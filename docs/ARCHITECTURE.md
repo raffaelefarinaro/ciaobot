@@ -472,7 +472,26 @@ holds `.runtime/server.lock` for the engine process lifetime, so a normal
 server and `ciao dev` cannot run against the same registry concurrently.
 Project/chat writes use a short-lived registry lock, merge field-level local
 deltas onto the latest revision, and append mutation IDs to
-`.runtime/web_projects.audit.jsonl`. Vault-backed project IDs are
+`.runtime/web_projects.audit.jsonl`. A chat's pinned file (`pinned_file_path`,
+`dismissed_pin_paths`, `pin_revision`) lives in that same registry rather than in
+browser storage, so a pin survives a browser change of device and an engine
+restart, and there is one writer instead of per-tab copies (#1118). A path is an
+identity key: the transport resolves a manual path with the file viewer's exact
+resolver (`_resolve_workspace_path(..., allow_fuzzy=False)`) and stores the
+canonical absolute POSIX path, so pins carry the viewer's existing permissions
+and never widen them; agent `file_surface` records the same identity through the
+scoped path it already validated. Manual writes carry `expected_revision`, which
+is compared before any mutation, so a device that raced a newer selection gets a
+409 with the authoritative state instead of replacing it. Closing a pin
+dismisses the path the server had selected, which is why an empty path never
+touches the filesystem (a deleted file must still be closable) and why agent
+surfacing skips a dismissed path. A real change publishes `chat_pin_changed` and
+bumps the per-chat revision; a no-op does neither. The `/ws/events` snapshot
+carries `chat_pins` for every persisted chat, including unpinned and archived
+ones, so a reconnecting client can close stale state. `file_surface` is the only
+place agent intent becomes a pin — replaying browser tool traces is deliberately
+not a second writer — and its `viewers`/`stream_state` fields still say nothing
+about whether a panel actually rendered. Vault-backed project IDs are
 deterministic for newly discovered `(workspace, vault_folder)` pairs. At
 startup, archive discovery resolves both display names and vault-folder slugs;
 missing active rows are reconstructed from normalized runtime transcripts only

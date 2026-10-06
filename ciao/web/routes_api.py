@@ -107,7 +107,10 @@ from ciao.vault_index import (
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
-from ciao.web.project_chats import _ALLOWED_IMAGE_EXTENSIONS
+from ciao.web.project_chats import (
+    _ALLOWED_IMAGE_EXTENSIONS,
+    ChatPinConflictError,
+)
 from ciao.web.routes_helpers import (
     _allowed_roots,
     _commit_and_push,
@@ -2126,6 +2129,86 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 # ── Chats ────────────────────────────────────────────────────────────────
 
+# The only top-level keys an ordinary `PATCH /api/chats/{id}` body may carry. A
+# pin write is a dedicated body (`{"pin": {...}}`) and cannot bring any of them
+# along: a pin is one shared selection per chat, so a combined write could land
+# the title change and then conflict on the pin, leaving half the request
+# applied. Checked by exclusion, so a new chat field does not silently become
+# combinable with a pin.
+_CHAT_PATCH_FIELDS = frozenset({
+    "title", "model", "provider", "mode", "project_id", "thinking_level",
+})
+
+
+def _chat_pin_request(body: dict) -> tuple[str, int]:
+    """Validate a `{"pin": {...}}` chat PATCH body. Returns ``(path, revision)``.
+
+    Deliberately separate from `update_chat`: pins are one shared selection per
+    chat with their own optimistic-concurrency revision, so they get their own
+    parser rather than an extra optional argument on a function whose `None`
+    already means "leave this field alone" — which is precisely the ambiguity an
+    empty pin path would otherwise collide with.
+
+    Raises ``ValueError`` with a caller-facing message for every malformed
+    shape. The path itself is *not* resolved here: a nonempty path has to go
+    through the viewer's exact resolver, and an empty one must not touch the
+    filesystem at all so a deleted file can still be closed.
+    """
+    if set(body) - {"pin"}:
+        raise ValueError(
+            "pin cannot be combined with other chat updates "
+            f"(ordinary fields: {', '.join(sorted(_CHAT_PATCH_FIELDS))})"
+        )
+    pin = body["pin"]
+    if not isinstance(pin, dict):
+        raise ValueError("pin must be an object")
+    extra = set(pin) - {"path", "expected_revision"}
+    if extra:
+        raise ValueError(
+            f"pin has unknown keys: {', '.join(sorted(extra))} "
+            "(allowed: path, expected_revision)"
+        )
+    raw_path = pin.get("path")
+    if not isinstance(raw_path, str):
+        raise ValueError("pin.path must be a string")
+    if "\x00" in raw_path or not raw_path.isprintable():
+        # Rejected here rather than left to the resolver: an empty path skips
+        # the resolver entirely, so this check has to live here for it to hold
+        # for both branches.
+        raise ValueError("pin.path contains characters that cannot be a path")
+    revision = pin.get("expected_revision")
+    # bool is an int subclass, so `True` must not be read as revision 1.
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+    ):
+        raise ValueError("pin.expected_revision must be a non-negative integer")
+    return raw_path.strip(), revision
+
+
+def _resolve_pin_path(config, raw_path: str) -> Path | Response:
+    """Resolve a nonempty manual pin path to the identity that gets stored.
+
+    Reuses the viewer's resolver with fuzzy matching off. A pin is an identity
+    key held for as long as the chat lives and matched exactly against later
+    dismissals and agent surfaces, so a fuzzy hit would store a path nobody
+    asked for. `_resolve_workspace_path` returns a real file only, so a
+    directory is answered with its own 404 and needs no second check here.
+    """
+    roots = _allowed_roots(config)
+    resolved = _resolve_workspace_path(roots, raw_path, allow_fuzzy=False)
+    if isinstance(resolved, Response):
+        return resolved
+    if resolved.suffix.lower() not in _WORKSPACE_FILE_EXTS:
+        # The panel renders the text viewer, so a pin has to name a file that
+        # viewer can serve: same rule, same 415 as `/api/workspace/file`. This
+        # reuses the existing viewer permissions rather than inventing a
+        # sandbox or wider access for pins.
+        return JSONResponse({"error": "unsupported type"}, status_code=415)
+    return resolved
+
+
 async def list_all_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     # `?active_only=1` skips archived chats. The PWA's frequent syncLatest poll
@@ -2140,7 +2223,7 @@ async def list_all_chats(request: Request) -> JSONResponse:
     return JSONResponse(pcm.list_chats_dicts())
 
 
-async def chat_detail(request: Request) -> JSONResponse:
+async def chat_detail(request: Request) -> Response:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     if request.method == "DELETE":
@@ -2164,6 +2247,11 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
+    # A pin write is its own body shape, not another `update_chat` field
+    # (#1118). It never falls through to `update_chat`, so `path: ""` cannot be
+    # read as "no change" there.
+    if isinstance(body, dict) and "pin" in body:
+        return await _chat_pin_patch(request, pcm, chat_id, body)
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2177,6 +2265,58 @@ async def chat_detail(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
+
+
+async def _chat_pin_patch(
+    request: Request, pcm, chat_id: str, body: dict
+) -> Response:
+    """`PATCH /api/chats/{id}` with a `{"pin": {...}}` body (#1118).
+
+    Sets or closes the chat's pinned file. Reuses the existing signed-session,
+    origin-gated route: pins get no new endpoint and no auth exception.
+
+    Ordering is deliberate. Shape first (400), then existence (404) *before*
+    any filesystem probing, then the resolver, and only then the write: a
+    nonexistent chat must not be answerable as "that file does not exist", and
+    an invalid body must not cost a `resolve()`.
+
+    The empty path never touches the filesystem, which is what lets a user
+    close a pin whose file has since been deleted.
+    """
+    try:
+        raw_path, expected_revision = _chat_pin_request(body)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    path = ""
+    if raw_path:
+        resolved = _resolve_pin_path(request.app.state.config, raw_path)
+        if isinstance(resolved, Response):
+            return resolved
+        # Store the canonical absolute POSIX identity: relative and `~` forms
+        # would not match a later surface or dismissal of the same file.
+        path = resolved.as_posix()
+
+    try:
+        # Raises ChatPinConflictError before mutating anything when the quoted
+        # revision is stale, so a 409 leaves the newer selection untouched.
+        pcm.set_chat_pin(chat_id, path, expected_revision=expected_revision)
+    except ChatPinConflictError as exc:
+        return JSONResponse(
+            {"error": "pin_revision_conflict", "pin": exc.pin}, status_code=409
+        )
+    except Exception as exc:
+        # The write rolled back in the manager; report the failure rather than
+        # a 200 for a pin that is not on disk.
+        logger.exception("Failed to persist pin for chat %s", chat_id)
+        return JSONResponse({"error": f"Failed to set pin: {exc}"}, status_code=500)
+    chat = pcm.get_chat(chat_id)
+    if chat is None:  # pragma: no cover — deleted between the checks above
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
 

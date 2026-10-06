@@ -1957,13 +1957,22 @@ def test_auto_approved_policy_matches_tool_annotations() -> None:
 
 
 class _StreamPcm:
-    """Fake pcm exposing only what `_file_surface_signal` reads."""
+    """Fake pcm exposing only what `_file_surface_signal` and `file_surface` use.
+
+    `surface_chat_file` is recorded rather than stubbed to a no-op: the plane
+    calls it after its own scoped validation, and a test that could not see the
+    call could not tell whether the canonical path was ever persisted.
+    """
 
     def __init__(self, stream: Any = None) -> None:
         self._stream = stream
+        self.surfaced: list[tuple[str, str]] = []
 
     def get_active_stream(self, chat_id: str) -> Any:
         return self._stream
+
+    def surface_chat_file(self, chat_id: str, path: str) -> None:
+        self.surfaced.append((chat_id, path))
 
 
 def _fake_ws(host: str) -> SimpleNamespace:
@@ -1971,7 +1980,11 @@ def _fake_ws(host: str) -> SimpleNamespace:
 
 
 def _file_surface_plane(
-    tmp_path: Path, *, stream: Any = None, connection_tracker: Any = None
+    tmp_path: Path,
+    *,
+    stream: Any = None,
+    connection_tracker: Any = None,
+    pcm: Any = None,
 ) -> CiaoControlPlane:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -1984,7 +1997,7 @@ def _file_surface_plane(
     )
     return CiaoControlPlane(
         config,
-        project_chat_manager=_StreamPcm(stream),
+        project_chat_manager=_StreamPcm(stream) if pcm is None else pcm,
         schedule_manager=SimpleNamespace(),
         connection_tracker=connection_tracker,
     )
@@ -2026,6 +2039,16 @@ def test_file_surface_signal_without_connection_tracker(tmp_path: Path) -> None:
     assert plane._file_surface_signal("chat-1") == (0, "active")
 
 
+def _chat_principal(chat_id: str) -> McpPrincipal:
+    return McpPrincipal(
+        token_id="t",
+        chat_id=chat_id,
+        project_id="p",
+        workspace="personal",
+        provider="opencode",
+    )
+
+
 def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
     from ciao.web.connection_tracker import ConnectionTracker
 
@@ -2044,6 +2067,59 @@ def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
     result = plane.file_surface(principal, "note.md")
     assert result["ok"] is True
     assert result["data"] == {"path": "note.md", "viewers": 1, "stream_state": "active"}
+
+
+def test_file_surface_persists_the_canonical_path_only_for_a_chat_principal(
+    tmp_path: Path,
+) -> None:
+    """The surface call is the intent, and it is recorded exactly once.
+
+    What gets stored has to be the canonical absolute path, because that is the
+    identity a later manual pin or dismissal is matched against — a
+    workspace-relative string would never match. A principal with no chat has
+    nothing to pin, so it validates and reports without mutating any chat.
+    """
+    plane = _file_surface_plane(tmp_path, stream=None, connection_tracker=None)
+    pcm = plane.pcm
+    assert isinstance(pcm, _StreamPcm)
+    root = plane.config.workspace_root
+    (root / "reports").mkdir(parents=True)
+    (root / "reports" / "october.md").write_text("b", encoding="utf-8")
+
+    plane.file_surface(_chat_principal("chat-1"), "reports/october.md")
+    assert pcm.surfaced == [
+        ("chat-1", (root / "reports" / "october.md").as_posix())
+    ]
+
+    # No chat principal: validation and the honest signal fields still happen,
+    # but no chat's pin state is touched.
+    result = plane.file_surface(_chat_principal(""), "reports/october.md")
+    assert result["ok"] is True
+    assert result["data"]["path"] == "reports/october.md"
+    assert pcm.surfaced == [
+        ("chat-1", (root / "reports" / "october.md").as_posix())
+    ]
+
+
+def test_file_surface_does_not_pin_a_rejected_path(tmp_path: Path) -> None:
+    """A surface that fails its own scoped validation persists nothing.
+
+    Otherwise a `file_not_found` miss would leave a pin on a path that does not
+    exist, which is the state a user then has to dismiss by hand.
+    """
+    plane = _file_surface_plane(tmp_path, stream=None, connection_tracker=None)
+    pcm = plane.pcm
+    assert isinstance(pcm, _StreamPcm)
+    (plane.config.workspace_root / "reports").mkdir(parents=True)
+
+    with pytest.raises(ControlPlaneError):
+        plane.file_surface(_chat_principal("chat-1"), "reports/missing.md")
+    assert pcm.surfaced == []
+
+    # A directory is refused as an unsupported type, also without persisting.
+    with pytest.raises(ControlPlaneError):
+        plane.file_surface(_chat_principal("chat-1"), "reports")
+    assert pcm.surfaced == []
 
 
 def test_file_surface_suggests_nearest_paths_on_a_miss(tmp_path: Path) -> None:

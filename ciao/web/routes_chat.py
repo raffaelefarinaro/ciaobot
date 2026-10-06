@@ -406,6 +406,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_subagents_ready`    {chat_id, project_id, remaining}
     - `chat_read`               {chat_id, last_read_at}
     - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)
+    - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
     - `chat_title`              {chat_id, title}
     - `open_chat`               {chat_id}  (menu-bar deep link into running PWA)
     - `server_restarting`       {message}  (restart drain began; show overlay)
@@ -451,6 +452,13 @@ async def ws_events(websocket: WebSocket) -> None:
             # Late connectors that missed `server_restarting` still get the
             # overlay instead of a chat-level turn rejection.
             "restarting": bool(getattr(pcm, "_restart_draining", False)),
+            # Durable pinned-file state per chat id (#1118), each value the
+            # same `{path, dismissed_paths, revision}` payload the
+            # `chat_pin_changed` event and a pin PATCH carry. Every persisted
+            # chat is listed, INCLUDING unpinned and archived ones: a client
+            # reconnecting after a gap has to be able to close a pin the engine
+            # no longer holds, and it cannot do that for a chat that is absent.
+            "chat_pins": pcm.chat_pin_states,
         })
     except (WebSocketDisconnect, RuntimeError):
         subscription.close()

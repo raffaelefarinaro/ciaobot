@@ -43,7 +43,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
 | POST | `/api/chats/read-all` | Mark all chats read |
-| PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
+| PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it); see **Chat pins** below |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
 | POST | `/api/chats/{chat_id}/handover` | Continue chat on a fresh provider session |
 | POST | `/api/chats/{chat_id}/fork` | Fork chat continuing from a completed turn |
@@ -1392,6 +1392,60 @@ curl -sS -b /tmp/ciao.jar -X PATCH \
 
 When adding a new state-changing route (`POST/PATCH/DELETE /api/...`), add an entry here or add the path to `BROWSER_OR_INTERNAL_ROUTES` in `tests/test_pwa_api_docs.py` with a one-line reason. The doc-sync test enforces this.
 
+**Chat pins (#1118)**
+
+A chat's pinned file (the file panel beside the conversation) is engine state,
+not browser state: it lives on `ChatInfo` in the existing
+`.runtime/web_projects.json` chat registry, so it survives a browser change of
+device and an engine restart. There is no new route and no auth exception — pins
+are written through the existing signed-session, origin-gated
+`PATCH /api/chats/{chat_id}`.
+
+- **Set/close**: `PATCH /api/chats/{chat_id}` with body
+  `{"pin": {"path": "<canonical absolute POSIX path>", "expected_revision": N}}`.
+  An empty path closes the pin and dismisses the path the server currently has
+  selected, so the next agent surface of that exact file does not reopen it; a
+  nonempty path selects it and clears only that path's own dismissal.
+- **Validation**: the body must be `{"pin": {...}}` and nothing else — a pin
+  cannot be combined with `title`/`model`/`provider`/`mode`/`project_id`/
+  `thinking_level` (400), because the pin can conflict and a combined write
+  would leave the other fields applied. `pin.path` must be a printable string
+  with no NUL; `expected_revision` is required and must be a non-negative JSON
+  integer (`true`/`false` are rejected even though Python would read them as
+  `1`/`0`); unknown keys inside `pin` are rejected. `expected_revision` is
+  compared before anything is mutated.
+- **Resolution**: a nonempty path goes through the same exact resolver as the
+  file viewer (`_allowed_roots` + `_resolve_workspace_path(allow_fuzzy=False)`),
+  so pins have the viewer's existing permissions and no wider access, accept
+  existing viewer-servable files, reject a directory (404) and a non-text type
+  (415). What is stored is the resolved canonical absolute POSIX path — no
+  fuzzy matching, since a pin is an identity key matched exactly against later
+  dismissals and agent surfaces. An **empty path never touches the filesystem**,
+  which is what lets a user close a pin whose file has since been deleted.
+- **Responses**: success returns the ordinary full `ChatInfo` payload (which
+  carries `pinned_file_path`, `dismissed_pin_paths`, `pin_revision`). A stale
+  `expected_revision` is **409** `{"error": "pin_revision_conflict", "pin":
+  {"path", "dismissed_paths", "revision"}}`, where `pin` is the current
+  authoritative state — a device that raced a newer selection cannot silently
+  replace it. Unknown chat is 404 **before** any filesystem probing. Ordinary
+  PATCH behavior is unchanged.
+- **Read**: every chat payload (`GET /api/chats`, `GET /api/chats/{id}`) carries
+  the three fields. Records written before this feature have none of them and
+  start unpinned at revision 0; nothing is imported from any browser.
+- **Cross-device**: a real change emits `chat_pin_changed` with
+  `{chat_id, path, dismissed_paths, revision}` (the complete pin payload
+  flattened into the event) and bumps the per-chat revision. A no-op write
+  neither bumps the revision nor publishes. The `/ws/events` connect `snapshot`
+  carries `chat_pins`, a map of chat id → the same payload for **every**
+  persisted chat, including unpinned and archived ones, so a reconnecting client
+  can close stale state rather than keep showing a pin the engine dropped.
+- **Agent surfacing**: the `file_surface` MCP tool records the intent itself
+  (`ProjectChatManager.surface_chat_file`) once its scoped existence/type checks
+  pass, with zero viewers or not; it respects a dismissal for that exact path,
+  and a principal with no chat id validates only and mutates no chat. Ordinary
+  file touches never pin. Archiving a chat does not clear its pin; a fork or new
+  chat starts without one.
+
 **WebSocket events**
 
 Global `/ws/events` payloads the PWA reacts to:
@@ -1399,6 +1453,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_streaming_started` / `chat_streaming_done` / `chat_result_ready`: lifecycle of the main chat turn.
 - `chat_subagents_ready`: emitted when a background `Agent` (run_in_background) finishes or its count drops. Fields: `{chat_id, project_id, remaining}`.
 - `chat_runs_reported`: emitted on a chat once finished background command runs have been reported back to it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (the chat was mid-turn, so the wake was appended as a follow-up) or `"started"` (the chat was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
+- `chat_pin_changed`: the chat's pinned file changed (a manual pin write or an agent `file_surface`), on this or another device. Fields: `{chat_id, path, dismissed_paths, revision}`, where `path` is the canonical POSIX path or `""` for closed and `revision` is the per-chat counter a later pin PATCH must quote. The connect `snapshot` carries the same payloads for every chat under `chat_pins`, so a client that missed this event still converges.
 - `chat_read`: another client/device marked the chat read.
 - `chat_unread`: another client/device marked the chat unread on purpose ("come back to this"). Fields: `{chat_id, last_read_at}` (empty string). The PWA clears the local read stamp so the dot and OS badge rise again.
 - `chat_title`: auto-title finished.
