@@ -1,5 +1,5 @@
-"""Model resolution for the post-archive memory pass, and the context-overflow
-classifier the schedule attention check shares with it.
+"""Model resolution for the post-archive memory pass, and the deterministic-
+rejection classifiers the schedule attention check shares with it.
 """
 
 from __future__ import annotations
@@ -38,8 +38,34 @@ def is_context_overflow(exc: Exception) -> bool:
     These fail identically on retry, so re-sending only burns another slow
     call plus the retry wait. Matched on message text because the providers
     surface it as a plain 400 rather than a typed error. Reused by the
-    schedule attention classifier so the two callers classify 400s the
+    schedule attention check so the two callers classify 400s the
     same way.
     """
     text = str(exc).lower()
     return "too long" in text or "context window" in text or "context_length_exceeded" in text
+
+
+_MODEL_REFUSAL_MARKERS = (
+    # opencode's free tier answers "OpenCode's free tier can only be used
+    # from within OpenCode" (#1066). A server-side one-shot is by definition
+    # outside OpenCode, so this model can never serve one — not a slow call,
+    # not a transient fault, and no retry or timeout budget changes it.
+    "free tier can only be used from within opencode",
+)
+"""Provider refusals naming the model itself rather than the request."""
+
+
+def is_model_refused(exc: Exception) -> bool:
+    """True when the provider rejected the model, not the call.
+
+    Distinct from :func:`is_context_overflow` in what the operator has to do
+    about it: an overflow is a payload that must be trimmed, while a refusal
+    means the configured insights model cannot serve server-side one-shots at
+    all and the fix is a different model in Settings → Models. Both are
+    deterministic, so neither is a fault worth a traceback per dispatch.
+
+    Matched on message text for the same reason as the overflow check: the
+    provider returns a plain error result rather than a typed rejection.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in _MODEL_REFUSAL_MARKERS)

@@ -1,5 +1,5 @@
 """What is left of ``ciao.insights``: model resolution for the memory pass and
-the context-overflow classifier the schedule attention check shares."""
+the deterministic-rejection classifiers the schedule attention check shares."""
 
 from __future__ import annotations
 
@@ -23,6 +23,23 @@ def test_context_overflow_is_distinguished_from_a_transient_timeout() -> None:
     # Transient failures must stay retryable.
     assert not insights.is_context_overflow(asyncio.TimeoutError())
     assert not insights.is_context_overflow(Exception("429 rate limit"))
+
+
+def test_a_refused_model_is_told_apart_from_an_overflow_or_a_timeout() -> None:
+    # opencode's free tier, verbatim from #1066. A server-side one-shot is
+    # outside OpenCode, so no retry or timeout can serve it.
+    refused = Exception(
+        "Error from provider (Console): OpenCode's free tier can only be "
+        "used from within OpenCode"
+    )
+    assert insights.is_model_refused(refused)
+    # The other two classifications stay distinct: a refusal is a config
+    # problem, an overflow is a payload, a timeout is tail latency.
+    assert not insights.is_model_refused(asyncio.TimeoutError())
+    assert not insights.is_model_refused(Exception("429 rate limit"))
+    assert not insights.is_model_refused(Exception("Message too long: 262183 > max"))
+    assert not insights.is_context_overflow(refused)
+    assert not insights.is_context_overflow(Exception("free tier"))
 
 
 def test_a_providers_insights_model_wins_over_its_default() -> None:
