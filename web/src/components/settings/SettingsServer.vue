@@ -36,10 +36,10 @@
         deploy from a source checkout.
       </p>
     </div>
-    <div class="dev-control">
+    <div class="settings-switch-row">
       <span class="hint">Developer mode</span>
       <button
-        class="dev-toggle"
+        class="settings-switch"
         type="button"
         role="switch"
         :aria-checked="devMode"
@@ -178,73 +178,7 @@ function saveAppRepo() {
   min-height: var(--touch);
 }
 
-/* One hairline row: the label, a switch on the right (SettingsInsights). */
-.dev-control {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  min-height: 56px;
-  padding: var(--space-2) 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-}
-.dev-control .hint {
-  margin: 0;
+.settings-switch-row .hint {
   color: var(--fg2);
-  font-size: var(--text-sm);
-}
-.dev-toggle {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--touch);
-  padding: 0 2px;
-  border: 0;
-  background: none;
-  color: var(--fg2);
-  font: inherit;
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-.dev-toggle:disabled { opacity: 0.6; cursor: default; }
-.dev-toggle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius-sm);
-}
-.switch-word { min-width: 2.2em; text-align: right; }
-.switch-track {
-  position: relative;
-  width: 36px;
-  height: 20px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-full, 9999px);
-  background: var(--bg3);
-  transition: background 120ms ease, border-color 120ms ease;
-}
-.switch-track::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--fg3);
-  transition: transform 120ms ease, background 120ms ease;
-}
-.dev-toggle[aria-checked='true'] .switch-word { color: var(--fg); }
-.dev-toggle[aria-checked='true'] .switch-track {
-  border-color: transparent;
-  background: var(--accent);
-}
-.dev-toggle[aria-checked='true'] .switch-track::after {
-  transform: translateX(16px);
-  background: var(--on-accent);
-}
-@media (prefers-reduced-motion: reduce) {
-  .switch-track, .switch-track::after { transition: none; }
 }
 </style>
