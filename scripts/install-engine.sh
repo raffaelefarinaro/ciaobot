@@ -1031,8 +1031,9 @@ check_host_workspace() {
     #     receipt still named the original;
     #   - a `--workspace` that is not there, because a hand-over creates no
     #     workspace: there would be nothing to hand over;
-    #   - a classified workspace that is not an existing one with a `.env` in
-    #     it, which is the same second workspace with an extra `mkdir` in it.
+    #   - a classified workspace that is not an existing set-up one (no
+    #     `.runtime/workspaces.json`, which every `ciao setup` writes), which is
+    #     the same second workspace with an extra `mkdir` in it.
     # And when the classifier could not recover a workspace at all - an
     # `--as-host` override on state nobody can read - the one that will be used
     # has to be named explicitly and has to exist, because a directory this
@@ -1051,8 +1052,8 @@ check_host_workspace() {
         fi
         migrate_workspace=$workspace
     fi
-    if [ ! -d "$migrate_workspace" ] || [ ! -f "$migrate_workspace/.env" ]; then
-        fail "the workspace the engine being migrated runs in is not a Ciaobot workspace: $migrate_workspace has no .env, so a host hand-over to it would start a second engine with a fresh password and a fresh runtime root next to the real ones. Point --workspace at the workspace Ciaobot.app was using, or re-run without --migrate on a Mac that has never run Ciaobot.app. Nothing on this Mac has been changed"
+    if [ ! -d "$migrate_workspace" ] || [ ! -f "$migrate_workspace/.runtime/workspaces.json" ]; then
+        fail "the workspace the engine being migrated runs in is not a Ciaobot workspace: $migrate_workspace has no .runtime/workspaces.json, so a host hand-over to it would start a second engine with a fresh password and a fresh runtime root next to the real ones. Point --workspace at the workspace Ciaobot.app was using, or re-run without --migrate on a Mac that has never run Ciaobot.app. Nothing on this Mac has been changed"
     fi
     migrate_workspace=$(CDPATH= cd -- "$migrate_workspace" && pwd -P)
     if [ -n "$workspace" ] && [ "$workspace" != "$migrate_workspace" ]; then
@@ -1429,7 +1430,7 @@ if [ "$migrate_path" != client ]; then
         fi
         if [ -z "$workspace" ] && [ -f "$plist" ] && [ -x "$PLISTBUDDY" ]; then
             existing=$("$PLISTBUDDY" -c 'Print :WorkingDirectory' "$plist" 2>/dev/null || true)
-            if [ -n "$existing" ] && [ -d "$existing" ] && [ -f "$existing/.env" ]; then
+            if [ -n "$existing" ] && [ -d "$existing" ] && [ -f "$existing/.runtime/workspaces.json" ]; then
                 workspace=$existing
                 setup_yes=1
             fi

@@ -31,6 +31,7 @@ from ciao.server_host import (
     host_service_argv,
     verify_owned_host,
 )
+from ciao.setup_marker import RUNTIME_DIR_NAME
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir, hosted_service_python
 from ciao.jsonio import write_private_text
@@ -139,13 +140,10 @@ def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]
     """
     from ciao.config import CiaoConfig
 
-    runtime = Path(existing_env.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime").expanduser()
-    if not runtime.is_absolute():
-        runtime = root / runtime
     source = {
         **existing_env,
         "CIAO_WORKSPACE": str(root),
-        "CIAO_RUNTIME_ROOT": str(runtime.resolve()),
+        "CIAO_RUNTIME_ROOT": str((root / RUNTIME_DIR_NAME).resolve()),
         "PWA_AUTH_TOKEN": existing_env.get("PWA_AUTH_TOKEN") or "setup",
     }
     CiaoConfig.from_env(source).import_legacy_workspaces_env()
@@ -1096,11 +1094,12 @@ def setup_workspace(
     desired_env: list[tuple[str, str]] = [
         ("PWA_AUTH_TOKEN", token),
     ]
+    # CIAO_WORKSPACE and CIAO_RUNTIME_ROOT are not written: the service
+    # definition carries both, and a `ciao run` started inside the workspace
+    # finds it through its registry (see `CiaoConfig.from_env`).
     desired_env.extend([
-        ("CIAO_WORKSPACE", "."),
         ("CIAO_VAULT_ROOT", vault_value),
         ("CIAO_VAULT_MODE", vault_mode),
-        ("CIAO_RUNTIME_ROOT", ".runtime"),
         ("PWA_PORT", str(port)),
     ])
     if not existing_env and not env_path.exists():
@@ -1140,10 +1139,7 @@ def setup_workspace(
             )
             written.append(env_path)
 
-    runtime_value = existing_env.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime"
-    runtime_root = Path(runtime_value).expanduser()
-    if not runtime_root.is_absolute():
-        runtime_root = root / runtime_root
+    runtime_root = root / RUNTIME_DIR_NAME
 
     # A brand-new install is created in the PER-ROOT layout directly, rather than
     # in the shared one and then migrated. Setup used to scaffold
@@ -5951,16 +5947,7 @@ def _register_launchd_service(workspace: Path) -> Path:
     """Write the server LaunchAgent for an already set-up workspace."""
     from ciao import macos_service
 
-    root = workspace.expanduser().resolve()
-    if not (root / ".env").is_file():
-        raise RuntimeError(
-            f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
-        )
-    if _looks_like_source_checkout(root):
-        raise RuntimeError(
-            f"{root} looks like the Ciaobot source checkout, not a workspace. "
-            "Pass your workspace folder to --workspace."
-        )
+    root = _require_set_up_workspace(workspace)
     from ciao.setup_status import tcc_protected_location
 
     protected = tcc_protected_location(root)
@@ -5970,12 +5957,7 @@ def _register_launchd_service(workspace: Path) -> Path:
             "Move the workspace out of Desktop/Documents/Downloads first."
         )
 
-    from dotenv import dotenv_values
-
-    runtime_value = (dotenv_values(root / ".env").get("CIAO_RUNTIME_ROOT") or "").strip() or ".runtime"
-    runtime_root = Path(runtime_value).expanduser()
-    if not runtime_root.is_absolute():
-        runtime_root = root / runtime_root
+    runtime_root = root / RUNTIME_DIR_NAME
     launch_dir = default_launch_agents_dir()
     resolved_engine = os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable
     # Activation (E2): a verified host selects the hosted service, otherwise the
@@ -6107,15 +6089,23 @@ def _validate_service_workspace(workspace: Path) -> Path:
     """Resolve and check a workspace the engine service may serve.
 
     The two checks `_register_launchd_service` makes before writing a plist: a
-    Ciaobot workspace has a ``.env``, and the app's own source checkout never is
-    one. The macOS TCC check is left out -- it names launchd and macOS privacy
-    protection, neither of which exists on Windows.
+    Ciaobot workspace has been set up, and the app's own source checkout never
+    is one. The macOS TCC check is left out -- it names launchd and macOS
+    privacy protection, neither of which exists on Windows.
     """
 
+    return _require_set_up_workspace(workspace)
+
+
+def _require_set_up_workspace(workspace: Path) -> Path:
+    """``workspace`` resolved, or ``RuntimeError`` when it is no set-up workspace."""
+    from ciao.setup_marker import is_set_up_workspace
+
     root = workspace.expanduser().resolve()
-    if not (root / ".env").is_file():
+    if not is_set_up_workspace(root):
         raise RuntimeError(
-            f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
+            f"{root} is not a Ciaobot workspace (no .runtime/workspaces.json). "
+            f"Run `ciao setup --workspace {root}` first."
         )
     if _looks_like_source_checkout(root):
         raise RuntimeError(

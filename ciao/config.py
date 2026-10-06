@@ -1643,6 +1643,21 @@ class CiaoConfig:
             source = os.environ
 
         if env is None and not _workspace_env(source):
+            from ciao.setup_marker import is_set_up_workspace
+
+            try:
+                cwd: Path | None = Path.cwd()
+            except OSError:  # the directory the shell stands in was deleted
+                cwd = None
+            if cwd is not None and is_set_up_workspace(cwd):
+                # Started inside a set-up workspace (`ciao run` from the
+                # workspace folder, or the Windows logon task, whose working
+                # directory is the workspace). Setup used to write
+                # CIAO_WORKSPACE=. into `.env` for this; the registry is the
+                # marker now. Checked before discovery, so a run inside a
+                # scratch workspace never attaches to the installed one.
+                source = {**source, "CIAO_WORKSPACE": str(cwd)}
+        if env is None and not _workspace_env(source):
             # A bare-shell CLI invocation has no CIAO_WORKSPACE: read the install the
             # LaunchAgent points at (see `installed_workspace_env`). Gated on
             # ``env is None``: explicit env dicts keep their exact semantics.

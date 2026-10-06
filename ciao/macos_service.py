@@ -255,7 +255,9 @@ def discover_runtime(
     if not 1 <= port <= 65535:
         port = DEFAULT_PORT
 
-    runtime_raw = str(dotenv.get("CIAO_RUNTIME_ROOT") or "").strip()
+    # The service definition is the only place a runtime root is set; setup
+    # always renders `<workspace>/.runtime` into it.
+    runtime_raw = str(plist_env.get("CIAO_RUNTIME_ROOT") or "").strip()
     if runtime_raw:
         runtime = Path(runtime_raw).expanduser()
         if not runtime.is_absolute() and workspace:

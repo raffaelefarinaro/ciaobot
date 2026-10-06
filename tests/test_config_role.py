@@ -372,3 +372,47 @@ def test_a_selection_for_another_provider_does_not_leak_into_claude(
     config.provider_default_models = {"opencode": "some/other-model"}
 
     assert config.default_model_for_workspace("default", "claude") == "opus"
+
+
+def _set_up_workspace(root: Path, token: str = "t") -> Path:
+    (root / ".runtime").mkdir(parents=True)
+    (root / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    (root / ".env").write_text(f"PWA_AUTH_TOKEN={token}\n", encoding="utf-8")
+    return root.resolve()
+
+
+def test_a_run_inside_a_set_up_workspace_uses_it(tmp_path: Path, monkeypatch) -> None:
+    """Setup no longer writes CIAO_WORKSPACE=. into `.env`; `ciao run` from the
+    workspace folder (and the Windows logon task, whose working directory is
+    the workspace) finds it through the registry instead."""
+    import os
+
+    workspace = _set_up_workspace(tmp_path / "ws", token="ws-token")
+    monkeypatch.chdir(workspace)
+    for name in ("CIAO_WORKSPACE", "CIAO_RUNTIME_ROOT", "PWA_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CIAO_BOOTSTRAP_WORKSPACE", str(tmp_path / "boot"))
+    before = dict(os.environ)
+
+    config = CiaoConfig.from_env(export=False)
+
+    assert config.bootstrap_mode is False
+    assert config.workspace_root == workspace
+    assert config.state_path == workspace / ".runtime" / "state.json"
+    assert config.pwa_auth_token == "ws-token"
+    assert dict(os.environ) == before
+
+
+def test_a_folder_with_only_a_dotenv_is_not_a_workspace(tmp_path: Path, monkeypatch) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    (folder / ".env").write_text("PWA_AUTH_TOKEN=t\n", encoding="utf-8")
+    monkeypatch.chdir(folder)
+    for name in ("CIAO_WORKSPACE", "CIAO_RUNTIME_ROOT", "PWA_AUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CIAO_BOOTSTRAP_WORKSPACE", str(tmp_path / "boot"))
+
+    config = CiaoConfig.from_env(export=False)
+
+    assert config.bootstrap_mode is True
+    assert config.workspace_root == (tmp_path / "boot").resolve()

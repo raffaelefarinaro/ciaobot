@@ -5675,7 +5675,6 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     # notes folder (no prior scaffold) is the vault itself; otherwise the
     # vault lives under memory-vault/.
     mode = detect_vault_mode(target)
-    existing_env_path = target / ".env"
     vault_root = target / "memory-vault"
     if mode == "existing" and not vault_root.is_dir():
         vault_root = target
@@ -5685,7 +5684,6 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
         "mode": mode,
         "vault_root": str(vault_root),
         "existing_workspaces": nested,
-        "has_env": existing_env_path.is_file(),
     })
 
 

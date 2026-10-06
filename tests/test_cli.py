@@ -531,7 +531,7 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert rc == 0
     assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:2] == [
         "PWA_AUTH_TOKEN=test-token",
-        "CIAO_WORKSPACE=.",
+        "CIAO_VAULT_ROOT=memory-vault",
     ]
     # Agent assets belong to the WORKSPACE root, not the install root: a fresh
     # setup now builds the per-workspace layout directly instead of the shared one
@@ -1333,9 +1333,10 @@ def test_setup_merges_into_existing_env(tmp_path: Path) -> None:
     )
     assert content.count("PWA_AUTH_TOKEN=") == 1
     # Missing Ciaobot variables are appended so the install actually works.
-    assert "CIAO_WORKSPACE=." in content
     assert "CIAO_VAULT_ROOT=" in content
-    assert "CIAO_RUNTIME_ROOT=.runtime" in content
+    # The service definition carries these; setup no longer writes them.
+    assert "CIAO_WORKSPACE=" not in content
+    assert "CIAO_RUNTIME_ROOT=" not in content
 
 
 def test_setup_env_merge_is_idempotent(tmp_path: Path) -> None:

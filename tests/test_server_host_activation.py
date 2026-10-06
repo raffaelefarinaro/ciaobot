@@ -439,6 +439,8 @@ def test_register_launchd_service_selects_the_verified_host(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
 
     cli._register_launchd_service(workspace)
 
@@ -455,6 +457,8 @@ def test_register_launchd_service_render_refusal_is_a_message(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     monkeypatch.setenv("CIAO_ENGINE_PATH", "/opt/tools/run-engine")
 
     with pytest.raises(RuntimeError, match="interpreter"):

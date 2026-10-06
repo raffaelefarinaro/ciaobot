@@ -21,6 +21,20 @@ SETUP_MARKER_FILENAME = "setup-completed-at"
 # How long after setup the startup catch-up stays quiet for system routines.
 SETUP_CATCH_UP_GRACE = timedelta(hours=24)
 
+# The runtime directory inside a workspace. Fixed: setup no longer records it in
+# `.env`, and the service definitions render `<workspace>/.runtime`.
+RUNTIME_DIR_NAME = ".runtime"
+# The workspace registry. Every `ciao setup` path writes it (fresh, rerun,
+# nested-vault adoption), so its presence is what "this folder is a set-up
+# Ciaobot workspace" means. The marker below is only written on a first-time
+# setup, and a `.env` is not specific to Ciaobot.
+WORKSPACE_REGISTRY_FILENAME = "workspaces.json"
+
+
+def is_set_up_workspace(root: Path) -> bool:
+    """Whether ``root`` is a workspace `ciao setup` has provisioned."""
+    return (root / RUNTIME_DIR_NAME / WORKSPACE_REGISTRY_FILENAME).is_file()
+
 
 def marker_path(runtime_root: Path) -> Path:
     return runtime_root / SETUP_MARKER_FILENAME
