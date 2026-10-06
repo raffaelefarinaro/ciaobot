@@ -7080,6 +7080,11 @@ class ProjectChatManager:
            leaves streaming state immediately and queued follow-ups still
            flush (unless ``park_queue``).
         """
+        # A Stop must also cancel any retry armed for this chat (quota /
+        # connection / startup / auth). The turn that armed it already errored,
+        # so no stream is live and the retry would otherwise replay after the
+        # stop (#1109). No-op when nothing is pending.
+        self.stop_chat_retry(chat_id)
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
