@@ -208,6 +208,26 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   reconciliation, every socket (per-chat and `/ws/events`) with its event
   handlers, unread and attention counts, the send path with its queue, deferred
   and unacked sends, the streaming timeline, toasts and package status.
+- **The route contract: Home is unselected.** Reaching Home (`/` or a bare
+  `/chat`) shows Home alone — no conversation, no pinned file — whatever was
+  selected before it (#1116). `ChatLayout.vue` reconciles the store against the
+  *path* (not only `params.chatId`, which is undefined on both sides of a
+  secondary-page → `/` move), and calls `store.clearActiveChatView()` there.
+  Secondary pages (Settings, Automations, Tasks, Memory, a project) still keep
+  the selection underneath them, so a chat left for Automations is waiting when
+  you come back; only the bare Home route clears it. Two rules follow:
+  **Home navigation is a view change, not a deletion** — the chat, its
+  composer draft, its staged attachments, its pin and any running turn survive,
+  and the conversation stays in the list. `clearActiveChatView()` is therefore
+  deliberately non-destructive (it detaches the selected chat's socket and clears
+  the id; the global `/ws/events` awareness socket stays connected), while
+  `closeChat()` keeps the destructive policy and remains the only path that
+  deletes an empty draft. An explicit Close (or Escape on a chat route) is a
+  request to discard that draft; clicking Home is not. **The pinned pane is
+  scoped to the route on screen** (`activePinKey` in `ChatLayout.vue`): the chat
+  id on a chat route, the project id on a project route, no key at all on Home,
+  so Home can never render a retained chat's pinned page for even one frame, and
+  reopening a conversation brings back *that* conversation's pin.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General begins with a
   short capability-help section linking to the public feature guide and inviting

@@ -2474,10 +2474,29 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function leaveChatView(wasActive: boolean): Promise<void> {
     if (!wasActive) return
-    activeChatId.value = null
-    persistState()
+    clearActiveChatView()
     const { router } = await import('../router')
     await router.push('/')
+  }
+
+  // A view change, not a request to delete or archive anything. Home clears the
+  // *view* through this: the chat, its draft, its staged attachments, its pin
+  // and any running turn are all untouched, the conversation is still in the
+  // list, and nothing is pushed onto the router. Only the per-chat socket goes
+  // away, because there is no longer a pane for it to stream into; the global
+  // awareness socket stays connected so the other chats keep reporting.
+  //
+  // closeChat() owns the destructive policy and stays the only path that
+  // deletes an empty draft: an explicit Close (or Escape on a chat route) is a
+  // request to discard that draft, while landing on Home is not. Reusing
+  // closeChat() here is what used to make a plain navigation delete a chat the
+  // user never closed.
+  function clearActiveChatView(): void {
+    const chatId = activeChatId.value
+    if (!chatId) return
+    disconnectWs(chatId)
+    activeChatId.value = null
+    persistState()
   }
 
   async function archiveChat(chatId: string) {
@@ -5839,7 +5858,7 @@ export const useProjectStore = defineStore('projects', () => {
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
-    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,

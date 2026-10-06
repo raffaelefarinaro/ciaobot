@@ -1729,6 +1729,126 @@ describe('pinned file dismissal', () => {
 })
 
 describe('chat closing', () => {
+  // #1116: Home is a view, not a request to destroy anything. This helper is
+  // what the route reconciliation in ChatLayout calls, and it must be strictly
+  // non-destructive where closeChat() is deliberately destructive.
+  describe('clearActiveChatView', () => {
+    function seedDraft() {
+      const chatId = 'chat-keep-draft'
+      const store = useProjectStore()
+      store.chats = [{
+        chat_id: chatId,
+        project_id: 'p1',
+        title: 'New Chat',
+        model: 'sonnet',
+        provider: 'claude',
+        mode: 'auto',
+        session_id: '',
+        created_at: '',
+        archived: false,
+      }]
+      store.messages[chatId] = []
+      store.activeChatId = chatId
+      store.pendingImages = ['img-1']
+      localStorage.setItem('ciao-chat-drafts', JSON.stringify({ [chatId]: 'half a thought' }))
+      store.pinFile(chatId, '/workspace/report.md')
+      return { store, chatId }
+    }
+
+    test('preserves chats, drafts, pins and running turns', () => {
+      const { store, chatId } = seedDraft()
+      // A turn in flight when the user clicks Home.
+      store.streaming[chatId] = true
+      const stopChat = vi.spyOn(store, 'stopChat')
+
+      store.clearActiveChatView()
+
+      // Only the view moved.
+      expect(store.activeChatId).toBeNull()
+      // The conversation, its unsent text and its staged screenshot survive.
+      expect(store.chats.map(c => c.chat_id)).toEqual([chatId])
+      expect(store.messages[chatId]).toEqual([])
+      expect(JSON.parse(localStorage.getItem('ciao-chat-drafts') || '{}')[chatId]).toBe('half a thought')
+      // Its pin is still stored, ready to come back with the chat.
+      expect(store.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+      // And nothing was stopped on the way out.
+      expect(store.streaming[chatId]).toBe(true)
+      expect(stopChat).not.toHaveBeenCalled()
+    })
+
+    test('makes no mutation call and pushes no route', () => {
+      const { store } = seedDraft()
+      routerPush.mockClear()
+
+      store.clearActiveChatView()
+
+      expect(apiDel).not.toHaveBeenCalled()
+      expect(apiPost).not.toHaveBeenCalled()
+      expect(apiPatch).not.toHaveBeenCalled()
+      expect(apiGet).not.toHaveBeenCalled()
+      // A view change the caller already navigated for: pushing again here
+      // would eject the user from wherever they have since gone.
+      expect(routerPush).not.toHaveBeenCalled()
+    })
+
+    test('detaches the selected chat socket but keeps global awareness', () => {
+      const { store, chatId } = seedDraft()
+      store.connectWs(chatId)
+      store.connectWs('chat-other')
+      store.connectEventsWs()
+      const chatSocket = fakeSockets.find(s => s.url.includes(`/ws/chat/${chatId}`))
+      const otherSocket = fakeSockets.find(s => s.url.includes('/ws/chat/chat-other'))
+      const eventsSocket = fakeSockets.find(s => s.url.includes('/ws/events'))
+      expect(chatSocket).toBeDefined()
+
+      store.clearActiveChatView()
+
+      // The selected chat has no pane left to stream into.
+      expect(chatSocket!.readyState).toBe(FakeWebSocket.CLOSED)
+      // Every other channel is untouched: awareness carries cross-chat events
+      // for chats with no pane open, and another chat may still be running.
+      expect(eventsSocket!.readyState).toBe(FakeWebSocket.OPEN)
+      expect(otherSocket!.readyState).toBe(FakeWebSocket.OPEN)
+    })
+
+    test('is a no-op with nothing selected', () => {
+      const store = useProjectStore()
+      routerPush.mockClear()
+
+      store.clearActiveChatView()
+
+      expect(store.activeChatId).toBeNull()
+      expect(routerPush).not.toHaveBeenCalled()
+      expect(apiDel).not.toHaveBeenCalled()
+    })
+
+    test('closeChat still deletes an empty draft', () => {
+      // The mirror image, and the reason the two paths must not be merged: the
+      // explicit Close gesture keeps its destructive policy.
+      const chatId = 'chat-really-empty'
+      const store = useProjectStore()
+      store.chats = [{
+        chat_id: chatId,
+        project_id: 'p1',
+        title: 'New Chat',
+        model: 'sonnet',
+        provider: 'claude',
+        mode: 'auto',
+        session_id: '',
+        created_at: '',
+        archived: false,
+      }]
+      store.messages[chatId] = []
+      store.activeChatId = chatId
+      apiDel.mockResolvedValue({ ok: true, deleted: true })
+
+      return store.closeChat().then(() => {
+        expect(apiDel).toHaveBeenCalledWith(`/api/chats/${chatId}?only_if_empty=1`)
+        expect(store.chats).toHaveLength(0)
+      })
+    })
+  })
+
   test('deletes an unused draft chat instead of leaving it in the sidebar', async () => {
     const store = useProjectStore()
     const chatId = 'chat-unused-draft'

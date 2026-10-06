@@ -363,13 +363,14 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  // From /settings (which deliberately retains activeChatId), chatId is
-  // undefined both before and after landing on `/` via the "chats" nav tab,
-  // so the chatId watcher does not fire - intentionally. That mirrors Esc's
-  // retention (see "leaves a retained hidden chat alone when escaping
-  // Settings" below): the nav tab, like Esc, should resurface the chat you
-  // left rather than force an empty home screen.
-  it('leaves a retained chat alone when navigating home from Settings via the nav tab', async () => {
+  // Secondary pages keep the selection underneath them, but Home does not:
+  // from /settings, route.params.chatId is undefined both before and after
+  // landing on `/` via the "chats" nav tab, so the old chatId-keyed watcher
+  // never fired and the retained chat resurfaced. The path watcher closes that
+  // hole (#1116). The parameterized version below covers every secondary
+  // destination; this one keeps the nav-tab scenario named on its own, since
+  // it is the reproduction from the report.
+  it('clears the retained chat when the nav tab lands home from Settings', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
@@ -417,7 +418,7 @@ describe('ChatLayout', () => {
       },
     })
     await flushPromises()
-    // Settings deliberately retains the chat underneath it.
+    // Settings retains the chat underneath it - until Home is asked for.
     expect(store.activeChatId).toBe('chat-1')
 
     // Simulates clicking the sidebar's "chats" nav-item from Settings:
@@ -425,7 +426,9 @@ describe('ChatLayout', () => {
     await router.push('/')
     await flushPromises()
 
-    expect(store.activeChatId).toBe('chat-1')
+    expect(store.activeChatId).toBeNull()
+    // Cleared, not closed: the conversation is still in the list.
+    expect(store.chats).toHaveLength(1)
     wrapper.unmount()
   })
 
@@ -1010,11 +1013,17 @@ describe('ChatLayout', () => {
   it('defers to an open comment popover in the pinned file panel', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
+    // Started on the chat's own route, not on Home: the pinned pane is scoped
+    // to the route on screen, so since #1116 a Home mount no longer renders a
+    // retained chat's pinned file and there would be no panel here to defer to.
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1271,6 +1280,302 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+})
+
+// #1116: reaching Home must show Home - no conversation, no pinned file -
+// whatever was selected before. Secondary pages keep the selection underneath
+// them; only the bare Home route clears it, and clearing is a view change, not
+// a deletion.
+describe('ChatLayout Home navigation clears the selected chat', () => {
+  class MemoryStorage {
+    private values = new Map<string, string>()
+    getItem(key: string): string | null { return this.values.get(key) ?? null }
+    setItem(key: string, value: string): void { this.values.set(key, value) }
+    removeItem(key: string): void { this.values.delete(key) }
+    clear(): void { this.values.clear() }
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    localStorage.clear()
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const secondaryRoutes = [
+    ['Settings', '/settings'],
+    ['Automations', '/schedules'],
+    ['Tasks', '/tasks'],
+    ['Memory', '/memory'],
+    ['Project', '/project/project-1'],
+  ] as const
+
+  // Mounts with a chat selected and a file pinned to it, on `startPath`.
+  async function mountWithSelection(startPath = '/chat/chat-1') {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+        { path: '/project/:projectId', component: EmptyStub },
+        { path: '/settings', component: EmptyStub },
+        { path: '/schedules', component: EmptyStub },
+        { path: '/tasks', component: EmptyStub },
+        { path: '/memory', component: EmptyStub },
+      ],
+    })
+    await router.push(startPath)
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [
+      { chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' },
+      { chat_id: 'chat-2', project_id: 'project-1', title: 'Chat two' },
+    ] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    store.pinFile('chat-1', 'src/pinned-file.ts')
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    return { wrapper, router, store }
+  }
+
+  it('shows the chat and its pinned file before navigating away', async () => {
+    const { wrapper, store } = await mountWithSelection()
+    // Fixture check: the split layout is genuinely on screen here, so the
+    // assertions after navigating Home mean something.
+    expect(store.activeChatId).toBe('chat-1')
+    expect(wrapper.find('[data-testid="close-chat"]').exists()).toBe(true)
+    expect(wrapper.find('.chat-split').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each(secondaryRoutes)('Home clears a retained chat after %s', async (_label, secondary) => {
+    const { wrapper, router, store } = await mountWithSelection()
+    await router.push(secondary)
+    await flushPromises()
+    // The secondary page keeps the selection underneath it - that is what makes
+    // the Home navigation below meaningful.
+    expect(store.activeChatId).toBe('chat-1')
+
+    await router.push('/')
+    await flushPromises()
+
+    // Home content, and nothing else: no chat pane, no pinned file pane.
+    expect(wrapper.find('.empty-shell').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="close-chat"]').exists()).toBe(false)
+    expect(wrapper.find('.chat-split').exists()).toBe(false)
+    expect(store.activeChatId).toBeNull()
+    // Cleared, not closed: both conversations remain available in the list.
+    expect(store.chats.map(c => c.chat_id)).toEqual(['chat-1', 'chat-2'])
+    wrapper.unmount()
+  })
+
+  it('direct chat to Home and bare chat route clear the view', async () => {
+    const fromChat = await mountWithSelection()
+    await fromChat.router.push('/chat')
+    await flushPromises()
+    // A bare `/chat` is the sidebar's chats nav tab: Home, not an open chat.
+    expect(fromChat.store.activeChatId).toBeNull()
+    expect(fromChat.wrapper.find('[data-testid="close-chat"]').exists()).toBe(false)
+    expect(fromChat.wrapper.find('.chat-split').exists()).toBe(false)
+    fromChat.wrapper.unmount()
+
+    const fromHome = await mountWithSelection('/')
+    // Re-select, so this leg starts from a real chat route.
+    await fromHome.router.push('/chat/chat-1')
+    await flushPromises()
+    expect(fromHome.store.activeChatId).toBe('chat-1')
+
+    await fromHome.router.push('/chat')
+    await flushPromises()
+    expect(fromHome.store.activeChatId).toBeNull()
+    fromHome.wrapper.unmount()
+  })
+
+  it('Home navigation does not delete an empty draft or its staged content', async () => {
+    const { wrapper, router, store } = await mountWithSelection()
+    const draftId = 'chat-draft'
+    // An unused New Chat: exactly what closeChat() would DELETE.
+    store.chats = [
+      ...store.chats,
+      { chat_id: draftId, project_id: 'project-1', title: 'New Chat', session_id: '' },
+    ] as unknown as typeof store.chats
+    store.messages[draftId] = []
+    store.activeChatId = draftId
+    store.pendingImages = ['img-1']
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ [draftId]: 'half a thought' }))
+
+    const closeChat = vi.spyOn(store, 'closeChat')
+    const deleteChat = vi.spyOn(store, 'deleteChat')
+
+    await router.push('/settings')
+    await flushPromises()
+    await router.push('/')
+    await flushPromises()
+
+    // The navigation is not a close gesture, so the destructive path must not
+    // run at all - not closeChat() (which owns the delete policy), not DELETE.
+    expect(closeChat).not.toHaveBeenCalled()
+    expect(deleteChat).not.toHaveBeenCalled()
+    expect(store.activeChatId).toBeNull()
+    // Everything survives: the chat, its unsent text and its staged image.
+    // `pendingImages` is a computed over the *active* chat's bucket, so with
+    // nothing selected it reads empty by design - the storage key is where the
+    // staged attachment has to still be.
+    expect(store.chats.map(c => c.chat_id)).toContain(draftId)
+    expect(JSON.parse(localStorage.getItem('ciao-chat-drafts') || '{}')[draftId]).toBe('half a thought')
+    expect(JSON.parse(localStorage.getItem('ciao-pending-images') || '{}')[draftId]).toEqual(['img-1'])
+
+    // Reopening the chat brings both back with it.
+    await router.push('/chat/draft')
+    await flushPromises()
+    store.activeChatId = draftId
+    await flushPromises()
+    expect(store.pendingImages).toEqual(['img-1'])
+    wrapper.unmount()
+  })
+
+  it('back and forward between Home and a chat follow the route', async () => {
+    const { wrapper, router, store } = await mountWithSelection()
+    await router.push('/')
+    await flushPromises()
+    expect(store.activeChatId).toBeNull()
+
+    // Back to the chat route: the chat comes back, with its pin.
+    router.back()
+    await flushPromises()
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/chat/chat-1')
+    expect(store.activeChatId).toBe('chat-1')
+    expect(wrapper.find('.chat-split').exists()).toBe(true)
+
+    // Forward to Home again: cleared, and no auto-selected replacement.
+    router.forward()
+    await flushPromises()
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(store.activeChatId).toBeNull()
+    expect(wrapper.find('[data-testid="close-chat"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('Home reconciliation does not clear a chat selected while bootstrap is pending', async () => {
+    // fetchAll() is held open, so the route can move to a chat while the layout
+    // is still bootstrapping. The post-fetchAll reconciliation must read the
+    // route as it is *then*, not the one captured before the await.
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-2',
+      project_id: 'project-1',
+      title: 'Chat two',
+    }] as unknown as typeof store.chats
+    store.activeChatId = null
+    store.bootstrapped = true
+
+    let releaseFetch: () => void = () => {}
+    vi.spyOn(store, 'fetchAll').mockImplementation(() => new Promise<void>((resolve) => {
+      releaseFetch = () => resolve()
+    }))
+    const openChatFromDeepLink = vi.spyOn(store, 'openChatFromDeepLink').mockResolvedValue(undefined)
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    // The user opens a chat while the boot is still in flight.
+    await router.push('/chat/chat-2')
+    await flushPromises()
+    store.activeChatId = 'chat-2'
+    expect(openChatFromDeepLink).toHaveBeenCalledWith('chat-2')
+
+    releaseFetch()
+    await flushPromises()
+    await flushPromises()
+
+    // The reconciliation saw `/chat/chat-2`, so it left the fresh selection be.
+    expect(store.activeChatId).toBe('chat-2')
+    wrapper.unmount()
+  })
+
+  it('restores a chat and its pin when that chat is reopened from Home', async () => {
+    const { wrapper, router, store } = await mountWithSelection()
+    await router.push('/')
+    await flushPromises()
+    expect(store.activeChatId).toBeNull()
+    expect(store.pinnedFileFor('chat-1')).toBe('src/pinned-file.ts')
+
+    await router.push('/chat/chat-1')
+    await flushPromises()
+
+    expect(store.activeChatId).toBe('chat-1')
+    // Home had no pin key at all; the chat route brings back *its* pin.
+    expect(wrapper.find('.chat-split').exists()).toBe(true)
+    wrapper.unmount()
+  })
 })
 
 describe('ChatLayout home arrow navigation', () => {
@@ -1535,8 +1840,10 @@ describe('ChatLayout home arrow navigation', () => {
   // Reported in review: activeChatId stays populated when Settings is opened
   // from a chat, so a chat-first Esc ran closeChat() on a chat that was not on
   // screen - disconnecting it, and deleting it outright when it was an unused
-  // draft with an unsent composer message.
-  it('leaves a retained hidden chat alone when escaping Settings', async () => {
+  // draft with an unsent composer message. Esc from a secondary page pushes
+  // `/`, and that is now a Home navigation, so the view clears (#1116) - the
+  // protection that matters is that nothing is deleted.
+  it('clears without deleting when escaping Settings', async () => {
     const wrapper = await mountHome()
     const store = useProjectStore()
     store.activeChatId = 'chat-1'
@@ -1547,7 +1854,9 @@ describe('ChatLayout home arrow navigation', () => {
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/')
-    expect(store.activeChatId).toBe('chat-1')
+    expect(store.activeChatId).toBeNull()
+    // The conversation is still there, and still on screen in the list.
+    expect(store.chats.map(c => c.chat_id)).toContain('chat-1')
     wrapper.unmount()
   })
 
@@ -1562,7 +1871,8 @@ describe('ChatLayout home arrow navigation', () => {
     await flushPromises()
 
     expect(router.currentRoute.value.path).toBe('/')
-    expect(store.activeChatId).toBe('chat-1')
+    expect(store.activeChatId).toBeNull()
+    expect(store.chats.map(c => c.chat_id)).toContain('chat-1')
     wrapper.unmount()
   })
 
