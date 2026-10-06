@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import urllib.request
@@ -39,6 +40,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import IO, Any, Callable, Protocol
 
 from ciao.os_support.locks import lock_exclusive, unlock
@@ -52,6 +54,10 @@ JOB_TASK_NAME = r"\Ciaobot\WorkspaceMove"
 JOB_TASK_FILE = "Ciaobot-WorkspaceMove.xml"
 JOB_LOG_NAME = "workspace-move.log"
 DEFINITION_BACKUP_PREFIX = "service-definition"
+LINUX_UNIT = "ciaobot.service"
+LINUX_UNIT_DIR = Path("/etc/systemd/system")
+# How docs/LINUX.md installs the CLI; root's PATH does not include the venv.
+LINUX_CLI = "/opt/ciaobot/venv/bin/ciao"
 
 PHASES = (
     "queued",
@@ -235,6 +241,43 @@ def abandoned(op: MoveOperation | None, state_dir: Path | None = None) -> bool:
     return not job_running(state_dir)
 
 
+def _running_as_root() -> bool:
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
+
+
+def _keep_owner(path: Path, like: Path, *, follow: bool = True) -> None:
+    """Give ``path`` the owner of ``like`` when running as root.
+
+    On Linux the administrator runs the move as root while the files belong to
+    the service account; a file root rewrote would otherwise become one the
+    engine can no longer write.
+    """
+    if sys.platform == "win32" or not _running_as_root():
+        return
+    try:
+        st = like.stat()
+        if follow:
+            os.chown(path, st.st_uid, st.st_gid)
+        else:
+            os.lchown(path, st.st_uid, st.st_gid)
+    except OSError:
+        pass
+
+
+def _keep_owner_tree(root: Path, like: Path) -> None:
+    if sys.platform == "win32" or not _running_as_root():
+        return
+    try:
+        st = like.stat()
+    except OSError:
+        return
+    os.chown(root, st.st_uid, st.st_gid)
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in [*dirnames, *filenames]:
+            os.lchown(Path(dirpath) / name, st.st_uid, st.st_gid)
+
+
 def _write_text_atomic(target: Path, text: str, *, private: bool = False) -> None:
     fd, tmp_name = mkstemp_private(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
@@ -248,6 +291,7 @@ def _write_text_atomic(target: Path, text: str, *, private: bool = False) -> Non
                 os.chmod(tmp, target.stat().st_mode & 0o777)
             except OSError:
                 pass
+        _keep_owner(tmp, target if target.exists() else target.parent)
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
@@ -295,6 +339,8 @@ def plan(
     platform: str | None = None,
     update_in_flight: bool = False,
     engine_running: bool = True,
+    admin: bool | None = None,
+    service_can_reach: Callable[[Path], bool] | None = None,
     state_dir: Path | None = None,
 ) -> MovePlan:
     """Whether ``source`` can move to ``target_raw``, and what to know first.
@@ -307,10 +353,17 @@ def plan(
     source = source.expanduser().resolve()
     raw = target_raw.strip()
     result = MovePlan(source=str(source), target=raw)
-    if platform not in ("darwin", "win32"):
+    if platform not in ("darwin", "win32") and not platform.startswith("linux"):
+        result.refusals.append(f"Moving the workspace is not supported on {platform}.")
+        return result
+    if platform.startswith("linux") and not (_running_as_root() if admin is None else admin):
+        # The service runs as an unprivileged account and its unit is root's:
+        # stopping it and rewriting the unit is the administrator's job, as
+        # updates are on Linux.
         result.refusals.append(
-            "Moving the workspace is supported on macOS and Windows. On Linux, stop the "
-            "service, move the folder, and point your systemd unit at the new path."
+            "On Linux the administrator moves the workspace: run "
+            f"`sudo {LINUX_CLI} workspace-move <new folder> --apply` on the server. "
+            "It stops the systemd service and rewrites its unit."
         )
         return result
     if not raw:
@@ -348,6 +401,13 @@ def plan(
             )
     except OSError as exc:
         result.refusals.append(f"Could not read {parent}: {exc}")
+    if service_can_reach is not None and parent.is_dir() and not service_can_reach(parent):
+        # Root can move the folder anywhere, but the engine runs as the service
+        # account: it would fail to start there, and the move would roll back
+        # only after the full readiness wait.
+        result.refusals.append(
+            f"The Ciaobot service account cannot open {parent}. Choose a folder it can reach."
+        )
     if platform == "darwin":
         from ciao.setup_status import tcc_protected_location
 
@@ -357,7 +417,12 @@ def plan(
                 f"The destination is inside ~/{protected}, which macOS privacy protection "
                 "blocks the background engine from reading. Choose another folder, e.g. ~/ciaobot."
             )
-    if registered is None:
+    if registered is None and platform.startswith("linux"):
+        result.refusals.append(
+            f"No Ciaobot unit names a workspace in {LINUX_UNIT_DIR / LINUX_UNIT}, so there is "
+            "nothing to repoint. Install it as docs/LINUX.md describes."
+        )
+    elif registered is None:
         result.refusals.append(
             "No Ciaobot service is registered, so there is nothing to repoint. "
             "Run `ciao setup --workspace <folder> --load-launchd` instead."
@@ -546,6 +611,7 @@ def relink_symlinks(root: Path, old: str, new: str) -> int:
                 links.link_dir(updated, link)
             else:
                 links.link_file(updated, link)
+            _keep_owner(link, base, follow=False)
             count += 1
         # Never descend into a link, and never into the pruned trees.
         dirnames[:] = [
@@ -598,6 +664,7 @@ def copy_claude_sessions(old: Path, new: Path, *, home: Path | None = None) -> l
         if source == dest or not source.is_dir():
             continue
         shutil.copytree(source, dest, symlinks=True, dirs_exist_ok=True)
+        _keep_owner_tree(dest, source)
         copied.append(dest.name)
     return copied
 
@@ -713,10 +780,169 @@ class WindowsServiceDefinition:
         windows_service.register_task(self.path)
 
 
+class LinuxServiceDefinition:
+    """The root-installed systemd unit (docs/LINUX.md), reloaded after every change."""
+
+    def __init__(self, path: Path | None = None, *, systemctl: Callable[..., Any] | None = None) -> None:
+        self.path = path or LINUX_UNIT_DIR / LINUX_UNIT
+        self._systemctl = systemctl or _systemctl
+
+    def _setting(self, key: str) -> str | None:
+        """The last ``key=`` value in the unit (systemd: a later line wins)."""
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        found: str | None = None
+        for line in lines:
+            name, sep, value = line.strip().partition("=")
+            if sep and name == key:
+                found = value
+        return found
+
+    def _environment(self, name: str) -> str | None:
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return None
+        found: str | None = None
+        for line in lines:
+            key, sep, value = line.strip().partition("=")
+            if not sep or key != "Environment":
+                continue
+            value = value.strip()
+            if value.startswith('"') and value.endswith('"'):
+                value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            var, eq, rest = value.partition("=")
+            if eq and var == name:
+                found = rest.replace("%%", "%")
+        return found
+
+    def workspace(self) -> Path | None:
+        # `_environment` has already undoubled `%`; WorkingDirectory= has not.
+        value = self._environment("CIAO_WORKSPACE")
+        if not value:
+            directory = self._setting("WorkingDirectory")
+            value = directory.replace("%%", "%") if directory else None
+        return Path(value) if value else None
+
+    def home(self) -> Path | None:
+        """The service account's home: ``HOME=`` in the unit, else ``User=``'s.
+
+        systemd sets HOME from User= when the unit does not, so a hand-written
+        unit without it still has one, and it is never root's.
+        """
+        value = self._environment("HOME")
+        if value:
+            return Path(value)
+        if sys.platform == "win32":
+            return None
+        import pwd
+
+        user = self.user()
+        if not user:
+            return None
+        try:
+            return Path(pwd.getpwnam(user).pw_dir)
+        except KeyError:
+            return None
+
+    def user(self) -> str | None:
+        return self._setting("User")
+
+    def drop_ins_naming(self, folder: Path) -> list[Path]:
+        """Drop-ins (``<unit>.d/*.conf``) that name ``folder``: the move rewrites only the unit."""
+        directory = self.path.parent / f"{self.path.name}.d"
+        found: list[Path] = []
+        for conf in sorted(directory.glob("*.conf")) if directory.is_dir() else []:
+            try:
+                if str(folder) in conf.read_text(encoding="utf-8"):
+                    found.append(conf)
+            except OSError:
+                continue
+        return found
+
+    def backup(self, dest: Path) -> None:
+        shutil.copy2(self.path, dest)
+
+    def repoint(self, old: Path, new: Path) -> None:
+        text = self.path.read_text(encoding="utf-8")
+        rewritten = text
+        # The unit holds the path as written and with `%` doubled (specifiers).
+        # One pass when there is no `%`: a second would rewrite the new path
+        # again whenever it ends with the old one (/srv/a -> /home/srv/a).
+        forms = {str(old): str(new), str(old).replace("%", "%%"): str(new).replace("%", "%%")}
+        for before, after in forms.items():
+            # A whole path only: it starts a value (after `=`, a quote or space).
+            pattern = re.compile(r'(?<=[="\s])' + re.escape(before) + r'(?=[/"\s]|$)', re.MULTILINE)
+            rewritten = pattern.sub(after.replace("\\", r"\\"), rewritten)
+        if rewritten == text:
+            raise MoveError(f"could not repoint the workspace in {self.path}")
+        _write_text_atomic(self.path, rewritten)
+        self._reload()
+
+    def restore(self, backup: Path) -> None:
+        shutil.copy2(backup, self.path)
+        self._reload()
+
+    def _reload(self) -> None:
+        completed = self._systemctl("daemon-reload")
+        if completed.returncode != 0:
+            raise MoveError(_completed_detail(completed) or "systemctl daemon-reload failed")
+
+
+def _systemctl(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["systemctl", *args], capture_output=True, text=True, encoding="utf-8",
+        errors="replace", check=False, timeout=180,
+    )
+
+
+def _completed_detail(completed: Any) -> str:
+    return str(getattr(completed, "stderr", "") or getattr(completed, "stdout", "") or "").strip()
+
+
+class LinuxEngineHost:
+    """``systemctl`` for the engine's unit; the port from the workspace ``.env``."""
+
+    def __init__(self, workspace: Path, *, systemctl: Callable[..., Any] | None = None) -> None:
+        self._workspace = workspace
+        self._systemctl = systemctl or _systemctl
+
+    def engine_port(self) -> int:
+        from ciao.macos_service import read_dotenv
+
+        raw = read_dotenv(self._workspace / ".env").get("PWA_PORT", "").strip()
+        try:
+            return int(raw)
+        except ValueError:
+            return 8443
+
+    def start_engine(self) -> Any:
+        completed = self._systemctl("start", LINUX_UNIT)
+        ok = completed.returncode == 0
+        return SimpleNamespace(ok=ok, message="" if ok else _completed_detail(completed))
+
+    def stop_engine(self, wait: Callable[[], bool] | None = None) -> bool:
+        # Synchronous: systemd returns once the unit's control group is gone.
+        self._systemctl("stop", LINUX_UNIT)
+        return wait() if wait is not None else True
+
+
 def current_service_definition() -> ServiceDefinition:
     if sys.platform == "win32":
         return WindowsServiceDefinition()
+    if sys.platform.startswith("linux"):
+        return LinuxServiceDefinition()
     return MacServiceDefinition()
+
+
+def current_engine_host(workspace: Path) -> EngineHost:
+    if sys.platform.startswith("linux"):
+        return LinuxEngineHost(workspace)
+    from ciao.update_host import current_update_host
+
+    return current_update_host()
 
 
 # ── start: record the operation and hand it to the detached job ──────
@@ -773,9 +999,25 @@ def _job_argv(op: MoveOperation, state_dir: Path) -> list[str]:
 
 
 def spawn_job(op: MoveOperation, state_dir: Path) -> None:
-    """Start the move as a sibling of the engine's service, never as its child."""
+    """Start the move as a sibling of the engine's service, never as its child.
+
+    On Linux the administrator's own root shell is already outside the
+    service's control group, so the move runs right here, in the foreground.
+    Ctrl-C and a dropped SSH session are ignored while it runs: either would
+    otherwise kill it past every rollback, leaving the engine drained or
+    stopped and the folder half-moved.
+    """
     if sys.platform == "win32":
         _spawn_windows_job(op, state_dir)
+    elif sys.platform.startswith("linux"):
+        import signal
+
+        previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGHUP)}
+        try:
+            execute(op.id, state_dir)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
     else:
         _spawn_mac_job(op, state_dir)
 
@@ -1025,9 +1267,8 @@ def update_in_flight() -> bool:
 
 
 def engine_port() -> int:
-    from ciao.update_host import current_update_host
-
-    return current_update_host().engine_port()
+    workspace = registered_workspace() or Path(".")
+    return current_engine_host(workspace).engine_port()
 
 
 def engine_running() -> bool:
@@ -1038,15 +1279,62 @@ def engine_running() -> bool:
     return _get_json(f"http://localhost:{port}/api/startup-status") is not None
 
 
+def _linux_service_can_reach() -> Callable[[Path], bool] | None:
+    """On Linux as root: whether the unit's account can enter a folder."""
+    if not sys.platform.startswith("linux") or not _running_as_root():
+        return None
+    user = LinuxServiceDefinition().user()
+    if not user:
+        return None
+
+    def can_reach(folder: Path) -> bool:
+        completed = subprocess.run(
+            ["runuser", "-u", user, "--", "test", "-x", str(folder)],
+            capture_output=True, check=False, timeout=30,
+        )
+        return completed.returncode == 0
+
+    return can_reach
+
+
 def plan_for(source: Path, target_raw: str) -> MovePlan:
     """:func:`plan` with this machine's service, engine, update and move state."""
-    return plan(
+    result = plan(
         source,
         target_raw,
         registered=registered_workspace(),
         update_in_flight=update_in_flight(),
         engine_running=engine_running(),
+        service_can_reach=_linux_service_can_reach(),
     )
+    if sys.platform.startswith("linux"):
+        for conf in LinuxServiceDefinition().drop_ins_naming(source.expanduser().resolve()):
+            result.refusals.append(
+                f"{conf} also names the workspace and the move only rewrites the unit. "
+                "Fold it into the unit or remove that line first."
+            )
+    return result
+
+
+def execute(operation_id: str, state_dir: Path) -> MoveOperation:
+    """Run the queued move ``operation_id`` with this machine's host. Raises ``MoveError``."""
+    op = read_operation(state_dir)
+    if op is None or op.id != operation_id or op.phase != "queued":
+        raise MoveError(f"no queued workspace move {operation_id}")
+    handle = _lock(state_dir)
+    try:
+        service = current_service_definition()
+        home = service.home() if isinstance(service, LinuxServiceDefinition) else None
+        return run_move(
+            op,
+            state_dir=state_dir,
+            host=current_engine_host(Path(op.source)),
+            service=service,
+            claude_home=home,
+        )
+    finally:
+        unlock(handle.fileno())
+        handle.close()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1058,27 +1346,11 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--state-dir", type=Path, default=None)
     args = parser.parse_args(argv)
     state_dir = args.state_dir or default_state_dir()
-    op = read_operation(state_dir)
-    if op is None or op.id != args.operation or op.phase != "queued":
-        print(f"no queued workspace move {args.operation}", file=sys.stderr)
-        return 1
     try:
-        handle = _lock(state_dir)
+        result = execute(args.operation, state_dir)
     except MoveError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    try:
-        from ciao.update_host import current_update_host
-
-        result = run_move(
-            op,
-            state_dir=state_dir,
-            host=current_update_host(),
-            service=current_service_definition(),
-        )
-    finally:
-        unlock(handle.fileno())
-        handle.close()
     print(f"{result.phase}: {result.error}" if result.error else result.phase)
     return 0 if result.phase == "done" else 1
 
