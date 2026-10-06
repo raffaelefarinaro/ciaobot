@@ -3432,6 +3432,8 @@ def _workspace_move_command(args: argparse.Namespace) -> int:
     if not args.apply:
         print("Nothing changed. Re-run with --apply to move it.")
         return 0
+    if sys.platform.startswith("linux"):
+        print("Moving. Ciaobot stops once running chats finish, and starts again from the new folder.")
     try:
         op = workspace_move.start(move_plan, port=workspace_move.engine_port())
     except workspace_move.MoveError as exc:
