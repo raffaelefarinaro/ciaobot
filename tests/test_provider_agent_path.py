@@ -360,3 +360,28 @@ def test_agent_request_default_extra_env_is_untouched() -> None:
     """
     request = AgentRequest(prompt="p", model="m", mode="normal")
     assert request.extra_env == {}
+
+
+# ── bare `gws` resolves the workspace's Google account ─────────────────────
+
+
+def test_chat_turn_env_points_bare_gws_at_the_linked_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    creds = tmp_path / "secrets" / "gws-personal"
+    creds.mkdir(parents=True)
+    (creds / "credentials.json").write_text("{}", encoding="utf-8")
+
+    extra_env = _chat_extra_env(tmp_path, monkeypatch)
+
+    assert extra_env["GWS_PROFILE"] == "personal"
+    assert extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(creds.resolve())
+
+
+def test_chat_turn_env_leaves_gws_config_unset_without_an_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    extra_env = _chat_extra_env(tmp_path, monkeypatch)
+
+    assert extra_env["GWS_PROFILE"] == ""
+    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in extra_env
