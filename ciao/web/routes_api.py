@@ -5355,6 +5355,15 @@ def _host_name(value: str) -> str:
 
 
 def _localhost_request(request: Request) -> bool:
+    """True when the TCP peer is this machine AND the Host names loopback.
+
+    The peer check is what makes it local: during first run the server binds
+    0.0.0.0, and a LAN client can send ``Host: localhost`` freely. The Host
+    check stays on top of it so a DNS-rebound page on this machine cannot
+    drive the setup routes either.
+    """
+    if not is_loopback_client(request):
+        return False
     name = _host_name(request.headers.get("host", ""))
     if not name:
         name = (request.url.hostname or "").rstrip(".").lower()
