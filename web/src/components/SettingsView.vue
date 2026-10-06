@@ -382,8 +382,10 @@
           <div class="settings-card-header">
             <p class="section-title">Main workspace</p>
             <p class="hint">
-              The server filesystem root for routines, skills, scripts, and runtime state.
-              Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
+              The server filesystem root for routines, skills, scripts, runtime state, and the <code>.env</code> file.
+              To move it, stop Ciaobot with <code>ciao service stop</code>, move the folder, then run
+              <code>ciao setup --workspace &lt;new folder&gt; --yes --load-launchd</code>.
+              Setup keeps the existing <code>.env</code>, password included.
               Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
             </p>
           </div>
