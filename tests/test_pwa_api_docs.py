@@ -10,9 +10,15 @@ from pathlib import Path
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/auth": "browser login flow; the recipe's auth step covers this",
     "/api/auth/logout": "browser logout; clears the session cookie",
+    "/api/chats/{chat_id}/background-runs/{run_id}/cancel": (
+        "Work details Stop button; agents cancel their own runs through "
+        "background_run_cancel on the agent surface"
+    ),
     "/api/auth/settings": "browser Settings auth form; enable/disable or change PWA password",
     "/api/setup/finish": "browser first-run setup handoff; writes local config and requests restart",
     "/api/setup/mkdir": "browser first-run setup folder picker; creates a local folder (bootstrap + localhost only)",
+    "/api/workspace-move": "browser Settings move of the install workspace (loopback only); agents run `ciao workspace-move`",
+    "/api/workspace-move/plan": "browser Settings dry run for the workspace move (loopback only); agents run `ciao workspace-move`",
     "/api/projects/{project_id}/files": "browser multipart upload; agents edit vault files directly",
     "/api/desktop-drop": "native app bridge; consumes a short-lived Finder-drop grant created outside HTTP",
     "/api/chats/{chat_id}/images": "browser image upload",

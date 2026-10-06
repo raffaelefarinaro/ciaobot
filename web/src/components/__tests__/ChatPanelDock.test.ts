@@ -272,6 +272,56 @@ describe('ChatPanel action dock', () => {
     wrapper.unmount()
   })
 
+  // A background run is not the user's move, so it is no longer a pill in the
+  // strip's disclosure — which had nothing to disclose for it, leaving a
+  // chevron that flipped and opened nothing. It is a status line naming the
+  // run that opens Work details, where the run has its log and Stop.
+  it('names a background run on its own line instead of a dead strip pill', async () => {
+    const { wrapper, store } = await mountPanel(s => {
+      s.backgroundRuns = {
+        'chat-1': [
+          { run_id: 'r1', label: 'Clone rizzo-flow', cmd: ['git', 'clone'], started_at: new Date(Date.now() - 125_000).toISOString(), status: 'running', exit_code: null },
+          { run_id: 'r2', label: '', cmd: ['uv', 'sync'], started_at: new Date().toISOString(), status: 'running', exit_code: null },
+        ],
+      }
+    })
+    expect(wrapper.find('.dock-strip').exists()).toBe(false)
+    const line = wrapper.get('.run-status')
+    expect(line.text()).toContain('Clone rizzo-flow and 1 more')
+    expect(line.get('.run-status-elapsed').text()).toMatch(/^2m/)
+    expect(line.classes()).toContain('run-status--live')
+
+    // While the turn's own live line shows activity, the run line steps aside.
+    store.projectStreaming = { 'chat-1': true }
+    await nextTick()
+    expect(wrapper.find('.run-status').exists()).toBe(false)
+
+    // When a run ends, the line says how instead of vanishing.
+    store.projectStreaming = {}
+    store.backgroundRuns = {}
+    store.finishedBackgroundRuns = {
+      'chat-1': { run_id: 'r1', label: 'Clone rizzo-flow', cmd: [], started_at: '', status: 'error', exit_code: 128 },
+    }
+    await nextTick()
+    expect(wrapper.get('.run-status').text()).toBe('Clone rizzo-flow failed (exit 128)')
+    expect(wrapper.get('.run-status').classes()).toContain('run-status--error')
+    wrapper.unmount()
+  })
+
+  it('opens Work details on the Activity tab from the run line on a narrow pane', async () => {
+    const { wrapper } = await mountPanel(s => {
+      s.backgroundRuns = {
+        'chat-1': [{ run_id: 'r1', label: 'Clone rizzo-flow', cmd: [], started_at: new Date().toISOString(), status: 'running', exit_code: null }],
+      }
+    })
+    await wrapper.get('.run-status').trigger('click')
+    await nextTick()
+    const panel = wrapper.get('#work-panel-activity')
+    expect(panel.text()).toContain('Running')
+    expect(panel.findComponent({ name: 'BackgroundRunRows' }).exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   // The strip used to be gated purely on dockDeferred, every entry of which
   // disappears once dockExpanded is true — so clicking it unmounted the control
   // and left no way back, with focus dropping to <body>.

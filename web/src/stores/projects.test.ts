@@ -3363,44 +3363,54 @@ describe('background agents indicator', () => {
     expect(store.backgroundAgents['c-live']).toBe(2)
   })
 
-  test('tracked background runs get their own count, cleared at zero', () => {
+  test('tracked background runs carry their rows, cleared when none are left', () => {
+    vi.useFakeTimers()
     const store = useProjectStore()
     const chatId = 'c-run'
     store.activeChatId = chatId
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (running: number) =>
+    const row = (runId: string, over: Record<string, unknown> = {}) => ({
+      run_id: runId, label: 'clone', cmd: ['git', 'clone'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null, ...over,
+    })
+    const fire = (runs: unknown[], finished?: unknown) =>
       sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_background_runs', chat_id: chatId, project_id: 'p1', running }),
+        data: JSON.stringify({ type: 'chat_background_runs', chat_id: chatId, project_id: 'p1', runs, finished }),
       })
 
-    fire(1)
-    expect(store.activeBackgroundRuns).toBe(1)
+    fire([row('r1')])
+    expect(store.activeBackgroundRuns.map(r => r.run_id)).toEqual(['r1'])
     expect(store.chatHasBackgroundRuns(chatId)).toBe(true)
-    fire(2)
-    expect(store.activeBackgroundRuns).toBe(2)
-    fire(0)
+    fire([row('r1'), row('r2')])
+    expect(store.activeBackgroundRuns).toHaveLength(2)
+    fire([], row('r2', { status: 'error', exit_code: 1 }))
     expect(store.backgroundRuns[chatId]).toBeUndefined()
     expect(store.chatHasBackgroundRuns(chatId)).toBe(false)
+    // How the last run ended is held briefly for the composer, then dropped.
+    expect(store.finishedBackgroundRuns[chatId]?.exit_code).toBe(1)
+    vi.advanceTimersByTime(6000)
+    expect(store.finishedBackgroundRuns[chatId]).toBeUndefined()
     // Background agents are a separate signal; a run must not light that pill.
     expect(store.activeBackgroundAgents).toBe(0)
+    vi.useRealTimers()
   })
 
-  test('the snapshot re-seeds run counts for a client that missed the start', () => {
+  test('the snapshot re-seeds runs for a client that missed the start', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
-    store.backgroundRuns['c-stale'] = 3
+    store.backgroundRuns['c-stale'] = []
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
+    const live = { run_id: 'r1', label: '', cmd: ['uv', 'sync'], started_at: '', status: 'running', exit_code: null }
     sock.onmessage?.({
       data: JSON.stringify({
         type: 'snapshot',
         active_streams: [],
-        background_runs: { 'c-live': 1 },
+        background_runs: { 'c-live': [live] },
       }),
     })
     expect(store.backgroundRuns['c-stale']).toBeUndefined()
-    expect(store.backgroundRuns['c-live']).toBe(1)
+    expect(store.backgroundRuns['c-live']).toEqual([live])
   })
 })
 

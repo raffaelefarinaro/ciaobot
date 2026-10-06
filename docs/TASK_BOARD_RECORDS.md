@@ -140,7 +140,7 @@ workspace. The vocabulary is deliberately **not** the board's:
 | State | Meaning | Live? |
 | ----- | ------- | ----- |
 | `running` | a turn is in flight | yes |
-| `needs_you` | the turn is paused on a question or an approval card | yes |
+| `needs_you` | the turn ended waiting on the user: paused on a question card, or without a `done` report (none, `blocked` or `needs_input`) | yes |
 | `ready_for_review` | the provider turn ended; the result waits for the user | yes |
 | `failed` | the turn ran and ended in an error | no |
 | `interrupted` | the outcome is unknown — a dead launch or a crash | no |
@@ -198,10 +198,12 @@ state the turn actually ended in.
 ### Known limitations
 
 - **A pending permission card does not end the turn, so the attempt reads
-  `running`.** `needs_you` is derived from the chat's pending question or
-  permission *after* the stream ends, so while the card is actually up and the
-  user has not answered it, the badge still says Running. The Needs-you badge
-  appears once the turn has ended waiting, not while it waits.
+  `running` while it is up.** Once a turn has ended with a result, a saved
+  permission card is ignored: it is kept until the response endpoint confirms the
+  answer and can outlive its turn. A question card counts as a pause in two cases:
+  a legacy card on a stream that ended without a result, or a native (opencode)
+  card still saved after a turn that ended with a result, because that card blocks
+  new turns until it is answered (#1092, #1097).
 - **An attended turn in a delegated chat that did not *start* there is not
   announced.** Re-attaching (see "Re-attaching the watcher") covers every turn
   `ProjectChatManager.start_stream` begins, which is every route to the model
@@ -258,7 +260,13 @@ watcher left over from a detached or retried attempt cannot put a Review badge o
 a card another attempt now owns. A stream that ends without a `result` event
 settles `interrupted`, not `ready_for_review`: there is no answer to review, and
 an empty result dressed as a finished one is the one reading the user cannot
-recover from without opening the chat.
+recover from without opening the chat. The one exception is a turn paused on a
+question card. The drive loop stops the provider and ends the stream with no
+`result`, so when the chat has a `pending_question` the attempt settles
+`needs_you` and the next turn re-attaches it (#1092). A saved permission card or
+a native (opencode) question card with a `request_id` does not count: both keep
+the turn open while they are up and can outlive it, so on a stream that has
+already ended they are leftovers.
 
 The gesture routes (`stop`, `detach`) await `ProjectChatManager.stop_chat`, which
 is `async`. `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` checks `task_id`

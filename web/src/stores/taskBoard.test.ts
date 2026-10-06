@@ -268,6 +268,26 @@ describe('taskBoard store', () => {
     })
   })
 
+  it('sends hand-over instructions trimmed, and omits blank ones', async () => {
+    const store = useTaskBoardStore()
+    get.mockResolvedValue({ workspace: 'personal', tasks: [task()] })
+    await store.reload('personal')
+    post.mockResolvedValue(delegated())
+
+    await store.delegate('personal', 'ship', REVISION, undefined, '  Done = a PR link.\n')
+    expect(post).toHaveBeenLastCalledWith('/api/tasks/ship/delegate', {
+      workspace: 'personal',
+      expected_revision: REVISION,
+      instructions: 'Done = a PR link.',
+    })
+
+    await store.delegate('personal', 'ship', REVISION, undefined, '   ')
+    expect(post).toHaveBeenLastCalledWith('/api/tasks/ship/delegate', {
+      workspace: 'personal',
+      expected_revision: REVISION,
+    })
+  })
+
   it('adopts the attempt a second delegation returned rather than inventing one',
     async () => {
       const store = useTaskBoardStore()

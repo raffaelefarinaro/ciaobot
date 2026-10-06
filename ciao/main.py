@@ -807,7 +807,7 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # Drop the indicator now. The wake below is coalesced over a short
         # window, so waiting for it would leave the chat claiming a run is
         # live for seconds after it exited.
-        pcm.announce_background_runs(run.parent_chat_id)
+        pcm.announce_background_runs(run.parent_chat_id, finished=run)
         pcm.queue_background_wake(
             run.parent_chat_id,
             run_id=run.run_id,
