@@ -3758,6 +3758,17 @@ class CiaoControlPlane:
         if not self._is_current_turn(workspace, attempt_id, stream):
             return
         if not seen_result:
+            # A turn paused on a question card ends its stream without a result
+            # (the drive loop stops the provider and waits for the answer), so a
+            # chat that is waiting on the user is a paused turn, not a lost one.
+            try:
+                waiting = _chat_needs_user(self.pcm.get_chat(chat_id))
+            except Exception:  # noqa: BLE001 — a chat store that cannot answer is unknown
+                logger.exception("delegation: could not read chat %s after the turn", chat_id)
+                waiting = False
+            if waiting:
+                self._settle_from_result(workspace, attempt_id, task_id, chat_id, stream, {})
+                return
             # The stream ended without a result event. Whatever the turn did — a
             # provider drop, a cancel the manager swallowed, a subscription that
             # closed early — this engine never saw an answer, so there is nothing
