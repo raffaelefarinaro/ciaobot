@@ -236,6 +236,84 @@ async def test_a_board_stop_parks_the_queue_instead_of_running_it(
     first_turn_blocked.set()
 
 
+async def test_a_message_queued_during_a_board_stop_is_parked_too(
+    tmp_path: Path,
+) -> None:
+    """A message queued while the board Stop is in flight is parked, not run.
+
+    The park decision happens at the drive loop's drain point, so anything
+    ``queue_message`` accepts during the stop window (provider grace, force
+    close, drive cleanup) is parked with the rest instead of running as a
+    follow-up over an attempt the board has settled ``stopped`` (#1103).
+    """
+    pcm = _make_manager(tmp_path)
+    pcm._STOP_GRACE_S = 0.05
+    project = pcm.create_project("stop-late", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="stop-late", provider="claude")
+
+    acked = asyncio.Event()
+    disconnects: list[int] = []
+    pcm._providers[chat.chat_id] = _fake_provider_service(acked, disconnects)
+
+    turn_calls: list[str] = []
+    first_turn_blocked = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            yield AssistantTextDelta(type="text", text="partial answer")
+            await first_turn_blocked.wait()
+        else:
+            yield ResultEvent(
+                type="result",
+                result="post-stop answer",
+                session_id="sess-x",
+                is_error=False,
+                effective_model=chat.model,
+                usage={},
+                quota={},
+            )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "text_delta" for e in captured),
+    )
+    assert pcm.queue_message(chat.chat_id, "follow-up") is True
+
+    stop_task = asyncio.create_task(pcm.stop_chat(chat.chat_id, park_queue=True))
+    await asyncio.sleep(0.01)
+    assert pcm.queue_message(chat.chat_id, "late") is True
+    stopped = await asyncio.wait_for(stop_task, timeout=2.0)
+    assert stopped is True
+
+    await _wait_for(
+        lambda: len([e for e in captured if e.get("type") == "result"]) == 1
+    )
+    await _wait_for(lambda: stream.done)
+    # No follow-up turn ran, and both messages are parked.
+    assert turn_calls == ["initial"]
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1
+    assert results[0].get("stopped") is True
+    assert [e["text"] for e in pcm.get_chat(chat.chat_id).pending_queue] == [
+        "follow-up",
+        "late",
+    ]
+
+    consumer.cancel()
+    first_turn_blocked.set()
+
+
 async def test_stop_prefers_the_clean_provider_level_end(tmp_path: Path) -> None:
     """Provider reacts to the stop inside the grace window: no force close."""
     pcm = _make_manager(tmp_path)

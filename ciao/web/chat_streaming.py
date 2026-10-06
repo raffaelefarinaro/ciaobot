@@ -841,16 +841,19 @@ class ChatStreaming:
                     if next_pending is not None:
                         remaining = [next_pending, *remaining]
                     stream.publish({"type": "queue_state", "queue": remaining})
+                # A task-board Stop or Detach ends the delegated work: what
+                # is queued is parked on the chat, not run (#1103).
+                park_rest = stream.user_stopped and stream.park_on_stop
                 if stream.user_stopped:
                     stream.user_stopped = False
-                    if next_pending is not None:
+                    if next_pending is not None and not park_rest:
                         had_error = False
-                if next_pending is None or had_error:
+                if next_pending is None or had_error or park_rest:
                     stream.accepting_queue = False
                     late = stream.drain_pending()
                     parked = (
                         [next_pending, *late]
-                        if had_error and next_pending is not None
+                        if (had_error or park_rest) and next_pending is not None
                         else late
                     )
                     if parked:
