@@ -967,8 +967,6 @@ _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
     ("CIAO_LOG_LEVEL", "remove it: it was imported once into Settings → General → Developer"),
     ("CIAO_DEV_MODE", "remove it: it was imported once into Settings → General → Developer"),
     ("CIAO_APP_REPO", "remove it: it was imported once into Settings → General → Developer"),
-    # Only the first-run onboarding chat read it; setup records it in its marker.
-    ("CIAO_VAULT_MODE", "remove it: setup records the vault mode itself now"),
     # The workspace list is runtime state owned by Settings. Server startup
     # imports the variable into workspaces.json once; after that it is inert.
     (
@@ -977,6 +975,18 @@ _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
         "and workspaces are managed in Settings now",
     ),
 )
+
+
+# Values `ciao setup` itself wrote into every `.env`. They say what is still
+# true, so flagging them would put the tile on every upgraded install for a line
+# the operator never chose. `CIAO_VAULT_MODE` is never listed at all: setup
+# wrote it and nothing the operator sets there changes behaviour now.
+_SETUP_WRITTEN_DEFAULTS: dict[str, str] = {"PWA_AUTH_REQUIRED": "true"}
+
+
+def _is_setup_written_default(name: str, value: str) -> bool:
+    default = _SETUP_WRITTEN_DEFAULTS.get(name)
+    return default is not None and value.strip().lower() == default
 
 
 def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction]:
@@ -989,7 +999,12 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
     is in effect. Chat-only — the fix edits `.env`, which is theirs.
     """
     source = getattr(context.config, "env_source", None) or os.environ
-    stale = [(name, hint) for name, hint in _IGNORED_ENV_VARS if str(source.get(name, "")).strip()]
+    stale = [
+        (name, hint)
+        for name, hint in _IGNORED_ENV_VARS
+        if str(source.get(name, "")).strip()
+        and not _is_setup_written_default(name, str(source.get(name, "")))
+    ]
     if not stale:
         return []
     names = ", ".join(name for name, _hint in stale)

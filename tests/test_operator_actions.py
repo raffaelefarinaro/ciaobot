@@ -1186,7 +1186,6 @@ def test_server_variables_that_moved_to_settings_are_surfaced(tmp_path: Path) ->
         "CIAO_LOG_LEVEL": "debug",
         "CIAO_DEV_MODE": "true",
         "CIAO_APP_REPO": "/src",
-        "CIAO_VAULT_MODE": "scratch",
     }
 
     actions = [a for a in detect_actions(_context(tmp_path, config=config))
@@ -1196,6 +1195,18 @@ def test_server_variables_that_moved_to_settings_are_surfaced(tmp_path: Path) ->
     for name in config.env_source:
         assert name in actions[0].detail
     assert "Settings" in actions[0].chat_prompt
+
+
+def test_lines_setup_wrote_itself_do_not_raise_the_tile(tmp_path: Path) -> None:
+    """Every pre-upgrade `.env` carries PWA_AUTH_REQUIRED=true and
+    CIAO_VAULT_MODE from setup; both still describe reality, so no tile."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"PWA_AUTH_REQUIRED": "true", "CIAO_VAULT_MODE": "scratch"}
+
+    assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))
 
 
 def test_no_legacy_env_vars_means_no_tile(tmp_path: Path) -> None:
