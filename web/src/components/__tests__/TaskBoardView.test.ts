@@ -1524,6 +1524,23 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
+  it('hands over the instructions typed into the sheet with the delegation', async () => {
+    apiPost.mockResolvedValue(delegateAnswer())
+    const wrapper = await mountWithBody([plainTask({ project_id: 'p1' })])
+
+    await openPreview(wrapper, 'Draft the runbook')
+    await wrapper.get('#task-delegate-instructions').setValue('Ask before deleting. Done = a link.')
+    await wrapper.get('.task-sheet .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/fresh/delegate', {
+      workspace: 'personal',
+      expected_revision: REVISION,
+      instructions: 'Ask before deleting. Done = a link.',
+    })
+    wrapper.unmount()
+  })
+
   it('sends a named project only when one was chosen', async () => {
     apiPost.mockResolvedValue(delegateAnswer())
     const wrapper = await mountWithBody([plainTask()])

@@ -56,6 +56,7 @@ from ciao.schedules import (
 )
 from ciao.task_attempts import (
     HANDOFF_ATTEMPTS,
+    MAX_INSTRUCTIONS_CHARS,
     RESUMABLE_STATES,
     PreviousAttempt,
     TaskAttempt,
@@ -3106,6 +3107,7 @@ class CiaoControlPlane:
         expected_revision: str,
         project_id: str | None = None,
         actor: Actor = "user",
+        instructions: str = "",
     ) -> dict[str, Any]:
         """Hand one task to the agent as an ordinary chat, exactly once.
 
@@ -3119,7 +3121,9 @@ class CiaoControlPlane:
            created and no turn is started: a second delegation of a delegated task
            is a race, not a request for two turns.
         3. Resolve the project (see :meth:`_delegation_project`) and build the
-           prompt from the task's own fields. There is no caller-supplied prompt.
+           prompt from the task's own fields. The only caller text is
+           *instructions*, the user's note for this hand-over, quoted in its own
+           fence after the description; it cannot replace the task.
         4. Create **one ordinary chat** in that project, titled for the task and
            stamped with a ``task_delegation`` helper naming the task, its revision
            and the attempt — the provenance that lets the board link back to it
@@ -3146,6 +3150,13 @@ class CiaoControlPlane:
         *Done*, never a side effect of asking for work.
         """
         clean = str(task_id or "").strip()
+        note = str(instructions or "").strip()
+        if len(note) > MAX_INSTRUCTIONS_CHARS:
+            raise ControlPlaneError(
+                "invalid_task",
+                f"delegation instructions are limited to {MAX_INSTRUCTIONS_CHARS} "
+                "characters; put longer guidance in the task's description.",
+            )
         document = self._task_call(workspace, lambda store: store.get(clean))
         revision = document.revision
         if str(expected_revision or "").strip() != revision:
@@ -3188,6 +3199,7 @@ class CiaoControlPlane:
             relative_path=document.relative_path,
             body=document.body,
             previous_attempts=self._previous_attempts(workspace, record.id),
+            instructions=note,
         )
         attempt_id = uuid.uuid4().hex
         # Two revisions are in play from here, and they are not the same one. The
