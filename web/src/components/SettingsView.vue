@@ -382,12 +382,28 @@
           <div class="settings-card-header">
             <p class="section-title">Main workspace</p>
             <p class="hint">
-              The server filesystem root for routines, skills, scripts, and runtime state.
-              Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
+              The server filesystem root for routines, skills, scripts, runtime state, and the <code>.env</code> file.
               Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
             </p>
           </div>
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
+          <p v-if="workspaceMoveOutcome" class="hint workspace-move-outcome" :class="{ 'workspace-move-outcome--error': workspaceMoveOutcome.error }">
+            {{ workspaceMoveOutcome.text }}
+          </p>
+          <div v-if="workspaceMove?.local" class="workspace-move-row">
+            <button class="btn-small" type="button" @click="workspaceMoveOpen = true">Move&hellip;</button>
+          </div>
+          <p v-else-if="workspaceMove" class="hint">
+            To move it, open Settings on the computer running Ciaobot, or run
+            <code>ciao workspace-move &lt;new folder&gt;</code> there.
+          </p>
+          <WorkspaceMoveDialog
+            v-if="workspaceMove?.local"
+            :open="workspaceMoveOpen"
+            :workspace-root="workspaceMove.workspace_root"
+            @close="workspaceMoveOpen = false"
+            @started="onWorkspaceMoveStarted"
+          />
         </div>
 
         <!-- Workspace health -->
@@ -2081,6 +2097,7 @@ import {
 } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
+import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
@@ -2423,6 +2440,58 @@ type AliasProviderSection = {
   // Whether the provider is signed in and reporting models. Routine selectors
   // filter to available sections.
   available: boolean
+}
+
+interface WorkspaceMoveOperation {
+  phase: string
+  source: string
+  target: string
+  error: string
+  updated_at: string
+}
+
+interface WorkspaceMoveStatus {
+  workspace_root: string
+  local: boolean
+  operation: WorkspaceMoveOperation | null
+}
+
+const workspaceMove = ref<WorkspaceMoveStatus | null>(null)
+const workspaceMoveOpen = ref(false)
+
+async function fetchWorkspaceMove() {
+  try {
+    workspaceMove.value = await api.get<WorkspaceMoveStatus>('/api/workspace-move')
+  } catch {
+    workspaceMove.value = null
+  }
+}
+
+// The last move's outcome, for a day after it: the page reloads while the
+// engine restarts, so this is where a move that finished — or was undone —
+// says so.
+const workspaceMoveOutcome = computed(() => {
+  const op = workspaceMove.value?.operation
+  if (!op) return null
+  const age = Date.now() - Date.parse(op.updated_at)
+  if (!(age < 24 * 60 * 60 * 1000)) return null
+  switch (op.phase) {
+    case 'done':
+      return { text: `Moved here from ${op.source}.`, error: false }
+    case 'failed':
+      return { text: `The move to ${op.target} did not start: ${op.error}`, error: true }
+    case 'rolled_back':
+      return { text: `The move to ${op.target} did not finish and was undone: ${op.error}`, error: true }
+    case 'rollback_failed':
+      return { text: `The move to ${op.target} failed and could not be undone: ${op.error}`, error: true }
+    default:
+      return null
+  }
+})
+
+function onWorkspaceMoveStarted() {
+  workspaceMoveOpen.value = false
+  restartAndReload('Moving the workspace. Ciaobot will restart from the new folder…')
 }
 
 async function fetchRoutines() {
@@ -4031,6 +4100,7 @@ onMounted(async () => {
   })
   fetchAuthSettings()
   fetchRoutines()
+  fetchWorkspaceMove()
   fetchPackageStatus()
   fetchUpdateStatus()
   fetchProviderKeys().then(scrollToChatProvidersIfLinked)
@@ -5331,6 +5401,15 @@ a.btn-secondary {
   border-radius: 3px;
   background: var(--bg);
   color: var(--fg);
+}
+.workspace-move-row {
+  margin-top: var(--space-3);
+}
+.workspace-move-outcome {
+  margin-top: var(--space-3);
+}
+.workspace-move-outcome--error {
+  color: var(--error);
 }
 .workspace-root-path {
   display: block;

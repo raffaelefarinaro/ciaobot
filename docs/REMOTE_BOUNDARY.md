@@ -43,6 +43,11 @@ carried by the session.
   other proxies on this machine connect from 127.0.0.1 on behalf of remote
   callers. `is_loopback_client` is the only "is it local" check in the
   codebase and nothing else grants access on it.
+- Moving the install workspace (`/api/workspace-move/dirs`, `/plan` and the
+  `POST`) needs the session *and* `is_loopback_client`, a localhost `Host` and a
+  same-host `Origin`: browsing folders and moving the install are for the
+  computer running Ciaobot. The peer check narrows a session route here; it
+  grants nothing. A remote browser gets the CLI command instead.
 - Model-authored HTML is served from `/api/workspace-html` under a sandboxing
   CSP (`sandbox allow-scripts`, no `allow-same-origin`, `connect-src 'none'`,
   `form-action 'none'`), so an artifact cannot reach the API or the local-only
