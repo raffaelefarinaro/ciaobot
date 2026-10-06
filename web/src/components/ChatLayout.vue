@@ -570,13 +570,6 @@ const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
 let latestStatusSyncTimer: ReturnType<typeof setInterval> | null = null
 
-// Current project id for pinned-file lookup.
-const currentProjectId = computed(() => {
-  if (projectIdParam.value) return projectIdParam.value
-  const chat = store.activeChat
-  if (chat?.project_id) return chat.project_id
-  return ''
-})
 // Only for the true empty state. Every lane carries its own "+ new" and lanes
 // no longer collapse at narrow widths, so on a phone with chats these were a
 // second, louder copy of an action already on screen — and a saturated fill
@@ -665,16 +658,18 @@ async function handleNewChatShortcut() {
   await chooseNewChat()
 }
 const activePinKey = computed(() => {
-  return store.activeChatId || currentProjectId.value
+  // The pinned pane belongs to the route on screen, never to whatever chat is
+  // still selected underneath it. Home (`/` or a bare `/chat`) has no key at
+  // all, so a retained chat can never surface its pinned page for even one
+  // frame while the route watcher clears the view; Settings, Automations,
+  // Tasks, Memory and the project routes read as before (they carry neither
+  // param). Coming back to the chat restores that chat's pin, because the pin
+  // is looked up under the chat the route names.
+  if (projectIdParam.value) return projectIdParam.value
+  return (route.params.chatId as string) || ''
 })
 const pinnedFilePath = computed(() => {
   if (isMobile.value) return ''
-  // Pinned files are scoped. When the user navigates to a global
-  // surface (settings, schedules, the task board), the split layout would
-  // otherwise mask those views entirely because the v-if="pinnedFilePath" branch
-  // only renders ProjectView/ChatPanel. Hide the pin in those modes; the store
-  // entry stays intact, so coming back restores it.
-  if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'memory' || viewMode.value === 'proposals') return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
 })
 function unpinCurrent(): void {
@@ -707,12 +702,52 @@ function stopLatestStatusSync() {
   latestStatusSyncTimer = null
 }
 
+// Home is a view, not a request to destroy anything: reaching `/` (or a bare
+// `/chat`) shows Home alone, with no conversation and no pinned file. This
+// reconciles the store with the route that is actually displayed, so the
+// sidebar's "chats" nav tab, a direct `router.push('/')`, browser back/forward
+// and the history buttons all land in the same place.
+//
+// Deliberately NOT closeChat(): that is the explicit Close/Escape gesture and
+// it owns the empty-draft delete policy. Clicking Home is a navigation, so an
+// unused New Chat, its typed-but-unsent prompt and its staged screenshots all
+// survive it and reappear when that chat is opened again.
+//
+// Secondary destinations (settings, automations, tasks, memory, a project) keep
+// the selection underneath them, as they always have - so a chat the user left
+// for Automations is still there when they come back to it. Only the bare Home
+// route clears.
+function isHomeRoute(path: string): boolean {
+  return path === '/' || path === '/chat'
+}
+
+function clearRetainedChatView() {
+  if (store.activeChatId) store.clearActiveChatView()
+}
+
 onMounted(async () => {
+  // `fetchAll()` is a boot *and* a refresh, and its first step is
+  // `restoreState()`, which re-applies `ciao-active-chat` from localStorage.
+  // Remembering the selection across that await is what separates a chat the
+  // store just restored from one the session already had open: only the
+  // former may be reconciled away below.
+  const selectedBeforeFetch = store.activeChatId
   await store.fetchAll()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
-  const chatId = route.params.chatId as string
-  if (chatId && store.chats.find(c => c.chat_id === chatId)) {
+  // The route is re-read here, after the awaits, never captured before them.
+  // A slow `fetchAll()` is long enough for the user to have navigated, and a
+  // stale pre-fetch route would clear a chat they opened in the meantime —
+  // so a chat route is resolved against where the router actually is now.
+  const chatId = (route.params.chatId as string) || ''
+  if (isHomeRoute(route.path)) {
+    // Home alone: no conversation, no pinned page. Only the id that came back
+    // from storage is cleared, so a selection this session made before the
+    // layout existed is left to the route watcher above to own.
+    if (store.activeChatId && store.activeChatId !== selectedBeforeFetch) {
+      store.clearActiveChatView()
+    }
+  } else if (chatId && store.chats.find(c => c.chat_id === chatId)) {
     await store.openChatFromDeepLink(chatId)
   }
   // Auto-collapse sidebar on mobile when a chat is active
@@ -726,25 +761,18 @@ watch(() => route.path, (p) => {
 })
 
 // React to route changes (e.g. clicking a chat link from ProjectView).
+//
+// The path is watched, not just `params.chatId`: a move from a secondary page
+// to `/` leaves chatId undefined on *both* routes, so a chatId-keyed watcher
+// never fired and the retained chat resurfaced on Home. Watching the path also
+// keeps the explicit `/chat/:chatId` and subagent routes working exactly as
+// before.
 watch(
-  () => route.params.chatId,
-  (chatId) => {
-    const id = chatId as string
+  () => route.path,
+  (path) => {
+    const id = (route.params.chatId as string) || ''
     if (!id) {
-      // The sidebar's "chats" nav tab (and any other plain link to `/` or
-      // `/chat`) navigates here without going through closeChat(), so
-      // activeChatId - and the ChatPanel/keyboard-shortcut logic keyed off
-      // it - stayed on the chat the user left. Only bare chat routes mean
-      // "go home": project/settings/schedules routes deliberately leave
-      // activeChatId populated underneath them (see the Esc handler above),
-      // so this only fires when chatId itself changed away from a real id -
-      // not on a settings/schedules -> `/` transition, where chatId was
-      // already undefined and the retained chat is meant to resurface.
-      // Route through the local closeChat() wrapper, not store.closeChat()
-      // directly, so a failed close (e.g. the DELETE request itself erroring
-      // out) surfaces the same toast the close button and Esc already show,
-      // instead of an unhandled rejection with no explanation.
-      if (viewMode.value === 'chat' && store.activeChatId) closeChat()
+      if (isHomeRoute(path)) clearRetainedChatView()
       return
     }
     if (!store.chats.find(c => c.chat_id === id)) return
