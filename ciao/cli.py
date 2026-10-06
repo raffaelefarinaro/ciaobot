@@ -1097,9 +1097,10 @@ def setup_workspace(
     # CIAO_WORKSPACE and CIAO_RUNTIME_ROOT are not written: the service
     # definition carries both, and a `ciao run` started inside the workspace
     # finds it through its registry (see `CiaoConfig.from_env`).
+    # Nor CIAO_VAULT_MODE: only the first-run onboarding chat reads it, so it
+    # is recorded in the setup marker below.
     desired_env.extend([
         ("CIAO_VAULT_ROOT", vault_value),
-        ("CIAO_VAULT_MODE", vault_mode),
         ("PWA_PORT", str(port)),
     ])
     if not existing_env and not env_path.exists():
@@ -1115,7 +1116,7 @@ def setup_workspace(
         from ciao.setup_marker import write_setup_marker
 
         written.append(
-            write_setup_marker(root / ".runtime")
+            write_setup_marker(root / RUNTIME_DIR_NAME, vault_mode=vault_mode)
         )
     else:
         # Merge into the user's file: keep every existing line untouched
@@ -5879,12 +5880,17 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace_root).expanduser().resolve()
     _load_env_file(workspace_root / ".env")
 
-    # PWA_HOST is the server's *bind* address. For a loopback/wildcard bind we
-    # emit "localhost" so the printed chat link matches the host the browser is
-    # authenticated on (the menu bar, setup, and login URLs all use localhost).
-    # The session cookie is host-only, so a "127.0.0.1" link would not carry the
-    # "localhost" cookie and every /ws and authed /api request would be rejected.
-    host = os.environ.get("PWA_HOST", "localhost")
+    # The bind address (Settings → General → Network access) is where the
+    # server listens. For a loopback/wildcard bind we emit "localhost" so the
+    # printed chat link matches the host the browser is authenticated on (the
+    # menu bar, setup, and login URLs all use localhost). The session cookie is
+    # host-only, so a "127.0.0.1" link would not carry the "localhost" cookie
+    # and every /ws and authed /api request would be rejected.
+    from ciao.app_settings import read_app_settings
+
+    host = read_app_settings(
+        workspace_root / RUNTIME_DIR_NAME / "app_settings.json"
+    ).pwa_host
     if host in ("0.0.0.0", "127.0.0.1", "::", "::1", ""):
         host = "localhost"
     port = os.environ.get("PWA_PORT", "8443")
@@ -7773,7 +7779,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat_parser.add_argument(
         "--base-url",
-        help="Ciaobot server URL. Defaults to PWA_HOST/PWA_PORT.",
+        help="Ciaobot server URL. Defaults to the bind address in Settings and PWA_PORT.",
     )
     chat_parser.set_defaults(func=_create_chat_command)
 

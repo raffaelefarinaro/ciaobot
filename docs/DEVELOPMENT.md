@@ -5,8 +5,9 @@ Setup, dev workflow, testing, and change guidelines. For the system design, read
 ## Server install
 
 Linux production and every installer-managed macOS install restart the engine
-from Settings through `POST /api/admin/restart`; `CIAO_DEV_MODE=true` on a
-source checkout retains the source deploy workflow.
+from Settings through `POST /api/admin/restart`; developer mode (Settings →
+General → Developer, with the source checkout set there) on a source checkout
+retains the source deploy workflow.
 
 ```bash
 python3.12 -m venv .venv

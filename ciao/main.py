@@ -414,6 +414,20 @@ async def _async_main(*, supervised: bool = False) -> int:
 async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
+    # Runtime-mutable settings overlay (PWA Settings). Applied on top of the
+    # env-backed config so PATCHes take effect without a restart and survive
+    # one via .runtime/app_settings.json. Loaded first: the log level and the
+    # bind address below come from it, and the one-time import of their
+    # retired `.env` variables has to land before either is used.
+    from ciao.app_settings import AppSettingsStore
+
+    app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
+    app_settings.migrate_legacy_insights_enabled(
+        getattr(config, "legacy_insights_disabled", None)
+    )
+    app_settings.import_legacy_env(getattr(config, "legacy_env_settings", {}))
+    app_settings.apply_to_config(config)
+
     setup_error_logging(config.workspace_root)
     # The engine holds a descriptor per accepted connection. A service manager
     # starts it with a low soft limit (macOS launchd: 256) unless the service
@@ -422,13 +436,14 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     # covers `ciao run`/`ciao supervise` and an upgrade that did not rewrite
     # the unit. Best-effort: the engine must still start if the call fails.
     raise_file_descriptor_limit()
-    # When CIAO_LOG_LEVEL=debug, also capture DEBUG+ records into a rotating
-    # server_debug.log so verbose runtime detail is inspectable after the fact
-    # (surfaced through the debug issue report). No-op at the default INFO.
+    # At the debug log level (Settings), also capture DEBUG+ records into a
+    # rotating server_debug.log so verbose runtime detail is inspectable after
+    # the fact (surfaced through the debug issue report). No-op at INFO.
     from ciao.error_log import resolve_log_level, setup_debug_logging
 
-    setup_debug_logging(config.workspace_root)
-    log_level = resolve_log_level()
+    log_level = resolve_log_level(config.log_level)
+    logging.getLogger().setLevel(log_level)
+    setup_debug_logging(config.workspace_root, level=log_level)
     # Keep the SDK's benign closed-transport control-task errors out of the
     # error log (asyncio would otherwise log them at ERROR). See issue #163.
     install_asyncio_noise_filter()
@@ -436,17 +451,6 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     # No model discovery at startup: opencode serves its catalog on demand and
     # Claude Code has a fixed tier vocabulary,
     # so there is no allowlist to warm here.
-
-    # Runtime-mutable settings overlay (PWA Settings → Models tab). Applied
-    # on top of the env-backed config so PATCHes take effect without a
-    # restart and survive one via .runtime/app_settings.json.
-    from ciao.app_settings import AppSettingsStore
-
-    app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
-    app_settings.migrate_legacy_insights_enabled(
-        getattr(config, "legacy_insights_disabled", None)
-    )
-    app_settings.apply_to_config(config)
 
     # Pin the job-run recorder to the same .runtime the config uses, then
     # route finished startup phases (vault index, skills update) into it.
@@ -889,7 +893,6 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     app.state.local_session_manager = LocalSessionManager(
         workspace=git_sync_root,
         runtime_root=config.state_path.parent,
-        dev_mode=config.dev_mode,
     )
     if mcp_service is not None:
         from ciao.control_plane import CiaoControlPlane
@@ -1408,9 +1411,9 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
 
 def main(*, supervised: bool = False) -> None:
     """CLI entrypoint."""
-    from ciao.error_log import resolve_log_level
-
-    logging.basicConfig(level=resolve_log_level())
+    # INFO until the workspace's own log level (Settings) is known, which
+    # `_run_server_locked` applies.
+    logging.basicConfig(level=logging.INFO)
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:

@@ -12,6 +12,7 @@ from ciao.config import CiaoConfig
 from ciao.models import ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.setup_marker import write_setup_marker
 from ciao.web.project_chats import (
     AgentSurfaceUnavailableError,
     ProjectChatManager,
@@ -21,9 +22,12 @@ from ciao.web.project_chats import (
 from tests.conftest import attach_stub_mcp
 
 
-def _make_manager(tmp_path: Path) -> ProjectChatManager:
+def _make_manager(tmp_path: Path, *, vault_mode: str | None = None) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
+    if vault_mode is not None:
+        # What a first-time `ciao setup` records for the onboarding chat.
+        write_setup_marker(runtime, vault_mode=vault_mode)
     config = CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
@@ -72,8 +76,7 @@ def _write_registry(root: Path, overrides: str) -> None:
 def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    manager = _make_manager(tmp_path)
+    manager = _make_manager(tmp_path, vault_mode="existing")
 
     onboarding = next(
         chat for chat in manager._chats.values()
@@ -87,8 +90,7 @@ def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
     assert "`Templates/` and `personal/`/`work/` are not required" in prompt
     assert "Create Directory Structure" not in prompt
 
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    fresh_manager = _make_manager(tmp_path / "fresh")
+    fresh_manager = _make_manager(tmp_path / "fresh", vault_mode="scratch")
     fresh_onboarding = next(
         chat for chat in fresh_manager._chats.values()
         if chat.title == "Welcome to Ciaobot! 👋"
@@ -161,10 +163,8 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Scratch and existing-vault onboarding both teach the two memory layers."""
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    existing = _make_manager(tmp_path / "existing")
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    scratch = _make_manager(tmp_path / "scratch")
+    existing = _make_manager(tmp_path / "existing", vault_mode="existing")
+    scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")
 
     for manager, title in (
         (existing, "Connect Existing Vault 👋"),
@@ -237,10 +237,8 @@ def test_onboarding_asks_workspace_purpose_and_style(
     the same ordered interview, so one pass over the two covers an adopted vault
     and a brand-new one.
     """
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    existing = _make_manager(tmp_path / "existing")
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    scratch = _make_manager(tmp_path / "scratch")
+    existing = _make_manager(tmp_path / "existing", vault_mode="existing")
+    scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")
 
     for manager, title in (
         (existing, "Connect Existing Vault 👋"),
@@ -279,10 +277,8 @@ def test_onboarding_routes_purpose_to_context_and_style_to_profile(
     its home and rules the bounded regions out for it, while style and operating
     context go where the memory tool says they belong.
     """
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    existing = _make_manager(tmp_path / "existing")
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    scratch = _make_manager(tmp_path / "scratch")
+    existing = _make_manager(tmp_path / "existing", vault_mode="existing")
+    scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")
 
     for manager, title in (
         (existing, "Connect Existing Vault 👋"),
@@ -314,10 +310,8 @@ def test_onboarding_starting_knowledge_is_confirmed_facts_only(
     reading past conversations is the consent-gated memory job, which the user
     starts from Memory whenever they choose, not a side effect of onboarding.
     """
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    existing = _make_manager(tmp_path / "existing")
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    scratch = _make_manager(tmp_path / "scratch")
+    existing = _make_manager(tmp_path / "existing", vault_mode="existing")
+    scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")
 
     for manager, title in (
         (existing, "Connect Existing Vault 👋"),

@@ -572,19 +572,17 @@ def test_manager_status_non_git_workspace(tmp_path: Path) -> None:
         "git_repo": False,
         "branch": None,
         "dirty": False,
-        "dev_mode": False,
     }
 
 
 def test_manager_status_reports_current_branch(tmp_path: Path) -> None:
     local, _ = _make_world(tmp_path, branch="feature-x")
     _write(local / "dirty.md", "dirty\n")
-    mgr = LocalSessionManager(workspace=local, runtime_root=tmp_path / "rt", dev_mode=True)
+    mgr = LocalSessionManager(workspace=local, runtime_root=tmp_path / "rt")
     assert mgr.status() == {
         "git_repo": True,
         "branch": "feature-x",
         "dirty": True,
-        "dev_mode": True,
     }
 
 

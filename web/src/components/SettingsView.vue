@@ -493,6 +493,14 @@
              computer. The one place to set the trusted HTTPS address. -->
         <SettingsDevices />
 
+        <!-- Network access and the developer switches: server settings that
+             used to live in the workspace .env. -->
+        <SettingsServer
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
+
         <!-- Installing is optional and the guidance is permanent: the Home setup
              reminder can be closed for good, so Settings keeps the steps. -->
         <SettingsAppInstall />
@@ -2073,6 +2081,7 @@ import UpdateProgressView from './UpdateProgressView.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
+import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
@@ -4243,6 +4252,15 @@ async function fixIssuesInChat() {
 
 // ── Workspace git sync (current branch) ──────────────────────────────────
 const localStatus = ref<LocalStatus | null>(null)
+
+// Developer mode is a setting now; the Debug card reads it from the local
+// status, so a toggle refreshes that rather than waiting for a reload.
+watch(
+  () => routines.value?.dev_mode,
+  (current, previous) => {
+    if (previous !== undefined && current !== previous) void fetchLocalStatus()
+  },
+)
 
 async function fetchLocalStatus() {
   try {

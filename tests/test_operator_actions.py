@@ -1176,6 +1176,28 @@ def test_retired_auth_switch_is_surfaced(tmp_path: Path) -> None:
     assert "PWA_AUTH_REQUIRED" in actions[0].detail
 
 
+def test_server_variables_that_moved_to_settings_are_surfaced(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {
+        "PWA_HOST": "127.0.0.1",
+        "CIAO_LOG_LEVEL": "debug",
+        "CIAO_DEV_MODE": "true",
+        "CIAO_APP_REPO": "/src",
+        "CIAO_VAULT_MODE": "scratch",
+    }
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    for name in config.env_source:
+        assert name in actions[0].detail
+    assert "Settings" in actions[0].chat_prompt
+
+
 def test_no_legacy_env_vars_means_no_tile(tmp_path: Path) -> None:
     config = _RerootedConfig(tmp_path)
     for name in ("personal", "work"):

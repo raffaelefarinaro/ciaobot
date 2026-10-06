@@ -24,7 +24,7 @@ is:
    page script; a machine sender sends neither header and is unaffected.
 3. ``401`` — ``Authorization: Bearer <secret>`` checked against
    ``WebhookStore.authenticate(trigger_id, secret)``, *before* the body is read.
-   With ``PWA_HOST=0.0.0.0`` this route is reachable from the LAN, so buffering
+   With the default ``0.0.0.0`` bind this route is reachable from the LAN, so buffering
    an unauthenticated upload first would let anyone fill memory before the 401.
    A trigger that is missing, disabled, revoked or simply wrong all answer 401;
    a store this code cannot read raises and answers **500**, because answering

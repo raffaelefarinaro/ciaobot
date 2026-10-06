@@ -56,7 +56,8 @@ async def test_local_status_advertises_linux_restart_only(monkeypatch, platform,
     monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     monkeypatch.setattr(sys, "platform", platform)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        local_session_manager=SimpleNamespace(status=lambda: {"dev_mode": dev_mode}),
+        config=SimpleNamespace(dev_mode=dev_mode),
+        local_session_manager=SimpleNamespace(status=lambda: {}),
     )))
     response = await local_status(request)
     assert json.loads(response.body)["restart_only"] is expected
@@ -97,8 +98,8 @@ async def _status_restart_only(monkeypatch, *, platform, dev_mode, app_repo, bun
         monkeypatch.delenv("CIAO_BUNDLED_APP", raising=False)
     monkeypatch.setattr(sys, "platform", platform)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(
-        config=SimpleNamespace(app_repo=str(app_repo)),
-        local_session_manager=SimpleNamespace(status=lambda: {"dev_mode": dev_mode}),
+        config=SimpleNamespace(app_repo=str(app_repo), dev_mode=dev_mode),
+        local_session_manager=SimpleNamespace(status=lambda: {}),
     )))
     response = await local_status(request)
     return json.loads(response.body)["restart_only"]

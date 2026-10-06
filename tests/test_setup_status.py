@@ -15,6 +15,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
+from ciao.setup_marker import read_setup_vault_mode
 from ciao.setup_status import claude_auth_status, claude_path_command, setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
@@ -705,7 +706,8 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     )
     assert resp.status_code == 200
     env_text = (ws / ".env").read_text(encoding="utf-8")
-    assert "CIAO_VAULT_MODE=scratch" in env_text
+    assert "CIAO_VAULT_MODE" not in env_text
+    assert read_setup_vault_mode(ws / ".runtime") == "scratch"
     # `<workspace>/memory-vault`: the wizard creates the per-workspace layout
     # directly, so a new install never has a shared vault to migrate.
     assert (ws / "life" / "memory-vault" / "MEMORY.md").is_file()
@@ -760,7 +762,8 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     )
     assert resp.status_code == 200
     env_text = (ws / ".env").read_text(encoding="utf-8")
-    assert "CIAO_VAULT_MODE=existing" in env_text
+    assert "CIAO_VAULT_MODE" not in env_text
+    assert read_setup_vault_mode(ws / ".runtime") == "existing"
     assert "CIAO_VAULT_ROOT=." in env_text
     assert (ws / "MEMORY.md").is_file()
     assert not (ws / "memory-vault").exists()

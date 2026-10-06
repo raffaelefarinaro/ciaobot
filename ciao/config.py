@@ -573,12 +573,11 @@ class CiaoConfig:
     workspace_root: Path
     state_path: Path
     media_root: Path
+    # Developer controls and the source checkout for developer-only
+    # deploy/restart workflows. Both are Settings (`app_settings.json`), read at
+    # startup and overlaid live by `AppSettingsStore.apply_to_config`.
     dev_mode: bool = False
-    # Path to the Ciaobot source checkout for developer-only deploy/restart
-    # workflows. Packaged apps update the app bundle atomically instead. From
-    # CIAO_APP_REPO.
     app_repo: Path | None = None
-    vault_mode: str = "scratch"
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
     claude_default_model: str = CLAUDE_MODELS[0]
@@ -596,6 +595,10 @@ class CiaoConfig:
     legacy_workspaces_env: str = field(default="", repr=False)
     legacy_gws_profile: str = field(default="", repr=False)
     legacy_insights_disabled: bool | None = field(default=None, repr=False)
+    # Raw values of the retired `.env` server variables
+    # (`app_settings.LEGACY_ENV_SETTINGS`) this install still sets. Never read
+    # as settings; server startup imports them into Settings once.
+    legacy_env_settings: dict[str, str] = field(default_factory=dict, repr=False)
     claude_mode: BridgeMode = "auto"
     # Per-provider default execution (permission) mode for new chats, set from
     # the PWA Settings → Models & providers tab (runtime settings store). A missing
@@ -615,9 +618,11 @@ class CiaoConfig:
     pwa_port: int = 8443
     # The server binds all interfaces by default so the PWA is reachable over
     # LAN and Tailscale; the dashboard password + login rate limit are the
-    # access control. Set ``PWA_HOST=127.0.0.1`` in ``.env`` for loopback-only.
-    # This must stay equal to the ``PWA_HOST`` fallback in ``from_env`` below.
+    # access control. Settings → General → Network access sets "127.0.0.1"
+    # for loopback-only (`app_settings.DEFAULT_PWA_HOST` is this default).
     pwa_host: str = "0.0.0.0"
+    # Root log level name (Settings → General → Developer).
+    log_level: str = "info"
     # Per-provider default model for new chats, set from the PWA Settings →
     # Models tab. Empty means the provider's own default applies.
     opencode: OpencodeSettings = field(default_factory=OpencodeSettings)
@@ -1718,15 +1723,24 @@ class CiaoConfig:
 
         workspaces = _parse_workspaces_json(workspaces_json) or _bootstrap_registry(vault_root)
 
-        dev_mode_raw = source.get("CIAO_DEV_MODE", "").strip().lower()
-        dev_mode = dev_mode_raw in {"true", "1", "yes", "y"}
+        # Settings the server needs before it exists (bind address, log level),
+        # read from the runtime root like the registry above. Read-only: the
+        # one-time import of their retired `.env` variables happens at server
+        # startup, which then overlays the result (`apply_to_config`).
+        from ciao.app_settings import (
+            DEFAULT_LOG_LEVEL,
+            DEFAULT_PWA_HOST,
+            LEGACY_ENV_SETTINGS,
+            read_app_settings,
+        )
 
-        app_repo_raw = source.get("CIAO_APP_REPO", "").strip()
-        app_repo = Path(app_repo_raw).expanduser().resolve() if app_repo_raw else None
-
-        vault_mode = source.get("CIAO_VAULT_MODE", "scratch").strip().lower()
-        if vault_mode not in {"existing", "scratch"}:
-            vault_mode = "scratch"
+        stored = read_app_settings(runtime_root / "app_settings.json")
+        app_repo = Path(stored.app_repo).expanduser().resolve() if stored.app_repo else None
+        legacy_env_settings = {
+            name: str(source.get(name, "") or "").strip()
+            for name in LEGACY_ENV_SETTINGS
+            if str(source.get(name, "") or "").strip()
+        }
 
         legacy_insights_raw = str(
             source.get("CIAO_INSIGHTS_DISABLED", "") or ""
@@ -1742,14 +1756,15 @@ class CiaoConfig:
             workspace_root=workspace_root,
             state_path=state_path,
             media_root=media_root,
-            dev_mode=dev_mode,
+            dev_mode=stored.dev_mode,
             app_repo=app_repo,
-            vault_mode=vault_mode,
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
             claude_mode="auto",
             pwa_port=int(source.get("PWA_PORT", "8443")),
-            pwa_host=(source.get("PWA_HOST") or "0.0.0.0").strip() or "0.0.0.0",
+            pwa_host=stored.pwa_host or DEFAULT_PWA_HOST,
+            log_level=stored.log_level or DEFAULT_LOG_LEVEL,
+            legacy_env_settings=legacy_env_settings,
             workspaces=workspaces,
             legacy_workspaces_env=str(source.get("CIAO_WORKSPACES", "") or "").strip(),
             legacy_gws_profile=str(source.get("GWS_PROFILE", "") or "").strip(),

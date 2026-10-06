@@ -10,6 +10,13 @@ config object so call sites keep reading ``config.*`` and PATCHes take
 effect without a restart. Empty string means "no override, use the
 config/env default".
 
+The server fields (bind address, log level, developer mode and the source
+checkout) used to be workspace `.env` variables. `CiaoConfig.from_env` reads
+them from this file at startup with :func:`read_app_settings`, because the bind
+address and the log level are needed before the server exists; a value found
+in an older `.env` is imported once (:meth:`AppSettingsStore.import_legacy_env`)
+and ignored after that.
+
 The backup fields are the one part of this file that no env var and no
 `CiaoConfig` attribute backs: the cadence is a named constant, and
 whether a given machine backs up, and what it last managed to push, is
@@ -20,11 +27,13 @@ effect on the next tick.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from ciao import provider_registry
 
@@ -80,7 +89,57 @@ _BOOLEAN_FIELDS = {
     "insights_enabled",
     "backup_enabled",
     "backup_paused",
+    "dev_mode",
+    "legacy_env_imported",
 }
+# Bookkeeping the store owns; a PATCH never sets it.
+_INTERNAL_FIELDS = {"legacy_env_imported"}
+# Booleans whose default is False and that are only written once true, so a
+# file never grows keys that say nothing.
+_SPARSE_BOOLEANS = {"dev_mode", "legacy_env_imported"}
+
+# The server's bind address when none is set: every interface, so the PWA is
+# reachable over LAN and Tailscale. The password and the login rate limit are
+# the access control. Loopback-only is "127.0.0.1".
+DEFAULT_PWA_HOST = "0.0.0.0"
+LOG_LEVELS = ("debug", "info", "warning", "error")
+DEFAULT_LOG_LEVEL = "info"
+
+# Retired workspace `.env` variables and the setting each one became. Imported
+# once by `import_legacy_env`, then no longer read.
+LEGACY_ENV_SETTINGS: dict[str, str] = {
+    "PWA_HOST": "pwa_host",
+    "CIAO_LOG_LEVEL": "log_level",
+    "CIAO_DEV_MODE": "dev_mode",
+    "CIAO_APP_REPO": "app_repo",
+}
+_TRUTHY = {"true", "1", "yes", "y", "on"}
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
+)
+
+
+def _valid_host(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return bool(_HOSTNAME_RE.match(value))
+    return True
+
+
+def _normalize_log_level(raw: str) -> str:
+    """A stored log level name, or "" when ``raw`` names none we accept.
+
+    Numeric values are accepted for the standard levels, because the retired
+    ``CIAO_LOG_LEVEL`` accepted them too.
+    """
+    value = raw.strip().lower()
+    if value.isdigit():
+        value = str(logging.getLevelName(int(value))).lower()
+    if value == "warn":
+        value = "warning"
+    return value if value in LOG_LEVELS else ""
 
 # Apple's on-device model used to be an insights option. It is gone, so a
 # stored sentinel reads as Automatic instead of reaching a provider as a
@@ -164,6 +223,70 @@ class AppSettings:
     # default chat model.
     provider_insights_models: dict[str, str] | None = None
 
+    # The server's bind address; "" = DEFAULT_PWA_HOST. Read at startup only,
+    # so a change takes effect after a restart. Was PWA_HOST.
+    pwa_host: str = ""
+    # Root log level name; "" = DEFAULT_LOG_LEVEL. "debug" also writes
+    # .runtime/server_debug.log. Read at startup. Was CIAO_LOG_LEVEL.
+    log_level: str = ""
+    # Developer controls in Settings, /api/debug/issues and the source-checkout
+    # deploy. Was CIAO_DEV_MODE.
+    dev_mode: bool = False
+    # Absolute path of the Ciaobot source checkout for developer-mode Deploy and
+    # Restart; "" = the checkout the running engine lives in, if any. Was
+    # CIAO_APP_REPO.
+    app_repo: str = ""
+
+    # Whether the retired `.env` variables in LEGACY_ENV_SETTINGS have been
+    # imported. Set on the first start that runs the import, whatever it found,
+    # so a value later cleared in Settings is never brought back from `.env`.
+    legacy_env_imported: bool = False
+
+
+def _parse_settings(raw: object) -> AppSettings:
+    """``raw`` (the decoded JSON file) as validated settings. No side effects."""
+    settings = AppSettings()
+    if not isinstance(raw, dict):
+        return settings
+    string_fields = {
+        field.name
+        for field in fields(AppSettings)
+        if field.name not in _NESTED_CLEANERS
+        and field.name not in _BOOLEAN_FIELDS
+    }
+    for key, value in raw.items():
+        if key in string_fields and isinstance(value, str):
+            setattr(settings, key, value.strip())
+    for key in _BOOLEAN_FIELDS:
+        if isinstance(raw.get(key), bool):
+            setattr(settings, key, raw[key])
+    for key, cleaner in _NESTED_CLEANERS.items():
+        cleaned = cleaner(raw.get(key))
+        if cleaned:
+            setattr(settings, key, cleaned)
+    # A hand-edited file must not hand uvicorn or the root logger garbage.
+    if settings.pwa_host and not _valid_host(settings.pwa_host):
+        logger.warning("Ignoring invalid pwa_host %r in app settings", settings.pwa_host)
+        settings.pwa_host = ""
+    settings.log_level = _normalize_log_level(settings.log_level)
+    _drop_retired_models(settings)
+    return settings
+
+
+def read_app_settings(path: Path) -> AppSettings:
+    """The settings stored at ``path``, read without writing anything.
+
+    For :meth:`CiaoConfig.from_env`, which runs in read-only diagnostics too:
+    the store's own load may rewrite the file to finish a migration.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return AppSettings()
+    except (OSError, ValueError):
+        return AppSettings()
+    return _parse_settings(raw)
+
 
 def _migrate_global_insights_model(raw: dict, settings: AppSettings) -> bool:
     """Move the retired global ``insights_model`` into its provider's slot.
@@ -214,24 +337,7 @@ class AppSettingsStore:
             self._explicit_fields.update(
                 key for key in _BOOLEAN_FIELDS if isinstance(raw.get(key), bool)
             )
-        string_fields = {
-            field.name
-            for field in fields(AppSettings)
-            if field.name not in _NESTED_CLEANERS
-            and field.name not in _BOOLEAN_FIELDS
-        }
-        settings = AppSettings()
-        for key, value in raw.items():
-            if key in string_fields and isinstance(value, str):
-                setattr(settings, key, value.strip())
-        for key in _BOOLEAN_FIELDS:
-            if isinstance(raw.get(key), bool):
-                setattr(settings, key, raw[key])
-        for key, cleaner in _NESTED_CLEANERS.items():
-            cleaned = cleaner(raw.get(key))
-            if cleaned:
-                setattr(settings, key, cleaned)
-        _drop_retired_models(settings)
+        settings = _parse_settings(raw)
         if isinstance(raw, dict) and _migrate_global_insights_model(raw, settings):
             self.settings = settings
             try:
@@ -243,7 +349,7 @@ class AppSettingsStore:
     def _save(self) -> None:
         payload = {}
         for key, value in asdict(self.settings).items():
-            if key in _BOOLEAN_FIELDS or value:
+            if (key in _BOOLEAN_FIELDS and key not in _SPARSE_BOOLEANS) or value:
                 payload[key] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
@@ -256,7 +362,7 @@ class AppSettingsStore:
         Unknown keys are ignored. Raises ``ValueError`` on a bad engine
         value so the API route can 400 instead of persisting garbage.
         """
-        known = {f.name for f in fields(AppSettings)}
+        known = {f.name for f in fields(AppSettings)} - _INTERNAL_FIELDS
         for key, value in changes.items():
             if key not in known:
                 continue
@@ -289,6 +395,14 @@ class AppSettingsStore:
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             value = value.strip()
+            if key == "pwa_host" and value and not _valid_host(value):
+                raise ValueError("pwa_host must be an IP address or a host name")
+            if key == "log_level" and value:
+                if _normalize_log_level(value) != value.lower():
+                    raise ValueError(f"log_level must be one of {', '.join(LOG_LEVELS)}")
+                value = value.lower()
+            if key == "app_repo" and value and not Path(value).expanduser().is_absolute():
+                raise ValueError("app_repo must be an absolute path")
             setattr(self.settings, key, value)
         _drop_retired_models(self.settings)
         self._save()
@@ -310,6 +424,49 @@ class AppSettingsStore:
         )
         return self.settings.insights_enabled
 
+    def import_legacy_env(self, legacy: Mapping[str, str]) -> list[str]:
+        """Copy the retired `.env` server variables into Settings, once.
+
+        ``legacy`` is the raw values ``CiaoConfig.from_env`` saw for the keys of
+        :data:`LEGACY_ENV_SETTINGS`. The first start that runs this imports every
+        usable value and records that it ran, so a later start never imports
+        again: a value changed or cleared in Settings stays that way while the
+        variable is still in `.env`. Returns the names imported.
+        """
+        if self.settings.legacy_env_imported:
+            return []
+        imported: list[str] = []
+        for name, key in LEGACY_ENV_SETTINGS.items():
+            raw = str(legacy.get(name, "") or "").strip()
+            if not raw:
+                continue
+            if key == "dev_mode":
+                self.settings.dev_mode = raw.lower() in _TRUTHY
+            elif key == "log_level":
+                level = _normalize_log_level(raw)
+                if not level:
+                    logger.warning("Not importing unrecognized CIAO_LOG_LEVEL %r", raw)
+                    continue
+                self.settings.log_level = level
+            elif key == "pwa_host":
+                if not _valid_host(raw):
+                    logger.warning("Not importing invalid PWA_HOST %r", raw)
+                    continue
+                self.settings.pwa_host = raw
+            else:
+                self.settings.app_repo = str(Path(raw).expanduser())
+            imported.append(name)
+        self.settings.legacy_env_imported = True
+        self._explicit_fields.add("legacy_env_imported")
+        self._save()
+        if imported:
+            logger.warning(
+                "%s no longer read from .env; imported into Settings once. "
+                "Remove them from .env.",
+                ", ".join(imported),
+            )
+        return imported
+
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
 
@@ -318,6 +475,12 @@ class AppSettingsStore:
         instead of keeping a stale override.
         """
         if self._defaults is None:
+            # The bind address and the log level are startup-only: overlaid on
+            # the first call (server startup, after any legacy import), and
+            # left alone by later PATCHes so the config keeps saying what the
+            # running server actually uses.
+            config.pwa_host = self.settings.pwa_host or DEFAULT_PWA_HOST
+            config.log_level = self.settings.log_level or DEFAULT_LOG_LEVEL
             self._defaults = {
                 "critique_models": config.critique_models,
             }
@@ -333,6 +496,8 @@ class AppSettingsStore:
         d = self._defaults
         s = self.settings
         config.insights_enabled = s.insights_enabled
+        config.dev_mode = s.dev_mode
+        config.app_repo = Path(s.app_repo).expanduser().resolve() if s.app_repo else None
         config.critique_models = s.critique_models or d["critique_models"]
         # Per-provider default models / thinking / routine models have no
         # env-backed default; absence means "use the provider's own default".

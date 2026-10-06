@@ -961,6 +961,14 @@ def _detect_mcp_uncomposed(context: DetectionContext) -> list[OperatorAction]:
 
 _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
     ("PWA_AUTH_REQUIRED", "remove it: password protection is always on"),
+    # Server settings that moved to Settings. Server startup imports each one
+    # into `.runtime/app_settings.json` once; after that they are inert.
+    ("PWA_HOST", "remove it: it was imported once into Settings → General → Network access"),
+    ("CIAO_LOG_LEVEL", "remove it: it was imported once into Settings → General → Developer"),
+    ("CIAO_DEV_MODE", "remove it: it was imported once into Settings → General → Developer"),
+    ("CIAO_APP_REPO", "remove it: it was imported once into Settings → General → Developer"),
+    # Only the first-run onboarding chat read it; setup records it in its marker.
+    ("CIAO_VAULT_MODE", "remove it: setup records the vault mode itself now"),
     # The workspace list is runtime state owned by Settings. Server startup
     # imports the variable into workspaces.json once; after that it is inert.
     (
@@ -975,6 +983,7 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
     """Environment variables the engine no longer reads.
 
     `PWA_AUTH_REQUIRED` went when password protection became unconditional;
+    the server variables moved to Settings after a one-time import;
     `CIAO_WORKSPACES` gave way to the Settings-owned runtime registry. A variable that is set and silently
     ignored is worse than one that never existed: the operator believes a setting
     is in effect. Chat-only — the fix edits `.env`, which is theirs.

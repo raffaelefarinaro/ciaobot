@@ -7,6 +7,10 @@ existing one). Startup reads it to hold system-routine catch-up for
 onboarding chat, not by four parallel routine chats, so within the grace
 window the routines wait for their next regular tick instead of replaying the
 missed occurrence at startup.
+
+Its second line is the vault mode setup chose (`scratch` or `existing`), which
+only the first-run onboarding chat reads. It used to be `CIAO_VAULT_MODE` in
+`.env`, a permanent variable for a one-shot decision.
 """
 
 from __future__ import annotations
@@ -40,23 +44,41 @@ def marker_path(runtime_root: Path) -> Path:
     return runtime_root / SETUP_MARKER_FILENAME
 
 
+VAULT_MODES = ("scratch", "existing")
+
+
 def write_setup_marker(
-    runtime_root: Path, *, now: datetime | None = None
+    runtime_root: Path, *, now: datetime | None = None, vault_mode: str = "scratch"
 ) -> Path:
-    """Record setup completion as an ISO UTC timestamp, one line."""
+    """Record setup completion (an ISO UTC timestamp) and the vault mode."""
     runtime_root.mkdir(parents=True, exist_ok=True)
     stamp = (now or datetime.now(UTC)).isoformat(timespec="seconds")
+    mode = vault_mode if vault_mode in VAULT_MODES else "scratch"
     path = marker_path(runtime_root)
-    path.write_text(f"{stamp}\n", encoding="utf-8", newline="")
+    path.write_text(f"{stamp}\n{mode}\n", encoding="utf-8", newline="")
     return path
+
+
+def _marker_lines(runtime_root: Path) -> list[str]:
+    return marker_path(runtime_root).read_text(encoding="utf-8").strip().splitlines()
+
+
+def read_setup_vault_mode(runtime_root: Path) -> str:
+    """The vault mode the first-time setup chose; ``scratch`` when unrecorded."""
+    try:
+        lines = _marker_lines(runtime_root)
+    except OSError:
+        return "scratch"
+    mode = lines[1].strip().lower() if len(lines) > 1 else ""
+    return mode if mode in VAULT_MODES else "scratch"
 
 
 def read_setup_marker(runtime_root: Path) -> datetime | None:
     """Return the recorded setup timestamp, or None when absent/unreadable."""
     path = marker_path(runtime_root)
     try:
-        raw = path.read_text(encoding="utf-8").strip()
-        return datetime.fromisoformat(raw)
+        lines = _marker_lines(runtime_root)
+        return datetime.fromisoformat(lines[0].strip() if lines else "")
     except FileNotFoundError:
         return None
     except (ValueError, OSError):

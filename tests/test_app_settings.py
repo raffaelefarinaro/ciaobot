@@ -275,3 +275,111 @@ def test_provider_default_modes_reject_bad_values(tmp_path):
     )
     fresh = AppSettingsStore(path)
     assert fresh.settings.provider_default_modes == {"opencode": "manual"}
+
+
+# -- server settings that used to be workspace `.env` variables --------------
+
+
+def test_server_settings_default_and_apply(tmp_path):
+    from pathlib import Path
+
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+    store.apply_to_config(config)
+    assert (config.pwa_host, config.log_level, config.dev_mode, config.app_repo) == (
+        "0.0.0.0", "info", False, None,
+    )
+
+    store.update({
+        "pwa_host": "127.0.0.1",
+        "log_level": "DEBUG",
+        "dev_mode": True,
+        "app_repo": str(tmp_path / "checkout"),
+    })
+    store.apply_to_config(config)
+
+    # The bind address and the log level are startup-only: the live config
+    # keeps what the running server uses until the next start.
+    assert (config.pwa_host, config.log_level) == ("0.0.0.0", "info")
+    restarted = FakeConfig()
+    AppSettingsStore(tmp_path / "app_settings.json").apply_to_config(restarted)
+    assert (restarted.pwa_host, restarted.log_level) == ("127.0.0.1", "debug")
+    assert config.dev_mode is True
+    assert config.app_repo == Path(tmp_path / "checkout").resolve()
+    stored = json.loads((tmp_path / "app_settings.json").read_text())
+    assert stored["pwa_host"] == "127.0.0.1" and stored["log_level"] == "debug"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"pwa_host": "not a host!"},
+        {"log_level": "chatty"},
+        {"app_repo": "relative/checkout"},
+        {"dev_mode": "yes"},
+    ],
+)
+def test_server_settings_reject_bad_values(tmp_path, change):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    with pytest.raises(ValueError):
+        store.update(change)
+
+
+def test_the_import_marker_cannot_be_patched(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    store.update({"legacy_env_imported": True})
+    assert store.settings.legacy_env_imported is False
+
+
+def test_legacy_env_values_are_imported_once(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+
+    imported = store.import_legacy_env({
+        "PWA_HOST": "127.0.0.1",
+        "CIAO_LOG_LEVEL": "10",
+        "CIAO_DEV_MODE": "true",
+        "CIAO_APP_REPO": "/src/ciaobot",
+    })
+
+    assert imported == ["PWA_HOST", "CIAO_LOG_LEVEL", "CIAO_DEV_MODE", "CIAO_APP_REPO"]
+    s = AppSettingsStore(path).settings
+    assert (s.pwa_host, s.log_level, s.dev_mode, s.app_repo) == (
+        "127.0.0.1", "debug", True, "/src/ciaobot",
+    )
+    assert s.legacy_env_imported is True
+
+    # A value cleared in Settings stays cleared while `.env` still says it.
+    again = AppSettingsStore(path)
+    again.update({"pwa_host": "", "dev_mode": False})
+    assert again.import_legacy_env({"PWA_HOST": "127.0.0.1", "CIAO_DEV_MODE": "true"}) == []
+    assert AppSettingsStore(path).settings.pwa_host == ""
+    assert AppSettingsStore(path).settings.dev_mode is False
+
+
+def test_the_import_runs_once_even_when_there_is_nothing_to_import(tmp_path):
+    path = tmp_path / "app_settings.json"
+    assert AppSettingsStore(path).import_legacy_env({}) == []
+    # Added to `.env` after the import ran: no longer read, never imported.
+    assert AppSettingsStore(path).import_legacy_env({"PWA_HOST": "127.0.0.1"}) == []
+    assert AppSettingsStore(path).settings.pwa_host == ""
+
+
+def test_unusable_legacy_values_are_skipped(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    assert store.import_legacy_env({"PWA_HOST": "bad host", "CIAO_LOG_LEVEL": "chatty"}) == []
+    assert store.settings.pwa_host == "" and store.settings.log_level == ""
+
+
+def test_read_app_settings_writes_nothing(tmp_path):
+    from ciao.app_settings import read_app_settings
+
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"insights_model": "opencode:x", "pwa_host": "127.0.0.1"}))
+    before = path.read_text()
+
+    settings = read_app_settings(path)
+
+    assert settings.pwa_host == "127.0.0.1"
+    assert path.read_text() == before
+    assert read_app_settings(tmp_path / "missing.json") == AppSettings()

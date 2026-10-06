@@ -96,9 +96,8 @@ async def test_noise_filter_is_a_noop_without_prior_handler() -> None:
     )
 
 
-def test_resolve_log_level_defaults_to_info(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CIAO_LOG_LEVEL", raising=False)
-    assert resolve_log_level() == logging.INFO
+def test_resolve_log_level_defaults_to_info() -> None:
+    assert resolve_log_level("") == logging.INFO
     for raw, expected in (
         ("debug", logging.DEBUG),
         ("DEBUG", logging.DEBUG),
@@ -106,23 +105,18 @@ def test_resolve_log_level_defaults_to_info(monkeypatch: pytest.MonkeyPatch) -> 
         ("error", logging.ERROR),
         ("10", 10),
     ):
-        monkeypatch.setenv("CIAO_LOG_LEVEL", raw)
-        assert resolve_log_level() == expected
+        assert resolve_log_level(raw) == expected
 
 
-def test_resolve_log_level_invalid_falls_back_to_info(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("CIAO_LOG_LEVEL", "chatty")
-    assert resolve_log_level() == logging.INFO
+def test_resolve_log_level_invalid_falls_back_to_info() -> None:
+    assert resolve_log_level("chatty") == logging.INFO
 
 
 def test_debug_logging_disabled_by_default(tmp_path: Path) -> None:
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.delenv("CIAO_LOG_LEVEL", raising=False)
     try:
         setup_error_logging(tmp_path)
-        setup_debug_logging(tmp_path)
+        setup_debug_logging(tmp_path, level=resolve_log_level(""))
         root = logging.getLogger()
         file_handlers = [
             h
@@ -138,9 +132,8 @@ def test_debug_logging_disabled_by_default(tmp_path: Path) -> None:
 def test_debug_logging_captures_debug_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CIAO_LOG_LEVEL", "debug")
     setup_error_logging(tmp_path)
-    setup_debug_logging(tmp_path)
+    setup_debug_logging(tmp_path, level=logging.DEBUG)
     root = logging.getLogger()
     debug_path = tmp_path / ".runtime" / "server_debug.log"
     handlers = [
@@ -168,10 +161,9 @@ def test_debug_logging_captures_debug_records(
 def test_setup_debug_logging_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("CIAO_LOG_LEVEL", "debug")
     setup_error_logging(tmp_path)
-    setup_debug_logging(tmp_path)
-    setup_debug_logging(tmp_path)  # second call must not duplicate
+    setup_debug_logging(tmp_path, level=logging.DEBUG)
+    setup_debug_logging(tmp_path, level=logging.DEBUG)  # second call must not duplicate
     root = logging.getLogger()
     debug_path = tmp_path / ".runtime" / "server_debug.log"
     handlers = [

@@ -106,7 +106,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/import/batches/{batch_id}/cancel` | Stop a batch, keeping its recorded progress and provenance; body is `{"workspace"}` and a batch filed for another workspace is a 404. Idempotent — cancelling a cancelled batch answers it unchanged — while a batch already settled as done, failed or partial is a 409. Cancellation cannot unsend provider input |
 | DELETE | `/api/import/batches/{batch_id}` | Drop a batch record (`?workspace=` is required; a batch filed for another workspace is a 404). Queue and vault are untouched: filed proposals stay queued and accepted facts stay in the vault |
 | POST | `/hooks/v1/{trigger_id}` | Webhook receiver (machine surface, bearer + `Idempotency-Key`, not the session cookie): records a durable receipt for one event and answers `202 accepted` — recorded, not dispatched; the background launch turns it into an ordinary chat in the trigger's own project. See `docs/WEBHOOK_TRIGGER_STORE.md` |
-| GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
+| GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless developer mode is on (Settings → General → Developer) |
 | GET | `/api/commands` | List slash commands; `?workspace=<name>` scopes them to that workspace's agent root |
 | GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings; `?workspace=<name>` scopes the subagent and command lists to that workspace's agent root |
 | GET | `/api/agent-assets/audit` | Full AI OS audit report; `status` is `healthy`, `needs_attention`, or `error` |
@@ -830,7 +830,8 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/sched
 
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
 # (AGENTS.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
-# Steps run against CIAO_APP_REPO when set, else the directory holding the running
+# Steps run against the source checkout setting (Settings → General → Developer)
+# when set, else the directory holding the running
 # ciao package; a non-checkout returns 400 with a "locate checkout" step. An
 # installer-managed engine is refused up front: re-run install.sh to update it.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
@@ -866,6 +867,10 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 # thinking / Session insights maps. insights_enabled=false stops the memory
 # pass. provider_insights_models is keyed by the chat's provider; a missing
 # entry means that provider's default chat model reads the session.
+# Also the server settings that used to be .env variables, as stored ("" =
+# default): pwa_host (bind address), log_level, dev_mode, app_repo (source
+# checkout), with server_defaults and server_running (what the running engine
+# bound and logs at; pwa_host and log_level change only at the next start).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
@@ -874,6 +879,9 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # retired on-device option) reads as Automatic rather than reaching a provider
 # as a literal model id. Per-provider defaults use the nested maps:
 # provider_default_models, provider_default_thinking, provider_insights_models.
+# pwa_host must be an IP address or host name ("127.0.0.1" = this computer
+# only), log_level one of debug/info/warning/error, app_repo an absolute path;
+# anything else is a 400.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
   -d '{"insights_enabled":false,"provider_insights_models":{"claude":"haiku"},"critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
@@ -1618,7 +1626,7 @@ has no way to read that outcome back; the *operator* can, through
 | 429 | Over 10 attempts a minute for this trigger, with `Retry-After` | yes, after one window |
 | 503 | The trigger already has 20 receipts still awaiting launch, or the journal could not be written (the event was **not** recorded) | yes |
 
-With `PWA_HOST=0.0.0.0` this route is reachable from the LAN, so the secret is
+With the default `0.0.0.0` bind this route is reachable from the LAN, so the secret is
 the credential: give each trigger its own, keep it out of shell history and
 source control, and rotate it (`POST /api/webhooks/{trigger_id}/rotate`) the
 moment it is exposed.
