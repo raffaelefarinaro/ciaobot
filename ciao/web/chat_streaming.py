@@ -825,6 +825,22 @@ class ChatStreaming:
                     break
 
                 next_pending = stream.drain_one()
+                skipped_blank = False
+                while next_pending is not None and not str(
+                    next_pending.get("text", "")
+                ).strip():
+                    # A blank follow-up has nothing to send. Continuing the turn
+                    # loop with it would re-run the previous prompt (#1102), so
+                    # take the next entry instead.
+                    skipped_blank = True
+                    next_pending = stream.drain_one()
+                if skipped_blank:
+                    # Keep the entry we are about to run (or park) in the list:
+                    # its chip clears on its own user_echo.
+                    remaining = stream.pending
+                    if next_pending is not None:
+                        remaining = [next_pending, *remaining]
+                    stream.publish({"type": "queue_state", "queue": remaining})
                 if stream.user_stopped:
                     stream.user_stopped = False
                     if next_pending is not None:
@@ -851,8 +867,6 @@ class ChatStreaming:
                     attachment = self._host.resolve_image_ref(ref)
                     if attachment:
                         merged_images.append(attachment)
-                if not combined_text:
-                    continue
 
                 turn_unattended = False
                 turn_index2: int | None = None

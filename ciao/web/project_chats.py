@@ -4509,7 +4509,18 @@ class ProjectChatManager:
                 env["CIAO_VAULT_ROOT"] = str(self._config.agent_vault_root(workspace))
         except (AttributeError, ValueError, OSError):
             logger.debug("could not resolve the agent vault root for %r", workspace)
-        env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
+        gws_profile = self._workspace_gws_profile(workspace)
+        env["GWS_PROFILE"] = gws_profile
+        # Point a bare `gws` at the same credential dir `ciao gws` would use.
+        # Without it, an agent that skips the wrapper reads `~/.config/gws`
+        # (often a stale keyring-encrypted login) and reports Google as
+        # unauthenticated while the workspace account is connected.
+        if gws_profile:
+            from ciao.gws_auth import profile_config_dir
+
+            config_dir = profile_config_dir(self._config, gws_profile)
+            if config_dir is not None:
+                env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
