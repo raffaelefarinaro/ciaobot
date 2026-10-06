@@ -115,7 +115,6 @@ def test_terminate_does_not_raise_and_close_leaves_the_tree_running(tmp_path: Pa
     second = ProcessTree(other.pid)
     try:
         second.terminate()
-        other.wait(timeout=15)
     finally:
         # Once SIGTERM has ended the leader its group holds only a zombie,
         # and macOS killpg answers EPERM for that, as callers already
