@@ -38,6 +38,7 @@ export default defineConfig({
     // layout's key handlers behind for the tests after it. A test that is
     // genuinely slow is still caught; one that hangs still fails.
     testTimeout: 20_000,
+    setupFiles: ['./src/testSetup.ts'],
   },
   server: {
     allowedHosts: true,
