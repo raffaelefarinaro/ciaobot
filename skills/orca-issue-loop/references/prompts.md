@@ -25,8 +25,10 @@ You are implementing GitHub issue #<N> in the Ciaobot repo. You are in the workt
 ```markdown
 You are reviewing PR #<PR> for issue #<N> in raffaelefarinaro/ciaobot, review round <K> of 5. You are in the worktree <path>. Do not edit files, commit, or push — review only.
 
+AUTHORIZED, on PR #<PR> only: posting review comments, per steps 2 and 4 below. Your Orca preamble forbids GitHub writes, and this is the single documented exception — the reviewer is the one worker type allowed to write to the PR (§4). Everything else stays prohibited: no labels, no ready/merge/close, no review approval or merge, no issue writes, no comments on any other issue or PR, no `git push`, no branch switch, no file edits, no commits. Read-only `gh` commands (`gh pr view`, `gh issue view`, `gh api` GET) are expected and fine. If a comment fails to post, do not retry more than once — report `--outcome failed` with the error so the coordinator can post it. Do not stop to ask whether posting the verdict comment is allowed; it is.
+
 1. Read the plan and history: `gh issue view <N> --repo raffaelefarinaro/ciaobot --comments` and `gh pr view <PR> --comments`. <If K>1: also read the previous verdict comments and check each earlier finding was actually addressed.>
-2. Run `/code-review high <PR> --comment` to post inline findings on the PR. <Use `max` for large or risky diffs.>
+2. Review the diff and post inline findings on the PR. If a `/code-review` command is available in this environment (`ls .opencode/command .claude/commands 2>/dev/null`), use `/code-review high <PR> --comment` and read its output critically — do not paste it. If there is no such command, do the review yourself from `git diff origin/develop...HEAD` and post findings directly. **Do not stall on a missing command and do not treat its absence as a blocker:** the verdict comment in step 4 is the deliverable and inline comments are optional. This repo does not currently ship `/code-review`, and a worker that assumes it does will waste the round.
 3. Separately check the diff (`git diff origin/develop...HEAD`) against the plan:
    - every step and every listed test implemented;
    - nothing outside the plan or listed in "Out of scope" changed;
