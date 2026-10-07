@@ -41,7 +41,7 @@
         </div>
       </div>
       <p class="rail-note">
-        Sent with every chat in this workspace · ≈ {{ guideStats.totalTokens.toLocaleString() }} {{ guideStats.totalTokens === 1 ? 'token' : 'tokens' }}.
+        Region bars count entry text inside the markers; ≈ {{ guideStats.totalTokens.toLocaleString() }} {{ guideStats.totalTokens === 1 ? 'token' : 'tokens' }} is the whole file sent with every chat, including markers, headings, and separators.
       </p>
     </template>
     <p v-else-if="!guideLoading" class="rail-note">No guide file found for this workspace.</p>
@@ -130,7 +130,7 @@ const guideStats = computed(() => {
       overCap: used > cap,
     })
   }
-  return { regions, totalTokens: tokensFor(content.length), totalChars: content.length }
+  return { regions, totalTokens: tokensFor(content.length) }
 })
 const guideOverCap = computed(() => !!guideStats.value?.regions.some(r => r.overCap))
 const canDiscussGuide = computed(() => !!guideResolvedPath.value && !guideLoading.value && !guideError.value)
