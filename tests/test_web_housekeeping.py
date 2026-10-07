@@ -9,6 +9,7 @@ it is unit-tested.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -192,6 +193,38 @@ def test_run_clears_tile_when_condition_resolved(tmp_path: Path) -> None:
     assert data["ok"] is True
     # The tile is gone: the one-timer was consumed and re-detection saw it.
     assert [a["id"] for a in data["actions"]] == []
+
+
+def test_run_clears_the_legacy_env_tile_through_the_route(tmp_path: Path) -> None:
+    """The tile that asks to comment `.env` lines can now actually be cleared.
+
+    The chat path can never do it — `.env` is credential-denied for every
+    provider — so the run handler is the only way the tile reaches zero (#1134).
+    """
+    config = _config(tmp_path)
+    (tmp_path / ".env").write_text(
+        "PWA_AUTH_TOKEN=secret\nCIAO_DEV_MODE=true\n", encoding="utf-8"
+    )
+    _runtime(tmp_path)
+    _starred(tmp_path)
+    client = _client(config)
+    # The route's detector reads the process environment; seed it as startup's
+    # one-time `load_dotenv` would have.
+    with patch.dict(os.environ, {"CIAO_DEV_MODE": "true"}):
+        before = client.get("/api/housekeeping").json()["actions"]
+        assert "legacy-env-ignored" in [a["id"] for a in before]
+        tile = next(a for a in before if a["id"] == "legacy-env-ignored")
+        assert tile["run_label"], "the tile must offer the engine-owned fix"
+
+        resp = client.post("/api/housekeeping/legacy-env-ignored/run")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert "legacy-env-ignored" not in [a["id"] for a in data["actions"]]
+
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "# CIAO_DEV_MODE=true" in text
+    assert "PWA_AUTH_TOKEN=secret" in text
 
 
 def test_run_unknown_action_returns_404(tmp_path: Path) -> None:
