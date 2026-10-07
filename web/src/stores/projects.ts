@@ -1827,8 +1827,35 @@ export const useProjectStore = defineStore('projects', () => {
     })
   }
 
+  /**
+   * Parked follow-ups live on the chat record once the stream that queued them
+   * has torn down. A non-empty `pending_queue` replaces that chat's chips. An
+   * empty one on an idle chat drops chips that came from a parked list (a
+   * remove on another client). An empty one while the chat is streaming must
+   * not: `start_stream` clears `pending_queue` when it re-seeds the live queue,
+   * and those chips arrive on `queue_state`.
+   */
+  function hydrateParkedQueues(nextChats: ChatInfo[]) {
+    for (const chat of nextChats) {
+      const parked = chat.pending_queue
+      if (!Array.isArray(parked)) continue
+      if (parked.length) {
+        queuedMessages.value[chat.chat_id] = parked.map(entry => ({
+          id: entry.id || makeQueuedId(),
+          text: (entry.text || '').trim(),
+          images: entry.images?.length ? [...entry.images] : undefined,
+        }))
+        continue
+      }
+      if (isChatStreaming(chat.chat_id)) continue
+      delete queuedMessages.value[chat.chat_id]
+    }
+  }
+
   function reconcileChatList(nextChats: ChatInfo[]) {
-    chats.value = applyPendingArchived(nextChats)
+    const applied = applyPendingArchived(nextChats)
+    chats.value = applied
+    hydrateParkedQueues(applied)
 
     // Hydrate server-owned pin state from every chat payload, and prune any
     // chat id a pre-#1119 build left in the browser-local pin/dismissal keys.
@@ -2634,6 +2661,7 @@ export const useProjectStore = defineStore('projects', () => {
     if (idx >= 0) chats.value[idx] = chat
     else chats.value.push(chat)
     applyChatPinFromChatInfo(chat)
+    hydrateParkedQueues([chat])
   }
 
   function chatPinStateFromChat(chat: ChatInfo): ChatPinState {

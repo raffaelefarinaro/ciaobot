@@ -694,6 +694,17 @@ class ChatStream:
             except asyncio.QueueFull:
                 logger.warning("Chat stream subscriber queue full, dropping event")
 
+    def publish_queue_state(self, queue: list[dict]) -> None:
+        """Publish a parked queue while this stream can still reach subscribers.
+
+        An empty list is not published: the client treats ``queue_state`` as
+        the whole queue and would clear the chips. A finished stream has
+        already delivered its end sentinel, so a late event never arrives.
+        """
+        if self._done or not queue:
+            return
+        self.publish({"type": "queue_state", "queue": list(queue)})
+
     def publish_live(self, payload: dict) -> None:
         """Fan out an ephemeral control event without adding it to replay."""
         for queue in list(self._subs):

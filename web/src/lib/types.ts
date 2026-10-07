@@ -215,6 +215,11 @@ export interface ChatInfo {
   // chat receiving the live WS stream. Cleared by the server on answer or
   // turn end.
   pending_permission?: string
+  // Follow-ups parked when a turn ended without flushing them (error, question
+  // pause, native question, retry, task-board stop). Each entry is
+  // {id, text, images}. Empty once the next turn re-seeds the live queue, so
+  // an empty list during a live turn is not "no chips".
+  pending_queue?: Array<{ id: string; text: string; images?: string[] }>
   retry?: ChatRetryInfo | null
   forked_from_chat_id?: string
   forked_from_turn_index?: number | null

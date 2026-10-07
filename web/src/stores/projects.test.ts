@@ -3609,6 +3609,56 @@ describe('projectChats order', () => {
   })
 })
 
+describe('parked pending_queue chips', () => {
+  function chat(over: Partial<ChatInfo> & { chat_id: string }): ChatInfo {
+    return {
+      chat_id: over.chat_id,
+      project_id: 'p1',
+      title: 'T',
+      model: '',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '2026-01-01T00:00:00Z',
+      archived: false,
+      ...over,
+    }
+  }
+
+  test('an idle chat payload with pending_queue becomes chips', () => {
+    const store = useProjectStore()
+    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip' }]
+    store.reconcileChatList([
+      chat({
+        chat_id: 'idle',
+        pending_queue: [{ id: 'q-1', text: ' after the error ', images: ['shot.png'] }],
+      }),
+    ])
+    expect(store.queuedMessages.idle).toEqual([
+      { id: 'q-1', text: 'after the error', images: ['shot.png'] },
+    ])
+  })
+
+  test('an empty pending_queue during streaming does not clear existing chips', () => {
+    const store = useProjectStore()
+    store.streaming.live = true
+    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued' }]
+    store.reconcileChatList([
+      chat({ chat_id: 'live', pending_queue: [] }),
+    ])
+    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued' }])
+  })
+
+  test('an empty pending_queue on an idle chat clears parked chips', () => {
+    const store = useProjectStore()
+    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error' }]
+    store.reconcileChatList([
+      chat({ chat_id: 'idle', pending_queue: [] }),
+    ])
+    expect(store.queuedMessages.idle).toBeUndefined()
+  })
+})
+
 describe('memoryInsightRows', () => {
   // The pass is a real chat, so it used to be listed twice for one archived
   // conversation: once in the Home tiers under its own internal title, and

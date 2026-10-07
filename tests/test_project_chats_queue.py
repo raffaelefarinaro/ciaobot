@@ -691,6 +691,31 @@ async def test_queued_messages_survive_question_pause_and_flush_after_answer(
     parked = pcm._chats[chat.chat_id].pending_queue
     assert [p["text"] for p in parked] == ["msg A", "msg B"], parked
 
+    # The park must tell a connected client. An empty queue_state here would
+    # wipe the chips the PWA is about to keep across the torn-down stream.
+    queue_states = [e for e in captured if e.get("type") == "queue_state"]
+    assert queue_states, "parking follow-ups must publish queue_state"
+    assert [entry.get("text") for entry in queue_states[-1]["queue"]] == [
+        "msg A",
+        "msg B",
+    ], queue_states[-1]
+    assert queue_states[-1]["queue"], "an empty queue_state would wipe the chips"
+
+    public = pcm._chats[chat.chat_id].to_dict()["pending_queue"]
+    assert [entry["text"] for entry in public] == ["msg A", "msg B"]
+    assert [entry["id"] for entry in public] == [entry["id"] for entry in parked]
+    assert all(set(entry) == {"id", "text", "images"} for entry in public)
+    # A caller must not be able to mutate the live queue through the payload.
+    assert public is not parked
+    assert public[0] is not parked[0]
+    assert public[0]["images"] is not parked[0]["images"]
+    public[0]["text"] = "changed"
+    public.append({"id": "extra", "text": "nope", "images": []})
+    assert [entry["text"] for entry in pcm._chats[chat.chat_id].pending_queue] == [
+        "msg A",
+        "msg B",
+    ]
+
     # The user answers, starting a fresh turn. The parked follow-ups must
     # re-seed and flush after it, in order.
     captured2: list[dict] = []
@@ -1223,3 +1248,48 @@ async def test_a_message_queued_as_the_turn_ends_is_parked_not_lost(
     assert parked == ["landed in the race window"], (
         "a message queued as the turn ended must survive to the next turn"
     )
+
+
+def test_park_pending_for_retry_publishes_the_parked_queue(tmp_path: Path) -> None:
+    """A retry park publishes the parked entries and `to_dict` copies them.
+
+    Publishing `stream.pending` after the drain would send an empty
+    `queue_state` and wipe the chips. A stream that has already finished
+    cannot deliver the event, so that case stays on the chat record only.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-retry-park", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="retry-park")
+
+    stream = ChatStream("prompt")
+    stream.enqueue("and then summarise it", ["shot.png"], entry_id="q-1")
+    pcm._park_pending_for_retry(chat.chat_id, stream)
+
+    states = [e for e in stream.buffered_events() if e.get("type") == "queue_state"]
+    assert states == [
+        {
+            "type": "queue_state",
+            "queue": [
+                {"id": "q-1", "text": "and then summarise it", "images": ["shot.png"]},
+            ],
+        }
+    ]
+    public = pcm._chats[chat.chat_id].to_dict()["pending_queue"]
+    assert public == states[0]["queue"]
+    assert public is not pcm._chats[chat.chat_id].pending_queue
+    assert public[0] is not pcm._chats[chat.chat_id].pending_queue[0]
+
+    # Nothing queued: do not publish an empty queue.
+    quiet = ChatStream("prompt")
+    pcm._park_pending_for_retry(chat.chat_id, quiet)
+    assert not any(e.get("type") == "queue_state" for e in quiet.buffered_events())
+
+    # Already finished: the list is stored, but the sentinel has gone out.
+    done = ChatStream("prompt")
+    done.enqueue("too late", [], entry_id="q-late")
+    done.finish()
+    pcm._park_pending_for_retry(chat.chat_id, done)
+    assert pcm._chats[chat.chat_id].pending_queue == [
+        {"id": "q-late", "text": "too late", "images": []}
+    ]
+    assert not any(e.get("type") == "queue_state" for e in done.buffered_events())

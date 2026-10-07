@@ -503,6 +503,8 @@ class ChatInfo:
     # stashed here and re-seeded into the next stream — the user's answer turn
     # — so they still flush as follow-ups instead of being silently dropped.
     # Each entry is {"id": str, "text": str, "images": list[str]}.
+    # `to_dict` copies the list so a reload can show the chips; callers must
+    # not receive the live list.
     pending_queue: list[dict] = field(default_factory=list)
     # Provider-neutral conversation fork lineage. Forks are normal chats with
     # a fresh provider session; these fields only preserve their relationship
@@ -569,6 +571,14 @@ class ChatInfo:
             "title_status": self.title_status,
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
+            "pending_queue": [
+                {
+                    "id": str(entry.get("id", "")),
+                    "text": str(entry.get("text", "")),
+                    "images": [str(ref) for ref in (entry.get("images") or [])],
+                }
+                for entry in self.pending_queue
+            ],
             "forked_from_chat_id": self.forked_from_chat_id,
             "forked_from_turn_index": self.forked_from_turn_index,
             "fork_root_chat_id": self.fork_root_chat_id,
@@ -5386,6 +5396,10 @@ class ProjectChatManager:
         if chat is not None:
             chat.pending_queue = list(parked)
             self._save()
+            # The stream is about to be torn down. Publish the parked list
+            # itself — `stream.pending` is already empty, and an empty
+            # `queue_state` would clear the chips.
+            stream.publish_queue_state(chat.pending_queue)
 
     def _arm_retry(
         self,

@@ -828,6 +828,7 @@ class ChatStreaming:
                             if cm_park is not None:
                                 cm_park.pending_queue = list(parked)
                                 self._host._save()
+                                stream.publish_queue_state(cm_park.pending_queue)
                         break
                 finally:
                     stream.turn_task = None
@@ -842,6 +843,7 @@ class ChatStreaming:
                         if cm_park is not None:
                             cm_park.pending_queue = list(parked)
                             self._host._save()
+                            stream.publish_queue_state(cm_park.pending_queue)
                     break
 
                 next_pending = stream.drain_one()
@@ -885,6 +887,7 @@ class ChatStreaming:
                         if cm_park is not None:
                             cm_park.pending_queue = list(parked)
                             self._host._save()
+                            stream.publish_queue_state(cm_park.pending_queue)
                     break
 
                 combined_text = next_pending.get("text", "").strip()
@@ -912,6 +915,7 @@ class ChatStreaming:
                     parked = [next_pending, *stream.drain_pending()]
                     chat_meta2.pending_queue = list(parked)
                     self._host._save()
+                    stream.publish_queue_state(chat_meta2.pending_queue)
                     break
                 if chat_meta2 is not None:
                     chat_meta2.pending_question = ""
