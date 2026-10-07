@@ -1744,6 +1744,32 @@ describe('server-owned chat pins', () => {
     })
     expect(store.pinnedFileFor('c-pin')).toBeUndefined()
   })
+
+  test('a 409 conflict adopts the server pin and surfaces the conflict', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-pin')]
+    store.applyChatPinState('c-pin', { path: '/workspace/a.md', dismissed_paths: [], revision: 4 }, { source: 'event' })
+
+    // Another device replaced the pin between read and write: the PATCH 409s
+    // with the server's truth.
+    apiPatch.mockRejectedValue(Object.assign(new Error('pin_revision_conflict'), {
+      status: 409,
+      payload: {
+        error: 'pin_revision_conflict',
+        pin: { path: '/workspace/other.md', dismissed_paths: ['/workspace/a.md'], revision: 7 },
+      },
+    }))
+
+    await store.unpinFile('c-pin')
+
+    // One PATCH, no retry; the server's pin is adopted…
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect(store.pinnedFileFor('c-pin')).toBe('/workspace/other.md')
+    // …and the loss is surfaced, not silently folded into the other device's choice.
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].title).toBe('Could not update pinned file')
+    expect(store.toasts[0].errorText).toBe('Pinned file was changed on another device')
+  })
 })
 
 describe('chat closing', () => {

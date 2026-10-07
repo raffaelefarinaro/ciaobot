@@ -70,7 +70,7 @@ import {
   type ActiveQuestion,
   type CapabilityQuestion,
 } from '../lib/chatQuestions'
-import { createChatAnnotations, type PreparedMessage } from './chatAnnotations'
+import { ChatPinConflict, createChatAnnotations, type PreparedMessage } from './chatAnnotations'
 
 // Moved to focused modules; re-exported so importers of this store keep
 // resolving them. `lib/chatWs.ts` owns the reconnect policy and
@@ -2654,8 +2654,9 @@ export const useProjectStore = defineStore('projects', () => {
   interface PinConflictPayload { error?: string; pin?: ChatPinState }
 
   // The PATCH behind a manual chat pin/unpin. `path === ''` closes the current
-  // pin. Success returns the full `ChatInfo`; a stale revision returns the 409
-  // body's `pin` (server truth) so the caller applies it without resubmitting.
+  // pin. Success returns the full `ChatInfo`; a stale revision throws a
+  // `ChatPinConflict` carrying the 409 body's `pin` (server truth) so the caller
+  // applies it without resubmitting.
   async function patchChatPin(
     chatId: string,
     path: string,
@@ -2670,7 +2671,7 @@ export const useProjectStore = defineStore('projects', () => {
     } catch (e) {
       const err = e as { status?: number; payload?: PinConflictPayload }
       if (err?.status === 409 && err.payload?.error === 'pin_revision_conflict' && err.payload.pin) {
-        return err.payload.pin
+        throw new ChatPinConflict(err.payload.pin)
       }
       throw e
     }

@@ -53,7 +53,7 @@
           </DropdownMenuPortal>
         </DropdownMenuRoot>
         <!-- Close sits last, where a window's close lives; the tile is a window. -->
-        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || 'Unpin file'" :aria-label="closeLabel || 'Unpin file'">
+        <button class="btn-icon close-btn" :class="{ 'desktop-only': !inMemoryMap }" @click="$emit('close')" :title="closeLabel || 'Unpin file'" :aria-label="closeLabel || 'Unpin file'" :disabled="closeDisabled" :aria-disabled="closeDisabled">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </template>
@@ -357,6 +357,8 @@ const props = defineProps<{
   inMemoryMap?: boolean
   /** The close control's name; the chat's tile unpins, the map's closes. */
   closeLabel?: string
+  /** Disable the close control while a pin write is in flight. */
+  closeDisabled?: boolean
 }>()
 defineEmits<{ (e: 'close'): void }>()
 
@@ -1446,6 +1448,11 @@ defineExpose({ isBusyAuthoring })
   color: var(--fg2);
 }
 .close-btn:hover { color: var(--fg); }
+.close-btn:disabled {
+  color: var(--fg3);
+  cursor: default;
+  opacity: 0.55;
+}
 
 /* The file's folder, muted after its name: where it lives, not a second title. */
 .pfp-dir {

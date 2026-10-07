@@ -2,7 +2,7 @@
 // bare ref for the active chat: no Pinia, no router, no component mount.
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { ref } from 'vue'
-import { createChatAnnotations, type ChatPinMutator } from './chatAnnotations'
+import { createChatAnnotations, type ChatPinMutator, ChatPinConflict } from './chatAnnotations'
 import type { ChatPinState } from '../lib/types'
 
 let stored: Record<string, string> = {}
@@ -228,13 +228,16 @@ describe('pinned files (server-owned chats)', () => {
   })
 
   test('unpin conflict adopts server truth without retry', async () => {
-    const mutate = vi.fn(async () =>
-      pinState({ path: 'docs/other.md', dismissed_paths: ['docs/a.md'], revision: 7 })) as unknown as ChatPinMutator
-    const { a } = make('c1', { chats: ['c1'], mutate })
+    const mutate = vi.fn(async () => {
+      throw new ChatPinConflict(pinState({ path: 'docs/other.md', dismissed_paths: ['docs/a.md'], revision: 7 }))
+    }) as unknown as ChatPinMutator
+    const { a, notifyPinError } = make('c1', { chats: ['c1'], mutate })
     a.applyChatPinState('c1', pinState({ path: 'docs/a.md', revision: 4 }), { source: 'event' })
     await a.unpinFile('c1')
     expect(mutate).toHaveBeenCalledTimes(1)
     expect(a.pinnedFileFor('c1')).toBe('docs/other.md')
+    // The conflict is surfaced, not silently adopted.
+    expect(notifyPinError).toHaveBeenCalledWith('c1', 'Pinned file was changed on another device')
   })
 
   test('failed pin preserves acknowledged state', async () => {

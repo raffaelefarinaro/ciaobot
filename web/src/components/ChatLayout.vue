@@ -21,9 +21,9 @@
       aria-hidden="true"
       @click="sidebarCollapsed = true"
     />
-    <div class="chat-main" :class="{ 'chat-split': !!pinnedFilePath }">
+    <div class="chat-main" :class="{ 'chat-split': !!panelPath }">
       <!-- Split view when a file is pinned -->
-      <template v-if="pinnedFilePath">
+      <template v-if="panelPath">
         <div
           class="chat-split-main"
           :style="{
@@ -143,7 +143,7 @@
         <!-- Takes whatever the chat pane and gutter leave, so the tile's inset
              margin never pushes the pair past 100%. -->
         <div class="chat-split-side">
-          <PinnedFilePanel ref="pinnedFilePanelRef" :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
+          <PinnedFilePanel ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
         </div>
       </template>
       <template v-else>
@@ -195,7 +195,7 @@
               type="button"
               class="narrow-pin-close btn-icon"
               aria-label="Unpin file"
-              :disabled="narrowSharedPinPending"
+              :disabled="pinWritePending"
               @click="unpinCurrent"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -698,6 +698,29 @@ const pinnedFilePath = computed(() => {
   if (isMobile.value) return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
 })
+// The split panel shows the route's pinned file, but a remote pin change must
+// never discard an in-progress edit. `panelPath` tracks `pinnedFilePath` while
+// the panel is clean (a remote replace/unpin switches or unmounts it
+// immediately), and holds the previous path while the panel is dirty; the
+// deferred change is applied the moment the panel goes idle.
+const panelPath = ref('')
+const deferredPinPath = ref<string | null>(null)
+watch(pinnedFilePath, (next) => {
+  if (pinnedFilePanelRef.value?.isBusyAuthoring) {
+    deferredPinPath.value = next
+    return
+  }
+  panelPath.value = next
+  deferredPinPath.value = null
+}, { immediate: true })
+watch(
+  () => pinnedFilePanelRef.value?.isBusyAuthoring,
+  (busy) => {
+    if (busy || deferredPinPath.value === null) return
+    panelPath.value = deferredPinPath.value
+    deferredPinPath.value = null
+  },
+)
 // On a narrow device there is no split pane: the chat's shared (server-owned)
 // pin is a compact opener within the chat. Only a chat route carries one — a
 // project route and Home have no narrow pin (their pins stay desktop-local).
@@ -707,7 +730,7 @@ const narrowSharedPin = computed(() => {
   if (!key || projectIdParam.value) return ''
   return store.pinnedFileFor(key) || ''
 })
-const narrowSharedPinPending = computed(() => {
+const pinWritePending = computed(() => {
   const key = activePinKey.value
   return !!key && store.isChatPinPending(key)
 })
@@ -720,7 +743,7 @@ function openNarrowSharedPin(): void {
   const key = activePinKey.value
   const path = narrowSharedPin.value
   if (!key || !path) return
-  void fileViewer.open(path, null, key)
+  void fileViewer.openSharedPin(path, key)
 }
 async function unpinCurrent(): Promise<void> {
   const key = activePinKey.value

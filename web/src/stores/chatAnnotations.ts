@@ -75,16 +75,31 @@ export type PreparedMessage = {
 /**
  * A server-side chat pin mutation. `path === ''` closes (and dismisses) the
  * current path; a non-empty path pins it. The callback returns the server's
- * authoritative `ChatPinState` on success **and** on a revision conflict (the
- * 409 body's `pin`), so the caller applies acknowledged truth either way and
- * never resubmits on its own. It throws on any other failure (network, 5xx),
- * leaving the previous acknowledged state intact for an explicit retry.
+ * authoritative `ChatPinState` on success. On a stale-revision conflict (409)
+ * it throws a `ChatPinConflict` carrying the server's truth, so the caller
+ * adopts that state and surfaces the conflict rather than resubmitting on its
+ * own. It throws on any other failure (network, 5xx), leaving the previous
+ * acknowledged state intact for an explicit retry.
  */
 export type ChatPinMutator = (
   chatId: string,
   path: string,
   expectedRevision: number,
 ) => Promise<ChatPinState>
+
+/**
+ * A pin write was refused because another device changed the chat's pin since
+ * this client read it (409). Carries the server's authoritative state so the
+ * caller can adopt it without resubmitting — the user's action did not win.
+ */
+export class ChatPinConflict extends Error {
+  readonly pin: ChatPinState
+  constructor(pin: ChatPinState) {
+    super('Pinned file was changed on another device')
+    this.name = 'ChatPinConflict'
+    this.pin = pin
+  }
+}
 
 export interface ChatAnnotationsDeps {
   activeChatId: Ref<string | null>
@@ -404,9 +419,17 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
       const state = await mutateChatPin(chatId, path, expectedRevision)
       applyChatPinState(chatId, state, { source: 'mutation' })
     } catch (e) {
-      // Leave the acknowledged state intact and surface the failure; an
-      // explicit retry re-presents the same acknowledged revision.
-      notifyPinError(chatId, e instanceof Error ? e.message : String(e))
+      if (e instanceof ChatPinConflict) {
+        // Another device won: adopt the server's truth and tell the user their
+        // action lost the race. No retry — resubmitting the same stale
+        // revision would 409 again.
+        applyChatPinState(chatId, e.pin, { source: 'conflict' })
+        notifyPinError(chatId, 'Pinned file was changed on another device')
+      } else {
+        // Leave the acknowledged state intact and surface the failure; an
+        // explicit retry re-presents the same acknowledged revision.
+        notifyPinError(chatId, e instanceof Error ? e.message : String(e))
+      }
     } finally {
       delete chatPinPending.value[chatId]
     }
