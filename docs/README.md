@@ -31,6 +31,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 ## Building Ciaobot
 
 - [Architecture](ARCHITECTURE.md): the meta-harness layers, repository layout, and runtime design.
+- [Adding a provider](ADDING_A_PROVIDER.md): the turn contract and the call sites a new agent CLI still has to wire.
 - [Development](DEVELOPMENT.md) and [contributing](../CONTRIBUTING.md): local setup, tests, and contribution workflow.
 - [PWA development](../web/README.md) and [design system](../DESIGN.md): frontend structure and interaction principles.
 - [HTTP API](../PWA_API.md) and [agent CLI](AGENT_CLI.md): application operations and security contracts.
