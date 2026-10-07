@@ -14,6 +14,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1007,7 +1008,7 @@ def _run_refuse_desktop_engine(
         "<plist/>", encoding="utf-8"
     )
     plistbuddy = tmp_path / "PlistBuddy"
-    _write_exec(plistbuddy, f"#!/bin/sh\necho {program}\n")
+    _write_exec(plistbuddy, f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(str(program))}\n")
     body = "\n".join(
         [
             f"PLISTBUDDY={plistbuddy}",
@@ -1053,6 +1054,29 @@ def test_engine_installer_ignores_plist_of_deleted_app(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0
+    assert result.stderr == ""
+
+
+@runs_the_sh_installer
+def test_engine_installer_accepts_its_own_server_host(tmp_path: Path) -> None:
+    # v1.2.0 points the LaunchAgent at Ciaobot Server.app. A later install is
+    # an update of that host, not a hand-over from the retired Ciaobot.app
+    # (#1141). The executable has to exist: a missing program is already
+    # ignored, and that would not catch this refusal.
+    host = (
+        tmp_path
+        / "Applications"
+        / "Ciaobot Server.app"
+        / "Contents"
+        / "MacOS"
+        / "CiaobotServerHost"
+    )
+    host.parent.mkdir(parents=True)
+    _write_exec(host, "#!/bin/sh\nexit 0\n")
+
+    result = _run_refuse_desktop_engine(tmp_path, host)
+
+    assert result.returncode == 0, result.stderr
     assert result.stderr == ""
 
 
