@@ -78,9 +78,12 @@ outperforms any pipeline that summarizes those sources away.
 - **Bloat** — curated-small beats add-all by large margins (a 248-record
   curated store outperformed 2,400 add-all records ~3× in one 2026 study).
   Caps + write-time reconcile + recurrence-counted learnings + log rotation.
-- **Stale overriding fresh** — timestamps + UPDATE-replaces + aging audit;
-  supersession-only systems miss silent changes, which is what the disuse
-  signal backstops.
+- **Stale overriding fresh** — timestamps + UPDATE-replaces + aging audit.
+  A note keeps one current instruction: the surviving line carries the source
+  and date, and the superseded line is removed. A genuine conflict is shown
+  to the owner. Annotating the old line in place leaves it looking current in
+  search. Supersession-only systems miss silent changes, which is what the
+  disuse signal backstops.
 - **Event-shaped rot** — the single most common gap in production memories;
   filtered where a fact is promoted (`_promotable_text`, `memory_audit`) and
   flagged in the regions afterwards.

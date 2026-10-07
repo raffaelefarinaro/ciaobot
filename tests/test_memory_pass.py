@@ -281,6 +281,38 @@ def test_prompt_routes_categories_to_the_vocabulary_block() -> None:
     assert "instead of inventing a type" in prompt
 
 
+def test_superseded_guidance_is_rewritten_not_annotated() -> None:
+    """A later reader must not be left with two current instructions (#1132).
+
+    The pass prompt is what every memory pass reads, and the skill is what
+    "the way you normally would" points at. A rule in only one of them is how
+    the pass kept the old line and annotated the new one.
+    """
+    from importlib import resources
+
+    skill = (
+        resources.files("ciao.stock")
+        .joinpath("skills/ciao-memory/SKILL.md")
+        .read_text(encoding="utf-8")
+    )
+    architecture = (
+        Path(__file__).resolve().parents[1] / "docs" / "ARCHITECTURE.md"
+    ).read_text(encoding="utf-8")
+    phrases = (
+        "one instruction",
+        "source and date",
+        "remove the superseded line rather than annotating",
+        "genuinely conflict",
+        "let them decide instead of picking silently",
+    )
+    for phrase in phrases:
+        assert phrase in memory_pass.MEMORY_PASS_PROMPT, phrase
+        assert phrase in skill, phrase
+    # An unattended run queues the conflict; it does not write either line.
+    assert "writes neither as the current instruction" in skill
+    assert "removes the superseded line" in architecture
+
+
 def test_prompt_still_formats_every_placeholder() -> None:
     """A brace in the added sentence would raise on the next chat's first turn."""
     rendered = memory_pass.MEMORY_PASS_PROMPT.format(
