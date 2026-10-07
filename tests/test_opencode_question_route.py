@@ -139,3 +139,45 @@ def test_permission_response_forwards_a_boolean_verdict_and_session() -> None:
         "approved": False,
         "reason": "User denied",
     }]
+
+
+def test_answering_a_native_card_asks_the_control_plane_to_resettle() -> None:
+    """The answer path re-settles a held attempt (#1110).
+
+    Answering a native card starts no turn, so the route itself has to hand the
+    chat to the control plane once the card is acknowledged. The plane is reached
+    off ``app.state.mcp_service``; a fake records the one call.
+    """
+    manager = _Manager()
+    resettled: list[str] = []
+    app = _app(manager)
+    app.state.mcp_service = SimpleNamespace(
+        control_plane=SimpleNamespace(
+            resettle_after_question_answer=lambda chat_id: resettled.append(chat_id) or True
+        )
+    )
+    with signed_in(TestClient(app)).websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_json({
+            "type": "question_response",
+            "request_id": "form-1",
+            "action": "reply",
+            "answers": {"choice": ["yes"]},
+        })
+        ws.receive_json()
+
+    assert resettled == ["chat-1"]
+
+
+def test_question_response_still_answers_when_no_control_plane_is_bound() -> None:
+    """Bootstrap has no control plane; the answer must not fail on its absence."""
+    manager = _Manager()
+    with signed_in(TestClient(_app(manager))).websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_json({
+            "type": "question_response",
+            "request_id": "form-1",
+            "action": "reply",
+            "answers": {"choice": ["yes"]},
+        })
+        result = ws.receive_json()
+
+    assert result["ok"] is True
