@@ -92,6 +92,47 @@ def test_plan_refuses_an_engine_python_inside_the_workspace(tmp_path: Path) -> N
     assert any("Python inside the workspace" in r for r in result.refusals)
 
 
+def test_plan_warns_when_opencode_chats_lose_their_session(tmp_path: Path) -> None:
+    source = _workspace(tmp_path / "old")
+    (source / ".runtime" / "web_projects.json").write_text(
+        json.dumps(
+            {
+                "chats": {
+                    "c-claude": {"provider": "claude", "title": "Claude"},
+                    "c-open": {"provider": "opencode", "title": "OpenCode"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = _plan(source, tmp_path / "new")
+    assert result.ok
+    assert any(
+        "OpenCode chats continue from their transcript" in warning
+        for warning in result.warnings
+    ), result.warnings
+
+
+def test_plan_skips_the_opencode_warning_without_such_a_chat(tmp_path: Path) -> None:
+    source = _workspace(tmp_path / "old")
+    runtime = source / ".runtime"
+
+    def warnings() -> list[str]:
+        return _plan(source, tmp_path / "new").warnings
+
+    # No file yet.
+    assert not any("OpenCode" in warning for warning in warnings())
+
+    (runtime / "web_projects.json").write_text("{", encoding="utf-8")
+    assert not any("OpenCode" in warning for warning in warnings())
+
+    (runtime / "web_projects.json").write_text(
+        json.dumps({"chats": {"c1": {"provider": "claude"}}}),
+        encoding="utf-8",
+    )
+    assert not any("OpenCode" in warning for warning in warnings())
+
+
 def test_plan_warns_about_what_it_does_not_repair(tmp_path: Path) -> None:
     source = _workspace(tmp_path / "old")
     (source / ".venv").mkdir()

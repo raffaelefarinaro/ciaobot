@@ -484,7 +484,31 @@ def plan(
         result.warnings.append(
             "Some automation prompts mention the old folder by path. Edit them after the move."
         )
+    try:
+        projects_state: Any = json.loads(
+            (source / ".runtime" / "web_projects.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        projects_state = None
+    # OpenCode session ids live in the workspace's opencode state, which this
+    # move does not rewrite. A missing or unreadable file is not a warning,
+    # same as schedules.
+    if _has_opencode_chat(projects_state):
+        result.warnings.append(
+            "OpenCode chats continue from their transcript after this move, not their previous session."
+        )
     return result
+
+
+def _has_opencode_chat(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    chats = data.get("chats")
+    if not isinstance(chats, dict):
+        return False
+    return any(
+        isinstance(chat, dict) and chat.get("provider") == "opencode" for chat in chats.values()
+    )
 
 
 def _mentions(data: Any, needle: str) -> bool:
