@@ -659,11 +659,12 @@ class ChatStreaming:
                 if stream.user_stopped:
                     # A Stop landed before the turn task existed (start-up or
                     # between turns). Honour it without creating or running the
-                    # provider task (#1109): consume the flag and end the turn
-                    # through the stopped-result path. Clearing the carry-over
-                    # keeps this turn from inheriting and re-announcing the
-                    # previous turn's answer.
-                    stream.user_stopped = False
+                    # provider task (#1109): publish the stopped result and
+                    # leave the flag for the bottom-of-loop block below, which
+                    # also honours park_queue (a board Stop parks the queued
+                    # follow-ups instead of running them, #1103). Clearing the
+                    # carry-over keeps this turn from inheriting and
+                    # re-announcing the previous turn's answer.
                     last_assistant_text = ""
                     stream.publish(
                         self._host._stop_result_payload(

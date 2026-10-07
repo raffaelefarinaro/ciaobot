@@ -1394,3 +1394,99 @@ async def test_stop_cancels_armed_retry(tmp_path: Path) -> None:
     assert updated.retry_prompt == ""
     # The cleared retry will not replay: the idle-replay entrypoint refuses it.
     assert pcm.try_chat_retry_now(chat.chat_id) is None
+
+
+async def test_plain_stop_without_armed_retry_leaves_retry_untouched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A plain Stop with no armed retry must not stamp ``retry_status="stopped"``.
+
+    ``stop_chat`` used to call ``stop_chat_retry`` unconditionally, which
+    clears the retry with ``status="stopped"``, saves, and publishes a
+    ``chat_retry`` event even when nothing was pending. Nothing resets
+    ``"stopped"`` back to ``""``, so the archive-proposal helper and the
+    memory pass refused forever after any plain Stop.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("stop-noretry", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="stop-noretry", provider="claude")
+
+    published: list[dict] = []
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+
+    stopped = await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=2.0)
+    assert stopped is False  # no turn was running
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated.retry_status == ""
+    assert updated.retry_prompt == ""
+    # No retry was armed, so nothing may have published a chat_retry event.
+    assert not any(ev.get("type") == "chat_retry" for ev in published)
+
+
+async def test_a_board_stop_in_the_pre_task_window_parks_the_queue(
+    tmp_path: Path,
+) -> None:
+    """A board Stop landing before the turn task exists must park the queue.
+
+    ``park_queue=True`` sets both ``user_stopped`` and ``park_on_stop``. The
+    pre-task guard used to consume ``user_stopped`` before the bottom-of-loop
+    ``park_rest`` read it, so the first queued follow-up ran as a normal turn
+    instead of being parked (#1103). The guard must publish the stopped result
+    but leave the flag for the loop to honour the park.
+    """
+    pcm = _make_manager(tmp_path)
+    pcm._STOP_GRACE_S = 0.05
+    project = pcm.create_project("stop-early-park", workspace="work")
+    chat = pcm.create_chat(
+        project.project_id, title="stop-early-park", provider="claude"
+    )
+
+    acked = asyncio.Event()
+    disconnects: list[int] = []
+    pcm._providers[chat.chat_id] = _fake_provider_service(acked, disconnects)
+
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        yield ResultEvent(
+            type="result",
+            result="should not run",
+            session_id="sess-x",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    # The Stop lands before the drive loop has created the turn task.
+    assert stream.turn_task is None
+    assert pcm.queue_message(chat.chat_id, "follow-up") is True
+    stopped = await asyncio.wait_for(
+        pcm.stop_chat(chat.chat_id, park_queue=True), timeout=2.0
+    )
+    assert stopped is True
+
+    await _wait_for(lambda: stream.done)
+    # The provider was never invoked: the queued follow-up was parked, not run.
+    assert turn_calls == []
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1
+    assert results[0].get("stopped") is True
+    assert [e["text"] for e in pcm.get_chat(chat.chat_id).pending_queue] == [
+        "follow-up"
+    ]
+
+    consumer.cancel()

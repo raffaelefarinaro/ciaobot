@@ -7083,8 +7083,13 @@ class ProjectChatManager:
         # A Stop must also cancel any retry armed for this chat (quota /
         # connection / startup / auth). The turn that armed it already errored,
         # so no stream is live and the retry would otherwise replay after the
-        # stop (#1109). No-op when nothing is pending.
-        self.stop_chat_retry(chat_id)
+        # stop (#1109). Only fire when a retry is actually pending: clearing
+        # unconditionally would stamp ``retry_status="stopped"`` (with no path
+        # back to "") and permanently refuse the archive-proposal helper and the
+        # memory pass after any plain Stop.
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.retry_status == "pending":
+            self.stop_chat_retry(chat_id)
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
