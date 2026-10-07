@@ -1322,7 +1322,10 @@ async def test_stop_before_turn_task_prevents_turn(tmp_path: Path) -> None:
     stopped result without ever invoking the provider (#1109).
     """
     pcm = _make_manager(tmp_path)
-    pcm._STOP_GRACE_S = 0.05
+    # Same window as the board-stop pre-task test: wait_for_drive_cleanup does
+    # a real state save, and 50ms returns False on a loaded Windows runner
+    # before the drive has published the stopped result.
+    pcm._STOP_GRACE_S = 2.0
     project = pcm.create_project("stop-early", workspace="work")
     chat = pcm.create_chat(project.project_id, title="stop-early", provider="claude")
 
