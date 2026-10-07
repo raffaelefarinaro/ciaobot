@@ -32,6 +32,29 @@ from ciao.web.project_chats import RestartDrainingError
 logger = logging.getLogger(__name__)
 
 
+async def _resettle_after_question_answer(websocket: WebSocket, chat_id: str) -> None:
+    """Re-settle a delegated attempt whose native question card was just answered.
+
+    Best effort by design: the user's answer already succeeded, and a settlement
+    that cannot be made is logged, never raised back at the socket. The control
+    plane owns the decision (``resettle_after_question_answer``); this only finds
+    it and runs the write off the event loop, the way ``routes_tasks`` runs every
+    other control-plane call.
+    """
+    service = getattr(websocket.app.state, "mcp_service", None)
+    plane = getattr(service, "control_plane", None)
+    if plane is None:
+        return
+    try:
+        await asyncio.to_thread(plane.resettle_after_question_answer, chat_id)
+    except Exception:  # noqa: BLE001 — a settlement must never fail the answer
+        logger.exception(
+            "delegation: could not re-settle the attempt for chat %s after its card "
+            "was answered",
+            chat_id,
+        )
+
+
 async def _forward_stream(websocket: WebSocket, stream: ChatStream) -> bool:
     """Pump events from the stream to the WS client.
 
@@ -249,6 +272,13 @@ async def ws_chat(websocket: WebSocket) -> None:
                         })
                     except (WebSocketDisconnect, RuntimeError):
                         break
+                    if result.ok:
+                        # Answering a native card starts no turn, so nothing else
+                        # re-settles a delegated attempt the card was holding at
+                        # ``needs_you`` with a `done` report already on it (#1110).
+                        # Best effort: a settlement that cannot be made must not
+                        # fail the answer the user just gave.
+                        await _resettle_after_question_answer(websocket, chat_id)
                 continue
 
             if msg_type == "capability_response":
