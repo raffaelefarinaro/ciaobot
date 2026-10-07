@@ -4,8 +4,8 @@ import { bindingFromEvent, DEFAULT_SHORTCUTS, displayBinding, effectiveBinding, 
 
 describe('keyboard shortcuts', () => {
   it('uses defaults and supports disabled/custom bindings', () => {
-    expect(effectiveBinding({ keyboard_shortcuts: {}, keyboard_send_mode: 'modifier' }, 'archiveChat')).toBe(DEFAULT_SHORTCUTS.archiveChat)
-    expect(effectiveBinding({ keyboard_shortcuts: { archiveChat: 'disabled' }, keyboard_send_mode: 'modifier' }, 'archiveChat')).toBe('disabled')
+    expect(effectiveBinding({ keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', revision: '' }, 'archiveChat')).toBe(DEFAULT_SHORTCUTS.archiveChat)
+    expect(effectiveBinding({ keyboard_shortcuts: { archiveChat: 'disabled' }, keyboard_send_mode: 'modifier', revision: '' }, 'archiveChat')).toBe('disabled')
   })
 
   it('matches physical codes and exact modifiers', () => {

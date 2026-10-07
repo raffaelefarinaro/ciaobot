@@ -4066,6 +4066,7 @@ export const useProjectStore = defineStore('projects', () => {
           applyKeyboardSettings({
             keyboard_shortcuts: msg.keyboard_shortcuts,
             keyboard_send_mode: msg.keyboard_send_mode,
+            revision: msg.keyboard_revision,
           })
         }
         // Reset broker-streaming state to match server truth.

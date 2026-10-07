@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import errno
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -5367,6 +5368,17 @@ async def settings_keyboard(request: Request) -> JSONResponse:
     app_settings = request.app.state.app_settings
     if app_settings is None:
         return JSONResponse({"error": "settings store unavailable"}, status_code=503)
+    def payload() -> dict[str, Any]:
+        keyboard_shortcuts = app_settings.settings.keyboard_shortcuts or {}
+        keyboard_send_mode = app_settings.settings.keyboard_send_mode or "modifier"
+        revision_source = json.dumps(
+            [keyboard_shortcuts, keyboard_send_mode], sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return {
+            "keyboard_shortcuts": keyboard_shortcuts,
+            "keyboard_send_mode": keyboard_send_mode,
+            "revision": hashlib.sha256(revision_source).hexdigest(),
+        }
     if request.method == "PATCH":
         try:
             body = await request.json()
@@ -5374,6 +5386,12 @@ async def settings_keyboard(request: Request) -> JSONResponse:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         if not isinstance(body, dict):
             return JSONResponse({"error": "expected an object"}, status_code=400)
+        expected_revision = body.pop("revision", None)
+        current = payload()
+        if not isinstance(expected_revision, str):
+            return JSONResponse({"error": "revision is required"}, status_code=400)
+        if expected_revision != current["revision"]:
+            return JSONResponse({"error": "Keyboard settings changed on another device. Reload and try again."}, status_code=409)
         try:
             app_settings.update(body)
         except ValueError as exc:
@@ -5382,13 +5400,9 @@ async def settings_keyboard(request: Request) -> JSONResponse:
         if pcm is not None:
             pcm.events.publish({
                 "type": "keyboard_settings_changed",
-                "keyboard_shortcuts": app_settings.settings.keyboard_shortcuts or {},
-                "keyboard_send_mode": app_settings.settings.keyboard_send_mode or "modifier",
+                **payload(),
             })
-    return JSONResponse({
-        "keyboard_shortcuts": app_settings.settings.keyboard_shortcuts or {},
-        "keyboard_send_mode": app_settings.settings.keyboard_send_mode or "modifier",
-    })
+    return JSONResponse(payload())
 
 
 # ── Status ───────────────────────────────────────────────────────────────

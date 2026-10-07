@@ -1,10 +1,16 @@
-// Node 22.23 exposes an experimental global localStorage accessor that is
-// undefined unless Node starts with --localstorage-file. Point tests at the
-// storage provided by their jsdom window so the browser API remains available
-// without a Node-specific launch flag.
+// Vitest 4's jsdom environment does not consistently expose localStorage on
+// the test global. Use one browser-shaped store for code and assertions.
+const values = new Map<string, string>()
+const storage: Storage = {
+  get length() { return values.size },
+  clear() { values.clear() },
+  getItem(key) { return values.get(String(key)) ?? null },
+  key(index) { return Array.from(values.keys())[index] ?? null },
+  removeItem(key) { values.delete(String(key)) },
+  setItem(key, value) { values.set(String(key), String(value)) },
+}
+
+Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage })
 if (typeof window !== 'undefined') {
-  Object.defineProperty(globalThis, 'localStorage', {
-    configurable: true,
-    value: window.localStorage,
-  })
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: storage })
 }

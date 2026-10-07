@@ -2,7 +2,7 @@ import { ref } from 'vue'
 import { api } from '../lib/api'
 import type { KeyboardSettings } from '../lib/keyboardShortcuts'
 
-const settings = ref<KeyboardSettings>({ keyboard_shortcuts: {}, keyboard_send_mode: 'modifier' })
+const settings = ref<KeyboardSettings>({ keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', revision: '' })
 const loaded = ref(false)
 let loading: Promise<void> | null = null
 
@@ -13,6 +13,7 @@ export function applyKeyboardSettings(value: Partial<KeyboardSettings>): void {
   if (value.keyboard_send_mode === 'modifier' || value.keyboard_send_mode === 'enter') {
     settings.value.keyboard_send_mode = value.keyboard_send_mode
   }
+  if (typeof value.revision === 'string') settings.value.revision = value.revision
   loaded.value = true
 }
 
@@ -35,7 +36,10 @@ export function useKeyboardSettings(): {
     loaded,
     load,
     async save(patch) {
-      const value = await api.patch<KeyboardSettings>('/api/settings/keyboard', patch)
+      const value = await api.patch<KeyboardSettings>('/api/settings/keyboard', {
+        ...patch,
+        revision: settings.value.revision,
+      })
       applyKeyboardSettings(value)
     },
   }

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 
@@ -500,6 +501,15 @@ async def ws_events(websocket: WebSocket) -> None:
             "keyboard_send_mode": (
                 websocket.app.state.app_settings.settings.keyboard_send_mode or "modifier"
                 if getattr(websocket.app.state, "app_settings", None) is not None else "modifier"
+            ),
+            "keyboard_revision": (
+                hashlib.sha256(
+                    json.dumps([
+                        websocket.app.state.app_settings.settings.keyboard_shortcuts or {},
+                        websocket.app.state.app_settings.settings.keyboard_send_mode or "modifier",
+                    ], sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                if getattr(websocket.app.state, "app_settings", None) is not None else ""
             ),
         })
     except (WebSocketDisconnect, RuntimeError):

@@ -900,11 +900,12 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
 # is "modifier" (Cmd/Ctrl+Enter) or "enter".
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/keyboard"
 
-# Partial updates persist to .runtime/app_settings.json and broadcast through
-# /ws/events so connected devices take effect immediately.
+# Include the revision returned by GET. A stale revision receives 409 instead
+# of overwriting another device's change. Updates persist to
+# .runtime/app_settings.json and broadcast through /ws/events.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/keyboard" \
   -H 'content-type: application/json' \
-  -d '{"keyboard_shortcuts":{"archiveChat":"Mod+KeyK","workspace2":"disabled"},"keyboard_send_mode":"enter"}'
+  -d '{"revision":"<revision-from-GET>","keyboard_shortcuts":{"archiveChat":"Mod+KeyK","workspace2":"disabled"},"keyboard_send_mode":"enter"}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**

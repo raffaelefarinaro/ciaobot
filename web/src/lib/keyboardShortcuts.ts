@@ -4,6 +4,7 @@ export type SendMode = 'modifier' | 'enter'
 export interface KeyboardSettings {
   keyboard_shortcuts: Record<string, string>
   keyboard_send_mode: SendMode
+  revision: string
 }
 
 export const DEFAULT_SHORTCUTS: Record<ShortcutId, string> = {
