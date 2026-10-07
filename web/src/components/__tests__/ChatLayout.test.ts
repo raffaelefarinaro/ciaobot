@@ -1874,6 +1874,10 @@ describe('ChatLayout home arrow navigation', () => {
           FileViewerModal: EmptyStub,
           PinnedFilePanel: EmptyStub,
           PaneHeader: EmptyStub,
+          // Bare /memory is not this test's route. The real map replaces it
+          // with /memory/<section> (To decide on a first visit), and that
+          // replace races the assertion that the chord landed on /memory.
+          MemoryMapView: EmptyStub,
         },
       },
     })

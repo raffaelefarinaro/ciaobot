@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.2.1 - 2026-10-08
+
+### Changed
+- Merge pull request #1140 from raffaelefarinaro/chore/sync-develop-v1.2.0 (`7ac5485e`)
+- Merge pull request #1142 from raffaelefarinaro/fix/1141-server-host-update (`44285e34`)
+- Merge pull request #1143 from raffaelefarinaro/fix/memory-chord-test-race (`1f2f8a3c`)
+
+### Fixed
+- fix(installer): let a macOS update re-run past the server host (`c1256f49`)
+
+### Maintenance
+- test(stop): give the pre-task stop the same grace as the park test (`e9642152`)
+- test(web): stop the memory chord assertion racing the map redirect (`77b42533`)
+
 ## v1.2.0 - 2026-10-07
 
 ### Added
