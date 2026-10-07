@@ -655,12 +655,32 @@ class ChatStreaming:
                             else:
                                 turn_assistant_text = event.result or ""
 
-                turn_task = asyncio.create_task(
-                    _run_turn(), name=f"chat-turn-{chat_id}"
-                )
+                turn_task: asyncio.Task | None = None
+                if stream.user_stopped:
+                    # A Stop landed before the turn task existed (start-up or
+                    # between turns). Honour it without creating or running the
+                    # provider task (#1109): publish the stopped result and
+                    # leave the flag for the bottom-of-loop block below, which
+                    # also honours park_queue (a board Stop parks the queued
+                    # follow-ups instead of running them, #1103). Clearing the
+                    # carry-over keeps this turn from inheriting and
+                    # re-announcing the previous turn's answer.
+                    last_assistant_text = ""
+                    stream.publish(
+                        self._host._stop_result_payload(
+                            chat_id,
+                            turn_index=current_turn_index,
+                            text=turn_streamed_text,
+                        )
+                    )
+                else:
+                    turn_task = asyncio.create_task(
+                        _run_turn(), name=f"chat-turn-{chat_id}"
+                    )
                 stream.turn_task = turn_task
                 try:
-                    await turn_task
+                    if turn_task is not None:
+                        await turn_task
                 except asyncio.CancelledError:
                     if not stream.force_closing:
                         raise
