@@ -387,7 +387,7 @@ describe('VaultReviewPanel', () => {
     const createChat = vi
       .spyOn(projects, 'createChat')
       .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
-    const pinFile = vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+    const pinFile = vi.spyOn(projects, 'pinFile').mockResolvedValue(undefined)
     apiPost.mockClear()
 
     await buttonByText(wrapper, 'Discuss').trigger('click')
@@ -466,7 +466,7 @@ describe('VaultReviewPanel', () => {
     const createChat = vi
       .spyOn(projects, 'createChat')
       .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
-    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(undefined)
 
     await buttonByText(wrapper, 'Discuss').trigger('click')
     await flushPromises()
@@ -496,7 +496,7 @@ describe('VaultReviewPanel', () => {
     const createChat = vi
       .spyOn(projects, 'createChat')
       .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
-    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(undefined)
 
     await buttonByText(wrapper, 'Discuss').trigger('click')
     await flushPromises()
@@ -766,7 +766,7 @@ describe('VaultReviewPanel', () => {
     const createChat = vi
       .spyOn(projects, 'createChat')
       .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
-    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(undefined)
 
     await buttonByText(wrapper, 'Discuss').trigger('click')
     await flushPromises()
@@ -798,7 +798,7 @@ describe('VaultReviewPanel', () => {
     const createChat = vi
       .spyOn(projects, 'createChat')
       .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
-    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(undefined)
 
     await buttonByText(wrapper, 'Discuss').trigger('click')
     await flushPromises()
@@ -827,7 +827,7 @@ describe('VaultReviewPanel', () => {
     const createChat = vi
       .spyOn(projects, 'createChat')
       .mockResolvedValue({ chat_id: 'c-new' } as ChatInfo)
-    vi.spyOn(projects, 'pinFile').mockImplementation(() => {})
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(undefined)
 
     await buttonByText(wrapper, 'Discuss').trigger('click')
     await flushPromises()

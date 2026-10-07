@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h, nextTick } from 'vue'
+import { defineComponent, h, nextTick, ref } from 'vue'
 import { useProjectStore } from '../../stores/projects'
+import { useFileViewerStore } from '../../stores/fileViewer'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useFontScale } from '../../composables/useFontScale'
@@ -1039,7 +1040,7 @@ describe('ChatLayout', () => {
     }] as unknown as typeof store.chats
     store.activeChatId = 'chat-1'
     store.bootstrapped = true
-    store.pinFile('chat-1', 'src/pinned-file.ts')
+    store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'test' })
     vi.spyOn(store, 'fetchAll').mockResolvedValue()
 
     const taskStore = useTaskStore()
@@ -1343,7 +1344,7 @@ describe('ChatLayout Home navigation clears the selected chat', () => {
     ] as unknown as typeof store.chats
     store.activeChatId = 'chat-1'
     store.bootstrapped = true
-    store.pinFile('chat-1', 'src/pinned-file.ts')
+    store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'test' })
     vi.spyOn(store, 'fetchAll').mockResolvedValue()
 
     const taskStore = useTaskStore()
@@ -1574,6 +1575,226 @@ describe('ChatLayout Home navigation clears the selected chat', () => {
     expect(store.activeChatId).toBe('chat-1')
     // Home had no pin key at all; the chat route brings back *its* pin.
     expect(wrapper.find('.chat-split').exists()).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+describe('ChatLayout shared chat pin', () => {
+  class MemoryStorage {
+    private values = new Map<string, string>()
+    getItem(key: string): string | null { return this.values.get(key) ?? null }
+    setItem(key: string, value: string): void { this.values.set(key, value) }
+    removeItem(key: string): void { this.values.delete(key) }
+    clear(): void { this.values.clear() }
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  async function mountChat(width: number, path = '/chat/chat-1') {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
+    })
+    await router.push(path)
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Chat one',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    return { wrapper, router, store }
+  }
+
+  it('restores the shared pin on desktop and clears it on a remote close', async () => {
+    const { wrapper, store } = await mountChat(1180)
+    store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+    expect(wrapper.find('.chat-split').exists()).toBe(true)
+
+    // A remote unpin removes the dock without navigating away.
+    store.applyChatPinState('chat-1', { path: '', dismissed_paths: ['src/pinned-file.ts'], revision: 2 }, { source: 'event' })
+    await nextTick()
+    expect(wrapper.find('.chat-split').exists()).toBe(false)
+    expect(store.activeChatId).toBe('chat-1')
+    wrapper.unmount()
+  })
+
+  it('renders a keyboard-accessible narrow opener that never auto-opens a modal', async () => {
+    const { wrapper, store } = await mountChat(390)
+    store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+
+    const opener = wrapper.find('.narrow-pin-opener')
+    expect(opener.exists()).toBe(true)
+    const openBtn = opener.find('.narrow-pin-btn')
+    expect(openBtn.exists()).toBe(true)
+    // Accessible name carries the filename; the control is a real button.
+    expect(openBtn.attributes('aria-label')).toContain('pinned-file.ts')
+    // A pin restore must not auto-open the viewer modal.
+    expect(useFileViewerStore().isOpen).toBe(false)
+
+    // A remote unpin removes the opener.
+    store.applyChatPinState('chat-1', { path: '', dismissed_paths: ['src/pinned-file.ts'], revision: 2 }, { source: 'event' })
+    await nextTick()
+    expect(wrapper.find('.narrow-pin-opener').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('Home shows no shared-pin opener even when a chat is pinned', async () => {
+    const { wrapper, store } = await mountChat(390, '/')
+    store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+    expect(wrapper.find('.narrow-pin-opener').exists()).toBe(false)
+    expect(wrapper.find('.chat-split').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('opens the narrow shared pin through openSharedPin, not open', async () => {
+    const { wrapper, store } = await mountChat(390)
+    store.applyChatPinState('chat-1', { path: 'src/pinned-file.ts', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+
+    const viewer = useFileViewerStore()
+    const openSharedPin = vi.spyOn(viewer, 'openSharedPin').mockResolvedValue(true)
+    const open = vi.spyOn(viewer, 'open')
+
+    await wrapper.find('.narrow-pin-btn').trigger('click')
+    await flushPromises()
+
+    // The opener must mark the preview as the chat's shared-pin surface so a
+    // remote unpin reconciles it and a user close unpins through the server.
+    expect(openSharedPin).toHaveBeenCalledWith('src/pinned-file.ts', 'chat-1')
+    expect(open).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps a dirty pinned panel alive across a remote pin change, applying it once idle', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
+    })
+    await router.push('/chat/chat-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Chat one',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const busy = ref(true)
+    const BusyPanelStub = defineComponent({
+      name: 'PinnedFilePanel',
+      props: ['filePath'],
+      setup(_, { expose }) {
+        expose({ isBusyAuthoring: busy })
+        return () => h('div', { class: 'busy-panel' })
+      },
+    })
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: BusyPanelStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    store.applyChatPinState('chat-1', { path: 'src/a.ts', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+    expect(wrapper.find('.chat-split').exists()).toBe(true)
+
+    const panel = wrapper.findComponent(BusyPanelStub)
+    expect(panel.props('filePath')).toBe('src/a.ts')
+
+    // A remote replacement while the panel is mid-edit must not remount or
+    // discard the edit: the panel holds its current path.
+    store.applyChatPinState('chat-1', { path: 'src/b.ts', dismissed_paths: [], revision: 2 }, { source: 'event' })
+    await nextTick()
+    expect(wrapper.find('.chat-split').exists()).toBe(true)
+    expect(panel.props('filePath')).toBe('src/a.ts')
+
+    // A remote unpin while mid-edit likewise leaves the dirty panel alive.
+    store.applyChatPinState('chat-1', { path: '', dismissed_paths: ['src/b.ts'], revision: 3 }, { source: 'event' })
+    await nextTick()
+    expect(wrapper.find('.chat-split').exists()).toBe(true)
+    expect(panel.props('filePath')).toBe('src/a.ts')
+
+    // Once the user finishes editing, the deferred change is applied.
+    busy.value = false
+    await nextTick()
+    expect(wrapper.find('.chat-split').exists()).toBe(false)
     wrapper.unmount()
   })
 })

@@ -255,6 +255,25 @@ export interface ChatInfo {
   // chat (ciao/web/memory_pass.py). Present only on archived chats that queued
   // one.
   postprocess?: ChatPostprocess | null
+  // Server-owned per-chat pinned file (canonical absolute POSIX path, '' when
+  // nothing is pinned). The engine is the only writer of this state; the PWA
+  // consumes it and PATCHes it via the `pin` body, never from localStorage.
+  pinned_file_path?: string
+  dismissed_pin_paths?: string[]
+  pin_revision?: number
+}
+
+/**
+ * The server's authoritative per-chat pin state, as carried by `ChatInfo`,
+ * the `chat_pin_changed` event, and the `/ws/events` snapshot's `chat_pins`
+ * map. `path` is the canonical absolute POSIX path ('' = closed/dismissed),
+ * `dismissed_paths` are the paths the user has explicitly closed, and
+ * `revision` is the optimistic-concurrency counter every PATCH must present.
+ */
+export interface ChatPinState {
+  path: string
+  dismissed_paths: string[]
+  revision: number
 }
 
 /** The memory pass's step on an archived chat's postprocess record. */
@@ -469,7 +488,8 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState> }
+  | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }

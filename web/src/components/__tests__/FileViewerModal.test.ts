@@ -125,7 +125,7 @@ describe('FileViewerModal', () => {
     trigger.focus()
 
     const store = openViewer()
-    const close = vi.spyOn(store, 'close')
+    const close = vi.spyOn(store, 'dismissSharedPin')
     await settle()
     press(wrapper!.get<HTMLElement>('.fv-modal').element, 'Escape')
     await flushPromises()
@@ -144,7 +144,7 @@ describe('FileViewerModal', () => {
     trigger.focus()
 
     const store = openViewer()
-    const close = vi.spyOn(store, 'close')
+    const close = vi.spyOn(store, 'dismissSharedPin')
     await settle()
     wrapper!.get<HTMLElement>('.fv-backdrop').element.dispatchEvent(new MouseEvent('pointerdown', {
       bubbles: true,
