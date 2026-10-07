@@ -3121,9 +3121,11 @@ def test_login_status_reports_a_missing_binary_as_an_install_step(
     """No binary means no chats, so the row asks for an install, not a login.
 
     The install branch is shared with Claude: `auth="not_installed"` with a
-    one-line installer, the download page, and a PATH line. Before this the row
-    said `auth="missing"` with a bare `opencode` command, so the provider page
-    and the wizard showed nothing a user could run.
+    one-line installer, the download page, and a PATH line when the installer
+    drops the binary off the default PATH. An empty hint is omitted, the same
+    way Claude's row omits it. Before this the row said `auth="missing"` with
+    a bare `opencode` command, so the provider page and the wizard showed
+    nothing a user could run.
     """
     from ciao.providers import opencode as mod
 
@@ -3135,20 +3137,29 @@ def test_login_status_reports_a_missing_binary_as_an_install_step(
     assert row["auth"] == "not_installed"
     assert row["install_url"] == mod.OPENCODE_INSTALL_DOCS_URL
     assert "opencode" in row["command"]
-    assert row["path_command"] == mod.opencode_path_hint()
+    hint = mod.opencode_path_hint()
+    if hint:
+        assert row["path_command"] == hint
+    else:
+        assert "path_command" not in row
     assert "not installed" in row["detail"]
 
 
 def test_the_opencode_path_line_is_only_offered_for_the_curl_installer(monkeypatch):
     """npm's shim and Homebrew bins are already searched, so only the curl
     installer's ``~/.opencode/bin`` needs a PATH line — and Windows, where the
-    row offers npm, needs none at all."""
+    row offers npm, needs none at all.
+
+    The POSIX line is built with ``Path``, so it is asserted on a POSIX host
+    only. Monkeypatching ``sys.platform`` to Darwin on Windows still joins
+    with backslashes.
+    """
     import sys
 
     from ciao.providers import opencode as mod
 
-    monkeypatch.setattr(sys, "platform", "darwin")
-    assert ".opencode/bin" in mod.opencode_path_hint()
+    if sys.platform != "win32":
+        assert ".opencode/bin" in mod.opencode_path_hint()
     monkeypatch.setattr(sys, "platform", "win32")
     assert mod.opencode_path_hint() == ""
 
