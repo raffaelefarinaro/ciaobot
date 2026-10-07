@@ -55,7 +55,10 @@ Verification:
   Lint is still worth running — it just will not fail the build for you.
 - For UI changes, verify keyboard focus, browser zoom, and mobile touch targets.
 - Workspace shortcuts map unmodified `1`–`9` to the visible sidebar order and
-  must remain inert while a text field is focused.
+  must remain inert while a text field is focused. The Settings keyboard
+  shortcuts card can disable or rebind them; preferences are shared through the
+  engine. Enter-to-send is also shared, but touch keyboards always insert a
+  newline. Preserve picker precedence and IME composition handling.
 - OpenCode provider changes must preserve the V2-only 2.0.16+ contract. Replay
   the V2 fixtures and run one tiny real turn against the installed OpenCode 2.x
   server; do not restore V1 route or response-shape fallbacks.

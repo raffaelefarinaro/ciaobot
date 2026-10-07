@@ -333,6 +333,8 @@ import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
 import { pendingPrompt } from '../lib/prompt'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
+import { useKeyboardSettings } from '../composables/useKeyboardSettings'
+import { effectiveBinding, keyboardMatches, type ShortcutId } from '../lib/keyboardShortcuts'
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
@@ -357,6 +359,12 @@ const schedulePanelRef = ref<any>(null)
 // Cmd/Ctrl+Shift+- shortcuts (below); the same composable is consumed by
 // Settings → Appearance so the +/- buttons and the shortcuts stay in sync.
 const fontScale = useFontScale()
+const keyboard = useKeyboardSettings()
+void keyboard.load().catch(() => {})
+
+function matchesShortcut(event: KeyboardEvent, id: ShortcutId): boolean {
+  return keyboardMatches(event, effectiveBinding(keyboard.settings.value, id))
+}
 
 // Wide enough for the nav row to show the active item's label ("automations" is
 // the longest) beside all four glyphs. At 280 the row could not fit it and the
@@ -886,24 +894,6 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
-// The PWA's Option/Alt chords match the physical key. On macOS, Option turns
-// `e.key` into the character the chord would type (⌥D is "∂", ⌥S "ß", ⌥M "µ",
-// ⌥= "≠", ⌥- "–", and ⌥N is a "Dead" key), so comparing `e.key` with ASCII
-// letters never matched on a Mac. `e.code` names the key position and is
-// unaffected by Option. When a browser or a synthetic event leaves `code`
-// empty, fall back to `e.key` so Windows/Linux Alt chords still match.
-//
-// Inside a text field the physical match is off: Option+letter is how a Mac
-// types accents and symbols (⌥N then N is ñ, ⌥D is ∂, ⌥M is µ), so a press
-// whose `key` is a produced character or "Dead" must reach the field. There
-// only the old `e.key` comparison applies, which still matches Windows/Linux
-// Alt chords and ⌥Backspace (Backspace produces no character).
-function optionChord(e: KeyboardEvent, codes: readonly string[], keys: readonly string[]): boolean {
-  if (isTypingTarget(e.target)) return keys.includes(e.key)
-  if (e.code) return codes.includes(e.code)
-  return keys.includes(e.key)
-}
-
 // Unmodified keys, which no browser reserves: number keys switch to the
 // corresponding workspace, arrow keys roam the home recent-chat grid (Enter
 // opens the focused card natively), and Esc closes the open chat. Anything
@@ -966,8 +956,10 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // preventDefault. Both branches stay inside the existing viewShortcutsActive
   // and typing-target gates, so a confirm dialog or the file viewer still
   // swallows the digit and the composer still types it.
+  const workspaceSlot = Array.from({ length: 9 }, (_, i) => i + 1)
+    .find(i => matchesShortcut(e, `workspace${i}` as ShortcutId))
   if (viewShortcutsActive.value && !isTypingTarget(e.target) && !e.defaultPrevented
-    && bare && /^[1-9]$/.test(e.key)) {
+    && workspaceSlot) {
     if (chatPanelRef.value?.handleQuestionShortcut?.(e)) {
       e.preventDefault()
       return
@@ -980,7 +972,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       e.preventDefault()
       return
     }
-    const workspace = store.workspaceOptions[Number(e.key) - 1]
+    const workspace = store.workspaceOptions[workspaceSlot - 1]
     if (workspace) {
       e.preventDefault()
       // The schedules, task-board and memory views have no chat to transition
@@ -1015,7 +1007,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // the common complaint. Widgets that genuinely own Esc claim it with
   // stopPropagation (the slash-command picker in ChatPanel, the notification
   // bell), so this never steals the key from them.
-  if (e.key === 'Escape') {
+  if (matchesShortcut(e, 'closeChat')) {
     // The confirm dialog and the file viewer own Esc while they are up.
     if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
     // Any open Reka layer (dialog, menu, popover) owns Esc: Reka marks each one
@@ -1144,21 +1136,23 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
+  // User shortcuts must never take printable chords away from an editor.
+  if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
+
   // New Chat: Option+N. Opens a small picker to choose the workspace the new
   // chat should live in; Enter creates it in the active workspace's General
   // project. Cmd+T is left alone: it is the browser's new tab.
-  if (alt && optionChord(e, ['KeyN'], ['n', 'N'])) {
+  if (matchesShortcut(e, 'newChat')) {
+    if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
     e.preventDefault()
     void handleNewChatShortcut()
     return
   }
 
-  // Archive: Option+Backspace. Unlike the old Cmd+A it also fires while a
-  // text field is focused — that is the point: archive from mid-thought
-  // without clicking out. The confirm dialog from archiveActiveChat is what
-  // makes this safe to fire while typing, and it gates on shortcutsActive
-  // anyway, so the dialog swallows further keys.
-  if (alt && !mod && optionChord(e, ['Backspace'], ['Backspace'])) {
+  // Archive is deliberately inert in editable controls so Option+Backspace
+  // keeps its native “delete previous word” meaning on macOS.
+  if (matchesShortcut(e, 'archiveChat')) {
+    if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
@@ -1169,7 +1163,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // typing for the same reason as archive: in a text field Option+S is how you
   // type ß, and stealing it would break text entry for the sake of a view
   // toggle.
-  if (alt && optionChord(e, ['KeyS'], ['s', 'S'])) {
+  if (matchesShortcut(e, 'toggleSidebar')) {
     if (isTypingTarget(e.target)) return
     e.preventDefault()
     sidebarCollapsed.value = !sidebarCollapsed.value
@@ -1179,7 +1173,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // Model picker: Option+M. Not gated on the typing target: opening the picker
   // is the useful reading of the key even mid-compose, and the picker is a
   // popover, not a text mutation.
-  if (alt && optionChord(e, ['KeyM'], ['m', 'M'])) {
+  if (matchesShortcut(e, 'modelPicker')) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleModelPicker()
@@ -1195,9 +1189,9 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // Skipped while typing because Option+= / Option+- type ≠ and – on macOS.
   // Step, bounds and persistence come from useFontScale, shared with the
   // Settings +/- buttons.
-  if (alt && !mod && !isTypingTarget(e.target)) {
-    const zoomIn = optionChord(e, ['Equal', 'NumpadAdd'], ['=', '+'])
-    const zoomOut = optionChord(e, ['Minus', 'NumpadSubtract'], ['-', '_'])
+  if (!isTypingTarget(e.target) && !isTypingTarget(document.activeElement)) {
+    const zoomIn = matchesShortcut(e, 'fontIncrease')
+    const zoomOut = matchesShortcut(e, 'fontDecrease')
     if (zoomIn) {
       e.preventDefault()
       fontScale.adjust(FONT_SCALE_STEP)

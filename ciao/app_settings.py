@@ -56,6 +56,11 @@ def _clean_provider_map(raw: object) -> dict[str, str]:
 # PWA-facing name for the BridgeMode ``normal`` (ask for every action);
 # ``plan`` stays chat-only and is not a settings default.
 _MODES = ("manual", "auto", "bypass")
+_KEYBOARD_SHORTCUT_IDS = {
+    "newChat", "archiveChat", "toggleSidebar", "modelPicker",
+    "fontIncrease", "fontDecrease", "closeChat",
+    *(f"workspace{i}" for i in range(1, 10)),
+}
 
 
 def _clean_default_modes(raw: object) -> dict[str, str]:
@@ -223,6 +228,10 @@ class AppSettings:
     # default chat model.
     provider_insights_models: dict[str, str] | None = None
 
+    # Browser keyboard behavior is engine-owned so a person's clients share it.
+    keyboard_shortcuts: dict[str, str] | None = None
+    keyboard_send_mode: str = ""
+
     # The server's bind address; "" = DEFAULT_PWA_HOST. Read at startup only,
     # so a change takes effect after a restart. Was PWA_HOST.
     pwa_host: str = ""
@@ -264,6 +273,14 @@ def _parse_settings(raw: object) -> AppSettings:
         cleaned = cleaner(raw.get(key))
         if cleaned:
             setattr(settings, key, cleaned)
+    shortcuts = raw.get("keyboard_shortcuts")
+    if isinstance(shortcuts, dict):
+        settings.keyboard_shortcuts = {
+            key: value for key, value in shortcuts.items()
+            if isinstance(key, str) and isinstance(value, str)
+        } or None
+    if settings.keyboard_send_mode not in {"", "modifier", "enter"}:
+        settings.keyboard_send_mode = ""
     # A hand-edited file must not hand uvicorn or the root logger garbage.
     if settings.pwa_host and not _valid_host(settings.pwa_host):
         logger.warning("Ignoring invalid pwa_host %r in app settings", settings.pwa_host)
@@ -396,6 +413,27 @@ class AppSettingsStore:
                             f"{key} entries must be one of {', '.join(_MODES)}"
                         )
                 setattr(updated, key, _NESTED_CLEANERS[key](value))
+                continue
+            if key == "keyboard_shortcuts":
+                if not isinstance(value, dict):
+                    raise ValueError("keyboard_shortcuts must be an object")
+                cleaned: dict[str, str] = {}
+                for shortcut_id, binding in value.items():
+                    if not isinstance(shortcut_id, str) or not isinstance(binding, str):
+                        raise ValueError("keyboard_shortcuts entries must be strings")
+                    if shortcut_id not in _KEYBOARD_SHORTCUT_IDS:
+                        raise ValueError(f"Unknown keyboard shortcut: {shortcut_id}")
+                    if binding != "disabled" and not re.fullmatch(
+                        r"(?:Digit[1-9]|(?:(?:Alt|Mod|Shift)\+){1,3}[A-Za-z0-9]+)", binding
+                    ):
+                        raise ValueError(f"Invalid keyboard shortcut: {binding}")
+                    cleaned[shortcut_id] = binding
+                updated.keyboard_shortcuts = cleaned or None
+                continue
+            if key == "keyboard_send_mode":
+                if value not in {"modifier", "enter"}:
+                    raise ValueError("keyboard_send_mode must be modifier or enter")
+                updated.keyboard_send_mode = "enter" if value == "enter" else ""
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")

@@ -529,52 +529,7 @@
         <!-- Notifications. -->
         <SettingsNotifications />
 
-        <!-- Keyboard shortcuts -->
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">Keyboard shortcuts</p>
-            <p class="hint">Global shortcuts. Text fields keep their normal meaning: number keys stay typeable, Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
-          </div>
-          <ul id="settings-shortcut-list" class="shortcut-list">
-            <li>
-              <kbd>{{ webChord('N') }}</kbd>
-              <span>Open a new chat in the default General project</span>
-            </li>
-            <li>
-              <kbd>{{ webChord('M') }}</kbd>
-              <span>Open the model picker</span>
-            </li>
-            <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
-            <template v-if="showAllShortcuts">
-              <li>
-                <kbd>{{ webChord('\u232B', 'Backspace') }}</kbd>
-                <span>Archive the open chat (asks to confirm)</span>
-              </li>
-              <li>
-                <kbd>{{ webChord('S') }}</kbd>
-                <span>Show or hide the sidebar</span>
-              </li>
-              <li>
-                <kbd>{{ webChord('=') }}</kbd>
-                <span>Increase the font size</span>
-              </li>
-              <li>
-                <kbd>{{ webChord('-') }}</kbd>
-                <span>Decrease the font size</span>
-              </li>
-              <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
-              <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats; stacked workspaces use up/down between lanes</span></li>
-              <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
-            </template>
-          </ul>
-          <button
-            type="button"
-            class="settings-disclosure"
-            aria-controls="settings-shortcut-list"
-            :aria-expanded="showAllShortcuts"
-            @click="showAllShortcuts = !showAllShortcuts"
-          >{{ showAllShortcuts ? 'Show fewer' : `Show all ${SHORTCUT_COUNT}` }}</button>
-        </div>
+        <SettingsKeyboardShortcuts />
 
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
@@ -2040,7 +1995,6 @@ import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
-import { isApplePlatform } from '../lib/platform'
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_STEP,
@@ -2105,6 +2059,7 @@ import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
+import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
@@ -2114,12 +2069,6 @@ import { isLoopbackHostname } from '../lib/loopback'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
-// The shortcuts bind altKey. Apple keyboards label that key Option (\u2325);
-// Windows and Linux keyboards label it Alt.
-const onApplePlatform = isApplePlatform()
-function webChord(key: string, nonAppleKey: string = key): string {
-  return onApplePlatform ? `\u2325${key}` : `Alt+${nonAppleKey}`
-}
 import {
   DEFAULT_WORKSPACE_COLOR,
   WORKSPACE_COLOR_PRESETS,
@@ -2158,8 +2107,6 @@ const currentTab = computed(() => {
 })
 
 // ── Keyboard shortcuts: the common four, the rest behind a disclosure ────
-const SHORTCUT_COUNT = 10
-const showAllShortcuts = ref(false)
 
 // ── On this page ─────────────────────────────────────────────────────────
 // Read from the rendered tab, not a hand-kept list: a section is any
@@ -2247,7 +2194,6 @@ function scrollToSection(id: string): void {
 }
 
 watch(currentTab, () => {
-  showAllShortcuts.value = false
   void nextTick(rebuildToc)
 })
 

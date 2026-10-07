@@ -28,6 +28,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/schedules": "agents create/edit schedules via the schedule_* MCP tools, not curl",
     "/api/schedules/{schedule_id}": "agents edit schedules via the schedule_* MCP tools, not curl",
     "/api/status": "internal status PATCH",
+    "/api/settings/keyboard": "user-owned keyboard preferences are managed through Settings",
     "/api/push/subscribe": "browser push registration",
     "/api/push/unsubscribe": "browser push registration",
     "/api/admin/snapshot": "admin internal; deploy is the agent-callable wrapper",

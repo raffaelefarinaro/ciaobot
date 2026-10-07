@@ -493,6 +493,14 @@ async def ws_events(websocket: WebSocket) -> None:
             # reconnecting after a gap has to be able to close a pin the engine
             # no longer holds, and it cannot do that for a chat that is absent.
             "chat_pins": pcm.chat_pin_states,
+            "keyboard_shortcuts": (
+                websocket.app.state.app_settings.settings.keyboard_shortcuts or {}
+                if getattr(websocket.app.state, "app_settings", None) is not None else {}
+            ),
+            "keyboard_send_mode": (
+                websocket.app.state.app_settings.settings.keyboard_send_mode or "modifier"
+                if getattr(websocket.app.state, "app_settings", None) is not None else "modifier"
+            ),
         })
     except (WebSocketDisconnect, RuntimeError):
         subscription.close()

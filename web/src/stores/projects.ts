@@ -11,6 +11,7 @@ import {
   restartMessageForDisplay,
 } from '../lib/serverRestart'
 import { errorMessage } from '../lib/errorMessage'
+import { applyKeyboardSettings } from '../composables/useKeyboardSettings'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
@@ -4061,6 +4062,12 @@ export const useProjectStore = defineStore('projects', () => {
   function handleEventsMessage(msg: EventsWsMessage) {
     switch (msg.type) {
       case 'snapshot': {
+        if (msg.keyboard_shortcuts || msg.keyboard_send_mode) {
+          applyKeyboardSettings({
+            keyboard_shortcuts: msg.keyboard_shortcuts,
+            keyboard_send_mode: msg.keyboard_send_mode,
+          })
+        }
         // Reset broker-streaming state to match server truth.
         projectStreaming.value = {}
         for (const entry of msg.active_streams) {
@@ -4099,6 +4106,9 @@ export const useProjectStore = defineStore('projects', () => {
         if (bootstrapped.value) reloadTaskSignals()
         break
       }
+      case 'keyboard_settings_changed':
+        applyKeyboardSettings(msg)
+        break
       case 'server_restarting':
         beginServerRestart(msg.message)
         break

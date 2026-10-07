@@ -5362,6 +5362,35 @@ async def settings_routines(request: Request) -> JSONResponse:
     return JSONResponse(_routines_payload(config, app_settings))
 
 
+async def settings_keyboard(request: Request) -> JSONResponse:
+    """Read or update keyboard preferences shared by this engine's clients."""
+    app_settings = request.app.state.app_settings
+    if app_settings is None:
+        return JSONResponse({"error": "settings store unavailable"}, status_code=503)
+    if request.method == "PATCH":
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "expected an object"}, status_code=400)
+        try:
+            app_settings.update(body)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+        if pcm is not None:
+            pcm.events.publish({
+                "type": "keyboard_settings_changed",
+                "keyboard_shortcuts": app_settings.settings.keyboard_shortcuts or {},
+                "keyboard_send_mode": app_settings.settings.keyboard_send_mode or "modifier",
+            })
+    return JSONResponse({
+        "keyboard_shortcuts": app_settings.settings.keyboard_shortcuts or {},
+        "keyboard_send_mode": app_settings.settings.keyboard_send_mode or "modifier",
+    })
+
+
 # ── Status ───────────────────────────────────────────────────────────────
 
 async def status_endpoint(request: Request) -> JSONResponse:

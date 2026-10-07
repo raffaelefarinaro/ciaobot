@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from ciao.app_settings import AppSettingsStore
+from ciao.web.routes_api import settings_keyboard
+
+
+def test_keyboard_settings_endpoint_persists_and_broadcasts(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+
+    class Events:
+        published = []
+
+        def publish(self, payload):
+            self.published.append(payload)
+
+    class Manager:
+        events = Events()
+
+    app = Starlette(routes=[Route("/api/settings/keyboard", settings_keyboard, methods=["GET", "PATCH"])])
+    app.state.app_settings = store
+    app.state.project_chat_manager = Manager()
+    client = TestClient(app)
+
+    response = client.patch("/api/settings/keyboard", json={
+        "keyboard_shortcuts": {"archiveChat": "Mod+KeyK"},
+        "keyboard_send_mode": "enter",
+    })
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "keyboard_shortcuts": {"archiveChat": "Mod+KeyK"},
+        "keyboard_send_mode": "enter",
+    }
+    assert client.get("/api/settings/keyboard").json() == response.json()
+    assert Manager.events.published[-1] == {
+        "type": "keyboard_settings_changed",
+        "keyboard_shortcuts": {"archiveChat": "Mod+KeyK"},
+        "keyboard_send_mode": "enter",
+    }
+
+
+def test_keyboard_settings_endpoint_rejects_invalid_patch(tmp_path):
+    app = Starlette(routes=[Route("/api/settings/keyboard", settings_keyboard, methods=["GET", "PATCH"])])
+    app.state.app_settings = AppSettingsStore(tmp_path / "app_settings.json")
+    client = TestClient(app)
+
+    response = client.patch("/api/settings/keyboard", json={"keyboard_send_mode": "arbitrary"})
+
+    assert response.status_code == 400
+    assert AppSettingsStore(tmp_path / "app_settings.json").settings.keyboard_send_mode == ""

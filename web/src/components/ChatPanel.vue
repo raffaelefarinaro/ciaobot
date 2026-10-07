@@ -1313,6 +1313,7 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { errorMessage } from '../lib/errorMessage'
 import { isApplePlatform } from '../lib/platform'
+import { useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
@@ -2872,8 +2873,12 @@ const inputPlaceholder = computed(() => {
   if (store.isStreaming) return 'Reply — it is queued until Ciao finishes'
   return 'Reply to Ciao'
 })
-// Same send chord as Home's composer; bare Enter stays a newline.
-const sendChordLabel = isApplePlatform() ? '⌘↩' : 'Ctrl+↩'
+const keyboard = useKeyboardSettings()
+const touchKeyboard = () => typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches
+const enterSends = () => keyboard.settings.value.keyboard_send_mode === 'enter' && !touchKeyboard()
+const sendChordLabel = computed(() => enterSends() ? '↩' : (isApplePlatform() ? '⌘↩' : 'Ctrl+↩'))
 
 
 // ── Chat comment selection UX ─────────────────────────────────────────
@@ -4009,6 +4014,9 @@ function handleInput(): void {
 }
 
 function handleKeydown(e: KeyboardEvent) {
+  // IME uses Enter to accept a candidate. Let the browser and composition
+  // system finish that interaction before any picker or send logic runs.
+  if (e.isComposing || e.keyCode === 229) return
   // Mention navigation uses the same keyboard-first picker contract as slash
   // commands, but only consumes keys while an @ token is active.
   if (mentionPicker.handleKeydown(e)) return
@@ -4066,6 +4074,12 @@ function handleKeydown(e: KeyboardEvent) {
   // prompt is being edited. Once recall starts, the arrows walk that session's
   // bounded history and Down restores the draft that was present beforehand.
   if (handlePromptHistoryKey(e)) return
+
+  if (e.key === 'Enter' && enterSends() && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault()
+    send()
+    return
+  }
 
   // Cmd+Enter (mac) / Ctrl+Enter (linux/win) sends the message. Bare Enter
   // inserts a newline: this avoids accidental sends, especially on phones

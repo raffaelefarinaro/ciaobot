@@ -24,8 +24,7 @@ async function shortcutLabels(platform: string): Promise<string[]> {
   try {
     await flushPromises()
     // The less common shortcuts sit behind "Show all"; open it to read them.
-    await wrapper.get('.settings-disclosure').trigger('click')
-    return wrapper.findAll('.shortcut-list kbd').map(k => k.text())
+    return wrapper.findAll('.shortcut-setting-row kbd').map(k => k.text())
   } finally {
     wrapper.unmount()
   }
@@ -54,16 +53,9 @@ it('shows the common shortcuts and discloses the rest', async () => {
   const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
   try {
     await flushPromises()
-    const toggle = wrapper.get('.settings-disclosure')
-    expect(wrapper.findAll('.shortcut-list li')).toHaveLength(3)
-    expect(toggle.attributes('aria-expanded')).toBe('false')
-    expect(toggle.attributes('aria-controls')).toBe('settings-shortcut-list')
-    expect(toggle.text()).toBe('Show all 10')
-
-    await toggle.trigger('click')
-    expect(wrapper.findAll('.shortcut-list li')).toHaveLength(10)
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-    expect(toggle.text()).toBe('Show fewer')
+    expect(wrapper.findAll('.shortcut-setting-row')).toHaveLength(16)
+    expect(wrapper.get('.shortcut-send-setting').text()).toContain('Send a message with')
+    expect(wrapper.get('.settings-disclosure').text()).toBe('Restore all defaults')
   } finally {
     wrapper.unmount()
   }

@@ -891,6 +891,22 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
   -d '{"insights_enabled":false,"provider_insights_models":{"claude":"haiku"},"critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
 ```
 
+**Keyboard settings (Settings → Home → Keyboard shortcuts)**
+
+```bash
+# Read engine-shared shortcut overrides and send mode. Missing shortcut keys
+# use the PWA's built-in binding; "disabled" turns one off. Bindings use
+# physical KeyboardEvent codes and the Mod/Alt/Shift modifiers. The send mode
+# is "modifier" (Cmd/Ctrl+Enter) or "enter".
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/keyboard"
+
+# Partial updates persist to .runtime/app_settings.json and broadcast through
+# /ws/events so connected devices take effect immediately.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/keyboard" \
+  -H 'content-type: application/json' \
+  -d '{"keyboard_shortcuts":{"archiveChat":"Mod+KeyK","workspace2":"disabled"},"keyboard_send_mode":"enter"}'
+```
+
 **Project MCP servers (Settings → MCP tab)**
 
 ```bash

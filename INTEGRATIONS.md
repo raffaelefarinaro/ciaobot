@@ -215,11 +215,17 @@ Note: many adapters require the Browser Bridge Chrome extension and a logged-in 
 
 ### PWA workspace keyboard navigation
 
-The PWA has no integration or environment setting for workspace shortcuts. In the
-chat and automations views, unmodified `1`–`9` keys select the first through
-ninth workspace in the sidebar's displayed order; the sidebar shows the assigned
-number on each workspace button. Number keys remain available for normal typing
-inside text fields.
+The Settings → Home → Keyboard shortcuts card lets you disable or rebind the
+PWA's global shortcuts, including the workspace number slots, and choose
+Cmd/Ctrl+Enter or Enter to send. These preferences live in the engine's
+`.runtime/app_settings.json` and are shared with connected devices. No
+environment variable or integration setup is required. Enter-to-send stays off
+for touch keyboards so Enter continues to insert a newline.
+
+By default, unmodified `1`–`9` keys select the first through ninth workspace in
+the sidebar's displayed order; the sidebar shows the assigned number on each
+workspace button. Number keys remain available for normal typing inside text
+fields.
 
 The home screen shows the selected workspace's chats only; switching workspaces
 swaps the home content. Arrow-key navigation follows the visible lane layout:

@@ -52,6 +52,29 @@ def test_insights_enabled_rejects_non_boolean(tmp_path):
         store.update({"insights_enabled": "false"})
 
 
+def test_keyboard_preferences_persist_and_validate(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    store.update({
+        "keyboard_shortcuts": {"archiveChat": "Mod+KeyK", "workspace2": "Digit2"},
+        "keyboard_send_mode": "enter",
+    })
+
+    fresh = AppSettingsStore(path)
+    assert fresh.settings.keyboard_shortcuts == {"archiveChat": "Mod+KeyK", "workspace2": "Digit2"}
+    assert fresh.settings.keyboard_send_mode == "enter"
+
+
+@pytest.mark.parametrize("changes", [
+    {"keyboard_shortcuts": {"unknown": "Mod+KeyK"}},
+    {"keyboard_shortcuts": {"archiveChat": "KeyK"}},
+    {"keyboard_send_mode": "sometimes"},
+])
+def test_keyboard_preferences_reject_invalid_values(tmp_path, changes):
+    with pytest.raises(ValueError):
+        AppSettingsStore(tmp_path / "app_settings.json").update(changes)
+
+
 def test_legacy_insights_opt_out_migrates_once(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)

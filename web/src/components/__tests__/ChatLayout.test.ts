@@ -708,11 +708,8 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
-  // Archive moved off Cmd+A (select-all owns it inside text fields) to
-  // Option+Backspace, and it deliberately fires even while a text field is
-  // focused: archiving from mid-thought without clicking out is the point, and
-  // the confirm dialog archiveActiveChat raises is what makes that safe.
-  it('archives the open chat on Option+Backspace, even while typing', async () => {
+  // Option+Backspace is the macOS delete-previous-word command while editing.
+  it('leaves Option+Backspace to the focused text field', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
 
     const router = createRouter({
@@ -770,10 +767,10 @@ describe('ChatLayout', () => {
       altKey: true,
       cancelable: true,
     })
-    window.dispatchEvent(event)
+    textarea.dispatchEvent(event)
 
-    expect(archiveActiveChat).toHaveBeenCalledOnce()
-    expect(event.defaultPrevented).toBe(true)
+    expect(archiveActiveChat).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
     textarea.remove()
     wrapper.unmount()
   })
@@ -2242,7 +2239,7 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
-  it.each(platforms)('%s+Backspace archives the open chat', async () => {
+  it.each(platforms)('%s+Backspace archives the open chat outside text fields', async () => {
     const wrapper = await mountWebLayout()
     const event = press({ key: 'Backspace', code: 'Backspace' })
     expect(archiveActiveChat).toHaveBeenCalledOnce()
@@ -2331,22 +2328,18 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 
-  it.each([
-    ['Windows Alt+N', { key: 'n', code: 'KeyN' }],
-    ['Mac ⌥Backspace', { key: 'Backspace', code: 'Backspace' }],
-  ] as const)('%s still fires while a textarea is focused', async (label, init) => {
+  it('leaves Alt+N alone while a textarea is focused', async () => {
     const wrapper = await mountWebLayout()
     const textarea = document.createElement('textarea')
     document.body.appendChild(textarea)
     textarea.focus()
     homeNewChatProjectId.value = ''
 
-    const event = press(init, textarea)
-    await flushPromises()
+    const event = press({ key: 'n', code: 'KeyN' }, textarea)
 
-    expect(event.defaultPrevented).toBe(true)
-    if (label === 'Windows Alt+N') expect(pendingNewChat.value).not.toBeNull()
-    else expect(archiveActiveChat).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(false)
+    expect(pendingNewChat.value).toBeNull()
+    expect(archiveActiveChat).not.toHaveBeenCalled()
 
     textarea.remove()
     wrapper.unmount()
