@@ -8,6 +8,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 - [Workspaces, projects, and chats](https://www.raffaelefarinaro.com/ciaobot/#blocks): organise personal, work, and client context.
 - [Memory](https://www.raffaelefarinaro.com/ciaobot/memory.html): archiving, recall, proposals, history, and notes to revisit.
 - [Files and documents](https://www.raffaelefarinaro.com/ciaobot/features.html#documents): preview, pin, edit, and annotate outputs beside a chat.
+- [Tasks](https://www.raffaelefarinaro.com/ciaobot/features.html#tasks): track next steps, delegate to an agent, and review results before completing them.
 - [Automations](https://www.raffaelefarinaro.com/ciaobot/features.html#automations): recurring tasks and inspectable results.
 
 ## Connecting and extending

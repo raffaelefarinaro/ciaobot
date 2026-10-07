@@ -3612,7 +3612,6 @@ describe('projectChats order', () => {
 describe('parked pending_queue chips', () => {
   function chat(over: Partial<ChatInfo> & { chat_id: string }): ChatInfo {
     return {
-      chat_id: over.chat_id,
       project_id: 'p1',
       title: 'T',
       model: '',
@@ -3622,6 +3621,7 @@ describe('parked pending_queue chips', () => {
       created_at: '2026-01-01T00:00:00Z',
       archived: false,
       ...over,
+      chat_id: over.chat_id,
     }
   }
 

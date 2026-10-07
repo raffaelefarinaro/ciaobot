@@ -751,27 +751,10 @@ figure > a { display: block; border-radius: 12px; }
 .example-body figure { margin-top: 4px; }
 .prompt-inline { font-family: var(--mono); font-size: 0.9em; background: var(--surface-3); border-radius: 6px; padding: 0.1em 0.4em; }
 
-/* Home: fixed three-column feature grid with a trailing "all features" tile */
+/* Home: responsive three-column feature grid */
 .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 900px) { .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 580px) { .grid-3 { grid-template-columns: 1fr; } }
-.card-more {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  min-height: 120px;
-  border: 1.5px dashed var(--primary);
-  border-radius: var(--radius);
-  color: var(--primary);
-  font-weight: 700;
-  font-size: 18px;
-  text-decoration: none;
-  transition: background 0.18s ease, transform 0.18s ease;
-}
-.card-more:hover, .card-more:focus-visible { background: color-mix(in srgb, var(--primary) 10%, var(--surface)); color: var(--primary); transform: translateY(-3px); }
-@media (prefers-reduced-motion: reduce) { .card-more { transition: none; } .card-more:hover { transform: none; } }
-
 /* Built-in page: names link to their source file on GitHub */
 td a code, .pill-list a { color: var(--primary); }
 .pill-list a { text-decoration: none; }
