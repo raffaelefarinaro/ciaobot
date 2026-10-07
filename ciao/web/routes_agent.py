@@ -66,14 +66,14 @@ async def agent_dispatch_endpoint(request: Request) -> JSONResponse:
     # Loopback-only: the only legitimate caller is the `ciao` CLI in a managed
     # provider shell on this machine (`agent_url` is hardcoded to 127.0.0.1),
     # so a token presented from anywhere else is rejected before it is even
-    # checked — with PWA_HOST=0.0.0.0 this route is reachable from the LAN,
+    # checked — with the default 0.0.0.0 bind this route is reachable from the LAN,
     # and a leaked token must not become a remote control plane.
     if not is_loopback_client(request):
         return JSONResponse(
             {"ok": False, "error": {"code": "forbidden", "message": "The agent surface is only reachable from this machine.", "retryable": False}},
             status_code=403,
         )
-    # Authenticate before touching the body: with PWA_HOST=0.0.0.0 this route
+    # Authenticate before touching the body: with the default 0.0.0.0 bind this route
     # is reachable from the LAN, and buffering an unauthenticated upload first
     # would let anyone fill memory before the 401. Then read the body in
     # bounded chunks; a control-plane call is a few hundred bytes, the largest

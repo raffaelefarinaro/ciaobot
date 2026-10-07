@@ -2,6 +2,8 @@
 
 One-time setup for external tools and CLI dependencies.
 
+The chat's Work details window displays project context and a link to its canonical document; this is a presentation of existing context, with no new integration, configuration, or change to what providers receive.
+
 SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the module docstring of `ciao/providers/claude.py`.
 
 ## Install
@@ -12,7 +14,7 @@ SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the modu
 irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
 ```
 
-The installer is per user and needs no administrator rights. It installs the engine into a `uv tool` environment, puts `ciao.exe` on your user `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`, or `-Workspace DIR`), registers the per-user logon task `\Ciaobot\Engine` and starts it. Options are `-Workspace`, `-NoStart` and `-Uninstall`; because `iex` cannot take arguments, pass them through a script block. The full guide, including logs and troubleshooting, is [docs/WINDOWS.md](docs/WINDOWS.md). Engine updates on Windows are not available yet (#857).
+The installer is per user and needs no administrator rights. It installs the engine into a `uv tool` environment, puts `ciao.exe` on your user `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`, or `-Workspace DIR`), registers the per-user logon task `\Ciaobot\Engine` and starts it. Options are `-Workspace`, `-NoStart` and `-Uninstall`; because `iex` cannot take arguments, pass them through a script block. The full guide, including logs and troubleshooting, is [docs/WINDOWS.md](docs/WINDOWS.md). For engine updates and rollback, see [the Windows update guide](docs/WINDOWS.md#update-and-rollback).
 
 ### Upgrading from the macOS app
 
@@ -213,11 +215,17 @@ Note: many adapters require the Browser Bridge Chrome extension and a logged-in 
 
 ### PWA workspace keyboard navigation
 
-The PWA has no integration or environment setting for workspace shortcuts. In the
-chat and automations views, unmodified `1`–`9` keys select the first through
-ninth workspace in the sidebar's displayed order; the sidebar shows the assigned
-number on each workspace button. Number keys remain available for normal typing
-inside text fields.
+The Settings → Home → Keyboard shortcuts card lets you disable or rebind the
+PWA's global shortcuts, including the workspace number slots, and choose
+Cmd/Ctrl+Enter or Enter to send. These preferences live in the engine's
+`.runtime/app_settings.json` and are shared with connected devices. No
+environment variable or integration setup is required. Enter-to-send stays off
+for touch keyboards so Enter continues to insert a newline.
+
+By default, unmodified `1`–`9` keys select the first through ninth workspace in
+the sidebar's displayed order; the sidebar shows the assigned number on each
+workspace button. Number keys remain available for normal typing inside text
+fields.
 
 The home screen shows the selected workspace's chats only; switching workspaces
 swaps the home content. Arrow-key navigation follows the visible lane layout:
@@ -277,7 +285,7 @@ workspace and choose the password.
 
 Copy `.env.example` to `.env` and fill in the engine-level settings first:
 
-**Required for a configured workspace:** `PWA_AUTH_TOKEN` — the dashboard password. Password protection is on by default; see `PWA_AUTH_REQUIRED` below for the opt-out.
+**Required for a configured workspace:** `PWA_AUTH_TOKEN` — the dashboard password. Password protection is always on and cannot be turned off.
 
 `ciao setup` writes the initial `.env` into the selected workspace, seeds skills (including `ciao-memory`), commands, schedules, agent-readable workspace docs (`AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, and renders `~/Library/LaunchAgents/com.ciao.server.plist`. No stock subagents ship; the main agent can delegate independent work or use custom subagents. Open `http://localhost:<port>` and follow the setup wizard; the first-run link is printed with the `?setup=<token>` one-time token, which the server redeems once on localhost, sets the signed session cookie, then deletes. By default setup prints the launchd load command without starting the service; use `--load-launchd` on macOS to run `launchctl`. `ciao auth <claude|opencode>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code and opencode readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` and `password` are required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
 
@@ -300,7 +308,7 @@ The agent control plane runs inside `ciao/mcp_server.py` (the shared operation t
 
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for a managed provider. They are not environment variables and should not be configured.
 
-**Provider-owned credentials:** Claude Code also accepts `ANTHROPIC_API_KEY` from the process environment when OAuth is not used. Ciaobot only checks whether that key is present, never returns or stores its value, and exposes no API-key editor; opencode credentials remain owned by opencode.
+**Provider-owned credentials:** Claude Code and opencode credentials are owned by their CLIs (`ciao auth <provider>` or Settings → Models & providers). Ciaobot reads no provider API key and exposes no API-key editor.
 
 Workspace-specific integrations can still be set in `.env`, but the public `.env.example` does not ship private/work examples. Use user-owned credentials for each integration:
 
@@ -321,9 +329,7 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 **Provider connections.** The chat providers card in Settings → Models &
 providers launches, verifies, and logs out Claude Code and opencode through
 their own CLIs; Ciaobot stores none of their credentials, and there are no
-API-key fields to fill in. Claude Code may instead use an
-`ANTHROPIC_API_KEY` inherited from the process environment; Ciaobot reports only
-whether one is present.
+API-key fields to fill in.
 
 **Reaching any other model.** Ciaobot talks to exactly two providers: Claude
 Code (Anthropic) and opencode (everything else). opencode is
@@ -367,20 +373,25 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
   it and Settings → PWA password changes it. There is one engine per install, so
   this is the only password that install has: a second device runs its own engine
   and its own token.
-- `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`). The server binds
-  all interfaces so the PWA is reachable over LAN and Tailscale; set
-  `PWA_HOST=127.0.0.1` in `.env` for loopback-only access.
-- `CIAO_RUNTIME_ROOT` (optional): runtime-state directory. The engine reads
-  this from the configured workspace `.env` and resolves a relative value
-  against the workspace.
+- `PWA_PORT` (default `8443`). The bind address is no longer an env var: the
+  server binds all interfaces by default so the PWA is reachable over LAN and
+  Tailscale, and Settings → General → Network access → "This computer only"
+  makes it loopback-only (takes effect after a restart).
+- `CIAO_RUNTIME_ROOT` (service-provided, process environment only):
+  runtime-state directory. The runtime root is `<workspace>/.runtime` unless the
+  process environment names another one; the macOS LaunchAgent sets it to
+  `<workspace>/.runtime`, and tests and isolated dev backends use it to move the
+  runtime root. It is **not read from `.env`**: setup no longer writes it there,
+  and every reader of the workspace `.env` drops the line. A leftover
+  `CIAO_RUNTIME_ROOT=.runtime` (what setup used to write) is silent; any other
+  value raises the `legacy-env-ignored` operator tile, because the runtime it
+  names is no longer the one the engine uses.
 - `CIAO_OPENCODE_BIN` (optional): absolute path to an OpenCode CLI installed
   outside the login-shell `PATH`. The path is used for provider startup and
   authentication; an invalid path is reported as unavailable.
 - `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
   CLI runs. It is still read by `ciao/cli.py`, and on Windows `ciao service start` uses it as the interpreter (`python.exe` or `pythonw.exe`) when it has to register the logon task, but nothing sets it any more
   (the bundled launcher that used to is gone), so an operator never needs to.
-- `CIAO_DESKTOP_SERVER_URL` (development only): overrides runtime discovery for
-  a local development-server target.
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same host via `Origin` or `Referer`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 - There is one origin and one session: `/api/*` needs the signed `ciao_session` cookie (minus a small public allowlist), `/ws/*` handshakes are checked for same-origin and then the session, and state-changing requests must present a matching `Origin`/`Referer`. The loopback-only local feed (legacy route name, no native client) and the update drain stay gated on the TCP peer. There is no native capability of any kind on a remote browser; see `docs/REMOTE_BOUNDARY.md` for the remaining protocol and credential work.
@@ -398,29 +409,24 @@ Linux production Settings uses `/api/admin/restart` for a draining restart,
 without a git checkout, package reinstall, or desktop build.
 See [Linux hosting](docs/LINUX.md) for provisioning, HTTPS, updates, and recovery.
 
-- `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** The permission mode is now set per provider in Settings → Models & providers (Manual asks before every action, Auto lets safe reads and edits run silently and asks before destructive operations, Bypass allows everything); a provider with no pin uses Auto. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
-- `PWA_AUTH_REQUIRED`: password protection for the PWA dashboard. **Enabled by default** — an unset value protects the dashboard whenever `PWA_AUTH_TOKEN` is present (without a token there is no password a human could type, so protection stays off until one is set in Settings). Set it to `false` to run unprotected on a machine nobody else can reach; that is the only way to turn protection off, since Settings can only change the password. `ciao setup` writes the value explicitly (`--no-auth` writes `false`).
-- `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button), the `/api/debug/issues` report, and a source-checkout deploy from Settings → Restart.
-- `CIAO_APP_REPO`: absolute path to the Ciaobot source checkout for developer-mode Deploy/Restart actions. The engine is a normal package install, so a production install resolves no checkout, Homebrew, or PyPI installation and restarts only.
-- `CIAO_VAULT_MODE`: onboarding mode for vault folders. Either `scratch` (initialize the current vault layout) or `existing` (preserve the selected notes folder and start an initial inventory/curation chat; clear material may be reorganized, ambiguous material is left in place).
+- `CLAUDE_EXECUTION_MODE` / `CLAUDE_PERMISSION_MODE`: **removed 2026-08-21 and no longer read.** The permission mode is now set per provider in Settings → Models & providers (Manual asks before every action, Auto lets safe reads and edits run silently and asks before destructive operations, Bypass allows everything); a provider with no pin uses Auto.
+- `PWA_AUTH_REQUIRED`: **removed and no longer read.** Password protection is always on; `ciao setup --no-auth` is gone with it. An install that still sets it to `false` gets a `legacy-env-ignored` operator tile; the `true` that setup used to write is ignored silently. A workspace `.env` with no `PWA_AUTH_TOKEN` signs sessions with a generated `.runtime/session-secret` and is still protected: put a password in `PWA_AUTH_TOKEN` and restart, or sign in once with `ciao setup-url`.
+- `PWA_HOST`, `CIAO_LOG_LEVEL`, `CIAO_DEV_MODE`, `CIAO_APP_REPO`: **moved to Settings and no longer read.** They are Settings → General → Network access (the bind address, default `0.0.0.0`; read at startup) and Settings → General → Developer (developer mode — the Debug card, `/api/debug/issues` and a source-checkout deploy from Settings → Restart; the source checkout path for that deploy; and the log level, read at startup, where `debug` also attaches a rotating `.runtime/server_debug.log` of 10 MB × 2 backups that the dev-mode `/api/debug/issues` report and the `{{ISSUE_REPORT}}` placeholder surface alongside the error tail). All four are stored in `.runtime/app_settings.json` and exposed on `/api/settings/routines`. On the first server start after upgrading, any of them still set in `.env` is imported into Settings once (an unusable host or log level is skipped with a warning); the `legacy_env_imported` flag in that file makes the import one-shot, so a value later changed in Settings stays changed. After that the variables are inert: the `legacy-env-ignored` operator tile asks you to remove them from `.env`.
+- `CIAO_VAULT_MODE`: **no longer written or read.** Setup records the vault mode (`scratch` initializes the current vault layout; `existing` preserves the selected notes folder and starts an initial inventory/curation chat, where clear material may be reorganized and ambiguous material is left in place) on the second line of `.runtime/setup-completed-at`, which only the first-run onboarding chat reads. A value left in `.env` is ignored silently: setup wrote it, so it is not a setting the operator chose.
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
-- `CIAO_WORKSPACE`: filesystem workspace root for operational state, `.runtime/`, `.env`, canonical `skills/`, `subagents/`, and `commands/`, the generated `.claude/` catalog, and the active agent root's `AGENTS.md` (the install root on the shared layout, or a per-workspace root after re-rooting). Default `.`. `.agents/skills/` remains a legacy native-discovery path and is not generated by sync.
+- `CIAO_WORKSPACE`: set by the service definition (and by `ciao run` started inside a set-up workspace, which is found through its `.runtime/workspaces.json` or, for a pre-1.0 install not yet started on this release, a `.env` with a non-empty `CIAO_WORKSPACES`; setup no longer writes `CIAO_WORKSPACE=.` into `.env`). The filesystem workspace root for operational state, `.runtime/`, `.env`, canonical `skills/`, `subagents/`, and `commands/`, the generated `.claude/` catalog, and the active agent root's `AGENTS.md` (the install root on the shared layout, or a per-workspace root after re-rooting). Default `.`. `.agents/skills/` remains a legacy native-discovery path and is not generated by sync. Setting it inside that `.env` cannot move the install, because the engine finds `.env` inside the folder the service definition names; move it with Settings → Main workspace → Move… (on the computer running Ciaobot) or `ciao workspace-move <new folder> [--apply]`; on Linux the administrator runs it with `sudo` (docs/LINUX.md).
 - `CIAO_VAULT_ROOT`: durable memory/vault root. Default `<CIAO_WORKSPACE>/memory-vault`. Set this to an external notes folder when operational state should stay out of synced notes.
 - `CIAO_WORKSPACES`: **retired and no longer read as a workspace source.** It used to override `.runtime/workspaces.json` on every start, so a workspace created, edited or archived in Settings could silently revert on the next restart. The workspace list is now runtime state owned by the app: Settings → Workspaces writes `.runtime/workspaces.json`, and that file is the only source. On the first server start after upgrading, an install that still sets the variable has its workspaces imported into the registry once (every one when no registry file exists, otherwise only names the registry does not already define; existing entries are never overwritten, a workspace with an archive in `.archived-workspaces/` is skipped rather than re-registered, and an imported workspace without `allowed_mcp_servers` gets an empty allowlist, which is what it resolved to before). A `.runtime/workspaces-env-imported.json` marker makes that import one-shot, so a workspace later removed in Settings stays removed. After that the variable is inert: startup logs a warning and the `legacy-env-ignored` operator tile asks you to remove it from `.env`; Ciaobot does not edit `.env` for you.
 - `.runtime/workspaces.json` (not an environment variable): the workspace registry, a JSON list of objects with `name`, `vault_root`, `default_provider`, `disallowed_tools`, `allowed_mcp_servers`, `gws_profile` and `color`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. Fresh setup and ordinary PWA workspace creation derive `<CIAO_VAULT_ROOT>/<name>`, while existing-folder setup preserves the selected root until a model-guided migration updates the registry. Later Settings updates preserve the stored path. If the file is missing, Ciaobot bootstraps one registry entry per directory in the vault that looks like a workspace (a folder containing `People/`, `Projects/`, `journal/` or a `MEMORY.md`), falling back to a single `personal` workspace when none do. It used to manufacture `personal` and `work` unconditionally, which left an install unable to re-root: a registered workspace with no vault directory refuses the plan. Schedules assigned to a workspace inherit its current `default_provider` on every run unless an explicit override is stored; the model comes from that provider's operator default (Settings → Models) — a workspace no longer pins one, and a `default_model` key in the registry is ignored. Example: `[{"name":"default","vault_root":"memory-vault/default","default_provider":"claude","gws_profile":"personal"}]`.
-- `CIAO_LOG_LEVEL`: root log level for the server (default `info`). Accepts standard names (`debug`, `info`, `warning`, `error`) or numeric values. Setting it to `debug` also attaches a rotating `.runtime/server_debug.log` (10 MB × 2 backups) capturing every DEBUG+ record — provider stderr noise, lifecycle events, uvicorn request logs — which the dev-mode `/api/debug/issues` report and the `{{ISSUE_REPORT}}` placeholder surface alongside the error tail so failures can be traced beyond their final error line.
 - File viewer path policy: the file/binary/image viewers and the in-PWA editor have **no workspace sandbox**. They read (and, for the editor and snapshot-restore, write) any path on disk. Relative paths still anchor to the workspace root. The extension allowlist (no `.env`, no key files) and the size caps are the only remaining guards, so secrets in allowlisted files elsewhere on the machine are reachable from an authenticated PWA session.
 - `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND`: optional override for `gws`; the server defaults it to `file` at startup for headless auth.
 - `CIAO_INSIGHTS_DISABLED`: **retired and no longer read after one-time migration.** On the first upgraded server start, its value is copied into the persisted **Session insights** switch in Settings → General; an existing Settings value wins. Remove it from `.env` after that migration. The retired startup-backfill opt-in remains inert.
-- `CIAO_TRAJECTORIES_DISABLED`: **removed and no longer read.** Trajectory capture is gone; remove it from `.env`.
 - `ciao gws-auth-helper <profile>`: interactive headless OAuth re-authentication when `gws auth login` cannot open a browser.
-- `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `disallowed_tools` on the workspace in `.runtime/workspaces.json`, which works for any name; the default model is now a per-provider operator setting (Settings → Models), not a per-workspace one. An install that still sets one gets a `legacy-env-ignored` operator tile, because a setting that is silently ignored reads as a setting that is in effect.
+- `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `disallowed_tools` on the workspace in `.runtime/workspaces.json`, which works for any name; the default model is now a per-provider operator setting (Settings → Models), not a per-workspace one.
 - `CIAO_MEMORY_DIR`: legacy override for the old `~/.ciao/memory.md` + `user.md` directory during the one-release migration window. Default `~/.ciao`. Not used for new writes; safe to unset after migration.
-- `CIAO_GITHUB_TOKEN` (also honors `GITHUB_TOKEN` / `GH_TOKEN`): personal access token used to authenticate on-demand GitHub REST API calls when fetching the changelog for an available update. Optional; when set it raises GitHub's API rate limit from 60 to 5000 requests/hour. The recurring update check does not use the API at all (it follows the public `releases/latest` redirect), so a token is not needed just to check for updates. No scopes are required (public read only).
 - **Image-capability pre-flight**: before dispatch, a turn that carries images checks whether the selected model can see them. Anthropic's and OpenAI's current models all accept images, so only OpenCode is consulted — it is bring-your-own-provider, and each V2 catalog entry lists supported modalities in `capabilities.input`. An unstated answer counts as capable, so a cold catalog never blocks a turn. A non-vision model pauses the turn on a `model_capability_question` (30s window): the PWA offers the models OpenCode states accept images, an "Open picker" escape hatch, and Cancel. Switch re-dispatches on the picked model; cancel/timeout close the turn with a `status` bubble; the images are never silently dropped. Text-only and unattended (loop/schedule) turns skip the question. Implemented in `ciao/providers/opencode.py::model_accepts_images` and the pre-flight in `ciao/web/project_chats.py::ProjectChatManager.stream_chat`.
-- `CIAO_PUSH_CONTACT`: push notification contact string. Optional, no default; empty disables Web Push delivery. Used for VAPID subject.
-- `CIAO_PUSH_DELAY_SECONDS`: delay before sending push notifications after a completed turn (default `30`). Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends. Marking a chat read sends a separate clear control to all registered Web Push subscriptions and the macOS notification log.
+- **Web Push timing** (not configurable): a completed turn pushes 30 seconds after it ends. Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends. Marking a chat read sends a separate clear control to all registered Web Push subscriptions and the macOS notification log.
 - `CIAO_PYTHON`: path to a specific Python binary for `scripts/dev.sh` (e.g. when Homebrew breaks `ensurepip`).
 - `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so developer-mode subprocesses (npm, node, git) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.
 - Installer and release-build variables: `CIAO_APP_DIR` overrides the per-user app directory, `CIAO_ARCHIVE_NAME` and `CIAO_VERIFIER_NAME` override release asset names, and `CIAO_RELEASE_BASE_URL` selects a private release mirror for an explicit `--version` (the embedded archive signature is still mandatory). `CIAO_BUNDLED_APP` marks the embedded runtime for internal mode detection. `CIAO_PYTHON_ARM64_URL`, `CIAO_PYTHON_ARM64_SHA256`, `CIAO_PYTHON_X86_64_URL`, and `CIAO_PYTHON_X86_64_SHA256` are retired: the release workflow used to require them when assembling the embedded runtimes, and nothing reads them now. `CIAO_EXECUTABLE` is a LaunchAgent template token, not an operator environment variable.

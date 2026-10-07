@@ -2,7 +2,8 @@
 // bare ref for the active chat: no Pinia, no router, no component mount.
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { ref } from 'vue'
-import { createChatAnnotations } from './chatAnnotations'
+import { createChatAnnotations, type ChatPinMutator, ChatPinConflict } from './chatAnnotations'
+import type { ChatPinState } from '../lib/types'
 
 let stored: Record<string, string> = {}
 
@@ -16,9 +17,27 @@ beforeEach(() => {
   })
 })
 
-function make(chatId: string | null = 'c1') {
+function make(
+  chatId: string | null = 'c1',
+  opts: { chats?: string[]; mutate?: ChatPinMutator } = {},
+) {
   const activeChatId = ref<string | null>(chatId)
-  return { activeChatId, a: createChatAnnotations({ activeChatId }) }
+  const chats = new Set(opts.chats ?? [])
+  const mutate = opts.mutate ?? (vi.fn(async (_id: string, path: string, _rev: number) => ({
+    path, dismissed_paths: [], revision: 1,
+  })) as unknown as ChatPinMutator)
+  const notifyPinError = vi.fn()
+  const a = createChatAnnotations({
+    activeChatId,
+    ownerOf: (id) => (chats.has(id) ? 'chat' : 'project'),
+    mutateChatPin: mutate,
+    notifyPinError,
+  })
+  return { activeChatId, a, chats, mutate, notifyPinError }
+}
+
+function pinState(over: Partial<ChatPinState> = {}): ChatPinState {
+  return { path: '', dismissed_paths: [], revision: 0, ...over }
 }
 
 describe('pending images', () => {
@@ -139,36 +158,109 @@ describe('chat comments', () => {
   })
 })
 
-describe('pinned files', () => {
-  test('pin, read back and persist', () => {
+describe('pinned files (project-local)', () => {
+  test('pin, read back and persist', async () => {
     const { a } = make()
-    a.pinFile('c1', 'docs/a.md')
-    expect(a.pinnedFileFor('c1')).toBe('docs/a.md')
-    expect(JSON.parse(stored['ciao-pinned-files'])).toEqual({ c1: 'docs/a.md' })
+    await a.pinFile('p1', 'docs/a.md')
+    expect(a.pinnedFileFor('p1')).toBe('docs/a.md')
+    expect(JSON.parse(stored['ciao-pinned-files'])).toEqual({ p1: 'docs/a.md' })
   })
 
-  test('closing a pin records the dismissal for that path only', () => {
+  test('closing a pin records the dismissal for that path only', async () => {
     const { a } = make()
-    a.pinFile('c1', 'docs/a.md')
-    a.unpinFile('c1')
-    expect(a.pinnedFileFor('c1')).toBeUndefined()
-    expect(a.isAutoPinDismissed('c1', 'docs/a.md')).toBe(true)
-    expect(a.isAutoPinDismissed('c1', 'docs/b.md')).toBe(false)
+    await a.pinFile('p1', 'docs/a.md')
+    await a.unpinFile('p1')
+    expect(a.pinnedFileFor('p1')).toBeUndefined()
+    expect(a.isAutoPinDismissed('p1', 'docs/a.md')).toBe(true)
+    expect(a.isAutoPinDismissed('p1', 'docs/b.md')).toBe(false)
   })
 
-  test('re-pinning the same path clears its dismissal', () => {
+  test('re-pinning the same path clears its dismissal', async () => {
     const { a } = make()
-    a.pinFile('c1', 'docs/a.md')
-    a.unpinFile('c1')
-    a.pinFile('c1', 'docs/a.md')
-    expect(a.isAutoPinDismissed('c1', 'docs/a.md')).toBe(false)
+    await a.pinFile('p1', 'docs/a.md')
+    await a.unpinFile('p1')
+    await a.pinFile('p1', 'docs/a.md')
+    expect(a.isAutoPinDismissed('p1', 'docs/a.md')).toBe(false)
     expect(JSON.parse(stored['ciao-dismissed-auto-pins'])).toEqual({})
   })
 
-  test('unpinning nothing records nothing', () => {
+  test('unpinning nothing records nothing', async () => {
     const { a } = make()
-    a.unpinFile('c1')
+    await a.unpinFile('p1')
     expect(stored['ciao-dismissed-auto-pins']).toBeUndefined()
+  })
+})
+
+describe('pinned files (server-owned chats)', () => {
+  test('server pin state is applied without a write', () => {
+    const { a, mutate } = make('c1', { chats: ['c1'] })
+    a.applyChatPinState('c1', pinState({ path: 'docs/a.md', revision: 1 }), { source: 'event' })
+    expect(a.pinnedFileFor('c1')).toBe('docs/a.md')
+    expect(mutate).not.toHaveBeenCalled()
+  })
+
+  test('stale revisions cannot overwrite newer pins', () => {
+    const { a } = make('c1', { chats: ['c1'] })
+    a.applyChatPinState('c1', pinState({ path: 'docs/new.md', revision: 5 }), { source: 'event' })
+    a.applyChatPinState('c1', pinState({ path: 'docs/old.md', revision: 3 }), { source: 'chat-payload' })
+    expect(a.pinnedFileFor('c1')).toBe('docs/new.md')
+  })
+
+  test('chat storage leftovers are not uploaded', () => {
+    // An older build wrote a chat id into the browser-local pin key.
+    stored['ciao-pinned-files'] = JSON.stringify({ c1: 'x.md' })
+    const { a, mutate } = make('c1', { chats: ['c1'] })
+    a.restoreFromStorage()
+    // The leftover is never read as chat state…
+    expect(a.pinnedFileFor('c1')).toBeUndefined()
+    // …and once the chat rows are known it is pruned, not uploaded.
+    a.pruneChatPins(['c1'])
+    expect(JSON.parse(stored['ciao-pinned-files'])).toEqual({})
+    expect(mutate).not.toHaveBeenCalled()
+  })
+
+  test('project pins survive chat hydration', async () => {
+    const { a } = make('c1', { chats: ['c1'] })
+    await a.pinFile('p1', 'docs/project.md')
+    a.applyChatPinState('c1', pinState({ path: 'docs/chat.md', revision: 1 }), { source: 'event' })
+    expect(a.pinnedFileFor('p1')).toBe('docs/project.md')
+    expect(a.pinnedFileFor('c1')).toBe('docs/chat.md')
+  })
+
+  test('unpin conflict adopts server truth without retry', async () => {
+    const mutate = vi.fn(async () => {
+      throw new ChatPinConflict(pinState({ path: 'docs/other.md', dismissed_paths: ['docs/a.md'], revision: 7 }))
+    }) as unknown as ChatPinMutator
+    const { a, notifyPinError } = make('c1', { chats: ['c1'], mutate })
+    a.applyChatPinState('c1', pinState({ path: 'docs/a.md', revision: 4 }), { source: 'event' })
+    await a.unpinFile('c1')
+    expect(mutate).toHaveBeenCalledTimes(1)
+    expect(a.pinnedFileFor('c1')).toBe('docs/other.md')
+    // The conflict is surfaced, not silently adopted.
+    expect(notifyPinError).toHaveBeenCalledWith('c1', 'Pinned file was changed on another device')
+  })
+
+  test('failed pin preserves acknowledged state', async () => {
+    const mutate = vi.fn(async () => { throw new Error('offline') }) as unknown as ChatPinMutator
+    const { a, notifyPinError } = make('c1', { chats: ['c1'], mutate })
+    a.applyChatPinState('c1', pinState({ path: 'docs/a.md', revision: 4 }), { source: 'event' })
+    await a.pinFile('c1', 'docs/b.md')
+    expect(mutate).toHaveBeenCalledTimes(1)
+    expect(a.pinnedFileFor('c1')).toBe('docs/a.md')
+    expect(notifyPinError).toHaveBeenCalledWith('c1', 'offline')
+  })
+
+  test('pin write captures its chat before selection changes', async () => {
+    let release!: (s: ChatPinState) => void
+    const mutate = vi.fn(() => new Promise<ChatPinState>(r => { release = r })) as unknown as ChatPinMutator
+    const { activeChatId, a } = make('c1', { chats: ['c1'], mutate })
+    const pending = a.pinFile('c1', 'docs/a.md')
+    // Selection moves while the PATCH is in flight.
+    activeChatId.value = 'c2'
+    release(pinState({ path: 'docs/a.md', revision: 1 }))
+    await pending
+    expect(mutate).toHaveBeenCalledWith('c1', 'docs/a.md', 0)
+    expect(a.pinnedFileFor('c1')).toBe('docs/a.md')
   })
 })
 

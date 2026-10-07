@@ -61,6 +61,7 @@ function task(overrides: Partial<UpdateTaskRow> = {}): UpdateTaskRow {
     offered: true,
     suppressed: false,
     chat_id: '',
+    chat_live: false,
     prompt_digest: '',
     attempted_fingerprint: '',
     updated_at: '',
@@ -239,11 +240,28 @@ describe('one card per lifecycle', () => {
   })
 
   it('offers Resume and the chat for one already under way', async () => {
-    const { wrapper } = await mountGroup([task({ status: 'in_progress', chat_id: 'chat-9' })])
+    const { wrapper } = await mountGroup([task({ status: 'in_progress', chat_id: 'chat-9', chat_live: true })])
     expect(buttons(wrapper)).toContain('Resume chat')
     expect(buttons(wrapper)).toContain('Open its chat')
     expect(buttons(wrapper)).not.toContain('Start in chat')
     expect(cards(wrapper)[0].text()).toContain('Started')
+    wrapper.unmount()
+  })
+
+  it('stops claiming an archived chat is open, and does not offer to open it', async () => {
+    // The record still names the chat its attempt opened, but archiving it means
+    // there is no chat to open and a start mints a fresh one. "Its chat is open"
+    // and "Open its chat" would both be about something that is not there.
+    const { wrapper } = await mountGroup([
+      task({ status: 'in_progress', chat_id: 'chat-9', chat_live: false }),
+    ])
+    expect(cards(wrapper)[0].text()).not.toContain('Its chat is open')
+    expect(cards(wrapper)[0].text()).toContain('archived or deleted')
+    expect(cards(wrapper)[0].text()).toContain('Starting opens a new one')
+    expect(buttons(wrapper)).not.toContain('Open its chat')
+    // The lead action is the same start that will mint a chat, so it says so.
+    expect(buttons(wrapper)).not.toContain('Resume chat')
+    expect(buttons(wrapper)).toContain('Start a new chat')
     wrapper.unmount()
   })
 
@@ -252,7 +270,7 @@ describe('one card per lifecycle', () => {
     // somebody to decide proposals in a chat, while the buttons for them sit one
     // route away, is the failure this button exists to avoid.
     const { wrapper, store } = await mountGroup([
-      task({ status: 'waiting_review', chat_id: 'chat-9' }),
+      task({ status: 'waiting_review', chat_id: 'chat-9', chat_live: true }),
     ])
     expect(buttons(wrapper)).toContain('Review proposals')
     expect(buttons(wrapper)).toContain('Resume chat')
@@ -265,7 +283,7 @@ describe('one card per lifecycle', () => {
 
   it('shows the failure and a retry for an attempt that did not get going', async () => {
     const { wrapper } = await mountGroup([
-      task({ status: 'failed', chat_id: 'chat-9', updated_at: '2026-09-05T18:30:00+00:00' }),
+      task({ status: 'failed', chat_id: 'chat-9', chat_live: true, updated_at: '2026-09-05T18:30:00+00:00' }),
     ])
     expect(buttons(wrapper)).toContain('Try again')
     expect(cards(wrapper)[0].text()).toContain('did not get going')
@@ -313,7 +331,7 @@ describe('one card per lifecycle', () => {
         status: 'in_progress',
         applicability: 'not_applicable',
         offered: false,
-        chat_id: 'chat-9',
+        chat_id: 'chat-9', chat_live: true,
       }),
     ])
     expect(buttons(wrapper)).toContain('Resume chat')
@@ -328,7 +346,7 @@ describe('one card per lifecycle', () => {
     // The server's start is idempotent per (task, revision), so a retry here
     // reuses that attempt's chat rather than starting a second one.
     const { wrapper } = await mountGroup([
-      task({ status: 'failed', applicability: 'unknown', offered: false, chat_id: 'chat-9' }),
+      task({ status: 'failed', applicability: 'unknown', offered: false, chat_id: 'chat-9', chat_live: true }),
     ])
     expect(buttons(wrapper)).toContain('Try again')
     expect(buttons(wrapper)).not.toContain('Check again')
@@ -396,7 +414,7 @@ describe('a transition that did not happen', () => {
     apiPost.mockRejectedValueOnce(
       Object.assign(
         new Error('the turn could not be dispatched'),
-        { name: 'ApiError', status: 500, payload: { error: 'the turn could not be dispatched', chat_id: 'chat-9' } },
+        { name: 'ApiError', status: 500, payload: { error: 'the turn could not be dispatched', chat_id: 'chat-9', chat_live: true } },
       ),
     )
 
@@ -444,7 +462,7 @@ describe('what the hide confirmation says', () => {
     // Two things are true at once and neither is obvious from a small button
     // labelled "Hide it": the card disappears for this workspace, and nothing
     // about the open chat changes. It is neither cancelled nor completed.
-    const { wrapper, store } = await mountGroup([task({ status: 'in_progress', chat_id: 'chat-9' })])
+    const { wrapper, store } = await mountGroup([task({ status: 'in_progress', chat_id: 'chat-9', chat_live: true })])
     const confirm = vi.spyOn(await import('../../lib/confirm'), 'askConfirm').mockResolvedValue(true)
     vi.spyOn(store, 'dismissUpdateTask').mockResolvedValue({ ok: true, chatId: '', resumed: false, error: '' })
 

@@ -129,10 +129,19 @@ application actions that are safe and meaningful for a scoped agent:
 bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
 `ciao vault review …`), projects (`ciao project …`), workspaces
 (`ciao workspace list`), chats (`ciao chat …`), background runs
-(`ciao run …`), schedules (`ciao schedule …`), Google Workspace
-(`ciao gws status`), context (`ciao context get`), and file surfacing
-(`ciao file surface`). Browser-session administration, login/OAuth secrets, and
-raw server deploy endpoints remain PWA/operator-only.
+(`ciao run …`), schedules (`ciao schedule …`), the task board
+(`ciao task …`, including `task delegate` and `task report`), note
+verification (`ciao note verify`), webhook triggers (`ciao webhook …`),
+Google Workspace (`ciao gws status`), context (`ciao context get`), and file
+surfacing (`ciao file surface`). Browser-session administration,
+login/OAuth secrets, and raw server deploy endpoints remain PWA/operator-only.
+
+That sentence is a summary, not a second catalog: the exhaustive list is the
+table, and `ciao/stock/skills/ciao-cli/commands.json` maps every command to the
+operation it dispatches. `tests/test_agent_surface.py` pins both directions of
+that mapping against the parser, so a verb added to the CLI without a row here
+fails rather than quietly becoming a command the telemetry and the behavioral
+evals cannot name.
 
 The proposals queue is reviewed and dismissed through the PWA, with one
 deliberate CLI exception the nightly curation agent drives because one shell

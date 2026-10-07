@@ -53,7 +53,7 @@
           <div class="grid">
             <div class="card">
               <h3>Claude Code</h3>
-              <p>Use your Claude subscription (or an Anthropic API key).</p>
+              <p>Use your Claude subscription.</p>
               <pre><code>curl -fsSL https://claude.ai/install.sh | bash
 claude auth login</code></pre>
               <p>On Windows, in PowerShell: <code>irm https://claude.ai/install.ps1 | iex</code>, then <code>claude auth login</code>.</p>
@@ -157,6 +157,13 @@ opencode auth login</code></pre>
       <p>Need to pick up an archived chat later? Open it and choose <strong>Continue in new chat</strong>.</p>
     </section>
 
+    <section id="tasks">
+      <h2>Keep track of the next steps</h2>
+      <p>For work you want to come back to, open <strong>Tasks</strong> in the sidebar and choose <strong>New task</strong>. Try <em>Compare three Spanish conversation classes</em>, with a description of your budget, availability and what a useful comparison should include. Choose your <em>Learning Spanish</em> project to keep it with the right context.</p>
+      <p>Open the task and choose <strong>Delegate to agent</strong>. Review the prompt, then start the work. Ciaobot opens a chat where you can follow along and answer questions. When the agent reports it finished, check the result and choose <strong>Approve Done</strong>.</p>
+      <p>You can also do tasks yourself and move them through <strong>To do</strong>, <strong>In progress</strong>, <strong>In review</strong> and <strong>Done</strong>. <a href="features.html#tasks">More on Tasks →</a></p>
+    </section>
+
     <section>
       <h2>Let it work on a schedule</h2>
       <div class="note"><strong>Ask yourself:</strong> is this a task I do more than once? If it is, make it a schedule instead of typing the same request again next week.</div>
@@ -182,6 +189,15 @@ opencode auth login</code></pre>
       <p>With a local model (for example <a href="https://ollama.com">Ollama</a>) through opencode, yes. Google, web search and cloud models need a connection, of course.</p>
       <h3>Something's wrong. Where do I look?</h3>
       <p>Ask Ciaobot first ("why did my morning agenda not run?"); it can read its own logs and diagnose most problems. It can also <a href="./#together">report the bug on GitHub</a> for you.</p>
+      <h3 id="password">I forgot my Ciaobot password. Where do I find it?</h3>
+      <p>The password is the one you chose in the setup wizard. Ciaobot keeps it on the computer it runs on (the host), in a file called <code>.env</code> inside your Ciaobot folder, on the line that starts with <code>PWA_AUTH_TOKEN=</code>. Everything after the <code>=</code> is your password.</p>
+      <ol>
+        <li>On the host computer, open the folder you picked during setup.</li>
+        <li>Open the file <code>.env</code> in a text editor. It is a hidden file: on a Mac, press <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>.</kbd> in Finder to show it. Or run <code>grep PWA_AUTH_TOKEN ~/path/to/your/folder/.env</code> in the Terminal.</li>
+        <li>Copy the text after <code>PWA_AUTH_TOKEN=</code> and paste it into the login page.</li>
+      </ol>
+      <p>Can't open the file? On the host, run <code>ciao setup-url --workspace ~/your-folder</code> in the Terminal, using the folder you picked during setup. It prints a one-time link that signs you in when opened in a browser on that same computer.</p>
+      <p>Once you are in, you can choose a new password in <strong>Settings → PWA password</strong>. Keep that file to yourself: anyone with the password can use your Ciaobot.</p>
       <h3>How do I update or uninstall?</h3>
       <p>To update, run the one-line install command again, or use <strong>Settings → General</strong> in Ciaobot, which installs the new engine for you. To stop Ciaobot, run <code>ciao service stop</code> in the Terminal; your notes folder is kept. If you are still on the old macOS app, run the one-liner with <code>--migrate</code>: it installs the engine and removes the old app for you.</p>
     </section>

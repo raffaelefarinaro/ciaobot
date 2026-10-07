@@ -4,6 +4,7 @@ import pytest
 from starlette.testclient import TestClient
 from ciao.config import CiaoConfig
 from ciao.web.app import create_app
+from tests.session import signed_in
 
 
 @pytest.fixture
@@ -28,11 +29,10 @@ def client(tmp_path):
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime",
         media_root=tmp_path / "media",
-        pwa_auth_required=False,
         vault_root=vault,
     )
     app = create_app(cfg)
-    return TestClient(app)
+    return signed_in(TestClient(app))
 
 
 def test_vault_backlinks_counts_only_real_links(client):

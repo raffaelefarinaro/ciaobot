@@ -9,7 +9,7 @@ const PROJECT = {
   project_id: 'p1',
   name: 'Launch',
   workspace: 'work',
-  context: 'Public beta launch planning.',
+  context: 'Public beta launch planning. Hub doc: launch.md',
   vault_doc_path: 'work/memory-vault/projects/launch.md',
 } as unknown as ProjectInfo
 
@@ -37,14 +37,34 @@ describe('AgentContextSection', () => {
     expect(rows[0].text()).toContain('AGENTS.md')
     expect(rows[0].text()).toContain('1k tokens')
     expect(rows[1].text()).toContain('Launch')
-    expect(rows[1].get('pre').text()).toBe(
-      'project="Launch"\nproject_context=Public beta launch planning.\ncanonical_doc=work/memory-vault/projects/launch.md',
-    )
-    await rows[1].get('pre button').trigger('click')
+    expect(rows[1].get('.agent-context-description').text()).toBe(PROJECT.context)
+    expect(rows[1].find('pre').exists()).toBe(false)
+    expect(rows[1].text()).not.toContain('project_context=')
+    expect(rows[1].text()).not.toContain('Project brief, sent')
+    expect(rows[1].find('.agent-context-doc').exists()).toBe(false)
+    expect(rows[1].get('.agent-context-description a').text()).toBe('launch.md')
+    await rows[1].get('.agent-context-description a').trigger('click')
     expect(wrapper.emitted('open-file')?.[0]).toEqual(['work/memory-vault/projects/launch.md'])
     expect(wrapper.getComponent(RouterLinkStub).props('to')).toBe('/project/p1')
     await rows[0].trigger('click')
     expect(wrapper.emitted('open-file')?.[1]).toEqual(['work/AGENTS.md'])
+  })
+
+  it('links a full canonical path in place and escapes HTML in the context', async () => {
+    const context = `Read ${PROJECT.vault_doc_path}. <img src=x onerror=alert(1)>`
+    const wrapper = await mountSection({ project: { ...PROJECT, context } })
+    const description = wrapper.get('.agent-context-description')
+    expect(description.text()).toBe(context)
+    expect(description.find('img').exists()).toBe(false)
+    await description.get('a').trigger('click')
+    expect(wrapper.emitted('open-file')?.[0]).toEqual([PROJECT.vault_doc_path])
+  })
+
+  it('does not add a separate document link when context does not mention it', async () => {
+    const wrapper = await mountSection({ project: { ...PROJECT, context: 'Public beta planning.' } })
+    expect(wrapper.get('.agent-context-description').text()).toBe('Public beta planning.')
+    expect(wrapper.find('.agent-context-brief button').exists()).toBe(false)
+    expect(wrapper.find('.agent-context-description a').exists()).toBe(false)
   })
 
   it('drops the brief row when General sends no brief', async () => {

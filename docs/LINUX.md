@@ -40,12 +40,12 @@ and transfer `ciao/web/static/` with the source. The server does not need Vite.
 Setup generates the dashboard password in `/srv/ciaobot/.env`, mode `0600`, and
 prints a one-time login URL. Existing passwords and config are preserved on rerun.
 
-For HTTPS reverse proxy hosting, set these values in the workspace `.env`:
+For HTTPS reverse proxy hosting, set Settings → General → Network access to
+**This computer only** (the bind address, `127.0.0.1`) and restart the service,
+and keep the port in the workspace `.env`:
 
 ```dotenv
-PWA_HOST=127.0.0.1
 PWA_PORT=8443
-PWA_AUTH_REQUIRED=true
 ```
 
 The proxy must forward the public host as `X-Forwarded-Host` (nginx:
@@ -96,6 +96,27 @@ The application handles its own `.env`; do not also use an `EnvironmentFile`.
 Settings → Restart drains active chat work and re-executes the backend. A direct
 `systemctl stop/restart` is an administrative stop, not that application drain:
 wait for active work to finish first. Systemd allows up to 120 seconds for shutdown.
+
+## Moving the workspace
+
+Editing `CIAO_WORKSPACE` in the workspace `.env` cannot move it: the engine
+finds that `.env` inside the folder the unit names. Move it as the
+administrator, on the same disk:
+
+```sh
+sudo /opt/ciaobot/venv/bin/ciao workspace-move /srv/new-folder          # plan only
+sudo /opt/ciaobot/venv/bin/ciao workspace-move /srv/new-folder --apply
+```
+
+It drains running chats, stops the unit, renames the folder, rewrites the old
+path in `.env`, `.runtime` and the command links (keeping every file owned by the
+service account), copies the account's Claude Code sessions to the new folder's
+name, repoints `WorkingDirectory=` and `CIAO_WORKSPACE` in
+`/etc/systemd/system/ciaobot.service`, runs `daemon-reload` and starts the unit.
+If the engine does not come back, everything is put back. It refuses a folder
+the service account cannot enter. Settings → Main workspace shows this command
+instead of a Move button, since the service account cannot stop its own unit.
+To undo, move it back.
 
 ## HTTPS access
 

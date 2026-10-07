@@ -28,7 +28,7 @@ raw bytes. Every update must present the revision it read; a stale one is a
 :ref:`revision_conflict <TaskBoardError>` and the file is left unchanged.
 
 **Managed-operation rules are not file restrictions.** The agent-cannot-complete,
-linked-task and ``ready`` rules below bind this store's ``update`` path.
+and linked-task rules below bind this store's ``update`` path.
 A user editing the Markdown directly can write whatever the schema accepts;
 this module never polices hand edits, it only refuses to manufacture such
 states through the managed API.
@@ -64,9 +64,9 @@ Live project membership and completion validation belong to a later
 application service; this store keeps the ``project_id`` string but knows
 no project registry. Linkage mutation (``chat_id``/``attempt_id``) belongs
 to the delegation child: source hand edits may carry nullable linkage, but
-this store never creates a live chat or attempt. Before any production
-writer is exposed, parent #973-B2 must exclude task bookkeeping from
-recall/graph/review/curation and verify backup inclusion.
+this store never creates a live chat or attempt. Task records are reserved
+bookkeeping (#1002): excluded from recall, the Memory Map graph, review and
+curation, and inside the durable backup scope.
 """
 
 from __future__ import annotations
@@ -96,8 +96,14 @@ from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import carry_mode
 
-SCHEMA_VERSION = 1
-"""The only frontmatter schema this store implements."""
+SCHEMA_VERSION = 2
+"""The only frontmatter schema this store implements.
+
+Schema 2 (#1069) is the four-column board ``backlog | in_progress | in_review |
+done``: ``on_hold`` is gone and the separate ``review_state`` flag became the
+``in_review`` column. A schema-1 file is rewritten once by
+:meth:`TaskBoardStore.migrate_schema_1`; this parser reads only schema 2.
+"""
 
 MAX_TASK_BYTES = 65536
 """Largest raw task file this store will read or write, in bytes."""
@@ -105,14 +111,11 @@ MAX_TASK_BYTES = 65536
 TASKS_RELATIVE = Path("Workspace") / "Tasks"
 """Vault-relative directory holding one ``<id>.md`` file per task."""
 
-STATUSES = ("backlog", "in_progress", "on_hold", "done")
-"""Allowed ``status`` values."""
+STATUSES = ("backlog", "in_progress", "in_review", "done")
+"""Allowed ``status`` values, in board order. ``backlog`` is the *To do* column."""
 
 ASSIGNEES = ("user", "agent")
 """Allowed ``assignee`` values."""
-
-REVIEW_STATES = ("none", "ready")
-"""Allowed ``review_state`` values."""
 
 _ID_RE = re.compile(r"[0-9a-f]{32}")
 """A task id: 32 lowercase hex characters, nothing else."""
@@ -129,7 +132,6 @@ _FIELD_ORDER = (
     "project_id",
     "due",
     "assignee",
-    "review_state",
     "created_at",
     "updated_at",
     "chat_id",
@@ -142,8 +144,12 @@ _FIELD_ORDER = (
 # linkage mutation belongs to the delegation child. ``updated_at`` is set by
 # the store from its clock, never by the caller.
 _EDITABLE_FIELDS = frozenset(
-    {"title", "status", "project_id", "due", "assignee", "review_state"}
+    {"title", "status", "project_id", "due", "assignee"}
 )
+
+#: The two linkage fields, editable only through :meth:`TaskBoardStore.link` and
+#: :meth:`TaskBoardStore.unlink`. See :func:`_check_editable`.
+_EDITABLE_LINKAGE_FIELDS = frozenset({"chat_id", "attempt_id"})
 
 _REQUIRED_FIELDS = (
     "schema",
@@ -151,7 +157,6 @@ _REQUIRED_FIELDS = (
     "title",
     "status",
     "assignee",
-    "review_state",
     "created_at",
     "updated_at",
 )
@@ -214,7 +219,6 @@ class TaskRecord:
     project_id: str | None
     due: str | None
     assignee: str
-    review_state: str
     created_at: datetime
     updated_at: datetime
     chat_id: str | None
@@ -596,6 +600,40 @@ def _mapping_values(root: MappingNode) -> dict[str, ScalarNode | None]:
     return found
 
 
+# ── Schema 1 → 2 ─────────────────────────────────────────────────────
+
+_FRONTMATTER = re.compile(rb"\A(\xef\xbb\xbf)?---\r?\n(.*?)(\r?\n)---", re.DOTALL)
+
+
+def _upgrade_schema_1(raw: bytes) -> bytes | None:
+    """The file rewritten to schema 2, or ``None`` when it is not schema 1.
+
+    Line edits on the frontmatter only, each anchored to a whole ``key: value``
+    line (quoted or not), so a value that merely contains one of these words is
+    never touched.
+    """
+    match = _FRONTMATTER.match(raw)
+    if match is None:
+        return None
+    front = match.group(2)
+    if not re.search(rb"(?m)^schema:[ \t]*1[ \t]*\r?$", front):
+        return None
+    value = rb"[ \t]*[\"']?([a-z_]+)[\"']?[ \t]*(\r?)$"
+    status = re.search(rb"(?m)^status:" + value, front)
+    review = re.search(rb"(?m)^review_state:" + value, front)
+    current = status.group(1) if status else b""
+    target = current
+    if current == b"on_hold":
+        target = b"backlog"
+    elif current == b"in_progress" and review is not None and review.group(1) == b"ready":
+        target = b"in_review"
+    if status is not None and target != current:
+        front = re.sub(rb"(?m)^status:" + value, b"status: " + target + rb"\2", front, count=1)
+    front = re.sub(rb"(?m)^review_state:.*\n?", b"", front)
+    front = re.sub(rb"(?m)^schema:[ \t]*1([ \t]*\r?)$", rb"schema: 2\1", front, count=1)
+    return raw[: match.start(2)] + front + raw[match.end(2) :]
+
+
 # ── Record building ──────────────────────────────────────────────────
 
 
@@ -651,12 +689,6 @@ def _build_record(data: Mapping[str, Any], expected_id: str) -> TaskRecord:
         raise TaskBoardError(
             "invalid_task", f"task assignee {assignee!r} is not one of {list(ASSIGNEES)}"
         )
-    review_state = data["review_state"]
-    if review_state not in REVIEW_STATES:
-        raise TaskBoardError(
-            "invalid_task",
-            f"task review_state {review_state!r} is not one of {list(REVIEW_STATES)}",
-        )
     created_at = _coerce_utc(data["created_at"], "created_at")
     updated_at = _coerce_utc(data["updated_at"], "updated_at")
     return TaskRecord(
@@ -667,7 +699,6 @@ def _build_record(data: Mapping[str, Any], expected_id: str) -> TaskRecord:
         project_id=_coerce_optional_id(data.get("project_id"), "project_id"),
         due=_coerce_due(data.get("due")),
         assignee=str(assignee),
-        review_state=str(review_state),
         created_at=created_at,
         updated_at=updated_at,
         chat_id=_coerce_optional_id(data.get("chat_id"), "chat_id"),
@@ -735,7 +766,7 @@ def _render_field_value(key: str, record: TaskRecord) -> str:
     """The canonical YAML rendering of one owned record field."""
     value: Any = getattr(record, key)
     if key == "schema":
-        return "1"
+        return str(SCHEMA_VERSION)
     if value is None:
         return "null"
     if isinstance(value, datetime):
@@ -768,12 +799,30 @@ def render_new_task(record: TaskRecord, body: str) -> bytes:
 # ── Source-preserving patch ──────────────────────────────────────────
 
 
-def _check_editable(changes: Mapping[str, object]) -> None:
-    """Refuse non-editable and unknown patch fields explicitly."""
+def _check_editable(
+    changes: Mapping[str, object], *, allow_linkage: bool = False
+) -> None:
+    """Refuse non-editable and unknown patch fields explicitly.
+
+    ``allow_linkage`` is set only by :meth:`TaskBoardStore.link` /
+    :meth:`TaskBoardStore.unlink`, the delegation child's own writes. Linkage is
+    not an ordinary user patch — an agent naming its own ``chat_id`` would be
+    claiming a delegation it never made — but it is not immutable either, or the
+    board could never be pointed at a turn. So it is a separate door rather than
+    a field any caller may pass.
+    """
     for key in changes:
         if key in _EDITABLE_FIELDS or key == "updated_at":
             continue
-        if key in ("schema", "id", "created_at", "chat_id", "attempt_id"):
+        if key in _EDITABLE_LINKAGE_FIELDS:
+            if allow_linkage:
+                continue
+            raise TaskBoardError(
+                "invalid_task",
+                f"{key} is not an editable patch field (identity, creation time "
+                "and linkage belong to the store and the delegation child)",
+            )
+        if key in ("schema", "id", "created_at"):
             raise TaskBoardError(
                 "invalid_task",
                 f"{key} is not an editable patch field (identity, creation time "
@@ -802,14 +851,9 @@ def _normalize_change(key: str, value: object) -> Union[str, datetime, None]:
                 "invalid_task", f"task assignee {value!r} is not one of {list(ASSIGNEES)}"
             )
         return str(value)
-    if key == "review_state":
-        if value not in REVIEW_STATES:
-            raise TaskBoardError(
-                "invalid_task",
-                f"task review_state {value!r} is not one of {list(REVIEW_STATES)}",
-            )
-        return str(value)
     if key in ("project_id",):
+        return _coerce_optional_id(value, key)
+    if key in _EDITABLE_LINKAGE_FIELDS:
         return _coerce_optional_id(value, key)
     if key == "due":
         return _coerce_due(value)
@@ -860,10 +904,26 @@ def patch_task(
     collection, or a multi-line scalar; invalid or truncated
     frontmatter). A parseable but unsupported edit shape is reported,
     never normalized silently.
+
+    Linkage (``chat_id``/``attempt_id``) is refused here: it is written
+    by the delegation child's own :meth:`TaskBoardStore.link` /
+    :meth:`TaskBoardStore.unlink` and by nothing else.
     """
+    return _patch(document, changes, body=body)
+
+
+def _patch(
+    document: TaskDocument,
+    changes: Mapping[str, object],
+    *,
+    body: str | None = None,
+    allow_linkage: bool = False,
+) -> bytes:
+    """:func:`patch_task`, with the linkage door opened only for the delegation
+    child's two store methods."""
     if body is not None and not isinstance(body, str):
         raise TaskBoardError("invalid_task", "task body must be a string or None")
-    _check_editable(changes)
+    _check_editable(changes, allow_linkage=allow_linkage)
     normalized: dict[str, Union[str, datetime, None]] = {
         key: _normalize_change(key, value) for key, value in changes.items()
     }
@@ -1055,6 +1115,7 @@ class TaskBoardStore:
         vault_root: Path,
         runtime_dir: Path,
         clock: Callable[[], datetime],
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         if not isinstance(workspace, str) or not workspace.strip():
             raise ValueError("workspace must be a non-empty string")
@@ -1062,6 +1123,10 @@ class TaskBoardStore:
         self._vault_root = Path(vault_root)
         self._runtime_dir = Path(runtime_dir)
         self._clock = clock
+        #: Called after every write that landed — a replaced file or a removed
+        #: one — so the engine can tell open clients the board moved. Never
+        #: called for a refused or failed write.
+        self._on_change = on_change
 
     # -- paths ------------------------------------------------------
 
@@ -1161,6 +1226,51 @@ class TaskBoardStore:
         """
         path = self._task_path(task_id)
         return parse_task(self._read_file_bytes(path, task_id), expected_id=task_id)
+
+    def migrate_schema_1(self) -> list[tuple[str, str, str]]:
+        """Rewrite every schema-1 task file in place to schema 2, once (#1069).
+
+        ``on_hold`` becomes ``backlog`` (*To do*); a task flagged ``review_state:
+        ready`` while ``in_progress`` becomes ``in_review``; the ``review_state``
+        line is dropped and ``schema`` set to 2. Only those frontmatter lines
+        change — everything else in the file is byte-for-byte what it was.
+
+        A file that does not parse as schema 2 after the rewrite is left exactly
+        as it was (it then lists as an unsupported-schema row, which says why),
+        so a hand-edited shape this cannot read is never half-migrated.
+
+        Returns ``(task_id, old_revision, new_revision)`` per rewritten file, so
+        the delegation service can rebind an attempt bound to the old bytes.
+        """
+        tasks_dir = self._tasks_dir()
+        try:
+            if not tasks_dir.is_dir():
+                return []
+            names = sorted(entry.name for entry in tasks_dir.iterdir())
+        except OSError:
+            return []
+        migrated: list[tuple[str, str, str]] = []
+        for name in names:
+            match = re.fullmatch(r"([0-9a-f]{32})\.md", name)
+            if not match:
+                continue
+            task_id = match.group(1)
+            path = tasks_dir / name
+            with _workspace_lock(self._workspace, self._runtime_dir):
+                try:
+                    raw = self._read_file_bytes(path, task_id)
+                except TaskBoardError:
+                    continue
+                upgraded = _upgrade_schema_1(raw)
+                if upgraded is None:
+                    continue
+                try:
+                    parse_task(upgraded, expected_id=task_id)
+                except TaskBoardError:
+                    continue
+                self._atomic_write(path, upgraded, existing=path)
+                migrated.append((task_id, _revision(raw), _revision(upgraded)))
+        return migrated
 
     def list(self) -> TaskListResult:
         """List this workspace's tasks in board order.
@@ -1297,6 +1407,11 @@ class TaskBoardStore:
                 tmp.unlink()
             except OSError:
                 pass
+        self._changed()
+
+    def _changed(self) -> None:
+        if self._on_change is not None:
+            self._on_change()
 
     @staticmethod
     def _fsync_dir(directory: Path) -> None:
@@ -1355,7 +1470,6 @@ class TaskBoardStore:
                     project_id=clean_project,
                     due=clean_due,
                     assignee="user",
-                    review_state="none",
                     created_at=now,
                     updated_at=now,
                     chat_id=None,
@@ -1403,9 +1517,6 @@ class TaskBoardStore:
         - A task linked to a live chat or attempt (non-null ``chat_id`` /
           ``attempt_id``) cannot be completed or reassigned here at all:
           that needs the later delegation service's stop/detach workflow.
-        - ``ready`` requires ``agent`` assignment and ``in_progress``
-          status. Leaving ``in_progress`` without an explicit review
-          change clears ``ready`` back to ``none``.
 
         Live project membership validation is a later application-service
         obligation; this store keeps the string without judging it.
@@ -1453,6 +1564,185 @@ class TaskBoardStore:
             self._atomic_write(path, new_raw, existing=path)
             return parse_task(new_raw, expected_id=task_id)
 
+    # -- linkage (the delegation child, #1033) -------------------------
+    #
+    # `chat_id` and `attempt_id` are the one pair of fields an ordinary `update`
+    # refuses: an agent naming its own chat would be claiming a delegation it
+    # never made, and the linked-task rules in `_plan_changes` treat a non-null
+    # linkage as "an attempt owns this task". So they get their own revision-
+    # checked door below, called only by the delegation service, and each write
+    # is one atomic replacement like every other managed write here.
+
+    def link(
+        self,
+        task_id: str,
+        *,
+        expected_revision: str,
+        chat_id: str,
+        attempt_id: str,
+        status: str = "in_progress",
+        assignee: str = "agent",
+    ) -> TaskDocument:
+        """Point one task at the chat and attempt working on it, in one write.
+
+        The revision the delegation service read is required and rechecked under
+        the workspace lock, exactly as for :meth:`update`: the linkage is written
+        before the turn starts, so a stale read must fail here rather than point
+        a running attempt at a task somebody else has since changed.
+
+        ``status``/``assignee`` default to handing the task over — ``in_progress``
+        and ``agent`` — in the same atomic write, because a delegated task that
+        stays in *To do* assigned to the user is not what a hand-over looks like.
+        They are parameters so the service, not this method, owns the decision.
+
+        Raises ``invalid_task`` for a malformed id, a missing chat or attempt id,
+        a bad status/assignee, or an edit that would need an ambiguous rewrite;
+        ``not_found``, ``revision_conflict`` and ``read_failed`` as
+        :meth:`update` does.
+        """
+        if not str(chat_id or "").strip():
+            raise TaskBoardError(
+                "invalid_task", "linking a task requires the chat the attempt runs in"
+            )
+        if not str(attempt_id or "").strip():
+            raise TaskBoardError(
+                "invalid_task", "linking a task requires the attempt that owns it"
+            )
+        path = self._task_path(task_id)
+        expected = str(expected_revision or "").strip()
+        if not expected:
+            raise TaskBoardError(
+                "invalid_task",
+                "an expected revision is required; this store never links a task it has not read",
+            )
+        changes: dict[str, object] = {
+            "chat_id": str(chat_id).strip(),
+            "attempt_id": str(attempt_id).strip(),
+            "status": status,
+            "assignee": assignee,
+        }
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            current_raw = self._read_file_bytes(path, task_id)
+            if _revision(current_raw) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed since this delegation was planned; nothing was written",
+                )
+            document = parse_task(current_raw, expected_id=task_id)
+            normalized = {
+                key: _normalize_change(key, value) for key, value in changes.items()
+            }
+            if all(
+                _change_is_noop(key, value, document.record)
+                for key, value in normalized.items()
+            ):
+                return document
+            normalized["updated_at"] = self._now()
+            new_raw = _patch(document, normalized, allow_linkage=True)
+            if new_raw == current_raw:
+                return document
+            reread = self._read_file_bytes(path, task_id)
+            if _revision(reread) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed while the delegation was being prepared; nothing was written",
+                )
+            self._atomic_write(path, new_raw, existing=path)
+            return parse_task(new_raw, expected_id=task_id)
+
+    def unlink(self, task_id: str, *, expected_revision: str) -> TaskDocument:
+        """Release a task from the chat and attempt that were working on it.
+
+        The whole of what makes a delegated task completable again: while
+        ``chat_id``/``attempt_id`` are non-null, :meth:`_plan_changes` refuses
+        both completion and reassignment, because a task with a turn in flight is
+        not one the user should be closing behind its back. Clearing the linkage
+        is the gesture that says the attempt no longer speaks for the task — the
+        attempt itself stays as history in the delegation child's own store.
+
+        Same protocol as :meth:`update`: revision required, rechecked under the
+        lock, nothing written on a conflict or a parse failure.
+        """
+        path = self._task_path(task_id)
+        expected = str(expected_revision or "").strip()
+        if not expected:
+            raise TaskBoardError(
+                "invalid_task",
+                "an expected revision is required; this store never unlinks a task it has not read",
+            )
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            current_raw = self._read_file_bytes(path, task_id)
+            if _revision(current_raw) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed since this detach was planned; nothing was written",
+                )
+            document = parse_task(current_raw, expected_id=task_id)
+            changes: dict[str, object] = {"chat_id": None, "attempt_id": None}
+            if all(
+                _change_is_noop(key, _normalize_change(key, value), document.record)
+                for key, value in changes.items()
+            ):
+                return document
+            changes["updated_at"] = self._now()
+            new_raw = _patch(document, changes, allow_linkage=True)
+            if new_raw == current_raw:
+                return document
+            reread = self._read_file_bytes(path, task_id)
+            if _revision(reread) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed while the detach was being prepared; nothing was written",
+                )
+            self._atomic_write(path, new_raw, existing=path)
+            return parse_task(new_raw, expected_id=task_id)
+
+    def delete(self, task_id: str, *, expected_revision: str) -> None:
+        """Remove one task record, revision-checked.
+
+        The same protocol as :meth:`update`, for the one write that is not a
+        rewrite: ``expected_revision`` is required and rechecked under the
+        workspace lock, so a delete planned against an older read is a
+        ``revision_conflict`` with the record left in place. Confinement is
+        inherited rather than re-derived: the id is validated before any path
+        is built (:meth:`_task_path`) and the record is read through
+        :meth:`_read_file_bytes` first, which refuses a link where the file
+        must be and any non-regular file — so the unlink below can only ever
+        remove a real task record inside this workspace's ``Tasks``
+        directory, never a link target and never anything outside it.
+
+        There is no trash: the record is the user's own Markdown file, and
+        this unlinks it. Raises ``unsafe_path`` for a malformed id, a link or
+        non-regular file; ``not_found`` when no file exists;
+        ``invalid_task`` when no revision was presented; and ``read_failed``
+        when the removal itself fails, with the record still there.
+        """
+        path = self._task_path(task_id)
+        expected = str(expected_revision or "").strip()
+        if not expected:
+            raise TaskBoardError(
+                "invalid_task",
+                "an expected revision is required; this store never removes a task it has not read",
+            )
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            current_raw = self._read_file_bytes(path, task_id)
+            if _revision(current_raw) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed since this removal was planned; nothing was removed",
+                )
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                raise TaskBoardError("not_found", f"no such task: {task_id}") from None
+            except OSError as exc:
+                raise TaskBoardError(
+                    "read_failed",
+                    f"could not remove task {task_id}; the file is unchanged: {exc}",
+                ) from None
+            self._fsync_dir(path.parent)
+        self._changed()
+
     def _plan_changes(
         self, document: TaskDocument, changes: dict[str, object], actor: Actor
     ) -> dict[str, object]:
@@ -1482,21 +1772,4 @@ class TaskBoardStore:
                 "a task linked to a live chat or attempt cannot be reassigned "
                 "here; the delegation service's stop/detach workflow owns that",
             )
-        planned = dict(changes)
-        effective_status = str(changes.get("status", current.status))
-        effective_assignee = str(changes.get("assignee", current.assignee))
-        effective_review = str(changes.get("review_state", current.review_state))
-        if effective_status != "in_progress" and effective_review == "ready" and "review_state" not in planned:
-            # Leaving In progress drops the review flag rather than carrying
-            # a stale `ready` into a state that can never satisfy it.
-            planned["review_state"] = "none"
-            effective_review = "none"
-        if effective_review == "ready" and not (
-            effective_assignee == "agent" and effective_status == "in_progress"
-        ):
-            raise TaskBoardError(
-                "invalid_task",
-                "review_state 'ready' requires assignee 'agent' and status "
-                "'in_progress'",
-            )
-        return planned
+        return dict(changes)

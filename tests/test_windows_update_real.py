@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from ciao import engine_update
 from ciao import windows_service as ws
 from ciao.engine_update import Operation
 from ciao.windows_update import WindowsUpdateHost
@@ -129,6 +130,7 @@ def test_offline_copy_mode_reinstall_and_launcher_restore_with_real_uv(
     op = Operation(
         id="op", phase="swapping", from_version="0.0.1", to_version="0.0.2",
         started_at="", updated_at="", stage_dir=str(stage), wheel=str(new_wheel),
+        wheel_sha256=engine_update._sha256(new_wheel)[0],
         env_python=str(staged_python), env_freeze=freeze or "ciaobot==0.0.2\n",
     )
     host = WindowsUpdateHost(state_dir=tmp_path / "state")

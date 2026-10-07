@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
 import { askPrompt } from '../lib/prompt'
@@ -294,12 +295,6 @@ async function openDiscussion(row: ProposalRow) {
 
 function linkedChatId(rowId: string): string | undefined {
   return proposalChatLinks.value[rowId]
-}
-
-function linkedChat(rowId: string) {
-  const id = linkedChatId(rowId)
-  if (!id) return undefined
-  return projectStore.chats.find(c => c.chat_id === id)
 }
 
 /** The chat implementing this row, from whichever surface owns the association.
@@ -1100,17 +1095,6 @@ function doDismiss(row: ProposalRow) {
   void store.act(row.id, 'dismiss')
 }
 
-async function openWorkspaceChat(workspace: string, title: string) {
-  const target = workspace || projectStore.activeWorkspace
-  if (projectStore.activeWorkspace !== target) {
-    await projectStore.switchWorkspace(target)
-  }
-  let project = projectStore.projects.find((p) => p.workspace === target && Boolean(p.is_auto))
-  if (!project) project = await projectStore.createProject('General')
-  if (!project) return null
-  return projectStore.createChat(project.project_id, title)
-}
-
 async function openWorkspaceChatInBackground(workspace: string, title: string, helper: ProposalHelper) {
   const target = workspace || projectStore.activeWorkspace
   let project = projectStore.projects.find((p) => p.workspace === target && Boolean(p.is_auto))
@@ -1473,7 +1457,7 @@ watch(
     <!-- The queue's four load states, kept apart so none of them can borrow the
          others' words. The old single "Nothing queued here." rendered under a
          slow or failed first GET and read as a confirmed-empty queue. -->
-    <p v-if="queueLoading" class="pr-empty" role="status" aria-live="polite">Loading proposals…</p>
+    <SkeletonLoader v-if="queueLoading" label="Loading proposals" variant="cards" :count="3" />
 
     <div v-else-if="queueFailed" class="pr-error-block" role="alert">
       <p class="pr-error">{{ store.loadError }}</p>

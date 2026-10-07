@@ -114,19 +114,8 @@ def test_package_status_non_ratelimit_http_error_keeps_code() -> None:
     assert "500" in str(data["error"])
 
 
-def test_github_request_adds_auth_header_when_token_present(monkeypatch) -> None:
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.delenv("GH_TOKEN", raising=False)
-    monkeypatch.setenv("CIAO_GITHUB_TOKEN", "secret-token")
-
-    request = _github_request("https://api.github.com/x")
-
-    assert request.headers.get("Authorization") == "Bearer secret-token"
-
-
-def test_github_request_omits_auth_header_without_token(monkeypatch) -> None:
-    for name in ("CIAO_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
-        monkeypatch.delenv(name, raising=False)
+def test_github_request_never_sends_an_auth_header(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
 
     request = _github_request("https://api.github.com/x")
 

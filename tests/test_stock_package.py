@@ -243,7 +243,7 @@ _OPERATION_NAME_EXEMPT = {
     "skills/ciao-cli/commands.json",
     "evals/scenarios.json",
 }
-_AGENT_CLI_NOUNS = "memory|vault|note|file|chat|project|schedule|workspace|context|run|gws"
+_AGENT_CLI_NOUNS = "memory|vault|note|file|chat|project|schedule|workspace|context|run|gws|task|webhook"
 _CLI_MENTION = re.compile(rf"\bciao ({_AGENT_CLI_NOUNS}) ([a-z][a-z-]*)")
 
 

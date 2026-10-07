@@ -21,9 +21,9 @@
       aria-hidden="true"
       @click="sidebarCollapsed = true"
     />
-    <div class="chat-main" :class="{ 'chat-split': !!pinnedFilePath }">
+    <div class="chat-main" :class="{ 'chat-split': !!panelPath }">
       <!-- Split view when a file is pinned -->
-      <template v-if="pinnedFilePath">
+      <template v-if="panelPath">
         <div
           class="chat-split-main"
           :style="{
@@ -143,7 +143,7 @@
         <!-- Takes whatever the chat pane and gutter leave, so the tile's inset
              margin never pushes the pair past 100%. -->
         <div class="chat-split-side">
-          <PinnedFilePanel ref="pinnedFilePanelRef" :key="pinnedFilePath" :file-path="pinnedFilePath" @close="unpinCurrent" />
+          <PinnedFilePanel ref="pinnedFilePanelRef" :key="activePinKey" :file-path="panelPath" :close-disabled="pinWritePending" @close="unpinCurrent" />
         </div>
       </template>
       <template v-else>
@@ -153,6 +153,10 @@
           :show-new="showNewSchedule"
           @created="showNewSchedule = false"
           @close="showNewSchedule = false"
+          @open-sidebar="sidebarCollapsed = false"
+        />
+        <TaskBoardView
+          v-else-if="viewMode === 'tasks'"
           @open-sidebar="sidebarCollapsed = false"
         />
         <MemoryMapView
@@ -172,7 +176,33 @@
           :agent-id="subagentRoute.agentId"
           @open-sidebar="sidebarCollapsed = false"
         />
-        <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+        <template v-else-if="store.activeChat">
+          <!-- Narrow shared pin: a compact native opener for the chat's
+               server-owned pin, not a forced split pane and never an
+               auto-opened modal. -->
+          <div v-if="narrowSharedPin" class="narrow-pin-opener">
+            <button
+              type="button"
+              class="narrow-pin-btn"
+              :aria-label="`Open pinned file ${narrowSharedPinBase}`"
+              :title="narrowSharedPin"
+              @click="openNarrowSharedPin"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a3 3 0 0 0-6 0z"/></svg>
+              <span class="narrow-pin-name">{{ narrowSharedPinBase }}</span>
+            </button>
+            <button
+              type="button"
+              class="narrow-pin-close btn-icon"
+              aria-label="Unpin file"
+              :disabled="pinWritePending"
+              @click="unpinCurrent"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+          <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+        </template>
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
@@ -288,6 +318,7 @@ const MemoryMapView = defineAsyncComponent(() => import('./MemoryMapView.vue'))
 const SubagentChatView = defineAsyncComponent(() => import('./SubagentChatView.vue'))
 const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
 const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
+const TaskBoardView = defineAsyncComponent(() => import('./TaskBoardView.vue'))
 const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
 import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
@@ -302,6 +333,8 @@ import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
 import { pendingPrompt } from '../lib/prompt'
 import { FONT_SCALE_STEP, useFontScale } from '../composables/useFontScale'
+import { useKeyboardSettings } from '../composables/useKeyboardSettings'
+import { effectiveBinding, keyboardMatches, type ShortcutId } from '../lib/keyboardShortcuts'
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
@@ -326,6 +359,12 @@ const schedulePanelRef = ref<any>(null)
 // Cmd/Ctrl+Shift+- shortcuts (below); the same composable is consumed by
 // Settings → Appearance so the +/- buttons and the shortcuts stay in sync.
 const fontScale = useFontScale()
+const keyboard = useKeyboardSettings()
+void keyboard.load().catch(() => {})
+
+function matchesShortcut(event: KeyboardEvent, id: ShortcutId): boolean {
+  return keyboardMatches(event, effectiveBinding(keyboard.settings.value, id))
+}
 
 // Wide enough for the nav row to show the active item's label ("automations" is
 // the longest) beside all four glyphs. At 280 the row could not fit it and the
@@ -526,10 +565,11 @@ const subagentRoute = computed(() => {
   const agentId = (route.params.agentId as string) || ''
   return chatId && agentId ? { chatId, agentId } : null
 })
-const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals'>(() => {
+const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
   if (path.startsWith('/schedules')) return 'schedules'
+  if (path.startsWith('/tasks')) return 'tasks'
   if (path.startsWith('/memory')) return 'memory'
   if (path.startsWith('/proposals')) return 'proposals'
   if (projectIdParam.value) return 'project'
@@ -544,30 +584,26 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings' | 'memor
 // /chat/:id and revived the handler. One predicate, so the next view mode
 // added has a single place to declare itself.
 // Split in two so the number-key workspace shortcut, which is useful on the
-// schedules view, does not have to restate the rest of the gate and drift
-// from it. Anything that owns the screen — a confirm dialog, the file viewer
-// modal — belongs in the base predicate, so a new overlay is declared once.
+// schedules and task-board views, does not have to restate the rest of the gate
+// and drift from it. Anything that owns the screen — a confirm dialog, the file
+// viewer modal — belongs in the base predicate, so a new overlay is declared once.
 const viewShortcutsActive = computed(() =>
   viewMode.value !== 'settings'
   && !pendingConfirm.value
   && !pendingPrompt.value
   && !fileViewer.isOpen,
 )
+// The chat-only chords are inert on the full-screen views that own the keyboard
+// themselves. `1`–`9` keep switching workspaces from all of them: they are gated
+// on `viewShortcutsActive`, which the board does not exclude.
 const shortcutsActive = computed(() =>
-  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
+  viewShortcutsActive.value && viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory' && viewMode.value !== 'proposals',
 )
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
 let latestStatusSyncTimer: ReturnType<typeof setInterval> | null = null
 
-// Current project id for pinned-file lookup.
-const currentProjectId = computed(() => {
-  if (projectIdParam.value) return projectIdParam.value
-  const chat = store.activeChat
-  if (chat?.project_id) return chat.project_id
-  return ''
-})
 // Only for the true empty state. Every lane carries its own "+ new" and lanes
 // no longer collapse at narrow widths, so on a phone with chats these were a
 // second, louder copy of an action already on screen — and a saturated fill
@@ -624,6 +660,7 @@ const pageDocumentTitle = computed(() => {
   }
   if (viewMode.value === 'memory') return 'memory'
   if (viewMode.value === 'proposals') return 'proposals'
+  if (viewMode.value === 'tasks') return 'tasks'
   if (projectIdParam.value) {
     const project = store.projects.find(p => p.project_id === projectIdParam.value)
     return project?.name || 'project'
@@ -655,20 +692,71 @@ async function handleNewChatShortcut() {
   await chooseNewChat()
 }
 const activePinKey = computed(() => {
-  return store.activeChatId || currentProjectId.value
+  // The pinned pane belongs to the route on screen, never to whatever chat is
+  // still selected underneath it. Home (`/` or a bare `/chat`) has no key at
+  // all, so a retained chat can never surface its pinned page for even one
+  // frame while the route watcher clears the view; Settings, Automations,
+  // Tasks, Memory and the project routes read as before (they carry neither
+  // param). Coming back to the chat restores that chat's pin, because the pin
+  // is looked up under the chat the route names.
+  if (projectIdParam.value) return projectIdParam.value
+  return (route.params.chatId as string) || ''
 })
 const pinnedFilePath = computed(() => {
   if (isMobile.value) return ''
-  // Pinned files are scoped. When the user navigates to a global
-  // surface (settings, schedules), the split layout would otherwise mask
-  // those views entirely because the v-if="pinnedFilePath" branch only
-  // renders ProjectView/ChatPanel. Hide the pin in those modes; the store
-  // entry stays intact, so coming back restores it.
-  if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory' || viewMode.value === 'proposals') return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
 })
-function unpinCurrent(): void {
-  if (activePinKey.value) store.unpinFile(activePinKey.value)
+// The split panel shows the route's pinned file, but a remote pin change must
+// never discard an in-progress edit. `panelPath` tracks `pinnedFilePath` while
+// the panel is clean (a remote replace/unpin switches or unmounts it
+// immediately), and holds the previous path while the panel is dirty; the
+// deferred change is applied the moment the panel goes idle.
+const panelPath = ref('')
+const deferredPinPath = ref<string | null>(null)
+watch(pinnedFilePath, (next) => {
+  if (pinnedFilePanelRef.value?.isBusyAuthoring) {
+    deferredPinPath.value = next
+    return
+  }
+  panelPath.value = next
+  deferredPinPath.value = null
+}, { immediate: true })
+watch(
+  () => pinnedFilePanelRef.value?.isBusyAuthoring,
+  (busy) => {
+    if (busy || deferredPinPath.value === null) return
+    panelPath.value = deferredPinPath.value
+    deferredPinPath.value = null
+  },
+)
+// On a narrow device there is no split pane: the chat's shared (server-owned)
+// pin is a compact opener within the chat. Only a chat route carries one — a
+// project route and Home have no narrow pin (their pins stay desktop-local).
+const narrowSharedPin = computed(() => {
+  if (!isMobile.value) return ''
+  const key = activePinKey.value
+  if (!key || projectIdParam.value) return ''
+  return store.pinnedFileFor(key) || ''
+})
+const pinWritePending = computed(() => {
+  const key = activePinKey.value
+  return !!key && store.isChatPinPending(key)
+})
+const narrowSharedPinBase = computed(() => {
+  const p = narrowSharedPin.value
+  const idx = p.lastIndexOf('/')
+  return idx === -1 ? p : p.slice(idx + 1)
+})
+function openNarrowSharedPin(): void {
+  const key = activePinKey.value
+  const path = narrowSharedPin.value
+  if (!key || !path) return
+  void fileViewer.openSharedPin(path, key)
+}
+async function unpinCurrent(): Promise<void> {
+  const key = activePinKey.value
+  if (!key) return
+  await store.unpinFile(key)
 }
 
 function onResize() {
@@ -697,12 +785,52 @@ function stopLatestStatusSync() {
   latestStatusSyncTimer = null
 }
 
+// Home is a view, not a request to destroy anything: reaching `/` (or a bare
+// `/chat`) shows Home alone, with no conversation and no pinned file. This
+// reconciles the store with the route that is actually displayed, so the
+// sidebar's "chats" nav tab, a direct `router.push('/')`, browser back/forward
+// and the history buttons all land in the same place.
+//
+// Deliberately NOT closeChat(): that is the explicit Close/Escape gesture and
+// it owns the empty-draft delete policy. Clicking Home is a navigation, so an
+// unused New Chat, its typed-but-unsent prompt and its staged screenshots all
+// survive it and reappear when that chat is opened again.
+//
+// Secondary destinations (settings, automations, tasks, memory, a project) keep
+// the selection underneath them, as they always have - so a chat the user left
+// for Automations is still there when they come back to it. Only the bare Home
+// route clears.
+function isHomeRoute(path: string): boolean {
+  return path === '/' || path === '/chat'
+}
+
+function clearRetainedChatView() {
+  if (store.activeChatId) store.clearActiveChatView()
+}
+
 onMounted(async () => {
+  // `fetchAll()` is a boot *and* a refresh, and its first step is
+  // `restoreState()`, which re-applies `ciao-active-chat` from localStorage.
+  // Remembering the selection across that await is what separates a chat the
+  // store just restored from one the session already had open: only the
+  // former may be reconciled away below.
+  const selectedBeforeFetch = store.activeChatId
   await store.fetchAll()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
-  const chatId = route.params.chatId as string
-  if (chatId && store.chats.find(c => c.chat_id === chatId)) {
+  // The route is re-read here, after the awaits, never captured before them.
+  // A slow `fetchAll()` is long enough for the user to have navigated, and a
+  // stale pre-fetch route would clear a chat they opened in the meantime —
+  // so a chat route is resolved against where the router actually is now.
+  const chatId = (route.params.chatId as string) || ''
+  if (isHomeRoute(route.path)) {
+    // Home alone: no conversation, no pinned page. Only the id that came back
+    // from storage is cleared, so a selection this session made before the
+    // layout existed is left to the route watcher above to own.
+    if (store.activeChatId && store.activeChatId !== selectedBeforeFetch) {
+      store.clearActiveChatView()
+    }
+  } else if (chatId && store.chats.find(c => c.chat_id === chatId)) {
     await store.openChatFromDeepLink(chatId)
   }
   // Auto-collapse sidebar on mobile when a chat is active
@@ -716,25 +844,18 @@ watch(() => route.path, (p) => {
 })
 
 // React to route changes (e.g. clicking a chat link from ProjectView).
+//
+// The path is watched, not just `params.chatId`: a move from a secondary page
+// to `/` leaves chatId undefined on *both* routes, so a chatId-keyed watcher
+// never fired and the retained chat resurfaced on Home. Watching the path also
+// keeps the explicit `/chat/:chatId` and subagent routes working exactly as
+// before.
 watch(
-  () => route.params.chatId,
-  (chatId) => {
-    const id = chatId as string
+  () => route.path,
+  (path) => {
+    const id = (route.params.chatId as string) || ''
     if (!id) {
-      // The sidebar's "chats" nav tab (and any other plain link to `/` or
-      // `/chat`) navigates here without going through closeChat(), so
-      // activeChatId - and the ChatPanel/keyboard-shortcut logic keyed off
-      // it - stayed on the chat the user left. Only bare chat routes mean
-      // "go home": project/settings/schedules routes deliberately leave
-      // activeChatId populated underneath them (see the Esc handler above),
-      // so this only fires when chatId itself changed away from a real id -
-      // not on a settings/schedules -> `/` transition, where chatId was
-      // already undefined and the retained chat is meant to resurface.
-      // Route through the local closeChat() wrapper, not store.closeChat()
-      // directly, so a failed close (e.g. the DELETE request itself erroring
-      // out) surfaces the same toast the close button and Esc already show,
-      // instead of an unhandled rejection with no explanation.
-      if (viewMode.value === 'chat' && store.activeChatId) closeChat()
+      if (isHomeRoute(path)) clearRetainedChatView()
       return
     }
     if (!store.chats.find(c => c.chat_id === id)) return
@@ -773,24 +894,6 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
-// The PWA's Option/Alt chords match the physical key. On macOS, Option turns
-// `e.key` into the character the chord would type (⌥D is "∂", ⌥S "ß", ⌥M "µ",
-// ⌥= "≠", ⌥- "–", and ⌥N is a "Dead" key), so comparing `e.key` with ASCII
-// letters never matched on a Mac. `e.code` names the key position and is
-// unaffected by Option. When a browser or a synthetic event leaves `code`
-// empty, fall back to `e.key` so Windows/Linux Alt chords still match.
-//
-// Inside a text field the physical match is off: Option+letter is how a Mac
-// types accents and symbols (⌥N then N is ñ, ⌥D is ∂, ⌥M is µ), so a press
-// whose `key` is a produced character or "Dead" must reach the field. There
-// only the old `e.key` comparison applies, which still matches Windows/Linux
-// Alt chords and ⌥Backspace (Backspace produces no character).
-function optionChord(e: KeyboardEvent, codes: readonly string[], keys: readonly string[]): boolean {
-  if (isTypingTarget(e.target)) return keys.includes(e.key)
-  if (e.code) return codes.includes(e.code)
-  return keys.includes(e.key)
-}
-
 // Unmodified keys, which no browser reserves: number keys switch to the
 // corresponding workspace, arrow keys roam the home recent-chat grid (Enter
 // opens the focused card natively), and Esc closes the open chat. Anything
@@ -808,22 +911,28 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // claims the keys it uses in the capture phase; this covers every chord it
   // does not.
   if (pendingNewChat.value) return
-  // Switch top-level sections (chat → schedules → memory → settings) with
-  // Option+Arrow, because the browser has already spent Cmd+Left/Right on
+  // Switch top-level sections (chat → schedules → tasks → memory → settings)
+  // with Option+Arrow, because the browser has already spent Cmd+Left/Right on
   // back/forward. Never Tab: that stays the native focus traversal.
   const mod = e.metaKey || e.ctrlKey
   const alt = e.altKey
   const isSectionArrow = alt && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
   if (isSectionArrow) {
     if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
-    const sections = ['/', '/schedules', '/memory', '/settings']
+    // Order matches the sidebar's own destination order (Chats, Automations,
+    // Tasks, Memory, Settings), so Option+Arrow walks the sections the way the
+    // nav lists them. `/tasks` needs its own index: it has no `viewMode` fall
+    // through to, so without one Alt+Right from the board jumped to Home.
+    const sections = ['/', '/schedules', '/tasks', '/memory', '/settings']
     const current = viewMode.value === 'chat' || viewMode.value === 'project'
       ? 0
       : viewMode.value === 'schedules'
         ? 1
-        : viewMode.value === 'memory' || viewMode.value === 'proposals'
+        : viewMode.value === 'tasks'
           ? 2
-          : 3
+          : viewMode.value === 'memory' || viewMode.value === 'proposals'
+            ? 3
+            : 4
     const next = (current + (e.key === 'ArrowLeft' ? -1 : 1) + sections.length) % sections.length
     e.preventDefault()
     void router.push(sections[next])
@@ -847,8 +956,10 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // preventDefault. Both branches stay inside the existing viewShortcutsActive
   // and typing-target gates, so a confirm dialog or the file viewer still
   // swallows the digit and the composer still types it.
+  const workspaceSlot = Array.from({ length: 9 }, (_, i) => i + 1)
+    .find(i => matchesShortcut(e, `workspace${i}` as ShortcutId))
   if (viewShortcutsActive.value && !isTypingTarget(e.target) && !e.defaultPrevented
-    && bare && /^[1-9]$/.test(e.key)) {
+    && workspaceSlot) {
     if (chatPanelRef.value?.handleQuestionShortcut?.(e)) {
       e.preventDefault()
       return
@@ -861,12 +972,15 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       e.preventDefault()
       return
     }
-    const workspace = store.workspaceOptions[Number(e.key) - 1]
+    const workspace = store.workspaceOptions[workspaceSlot - 1]
     if (workspace) {
       e.preventDefault()
-      // The schedules and memory views have no chat to transition into.
+      // The schedules, task-board and memory views have no chat to transition
+      // into: switching workspace there re-reads the page in place, and
+      // navigating to `/` would throw the user off the surface they pressed a
+      // number on.
       void store.switchWorkspace(workspace.name, {
-        transition: viewMode.value !== 'schedules' && viewMode.value !== 'memory',
+        transition: viewMode.value !== 'schedules' && viewMode.value !== 'tasks' && viewMode.value !== 'memory',
       })
       return
     }
@@ -893,9 +1007,14 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // the common complaint. Widgets that genuinely own Esc claim it with
   // stopPropagation (the slash-command picker in ChatPanel, the notification
   // bell), so this never steals the key from them.
-  if (e.key === 'Escape') {
+  if (matchesShortcut(e, 'closeChat')) {
     // The confirm dialog and the file viewer own Esc while they are up.
     if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    // Any open Reka layer (dialog, menu, popover) owns Esc: Reka marks each one
+    // `data-dismissable-layer` and closes it from its own window listener,
+    // which is registered after this one and so runs after it. Without this,
+    // Esc in a dialog on Settings or Automations also left the page.
+    if (document.querySelector('[data-dismissable-layer]')) return
     // A nested control that handled the key already, without claiming it. Popups
     // like ModelSelector close on Esc but do not stopPropagation, and treating
     // that press as "go home" both discarded their dismissal and navigated away
@@ -920,7 +1039,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
       memoryMapStore.selectNode(null)
       return
     }
-    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
+    if (viewMode.value === 'settings' || viewMode.value === 'schedules' || viewMode.value === 'tasks' || viewMode.value === 'memory' || viewMode.value === 'proposals') {
       e.preventDefault()
       void router.push('/')
       return
@@ -1017,21 +1136,23 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
+  // User shortcuts must never take printable chords away from an editor.
+  if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
+
   // New Chat: Option+N. Opens a small picker to choose the workspace the new
   // chat should live in; Enter creates it in the active workspace's General
   // project. Cmd+T is left alone: it is the browser's new tab.
-  if (alt && optionChord(e, ['KeyN'], ['n', 'N'])) {
+  if (matchesShortcut(e, 'newChat')) {
+    if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
     e.preventDefault()
     void handleNewChatShortcut()
     return
   }
 
-  // Archive: Option+Backspace. Unlike the old Cmd+A it also fires while a
-  // text field is focused — that is the point: archive from mid-thought
-  // without clicking out. The confirm dialog from archiveActiveChat is what
-  // makes this safe to fire while typing, and it gates on shortcutsActive
-  // anyway, so the dialog swallows further keys.
-  if (alt && !mod && optionChord(e, ['Backspace'], ['Backspace'])) {
+  // Archive is deliberately inert in editable controls so Option+Backspace
+  // keeps its native “delete previous word” meaning on macOS.
+  if (matchesShortcut(e, 'archiveChat')) {
+    if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
@@ -1042,7 +1163,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // typing for the same reason as archive: in a text field Option+S is how you
   // type ß, and stealing it would break text entry for the sake of a view
   // toggle.
-  if (alt && optionChord(e, ['KeyS'], ['s', 'S'])) {
+  if (matchesShortcut(e, 'toggleSidebar')) {
     if (isTypingTarget(e.target)) return
     e.preventDefault()
     sidebarCollapsed.value = !sidebarCollapsed.value
@@ -1052,7 +1173,7 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // Model picker: Option+M. Not gated on the typing target: opening the picker
   // is the useful reading of the key even mid-compose, and the picker is a
   // popover, not a text mutation.
-  if (alt && optionChord(e, ['KeyM'], ['m', 'M'])) {
+  if (matchesShortcut(e, 'modelPicker')) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleModelPicker()
@@ -1068,9 +1189,9 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // Skipped while typing because Option+= / Option+- type ≠ and – on macOS.
   // Step, bounds and persistence come from useFontScale, shared with the
   // Settings +/- buttons.
-  if (alt && !mod && !isTypingTarget(e.target)) {
-    const zoomIn = optionChord(e, ['Equal', 'NumpadAdd'], ['=', '+'])
-    const zoomOut = optionChord(e, ['Minus', 'NumpadSubtract'], ['-', '_'])
+  if (!isTypingTarget(e.target) && !isTypingTarget(document.activeElement)) {
+    const zoomIn = matchesShortcut(e, 'fontIncrease')
+    const zoomOut = matchesShortcut(e, 'fontDecrease')
     if (zoomIn) {
       e.preventDefault()
       fontScale.adjust(FONT_SCALE_STEP)
@@ -1573,6 +1694,43 @@ onBeforeUnmount(() => {
 }
 
 @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+
+/* Narrow shared-pin opener: a compact in-chat bar naming the chat's pinned
+   file, so a phone gets the same server-owned pin state without a split pane
+   or an unsolicited modal. Every control keeps the 44px touch target. */
+.narrow-pin-opener {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+}
+.narrow-pin-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.narrow-pin-btn:hover { background: var(--bg3); }
+.narrow-pin-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.narrow-pin-close {
+  flex: 0 0 auto;
+}
 
 /* Split-screen layout for pinned file viewer. Both panes share width 50/50
    by default; min-width is a soft floor during drag so a compressed window

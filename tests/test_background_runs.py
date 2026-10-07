@@ -254,6 +254,28 @@ def test_other_bare_names_still_resolve_from_the_user_path(
     assert resolve_executable(name, tmp_path, tmp_path) == str(tool)
 
 
+def test_build_env_prepends_the_engine_bin_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested ``ciao`` in a background command resolves to this engine."""
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/user/bin"]))
+
+    entries = build_env({}, run_id="bg-1", workspace="work")["PATH"].split(os.pathsep)
+
+    assert entries[0] == engine_bin_dir()
+    assert entries[1:] == ["/usr/bin", "/user/bin"]
+
+
+def test_build_env_prepends_even_over_a_path_override() -> None:
+    """A caller-supplied PATH override cannot strip the engine-first promotion."""
+    env = build_env({"PATH": "/user/bin"}, run_id="bg-1", workspace="work")
+
+    entries = env["PATH"].split(os.pathsep)
+
+    assert entries[0] == engine_bin_dir()
+    assert entries[1:] == ["/user/bin"]
+
+
 def test_env_rejects_loader_hooks_and_the_session_token() -> None:
     for key in ("LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "CIAO_AGENT_TOKEN"):
         with pytest.raises(BackgroundRunError) as excinfo:
@@ -1091,25 +1113,37 @@ async def test_live_runs_are_announced_and_snapshotted(
     chat = manager.create_chat(project.project_id, title="Owner")
     published: list[dict] = []
     monkeypatch.setattr(manager._events, "publish", published.append)
-    manager._background_runner = SimpleNamespace(
-        active_counts=lambda: {chat.chat_id: 2},
-    )
+    live = [
+        BackgroundRun(run_id="r1", parent_chat_id=chat.chat_id, label="clone", status="running"),
+        BackgroundRun(run_id="r2", parent_chat_id=chat.chat_id, cmd=["uv", "sync"], status="running"),
+    ]
+    manager._background_runner = SimpleNamespace(active_runs=lambda: {chat.chat_id: live})
 
     # The snapshot a reconnecting client gets, which must not depend on
     # having seen the start event.
-    assert manager.background_run_counts == {chat.chat_id: 2}
+    assert [r["run_id"] for r in manager.background_runs[chat.chat_id]] == ["r1", "r2"]
+    assert manager.background_runs[chat.chat_id][1]["cmd"] == ["uv", "sync"]
+    # Host details stay off the wire: every connected client receives this.
+    assert "pid" not in manager.background_runs[chat.chat_id][0]
 
     manager.announce_background_runs(chat.chat_id)
     events = [e for e in published if e.get("type") == "chat_background_runs"]
     assert len(events) == 1
-    assert events[0]["running"] == 2
+    assert [r["label"] for r in events[0]["runs"]] == ["clone", ""]
     assert events[0]["project_id"] == project.project_id
+    assert "finished" not in events[0]
 
-    # Finishing drops it back to zero, which is how the client clears the pill.
-    manager._background_runner = SimpleNamespace(active_counts=lambda: {})
-    manager.announce_background_runs(chat.chat_id)
+    # Finishing empties the list, which is how the client clears the row, and
+    # names the run that ended so the client can say how it ended.
+    manager._background_runner = SimpleNamespace(active_runs=lambda: {})
+    done = BackgroundRun(
+        run_id="r1", parent_chat_id=chat.chat_id, label="clone", status="error", exit_code=2
+    )
+    manager.announce_background_runs(chat.chat_id, finished=done)
     events = [e for e in published if e.get("type") == "chat_background_runs"]
-    assert events[-1]["running"] == 0
+    assert events[-1]["runs"] == []
+    assert events[-1]["finished"]["status"] == "error"
+    assert events[-1]["finished"]["exit_code"] == 2
 
 
 async def test_runner_announces_both_edges(tmp_path: Path) -> None:
@@ -1506,3 +1540,52 @@ def test_run_id_is_required(tmp_path: Path) -> None:
 def test_cwd_default_is_the_workspace_root(tmp_path: Path) -> None:
     assert resolve_cwd(tmp_path, "") == tmp_path.resolve()
     assert os.path.isdir(resolve_cwd(tmp_path, ""))
+
+
+def test_rail_routes_only_reach_the_chats_own_runs(tmp_path: Path) -> None:
+    """The Work details rail reads a run's log and stops it, for its own chat only."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.web.routes_api import chat_background_run_cancel, chat_background_run_log
+
+    run = BackgroundRun(run_id="r1", parent_chat_id="chat-1", label="clone", status="running")
+    cancelled: list[str] = []
+
+    async def _cancel(run_id: str) -> BackgroundRun:
+        cancelled.append(run_id)
+        return BackgroundRun(
+            run_id=run_id, parent_chat_id="chat-1", label="clone", status="cancelled"
+        )
+
+    app = Starlette(routes=[
+        Route("/api/chats/{chat_id}/background-runs/{run_id}/log", chat_background_run_log),
+        Route(
+            "/api/chats/{chat_id}/background-runs/{run_id}/cancel",
+            chat_background_run_cancel,
+            methods=["POST"],
+        ),
+    ])
+    app.state.background_runner = SimpleNamespace(
+        get=lambda rid: run if rid == "r1" else None,
+        tail=lambda rid: ["Cloning into 'rizzo-flow'...", "done."],
+        cancel=_cancel,
+    )
+    client = TestClient(app)
+
+    log = client.get("/api/chats/chat-1/background-runs/r1/log")
+    assert log.status_code == 200
+    assert log.json()["last_lines"] == ["Cloning into 'rizzo-flow'...", "done."]
+    assert log.json()["label"] == "clone"
+
+    # Another chat's run reads as missing, not forbidden, and is never touched.
+    assert client.get("/api/chats/chat-2/background-runs/r1/log").status_code == 404
+    assert client.post("/api/chats/chat-2/background-runs/r1/cancel").status_code == 404
+    assert client.get("/api/chats/chat-1/background-runs/nope/log").status_code == 404
+    assert cancelled == []
+
+    stopped = client.post("/api/chats/chat-1/background-runs/r1/cancel")
+    assert stopped.status_code == 200
+    assert stopped.json()["status"] == "cancelled"
+    assert cancelled == ["r1"]

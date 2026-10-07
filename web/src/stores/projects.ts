@@ -3,7 +3,7 @@ import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { buildFixPrompt } from '../lib/fixError'
 import { isPlausibleFilePath } from '../lib/filePaths'
-import { useFileViewerStore } from './fileViewer'
+import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
   isRestartDrainMessage,
@@ -11,6 +11,7 @@ import {
   restartMessageForDisplay,
 } from '../lib/serverRestart'
 import { errorMessage } from '../lib/errorMessage'
+import { applyKeyboardSettings } from '../composables/useKeyboardSettings'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
@@ -20,10 +21,13 @@ import type {
   ArchivedWorkspacesResponse,
   ProjectInfo,
   ChatInfo,
+  ChatPinState,
   ChatPostprocess,
   ChatMessage,
   RunningSubagent,
   RunningSubagentsResponse,
+  BackgroundRunLog,
+  BackgroundRunSummary,
   SubagentTranscript,
   WsEvent,
   EventsWsMessage,
@@ -67,7 +71,7 @@ import {
   type ActiveQuestion,
   type CapabilityQuestion,
 } from '../lib/chatQuestions'
-import { createChatAnnotations, type PreparedMessage } from './chatAnnotations'
+import { ChatPinConflict, createChatAnnotations, type PreparedMessage } from './chatAnnotations'
 
 // Moved to focused modules; re-exported so importers of this store keep
 // resolving them. `lib/chatWs.ts` owns the reconnect policy and
@@ -83,6 +87,9 @@ export { setListIndex } from '../lib/safeList'
 // tell an abandoned draft from a chat the user deliberately named.
 const DEFAULT_CHAT_TITLE = 'New Chat'
 
+// How long the composer says how a background run ended before the line goes.
+const FINISHED_RUN_NOTICE_MS = 6000
+
 export const useProjectStore = defineStore('projects', () => {
   const projects = ref<ProjectInfo[]>([])
   const chats = ref<ChatInfo[]>([])
@@ -92,9 +99,24 @@ export const useProjectStore = defineStore('projects', () => {
   ])
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
+  // App-wide read of the active workspace's delegated tasks: the sidebar's
+  // review count and Home's "needs you" tier. Re-read on boot, on a workspace
+  // switch, on every events snapshot (connect and reconnect) and whenever the
+  // engine says the active workspace's board moved (`tasks_changed`).
+  const taskSignals = useTaskSignalsStore()
+  function reloadTaskSignals(): void {
+    void taskSignals.reload(activeWorkspace.value)
+  }
   // False until the first fetchAll() resolves. Gates the home empty state so
   // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
+  // Every switch re-reads, whichever path made it (the scope menu, a deep link
+  // into another workspace's chat, a new chat there). Boot reads from
+  // `fetchAll` once the workspace is known, so a value restored from local
+  // storage before then does not fetch a board nobody is looking at.
+  watch(activeWorkspace, () => {
+    if (bootstrapped.value) reloadTaskSignals()
+  })
   const messages = ref<Record<string, ChatMessage[]>>({})
   // History is loaded independently after a chat becomes active. Keep this
   // separate from `messages` so cached text can render immediately while the
@@ -141,7 +163,17 @@ export const useProjectStore = defineStore('projects', () => {
   // localStorage keys that back them. The refs below ARE that module's refs —
   // it is a plain factory, not a second Pinia store — so the names this store
   // returns behave exactly as when they were declared here.
-  const annotations = createChatAnnotations({ activeChatId })
+  //
+  // Chat pins are server-owned: the factory resolves chat-vs-project ownership
+  // from the actual chat rows and routes chat pin writes through a PATCH.
+  const annotations = createChatAnnotations({
+    activeChatId,
+    ownerOf: (id) => (chats.value.some(c => c.chat_id === id) ? 'chat' : 'project'),
+    mutateChatPin: (chatId, path, expectedRevision) => patchChatPin(chatId, path, expectedRevision),
+    notifyPinError: (chatId, message) => {
+      pushErrorToast('Could not update pinned file', message)
+    },
+  })
   const {
     pendingImages,
     pendingComments,
@@ -159,6 +191,11 @@ export const useProjectStore = defineStore('projects', () => {
     pinFile,
     unpinFile,
     pinnedFileFor,
+    applyChatPinState,
+    applyChatPinsSnapshot,
+    dropChatPinState,
+    pruneChatPins,
+    isChatPinPending,
     addPendingChatComment,
     removePendingChatComment,
     clearPendingChatComments,
@@ -210,13 +247,17 @@ export const useProjectStore = defineStore('projects', () => {
   // running" indicator so the user can see work is ongoing during the quiet
   // gap between the turn ending and the agents reporting back.
   const backgroundAgents = ref<Record<string, number>>({})
-  // Per-chat count of live `background_run_start` command runs. Driven by
-  // `chat_background_runs` over /ws/events and re-seeded from the snapshot.
-  // Separate from `backgroundAgents`: a background run has no transcript and
-  // nothing to open, so it gets a count-only indicator. Without it the chat
-  // goes fully idle the moment the turn ends, with nothing saying a command
-  // is still going — the tool is non-blocking by design.
-  const backgroundRuns = ref<Record<string, number>>({})
+  // Per-chat live `background_run_start` command runs, oldest first. Driven
+  // by `chat_background_runs` over /ws/events and re-seeded from the snapshot.
+  // Separate from `backgroundAgents`: a background run has no transcript to
+  // open, only a command, a log and a Stop. Without it the chat goes fully
+  // idle the moment the turn ends, with nothing saying a command is still
+  // going — the tool is non-blocking by design.
+  const backgroundRuns = ref<Record<string, BackgroundRunSummary[]>>({})
+  // The run that most recently ended in each chat, held for a few seconds so
+  // the composer can say how it ended instead of the line just vanishing.
+  const finishedBackgroundRuns = ref<Record<string, BackgroundRunSummary>>({})
+  const finishedRunTimers = new Map<string, ReturnType<typeof setTimeout>>()
   // Full-screen restart overlay while the server drains active chats and
   // relaunches. Driven by /ws/events `server_restarting` (and the same
   // signal on the per-chat socket when a send is rejected mid-drain).
@@ -872,8 +913,8 @@ export const useProjectStore = defineStore('projects', () => {
     backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
-  const activeBackgroundRuns = computed(() =>
-    backgroundRuns.value[activeChatId.value || ''] || 0
+  const activeBackgroundRuns = computed<BackgroundRunSummary[]>(() =>
+    backgroundRuns.value[activeChatId.value || ''] || []
   )
 
   // Paused while the read-only subagent view is open for this chat: that
@@ -973,7 +1014,7 @@ export const useProjectStore = defineStore('projects', () => {
   // gate would poll /api/subagents/running for rows that cannot exist.
   const anyChatBusy = computed(() =>
     anyChatWorking.value
-    || Object.values(backgroundRuns.value).some(n => n > 0),
+    || Object.values(backgroundRuns.value).some(runs => runs.length > 0),
   )
 
   // The server keeps a row "running" until the agent's transcript goes idle,
@@ -1028,7 +1069,9 @@ export const useProjectStore = defineStore('projects', () => {
     // conversation that spawned it.
     return chats.value
       .filter(c => c.project_id === projectId && !c.archived && c.local !== false && !isMemoryPassChat(c))
-      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+      // Newest activity on top, same timestamp as chatActivity() and the
+      // project page. Project drag order stays on workspaceProjects.
+      .sort((a, b) => (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at))
   }
 
   function chatActivity(chat: ChatInfo): string {
@@ -1074,7 +1117,22 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function chatHasBackgroundRuns(chatId: string): boolean {
-    return (backgroundRuns.value[chatId] || 0) > 0
+    return (backgroundRuns.value[chatId]?.length || 0) > 0
+  }
+
+  async function fetchBackgroundRunLog(chatId: string, runId: string): Promise<BackgroundRunLog> {
+    return api.get<BackgroundRunLog>(
+      `/api/chats/${encodeURIComponent(chatId)}/background-runs/${encodeURIComponent(runId)}/log`,
+    )
+  }
+
+  // The row leaves when the finish edge arrives over /ws/events, not here, so
+  // every client drops it at the same moment.
+  async function cancelBackgroundRun(chatId: string, runId: string): Promise<void> {
+    await api.post(
+      `/api/chats/${encodeURIComponent(chatId)}/background-runs/${encodeURIComponent(runId)}/cancel`,
+      {},
+    )
   }
 
   // Subagents this chat has working right now, from /api/subagents/running.
@@ -1265,7 +1323,7 @@ export const useProjectStore = defineStore('projects', () => {
    */
   function chatIsAttentionItem(chat: ChatInfo): boolean {
     if (isMemoryPassChat(chat)) return chatNeedsInput(chat.chat_id)
-    return chatNeedsInput(chat.chat_id) || chatUnread(chat.chat_id) > 0
+    return chatNeedsYou(chat.chat_id) || chatUnread(chat.chat_id) > 0
   }
 
   // Open a fresh chat in the active workspace's auto-managed General project,
@@ -1504,6 +1562,23 @@ export const useProjectStore = defineStore('projects', () => {
     return Boolean(chat?.pending_permission)
   }
 
+  // Whether the user is the one this chat is waiting on: a live question or
+  // permission card (`chatNeedsInput`), or a delegated board task whose agent
+  // stopped for them — it reported needs input or blocked, or ended without a
+  // report. The reply goes in the chat either way, so Home files both under
+  // "Needs you" and both count as attention. Deliberately separate from
+  // `chatNeedsInput`, which drives the question/permission UI and
+  // notifications and must not light up for a task with no card to answer.
+  function chatNeedsYou(chatId: string): boolean {
+    if (chatNeedsInput(chatId)) return true
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (!chat) return false
+    // Only the loaded workspace's tasks are held, and slugs collide across
+    // workspaces: another workspace's chat must not resolve against them.
+    const workspace = projects.value.find(p => p.project_id === chat.project_id)?.workspace
+    return workspace === taskSignals.loadedWorkspace && taskSignals.chatTaskWaitingOnUser(chat)
+  }
+
   // The first outstanding question is useful on the home card, where it can
   // tell the user what needs an answer before they open the chat.
   function chatPendingQuestion(chatId: string): string | null {
@@ -1541,8 +1616,10 @@ export const useProjectStore = defineStore('projects', () => {
       : cached
   }
 
+  // Same question Home asks: a delegated chat whose agent stopped for the
+  // user counts beside the chats with a live question or permission card.
   function projectNeedsInput(projectId: string): number {
-    return projectChats(projectId).filter(c => chatNeedsInput(c.chat_id)).length
+    return projectChats(projectId).filter(c => chatNeedsYou(c.chat_id)).length
   }
 
   function projectUnread(projectId: string): number {
@@ -1658,6 +1735,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (!knownWorkspaceNames.includes(activeWorkspace.value)) {
         activeWorkspace.value = workspaceResponse.active || knownWorkspaceNames[0] || 'personal'
       }
+      reloadTaskSignals()
 
       // Initial active-chat resolution:
       //   1) URL /chat/:chatId represents the user's direct intent on a
@@ -1750,8 +1828,40 @@ export const useProjectStore = defineStore('projects', () => {
     })
   }
 
+  /**
+   * Parked follow-ups live on the chat record once the stream that queued them
+   * has torn down. A non-empty `pending_queue` replaces that chat's chips. An
+   * empty one on an idle chat drops chips that came from a parked list (a
+   * remove on another client). An empty one while the chat is streaming must
+   * not: `start_stream` clears `pending_queue` when it re-seeds the live queue,
+   * and those chips arrive on `queue_state`.
+   */
+  function hydrateParkedQueues(nextChats: ChatInfo[]) {
+    for (const chat of nextChats) {
+      const parked = chat.pending_queue
+      if (!Array.isArray(parked)) continue
+      if (parked.length) {
+        queuedMessages.value[chat.chat_id] = parked.map(entry => ({
+          id: entry.id || makeQueuedId(),
+          text: (entry.text || '').trim(),
+          images: entry.images?.length ? [...entry.images] : undefined,
+        }))
+        continue
+      }
+      if (isChatStreaming(chat.chat_id)) continue
+      delete queuedMessages.value[chat.chat_id]
+    }
+  }
+
   function reconcileChatList(nextChats: ChatInfo[]) {
-    chats.value = applyPendingArchived(nextChats)
+    const applied = applyPendingArchived(nextChats)
+    chats.value = applied
+    hydrateParkedQueues(applied)
+
+    // Hydrate server-owned pin state from every chat payload, and prune any
+    // chat id a pre-#1119 build left in the browser-local pin/dismissal keys.
+    for (const chat of nextChats) applyChatPinFromChatInfo(chat)
+    pruneChatPins(nextChats.map(ch => ch.chat_id))
 
     // Rebase any receipt-time snippet stamps now that the server's real
     // activity times are available (see lastResultSnippetNeedsRebase).
@@ -2246,6 +2356,7 @@ export const useProjectStore = defineStore('projects', () => {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, { title })
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
+    applyChatPinFromChatInfo(c)
   }
 
   async function updateChat(
@@ -2260,6 +2371,7 @@ export const useProjectStore = defineStore('projects', () => {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
+    applyChatPinFromChatInfo(c)
   }
 
   async function handoverChat(
@@ -2303,6 +2415,7 @@ export const useProjectStore = defineStore('projects', () => {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, { project_id: targetProjectId })
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
+    applyChatPinFromChatInfo(c)
     return c
   }
 
@@ -2414,10 +2527,29 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function leaveChatView(wasActive: boolean): Promise<void> {
     if (!wasActive) return
-    activeChatId.value = null
-    persistState()
+    clearActiveChatView()
     const { router } = await import('../router')
     await router.push('/')
+  }
+
+  // A view change, not a request to delete or archive anything. Home clears the
+  // *view* through this: the chat, its draft, its staged attachments, its pin
+  // and any running turn are all untouched, the conversation is still in the
+  // list, and nothing is pushed onto the router. Only the per-chat socket goes
+  // away, because there is no longer a pane for it to stream into; the global
+  // awareness socket stays connected so the other chats keep reporting.
+  //
+  // closeChat() owns the destructive policy and stays the only path that
+  // deletes an empty draft: an explicit Close (or Escape on a chat route) is a
+  // request to discard that draft, while landing on Home is not. Reusing
+  // closeChat() here is what used to make a plain navigation delete a chat the
+  // user never closed.
+  function clearActiveChatView(): void {
+    const chatId = activeChatId.value
+    if (!chatId) return
+    disconnectWs(chatId)
+    activeChatId.value = null
+    persistState()
   }
 
   async function archiveChat(chatId: string) {
@@ -2529,6 +2661,51 @@ export const useProjectStore = defineStore('projects', () => {
     const idx = chats.value.findIndex(x => x.chat_id === chat.chat_id)
     if (idx >= 0) chats.value[idx] = chat
     else chats.value.push(chat)
+    applyChatPinFromChatInfo(chat)
+    hydrateParkedQueues([chat])
+  }
+
+  function chatPinStateFromChat(chat: ChatInfo): ChatPinState {
+    return {
+      path: chat.pinned_file_path ?? '',
+      dismissed_paths: chat.dismissed_pin_paths ?? [],
+      revision: chat.pin_revision ?? 0,
+    }
+  }
+
+  // Hydrate the server-owned pin state from one ChatInfo payload. Skips when
+  // the payload carries no pin revision (a chat predating the feature, or a
+  // payload that simply never had the fields). The revision guard inside
+  // `applyChatPinState` keeps a GET that raced a newer event from rolling back.
+  function applyChatPinFromChatInfo(chat: ChatInfo): void {
+    if (typeof chat.pin_revision !== 'number') return
+    applyChatPinState(chat.chat_id, chatPinStateFromChat(chat), { source: 'chat-payload' })
+  }
+
+  interface PinConflictPayload { error?: string; pin?: ChatPinState }
+
+  // The PATCH behind a manual chat pin/unpin. `path === ''` closes the current
+  // pin. Success returns the full `ChatInfo`; a stale revision throws a
+  // `ChatPinConflict` carrying the 409 body's `pin` (server truth) so the caller
+  // applies it without resubmitting.
+  async function patchChatPin(
+    chatId: string,
+    path: string,
+    expectedRevision: number,
+  ): Promise<ChatPinState> {
+    try {
+      const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, {
+        pin: { path, expected_revision: expectedRevision },
+      })
+      replaceChat(c)
+      return chatPinStateFromChat(c)
+    } catch (e) {
+      const err = e as { status?: number; payload?: PinConflictPayload }
+      if (err?.status === 409 && err.payload?.error === 'pin_revision_conflict' && err.payload.pin) {
+        throw new ChatPinConflict(err.payload.pin)
+      }
+      throw e
+    }
   }
 
   async function newSession(chatId: string) {
@@ -2538,6 +2715,7 @@ export const useProjectStore = defineStore('projects', () => {
     pendingArchived.value.delete(chatId)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
+    applyChatPinFromChatInfo(c)
     messages.value[chatId] = []
     persistMessages()
     // Reconnect WebSocket for fresh session
@@ -3884,6 +4062,13 @@ export const useProjectStore = defineStore('projects', () => {
   function handleEventsMessage(msg: EventsWsMessage) {
     switch (msg.type) {
       case 'snapshot': {
+        if (msg.keyboard_shortcuts || msg.keyboard_send_mode) {
+          applyKeyboardSettings({
+            keyboard_shortcuts: msg.keyboard_shortcuts,
+            keyboard_send_mode: msg.keyboard_send_mode,
+            revision: msg.keyboard_revision,
+          })
+        }
         // Reset broker-streaming state to match server truth.
         projectStreaming.value = {}
         for (const entry of msg.active_streams) {
@@ -3900,6 +4085,10 @@ export const useProjectStore = defineStore('projects', () => {
         // over — the runner resolves them as orphans — so an empty map after
         // one is the truth, not a gap.)
         backgroundRuns.value = { ...(msg.background_runs || {}) }
+        // Authoritative per-chat pin state for every persisted chat (including
+        // closed/archived), so a client that missed a pin/unpin while its socket
+        // was down heals to server truth instead of writing stale browser state.
+        applyChatPinsSnapshot(msg.chat_pins)
         if (msg.restarting) {
           beginServerRestart()
         }
@@ -3913,8 +4102,14 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeForSnap && streaming.value[activeForSnap] && !projectStreaming.value[activeForSnap]) {
           void reconcileAfterResult(activeForSnap)
         }
+        // A `tasks_changed` published while the socket was down is gone (the
+        // hub keeps no replay), so every (re)connect re-reads the board.
+        if (bootstrapped.value) reloadTaskSignals()
         break
       }
+      case 'keyboard_settings_changed':
+        applyKeyboardSettings(msg)
+        break
       case 'server_restarting':
         beginServerRestart(msg.message)
         break
@@ -4030,13 +4225,22 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'chat_background_runs': {
-        // Count-only: there is no transcript to pull and no agent row to
-        // refresh, unlike `chat_subagents_ready`. The finishing run delivers
-        // its own wake turn, which arrives as a normal chat result.
-        if (msg.running > 0) {
-          backgroundRuns.value[msg.chat_id] = msg.running
+        // No transcript to pull and no agent row to refresh, unlike
+        // `chat_subagents_ready`. The finishing run delivers its own wake
+        // turn, which arrives as a normal chat result.
+        if (msg.runs?.length) {
+          backgroundRuns.value[msg.chat_id] = msg.runs
         } else {
           delete backgroundRuns.value[msg.chat_id]
+        }
+        if (msg.finished) {
+          const chatId = msg.chat_id
+          finishedBackgroundRuns.value[chatId] = msg.finished
+          clearTimeout(finishedRunTimers.get(chatId))
+          finishedRunTimers.set(chatId, setTimeout(() => {
+            delete finishedBackgroundRuns.value[chatId]
+            finishedRunTimers.delete(chatId)
+          }, FINISHED_RUN_NOTICE_MS))
         }
         break
       }
@@ -4161,6 +4365,18 @@ export const useProjectStore = defineStore('projects', () => {
         if (chat) chat.postprocess = msg.postprocess || null
         break
       }
+      case 'chat_pin_changed': {
+        // A pin/replace/unpin happened on another device. Apply server truth and
+        // nothing else: this must not select or navigate the chat, mark it read,
+        // stop a stream, or emit any mutation (the revision guard dedups an event
+        // that echoes a write this client itself just acknowledged).
+        applyChatPinState(msg.chat_id, {
+          path: msg.path,
+          dismissed_paths: msg.dismissed_paths,
+          revision: msg.revision,
+        }, { source: 'event' })
+        break
+      }
       case 'chat_deleted': {
         // Fires when the server prunes an empty chat (user created a "New
         // Chat" and never sent a message, then moved on) or when another
@@ -4170,6 +4386,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeChatId.value === msg.chat_id) {
           activeChatId.value = null
         }
+        dropChatPinState(msg.chat_id)
         if (messages.value[msg.chat_id]) delete messages.value[msg.chat_id]
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
@@ -4228,6 +4445,14 @@ export const useProjectStore = defineStore('projects', () => {
         // Refetch the registry so the sidebar and pickers stop offering it
         // (or show it again) without a reload.
         scheduleWorkspacesRefetch()
+        break
+      }
+      case 'tasks_changed': {
+        // A task or one of its attempts moved: created, edited, delegated,
+        // stopped, or a delegated turn settled (needs you, ready for review).
+        // Only the active workspace's tasks are held, so another one's change
+        // has nothing to refresh here.
+        if (msg.workspace === activeWorkspace.value) reloadTaskSignals()
         break
       }
       case 'schedules_changed': {
@@ -5004,50 +5229,11 @@ export const useProjectStore = defineStore('projects', () => {
     })
   }
 
-  // Show a file the agent deliberately surfaced via the `file_surface` MCP
-  // tool (action === 'surfaced'). Ordinary Write/Edit touches only ever get an
-  // inline card: this used to be guessed at by extension (.md/.csv) plus a
-  // bookkeeping skip-list, which both missed real deliverables and fired on
-  // noisy writes. An explicit tool call is a genuine signal; an extension is not.
-  //
-  // Because the call is explicit, it outranks whatever is currently pinned and
-  // replaces it. The only thing it respects is a dismissal of the *same* path
-  // (see dismissedAutoPins): the user closed that file, and a WS reconnect
-  // replaying the stream buffer must not shove it back. On a narrow viewport
-  // there is no split panel, so open the viewer modal instead of dropping the
-  // request on the floor. localStorage-backed like every other pin.
-  function _applySurfaceRequests(
-    chatId: string,
-    touches: Array<{ file_path?: string; action?: string }>,
-  ): void {
-    if (typeof window === 'undefined') return
-    // Freshest surfaced artifact wins (last touch in the batch).
-    for (let i = touches.length - 1; i >= 0; i--) {
-      const touch = touches[i]
-      if (touch?.action !== 'surfaced') continue
-      const raw = touch.file_path
-      if (!raw || !isPlausibleFilePath(raw)) continue
-      if (annotations.isAutoPinDismissed(chatId, raw)) return
-      if (pinnedFileFor(chatId) === raw) return
-      if (window.innerWidth <= 768) {
-        _openSurfacedInViewer(raw, chatId)
-        return
-      }
-      pinFile(chatId, raw)
-      return
-    }
-  }
-
-  // Mobile fallback for an explicit surface. Never interrupts: an already-open
-  // viewer (the user may be mid-edit there) keeps whatever it is showing, and
-  // the inline file card stays as the way in.
-  function _openSurfacedInViewer(path: string, chatId: string): void {
-    try {
-      const viewer = useFileViewerStore()
-      if (viewer.isOpen) return
-      void viewer.open(path, null, chatId)
-    } catch { /* store unavailable outside an app context */ }
-  }
+  // The `file_surface` MCP tool is the engine's durable surface-intent writer:
+  // it records the pin server-side, and the browser learns about it through the
+  // `chat_pin_changed` event / snapshot, never by re-deriving a pin from replayed
+  // `tool_use` touches. Ordinary Write/Edit touches still get an inline card
+  // (`_pushFileCard`), but no client-side pin mutation or auto-open remains here.
 
   function _flushTimeline(chatId: string): StreamEntry[] {
     const entries = streamingTimeline.value[chatId] || []
@@ -5308,7 +5494,6 @@ export const useProjectStore = defineStore('projects', () => {
               tool_use_id: event.tool_use_id,
             })
           }
-          _applySurfaceRequests(chatId, touches)
           break
         }
 
@@ -5742,13 +5927,13 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, backgroundAgents, backgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
-    chatUnread, chatNeedsInput, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
-    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
+    chatUnread, chatNeedsInput, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
@@ -5759,7 +5944,7 @@ export const useProjectStore = defineStore('projects', () => {
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
-    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
@@ -5769,7 +5954,7 @@ export const useProjectStore = defineStore('projects', () => {
     addPendingChatCommentImage, removePendingChatCommentImage,
     addFileCommentImage, removeFileCommentImage,
     fileCommentsFor, removeFileComment, updateFileComment,
-    pinFile, unpinFile, pinnedFileFor,
+    pinFile, unpinFile, pinnedFileFor, applyChatPinState, applyChatPinsSnapshot, dropChatPinState, pruneChatPins, isChatPinPending,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,

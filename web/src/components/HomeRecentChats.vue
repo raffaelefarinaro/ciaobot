@@ -87,13 +87,14 @@
                       class="home-chat-title"
                       :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
+                    <span v-if="taskSignals.isDelegatedChat(chat)" class="home-chat-task">task</span>
                   </span>
                   <!-- Project plus a status phrase read from the same signals
                        that sorted the row into its tier, so the sub-line can
                        never claim more than the tier heading above it. -->
                   <span class="home-chat-meta">
                     <span v-if="store.projectFor(chat.chat_id)?.name" class="home-chat-project">{{ store.projectFor(chat.chat_id)?.name }}</span>
-                    <span class="home-chat-status">{{ tierPhrase(entry.key) }}</span>
+                    <span class="home-chat-status">{{ statusPhrase(entry.key, chat) }}</span>
                     <span v-if="chat.local === false" class="remote-chip">remote</span>
                   </span>
                   <span v-if="entry.key === 'needsYou' && store.chatPendingQuestion(chat.chat_id)" class="home-chat-question">
@@ -183,6 +184,7 @@ import { activeInsightSummary, type MemoryInsight } from '../lib/memoryInsights'
 import { formatRelative } from '../lib/relativeTime'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
 
 type NewWorkspaceChatAction = { workspace: string; projectId: string; isCreating: boolean }
@@ -193,6 +195,7 @@ const emit = defineEmits<{
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
+const taskSignals = useTaskSignalsStore()
 // A pass is no longer a chat row, so the memory-insight rail is the only thing
 // left that says memory work is happening. Without it a workspace whose only
 // activity is a running pass would read as empty.
@@ -329,7 +332,7 @@ function makeLane(
     projects: projectsFor(workspace),
     tiers: groupHomeTiers(
       chats,
-      chatId => store.chatNeedsInput(chatId),
+      chatId => store.chatNeedsYou(chatId),
       chatId => store.chatIsWorking(chatId),
       chatId => store.chatUnread(chatId) > 0,
     ),
@@ -460,6 +463,27 @@ function tierPhrase(tier: HomeTierKey): string {
   if (tier === 'working') return 'agent is working'
   if (tier === 'unread') return 'new reply'
   return 'no new activity'
+}
+
+// A delegated chat's sub-line names where its task stands, in the board's
+// own words, rather than the generic tier phrase. Its tier is unchanged:
+// the phrase says why the row sits where it does, never more.
+function statusPhrase(tier: HomeTierKey, chat: ChatInfo): string {
+  // A live question or permission card is what files the row under Needs you,
+  // whatever the attempt says (a running turn that raised an approval card).
+  if (tier === 'needsYou' && store.chatNeedsInput(chat.chat_id)) return tierPhrase(tier)
+  const task = taskSignals.taskForChat(chat)
+  // A chat from an earlier attempt does not speak for the newer one.
+  if (task && taskSignals.chatHoldsTask(chat, task)) {
+    if (taskSignals.isWaitingOnUser(task)) {
+      if (task.attempt_outcome === 'needs_input') return 'needs input'
+      if (task.attempt_outcome === 'blocked') return 'blocked'
+      return 'waiting on you'
+    }
+    if (taskSignals.isAwaitingReview(task)) return 'ready for review'
+    if (tier === 'working' || task.attempt_state === 'running') return 'working'
+  }
+  return tierPhrase(tier)
 }
 
 function relativeActivity(chat: ChatInfo): string {
@@ -1140,6 +1164,23 @@ defineExpose({ onArrow })
 .home-chat-status {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.home-chat-heading:has(.home-chat-task) .home-chat-title { flex: 0 1 auto; }
+
+/* The sidebar's task tag (ProjectSidebar `.chat-task-tag`): a squared mono
+   word after the title, never colour. */
+.home-chat-task {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font: 600 calc(10px * var(--font-scale))/1 var(--font-mono);
 }
 
 .home-chat-project + .home-chat-status::before {

@@ -166,6 +166,16 @@ H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 # built from the native separator came out as `a\b.md` on Windows.
 KEY_SEPARATOR = "/"
 
+# The one spelling `_is_reserved_key` has to recognise in a key's parent
+# directory, derived from the shared rule so this walk cannot drift from it. A
+# substring test rather than a suffix one: it has to also cover a top-level
+# `Workspace/Tasks/` (no leading separator) and may over-match, which only
+# costs a `Path` construction the predicate then settles. The gate is therefore
+# a strict superset of `is_reserved_bookkeeping` by construction and decides
+# nothing on its own — keep it that way, or the walk could start rejecting rows
+# the predicate would accept.
+_TASK_RECORDS_PARENT_KEY = KEY_SEPARATOR.join(vault_index.TASK_RECORDS_PARENT_PARTS)
+
 # Every stored key is a path relative to the key base, so no key can begin with
 # a separator: this prefix matches no row. It is the fail-closed answer for a
 # vault whose rows have no identifying prefix, where the alternative ("" — match
@@ -397,7 +407,7 @@ def _scope_prefix(root_dir: Path, base: Path) -> str | None:
     under the base, so no prefix describes its rows and callers must fail closed
     rather than read the empty prefix as "everything".
 
-    That case is a supported layout, not a corrupt one: ``CIAO_VAULT_MODE=existing``
+    That case is a supported layout, not a corrupt one: existing-folder setup
     with an absolute vault root points a workspace at a vault outside the
     install, while ``path_base`` stays the install root. Compared against
     ``base`` exactly as the key-writing loop does — unresolved — so the scope can
@@ -413,13 +423,19 @@ def _scope_prefix(root_dir: Path, base: Path) -> str | None:
 def _is_reserved_key(root_rel: str) -> bool:
     """``vault_index.is_reserved_bookkeeping`` for a root-relative key string.
 
-    Gated on the filename first. The real check builds a ``Path`` to read its
-    parts, and doing that for every note in the vault on every search was pure
-    overhead: the predicate can only be true for the handful of reserved names,
-    so the set lookup decides it for everything else.
+    Gated on cheap string tests first. The real check builds a ``Path`` to read
+    its parts, and doing that for every note in the vault on every search was
+    pure overhead: the predicate can only be true for the handful of reserved
+    names and for a file directly under ``Workspace/Tasks/`` (the task board's
+    own records, #973-B2, named by id rather than by a reserved basename). Both
+    gates are deliberately wider than the rule — the shared predicate still
+    decides every path that reaches it, so neither can fork the second rule.
     """
-    name = root_rel.rpartition(KEY_SEPARATOR)[2]
-    if name.casefold() not in RESERVED_UNINDEXED_FILES:
+    parent, _, name = root_rel.rpartition(KEY_SEPARATOR)
+    if (
+        name.casefold() not in RESERVED_UNINDEXED_FILES
+        and _TASK_RECORDS_PARENT_KEY not in parent.casefold()
+    ):
         return False
     return _is_reserved_bookkeeping(Path(root_rel))
 
@@ -559,7 +575,7 @@ def _index_directory(
         # Nothing identifies this pass's rows (the indexed directory is outside
         # the key base), so pruning would have to guess. The old code guessed
         # "everything": the empty prefix put every row in scope, and one pass
-        # over a vault outside the install — CIAO_VAULT_MODE=existing with an
+        # over a vault outside the install — existing-folder setup with an
         # absolute root — deleted every OTHER agent root's rows. Keeping rows
         # for notes deleted from this vault is the strictly smaller error: they
         # are stale search hits until a pass that can be scoped runs, whereas

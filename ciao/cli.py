@@ -15,16 +15,26 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import asdict, replace
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
 from ciao import dev, gws_wrapper, package_smoke, public_release, release, service_backend
+from ciao.server_host import (
+    EXIT_TIMEOUT_SECONDS,
+    HostOwnership,
+    ServerHostError,
+    default_bundle_path,
+    host_service_argv,
+    verify_owned_host,
+)
+from ciao.setup_marker import RUNTIME_DIR_NAME
 from ciao.setup_status import detect_nested_workspaces
-from ciao.macos_service import default_launch_agents_dir
+from ciao.macos_service import default_launch_agents_dir, hosted_service_python
 from ciao.jsonio import write_private_text
 from ciao.os_support.console import use_utf8_stdio
 from ciao.git_proc import EXACT_BYTES
@@ -131,13 +141,10 @@ def _import_legacy_workspaces_for_setup(root: Path, existing_env: dict[str, str]
     """
     from ciao.config import CiaoConfig
 
-    runtime = Path(existing_env.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime").expanduser()
-    if not runtime.is_absolute():
-        runtime = root / runtime
     source = {
         **existing_env,
         "CIAO_WORKSPACE": str(root),
-        "CIAO_RUNTIME_ROOT": str(runtime.resolve()),
+        "CIAO_RUNTIME_ROOT": str((root / RUNTIME_DIR_NAME).resolve()),
         "PWA_AUTH_TOKEN": existing_env.get("PWA_AUTH_TOKEN") or "setup",
     }
     CiaoConfig.from_env(source).import_legacy_workspaces_env()
@@ -149,15 +156,53 @@ def _write_if_missing(path: Path, text: str) -> None:
         path.write_text(text, encoding="utf-8", newline="")
 
 
-def _launchd_program_arguments(executable: str) -> str:
-    """Render the arguments needed to start either a ciao launcher or Python."""
+def _host_service_arguments(
+    host: HostOwnership, python: str | None
+) -> tuple[str, ...]:
+    """The exact hosted argv for a verified host, or an actionable refusal.
+
+    ``host`` must be a :class:`ciao.server_host.HostOwnership` returned by
+    :func:`ciao.server_host.verify_owned_host` — the rendered command is built
+    from that canonical ``bundle_path``, never from a raw caller path, because
+    :func:`host_service_argv` can see names but not the bytes behind them.
+
+    ``python`` is the interpreter the host will run. A host cannot serve the
+    ``ciao`` console entry point (its own parser demands a python executable),
+    so a basename that is not ``python``/``python3``/``python3.N`` — or a
+    missing interpreter — is refused here with the reason, rather than being
+    written into launchd to fail at the next sign-in.
+    """
+    if python is None:
+        raise ValueError(
+            "cannot render the Ciaobot Server host service: a verified host "
+            "needs the interpreter it will serve. Pass the absolute python "
+            "the host runs, not the ciao console entry point."
+        )
+    try:
+        return host_service_argv(
+            PurePosixPath(host.bundle_path), PurePosixPath(python)
+        )
+    except ServerHostError as exc:
+        raise ValueError(
+            f"cannot render the Ciaobot Server host service: {exc}"
+        ) from exc
+
+
+def _direct_service_arguments(executable: str) -> tuple[str, ...]:
+    """The direct argv tail: ``-m ciao.cli run`` for a python, ``run`` otherwise."""
 
     name = Path(executable).name.lower()
-    arguments = (
-        ["-m", "ciao.cli", "run"]
-        if name == "python" or name.startswith("python3")
-        else ["run"]
-    )
+    if name == "python" or name.startswith("python3"):
+        return ("-m", "ciao.cli", "run")
+    return ("run",)
+
+
+def _launchd_program_arguments(arguments: tuple[str, ...]) -> str:
+    """Render the argv tail (everything after argv[0]) as ``<string>`` lines.
+
+    argv[0] is substituted into ``{{CIAO_EXECUTABLE}}`` by the caller.
+    """
+
     return "\n".join(
         f"        <string>{html.escape(argument, quote=False)}</string>"
         for argument in arguments
@@ -173,8 +218,28 @@ def _render_launchd_plist(
     port: int,
     path: str = "",
     template_name: str = "com.ciao.server.plist.tmpl",
+    host: HostOwnership | None = None,
+    host_python: str | None = None,
 ) -> str:
-    executable = engine_path or python_path or sys.executable
+    """Render the server LaunchAgent plist.
+
+    The default direct shape is byte-identical to before: ``python_path`` /
+    ``engine_path`` name the program and the arguments follow the launcher
+    name. When ``host`` is given — a snapshot from
+    ``ciao.server_host.verify_owned_host``, the only proof the bytes are ours —
+    the program becomes the native ``CiaobotServerHost`` running
+    ``serve --python <host_python>`` and the job gains ``ExitTimeOut``
+    ``EXIT_TIMEOUT_SECONDS`` (45 s), so launchd never sweeps the job group out
+    from under the host's own 35 s stop grace. The caller supplying ``host`` in
+    production is the installer (child E); nothing here invents a host.
+    """
+
+    if host is not None:
+        host_argv = _host_service_arguments(host, host_python)
+        executable, arguments = host_argv[0], host_argv[1:]
+    else:
+        executable = engine_path or python_path or sys.executable
+        arguments = _direct_service_arguments(executable)
     template = resources.files("ciao.stock").joinpath(
         "deploy", template_name
     ).read_text(encoding="utf-8")
@@ -187,12 +252,22 @@ def _render_launchd_plist(
             str((runtime_root or (workspace / ".runtime")).resolve()), quote=False
         ),
         "{{CIAO_EXECUTABLE}}": html.escape(executable, quote=False),
-        "{{LAUNCHD_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(executable),
+        "{{LAUNCHD_PROGRAM_ARGUMENTS}}": _launchd_program_arguments(arguments),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
         "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
     }
     for key, value in replacements.items():
         template = template.replace(key, value)
+    if host is not None:
+        # The template has no ExitTimeOut placeholder: a bare direct
+        # definition never has one, and only a hosted definition must exceed
+        # the host's stop grace. Insert it as the last key of the job dict.
+        exit_timeout = (
+            "    <key>ExitTimeOut</key>\n"
+            f"    <integer>{EXIT_TIMEOUT_SECONDS}</integer>\n"
+        )
+        head, marker, tail = template.rpartition("</dict>")
+        template = f"{head}{exit_timeout}{marker}{tail}"
     return template
 
 
@@ -207,6 +282,8 @@ def _write_launchd_plist(
     path: str = "",
     plist_name: str = "com.ciao.server.plist",
     confirm_repoint: bool = False,
+    host: HostOwnership | None = None,
+    host_python: str | None = None,
 ) -> Path:
     if not confirm_repoint:
         allow_env = os.environ.get("CIAO_ALLOW_LAUNCH_AGENT_REPOINT", "").strip().lower() in (
@@ -244,10 +321,104 @@ def _write_launchd_plist(
             port=port,
             path=path,
             template_name=f"{plist_name}.tmpl",
+            host=host,
+            host_python=host_python,
             ),
         encoding="utf-8", newline="",
     )
     return plist
+
+
+def _verified_host_if_installed() -> HostOwnership | None:
+    """This machine's verified server host, or ``None`` when there is none.
+
+    The one decision setup and registration make about activating the native
+    host: only a snapshot from :func:`ciao.server_host.verify_owned_host` —
+    which reads the owner-only record and proves the installed
+    ``Ciaobot Server.app`` bytes against it — selects the hosted service. A
+    missing record, a foreign or tampered bundle and every non-macOS platform
+    read as "no host", so the current direct shape is written instead. Nothing
+    here writes, signs, launches or starts anything, and no path renders a host
+    without that proof: verification is not inferred from a filename.
+
+    The bundle is :func:`ciao.server_host.default_bundle_path`, which is exactly
+    where the E1 installer installs and records the host, so the path the
+    installer used is the one verified.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        return verify_owned_host(default_bundle_path())
+    except (ServerHostError, OSError):
+        return None
+
+
+def _host_engine_interpreter(resolved_engine: str) -> str:
+    """The python a selected host must serve, from the direct path's program.
+
+    The direct shape writes ``resolved_engine`` as its program: the engine
+    interpreter itself when setup was handed one, or the ``ciao`` console the
+    release installer passes as ``--python``. A host cannot serve that console
+    — its own parser demands a python executable — so the console resolves to
+    this process's interpreter, which is the engine interpreter behind it when
+    setup runs from the installed ``ciao``. Anything else is passed through
+    untouched, so :func:`_host_service_arguments` refuses it with the reason
+    instead of a made-up interpreter being written into launchd.
+    """
+    if Path(resolved_engine).name.lower() == "ciao":
+        return sys.executable
+    return resolved_engine
+
+
+def _hosted_definition_program(data: dict[str, Any]) -> str | None:
+    """argv[0] of a strict hosted definition in *data*, or ``None``.
+
+    Recognition only: the hosted shape is confirmed through
+    :func:`ciao.macos_service.hosted_service_python`, the one recognizer B2
+    shares across consumers, and then argv[0] — the host executable — is read
+    off the same argv so a caller can ask whether it still exists. A direct,
+    legacy, unknown or malformed argv answers ``None`` and never raises.
+    """
+    arguments = data.get("ProgramArguments")
+    if hosted_service_python(arguments) is None:
+        return None
+    if not isinstance(arguments, (list, tuple)) or not arguments:
+        return None
+    program = arguments[0]
+    return program if isinstance(program, str) else None
+
+
+def _existing_hosted_definition_serves(launch_agents_dir: Path, workspace: Path) -> bool:
+    """Whether the installed definition is hosted, live and serves *workspace*.
+
+    The preservation half of activation. When no verified host is selected this
+    run, re-rendering would silently downgrade a live hosted job to the direct
+    shape, so the existing ``com.ciao.server.plist`` is read back first. Only a
+    definition that parses as the strict hosted shape, names the requested
+    workspace, **and** still names a host executable that exists as a regular
+    file is preserved; a missing, unreadable, direct, unknown/legacy,
+    other-workspace or dead definition answers ``False``.
+
+    The existence check is the narrow guard that gives a dead definition a
+    repair path: if the ``Ciaobot Server.app`` was deleted or moved, keeping the
+    hosted plist would leave launchd a job it cannot run and the documented
+    ``ciao setup && ciao service start`` could never write the working direct
+    shape. Requiring existence (and nothing stronger — no record, no native
+    probe) keeps a live hosted definition byte-for-byte. Recognition never
+    raises. Non-macOS platforms never have a hosted definition, so the check is
+    skipped there and their offline export stays byte-identical to before.
+    """
+    if sys.platform != "darwin":
+        return False
+    data = _load_server_plist(launch_agents_dir)
+    if data is None:
+        return False
+    program = _hosted_definition_program(data)
+    if program is None:
+        return False
+    if _plist_data_workspace(data) != workspace:
+        return False
+    return Path(program).is_file()
 
 
 def _setup_token_path(workspace: Path) -> Path:
@@ -301,18 +472,26 @@ def _pwa_port_from_env(workspace: Path, fallback: int) -> int:
 
 
 def _path_export_hint() -> str | None:
-    """A shell line that puts the interpreter's bin dir on PATH, or
+    """A shell line that puts the directory holding ``ciao`` on PATH, or
     ``None`` when it is already on PATH.
 
-    Ciaobot installs into a standalone venv (``~/.ciaobot-venv``) that is not
-    added to PATH, so ``ciao`` is normally invoked by absolute path. Shell
-    users who want to type ``ciao`` need this hint.
+    An installer engine's ``ciao`` is the launcher the receipt names, in uv's
+    bin dir (``~/.local/bin``), which the installer puts on PATH; the uv tool
+    env's own bin dir is never on PATH, so hinting at it told every installed
+    user to add a directory they do not need. Without a receipt (a checkout's
+    venv) the entry point sits next to the interpreter.
     """
 
+    from ciao import install_receipt
+
+    receipt = install_receipt.running_receipt()
     # Not .resolve(): a venv's bin/python is a symlink to the base interpreter,
     # and resolving it would report the base interpreter's bin dir instead of
     # the venv's own bin/ where the `ciao` entry point actually lives.
-    bin_dir = Path(sys.executable).parent
+    if receipt is not None and receipt.executable:
+        bin_dir = Path(receipt.executable).parent
+    else:
+        bin_dir = Path(sys.executable).parent
     entries = {
         str(Path(p).expanduser())
         for p in os.environ.get("PATH", "").split(os.pathsep)
@@ -339,7 +518,7 @@ def _print_setup_summary(workspace: Path, port: int) -> None:
     print(f"Open Ciaobot: {url}")
     hint = _path_export_hint()
     if hint is not None:
-        print("To run `ciao` from a shell, add its venv to PATH:")
+        print("To run `ciao` from a shell, add its directory to PATH:")
         print(f"  {hint}")
         # Only alongside the line it qualifies: with the bin dir already on PATH
         # there is nothing to change and nothing to wait for.
@@ -809,7 +988,6 @@ def setup_workspace(
     workspace: Path | str,
     *,
     auth_token: str | None = None,
-    auth_required: bool = True,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
     workspace_name: str | None = None,
@@ -906,6 +1084,9 @@ def setup_workspace(
         # vault_root / disallowed_tools / allowlist for the same name. Import
         # the variable first so the registry setup sees is the real one.
         _import_legacy_workspaces_for_setup(root, existing_env)
+    # No registry yet means this folder has never been set up, even when it
+    # already holds a `.env` of its own (a notes folder or a project checkout).
+    first_setup = not workspaces_registry.exists()
     registered_vaults = _setup_registry_vaults(
         workspaces_registry,
         workspace_root=root,
@@ -914,35 +1095,25 @@ def setup_workspace(
     name = requested_name or "personal"
 
     token = auth_token or secrets.token_urlsafe(32)
-    # Always pin PWA_AUTH_REQUIRED: an unset value is read as "protect when a
-    # token exists" (see CiaoConfig.from_env), and a setup that deliberately
-    # opted out must survive that default.
     desired_env: list[tuple[str, str]] = [
         ("PWA_AUTH_TOKEN", token),
-        ("PWA_AUTH_REQUIRED", "true" if auth_required else "false"),
     ]
+    # CIAO_WORKSPACE and CIAO_RUNTIME_ROOT are not written: the service
+    # definition carries both, and a `ciao run` started inside the workspace
+    # finds it through its registry (see `CiaoConfig.from_env`).
+    # Nor CIAO_VAULT_MODE: only the first-run onboarding chat reads it, so it
+    # is recorded in the setup marker below.
     desired_env.extend([
-        ("CIAO_WORKSPACE", "."),
         ("CIAO_VAULT_ROOT", vault_value),
-        ("CIAO_VAULT_MODE", vault_mode),
-        ("CIAO_RUNTIME_ROOT", ".runtime"),
         ("PWA_PORT", str(port)),
     ])
-    if not existing_env and not env_path.exists():
+    fresh_env = not existing_env and not env_path.exists()
+    if fresh_env:
         # The password is in here in clear text: owner-only from creation.
         write_private_text(
             env_path, "\n".join(f"{key}={value}" for key, value in desired_env) + "\n"
         )
         written.append(env_path)
-        # First-time setup: stamp when this workspace was provisioned so the
-        # post-setup restart can hold system-routine catch-up for a grace
-        # period. The onboarding chat should be the first thing a new user
-        # sees, not four parallel routine chats replaying missed runs.
-        from ciao.setup_marker import write_setup_marker
-
-        written.append(
-            write_setup_marker(root / ".runtime")
-        )
     else:
         # Merge into the user's file: keep every existing line untouched
         # (values, comments, unknown variables) and append only the Ciaobot
@@ -964,11 +1135,21 @@ def setup_workspace(
                 encoding="utf-8", newline="",
             )
             written.append(env_path)
+    if first_setup or fresh_env:
+        # First-time setup: stamp when this workspace was provisioned so the
+        # post-setup restart can hold system-routine catch-up for a grace
+        # period. The onboarding chat should be the first thing a new user
+        # sees, not four parallel routine chats replaying missed runs. The
+        # marker also carries the vault mode the onboarding chat reads, so it
+        # is written for a first setup into a folder with a `.env` of its own
+        # too (the merge branch above), not only for a brand-new `.env`.
+        from ciao.setup_marker import write_setup_marker
 
-    runtime_value = existing_env.get("CIAO_RUNTIME_ROOT", "").strip() or ".runtime"
-    runtime_root = Path(runtime_value).expanduser()
-    if not runtime_root.is_absolute():
-        runtime_root = root / runtime_root
+        written.append(
+            write_setup_marker(root / RUNTIME_DIR_NAME, vault_mode=vault_mode)
+        )
+
+    runtime_root = root / RUNTIME_DIR_NAME
 
     # A brand-new install is created in the PER-ROOT layout directly, rather than
     # in the shared one and then migrated. Setup used to scaffold
@@ -1217,8 +1398,8 @@ def setup_workspace(
             # above, through `_registered_service_workspace`.
             #
             # The renderer refuses values the task would only reject at logon:
-            # an interpreter that is not python*.exe, a UNC workspace, a
-            # missing USERNAME. Both setup callers report RuntimeError, so a
+            # an interpreter that is not python*.exe, a UNC workspace, an
+            # unreadable account SID. Both setup callers report RuntimeError, so a
             # bad value is a message and an exit code, never a traceback.
             try:
                 written.append(windows_service.write_task_definition(
@@ -1229,16 +1410,41 @@ def setup_workspace(
             except (ValueError, windows_service.WindowsServiceError) as exc:
                 raise RuntimeError(str(exc)) from exc
         else:
-            written.append(_write_launchd_plist(
-                workspace=root,
-                launch_agents_dir=launch_dir,
-                engine_path=resolved_engine,
-                runtime_root=runtime_root,
-                port=port,
-                path=os.environ.get("PATH", ""),
-                plist_name="com.ciao.server.plist",
-                confirm_repoint=confirm_repoint,
-            ))
+            # Activation (E2): only a verified host selects the native hosted
+            # service; an absent, foreign or unverified host is not claimed and
+            # the direct shape is written. When no host is selected this run but
+            # the installed definition is already hosted and serves this
+            # workspace, it is left exactly as it is: re-rendering would silently
+            # downgrade a live hosted job to the direct shape.
+            host = _verified_host_if_installed()
+            if host is None and _existing_hosted_definition_serves(launch_dir, root):
+                # A hosted definition already owns this workspace; setup is a
+                # faithful no-op for the service definition, not a downgrade.
+                written.append(launch_dir.expanduser() / "com.ciao.server.plist")
+            else:
+                try:
+                    written.append(_write_launchd_plist(
+                        workspace=root,
+                        launch_agents_dir=launch_dir,
+                        engine_path=resolved_engine,
+                        runtime_root=runtime_root,
+                        port=port,
+                        path=os.environ.get("PATH", ""),
+                        plist_name="com.ciao.server.plist",
+                        confirm_repoint=confirm_repoint,
+                        host=host,
+                        host_python=(
+                            _host_engine_interpreter(resolved_engine)
+                            if host is not None
+                            else None
+                        ),
+                    ))
+                except ValueError as exc:
+                    # The render-time refusal B2 defines (a host given without
+                    # the python it must serve). Both `ciao setup` callers catch
+                    # RuntimeError and report it as a message, so it is never a
+                    # traceback.
+                    raise RuntimeError(str(exc)) from exc
             # Explicit --launch-agents-dir also permits offline plist generation.
             _remove_legacy_app_shortcuts(app_root_dir)
             _disable_legacy_menubar_agent(launch_dir)
@@ -1269,13 +1475,30 @@ def _looks_like_source_checkout(path: Path) -> bool:
 def _plist_workspace(launch_agents_dir: Path) -> Path | None:
     """Workspace the server LaunchAgent currently points at, if set up."""
 
+    return _plist_data_workspace(_load_server_plist(launch_agents_dir))
+
+
+def _load_server_plist(launch_agents_dir: Path) -> dict[str, Any] | None:
+    """The parsed ``com.ciao.server.plist`` dict, or ``None`` if unreadable."""
+
     plist = launch_agents_dir.expanduser() / "com.ciao.server.plist"
     try:
         with plist.open("rb") as handle:
             data = plistlib.load(handle)
     except (OSError, ValueError):
         return None
-    workspace = (data.get("EnvironmentVariables") or {}).get("CIAO_WORKSPACE")
+    return data if isinstance(data, dict) else None
+
+
+def _plist_data_workspace(data: dict[str, Any] | None) -> Path | None:
+    """The resolved ``CIAO_WORKSPACE`` a parsed server plist names, if any."""
+
+    if data is None:
+        return None
+    environment = data.get("EnvironmentVariables")
+    if not isinstance(environment, dict):
+        return None
+    workspace = environment.get("CIAO_WORKSPACE")
     if not workspace:
         return None
     try:
@@ -1385,7 +1608,6 @@ def _setup_command(args: argparse.Namespace) -> int:
                 )
                 return 1
 
-    auth_required = not args.no_auth
     env_path = root / ".env"
     try:
         had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
@@ -1396,7 +1618,6 @@ def _setup_command(args: argparse.Namespace) -> int:
         written = setup_workspace(
             args.workspace,
             auth_token=args.auth_token,
-            auth_required=auth_required,
             workspace_name=args.workspace_name,
             python_path=args.python,
             port=args.port,
@@ -1417,7 +1638,7 @@ def _setup_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     setup_rc = SETUP_MEMORY_FAILED_RC if sync_failures else 0
-    if auth_required and not args.auth_token and not had_token:
+    if not args.auth_token and not had_token:
         print(
             "\nPassword protection is on. No --auth-token was given, so a random "
             f"password was written to {root / '.env'} (PWA_AUTH_TOKEN).\n"
@@ -3179,6 +3400,66 @@ def _print_vault_relocate_result(payload: dict[str, Any], *, applied: bool) -> N
         print("\nRe-run with --apply to write this change.")
 
 
+def _workspace_move_command(args: argparse.Namespace) -> int:
+    """Move the install workspace to another folder and repoint the service.
+
+    Prints the plan by default and changes nothing. --apply hands the move to a
+    one-shot job beside the engine's service (the same call Settings → Main
+    workspace makes), then follows it until it finishes. There is no --undo:
+    moving the folder back is the same command.
+    """
+    from ciao import workspace_move
+
+    if args.workspace is not None:
+        source = Path(args.workspace).expanduser().resolve()
+    else:
+        registered = workspace_move.registered_workspace()
+        source = (registered or Path(os.environ.get("CIAO_WORKSPACE") or ".")).expanduser().resolve()
+    move_plan = workspace_move.plan_for(source, args.target)
+    if args.json and not args.apply:
+        print(json.dumps(move_plan.as_dict(), indent=2))
+        return 0 if move_plan.ok else 1
+    print(f"Move {move_plan.source}")
+    print(f"  to {move_plan.target}")
+    for refusal in move_plan.refusals:
+        print(f"Refused: {refusal}")
+    for warning in move_plan.warnings:
+        print(f"Warning: {warning}")
+    if not move_plan.ok:
+        return 1
+    if not args.apply:
+        print("Nothing changed. Re-run with --apply to move it.")
+        return 0
+    if sys.platform.startswith("linux"):
+        print("Moving. Ciaobot stops once running chats finish, and starts again from the new folder.")
+    try:
+        op = workspace_move.start(move_plan, port=workspace_move.engine_port())
+    except workspace_move.MoveError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    seen = ""
+    while True:
+        current = workspace_move.read_operation()
+        if current is None or current.id != op.id:
+            print("Error: the move's record was replaced or removed.", file=sys.stderr)
+            return 1
+        if current.phase != seen:
+            seen = current.phase
+            print(f"- {seen}")
+        if current.phase in workspace_move.TERMINAL_PHASES:
+            if current.error:
+                print(current.error, file=sys.stderr)
+            return 0 if current.phase == "done" else 1
+        if workspace_move.abandoned(current):
+            print(
+                f"Error: the move job stopped during '{current.phase}' without finishing. "
+                f"See {workspace_move.default_state_dir() / workspace_move.JOB_LOG_NAME}.",
+                file=sys.stderr,
+            )
+            return 1
+        time.sleep(1)
+
+
 def _vault_relocate_command(args: argparse.Namespace) -> int:
     """Move one workspace's vault to its standard folder.
 
@@ -3204,9 +3485,9 @@ def _vault_relocate_command(args: argparse.Namespace) -> int:
     if dotenv_path.is_file():
         from dotenv import dotenv_values
 
-        config_source.update(
-            {key: value for key, value in dotenv_values(dotenv_path).items() if value is not None}
-        )
+        from ciao.config import without_ignored_dotenv_keys
+
+        config_source.update(without_ignored_dotenv_keys(dotenv_values(dotenv_path)))
     if args.workspace is None:
         config_source.update(os.environ)
     # Anchored to the already-resolved `workspace`, not `_resolve_runtime_root`'s
@@ -4340,13 +4621,42 @@ def _curation_context(
     from ciao.curation_run import RunBudget
 
     workspace, vault, registry_root, name = _resolve_workspace_and_vaults(args)
-    guide = Path(args.guide).expanduser().resolve() if args.guide else guide_path(workspace)
+    if args.guide:
+        guide = Path(args.guide).expanduser().resolve()
+    else:
+        guide = guide_path(_curation_agent_root(workspace, name))
     defaults = RunBudget()
     budget = RunBudget(
         max_items=args.max_items if args.max_items is not None else defaults.max_items,
         max_seconds=args.max_seconds if args.max_seconds is not None else defaults.max_seconds,
     )
     return workspace, vault, guide, budget, registry_root, name
+
+
+def _curation_agent_root(workspace: Path, name: str | None) -> Path:
+    """The root whose ``AGENTS.md`` holds the regions this run consolidates.
+
+    ``workspace`` is the install root, which owns the guide only before the
+    re-rooting. Afterwards each workspace has its own guide under
+    ``agent_root(name)`` and the install root keeps a near-empty one, so a plan
+    read from the install root saw an empty ``ciao:memory`` region on every
+    night and never scheduled the consolidation pass while ``memory status``
+    (which reads the agent root) reported the region over its cap.
+    """
+    if name is None:
+        return workspace
+    from ciao.config import CiaoConfig, installed_workspace_env
+
+    env_source = installed_workspace_env(os.environ)
+    env_source["CIAO_WORKSPACE"] = str(workspace)
+    if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+        # A read-only resolution must not mint a session secret (see
+        # `_resolve_workspace_and_vaults`).
+        env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
+    config = CiaoConfig.from_env(env_source)
+    if config.workspace(name) is None:
+        return workspace
+    return config.agent_root(name)
 
 
 def _curation_config(workspace: Path, vault: Path, name: str) -> Any:
@@ -5539,6 +5849,8 @@ def _sync_skills_command(args: argparse.Namespace) -> int:
 
 
 def _load_env_file(path: Path) -> None:
+    from ciao.config import DOTENV_IGNORED_KEYS
+
     if not path.exists():
         return
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -5547,7 +5859,7 @@ def _load_env_file(path: Path) -> None:
             continue
         key, value = cleaned.split("=", 1)
         key = key.strip()
-        if key and key not in os.environ:
+        if key and key not in os.environ and key not in DOTENV_IGNORED_KEYS:
             os.environ[key] = value.strip().strip("'\"")
 
 
@@ -5639,12 +5951,23 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace_root).expanduser().resolve()
     _load_env_file(workspace_root / ".env")
 
-    # PWA_HOST is the server's *bind* address. For a loopback/wildcard bind we
-    # emit "localhost" so the printed chat link matches the host the browser is
-    # authenticated on (the menu bar, setup, and login URLs all use localhost).
-    # The session cookie is host-only, so a "127.0.0.1" link would not carry the
-    # "localhost" cookie and every /ws and authed /api request would be rejected.
-    host = os.environ.get("PWA_HOST", "localhost")
+    # The bind address (Settings → General → Network access) is where the
+    # server listens. For a loopback/wildcard bind we emit "localhost" so the
+    # printed chat link matches the host the browser is authenticated on (the
+    # menu bar, setup, and login URLs all use localhost). The session cookie is
+    # host-only, so a "127.0.0.1" link would not carry the "localhost" cookie
+    # and every /ws and authed /api request would be rejected.
+    from ciao.app_settings import read_app_settings
+
+    # The runtime root is `<workspace>/.runtime` unless the process
+    # environment names another (a `.env` line is not read).
+    runtime_env = os.environ.get("CIAO_RUNTIME_ROOT", "").strip()
+    runtime_root = (
+        Path(runtime_env).expanduser() if runtime_env else Path(RUNTIME_DIR_NAME)
+    )
+    if not runtime_root.is_absolute():
+        runtime_root = workspace_root / runtime_root
+    host = read_app_settings(runtime_root / "app_settings.json").pwa_host
     if host in ("0.0.0.0", "127.0.0.1", "::", "::1", ""):
         host = "localhost"
     port = os.environ.get("PWA_PORT", "8443")
@@ -5707,16 +6030,7 @@ def _register_launchd_service(workspace: Path) -> Path:
     """Write the server LaunchAgent for an already set-up workspace."""
     from ciao import macos_service
 
-    root = workspace.expanduser().resolve()
-    if not (root / ".env").is_file():
-        raise RuntimeError(
-            f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
-        )
-    if _looks_like_source_checkout(root):
-        raise RuntimeError(
-            f"{root} looks like the Ciaobot source checkout, not a workspace. "
-            "Pass your workspace folder to --workspace."
-        )
+    root = _validate_service_workspace(workspace)
     from ciao.setup_status import tcc_protected_location
 
     protected = tcc_protected_location(root)
@@ -5726,20 +6040,30 @@ def _register_launchd_service(workspace: Path) -> Path:
             "Move the workspace out of Desktop/Documents/Downloads first."
         )
 
-    from dotenv import dotenv_values
-
-    runtime_value = (dotenv_values(root / ".env").get("CIAO_RUNTIME_ROOT") or "").strip() or ".runtime"
-    runtime_root = Path(runtime_value).expanduser()
-    if not runtime_root.is_absolute():
-        runtime_root = root / runtime_root
-    return _write_launchd_plist(
-        workspace=root,
-        launch_agents_dir=default_launch_agents_dir(),
-        engine_path=os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable,
-        runtime_root=runtime_root,
-        port=_pwa_port_from_env(root, macos_service.DEFAULT_PORT),
-        path=os.environ.get("PATH", ""),
-    )
+    runtime_root = root / RUNTIME_DIR_NAME
+    launch_dir = default_launch_agents_dir()
+    resolved_engine = os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable
+    # Activation (E2): a verified host selects the hosted service, otherwise the
+    # direct shape is written. The only caller registers when no definition is
+    # installed, so there is no hosted definition here to preserve.
+    host = _verified_host_if_installed()
+    host_python = _host_engine_interpreter(resolved_engine) if host is not None else None
+    try:
+        return _write_launchd_plist(
+            workspace=root,
+            launch_agents_dir=launch_dir,
+            engine_path=resolved_engine,
+            runtime_root=runtime_root,
+            port=_pwa_port_from_env(root, macos_service.DEFAULT_PORT),
+            path=os.environ.get("PATH", ""),
+            host=host,
+            host_python=host_python,
+        )
+    except ValueError as exc:
+        # The render-time refusal (a host given without the python it must
+        # serve) surfaces as the RuntimeError/ServiceResult message its callers
+        # already handle, never a traceback.
+        raise RuntimeError(str(exc)) from exc
 
 
 def _service_command(args: argparse.Namespace) -> int:
@@ -5848,15 +6172,17 @@ def _validate_service_workspace(workspace: Path) -> Path:
     """Resolve and check a workspace the engine service may serve.
 
     The two checks `_register_launchd_service` makes before writing a plist: a
-    Ciaobot workspace has a ``.env``, and the app's own source checkout never is
-    one. The macOS TCC check is left out -- it names launchd and macOS privacy
-    protection, neither of which exists on Windows.
+    Ciaobot workspace has been set up, and the app's own source checkout never
+    is one. The macOS TCC check is left out -- it names launchd and macOS
+    privacy protection, neither of which exists on Windows.
     """
+    from ciao.setup_marker import is_set_up_workspace
 
     root = workspace.expanduser().resolve()
-    if not (root / ".env").is_file():
+    if not is_set_up_workspace(root):
         raise RuntimeError(
-            f"{root} is not a Ciaobot workspace (no .env). Run `ciao setup --workspace {root}` first."
+            f"{root} is not a Ciaobot workspace (no .runtime/workspaces.json). "
+            f"Run `ciao setup --workspace {root}` first."
         )
     if _looks_like_source_checkout(root):
         raise RuntimeError(
@@ -6161,14 +6487,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "PWA password to write when .env is new (a random one is generated "
             "when omitted)."
-        ),
-    )
-    setup_parser.add_argument(
-        "--no-auth",
-        action="store_true",
-        help=(
-            "Write PWA_AUTH_REQUIRED=false instead of protecting the dashboard "
-            "with a password. Only for a machine nobody else can reach."
         ),
     )
     setup_parser.add_argument(
@@ -6831,6 +7149,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reroot_parser.set_defaults(func=_workspace_reroot_command)
+
+    move_parser = subparsers.add_parser(
+        "workspace-move",
+        help="Move the install workspace to another folder.",
+        description=(
+            "Move the whole install workspace (.env, .runtime, the vault, skills, "
+            "every agent root) to TARGET on the same disk, repair what recorded "
+            "the old path, repoint the engine's service and restart it. Prints "
+            "the plan by default and changes nothing; --apply performs it. "
+            "Settings -> Main workspace runs the same move. To undo, move it back."
+        ),
+    )
+    move_parser.add_argument("target", help="The new folder. It must not exist, or be empty.")
+    move_parser.add_argument(
+        "--workspace", type=Path, default=None,
+        help="The workspace to move. Defaults to the one the service runs.",
+    )
+    move_parser.add_argument("--apply", action="store_true", help="Perform the move.")
+    move_parser.add_argument("--json", action="store_true", help="Print the plan as JSON.")
+    move_parser.set_defaults(func=_workspace_move_command)
 
     relocate_parser = subparsers.add_parser(
         "vault-relocate",
@@ -7532,7 +7870,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat_parser.add_argument(
         "--base-url",
-        help="Ciaobot server URL. Defaults to PWA_HOST/PWA_PORT.",
+        help="Ciaobot server URL. Defaults to the bind address in Settings and PWA_PORT.",
     )
     chat_parser.set_defaults(func=_create_chat_command)
 

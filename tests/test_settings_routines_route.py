@@ -43,9 +43,11 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
-    # Automatic resolves to the workspace's default model.
-    assert data["insights_model_effective"] == config.claude_default_model
     assert data["insights_enabled"] is True
+    # Session insights is chosen per provider now; the global knob is gone.
+    assert data["provider_insights_models"] == {}
+    assert "insights_model" not in data
+    assert "insights_model_effective" not in data
     assert "trajectories_enabled" not in data
     # The Claude model list is the vocabulary the selectors offer.
     assert data["model_options"]["anthropic"] == ["opus", "sonnet", "haiku", "fable"]
@@ -68,11 +70,13 @@ def test_patching_the_retired_on_device_model_reads_as_automatic(
 ):
     monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
-    resp = client.patch("/api/settings/routines", json={"insights_model": sentinel})
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"provider_insights_models": {"claude": sentinel}},
+    )
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["insights_model"] == ""
-    assert data["insights_model_effective"] == config.claude_default_model
+    assert resp.json()["provider_insights_models"] == {}
+    assert config.provider_insights_models == {}
 
 
 def test_a_stored_on_device_model_is_dropped_on_load(tmp_path):
@@ -89,25 +93,8 @@ def test_a_stored_on_device_model_is_dropped_on_load(tmp_path):
     )
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
-    assert data["insights_model"] == ""
-    assert config.insights_model_override == ""
     assert data["provider_insights_models"] == {"opencode": "x/y"}
-
-
-def test_patch_applies_to_live_config_and_persists(tmp_path):
-    client, config = _make_client(tmp_path)
-    resp = client.patch(
-        "/api/settings/routines",
-        json={"insights_model": "haiku"},
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["insights_model_effective"] == "haiku"
-    # Live config updated, no restart needed.
-    assert config.insights_model_override == "haiku"
-    # Persisted: a fresh store sees the values.
-    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
-    assert fresh.settings.insights_model == "haiku"
+    assert config.provider_insights_models == {"opencode": "x/y"}
 
 
 def test_patch_toggles_insights_enabled(tmp_path):
@@ -169,6 +156,14 @@ def test_patch_applies_provider_routine_models(tmp_path):
     data = resp.json()
     assert data["provider_insights_models"] == {"opencode": "anthropic/claude-sonnet-4-6"}
     assert config.provider_insights_models == {"opencode": "anthropic/claude-sonnet-4-6"}
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.provider_insights_models == {
+        "opencode": "anthropic/claude-sonnet-4-6"
+    }
+
+    # Clearing one provider's entry puts it back on Automatic.
+    client.patch("/api/settings/routines", json={"provider_insights_models": {}})
+    assert config.provider_insights_models == {}
 
 
 def test_patch_applies_provider_default_thinking(tmp_path):
@@ -185,55 +180,10 @@ def test_patch_applies_provider_default_thinking(tmp_path):
     assert config.provider_default_thinking == {"claude": "high"}
 
 
-def test_patch_clearing_restores_defaults(tmp_path):
-    client, config = _make_client(tmp_path)
-    client.patch("/api/settings/routines", json={"insights_model": "haiku"})
-    client.patch("/api/settings/routines", json={"insights_model": ""})
-    assert config.insights_model_override == ""
-
-
 def test_route_503s_without_store(tmp_path):
     client, _config = _make_client(tmp_path)
     client.app.state.app_settings = None
     assert client.get("/api/settings/routines").status_code == 503
-
-
-def test_automatic_routines_report_every_workspace_not_just_the_primary(
-    monkeypatch, tmp_path
-):
-    """Automatic resolves per workspace, so one model must not be presented as global.
-
-    resolve_insights_model reads the chat's workspace, so *_effective (the
-    primary workspace's answer) is wrong for every other workspace. The UI
-    needs the whole map to say so.
-    """
-    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
-    client, config = _make_client(tmp_path)
-
-    data = client.get("/api/settings/routines").json()
-    names = config.workspace_names()
-    assert names, "fixture should register at least one workspace"
-
-    key = "insights_model_by_workspace"
-    assert set(data[key]) == set(names), f"{key} must cover every workspace"
-    for name in names:
-        assert data[key][name] == config.claude_default_model
-
-
-def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
-    """With an explicit override one model really does apply everywhere."""
-    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
-    client, _config = _make_client(tmp_path)
-
-    client.patch(
-        "/api/settings/routines",
-        json={"insights_model": "gemma4:12b-it-qat"},
-    )
-    data = client.get("/api/settings/routines").json()
-
-    assert data["insights_model_effective"] == "gemma4:12b-it-qat"
-    # Empty signals "not workspace-dependent" to the UI.
-    assert data["insights_model_by_workspace"] == {}
 
 
 def test_routines_no_longer_reports_the_on_device_model(tmp_path):
@@ -241,3 +191,34 @@ def test_routines_no_longer_reports_the_on_device_model(tmp_path):
     data = client.get("/api/settings/routines").json()
     assert "apple_model_available" not in data
     assert "apple_model_unavailable_reason" not in data
+
+
+def test_server_settings_patch_keeps_the_running_values(monkeypatch, tmp_path):
+    """The bind address and log level are saved now and used at the next start;
+    developer mode applies at once."""
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
+    client, config = _make_client(tmp_path)
+
+    before = client.get("/api/settings/routines").json()
+    assert before["pwa_host"] == "" and before["log_level"] == ""
+    assert before["server_running"] == {"pwa_host": "0.0.0.0", "log_level": "info"}
+    assert before["server_defaults"]["log_levels"] == ["debug", "info", "warning", "error"]
+
+    res = client.patch(
+        "/api/settings/routines",
+        json={"pwa_host": "127.0.0.1", "log_level": "debug", "dev_mode": True},
+    )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert (data["pwa_host"], data["log_level"], data["dev_mode"]) == ("127.0.0.1", "debug", True)
+    assert data["server_running"] == {"pwa_host": "0.0.0.0", "log_level": "info"}
+    assert config.dev_mode is True
+    assert config.pwa_host == "0.0.0.0"
+
+
+def test_server_settings_patch_rejects_a_bad_host(monkeypatch, tmp_path):
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
+    client, _config = _make_client(tmp_path)
+    res = client.patch("/api/settings/routines", json={"pwa_host": "two words"})
+    assert res.status_code == 400

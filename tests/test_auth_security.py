@@ -233,7 +233,7 @@ def test_menubar_chats_requires_loopback_or_session() -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.serializer = serializer
-    app.state.config = SimpleNamespace(pwa_auth_required=True, pwa_auth_token="x")
+    app.state.config = SimpleNamespace(pwa_auth_token="x")
 
     local = TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 5555))
     assert local.get("/api/menubar-chats").status_code == 200
@@ -292,7 +292,7 @@ def test_menubar_feed_is_not_readable_through_tailscale_serve() -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.serializer = serializer
-    app.state.config = SimpleNamespace(pwa_auth_required=True, pwa_auth_token="x")
+    app.state.config = SimpleNamespace(pwa_auth_token="x")
 
     proxied = TestClient(
         app, base_url="https://mini.tail1.ts.net", client=("127.0.0.1", 5555)

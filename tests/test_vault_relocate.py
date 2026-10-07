@@ -774,14 +774,15 @@ def test_plan_refuses_a_whole_directory_move_containing_another_workspace(
 # -- CLI: an explicit --workspace ignores ambient env, uses the target's .env
 
 
-def test_cli_explicit_workspace_loads_runtime_root_from_target_dotenv(
+def test_cli_explicit_workspace_uses_the_target_runtime_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--workspace <install> must resolve CIAO_RUNTIME_ROOT from THAT
-    install's own .env, not the calling shell's ambient env — an ambient
-    value belongs to whatever install the caller's own session is for, and
-    letting it leak in means apply can move the target's vault while writing
-    the registry entry to the wrong (caller's own) runtime directory.
+    """--workspace <install> must use THAT install's `.runtime`, not the
+    calling shell's ambient CIAO_RUNTIME_ROOT — an ambient value belongs to
+    whatever install the caller's own session is for, and letting it leak in
+    means apply can move the target's vault while writing the registry entry
+    to the wrong (caller's own) runtime directory. A CIAO_RUNTIME_ROOT line in
+    the target's `.env` is not read either.
     """
     from ciao import cli
 
@@ -804,5 +805,6 @@ def test_cli_explicit_workspace_loads_runtime_root_from_target_dotenv(
     rc = cli.main(["vault-relocate", "scandit", "--workspace", str(install), "--apply"])
 
     assert rc == 0
-    assert (custom_runtime / "migration" / "vault-relocate-scandit.json").is_file()
+    assert (install / ".runtime" / "migration" / "vault-relocate-scandit.json").is_file()
+    assert not (custom_runtime / "migration").exists()
     assert not (decoy_runtime / "migration").exists()

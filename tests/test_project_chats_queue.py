@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from ciao.config import CiaoConfig
-from ciao.models import ResultEvent, ToolUseEvent
+from ciao.models import ImageAttachment, ResultEvent, ToolUseEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.chat_broker import ChatStream
@@ -54,6 +54,14 @@ async def _wait_for(predicate, timeout: float = 2.0, step: float = 0.01) -> None
             return
         await asyncio.sleep(step)
     raise AssertionError(f"timed out waiting for predicate {predicate!r}")
+
+
+def _write_media(tmp_path: Path, filename: str = "shot.png") -> Path:
+    """Write a real file under the manager's media_root so refs resolve."""
+    media = tmp_path / ".runtime" / "media"
+    media.mkdir(parents=True, exist_ok=True)
+    (media / filename).write_bytes(b"\x89PNG\r\n\x1a\n")
+    return media / filename
 
 
 async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
@@ -133,6 +141,394 @@ async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
     assert echoes[2]["text"] == "msg B"
     assert echoes[2].get("turn_index") == 2
     assert echoes[2].get("entry_id") == "q-b"
+
+
+async def test_a_blank_queued_follow_up_does_not_rerun_the_previous_prompt(
+    tmp_path: Path,
+) -> None:
+    """A whitespace-only queued follow-up must be skipped, not re-run (#1102)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-blank", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="blank-followup-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-x",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    # A blank follow-up, then a real one.
+    assert pcm.queue_message(chat.chat_id, "   ", entry_id="q-blank") is True
+    assert pcm.queue_message(chat.chat_id, "msg A", entry_id="q-a") is True
+
+    first_turn_ready.set()
+
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The blank follow-up must not re-run "initial"; only "msg A" runs next.
+    assert turn_calls == ["initial", "msg A"], f"got {turn_calls!r}"
+
+    echoes = [e for e in captured if e.get("type") == "user_echo"]
+    assert len(echoes) == 2, f"expected 2 user_echo events, got {echoes!r}"
+
+    queue_states = [e for e in captured if e.get("type") == "queue_state"]
+    assert queue_states, "expected a queue_state event for the skipped blank entry"
+    assert all(
+        entry.get("id") != "q-blank"
+        for state in queue_states
+        for entry in state.get("queue", [])
+    ), f"skipped entry still present in {queue_states!r}"
+    assert [e.get("id") for e in queue_states[-1]["queue"]] == ["q-a"]
+
+
+async def test_a_blank_last_follow_up_ends_the_stream_without_another_turn(
+    tmp_path: Path,
+) -> None:
+    """A trailing whitespace-only follow-up must end the stream (#1102)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-blank-last", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="blank-last-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-x",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    assert pcm.queue_message(chat.chat_id, "   ", entry_id="q-blank") is True
+
+    first_turn_ready.set()
+
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    assert turn_calls == ["initial"], f"got {turn_calls!r}"
+    results = [e for e in captured if e.get("type") == "result"]
+    assert len(results) == 1, f"expected 1 result event, got {results!r}"
+
+
+async def test_a_blank_follow_up_before_an_errored_turn_keeps_the_real_chip(
+    tmp_path: Path,
+) -> None:
+    """A blank skipped before an errored turn must not wipe the parked chip.
+
+    When the turn ends in a non-retryable error, the real follow-up taken off
+    the stream is parked onto `chat.pending_queue` and runs on the next send.
+    The `queue_state` published for the skipped blank must still list it, or the
+    PWA's whole-list replacement drops its chip while it is still queued.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-blank-error", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="blank-error-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="boom",
+            session_id="sess-x",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    assert pcm.queue_message(chat.chat_id, "   ", entry_id="q-blank") is True
+    assert pcm.queue_message(chat.chat_id, "msg A", entry_id="q-a") is True
+
+    first_turn_ready.set()
+
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The errored turn stopped the loop; the real follow-up is parked for the
+    # next send.
+    assert turn_calls == ["initial"], f"got {turn_calls!r}"
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [e["id"] for e in parked] == ["q-a"], parked
+
+    queue_states = [e for e in captured if e.get("type") == "queue_state"]
+    assert queue_states, "expected a queue_state event for the skipped blank entry"
+    assert [e.get("id") for e in queue_states[-1]["queue"]] == ["q-a"], (
+        f"parked follow-up lost its chip: {queue_states[-1]!r}"
+    )
+
+
+async def test_image_only_queued_follow_up_flushes_with_images(
+    tmp_path: Path,
+) -> None:
+    """A queued follow-up with blank text but images must reach the provider.
+
+    The drive loop's blank skip read "no text" as "nothing to send" and dropped
+    the entry without a word, so the images the user attached never went out
+    (#1112). Image-only is sendable: the turn goes out with an empty prompt and
+    the resolved images.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-image-only", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="image-only-followup-test")
+    shot = _write_media(tmp_path)
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(
+            (prompt, [img.original_filename for img in images or []])
+        )
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-img",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    # A follow-up whose text is blank and whose images are the content.
+    assert (
+        pcm.queue_message(
+            chat.chat_id,
+            "   ",
+            images=[
+                ImageAttachment(
+                    path=shot,
+                    mime_type="image/png",
+                    original_filename="shot.png",
+                )
+            ],
+            entry_id="q-img",
+        )
+        is True
+    )
+
+    first_turn_ready.set()
+
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # It ran: as its own turn, with the images attached and no invented
+    # placeholder prompt text.
+    assert [prompt for prompt, _ in turn_calls] == ["initial", ""], turn_calls
+    assert turn_calls[1][1] == ["shot.png"], turn_calls
+
+    echoes = [e for e in captured if e.get("type") == "user_echo"]
+    assert [e["text"] for e in echoes] == ["initial", ""], echoes
+    assert echoes[1]["images"] == ["shot.png"], echoes
+    assert echoes[1].get("entry_id") == "q-img", echoes
+
+
+async def test_whitespace_text_without_images_is_ignored(tmp_path: Path) -> None:
+    """Blank text with no images is the one case that stays unsendable (#1112).
+
+    Nothing is lost when it is skipped: the entry carries no images, so there
+    is nothing to silently drop, and no provider call may happen for it.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-blank-no-images", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="blank-no-images-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(
+            (prompt, [img.original_filename for img in images or []])
+        )
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-blank",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    assert pcm.queue_message(chat.chat_id, "   ", entry_id="q-blank") is True
+
+    first_turn_ready.set()
+
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # No second turn for an entry with neither text nor images...
+    assert [prompt for prompt, _ in turn_calls] == ["initial"], turn_calls
+    # ...and no turn carries images that would have been lost with it.
+    assert all(not images for _, images in turn_calls), turn_calls
+
+    echoes = [e for e in captured if e.get("type") == "user_echo"]
+    assert [e["text"] for e in echoes] == ["initial"], echoes
+    assert all(not e.get("images") for e in echoes), echoes
+
+
+async def test_reseed_preserves_image_only_entries(tmp_path: Path) -> None:
+    """The `pending_queue` re-seed must keep an image-only parked entry.
+
+    The re-seed skipped every entry with no text, so a follow-up parked by a
+    question-pause with images but blank text lost them for good when the user
+    answered (#1112). An entry with neither text nor images is still dropped —
+    there is nothing to send.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-reseed-images", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="reseed-image-only-test")
+    _write_media(tmp_path)
+
+    pcm._chats[chat.chat_id].pending_queue = [
+        {"id": "q-img", "text": "   ", "images": ["shot.png"]},
+        {"id": "q-empty", "text": "", "images": []},
+    ]
+
+    turn_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(
+            (prompt, [img.original_filename for img in images or []])
+        )
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-reseed",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "answer")
+    # The re-seed is synchronous inside `start_stream` — the drive task only
+    # runs at the next await point.
+    assert [e["id"] for e in stream.pending] == ["q-img"], stream.pending
+
+    captured: list[dict] = []
+
+    async def consume(s) -> None:
+        async for ev in s.subscribe():
+            captured.append(ev)
+
+    consumer = asyncio.create_task(consume(stream))
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The answer turn, then the image-only follow-up with its image attached.
+    assert turn_calls == [("answer", []), ("", ["shot.png"])], turn_calls
+    assert pcm._chats[chat.chat_id].pending_queue == []
 
 
 def test_question_notification_prefers_text_prompt_alias(tmp_path: Path) -> None:
@@ -294,6 +690,31 @@ async def test_queued_messages_survive_question_pause_and_flush_after_answer(
     # ...but the queued follow-ups were parked on the chat, not dropped.
     parked = pcm._chats[chat.chat_id].pending_queue
     assert [p["text"] for p in parked] == ["msg A", "msg B"], parked
+
+    # The park must tell a connected client. An empty queue_state here would
+    # wipe the chips the PWA is about to keep across the torn-down stream.
+    queue_states = [e for e in captured if e.get("type") == "queue_state"]
+    assert queue_states, "parking follow-ups must publish queue_state"
+    assert [entry.get("text") for entry in queue_states[-1]["queue"]] == [
+        "msg A",
+        "msg B",
+    ], queue_states[-1]
+    assert queue_states[-1]["queue"], "an empty queue_state would wipe the chips"
+
+    public = pcm._chats[chat.chat_id].to_dict()["pending_queue"]
+    assert [entry["text"] for entry in public] == ["msg A", "msg B"]
+    assert [entry["id"] for entry in public] == [entry["id"] for entry in parked]
+    assert all(set(entry) == {"id", "text", "images"} for entry in public)
+    # A caller must not be able to mutate the live queue through the payload.
+    assert public is not parked
+    assert public[0] is not parked[0]
+    assert public[0]["images"] is not parked[0]["images"]
+    public[0]["text"] = "changed"
+    public.append({"id": "extra", "text": "nope", "images": []})
+    assert [entry["text"] for entry in pcm._chats[chat.chat_id].pending_queue] == [
+        "msg A",
+        "msg B",
+    ]
 
     # The user answers, starting a fresh turn. The parked follow-ups must
     # re-seed and flush after it, in order.
@@ -827,3 +1248,48 @@ async def test_a_message_queued_as_the_turn_ends_is_parked_not_lost(
     assert parked == ["landed in the race window"], (
         "a message queued as the turn ended must survive to the next turn"
     )
+
+
+def test_park_pending_for_retry_publishes_the_parked_queue(tmp_path: Path) -> None:
+    """A retry park publishes the parked entries and `to_dict` copies them.
+
+    Publishing `stream.pending` after the drain would send an empty
+    `queue_state` and wipe the chips. A stream that has already finished
+    cannot deliver the event, so that case stays on the chat record only.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-retry-park", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="retry-park")
+
+    stream = ChatStream("prompt")
+    stream.enqueue("and then summarise it", ["shot.png"], entry_id="q-1")
+    pcm._park_pending_for_retry(chat.chat_id, stream)
+
+    states = [e for e in stream.buffered_events() if e.get("type") == "queue_state"]
+    assert states == [
+        {
+            "type": "queue_state",
+            "queue": [
+                {"id": "q-1", "text": "and then summarise it", "images": ["shot.png"]},
+            ],
+        }
+    ]
+    public = pcm._chats[chat.chat_id].to_dict()["pending_queue"]
+    assert public == states[0]["queue"]
+    assert public is not pcm._chats[chat.chat_id].pending_queue
+    assert public[0] is not pcm._chats[chat.chat_id].pending_queue[0]
+
+    # Nothing queued: do not publish an empty queue.
+    quiet = ChatStream("prompt")
+    pcm._park_pending_for_retry(chat.chat_id, quiet)
+    assert not any(e.get("type") == "queue_state" for e in quiet.buffered_events())
+
+    # Already finished: the list is stored, but the sentinel has gone out.
+    done = ChatStream("prompt")
+    done.enqueue("too late", [], entry_id="q-late")
+    done.finish()
+    pcm._park_pending_for_retry(chat.chat_id, done)
+    assert pcm._chats[chat.chat_id].pending_queue == [
+        {"id": "q-late", "text": "too late", "images": []}
+    ]
+    assert not any(e.get("type") == "queue_state" for e in done.buffered_events())

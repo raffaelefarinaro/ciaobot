@@ -187,7 +187,7 @@ def test_setup_rerun_imports_the_variable_before_writing_a_registry(tmp_path: Pa
         encoding="utf-8",
     )
 
-    setup_workspace(tmp_path, auth_token="t", auth_required=False)
+    setup_workspace(tmp_path, auth_token="t")
 
     entries = {e["name"]: e for e in _registry(tmp_path)}
     assert list(entries) == ["home", "client"]

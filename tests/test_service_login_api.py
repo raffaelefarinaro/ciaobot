@@ -101,7 +101,6 @@ def _client(
     app.state.serializer = serializer
     app.state.config = SimpleNamespace(
         workspace_root=tmp_path / "workspace",
-        pwa_auth_required=True,
     )
     monkeypatch.setattr(service_login, "login_status", recorder.login_status)
     monkeypatch.setattr(service_login, "set_login_enabled", recorder.set_login_enabled)
@@ -465,7 +464,7 @@ def test_a_workspace_root_that_is_not_configured_is_500(
     """An engine with no workspace has no service to speak for."""
     recorder = _Recorder()
     client = _client(recorder, monkeypatch, Path("/tmp"))
-    client.app.state.config = SimpleNamespace(workspace_root=None, pwa_auth_required=True)
+    client.app.state.config = SimpleNamespace(workspace_root=None)
     with client:
         status = client.get("/api/service/login", headers=_signed(client))
         update = client.patch(

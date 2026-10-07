@@ -78,6 +78,11 @@ function chat(workspace, n, projectId, title, extra = {}) {
     helper: {},
     retry: null,
     local: true,
+    // Server-owned chat pin wire shape (#1119). Empty by default; the pin-sync
+    // journey opts a chat into a real pin below.
+    pinned_file_path: '',
+    dismissed_pin_paths: [],
+    pin_revision: 0,
     ...extra,
   }
 }
@@ -96,7 +101,13 @@ function passHelper(sourceChatId, sourceTitle, state) {
 }
 
 export const CHATS = WORKSPACES.flatMap((workspace) => ([
-  chat(workspace.name, 1, `${workspace.name}-general`, `${workspace.name} first conversation`),
+  chat(workspace.name, 1, `${workspace.name}-general`, `${workspace.name} first conversation`,
+    // One invented chat pin in a workspace no spec opens, so the two-context
+    // pin-sync journey has a real server pin to sync without disturbing the
+    // alpha chats every other spec measures.
+    workspace.name === 'beta'
+      ? { pinned_file_path: '/synthetic/beta/pinned-report.md', dismissed_pin_paths: [], pin_revision: 1 }
+      : {}),
   chat(workspace.name, 2, `${workspace.name}-notes`, `${workspace.name} second conversation`),
   // Archived, and only in the first workspace: the sidebar hides it, so every
   // other spec sees the same rows it saw before, while a deep link to its id
@@ -383,6 +394,10 @@ export function snapshotFrame(activeStreams) {
     background_agents: {},
     background_runs: {},
     restarting: false,
+    // Authoritative server pin map, mirroring the pin on beta-chat-1 above.
+    chat_pins: {
+      'beta-chat-1': { path: '/synthetic/beta/pinned-report.md', dismissed_paths: [], revision: 1 },
+    },
   }
 }
 

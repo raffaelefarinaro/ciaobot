@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import sys
 import pytest
 from pathlib import Path
+from types import FrameType
+from typing import Any
 from ciao import config as ciao_config
 from ciao import job_runs as jr
 from ciao import transcripts
@@ -29,6 +33,57 @@ def _isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.delenv("HOMEDRIVE", raising=False)
     monkeypatch.delenv("HOMEPATH", raising=False)
+    # Windows keeps the installed engine's task definition under
+    # %LOCALAPPDATA%\Ciaobot\service, and install discovery reads it to pin
+    # the workspace: on a machine with an install, every config-discovery test
+    # resolved to the developer's real workspace. The hosted runner has none.
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
+
+
+_TESTS_DIR = Path(__file__).resolve().parent
+_ERROR_PRIVILEGE_NOT_HELD = 1314
+
+
+def _test_frame_called(frame: FrameType | None) -> bool:
+    """Whether the first frame outside ``os``/``pathlib`` is in a test file."""
+    while frame is not None:
+        name = frame.f_globals.get("__name__", "")
+        if name not in {"os", "pathlib", "pathlib._local", "pathlib._abc", "ntpath"}:
+            try:
+                return _TESTS_DIR in Path(frame.f_code.co_filename).resolve().parents
+            except OSError:
+                return False
+        frame = frame.f_back
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _skip_when_symlinks_need_a_privilege(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip a test whose own symlink Windows refuses, as CI's runner never does.
+
+    Creating a symlink on Windows needs Developer Mode or an elevated token; the
+    hosted runner is elevated, a contributor's account usually is not, and every
+    symlink test then failed with WinError 1314 instead of skipping as the
+    suite's per-test ``pytest.skip("cannot create a symlink here")`` convention
+    intends. Only a symlink the *test* makes is skipped: the engine itself must
+    not need one on Windows (it uses junctions and hard links), so a refusal
+    raised from ``ciao`` code still fails the test.
+    """
+    if sys.platform != "win32":
+        return
+    real_symlink = os.symlink
+
+    def symlink(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+        try:
+            real_symlink(src, dst, *args, **kwargs)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == _ERROR_PRIVILEGE_NOT_HELD and _test_frame_called(
+                sys._getframe(1)
+            ):
+                pytest.skip(f"cannot create a symlink here: {exc}")
+            raise
+
+    monkeypatch.setattr(os, "symlink", symlink)
 
 
 @pytest.fixture
@@ -80,8 +135,8 @@ def _reset_exported_dotenv() -> None:
     ``monkeypatch`` cannot undo a key it never saw set, so one test's fixture
     workspace leaked into every test after it.
 
-    That is not merely untidy. A ``.env`` sets ``CIAO_RUNTIME_ROOT=.runtime``,
-    which is relative; leaked into a later test whose ``CIAO_WORKSPACE`` is
+    That is not merely untidy. A ``.env`` used to set
+    ``CIAO_RUNTIME_ROOT=.runtime`` (no longer exported), which is relative; leaked into a later test whose ``CIAO_WORKSPACE`` is
     unset, it resolved against the cwd and sent that test's outcome log into
     the repository checkout's own ``.runtime`` instead of its ``tmp_path``.
     """

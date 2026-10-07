@@ -960,11 +960,13 @@ def _detect_mcp_uncomposed(context: DetectionContext) -> list[OperatorAction]:
 
 
 _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
-    ("CIAO_DISALLOWED_TOOLS_PERSONAL", "set a workspace's disallowed_tools in workspaces.json"),
-    ("CIAO_DISALLOWED_TOOLS_WORK", "set a workspace's disallowed_tools in workspaces.json"),
-    # Execution mode is fixed at auto for every provider; there is no override.
-    ("CLAUDE_EXECUTION_MODE", "remove it: execution mode is always auto"),
-    ("CLAUDE_PERMISSION_MODE", "remove it: execution mode is always auto"),
+    ("PWA_AUTH_REQUIRED", "remove it: password protection is always on"),
+    # Server settings that moved to Settings. Server startup imports each one
+    # into `.runtime/app_settings.json` once; after that they are inert.
+    ("PWA_HOST", "remove it: it was imported once into Settings → General → Network access"),
+    ("CIAO_LOG_LEVEL", "remove it: it was imported once into Settings → General → Developer"),
+    ("CIAO_DEV_MODE", "remove it: it was imported once into Settings → General → Developer"),
+    ("CIAO_APP_REPO", "remove it: it was imported once into Settings → General → Developer"),
     # The workspace list is runtime state owned by Settings. Server startup
     # imports the variable into workspaces.json once; after that it is inert.
     (
@@ -975,18 +977,80 @@ _IGNORED_ENV_VARS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Values `ciao setup` itself wrote into every `.env`. They say what is still
+# true, so flagging them would put the tile on every upgraded install for a line
+# the operator never chose. `CIAO_VAULT_MODE` is never listed at all: setup
+# wrote it and nothing the operator sets there changes behaviour now.
+_SETUP_WRITTEN_DEFAULTS: dict[str, str] = {"PWA_AUTH_REQUIRED": "true"}
+
+
+def _is_setup_written_default(name: str, value: str) -> bool:
+    default = _SETUP_WRITTEN_DEFAULTS.get(name)
+    return default is not None and value.strip().lower() == default
+
+
+# Ignored in `.env` only: the process environment (a service definition, test
+# isolation) still sets it, so it is read from the file, never from the merged
+# source. Setup wrote `.runtime`; any value naming `<workspace>/.runtime` is that
+# default and stays silent.
+_RUNTIME_ROOT_HINT = (
+    "remove it: the runtime folder is always <workspace>/.runtime now; move "
+    "its contents there before deleting the line"
+)
+
+
+def _dotenv_runtime_root_moved(config: Any) -> bool:
+    """Whether the workspace `.env` sets a non-default ``CIAO_RUNTIME_ROOT``."""
+    workspace = getattr(config, "workspace_root", None)
+    if not workspace:
+        return False
+    from ciao.macos_service import read_dotenv
+
+    root = Path(workspace).expanduser()
+    raw = read_dotenv(root / ".env").get("CIAO_RUNTIME_ROOT", "").strip()
+    if not raw:
+        return False
+    named = Path(raw).expanduser()
+    if not named.is_absolute():
+        named = root / named
+    return named.resolve() != (root / ".runtime").resolve()
+
+
+def _stale_legacy_env(config: Any) -> list[tuple[str, str]]:
+    """The retired `.env` variables that are still set, with their hints.
+
+    One list, read by both the detector and the run handler, so the button
+    removes exactly what the tile reported. ``config.env_source`` is the test
+    seam; a real ``CiaoConfig`` has none, so the process environment is read —
+    which is where server startup's one-time ``load_dotenv`` put the file's
+    values.
+    """
+    source = getattr(config, "env_source", None) or os.environ
+    stale = [
+        (name, hint)
+        for name, hint in _IGNORED_ENV_VARS
+        if str(source.get(name, "")).strip()
+        and not _is_setup_written_default(name, str(source.get(name, "")))
+    ]
+    if _dotenv_runtime_root_moved(config):
+        stale.append(("CIAO_RUNTIME_ROOT", _RUNTIME_ROOT_HINT))
+    return stale
+
+
 def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction]:
     """Environment variables the engine no longer reads.
 
-    Some described the two hardcoded `personal`/`work` names and went with the
-    bootstrap registry that manufactured them; the execution-mode vars were
-    retired when auto became the only mode; `CIAO_WORKSPACES` gave way to the
-    Settings-owned runtime registry. A variable that is set and silently
+    `PWA_AUTH_REQUIRED` went when password protection became unconditional;
+    `CIAO_RUNTIME_ROOT` is no longer read from `.env`;
+    the server variables moved to Settings after a one-time import;
+    `CIAO_WORKSPACES` gave way to the Settings-owned runtime registry. A variable that is set and silently
     ignored is worse than one that never existed: the operator believes a setting
-    is in effect. Chat-only — the fix edits `.env`, which is theirs.
+    is in effect. The fix comments the lines out of `.env`, so it carries a run
+    button — the engine owns that file; the agent's credential denylist does not
+    reach it (``execution_modes.CREDENTIAL_DENY_PATTERNS`` denies `.env` to
+    every provider), which is why a chat alone could never clear the tile.
     """
-    source = getattr(context.config, "env_source", None) or os.environ
-    stale = [(name, hint) for name, hint in _IGNORED_ENV_VARS if str(source.get(name, "")).strip()]
+    stale = _stale_legacy_env(context.config)
     if not stale:
         return []
     names = ", ".join(name for name, _hint in stale)
@@ -1002,18 +1066,17 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
             ),
             glyph="⚑",
             workspace="",
-            chat_label="Move them for me",
+            run_label="Remove them",
+            chat_label="What changed?",
             chat_prompt=(
                 f"These variables in my `.env` are no longer read by the engine: "
                 f"{names}. For each one: "
                 + "; ".join(f"{name}: {hint}" for name, hint in stale)
-                + ". Tell me its current value and the workspace it was meant "
-                "for, and move any setting that has no home yet onto that "
-                "workspace in `.runtime/workspaces.json` (`disallowed_tools` is "
-                "a per-workspace field there). Ask before changing a value "
-                "rather than assuming the old one still reflects what I want, "
-                "and comment the variable out of `.env` once its setting has a "
-                "new home."
+                + ". Tell me its current value and check that the setting that "
+                "replaced it says what I want. Do not try to edit `.env` — the "
+                "sandbox forbids writes to it, and the tile's own Remove button "
+                "comments these lines out. Explain what each variable used to "
+                "control and where its setting lives now."
             ),
         )
     ]
@@ -1056,6 +1119,8 @@ async def run_action(action_id: str, context: DetectionContext) -> tuple[dict[st
         return await _run_missed_schedules(context)
     if action_id == "workspace-unmigrated":
         return _run_workspace_reroot(context)
+    if action_id == "legacy-env-ignored":
+        return _run_legacy_env_cleanup(context)
     if action_id.startswith(("workspace-root-missing:", "workspace-assets-stale:")):
         return _run_workspace_repair(context)
     raise ValueError(f"unknown operator action id: {action_id}")
@@ -1155,6 +1220,85 @@ def _run_workspace_repair(context: DetectionContext) -> tuple[dict[str, Any], st
     drifts = ", ".join(sorted({str(item.get("drift", "")) for item in repaired}))
     tail = f"; {len(reported)} left for a decision" if reported else ""
     return result, f"Repaired {len(repaired)} item(s): {drifts}{tail}."
+
+
+def _comment_out_env_lines(path: Path, keys: set[str]) -> list[str]:
+    """Comment out every ``KEY=...`` line in ``path`` for ``key`` in ``keys``.
+
+    Returns the keys actually commented. Only a line whose own key is targeted
+    is touched, and a line already commented is left alone, so the rewrite is
+    idempotent and preserves every other line's text, order and value — the
+    file also holds the password and provider keys, which is why it is written
+    back owner-only. A missing file is not an error: there is nothing to
+    comment, and the tile is already satisfied.
+    """
+    from ciao.jsonio import write_private_text
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise RuntimeError(f"Could not read {path}: {exc}") from exc
+
+    commented: list[str] = []
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            out.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key in keys:
+            out.append(f"# {line}")
+            commented.append(key)
+        else:
+            out.append(line)
+    if commented:
+        write_private_text(path, "\n".join(out).rstrip() + "\n")
+    return commented
+
+
+def _run_legacy_env_cleanup(context: DetectionContext) -> tuple[dict[str, Any], str]:
+    """Comment the retired variables out of the workspace ``.env``.
+
+    The tile's chat prompt used to ask the agent to do this, but `.env` is a
+    credential-denied path for every provider
+    (``execution_modes.CREDENTIAL_DENY_PATTERNS``), so the write can never
+    happen there and the tile could never clear (#1134). The engine owns the
+    file, and the lines are inert — commenting them out changes no behaviour.
+
+    Also drops the keys from the running process, because server startup
+    ``load_dotenv``ed them into ``os.environ`` and detection reads that; without
+    it the re-detection in the run response would still see them and the tile
+    would survive the very press that removed the lines.
+    """
+    stale = _stale_legacy_env(context.config)
+    if not stale:
+        return {"keys": [], "commented": []}, "Nothing to remove."
+    keys = {name for name, _hint in stale}
+
+    workspace = getattr(context.config, "workspace_root", None)
+    commented: list[str] = []
+    if workspace:
+        commented = _comment_out_env_lines(Path(workspace) / ".env", keys)
+
+    for name in sorted(keys):
+        os.environ.pop(name, None)
+        source = getattr(context.config, "env_source", None)
+        if isinstance(source, dict):
+            source.pop(name, None)
+
+    if not commented:
+        return (
+            {"keys": sorted(keys), "commented": []},
+            f"Removed {len(keys)} variable(s) from the environment; no line was "
+            "left in .env.",
+        )
+    return (
+        {"keys": sorted(keys), "commented": commented},
+        f"Commented {len(commented)} line(s) out of .env.",
+    )
 
 
 def _run_workspace_reroot(context: DetectionContext) -> tuple[dict[str, Any], str]:

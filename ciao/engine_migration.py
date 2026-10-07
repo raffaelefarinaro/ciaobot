@@ -27,11 +27,17 @@ import os
 import plistlib
 import sys
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
-from ciao.macos_service import DEFAULT_PORT, default_launch_agents_dir, discover_runtime
+from ciao.macos_service import (
+    DEFAULT_PORT,
+    default_launch_agents_dir,
+    discover_runtime,
+    hosted_service_python,
+)
+from ciao.server_host import APP_NAME as SERVER_HOST_APP_NAME
 
 # The engine LaunchAgent this classifies from: the same file
 # `macos_service.SERVER_LABEL` names, spelled out because this module also runs
@@ -93,12 +99,20 @@ def _read_plist(path: Path) -> tuple[bool, dict[str, Any]]:
 
 
 def _app_bundle(program: str) -> str:
-    """The `.app` path `program` lives in, or "" when it lives outside one."""
+    """The `.app` path `program` lives in, or "" when it lives outside one.
+
+    The native `Ciaobot Server.app` host is never a `Ciaobot.app` to retire,
+    even when its argv is one the strict hosted parser refuses: naming it here
+    would send the installer's migration to `rm -rf` the host bundle.
+    """
     marker = ".app/"
     index = program.find(marker)
     if index < 0:
         return ""
-    return program[: index + len(".app")]
+    bundle = program[: index + len(".app")]
+    if PurePosixPath(bundle).name == SERVER_HOST_APP_NAME:
+        return ""
+    return bundle
 
 
 def _client_host_url(value: Any) -> str:
@@ -255,6 +269,17 @@ def _classify(agents: Path) -> Classification:
         # A service definition that names no program is still a service
         # definition somebody's launchd may be running.
         return _unreadable()
+
+    if hosted_service_python(arguments) is not None:
+        # The native `Ciaobot Server.app` host already owns the service.
+        # This migration exists to hand a live `Ciaobot.app` over to the
+        # terminal engine; a hosted definition is already that engine's
+        # front, so there is nothing to migrate and it classifies as an
+        # installer-managed engine. `_app_bundle` would read the host's own
+        # bundle as though it were a `Ciaobot.app`, which is wrong: the
+        # hosted shape is recognised through the host parser, not by
+        # filename.
+        return Classification(kind="engine", plist_program=program)
 
     bundle = _app_bundle(program)
     if not bundle:

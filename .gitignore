@@ -58,6 +58,9 @@ secrets/
 # Orca CLI local state (dropped screenshots, worktree metadata)
 .orca/
 
+# Impeccable local design-tool state (preferences, cache, saved critiques)
+/.impeccable/
+
 
 # Workspace runtime artifacts seeded by `ciao sync-skills` when a dev
 # instance runs with this repo as its workspace (canonical copies live

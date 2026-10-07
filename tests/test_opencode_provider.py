@@ -2458,8 +2458,36 @@ def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
 
     status = mod.opencode_login_status()
 
-    assert status["skills"] == ["opencode", "pdf", "review"]
+    assert status["skills"] == ["pdf", "review"]
+    assert status["bundled_skills"] == ["opencode"]
     assert status["mcps"] == ["github"]
+
+
+def test_status_leaves_out_lists_the_server_could_not_report(monkeypatch):
+    """A failed list route must not read as "nothing installed"."""
+    import json as _json
+    from types import SimpleNamespace
+
+    import ciao.providers.opencode as mod
+
+    def fake_run(cmd, *a, **k):
+        if cmd[1:4] == ["api", "GET", "/api/skill"]:
+            return SimpleNamespace(stdout="", returncode=1)
+        if cmd[1:3] == ["api", "GET"]:
+            return SimpleNamespace(stdout=_json.dumps({"data": []}), returncode=0)
+        if cmd[1] == "--version":
+            return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
+        return SimpleNamespace(stdout="[]", returncode=0)
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    status = mod.opencode_login_status()
+
+    assert status["ok"] is True
+    assert "skills" not in status
+    assert "bundled_skills" not in status
+    assert status["mcps"] == []
 
 
 def test_credential_count_is_unknown_when_the_cli_fails(monkeypatch):
@@ -3073,6 +3101,67 @@ def test_extra_env_overlay_does_not_hide_an_exported_override(tmp_path, monkeypa
     ) == str(other.resolve())
 
 # ── a wrapper that leads nowhere ──────────────────────────────────────────
+
+
+def test_opencode_install_command_matches_installer_to_platform(monkeypatch):
+    """The row's one-liner follows the platform, as Claude's does."""
+    import sys
+
+    from ciao.providers import opencode as mod
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert "opencode.ai/v2/install" in mod.opencode_install_command()
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert mod.opencode_install_command() == "npm install -g @opencode/cli"
+
+
+def test_login_status_reports_a_missing_binary_as_an_install_step(
+    tmp_path: Path, monkeypatch
+):
+    """No binary means no chats, so the row asks for an install, not a login.
+
+    The install branch is shared with Claude: `auth="not_installed"` with a
+    one-line installer, the download page, and a PATH line when the installer
+    drops the binary off the default PATH. An empty hint is omitted, the same
+    way Claude's row omits it. Before this the row said `auth="missing"` with
+    a bare `opencode` command, so the provider page and the wizard showed
+    nothing a user could run.
+    """
+    from ciao.providers import opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: None)
+
+    row = mod.opencode_login_status()
+
+    assert row["ok"] is False
+    assert row["auth"] == "not_installed"
+    assert row["install_url"] == mod.OPENCODE_INSTALL_DOCS_URL
+    assert "opencode" in row["command"]
+    hint = mod.opencode_path_hint()
+    if hint:
+        assert row["path_command"] == hint
+    else:
+        assert "path_command" not in row
+    assert "not installed" in row["detail"]
+
+
+def test_the_opencode_path_line_is_only_offered_for_the_curl_installer(monkeypatch):
+    """npm's shim and Homebrew bins are already searched, so only the curl
+    installer's ``~/.opencode/bin`` needs a PATH line — and Windows, where the
+    row offers npm, needs none at all.
+
+    The POSIX line is built with ``Path``, so it is asserted on a POSIX host
+    only. Monkeypatching ``sys.platform`` to Darwin on Windows still joins
+    with backslashes.
+    """
+    import sys
+
+    from ciao.providers import opencode as mod
+
+    if sys.platform != "win32":
+        assert ".opencode/bin" in mod.opencode_path_hint()
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert mod.opencode_path_hint() == ""
 
 
 def test_login_status_reports_a_broken_wrapper_as_broken_not_missing(

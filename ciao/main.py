@@ -12,7 +12,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Literal
+from typing import TYPE_CHECKING, Awaitable, Callable, Literal
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
 from ciao.legacy_node_state import (
@@ -36,6 +36,9 @@ from ciao.error_log import install_asyncio_noise_filter, setup_error_logging
 from ciao.os_support.limits import raise_file_descriptor_limit
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
+
+if TYPE_CHECKING:
+    from ciao.provider_service import ProviderService
 
 logger = logging.getLogger(__name__)
 
@@ -304,6 +307,42 @@ def _ensure_tool_dirs_on_path() -> None:
 #: How long the restart watchdog lets asyncio cleanup run before forcing the restart.
 RESTART_WATCHDOG_GRACE_S = 15
 
+# Longer than the Claude SDK's 5 s stdin-EOF grace, so a CLI that is flushing
+# its session file is not cut off mid-write. Provider disconnect runs alongside
+# background-run shutdown (see _shutdown_concurrently), so this wait does not
+# eat into the time the watchdog leaves for terminating background commands.
+PROVIDER_SHUTDOWN_TIMEOUT_S = 6
+
+
+async def _disconnect_for_shutdown(svc: ProviderService) -> None:
+    """Disconnect one provider, bounded, without letting a failure escape.
+
+    Running out the bound is routine (a turn was in flight and the CLI is still
+    winding down), so it is a warning, not an error traceback in the error log.
+    """
+    try:
+        await asyncio.wait_for(svc.disconnect(), timeout=PROVIDER_SHUTDOWN_TIMEOUT_S)
+    except TimeoutError:
+        logger.warning(
+            "Provider disconnect did not finish within %ss during shutdown",
+            PROVIDER_SHUTDOWN_TIMEOUT_S,
+        )
+    except Exception:
+        logger.exception("Provider disconnect failed during shutdown")
+
+
+async def _shutdown_concurrently(*steps: Callable[[], Awaitable[None]]) -> None:
+    """Run independent shutdown steps at once, so their waits overlap.
+
+    The restart watchdog's grace covers the whole teardown; steps that wait on
+    unrelated children (provider CLIs, background commands) should not queue
+    behind each other. One step failing never cancels the others.
+    """
+    results = await asyncio.gather(*(step() for step in steps), return_exceptions=True)
+    for step, result in zip(steps, results):
+        if isinstance(result, Exception):
+            logger.error("Shutdown step %s failed", step.__name__, exc_info=result)
+
 
 # asyncio.run's cleanup phase (cancel tasks, shut down the default
 # executor) can wedge after uvicorn drains: leaked Claude SDK
@@ -375,6 +414,20 @@ async def _async_main(*, supervised: bool = False) -> int:
 async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
+    # Runtime-mutable settings overlay (PWA Settings). Applied on top of the
+    # env-backed config so PATCHes take effect without a restart and survive
+    # one via .runtime/app_settings.json. Loaded first: the log level and the
+    # bind address below come from it, and the one-time import of their
+    # retired `.env` variables has to land before either is used.
+    from ciao.app_settings import AppSettingsStore
+
+    app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
+    app_settings.migrate_legacy_insights_enabled(
+        getattr(config, "legacy_insights_disabled", None)
+    )
+    app_settings.import_legacy_env(getattr(config, "legacy_env_settings", {}))
+    app_settings.apply_to_config(config)
+
     setup_error_logging(config.workspace_root)
     # The engine holds a descriptor per accepted connection. A service manager
     # starts it with a low soft limit (macOS launchd: 256) unless the service
@@ -383,13 +436,14 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     # covers `ciao run`/`ciao supervise` and an upgrade that did not rewrite
     # the unit. Best-effort: the engine must still start if the call fails.
     raise_file_descriptor_limit()
-    # When CIAO_LOG_LEVEL=debug, also capture DEBUG+ records into a rotating
-    # server_debug.log so verbose runtime detail is inspectable after the fact
-    # (surfaced through the debug issue report). No-op at the default INFO.
+    # At the debug log level (Settings), also capture DEBUG+ records into a
+    # rotating server_debug.log so verbose runtime detail is inspectable after
+    # the fact (surfaced through the debug issue report). No-op at INFO.
     from ciao.error_log import resolve_log_level, setup_debug_logging
 
-    setup_debug_logging(config.workspace_root)
-    log_level = resolve_log_level()
+    log_level = resolve_log_level(config.log_level)
+    logging.getLogger().setLevel(log_level)
+    setup_debug_logging(config.workspace_root, level=log_level)
     # Keep the SDK's benign closed-transport control-task errors out of the
     # error log (asyncio would otherwise log them at ERROR). See issue #163.
     install_asyncio_noise_filter()
@@ -397,17 +451,6 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     # No model discovery at startup: opencode serves its catalog on demand and
     # Claude Code has a fixed tier vocabulary,
     # so there is no allowlist to warm here.
-
-    # Runtime-mutable settings overlay (PWA Settings → Models tab). Applied
-    # on top of the env-backed config so PATCHes take effect without a
-    # restart and survive one via .runtime/app_settings.json.
-    from ciao.app_settings import AppSettingsStore
-
-    app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
-    app_settings.migrate_legacy_insights_enabled(
-        getattr(config, "legacy_insights_disabled", None)
-    )
-    app_settings.apply_to_config(config)
 
     # Pin the job-run recorder to the same .runtime the config uses, then
     # route finished startup phases (vault index, skills update) into it.
@@ -768,7 +811,7 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # Drop the indicator now. The wake below is coalesced over a short
         # window, so waiting for it would leave the chat claiming a run is
         # live for seconds after it exited.
-        pcm.announce_background_runs(run.parent_chat_id)
+        pcm.announce_background_runs(run.parent_chat_id, finished=run)
         pcm.queue_background_wake(
             run.parent_chat_id,
             run_id=run.run_id,
@@ -850,7 +893,6 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     app.state.local_session_manager = LocalSessionManager(
         workspace=git_sync_root,
         runtime_root=config.state_path.parent,
-        dev_mode=config.dev_mode,
     )
     if mcp_service is not None:
         from ciao.control_plane import CiaoControlPlane
@@ -1024,6 +1066,16 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
                 len(orphaned), ", ".join(run.run_id for run in orphaned),
             )
 
+        # Import batch retention (C6, #1032): drop terminal batches past the
+        # 30-day snapshot window, keeping accepted fact evidence. Once per
+        # boot is plenty for a 30-day window, and the sweep is fail-soft
+        # (a prune error is logged inside, never blocks startup).
+        from ciao.import_store import sweep_import_batches
+
+        pruned_imports = sweep_import_batches(config)
+        if pruned_imports:
+            logger.info("Pruned %d expired import batch(es)", pruned_imports)
+
         # Wake chats whose CLI-owned tasks (Monitor / background Bash) were
         # still running when the old server died: no completion watcher
         # survives a restart, so the wake must be armed here.
@@ -1073,6 +1125,36 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
                 logger.exception("Schedule catch-up failed")
 
         asyncio.create_task(_run_catch_up())
+
+        # A webhook event accepted before the restart is still `accepted`: the
+        # event happened and nothing ran yet. Dispatch what is left, once, and
+        # record the receipts a crash left in the ambiguous window (`launching`
+        # with no outcome) as `interrupted` for a person instead of replaying
+        # them. Bounded, so a journal that accumulated accepted rows while
+        # nothing dispatched them cannot start a turn per row at boot.
+        from ciao.web.routes_webhooks import webhook_store as _webhook_store
+        from ciao.webhook_dispatch import resume_pending
+        from ciao.webhooks import WebhookReceiver
+
+        async def _resume_webhook_dispatches() -> None:
+            try:
+                store = _webhook_store(config)
+                summary = await resume_pending(
+                    WebhookReceiver(store.path), store, pcm
+                )
+                if summary.launched or summary.failed or summary.interrupted:
+                    logger.warning(
+                        "Webhook dispatch resume settled %d receipt(s): %d "
+                        "launched, %d failed, %d interrupted",
+                        summary.launched + summary.failed + summary.interrupted,
+                        summary.launched,
+                        summary.failed,
+                        summary.interrupted,
+                    )
+            except Exception:
+                logger.exception("Webhook dispatch resume failed")
+
+        asyncio.create_task(_resume_webhook_dispatches())
 
     # ── Memory backup ────────────────────────────────────────
     # Backs up the same repo the sync flow targets (the repo containing the
@@ -1260,13 +1342,10 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         services = list(pcm._providers.values())
         pcm._providers.clear()
         pcm._provider_last_used.clear()
-        async def _one(svc):
-            try:
-                await asyncio.wait_for(svc.disconnect(), timeout=3)
-            except Exception:
-                logger.exception("Provider disconnect failed during shutdown")
         if services:
-            await asyncio.gather(*(_one(s) for s in services), return_exceptions=True)
+            await asyncio.gather(
+                *(_disconnect_for_shutdown(s) for s in services), return_exceptions=True
+            )
 
     async def _shutdown_background_runs() -> None:
         # Terminate every live background command before the loop closes. This
@@ -1309,9 +1388,11 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # running finishes on its own.
         backup_stop.set()
 
+    async def _shutdown_children() -> None:
+        await _shutdown_concurrently(_shutdown_providers, _shutdown_background_runs)
+
     app.state.shutdown_callbacks = [
-        _shutdown_providers,
-        _shutdown_background_runs,
+        _shutdown_children,
         # Before the read executor: the scan is waiting on a worker, and closing
         # the pool out from under a pending task is the leak worth avoiding.
         _shutdown_links_scan,
@@ -1330,9 +1411,9 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
 
 def main(*, supervised: bool = False) -> None:
     """CLI entrypoint."""
-    from ciao.error_log import resolve_log_level
-
-    logging.basicConfig(level=resolve_log_level())
+    # INFO until the workspace's own log level (Settings) is known, which
+    # `_run_server_locked` applies.
+    logging.basicConfig(level=logging.INFO)
     from ciao.instance_lock import WorkspaceAlreadyRunningError
 
     try:

@@ -47,7 +47,7 @@
     <section>
       <svg class="diagram" viewBox="0 0 720 260" role="img" aria-labelledby="prov-title prov-desc">
         <title id="prov-title">Two ways to reach a model</title>
-        <desc id="prov-desc">Ciaobot sits on top. Claude Code connects to your Anthropic subscription or API key. opencode connects to OpenAI, OpenRouter, Z.ai, Ollama Cloud, local Ollama and many other providers.</desc>
+        <desc id="prov-desc">Ciaobot sits on top. Claude Code connects to your Claude subscription. opencode connects to OpenAI, OpenRouter, Z.ai, Ollama Cloud, local Ollama and many other providers.</desc>
         <rect class="box-accent" x="210" y="10" width="300" height="60" rx="14"/>
         <text x="360" y="37" text-anchor="middle" font-weight="700" font-size="17">Ciaobot</text>
         <text class="muted" x="360" y="57" text-anchor="middle" font-size="13">workspaces · memory · files · schedules</text>
@@ -58,7 +58,7 @@
         <text x="540" y="137" text-anchor="middle" font-weight="600" font-size="16">opencode</text>
         <text class="muted" x="540" y="157" text-anchor="middle" font-size="13">open-source agent, any provider</text>
         <rect class="box-secondary" x="40" y="200" width="280" height="50" rx="12"/>
-        <text x="180" y="230" text-anchor="middle" font-size="14">Claude subscription or API key</text>
+        <text x="180" y="230" text-anchor="middle" font-size="14">Claude subscription</text>
         <rect class="box-secondary" x="400" y="200" width="280" height="50" rx="12"/>
         <text x="540" y="222" text-anchor="middle" font-size="13">OpenAI · OpenRouter · Z.ai · Ollama Cloud</text>
         <text x="540" y="240" text-anchor="middle" font-size="13">local Ollama · LM Studio · and more</text>
@@ -83,7 +83,7 @@
 
     <section>
       <h2>Claude: through Claude Code</h2>
-      <p>For Anthropic's models, Ciaobot uses <a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code</a>, Anthropic's own agent, through its official SDK. That means you use your <strong>Claude subscription</strong> exactly as Anthropic intends (or an API key, if you prefer to pay per use). Sign in once with <code>claude auth login</code> and Ciaobot uses that session.</p>
+      <p>For Anthropic's models, Ciaobot uses <a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code</a>, Anthropic's own agent, through its official SDK. That means you use your <strong>Claude subscription</strong> exactly as Anthropic intends. Sign in once with <code>claude auth login</code> and Ciaobot uses that session.</p>
       <p>If the model you picked is busy or unavailable, Ciaobot steps down to the next one automatically instead of failing the chat.</p>
     </section>
 

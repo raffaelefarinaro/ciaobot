@@ -15,15 +15,21 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
+from ciao.setup_marker import read_setup_vault_mode
 from ciao.setup_status import claude_auth_status, claude_path_command, setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
     provider_connection_action,
     setup_finish_endpoint,
+    setup_inspect_folder_endpoint,
     setup_list_dirs_endpoint,
     setup_mkdir_endpoint,
     setup_status_endpoint,
 )
+
+
+# The setup routes check the TCP peer; TestClient defaults to "testclient".
+_LOOPBACK_PEER = ("127.0.0.1", 50000)
 
 
 @pytest.fixture(autouse=True)
@@ -61,16 +67,27 @@ def _config(tmp_path, env_extra: dict[str, str] | None = None) -> CiaoConfig:
     return CiaoConfig.from_env(env)
 
 
-def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
+def _sign_in_claude(monkeypatch) -> None:
+    """Report the Claude CLI as signed in, so a provider is ready."""
+    monkeypatch.setattr(
+        "ciao.setup_status.claude_auth_status",
+        lambda *args, **kwargs: {
+            "logged_in": True,
+            "unparseable": False,
+            "email": "operator@example.com",
+            "org_name": "",
+        },
+    )
+
+
+def test_setup_status_reports_workspace_and_required_config(tmp_path, monkeypatch) -> None:
+    _sign_in_claude(monkeypatch)
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()
 
     data = setup_status(
         config,
-        env={
-            "PWA_AUTH_TOKEN": "test-token",
-            "ANTHROPIC_API_KEY": "sk-anthropic",
-        },
+        env={"PWA_AUTH_TOKEN": "test-token"},
     )
 
     checks = {row["id"]: row for row in data["checks"]}
@@ -83,7 +100,7 @@ def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
     assert data["configured"] is True
 
 
-def test_setup_status_reports_the_workspace_guide(tmp_path) -> None:
+def test_setup_status_reports_the_workspace_guide(tmp_path, monkeypatch) -> None:
     """The optional guide check tracks whether the workspace has a guide.
 
     It used to check that AGENTS.md resolved to CLAUDE.md. There is one guide
@@ -91,9 +108,10 @@ def test_setup_status_reports_the_workspace_guide(tmp_path) -> None:
     gone; a workspace that has been migrated correctly must not be reported
     as broken for lacking the second file.
     """
+    _sign_in_claude(monkeypatch)
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()
-    env = {"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"}
+    env = {"PWA_AUTH_TOKEN": "test-token"}
 
     checks = {row["id"]: row for row in setup_status(config, env=env)["checks"]}
     assert checks["workspace_guides"]["ok"] is False
@@ -111,7 +129,7 @@ def test_setup_status_accepts_a_pre_migration_guide(tmp_path) -> None:
     """An install that has not run the guide migration still has its guide."""
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()
-    env = {"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"}
+    env = {"PWA_AUTH_TOKEN": "test-token"}
     (tmp_path / "CLAUDE.md").write_text("# Legacy guide\n", encoding="utf-8")
 
     checks = {row["id"]: row for row in setup_status(config, env=env)["checks"]}
@@ -147,7 +165,7 @@ def test_setup_status_survives_a_deleted_working_directory(tmp_path, monkeypatch
 
     data = setup_status(
         config,
-        env={"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"},
+        env={"PWA_AUTH_TOKEN": "test-token"},
     )
 
     checks = {row["id"]: row for row in data["checks"]}
@@ -192,15 +210,15 @@ def test_setup_status_detects_claude_cli_oauth(tmp_path, monkeypatch) -> None:
     assert "operator@example.com" in data["providers"]["claude"]["detail"]
 
 
-def test_setup_status_detects_claude_api_key_without_oauth(tmp_path) -> None:
+def test_setup_status_does_not_treat_an_api_key_as_claude_auth(tmp_path) -> None:
+    """Claude auth is the CLI login only; an inherited API key is not reported."""
     secret = "sk-ant-secret-value"
     config = _config(tmp_path)
     data = setup_status(config, env={"ANTHROPIC_API_KEY": secret})
 
     claude = data["providers"]["claude"]
-    assert claude["ok"] is True
-    assert claude["auth"] == "api_key"
-    assert claude["account"] == "Anthropic API"
+    assert claude["ok"] is False
+    assert claude["auth"] == "missing"
     assert secret not in json.dumps(data)
 
 
@@ -399,17 +417,13 @@ def test_setup_status_explains_desktop_login_is_app_private(tmp_path, monkeypatc
 def test_setup_status_reports_a_missing_claude_cli_as_an_install_step(
     tmp_path, monkeypatch
 ) -> None:
-    """No CLI means no chats, so setup asks for the install, not for a login.
-
-    An API key alone does not make Claude usable: Ciaobot drives the ``claude``
-    binary through the Agent SDK.
-    """
+    """No CLI means no chats, so setup asks for the install, not for a login."""
     monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
     monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
     config = _config(tmp_path)
 
-    claude = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})["providers"]["claude"]
+    claude = setup_status(config, env={})["providers"]["claude"]
 
     assert claude["ok"] is False
     assert claude["auth"] == "not_installed"
@@ -444,7 +458,7 @@ def test_setup_status_reports_the_resolved_cli_path(tmp_path) -> None:
     """The wizard shows which binary it would run, not just that one exists."""
     config = _config(tmp_path)
 
-    claude = setup_status(config, env={"ANTHROPIC_API_KEY": "sk-anthropic"})["providers"]["claude"]
+    claude = setup_status(config, env={})["providers"]["claude"]
 
     assert claude["cli_path"] == "/usr/local/bin/claude"
 
@@ -613,7 +627,6 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     monkeypatch.setenv("PWA_PORT", "")
     monkeypatch.setenv("PWA_AUTH_TOKEN", "")
-    monkeypatch.setenv("PWA_AUTH_REQUIRED", "")
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     restarts: list[int] = []
@@ -629,7 +642,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     notes = tmp_path / "notes"
     launch_agents = tmp_path / "LaunchAgents"
     apps = tmp_path / "Applications"
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -655,10 +668,9 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     # relaunched process through the environment too: load_dotenv would not
     # override a PWA_AUTH_TOKEN already set for the bootstrap run.
     assert os.environ["PWA_AUTH_TOKEN"] == "wizard-pass"
-    assert os.environ["PWA_AUTH_REQUIRED"] == "true"
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert "PWA_AUTH_TOKEN=wizard-pass" in env_text
-    assert "PWA_AUTH_REQUIRED=true" in env_text
+    assert "PWA_AUTH_REQUIRED" not in env_text
     assert "CIAO_PUSH_CONTACT" not in env_text
     assert f"CIAO_VAULT_ROOT={notes}" in env_text
     assert (notes / "MEMORY.md").is_file()
@@ -687,7 +699,7 @@ def _finish_client(tmp_path) -> TestClient:
     app.state.config = config
     app.state.serializer = serializer
     app.state.request_restart = lambda code: None
-    return TestClient(app, base_url="http://localhost:8443")
+    return TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
 
 
 def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
@@ -707,7 +719,8 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     )
     assert resp.status_code == 200
     env_text = (ws / ".env").read_text(encoding="utf-8")
-    assert "CIAO_VAULT_MODE=scratch" in env_text
+    assert "CIAO_VAULT_MODE" not in env_text
+    assert read_setup_vault_mode(ws / ".runtime") == "scratch"
     # `<workspace>/memory-vault`: the wizard creates the per-workspace layout
     # directly, so a new install never has a shared vault to migrate.
     assert (ws / "life" / "memory-vault" / "MEMORY.md").is_file()
@@ -762,7 +775,8 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     )
     assert resp.status_code == 200
     env_text = (ws / ".env").read_text(encoding="utf-8")
-    assert "CIAO_VAULT_MODE=existing" in env_text
+    assert "CIAO_VAULT_MODE" not in env_text
+    assert read_setup_vault_mode(ws / ".runtime") == "existing"
     assert "CIAO_VAULT_ROOT=." in env_text
     assert (ws / "MEMORY.md").is_file()
     assert not (ws / "memory-vault").exists()
@@ -771,6 +785,29 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     )
     assert registry[0]["name"] == "journal"
     assert registry[0]["vault_root"] == "."
+
+
+def test_setup_finish_records_vault_mode_for_folder_with_its_own_env(tmp_path) -> None:
+    """A notes folder that already holds an unrelated `.env` is still a first
+    setup: setup merges into that file, and the onboarding chat must still
+    learn that the folder is existing notes, not a scratch vault."""
+    ws = tmp_path / "notes"
+    ws.mkdir()
+    (ws / "ideas.md").write_text("# Ideas\n", encoding="utf-8")
+    (ws / ".env").write_text("SOME_TOOL_KEY=abc\n", encoding="utf-8")
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(ws),
+            "workspace_name": "journal",
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+    assert resp.status_code == 200
+    assert "SOME_TOOL_KEY=abc" in (ws / ".env").read_text(encoding="utf-8")
+    assert read_setup_vault_mode(ws / ".runtime") == "existing"
 
     loaded = CiaoConfig.from_env(
         {
@@ -797,7 +834,7 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.serializer = serializer
-    client = TestClient(app, base_url="http://localhost:8443")
+    client = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
     client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
 
     app.state.config = CiaoConfig.from_env(
@@ -816,7 +853,7 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
 
 
 def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
-    """Host auth_check must mirror AuthMiddleware when PWA_AUTH_REQUIRED is on."""
+    """Host auth_check must mirror AuthMiddleware: a session is always required."""
     from ciao.web.auth import SESSION_COOKIE
     from ciao.web.routes_auth import auth_check
 
@@ -828,12 +865,11 @@ def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
     app.state.serializer = serializer
     app.state.config = CiaoConfig.from_env(
         {
-            "PWA_AUTH_REQUIRED": "true",
             "PWA_AUTH_TOKEN": "secret",
             "CIAO_WORKSPACE": str(tmp_path / "ws"),
         }
     )
-    client = TestClient(app, base_url="http://localhost:8443")
+    client = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER)
 
     assert client.get("/api/auth/check").status_code == 401
 
@@ -893,7 +929,7 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -978,7 +1014,7 @@ def test_setup_finish_handoff_goes_through_the_backend(
     app.state.serializer = serializer
     app.state.request_restart = restarts.append
 
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -1039,7 +1075,7 @@ def test_setup_finish_requires_workspace(tmp_path) -> None:
     app.state.config = config
     app.state.serializer = serializer
 
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={"vault_root": str(tmp_path / "notes")},
     )
@@ -1061,7 +1097,7 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
     app.state.serializer = serializer
 
     workspace = tmp_path / "workspace"
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -1093,7 +1129,7 @@ def test_setup_finish_accepts_0000_host(tmp_path) -> None:
     app.state.config = config
     app.state.serializer = serializer
 
-    resp = TestClient(app, base_url="http://0.0.0.0:8443").post(
+    resp = TestClient(app, base_url="http://0.0.0.0:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={
             "password": "wizard-pass",
@@ -1119,7 +1155,7 @@ def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
     app.state.config = config
     app.state.serializer = serializer
 
-    resp = TestClient(app, base_url="http://localhost:8443").post(
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
         "/api/setup/finish",
         json={"workspace": str(tmp_path / "workspace")},
         cookies={"ciao_session": serializer.dumps({"user": "owner"})},
@@ -1151,7 +1187,40 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
     assert "open the wizard at http://localhost:8443" in resp.json()["error"]
 
 
-def _folder_picker_client(tmp_path, *, bootstrap: bool = True, base_url: str = "http://localhost:8443") -> TestClient:
+def test_setup_routes_refuse_a_lan_peer_claiming_localhost(tmp_path) -> None:
+    """First run binds 0.0.0.0: a LAN client can send `Host: localhost`, so
+    the Host header alone must not make the setup routes reachable."""
+    lan = ("192.168.1.20", 50000)
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    app.state.request_restart = lambda code: None
+
+    finish = TestClient(app, base_url="http://localhost:8443", client=lan).post(
+        "/api/setup/finish",
+        json={"password": "wizard-pass", "workspace": str(tmp_path / "workspace")},
+    )
+    listing = _folder_picker_client(tmp_path, peer=lan).get(
+        "/api/setup/list-dirs", params={"path": str(tmp_path)}
+    )
+
+    assert finish.status_code == 403
+    assert not (tmp_path / "workspace" / ".env").exists()
+    assert listing.status_code == 403
+
+
+def _folder_picker_client(
+    tmp_path,
+    *,
+    bootstrap: bool = True,
+    base_url: str = "http://localhost:8443",
+    peer: tuple[str, int] = _LOOPBACK_PEER,
+) -> TestClient:
     if bootstrap:
         config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     else:
@@ -1160,13 +1229,14 @@ def _folder_picker_client(tmp_path, *, bootstrap: bool = True, base_url: str = "
     app = Starlette(
         routes=[
             Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
+            Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
             Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
         ],
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.config = config
     app.state.serializer = serializer
-    return TestClient(app, base_url=base_url)
+    return TestClient(app, base_url=base_url, client=peer)
 
 
 def test_setup_list_dirs_requires_bootstrap_mode(tmp_path) -> None:
@@ -1255,6 +1325,20 @@ def test_setup_mkdir_requires_bootstrap_mode(tmp_path) -> None:
 
     assert resp.status_code == 404
     assert not (tmp_path / "workspace").exists()
+
+
+def test_setup_inspect_folder_reachable_without_session_in_bootstrap(tmp_path) -> None:
+    """The first-run wizard has no session yet; with password protection always
+    on, the folder probe must be on the public list like the other setup
+    filesystem routes, or the wizard never shows existing workspaces."""
+    target = tmp_path / "notes"
+    target.mkdir()
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+
+    assert resp.status_code == 200
+    assert "existing_workspaces" in resp.json()
 
 
 def test_tcc_protected_location_flags_desktop(monkeypatch, tmp_path) -> None:
@@ -1481,6 +1565,71 @@ def test_discover_claude_system_skills_merges_standalone_skills(
         "note-taking",
         "skill-creator",
     ]
+
+
+def test_discover_claude_system_skills_lists_synced_skills_and_loaded_plugins(
+    monkeypatch, tmp_path
+) -> None:
+    """claude.ai-synced skills sit under synced/<bucket>/, and synced plugins
+    report `loaded` rather than `enabled`. The folder is not a skill."""
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+
+    class FakeResult:
+        stdout = (
+            "❯ skill-creator@claude-plugins-official\n"
+            "  Status: ✔ enabled\n"
+            "❯ telegram@claude-plugins-official\n"
+            "  Status: ✘ disabled\n"
+            "Synced from claude.ai:\n"
+            "❯ cowork-plugin-management@synced\n"
+            "  Path: /x\n"
+            "  Status: ✔ loaded\n"
+        )
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(
+        setup_status.subprocess, "run", lambda *_a, **_k: FakeResult()
+    )
+    skills_dir = tmp_path / "skills"
+    (skills_dir / "impeccable").mkdir(parents=True)
+    bucket = skills_dir / "synced" / "org_user"
+    for name in ("docx", "pdf"):
+        (bucket / name).mkdir(parents=True)
+        (bucket / name / "SKILL.md").write_text("---\n---\n", encoding="utf-8")
+    (bucket / "manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        setup_status, "_claude_standalone_skills_dir", lambda: skills_dir
+    )
+
+    assert setup_status.discover_claude_system_skills() == [
+        "cowork-plugin-management",
+        "docx",
+        "impeccable",
+        "pdf",
+        "skill-creator",
+    ]
+
+
+def test_claude_probe_reports_bundled_skills_once_a_chat_recorded_them(
+    monkeypatch, tmp_path
+) -> None:
+    from ciao import setup_status
+
+    monkeypatch.setattr(setup_status, "_claude_bundled_skills", None)
+    monkeypatch.setattr(
+        setup_status, "_claude_status", lambda *_a, **_k: {"name": "claude", "ok": True}
+    )
+    probe = lambda: setup_status.claude_status_probe({}, config_path=tmp_path / "c.yaml")  # noqa: E731
+
+    assert "bundled_skills" not in probe()
+
+    setup_status.record_claude_bundled_skills(["simplify", "code-review", " "])
+
+    assert probe()["bundled_skills"] == ["code-review", "simplify"]
 
 
 def test_discover_claude_system_skills_falls_back_to_installed_plugins(
@@ -2087,3 +2236,34 @@ def test_winning_ownership_after_a_probe_lands_serves_its_result(monkeypatch, tm
     assert ss.discover_claude_mcps(tmp_path) == ["Airtable"]
     assert calls == [], "the landed result must be served instead of re-probed"
     assert ss._claude_mcps_inflight is None, "ownership must be handed back"
+
+
+def test_a_registry_marks_a_set_up_workspace(tmp_path: Path) -> None:
+    from ciao.setup_marker import is_set_up_workspace
+
+    assert not is_set_up_workspace(tmp_path)
+    (tmp_path / ".runtime").mkdir()
+    (tmp_path / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    assert is_set_up_workspace(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ('CIAO_WORKSPACES=[{"name":"personal"}]', True),
+        ("CIAO_WORKSPACES='[{\"name\":\"personal\"}]'", True),
+        ("CIAO_WORKSPACES=", False),
+        ('CIAO_WORKSPACES=""', False),
+        ('# CIAO_WORKSPACES=[{"name":"personal"}]', False),
+        ("PWA_PORT=8443", False),
+    ],
+)
+def test_a_pre_1_0_workspaces_env_marks_a_set_up_workspace(
+    tmp_path: Path, line: str, expected: bool
+) -> None:
+    """Pre-1.0 path: no registry until the first start on a release that
+    imports CIAO_WORKSPACES, so the `.env` variable still counts."""
+    from ciao.setup_marker import is_set_up_workspace
+
+    (tmp_path / ".env").write_text(line + "\n", encoding="utf-8")
+    assert is_set_up_workspace(tmp_path) is expected

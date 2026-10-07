@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 
@@ -30,6 +31,29 @@ from ciao.models import ImageAttachment
 from ciao.web.project_chats import RestartDrainingError
 
 logger = logging.getLogger(__name__)
+
+
+async def _resettle_after_question_answer(websocket: WebSocket, chat_id: str) -> None:
+    """Re-settle a delegated attempt whose native question card was just answered.
+
+    Best effort by design: the user's answer already succeeded, and a settlement
+    that cannot be made is logged, never raised back at the socket. The control
+    plane owns the decision (``resettle_after_question_answer``); this only finds
+    it and runs the write off the event loop, the way ``routes_tasks`` runs every
+    other control-plane call.
+    """
+    service = getattr(websocket.app.state, "mcp_service", None)
+    plane = getattr(service, "control_plane", None)
+    if plane is None:
+        return
+    try:
+        await asyncio.to_thread(plane.resettle_after_question_answer, chat_id)
+    except Exception:  # noqa: BLE001 — a settlement must never fail the answer
+        logger.exception(
+            "delegation: could not re-settle the attempt for chat %s after its card "
+            "was answered",
+            chat_id,
+        )
 
 
 async def _forward_stream(websocket: WebSocket, stream: ChatStream) -> bool:
@@ -249,6 +273,13 @@ async def ws_chat(websocket: WebSocket) -> None:
                         })
                     except (WebSocketDisconnect, RuntimeError):
                         break
+                    if result.ok:
+                        # Answering a native card starts no turn, so nothing else
+                        # re-settles a delegated attempt the card was holding at
+                        # ``needs_you`` with a `done` report already on it (#1110).
+                        # Best effort: a settlement that cannot be made must not
+                        # fail the answer the user just gave.
+                        await _resettle_after_question_answer(websocket, chat_id)
                 continue
 
             if msg_type == "capability_response":
@@ -300,7 +331,17 @@ async def ws_chat(websocket: WebSocket) -> None:
 
             if msg_type == "message":
                 text = msg.get("text", "")
-                if not text:
+                images = []
+                for ref in msg.get("images", []):
+                    attachment = pcm.resolve_image_ref(ref)
+                    if attachment:
+                        images.append(attachment)
+
+                # An image-only follow-up is a real message: the images are
+                # the content, so they go out with an empty prompt instead of
+                # being dropped without a word (#1112). Only an entry with
+                # neither text nor images has nothing to send.
+                if not str(text or "").strip() and not images:
                     continue
 
                 # A client with an open socket to a chat that was archived
@@ -319,12 +360,6 @@ async def ws_chat(websocket: WebSocket) -> None:
                     except (WebSocketDisconnect, RuntimeError):
                         break
                     continue
-
-                images = []
-                for ref in msg.get("images", []):
-                    attachment = pcm.resolve_image_ref(ref)
-                    if attachment:
-                        images.append(attachment)
 
                 # Concurrent-send handling. A message sent while a stream is in
                 # flight is buffered for flush when the turn finishes. Same-turn
@@ -406,6 +441,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_subagents_ready`    {chat_id, project_id, remaining}
     - `chat_read`               {chat_id, last_read_at}
     - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)
+    - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
     - `chat_title`              {chat_id, title}
     - `open_chat`               {chat_id}  (menu-bar deep link into running PWA)
     - `server_restarting`       {message}  (restart drain began; show overlay)
@@ -447,10 +483,34 @@ async def ws_events(websocket: WebSocket) -> None:
             # finished. A restart does not carry them over — the runner
             # resolves non-terminal runs as orphans on start — so this only
             # ever reports runs the live process is actually supervising.
-            "background_runs": pcm.background_run_counts,
+            "background_runs": pcm.background_runs,
             # Late connectors that missed `server_restarting` still get the
             # overlay instead of a chat-level turn rejection.
             "restarting": bool(getattr(pcm, "_restart_draining", False)),
+            # Durable pinned-file state per chat id (#1118), each value the
+            # same `{path, dismissed_paths, revision}` payload the
+            # `chat_pin_changed` event and a pin PATCH carry. Every persisted
+            # chat is listed, INCLUDING unpinned and archived ones: a client
+            # reconnecting after a gap has to be able to close a pin the engine
+            # no longer holds, and it cannot do that for a chat that is absent.
+            "chat_pins": pcm.chat_pin_states,
+            "keyboard_shortcuts": (
+                websocket.app.state.app_settings.settings.keyboard_shortcuts or {}
+                if getattr(websocket.app.state, "app_settings", None) is not None else {}
+            ),
+            "keyboard_send_mode": (
+                websocket.app.state.app_settings.settings.keyboard_send_mode or "modifier"
+                if getattr(websocket.app.state, "app_settings", None) is not None else "modifier"
+            ),
+            "keyboard_revision": (
+                hashlib.sha256(
+                    json.dumps([
+                        websocket.app.state.app_settings.settings.keyboard_shortcuts or {},
+                        websocket.app.state.app_settings.settings.keyboard_send_mode or "modifier",
+                    ], sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                if getattr(websocket.app.state, "app_settings", None) is not None else ""
+            ),
         })
     except (WebSocketDisconnect, RuntimeError):
         subscription.close()

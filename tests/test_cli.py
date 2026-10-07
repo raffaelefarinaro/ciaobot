@@ -531,9 +531,7 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert rc == 0
     assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:2] == [
         "PWA_AUTH_TOKEN=test-token",
-        # Password protection is the default and is pinned explicitly, so an
-        # unset value never has to be guessed at on the next start.
-        "PWA_AUTH_REQUIRED=true",
+        "CIAO_VAULT_ROOT=memory-vault",
     ]
     # Agent assets belong to the WORKSPACE root, not the install root: a fresh
     # setup now builds the per-workspace layout directly instead of the shared one
@@ -598,32 +596,6 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert setup_token
 
 
-def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
-    """`--no-auth` is the only way a scripted setup gets an unprotected
-    dashboard, and it must be pinned in .env — an unset value now means on."""
-    workspace = tmp_path / "workspace"
-
-    rc = cli.main(
-        [
-            "setup",
-            "--workspace",
-            str(workspace),
-            "--auth-token",
-            "test-token",
-            "--no-auth",
-            "--launch-agents-dir",
-            str(tmp_path / "LaunchAgents"),
-            "--app-dir",
-            str(tmp_path / "Applications"),
-        ]
-    )
-
-    assert rc == 0
-    env_lines = (workspace / ".env").read_text(encoding="utf-8").splitlines()
-    assert "PWA_AUTH_REQUIRED=false" in env_lines
-    assert "PWA_AUTH_REQUIRED=true" not in env_lines
-
-
 def _setup_cli_args(tmp_path: Path) -> list[str]:
     return [
         "setup",
@@ -631,7 +603,6 @@ def _setup_cli_args(tmp_path: Path) -> list[str]:
         str(tmp_path / "workspace"),
         "--auth-token",
         "test-token",
-        "--no-auth",
         "--launch-agents-dir",
         str(tmp_path / "LaunchAgents"),
         "--app-dir",
@@ -1362,9 +1333,10 @@ def test_setup_merges_into_existing_env(tmp_path: Path) -> None:
     )
     assert content.count("PWA_AUTH_TOKEN=") == 1
     # Missing Ciaobot variables are appended so the install actually works.
-    assert "CIAO_WORKSPACE=." in content
     assert "CIAO_VAULT_ROOT=" in content
-    assert "CIAO_RUNTIME_ROOT=.runtime" in content
+    # The service definition carries these; setup no longer writes them.
+    assert "CIAO_WORKSPACE=" not in content
+    assert "CIAO_RUNTIME_ROOT=" not in content
 
 
 def test_setup_env_merge_is_idempotent(tmp_path: Path) -> None:
@@ -1422,6 +1394,28 @@ def test_path_export_hint(monkeypatch: pytest.MonkeyPatch) -> None:
         assert hint == f'export PATH="{bin_dir}:$PATH"'
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(bin_dir)]))
     assert cli._path_export_hint() is None
+
+
+def test_path_export_hint_names_the_installed_launcher_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import install_receipt
+
+    # An installer engine runs from a uv tool env whose own bin dir is never on
+    # PATH; `ciao` is the launcher in uv's bin dir, which the installer adds.
+    launcher_dir = tmp_path / "First Last" / ".local" / "bin"
+    install_receipt.write_receipt(install_receipt.InstallReceipt(
+        version="1.2.3", executable=str(launcher_dir / "ciao.exe"), python=sys.executable,
+        service_backend="windows-task", service_label="\\Ciaobot\\Engine",
+        installed_at="2026-10-05T00:00:00+00:00",
+    ))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(launcher_dir)]))
+    assert cli._path_export_hint() is None
+
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(Path(sys.executable).parent)]))
+    hint = cli._path_export_hint()
+    assert hint is not None
+    assert str(launcher_dir) in hint
 
 
 def test_path_export_hint_uses_the_helper(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3611,7 +3605,7 @@ def _per_root_workspace(root: Path) -> None:
     """Scaffold a migrated per-workspace install like setup_workspace does."""
     from ciao.cli import setup_workspace
 
-    setup_workspace(root, auth_token="t", auth_required=True)
+    setup_workspace(root, auth_token="t")
 
 
 def test_cli_health_reports_the_installed_workspace_from_a_bare_shell(
@@ -3675,9 +3669,8 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
     """A bare-shell `ciao run` against a stopped install must adopt the
     workspace .env's auth settings, not the bare shell's absence of them.
 
-    Discovery used to apply its overlay after PWA_AUTH_TOKEN and
-    PWA_AUTH_REQUIRED were parsed, so the started server ignored the
-    workspace's configured password and booted unauthenticated.
+    Discovery used to apply its overlay after PWA_AUTH_TOKEN was parsed, so
+    the started server ignored the workspace's configured password.
     """
     from ciao.config import CiaoConfig, reset_reroot_cache
 
@@ -3686,8 +3679,7 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
     # A distinctive token in the .env, as a configured install has.
     env_path = workspace / ".env"
     env_path.write_text(
-        (env_path.read_text(encoding="utf-8")).replace("PWA_AUTH_TOKEN=t", "PWA_AUTH_TOKEN=ws-secret-token")
-        + "PWA_AUTH_REQUIRED=true\n",
+        (env_path.read_text(encoding="utf-8")).replace("PWA_AUTH_TOKEN=t", "PWA_AUTH_TOKEN=ws-secret-token"),
         encoding="utf-8",
     )
     agents = tmp_path / "LaunchAgents"
@@ -3701,7 +3693,6 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
         "CIAO_VAULT_ROOT",
         "CIAO_BOOTSTRAP_WORKSPACE",
         "PWA_AUTH_TOKEN",
-        "PWA_AUTH_REQUIRED",
     ):
         monkeypatch.delenv(name, raising=False)
     (tmp_path / "home").mkdir()
@@ -3714,7 +3705,6 @@ def test_config_discovery_applies_the_workspace_auth_before_parsing(
 
     assert config.workspace_root == workspace.resolve()
     assert config.pwa_auth_token == "ws-secret-token"
-    assert config.pwa_auth_required is True
 
 
 def test_config_discovery_survives_an_exported_empty_workspace(
@@ -3752,7 +3742,6 @@ def test_config_discovery_survives_an_exported_empty_workspace(
         "CIAO_VAULT_ROOT",
         "CIAO_BOOTSTRAP_WORKSPACE",
         "PWA_AUTH_TOKEN",
-        "PWA_AUTH_REQUIRED",
     ):
         monkeypatch.delenv(name, raising=False)
     # The whole point: present in the environment, but empty.
@@ -4253,6 +4242,54 @@ def test_the_curation_workspace_name_is_the_registry_s_not_the_directory_s(
         workspace="work",
     ).entries[0].identity
     assert identity in entries[0]["reason"], entries[0]["reason"]
+
+
+def test_a_rerooted_curation_plan_reads_the_workspace_guide_not_the_install_root_s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regions pass measures the guide the workspace's sessions load.
+
+    After the re-rooting the install root keeps a near-empty `AGENTS.md` and each
+    workspace owns its own. Planning from the install root saw an empty
+    `ciao:memory` region every night, so consolidation was never scheduled while
+    `memory status` reported the real region at its cap.
+    """
+    from ciao.config import reset_reroot_cache
+
+    root = tmp_path / "workspace"
+    vault = root / "personal" / "memory-vault"
+    (vault / "Workspace").mkdir(parents=True)
+    (root / ".runtime" / "migration").mkdir(parents=True)
+    (root / ".runtime" / "migration" / "workspace-rooting.json").write_text(
+        json.dumps({"status": "migrated"}), encoding="utf-8"
+    )
+    (root / ".runtime" / "workspaces.json").write_text(
+        json.dumps({"personal": {"name": "personal", "vault_root": str(vault)}}),
+        encoding="utf-8",
+    )
+    (root / "AGENTS.md").write_text(
+        "<!-- ciao:memory:start cap=3000 -->\n- one\n<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+    full = "\n".join(f"- durable fact number {i:03d} that fills the region" for i in range(60))
+    (root / "personal" / "AGENTS.md").write_text(
+        f"<!-- ciao:memory:start cap=3000 -->\n{full}\n<!-- ciao:memory:end -->\n",
+        encoding="utf-8",
+    )
+    reset_reroot_cache()
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "personal")
+
+    _workspace, _vault, guide, _budget, _registry, name = cli._curation_context(
+        _curation_args()
+    )
+
+    assert name == "personal"
+    assert guide == root / "personal" / "AGENTS.md"
+    payload, _worklist = cli._curation_plan(_curation_args())
+    assert any(item["pass"] == "regions" for item in payload["items"]), payload["items"]
 
 
 def test_an_explicit_vault_root_is_planned_under_its_registered_owner(

@@ -8,6 +8,7 @@ import { defineComponent, h } from 'vue'
 import type { Schedule } from '../../lib/types'
 import { useTaskStore } from '../../stores/tasks'
 import { useProjectStore } from '../../stores/projects'
+import { useWebhookStore } from '../../stores/webhooks'
 
 const confirmMock = vi.fn(async (_message: string) => true)
 vi.mock('../../lib/confirm', () => ({ askConfirm: (message: string) => confirmMock(message) }))
@@ -436,6 +437,13 @@ describe('SchedulePanel overview', () => {
     store.fetchSchedules = vi.fn(async () => {})
     store.fetchModels = vi.fn(async () => {})
     useProjectStore().activeWorkspace = 'work'
+    // The webhook section reads its own store on mount. Seeded as already read so
+    // this file never reaches the network for it: the section's five load states
+    // are pinned in `WebhookTriggers.test.ts`, and what is asserted here is that
+    // this pane draws the section at all.
+    const webhooks = useWebhookStore()
+    webhooks.loadedWorkspace = 'work'
+    webhooks.triggers = []
     const { default: SchedulePanel } = await import('../SchedulePanel.vue')
     const wrapper = mount(SchedulePanel, {
       global: { plugins: [router], stubs: { ModelSelector: Stub, PaneHeader: false } },
@@ -481,5 +489,27 @@ describe('SchedulePanel overview', () => {
     expect(row('Subagent sweep').text()).toContain('subagent results never summarised')
     expect(row('Subagent sweep').text()).not.toContain('needs you')
     expect(row('Flaky one').attributes('href')).toBe('/schedules/e')
+  })
+
+  it('draws the webhook section under the overview', async () => {
+    const wrapper = await mountOverview([
+      makeSchedule({ schedule_id: 'a', title: 'Morning brief' }),
+    ])
+    const webhooks = wrapper.get('[aria-labelledby="wh-section-title"]')
+    expect(webhooks.text()).toContain('Webhook triggers')
+    expect(webhooks.text()).toContain('New trigger')
+  })
+
+  it('draws the webhook section on the empty state, where a first-run workspace lands', async () => {
+    // With no routines the panel drew a bare "No automations yet" note instead,
+    // and the section went with the overview branch above it: the first run of a
+    // workspace had no way to create a trigger at all. A trigger needs no routine
+    // to exist first.
+    const wrapper = await mountOverview([])
+    expect(wrapper.text()).toContain('No automations yet')
+
+    const webhooks = wrapper.get('[aria-labelledby="wh-section-title"]')
+    expect(webhooks.text()).toContain('Webhook triggers')
+    expect(webhooks.text()).toContain('New trigger')
   })
 })

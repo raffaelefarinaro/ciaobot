@@ -8,6 +8,7 @@ import pytest
 from starlette.testclient import TestClient
 from ciao.config import CiaoConfig
 from ciao.web.app import create_app
+from tests.session import signed_in
 
 
 @pytest.fixture
@@ -40,11 +41,10 @@ def client(tmp_path):
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime",
         media_root=tmp_path / "media",
-        pwa_auth_required=False,
         vault_root=vault,
     )
     app = create_app(cfg)
-    return TestClient(app), vault
+    return signed_in(TestClient(app)), vault
 
 
 def test_delete_note_removes_file_and_cleans_backlinks(client):

@@ -6,18 +6,21 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 ## Auth And Browser Security
 
-- Password protection is on by default. `PWA_AUTH_TOKEN` is the dashboard password: the first-run wizard asks for it, `POST /api/auth/settings` changes it, and only `PWA_AUTH_REQUIRED=false` in the workspace `.env` turns protection off.
+- Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is always required). A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login.
 - `POST /api/auth` accepts `{"token": "<PWA_AUTH_TOKEN>"}` and returns an HttpOnly `ciao_session` cookie.
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
-- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, but it only answers in bootstrap mode, where protection is off anyway.) All `/ws/*` routes require the signed session cookie.
+- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, and it only answers in bootstrap mode.) All `/ws/*` routes require the signed session cookie.
 - Node mode is gone: there is one engine per install and a browser either talks to it directly or not at all. There is no second origin, no local-control capability header, and no session bridge between origins. `docs/REMOTE_BOUNDARY.md` records what replaced the old model.
 - `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), `password` (required — the dashboard password, at least 4 characters; setup always enables protection), plus optional `vault_mode`, `workspace_name`, `push_contact`, `port`, `python`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace. When the chosen folder already contains nested workspace directories (`memory-vault/<name>/` with a `MEMORY.md` inside), those are adopted as the workspace registry and `workspace_name` is ignored.
-- `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, has_env}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
+- `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 - `POST /agent/v1/{op}` is the agent CLI's loopback transport (`ciao <noun> <verb>` inside a managed provider shell, see `docs/ARCHITECTURE.md` → `agent_surface.py` and `docs/AGENT_CLI.md`). It takes a scoped bearer capability (`CIAO_AGENT_TOKEN`) in an `Authorization: Bearer` header, runs the registered control-plane operation, and returns the same JSON envelope; it is not a browser or curl API and does not accept the session cookie.
+- `GET /api/import/sources` and `POST /api/import/preview` are the import consent surface (#1029). Both take the ordinary signed session cookie and are in neither the public nor the loopback-only allowlist, so a signed-in browser — including a second device — can ask the engine what past conversations its own workspace holds and what a chosen selection would process. Discovery is metadata only and resolves its roots from configuration alone, and the preview takes `{provider, source_id}` pairs rather than paths, so a request cannot name a file outside the workspace's known sources; an OpenCode id additionally has to be one that workspace's own `session list` named, because the CLI resolves ids across projects, and that check runs before anything is exported. Neither route reads a Claude account export, a cache or a cookie store, neither sends an absolute session path to the browser, and neither sends transcript text to the browser.
+- The import journey the PWA drives is one flow, on one page (Memory → Import), reachable from the first-run welcome and from Memory at any time (#1041). Only `POST /api/import/batches/{batch_id}/run` reads a conversation; filing a batch (`POST /api/import/batches`), reading the runs (`GET /api/import/batches`), cancelling (`POST …/cancel`) and dropping a record (`DELETE …/{batch_id}`) move records only, and a request field never chooses the model or provider that reads a user's history. The first-run affordance is post-auth copy: the setup wizard names the page and reads nothing, and the seeded welcome links to it without running an import.
+- `POST /hooks/v1/{trigger_id}` is the **webhook receiver**, and it is a machine surface: not `/api/*`, so `AuthMiddleware` does not guard it and it does not accept the session cookie (a valid `ciao_session` authorizes nothing here). It takes one webhook trigger's own secret in an `Authorization: Bearer` header — the secret `POST /api/webhooks` shows once — an `Idempotency-Key` header, and a body of exactly `{"text": "..."}` (the trigger's `event_text` input policy; any other key, including one naming a workspace, project, model, mode or path, is a 400). `POST` only: any other method is a 405 with `Allow: POST`, refused ahead of the bearer check rather than answered by the SPA catch-all. A foreign or `null` `Origin` on this state-changing request is a 403. Success is `202` with `{receipt_id, trigger_id, status}`, `status` being `accepted`: **the event is recorded, not dispatched**. The launch happens after the response, in the background, so the answer carries no chat id and no output — see the sender recipe under "Agent recipes". Refusals use `{"ok": false, "error": {code, message, retryable}}`: 401 without a valid secret (missing, disabled, revoked and wrong are one answer), 400 for a bad body or key, 409 for the same key with a different body, 413 over 65536 bytes, 429 over 10 attempts a minute per trigger (with `Retry-After`), 503 when the trigger already has 20 receipts still awaiting launch, and 500 when the trigger store itself cannot be read. See `docs/WEBHOOK_TRIGGER_STORE.md`.
 
 ## Routes
 
@@ -26,7 +29,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth` | Login with `PWA_AUTH_TOKEN` |
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
-| GET, POST | `/api/auth/settings` | Read protection state, or set/change the PWA password (cannot disable protection) |
+| GET, POST | `/api/auth/settings` | Read whether a password is configured, or change the PWA password (`current_password` required) |
 | GET | `/api/projects` | List projects |
 | POST | `/api/projects` | Create project |
 | PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project |
@@ -40,7 +43,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
 | POST | `/api/chats/read-all` | Mark all chats read |
-| PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
+| PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it); see **Chat pins** below |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
 | POST | `/api/chats/{chat_id}/handover` | Continue chat on a fresh provider session |
 | POST | `/api/chats/{chat_id}/fork` | Fork chat continuing from a completed turn |
@@ -78,7 +81,32 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
-| GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
+| GET | `/api/tasks?workspace=` | One workspace's board rows (`?workspace=` is required, 400 otherwise), valid tasks in board order followed by one row per file that could not be read as a task — a row carrying `code` and no task fields, so a malformed file never reads as an empty board. A row carries `id`, `title`, `status`, `project_id`, `due`, `assignee`, `chat_id`, `attempt_id`, `created_at`, `updated_at`, `revision` and `relative_path` |
+| GET | `/api/tasks/{task_id}?workspace=` | One task as the store reads it now, `body` included — the list above deliberately carries no description, so this is the read an editor needs before it writes one back. `?workspace=` is required (400 otherwise), an unknown id in this workspace is a 404 |
+| POST | `/api/tasks` | File one task: `{"workspace", "title", "body", "project_id", "due"}`. `project_id` takes an id or a name and must be a project of this workspace (400 otherwise). Answers 201 with the record as stored, `body` and `revision` included |
+| PATCH | `/api/tasks/{task_id}` | Edit one task at `expected_revision` (required, 400 without it): only the fields sent change — `title`, `status` (`backlog` \| `in_progress` \| `in_review` \| `done`), `project_id`, `due`, `assignee`, and `body` replacing the description wholesale. Any other key is a 400. A stale revision is a **409** and writes nothing |
+| DELETE | `/api/tasks/{task_id}` | Remove one task record at `expected_revision` (required, 400 without it). The record is the user's own Markdown file and this unlinks it — there is no trash. A stale revision is a 409 and the file stays |
+| POST | `/api/tasks/{task_id}/complete` | Mark one task `done` at `expected_revision` (required). This is the signed-in user's own session, so completion is theirs to make here; the same operation through the agent CLI is refused `completion_requires_user`. A task linked to a live chat or attempt is refused too — detach it first |
+| POST | `/api/tasks/{task_id}/delegate` | Hand one task to the agent as **one ordinary chat**, at `expected_revision` (required): `{"workspace", "expected_revision", "project_id"}` and nothing else — there is no body key for prompt text, because the prompt is built server-side from the record's own fields. `project_id` takes an id or a name in this workspace and overrides where the chat is hosted; omit it to use the task's own project, or the workspace's General. The turn runs with the **default** attendance — never `unattended`, so an approval card it raises is an ordinary Needs-you card. Answers 200 with `{workspace, created, attempt, chat_id, project_id, project_origin, task, changed_since_delegated}`; `created: false` means a live attempt already existed and nothing was created or sent |
+| GET | `/api/tasks/{task_id}/attempts?workspace=` | One task's whole attempt history, the live attempt first. A row is `{attempt_id, task_id, task_revision, chat_id, state, created_at, updated_at, ended_at, detail, live}`; `state` is one of `running`, `needs_you`, `failed`, `interrupted`, `ready_for_review`, `stopped` |
+| POST | `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` | One lifecycle gesture on one attempt; `{"workspace"}` is the only body key, because the gesture acts on an attempt rather than editing a record (there is no field to present a revision at). `action` is `stop` (ends the turn irreversibly; the task keeps its linkage and stays uncompletable), `resume` (continues the **same** chat under the **same** attempt; only an attempt that did not finish is resumable), `retry` (starts a **new** attempt in a new chat, leaving the previous one as history) or `detach` (stops the turn if running and clears the linkage, which is what makes the task completable again). An unknown verb is a 400 `invalid_action`; an unknown attempt id is a 404 |
+| POST | `/api/tasks/{task_id}/attempt/{attempt_id}/update` | **Send update**: `{"workspace", "expected_revision", "message"}` and nothing else. Sends one ordinary attended message into that attempt's own chat — no second chat, no second attempt, the linkage untouched, and the turn watched so the agent's answer advances the card — and then rebinds the attempt to `expected_revision`, so `changed_since_delegated` comes back `false` and the control retires. `message` is the text the board previewed, so it travels with the request; the revision is what the server checks, and a stale one is a **409** with nothing sent. A turn already running in that chat gets the message queued into it and the answer is `queued: true`; a chat that will not take it yet is a **409** `task_update_busy`, also with nothing sent and nothing rebound. An attempt that no longer holds the task is a 400 `invalid_action` — continuing a dead turn is `resume`, not this |
+| GET | `/api/webhooks?workspace=` | List a workspace's webhook triggers (public records only, never secrets) |
+| POST | `/api/webhooks` | Create a webhook trigger; returns the trigger plus its one-time secret |
+| GET | `/api/webhooks/receipts?workspace=` | A workspace's recorded webhook events across every trigger, newest first, at most `limit` rows (#1044). A row is `{receipt_id, trigger_id, trigger_name, status, chat_id, event_text, created_at, updated_at, detail}`; `status` is `accepted`/`launching`/`launched`/`failed`/`interrupted`, `chat_id` is the chat a `launched` event became (`null` otherwise), and a receipt whose trigger has since been deleted is still listed — it is filtered on its own `workspace`. Never a verifier, an idempotency key or a body digest |
+| GET | `/api/webhooks/{trigger_id}/receipts?workspace=` | One trigger's recorded events, newest first, at most `limit` rows (#1044), beside that trigger's `trigger_id`, `trigger_name` and the same `limit`. `?workspace=` is required (400 otherwise) and a trigger that is not that workspace's is a 404 — the same answer as an unknown id |
+| PATCH | `/api/webhooks/{trigger_id}` | Update a trigger's name, instructions, or enabled flag (revision-checked) |
+| POST | `/api/webhooks/{trigger_id}/rotate` | Rotate a trigger's secret; returns the trigger plus the new one-time secret |
+| DELETE | `/api/webhooks/{trigger_id}` | Delete a trigger and its verifier (`?expected_revision=`, revision-checked) |
+| GET | `/api/import/sources?workspace=` | List the past conversations this workspace's known sources hold, **as metadata only**: offered refs (an id and its weakest locator, no absolute path), excluded rows with their reasons (Ciaobot's own / unreadable / over cap), sources that could not be listed (an OpenCode below the V2 floor), and per-source `truncated` when a listing cap was reached. Opens no conversation and returns no text |
+| POST | `/api/import/preview` | The pre-extraction confirmation for the **selected** sources only: per-conversation counts, the source's own first date when it has one, the reader's omission record, the effective provider and model, an input-volume estimate, `batch_cap` and the destination workspace. Body is `{"workspace", "sources": [{"provider", "source_id"}]}` — ids, never paths; an OpenCode id must be one this workspace's own listing named, or the row comes back `unreadable` with no export run. Reads the selected files and returns no transcript text; it extracts nothing and stores no batch — `POST /api/import/batches/{batch_id}/run` is the route that runs the extraction |
+| POST | `/api/import/batches` | File an import batch over a selection (#1032, C6): body is `{"workspace", "sources": [{"provider", "source_id"}]}` (ids, never paths; at most the `batch_cap` the preview states) with an optional `destination` workspace. Refuses a Ciaobot-own session (400), a second batch while one is still open for the workspace (409), and a conversation a live batch already covers (409). Answers 201 with the batch as stored — selection, per-source digests (empty until extraction reads them), progress and provenance. No provider call, no model call, no transcript text |
+| GET | `/api/import/batches?workspace=` | That workspace's import batches, oldest first, each with its selection, per-source digests, progress (`queued → running → done \| failed \| cancelled \| partial`), cancellation and per-fact provenance, beside `retention_days` — C6's own `IMPORT_SNAPSHOT_RETENTION_DAYS`, so the panel states the window the engine prunes on rather than a copy of the number. Digests only, never transcript text |
+| POST | `/api/import/batches/{batch_id}/run` | Extract a filed batch's selected conversations into the **review queue** (#1038, C7): body is `{"workspace"}` and a batch filed for another workspace is a 404. Answers 202 with the batch already moved to `running` — **no model turn runs inside the request**; the tool-less extraction happens afterwards in the runner. A body naming a `model` or `provider` is ignored: the run resolves the per-provider insights model for the *source's* provider (`resolve_insights_model`), which is not necessarily the `model` the preview screen showed — that one is the workspace default for the workspace's own provider. A batch already `running` is answered 200 with its current state rather than starting a second run; one already settled as done, failed, cancelled or partial is a 409, since re-running it is a new batch. Filed rows land in `Workspace/Memory-Proposals.md` with the **source** message's `[as-of:]` date and a `_(from: provider:session_id:anchor)_` tag; nothing else in the vault is written |
+| POST | `/api/import/batches/{batch_id}/cancel` | Stop a batch, keeping its recorded progress and provenance; body is `{"workspace"}` and a batch filed for another workspace is a 404. Idempotent — cancelling a cancelled batch answers it unchanged — while a batch already settled as done, failed or partial is a 409. Cancellation cannot unsend provider input |
+| DELETE | `/api/import/batches/{batch_id}` | Drop a batch record (`?workspace=` is required; a batch filed for another workspace is a 404). Queue and vault are untouched: filed proposals stay queued and accepted facts stay in the vault |
+| POST | `/hooks/v1/{trigger_id}` | Webhook receiver (machine surface, bearer + `Idempotency-Key`, not the session cookie): records a durable receipt for one event and answers `202 accepted` — recorded, not dispatched; the background launch turns it into an ordinary chat in the trigger's own project. See `docs/WEBHOOK_TRIGGER_STORE.md` |
+| GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless developer mode is on (Settings → General → Developer) |
 | GET | `/api/commands` | List slash commands; `?workspace=<name>` scopes them to that workspace's agent root |
 | GET | `/api/agent-assets` | List subagents, slash commands, and workspace health for Settings; `?workspace=<name>` scopes the subagent and command lists to that workspace's agent root |
 | GET | `/api/agent-assets/audit` | Full AI OS audit report; `status` is `healthy`, `needs_attention`, or `error` |
@@ -119,6 +147,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |
 | POST | `/api/setup/mkdir` | Create a folder from the setup wizard folder picker (bootstrap mode, localhost only) |
+| GET | `/api/workspace-move` | The install workspace path, whether this browser may move it (`local`), and the last move's record |
+| GET | `/api/workspace-move/dirs` | List local subdirectories for the Move workspace folder picker (loopback peer only) |
+| POST | `/api/workspace-move/plan` | Dry-run moving the install workspace to `{target}`: `{ok, refusals, warnings}` (loopback peer only) |
+| POST | `/api/workspace-move` | Start moving the install workspace to `{target}`: detached drain, stop, move, repoint, restart (loopback peer only; 202) |
 | GET | `/api/stats` | Read CLI stats |
 | GET | `/api/agent/status` | Agent CLI surface status: `{ready, operations, telemetry_path, version}` for the Settings → Agent CLI panel |
 | GET | `/api/workspaces` | List configured logical workspaces |
@@ -193,6 +225,51 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 `healthy` means a reliable scan found no actionable items. `needs_attention` means a reliable scan found findings. `error` means one or more required inputs could not be inspected reliably; `total_issues` includes those scan errors, while `total_errors` counts them separately. Each section object contains its detailed counts, findings, and local errors. An unexpected handler failure returns HTTP 500 with `{"error":"failed to run AI OS audit"}`.
 
 ## Agent recipes
+
+### Import batches
+
+`POST /api/import/batches` files one import batch over a selection (#1032,
+C6) — the private per-workspace record of what was selected, what was read,
+progress, dedupe across attempts, and per-fact provenance. One batch at a
+time per workspace. `POST /api/import/batches/{id}/run` (#1038, C7) is what
+drives it: it answers 202 with the batch already `running` and the
+extraction happens after the response, so poll the list route for progress.
+Nothing is applied — the extracted facts arrive as review proposals with the
+*source* message's date, and a person accepts them.
+
+```bash
+# File a batch over two selected conversations (ids, never paths).
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/import/batches" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"default","sources":[{"provider":"claude_code","source_id":"<session-a>"},{"provider":"opencode","source_id":"<session-b>"}]}'
+
+# That workspace's batches, oldest first, each with its selection,
+# per-source digests, progress and provenance, plus `retention_days`:
+# the window after which an undecided import's private snapshot is dropped.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/import/batches?workspace=default"
+
+# Run the batch. Answers 202 with the batch now `running`; no model turn
+# happens in this request. Polling `GET .../batches?workspace=` shows
+# progress move to `done` / `partial` / `failed`, and the proposals land in
+# the review queue for a person to accept. A batch already `running` is
+# answered 200 with its current state (never a second run); a settled batch
+# is a 409.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/import/batches/$BATCH/run" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"default"}'
+
+# Stop a batch, keeping its recorded progress, its provenance and every
+# proposal it already filed. Idempotent: cancelling a cancelled batch answers
+# it unchanged. Cannot unsend provider input, and a batch already settled as
+# done, failed or partial is a 409.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/import/batches/$BATCH/cancel" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"default"}'
+
+# Drop a batch record. Queue and vault are untouched: filed proposals stay
+# queued and accepted facts stay in the vault.
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/import/batches/$BATCH?workspace=default"
+```
 
 ### Restart an installed server
 
@@ -419,6 +496,122 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/projects/$PID"
 ```
 
+**Task board**
+
+Every call names a *workspace*, never a directory: the server resolves the name
+to that workspace's own vault. `workspace` is required on every route, and an
+unknown name is a 400 rather than a fallback to the install root. Every task is
+one Markdown file at `<workspace vault>/Workspace/Tasks/<32-hex id>.md`, and
+every write presents the `revision` it read — the SHA-256 of that file's exact
+bytes, returned by the list and create calls and by any successful edit. A stale
+revision is a **409** and writes nothing, so re-read rather than resending it.
+Completion is the user's own decision and works over this session cookie; the
+same operation from the agent CLI (`ciao task complete`) is refused with
+`task_completion_requires_user`.
+
+```bash
+# List one workspace's board. Every row carries the `revision` a later edit has
+# to pass back; a file that is not a readable task comes back as a row carrying
+# `code` instead of task fields, so a malformed file never reads as an empty
+# board.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/tasks?workspace=personal"
+
+# Read one task, description included. The list rows above carry no `body`,
+# so an editor that shows the prose and writes it back reads it from here.
+curl -sS -b /tmp/ciao.jar \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c?workspace=personal"
+
+# File a task. `project_id` accepts an id or a name and must belong to this
+# workspace; `due` is a calendar date (YYYY-MM-DD). Answers 201 with the record
+# as stored — take its `id` and `revision` from there.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/tasks" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"personal","title":"Draft the migration runbook","body":"Steps, links, acceptance criteria.","project_id":"Home","due":"2026-10-20"}'
+
+# Edit. Only the fields sent change; `body` replaces the description wholesale.
+TID=9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c
+TREV=$(curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/tasks?workspace=personal" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["tasks"][0]["revision"])')
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\",\"title\":\"Draft the rollback runbook\"}"
+
+# Complete — the user's own session, at the revision it read. A task with a live
+# delegation is refused: detach it first (below).
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/complete" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\"}"
+
+# Remove the record. The file is the user's own Markdown and this unlinks it:
+# there is no trash, so pass the revision you read.
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\"}"
+```
+
+**Delegation** hands a task to the agent as one ordinary chat, with no attendance
+bypass and no request-supplied prompt. Delegating twice returns the attempt that
+already exists (`created: false`) rather than starting a second turn, and a
+finished turn settles the attempt `ready_for_review` — never `done`, which stays
+the user's own gesture.
+
+```bash
+# Delegate. `project_id` is optional (id or name, this workspace): omit it and the
+# chat goes to the task's own project, or to General. Take the attempt id and the
+# new revision from the answer — the task moved to in_progress and is now linked,
+# so the next write presents *that* revision.
+DREV=$(curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/delegate" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\"}")
+AID=$(printf '%s' "$DREV" | python3 -c 'import json,sys; print(json.load(sys.stdin)["attempt"]["attempt_id"])')
+DREV=$(printf '%s' "$DREV" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task"]["revision"])')
+
+# The board row now carries the attempt facts a card draws: `attempt_state` (the
+# badge), `live_attempt_id` (non-empty while an attempt holds the task) and
+# `changed_since_delegated` (the task was edited after the handoff).
+curl -sS -b /tmp/ciao.jar \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID?workspace=personal"
+
+# The whole history, live attempt first. A retry adds a row rather than rewriting
+# the last, so "what did we try" stays answerable.
+curl -sS -b /tmp/ciao.jar \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempts?workspace=personal"
+
+# Stop the running turn. Irreversible, and the task keeps its linkage — so it stays
+# uncompletable until it is detached.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/stop" \
+  -H 'content-type: application/json' -d '{"workspace":"personal"}'
+
+# Resume continues the SAME chat under the SAME attempt; retry starts a NEW one in a
+# new chat. Only an attempt that did not finish is resumable — a `ready_for_review`
+# result is waiting for the user's decision.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/resume" \
+  -H 'content-type: application/json' -d '{"workspace":"personal"}'
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/retry" \
+  -H 'content-type: application/json' -d '{"workspace":"personal"}'
+
+# Detach releases the task: the turn is stopped if running, the linkage is cleared,
+# and the attempt stays as history. This is what makes completion possible again.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/detach" \
+  -H 'content-type: application/json' -d '{"workspace":"personal"}'
+
+# Send update: the task was edited after the hand-off, so hand the agent the current
+# description in the chat it is already working in. One ordinary attended message, no
+# second attempt — and the attempt is rebound to $TREV, so `changed_since_delegated`
+# goes back to false and the answer settles the card. A turn already running there
+# takes the message as its next follow-up (`queued: true`); a stale $TREV is a 409
+# that sends nothing and rebinds nothing.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/update" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\",\"message\":\"The task has changed since you were handed it. Work from this version.\"}"
+```
+
 Project and chat uploads are limited to 50 MB per file, 100 files per request,
 and 512 MB total. Project-file list responses use workspace-relative viewer
 paths when the vault is nested under the workspace and absolute viewer paths
@@ -641,7 +834,8 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/sched
 
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
 # (AGENTS.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
-# Steps run against CIAO_APP_REPO when set, else the directory holding the running
+# Steps run against the source checkout setting (Settings → General → Developer)
+# when set, else the directory holding the running
 # ciao package; a non-checkout returns 400 with a "locate checkout" step. An
 # installer-managed engine is refused up front: re-run install.sh to update it.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
@@ -672,27 +866,46 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 **Routine settings (Settings → General / Models)**
 
 ```bash
-# Read internal-routine settings: the automatic-session-insights switch,
-# insights and critique model overrides, the per-provider default model /
-# thinking / routine-model maps, and the effective models after defaults.
-# insights_enabled=false stops the memory pass.
-#
-# insights_model_effective is the PRIMARY workspace's answer only. With no
-# override the insights routine resolves from the chat's own workspace, so
-# insights_model_by_workspace carries the full {workspace: model} map. The map
-# is empty when an override is set, because then that one model applies
-# everywhere.
+# Read internal-routine settings: the automatic-session-insights switch, the
+# critique model override, and the per-provider default model / mode /
+# thinking / Session insights maps. insights_enabled=false stops the memory
+# pass. provider_insights_models is keyed by the chat's provider; a missing
+# entry means that provider's default chat model reads the session.
+# Also the server settings that used to be .env variables, as stored ("" =
+# default): pwa_host (bind address), log_level, dev_mode, app_repo (source
+# checkout), with server_defaults and server_running (what the running engine
+# bound and logs at; pwa_host and log_level change only at the next start).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
-# to the env default. A stored "apple"/"apfel" insights_model (from the retired
-# on-device option) reads as Automatic rather than reaching a provider as a
-# literal model id. Per-provider defaults use the nested maps:
+# to the env default. A stored "apple"/"apfel" Session insights model (from the
+# retired on-device option) reads as Automatic rather than reaching a provider
+# as a literal model id. Per-provider defaults use the nested maps:
 # provider_default_models, provider_default_thinking, provider_insights_models.
+# pwa_host must be an IP address or host name ("127.0.0.1" = this computer
+# only), log_level one of debug/info/warning/error, app_repo an absolute path;
+# anything else is a 400.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_enabled":false,"insights_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"insights_enabled":false,"provider_insights_models":{"claude":"haiku"},"critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
+```
+
+**Keyboard settings (Settings → Home → Keyboard shortcuts)**
+
+```bash
+# Read engine-shared shortcut overrides and send mode. Missing shortcut keys
+# use the PWA's built-in binding; "disabled" turns one off. Bindings use
+# physical KeyboardEvent codes and the Mod/Alt/Shift modifiers. The send mode
+# is "modifier" (Cmd/Ctrl+Enter) or "enter".
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/keyboard"
+
+# Include the revision returned by GET. A stale revision receives 409 instead
+# of overwriting another device's change. Updates persist to
+# .runtime/app_settings.json and broadcast through /ws/events.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/keyboard" \
+  -H 'content-type: application/json' \
+  -d '{"revision":"<revision-from-GET>","keyboard_shortcuts":{"archiveChat":"Mod+KeyK","workspace2":"disabled"},"keyboard_send_mode":"enter"}'
 ```
 
 **Project MCP servers (Settings → MCP tab)**
@@ -1196,6 +1409,60 @@ curl -sS -b /tmp/ciao.jar -X PATCH \
 
 When adding a new state-changing route (`POST/PATCH/DELETE /api/...`), add an entry here or add the path to `BROWSER_OR_INTERNAL_ROUTES` in `tests/test_pwa_api_docs.py` with a one-line reason. The doc-sync test enforces this.
 
+**Chat pins (#1118)**
+
+A chat's pinned file (the file panel beside the conversation) is engine state,
+not browser state: it lives on `ChatInfo` in the existing
+`.runtime/web_projects.json` chat registry, so it survives a browser change of
+device and an engine restart. There is no new route and no auth exception — pins
+are written through the existing signed-session, origin-gated
+`PATCH /api/chats/{chat_id}`.
+
+- **Set/close**: `PATCH /api/chats/{chat_id}` with body
+  `{"pin": {"path": "<canonical absolute POSIX path>", "expected_revision": N}}`.
+  An empty path closes the pin and dismisses the path the server currently has
+  selected, so the next agent surface of that exact file does not reopen it; a
+  nonempty path selects it and clears only that path's own dismissal.
+- **Validation**: the body must be `{"pin": {...}}` and nothing else — a pin
+  cannot be combined with `title`/`model`/`provider`/`mode`/`project_id`/
+  `thinking_level` (400), because the pin can conflict and a combined write
+  would leave the other fields applied. `pin.path` must be a printable string
+  with no NUL; `expected_revision` is required and must be a non-negative JSON
+  integer (`true`/`false` are rejected even though Python would read them as
+  `1`/`0`); unknown keys inside `pin` are rejected. `expected_revision` is
+  compared before anything is mutated.
+- **Resolution**: a nonempty path goes through the same exact resolver as the
+  file viewer (`_allowed_roots` + `_resolve_workspace_path(allow_fuzzy=False)`),
+  so pins have the viewer's existing permissions and no wider access, accept
+  existing viewer-servable files, reject a directory (404) and a non-text type
+  (415). What is stored is the resolved canonical absolute POSIX path — no
+  fuzzy matching, since a pin is an identity key matched exactly against later
+  dismissals and agent surfaces. An **empty path never touches the filesystem**,
+  which is what lets a user close a pin whose file has since been deleted.
+- **Responses**: success returns the ordinary full `ChatInfo` payload (which
+  carries `pinned_file_path`, `dismissed_pin_paths`, `pin_revision`). A stale
+  `expected_revision` is **409** `{"error": "pin_revision_conflict", "pin":
+  {"path", "dismissed_paths", "revision"}}`, where `pin` is the current
+  authoritative state — a device that raced a newer selection cannot silently
+  replace it. Unknown chat is 404 **before** any filesystem probing. Ordinary
+  PATCH behavior is unchanged.
+- **Read**: every chat payload (`GET /api/chats`, `GET /api/chats/{id}`) carries
+  the three fields. Records written before this feature have none of them and
+  start unpinned at revision 0; nothing is imported from any browser.
+- **Cross-device**: a real change emits `chat_pin_changed` with
+  `{chat_id, path, dismissed_paths, revision}` (the complete pin payload
+  flattened into the event) and bumps the per-chat revision. A no-op write
+  neither bumps the revision nor publishes. The `/ws/events` connect `snapshot`
+  carries `chat_pins`, a map of chat id → the same payload for **every**
+  persisted chat, including unpinned and archived ones, so a reconnecting client
+  can close stale state rather than keep showing a pin the engine dropped.
+- **Agent surfacing**: the `file_surface` MCP tool records the intent itself
+  (`ProjectChatManager.surface_chat_file`) once its scoped existence/type checks
+  pass, with zero viewers or not; it respects a dismissal for that exact path,
+  and a principal with no chat id validates only and mutates no chat. Ordinary
+  file touches never pin. Archiving a chat does not clear its pin; a fork or new
+  chat starts without one.
+
 **WebSocket events**
 
 Global `/ws/events` payloads the PWA reacts to:
@@ -1203,6 +1470,7 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_streaming_started` / `chat_streaming_done` / `chat_result_ready`: lifecycle of the main chat turn.
 - `chat_subagents_ready`: emitted when a background `Agent` (run_in_background) finishes or its count drops. Fields: `{chat_id, project_id, remaining}`.
 - `chat_runs_reported`: emitted on a chat once finished background command runs have been reported back to it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (the chat was mid-turn, so the wake was appended as a follow-up) or `"started"` (the chat was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
+- `chat_pin_changed`: the chat's pinned file changed (a manual pin write or an agent `file_surface`), on this or another device. Fields: `{chat_id, path, dismissed_paths, revision}`, where `path` is the canonical POSIX path or `""` for closed and `revision` is the per-chat counter a later pin PATCH must quote. The connect `snapshot` carries the same payloads for every chat under `chat_pins`, so a client that missed this event still converges.
 - `chat_read`: another client/device marked the chat read.
 - `chat_unread`: another client/device marked the chat unread on purpose ("come back to this"). Fields: `{chat_id, last_read_at}` (empty string). The PWA clears the local read stamp so the dot and OS badge rise again.
 - `chat_title`: auto-title finished.
@@ -1283,6 +1551,161 @@ Every file-touch tool call also triggers a debounced (1.5s) content snapshot via
 # is rewritten first so no dangling link is left behind. No undo.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/vault/note?path=memory-vault/work/People/Mo.md"
 ```
+
+### Manage a webhook trigger
+
+Two different people touch this feature, and this recipe is only about the first:
+the operator (or an in-chat agent acting for them) configuring the triggers an
+external sender will call. The sender's own call is
+[below](#send-a-webhook-event) and shares nothing with it but the secret.
+
+Every route here takes the ordinary session cookie — there is no separate
+authentication for managing triggers — and every write is revision-checked, so
+read the trigger first and send back the `revision` it reported. An agent in a
+managed chat has the same five verbs as `ciao webhook list|create|update|rotate|delete`;
+use those rather than curl when you are in one.
+
+```bash
+# Configure a trigger. `mode` is normal|auto|plan (default auto) and is the
+# permission mode the launched turn runs under; a sender can never change it.
+# The reply carries the secret, ONCE — only its SHA-256 is stored, so copy it
+# into the sender's configuration now. There is no way to read it back.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/webhooks" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"default","name":"Nightly build","instructions":"File the failure as an intake note and tell nobody","project_id":null,"mode":"normal"}'
+
+# Public records only: no secret is in a list, and `project_id: null` means this
+# workspace's General project. `revision` is what the next call has to send back.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/webhooks?workspace=default"
+
+# A new trigger is stored DISABLED and cannot authenticate until you say so.
+# Only `name`, `instructions` and `enabled` are editable: the target and the
+# mode are not, because retargeting a trigger somebody holds a secret for is a
+# trust change rather than an edit. A stale `expected_revision` is a 409 and
+# writes nothing.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/webhooks/$TRIGGER" \
+  -H 'content-type: application/json' \
+  -d '{"expected_revision":1,"enabled":true}'
+
+# Replace the secret. This REVOKES ON ROTATE: the previous secret stops
+# authorizing this trigger immediately, so whoever held it needs the new one.
+# `enabled` is preserved in both directions — rotating a disabled trigger does
+# not enable it, because a secret is not consent to run anything. The reply
+# carries the new secret once, exactly like create.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/webhooks/$TRIGGER/rotate" \
+  -H 'content-type: application/json' \
+  -d '{"expected_revision":2}'
+
+# Delete the trigger and destroy its verifier. Irreversible: the id cannot be
+# made to authenticate again, so the sender needs a new trigger. Receipts
+# already recorded for past events are kept, and stay readable on the workspace
+# read below.
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/webhooks/$TRIGGER?expected_revision=3"
+
+# What this trigger has received, newest first, at most `limit` (50) rows. One
+# row per accepted event, not per journal line: a row carries the receipt's
+# *current* state, so an event that walked accepted → launching → launched
+# appears once, as `launched`, with the chat it became.
+# 200 {"trigger_id":"…","trigger_name":"…","limit":50,"receipts":[
+#        {"receipt_id":"wbrcpt_…","trigger_id":"…","trigger_name":"…",
+#         "status":"launched","chat_id":"…","event_text":"…",
+#         "created_at":"…","updated_at":"…","detail":"chat …"}]}
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/webhooks/$TRIGGER/receipts?workspace=default"
+
+# The same rows for a whole workspace, across every trigger — which is how you
+# still see a receipt whose trigger has since been deleted.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/webhooks/receipts?workspace=default"
+
+# Archiving the workspace (POST /api/workspaces/<name>/archive) also disables
+# every trigger in it and destroys its verifiers, so restoring the name later
+# cannot reactivate an old secret: that trigger has to be rotated first.
+```
+
+What an accepted event does with it is invisible here. The receiver records a
+durable receipt, and dispatch launches the event as an ordinary chat in the
+trigger's own project with the trigger's mode and the operator's own model — so
+an approval card raised in that turn is an ordinary card in Needs-you. The
+trigger's `instructions` come first and the sender's text follows as data; a
+sender cannot choose the chat, the project, the workspace, the model or the
+permission mode. See `docs/WEBHOOK_TRIGGER_STORE.md`.
+
+### Read a trigger's receipt history
+
+`GET /api/webhooks/{trigger_id}/receipts?workspace=` is the answer to "what has
+this trigger actually received, and which chat did each event become" — including
+the one left `interrupted`, which nothing else reports and which is never replayed
+on its own.
+
+- **`status` is the receipt's current state, not a log line.** `accepted` and
+  `launching` mean the event is still in flight (recorded, or its launch
+  allocated and not yet reported); `launched` is the **success** outcome and
+  `chat_id` names the ordinary chat the event became; `failed` means the launch
+  did not complete and `detail` says why; `interrupted` means a process died
+  inside the launch window, so nobody can tell whether the turn ran — review it,
+  do not assume it did not.
+- **The read is bounded and capped at `limit` (50), newest first.** Older rows
+  are still in the journal; they are just not what a history view reads. The
+  journal is trimmed in its own right (4 MiB / 4000 settled rows), so this is a
+  cap on what a page draws rather than on what is kept.
+- **Retention.** The seven-day window is the *dedupe* window and nothing more: it
+  decides whether a sender reusing an `Idempotency-Key` collapses onto an earlier
+  receipt or starts a new generation of the id. A settled receipt stays readable
+  past it; what ages out is the key, never the record of what happened.
+- **Workspace-scoped, like the management routes.** An unregistered
+  `?workspace=` is a 400, and a trigger belonging to another workspace is the same
+  404 as an unknown id.
+- **No credential is in a row.** The projection
+  (`WebhookReceipt.to_public_dict`) carries no verifier, no `idempotency_key` and
+  no `body_digest`.
+
+### Send a webhook event
+
+The other person: a trusted external system (a CI provider, a monitoring agent,
+a home-automation box) calling one trigger's URL. It is a **machine surface** —
+no session cookie, no dashboard password, one trigger's own bearer secret — and
+its refusal statuses are the ones to program against:
+
+```bash
+# One event. The body is exactly {"text": "..."} — any other key, including one
+# naming a workspace, project, model, mode or path, is a 400. The key is the
+# sender's own idempotency key: the same key with the same body returns the same
+# receipt, and the same key with a DIFFERENT body is a 409 rather than a choice
+# about which of the two events to run.
+curl -sS -X POST "http://localhost:${PWA_PORT:-8443}/hooks/v1/$TRIGGER" \
+  -H "Authorization: Bearer $WEBHOOK_SECRET" \
+  -H "Idempotency-Key: build-4821" \
+  -H 'content-type: application/json' \
+  -d '{"text":"the nightly build failed on main"}'
+# 202 {"receipt_id":"wbrcpt_…","trigger_id":"…","status":"accepted"}
+```
+
+**`202 accepted` means the event is recorded, not dispatched.** It is a durable
+receipt in `.runtime/webhook-receipts.jsonl` and the whole answer to "did you
+get it": the launch happens afterwards in the background, off the response path,
+and the sender is not told about it — so no recipe, skill or capability may read
+`202` as "a turn ran" or "your work was done". The chat the event becomes is an
+ordinary one the operator opens like any other, and its outcome is recorded in
+that same journal (`launched`, `failed`, or `interrupted` if the engine died
+inside the launch window — which is never replayed automatically). A sender still
+has no way to read that outcome back; the *operator* can, through
+[the receipt-history read](#read-a-triggers-receipt-history).
+
+| Status | Meaning | Retry? |
+|---|---|---|
+| 202 | The event is recorded. `status` in the body is `accepted` for a new event, or the receipt's current state for a collapsed retry | — |
+| 400 | Body is not exactly `{"text": …}` with bounded non-empty text, or the `Idempotency-Key` is missing, empty, over 200 characters or holds a control character | no |
+| 401 | No valid secret for this trigger. Missing, disabled, revoked and wrong are one answer, so never retry a 401 with the same secret | no |
+| 403 | A foreign or `null` `Origin` — a browser page, not a sender | no |
+| 405 | Any method but `POST`, with `Allow: POST` | no |
+| 409 | This `(trigger, key)` was recorded with a different body; the recorded event is untouched | no — use a new key |
+| 413 | Body over 65536 bytes | no |
+| 429 | Over 10 attempts a minute for this trigger, with `Retry-After` | yes, after one window |
+| 503 | The trigger already has 20 receipts still awaiting launch, or the journal could not be written (the event was **not** recorded) | yes |
+
+With the default `0.0.0.0` bind this route is reachable from the LAN, so the secret is
+the credential: give each trigger its own, keep it out of shell history and
+source control, and rotate it (`POST /api/webhooks/{trigger_id}/rotate`) the
+moment it is exposed.
 
 ## State
 

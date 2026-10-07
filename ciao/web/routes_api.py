@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import errno
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -51,6 +52,7 @@ from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
 from ciao.web.auth import is_loopback_client
 from ciao.web.document_conversion import is_anydoc_document
+from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
@@ -106,7 +108,10 @@ from ciao.vault_index import (
 )
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.async_reads import run_read
-from ciao.web.project_chats import _ALLOWED_IMAGE_EXTENSIONS
+from ciao.web.project_chats import (
+    _ALLOWED_IMAGE_EXTENSIONS,
+    ChatPinConflictError,
+)
 from ciao.web.routes_helpers import (
     _allowed_roots,
     _commit_and_push,
@@ -453,11 +458,12 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
     refused before anything changes; schedules are taken and the folder moves
     first, so a failed move changes nothing that cannot be put back; only then
     are the chats archived (irreversible), still while the workspace is
-    registered; the registry entry goes last. A failure after the move puts
-    the folder and schedules back so the workspace stays registered and the
-    archive can be retried.
+    registered; its webhook verifiers are revoked just after that; the registry
+    entry goes last. A failure after the move puts the folder and schedules
+    back so the workspace stays registered and the archive can be retried.
     """
     from ciao import workspace_archive  # noqa: PLC0415
+    from ciao.web.routes_webhooks import webhook_store  # noqa: PLC0415
 
     config = request.app.state.config
     name = str(request.path_params.get("name", "")).strip()
@@ -602,6 +608,24 @@ async def archive_workspace_setting(request: Request) -> JSONResponse:
                 # primary workspace.
                 logger.exception("Could not archive every chat of workspace %s", name)
                 return _roll_back(f"its chats could not be archived ({exc})")
+        # Archiving destroys the workspace's webhook verifiers: a revoked
+        # trigger cannot be re-enabled until it is rotated, so a restored
+        # workspace name reactivates no old credential. Revoked before the
+        # registry entry goes, and with no await in between: a create passes
+        # the ``config.workspace(name)`` check only while the workspace is
+        # registered, so this cannot race a trigger being created for a name
+        # that is about to be unregistered. A failure here rolls back like any
+        # other step after the move, so the archive is refused rather than
+        # completed with live verifiers. If ``unregister`` then fails and rolls
+        # back, the triggers stay revoked on a still-registered workspace, which
+        # is the safe direction: rotating recovers.
+        try:
+            webhook_store(config).revoke_workspace(name)
+        except Exception as exc:  # noqa: BLE001 - unregistering would leave them live
+            logger.exception(
+                "Could not revoke webhook triggers for archived workspace %s", name
+            )
+            return _roll_back(f"its webhook triggers could not be revoked ({exc})")
         try:
             workspace_archive.unregister(config, name)
         except OSError as exc:
@@ -2106,6 +2130,86 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 # ── Chats ────────────────────────────────────────────────────────────────
 
+# The only top-level keys an ordinary `PATCH /api/chats/{id}` body may carry. A
+# pin write is a dedicated body (`{"pin": {...}}`) and cannot bring any of them
+# along: a pin is one shared selection per chat, so a combined write could land
+# the title change and then conflict on the pin, leaving half the request
+# applied. Checked by exclusion, so a new chat field does not silently become
+# combinable with a pin.
+_CHAT_PATCH_FIELDS = frozenset({
+    "title", "model", "provider", "mode", "project_id", "thinking_level",
+})
+
+
+def _chat_pin_request(body: dict) -> tuple[str, int]:
+    """Validate a `{"pin": {...}}` chat PATCH body. Returns ``(path, revision)``.
+
+    Deliberately separate from `update_chat`: pins are one shared selection per
+    chat with their own optimistic-concurrency revision, so they get their own
+    parser rather than an extra optional argument on a function whose `None`
+    already means "leave this field alone" — which is precisely the ambiguity an
+    empty pin path would otherwise collide with.
+
+    Raises ``ValueError`` with a caller-facing message for every malformed
+    shape. The path itself is *not* resolved here: a nonempty path has to go
+    through the viewer's exact resolver, and an empty one must not touch the
+    filesystem at all so a deleted file can still be closed.
+    """
+    if set(body) - {"pin"}:
+        raise ValueError(
+            "pin cannot be combined with other chat updates "
+            f"(ordinary fields: {', '.join(sorted(_CHAT_PATCH_FIELDS))})"
+        )
+    pin = body["pin"]
+    if not isinstance(pin, dict):
+        raise ValueError("pin must be an object")
+    extra = set(pin) - {"path", "expected_revision"}
+    if extra:
+        raise ValueError(
+            f"pin has unknown keys: {', '.join(sorted(extra))} "
+            "(allowed: path, expected_revision)"
+        )
+    raw_path = pin.get("path")
+    if not isinstance(raw_path, str):
+        raise ValueError("pin.path must be a string")
+    if "\x00" in raw_path or not raw_path.isprintable():
+        # Rejected here rather than left to the resolver: an empty path skips
+        # the resolver entirely, so this check has to live here for it to hold
+        # for both branches.
+        raise ValueError("pin.path contains characters that cannot be a path")
+    revision = pin.get("expected_revision")
+    # bool is an int subclass, so `True` must not be read as revision 1.
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+    ):
+        raise ValueError("pin.expected_revision must be a non-negative integer")
+    return raw_path.strip(), revision
+
+
+def _resolve_pin_path(config, raw_path: str) -> Path | Response:
+    """Resolve a nonempty manual pin path to the identity that gets stored.
+
+    Reuses the viewer's resolver with fuzzy matching off. A pin is an identity
+    key held for as long as the chat lives and matched exactly against later
+    dismissals and agent surfaces, so a fuzzy hit would store a path nobody
+    asked for. `_resolve_workspace_path` returns a real file only, so a
+    directory is answered with its own 404 and needs no second check here.
+    """
+    roots = _allowed_roots(config)
+    resolved = _resolve_workspace_path(roots, raw_path, allow_fuzzy=False)
+    if isinstance(resolved, Response):
+        return resolved
+    if resolved.suffix.lower() not in _WORKSPACE_FILE_EXTS:
+        # The panel renders the text viewer, so a pin has to name a file that
+        # viewer can serve: same rule, same 415 as `/api/workspace/file`. This
+        # reuses the existing viewer permissions rather than inventing a
+        # sandbox or wider access for pins.
+        return JSONResponse({"error": "unsupported type"}, status_code=415)
+    return resolved
+
+
 async def list_all_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     # `?active_only=1` skips archived chats. The PWA's frequent syncLatest poll
@@ -2120,7 +2224,7 @@ async def list_all_chats(request: Request) -> JSONResponse:
     return JSONResponse(pcm.list_chats_dicts())
 
 
-async def chat_detail(request: Request) -> JSONResponse:
+async def chat_detail(request: Request) -> Response:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
     if request.method == "DELETE":
@@ -2144,6 +2248,11 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok, "deleted": ok})
     # PATCH
     body = await request.json()
+    # A pin write is its own body shape, not another `update_chat` field
+    # (#1118). It never falls through to `update_chat`, so `path: ""` cannot be
+    # read as "no change" there.
+    if isinstance(body, dict) and "pin" in body:
+        return await _chat_pin_patch(request, pcm, chat_id, body)
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2157,6 +2266,58 @@ async def chat_detail(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
+
+
+async def _chat_pin_patch(
+    request: Request, pcm, chat_id: str, body: dict
+) -> Response:
+    """`PATCH /api/chats/{id}` with a `{"pin": {...}}` body (#1118).
+
+    Sets or closes the chat's pinned file. Reuses the existing signed-session,
+    origin-gated route: pins get no new endpoint and no auth exception.
+
+    Ordering is deliberate. Shape first (400), then existence (404) *before*
+    any filesystem probing, then the resolver, and only then the write: a
+    nonexistent chat must not be answerable as "that file does not exist", and
+    an invalid body must not cost a `resolve()`.
+
+    The empty path never touches the filesystem, which is what lets a user
+    close a pin whose file has since been deleted.
+    """
+    try:
+        raw_path, expected_revision = _chat_pin_request(body)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    path = ""
+    if raw_path:
+        resolved = _resolve_pin_path(request.app.state.config, raw_path)
+        if isinstance(resolved, Response):
+            return resolved
+        # Store the canonical absolute POSIX identity: relative and `~` forms
+        # would not match a later surface or dismissal of the same file.
+        path = resolved.as_posix()
+
+    try:
+        # Raises ChatPinConflictError before mutating anything when the quoted
+        # revision is stale, so a 409 leaves the newer selection untouched.
+        pcm.set_chat_pin(chat_id, path, expected_revision=expected_revision)
+    except ChatPinConflictError as exc:
+        return JSONResponse(
+            {"error": "pin_revision_conflict", "pin": exc.pin}, status_code=409
+        )
+    except Exception as exc:
+        # The write rolled back in the manager; report the failure rather than
+        # a 200 for a pin that is not on disk.
+        logger.exception("Failed to persist pin for chat %s", chat_id)
+        return JSONResponse({"error": f"Failed to set pin: {exc}"}, status_code=500)
+    chat = pcm.get_chat(chat_id)
+    if chat is None:  # pragma: no cover — deleted between the checks above
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
 
@@ -2289,6 +2450,50 @@ async def chat_stop(request: Request) -> JSONResponse:
         return JSONResponse({"error": "not found"}, status_code=404)
     stopped = await pcm.stop_chat(chat_id)
     return JSONResponse({"stopped": stopped})
+
+
+def _chat_background_run(request: Request) -> tuple[Any, Any] | JSONResponse:
+    """The runner and the run named in the path, if this chat owns it.
+
+    A run owned by another chat answers 404, like a missing one: the Work
+    details rail only ever asks about its own chat's runs.
+    """
+    runner = getattr(request.app.state, "background_runner", None)
+    if runner is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    run = runner.get(request.path_params["run_id"])
+    if run is None or run.parent_chat_id != request.path_params["chat_id"]:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return runner, run
+
+
+async def chat_background_run_log(request: Request) -> JSONResponse:
+    """The last lines of a background run's log, for the Work details rail."""
+    resolved = _chat_background_run(request)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    runner, run = resolved
+    return JSONResponse({**run.summary(), "last_lines": runner.tail(run.run_id)})
+
+
+async def chat_background_run_cancel(request: Request) -> JSONResponse:
+    """Stop a background run from the Work details rail.
+
+    The finish edge announces itself over /ws/events and wakes the chat, the
+    same as a cancel the agent asked for.
+    """
+    resolved = _chat_background_run(request)
+    if isinstance(resolved, JSONResponse):
+        return resolved
+    runner, run = resolved
+    from ciao.background import BackgroundRunError
+
+    try:
+        updated = await runner.cancel(run.run_id)
+    except BackgroundRunError:
+        # Pruned between the lookup and the cancel.
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(updated.summary())
 
 
 async def chat_prompt(request: Request) -> JSONResponse:
@@ -5067,27 +5272,9 @@ def _routines_payload(config, app_settings) -> dict:
     from ciao.critique import critique_models_effective
 
     critique_effective = critique_models_effective(config)
-    if config.insights_model_override:
-        insights_effective = config.insights_model_override
-    else:
-        insights_effective = config.default_model_for_workspace(
-            config.primary_workspace()
-        )
-
-    # On Automatic the memory pass resolves per workspace
-    # (resolve_insights_model takes the chat's workspace), so the single
-    # *_effective value above is only the primary-workspace answer. Reporting it
-    # alone reads as a global choice and is wrong for every other workspace, so
-    # ship the whole map and let the UI say what actually varies. Empty when an
-    # override is set, because then one model really does apply everywhere.
-    insights_by_workspace: dict[str, str] = {}
-    for name in config.workspace_names():
-        if not config.insights_model_override:
-            insights_by_workspace[name] = config.default_model_for_workspace(name)
 
     return {
         # Overrides as stored ("" = automatic default).
-        "insights_model": s.insights_model,
         "insights_enabled": config.insights_enabled,
         "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =
@@ -5101,14 +5288,30 @@ def _routines_payload(config, app_settings) -> dict:
         },
         # Per-provider default thinking level for new chats, as stored.
         "provider_default_thinking": s.provider_default_thinking or {},
-        # Per-provider routine models, as stored (missing = provider default).
+        # Per-provider Session insights models, as stored (missing = that
+        # provider's default chat model).
         "provider_insights_models": s.provider_insights_models or {},
-        # What actually runs right now, after defaults.
-        "insights_model_effective": insights_effective,
-        # Per-workspace resolution for the Automatic case; empty when overridden.
-        "insights_model_by_workspace": insights_by_workspace,
-
         "critique_models_effective": critique_effective,
+        # Server settings that used to be workspace `.env` variables, as
+        # stored ("" = default). The bind address and the log level are read
+        # at startup, so a change takes effect after a restart; developer mode
+        # and the source checkout apply at once.
+        "pwa_host": s.pwa_host,
+        "log_level": s.log_level,
+        "dev_mode": s.dev_mode,
+        "app_repo": s.app_repo,
+        "server_defaults": {
+            "pwa_host": DEFAULT_PWA_HOST,
+            "log_level": DEFAULT_LOG_LEVEL,
+            "log_levels": list(LOG_LEVELS),
+        },
+        # What the running server bound and logs at (the config keeps its
+        # startup values), so the page can say a saved change is waiting for a
+        # restart.
+        "server_running": {
+            "pwa_host": config.pwa_host,
+            "log_level": config.log_level,
+        },
         # Grouped options for the routine model selectors.
         "model_options": {
             "anthropic": list(CLAUDE_MODELS),
@@ -5160,6 +5363,48 @@ async def settings_routines(request: Request) -> JSONResponse:
     return JSONResponse(_routines_payload(config, app_settings))
 
 
+async def settings_keyboard(request: Request) -> JSONResponse:
+    """Read or update keyboard preferences shared by this engine's clients."""
+    app_settings = request.app.state.app_settings
+    if app_settings is None:
+        return JSONResponse({"error": "settings store unavailable"}, status_code=503)
+    def payload() -> dict[str, Any]:
+        keyboard_shortcuts = app_settings.settings.keyboard_shortcuts or {}
+        keyboard_send_mode = app_settings.settings.keyboard_send_mode or "modifier"
+        revision_source = json.dumps(
+            [keyboard_shortcuts, keyboard_send_mode], sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return {
+            "keyboard_shortcuts": keyboard_shortcuts,
+            "keyboard_send_mode": keyboard_send_mode,
+            "revision": hashlib.sha256(revision_source).hexdigest(),
+        }
+    if request.method == "PATCH":
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "expected an object"}, status_code=400)
+        expected_revision = body.pop("revision", None)
+        current = payload()
+        if not isinstance(expected_revision, str):
+            return JSONResponse({"error": "revision is required"}, status_code=400)
+        if expected_revision != current["revision"]:
+            return JSONResponse({"error": "Keyboard settings changed on another device. Reload and try again."}, status_code=409)
+        try:
+            app_settings.update(body)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        pcm = getattr(request.app.state, "project_chat_manager", None)
+        if pcm is not None:
+            pcm.events.publish({
+                "type": "keyboard_settings_changed",
+                **payload(),
+            })
+    return JSONResponse(payload())
+
+
 # ── Status ───────────────────────────────────────────────────────────────
 
 async def status_endpoint(request: Request) -> JSONResponse:
@@ -5186,15 +5431,12 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
     """Return startup phase progress and the host's own version state."""
     from ciao import __version__
 
-    config = getattr(request.app.state, "config", None)
-
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
     latest_version, update_available = await _cached_update_hint(request)
     payload.update({
         "version": __version__,
         "desktop_api_version": 1,
-        "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
         "latest_version": latest_version,
         "update_available": update_available,
     })
@@ -5358,6 +5600,15 @@ def _host_name(value: str) -> str:
 
 
 def _localhost_request(request: Request) -> bool:
+    """True when the TCP peer is this machine AND the Host names loopback.
+
+    The peer check is what makes it local: during first run the server binds
+    0.0.0.0, and a LAN client can send ``Host: localhost`` freely. The Host
+    check stays on top of it so a DNS-rebound page on this machine cannot
+    drive the setup routes either.
+    """
+    if not is_loopback_client(request):
+        return False
     name = _host_name(request.headers.get("host", ""))
     if not name:
         name = (request.url.hostname or "").rstrip(".").lower()
@@ -5523,7 +5774,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
                 setup_workspace,
                 workspace,
                 auth_token=password,
-                auth_required=True,
                 vault_root=str(body.get("vault_root", "")).strip() or None,
                 vault_mode=vault_mode,
                 workspace_name=workspace_name,
@@ -5546,7 +5796,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
     # bootstrap process would outrank the password just written to .env.
     os.environ["PWA_AUTH_TOKEN"] = password
-    os.environ["PWA_AUTH_REQUIRED"] = "true"
     # Only the real per-user LaunchAgents dir may be registered with launchd —
     # scripted/test setups pass a custom dir and must not touch it. Nothing
     # menu-bar related happens here any more: Ciaobot.app is the menu bar, and
@@ -5643,6 +5892,11 @@ async def setup_list_dirs_endpoint(request: Request) -> JSONResponse:
     guard = _setup_fs_guard(request)
     if guard is not None:
         return guard
+    return _dir_listing_response(request)
+
+
+def _dir_listing_response(request: Request) -> JSONResponse:
+    """The folder-picker listing for ``?path=``, shared by every picker route."""
     raw = str(request.query_params.get("path") or "~").strip() or "~"
     target = _resolve_setup_dir(raw)
     if target is None:
@@ -5683,7 +5937,6 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     # notes folder (no prior scaffold) is the vault itself; otherwise the
     # vault lives under memory-vault/.
     mode = detect_vault_mode(target)
-    existing_env_path = target / ".env"
     vault_root = target / "memory-vault"
     if mode == "existing" and not vault_root.is_dir():
         vault_root = target
@@ -5693,7 +5946,6 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
         "mode": mode,
         "vault_root": str(vault_root),
         "existing_workspaces": nested,
-        "has_env": existing_env_path.is_file(),
     })
 
 
@@ -5726,6 +5978,110 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
         return JSONResponse(_setup_dir_listing(parent))
     except OSError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+# ── Moving the install workspace ─────────────────────────────────────────
+#
+# Settings → Main workspace. Every route but the status read is for the
+# computer running Ciaobot only: browsing folders and moving the install are
+# filesystem operations a phone or a remote browser has no business making.
+# "Local" is the setup routes' rule (`_localhost_request`: a loopback TCP peer
+# whose Host names loopback) plus a same-host Origin, so a DNS-rebound page on
+# this machine cannot ride the session cookie.
+
+
+def _workspace_move_local(request: Request) -> bool:
+    return _localhost_request(request) and _setup_finish_origin_allowed(request)
+
+
+def _workspace_move_guard(request: Request) -> JSONResponse | None:
+    if _workspace_move_local(request):
+        return None
+    return JSONResponse(
+        {"error": "Moving the workspace is only available on the computer running Ciaobot."},
+        status_code=403,
+    )
+
+
+async def workspace_move_status_endpoint(request: Request) -> JSONResponse:
+    """Where the workspace is, whether this browser may move it, and the last move."""
+    from ciao import workspace_move
+
+    op = await asyncio.to_thread(workspace_move.read_operation)
+    return JSONResponse(
+        {
+            "workspace_root": str(Path(request.app.state.config.workspace_root).resolve()),
+            "local": _workspace_move_local(request),
+            # On Linux the service account cannot stop its own root-owned
+            # unit; the administrator moves it with `sudo ciao workspace-move`.
+            "admin_only": sys.platform.startswith("linux"),
+            "operation": asdict(op) if op is not None else None,
+        }
+    )
+
+
+async def workspace_move_dirs_endpoint(request: Request) -> JSONResponse:
+    """The folder picker's listing, for choosing where the workspace goes."""
+    guard = _workspace_move_guard(request)
+    if guard is not None:
+        return guard
+    return _dir_listing_response(request)
+
+
+async def _workspace_move_target(request: Request) -> str | JSONResponse:
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json object is required"}, status_code=400)
+    return str(body.get("target", "")).strip()
+
+
+async def workspace_move_plan_endpoint(request: Request) -> JSONResponse:
+    """Dry run: whether the move is possible and what to know first."""
+    from ciao import workspace_move
+
+    guard = _workspace_move_guard(request)
+    if guard is not None:
+        return guard
+    target = await _workspace_move_target(request)
+    if isinstance(target, JSONResponse):
+        return target
+    source = Path(request.app.state.config.workspace_root)
+    move_plan = await asyncio.to_thread(workspace_move.plan_for, source, target)
+    return JSONResponse(move_plan.as_dict())
+
+
+async def workspace_move_start_endpoint(request: Request) -> JSONResponse:
+    """Start the move. The engine stops, moves and restarts; the page reloads."""
+    from ciao import workspace_move
+
+    guard = _workspace_move_guard(request)
+    if guard is not None:
+        return guard
+    if sys.platform.startswith("linux"):
+        # On Linux the move runs in the caller's process, not as a sibling
+        # job: started from here it would stop the engine running it, even
+        # when the engine runs as root and the plan lets it through.
+        return JSONResponse(
+            {"error": "On Linux the administrator moves the workspace with `sudo ciao workspace-move`."},
+            status_code=403,
+        )
+    target = await _workspace_move_target(request)
+    if isinstance(target, JSONResponse):
+        return target
+    source = Path(request.app.state.config.workspace_root)
+    move_plan = await asyncio.to_thread(workspace_move.plan_for, source, target)
+    if not move_plan.ok:
+        return JSONResponse({**move_plan.as_dict(), "error": " ".join(move_plan.refusals)}, status_code=409)
+    try:
+        op = await asyncio.to_thread(
+            workspace_move.start, move_plan, port=request.app.state.config.pwa_port
+        )
+    except workspace_move.MoveError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"operation": asdict(op)}, status_code=202)
 
 
 # ── Admin ────────────────────────────────────────────────────────────────
@@ -5925,7 +6281,8 @@ def _pip_install_hint(output: str) -> str:
 def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
-    ``CIAO_APP_REPO`` wins over the module path for developer-mode deploys. A
+    The source checkout setting (Settings → General → Developer) wins over the
+    module path for developer-mode deploys. A
     packaged app does not resolve a checkout for production updates.
     """
     configured = getattr(config, "app_repo", None)
@@ -5967,7 +6324,7 @@ def _restart_only(config, *, dev_mode: bool) -> bool:
     checkout, so it only makes sense for a developer running from one. A
     packaged Ciaobot.app never qualifies: its embedded runtime is not a
     checkout, and ``pip install -e`` cannot replace it even when
-    ``CIAO_APP_REPO`` names one. Linux hosts outside dev mode are
+    the developer source checkout setting names one. Linux hosts outside dev mode are
     administrator-managed and restart only. Everywhere else, including Linux
     dev mode, anything that is not a deployable checkout (a plain package
     install) restarts only too, since deploy would stop at "locate checkout".
@@ -6129,7 +6486,8 @@ async def admin_deploy(request: Request) -> JSONResponse:
     problem = _checkout_problem(codebase_root)
     if problem:
         hint = (
-            f"{problem}. Set CIAO_APP_REPO to the ciaobot checkout so Restart can "
+            f"{problem}. Set the source checkout in Settings → General → Developer "
+            "to the ciaobot checkout so Restart can "
             "pull, reinstall, and rebuild from source."
         )
         steps.append({"step": "locate checkout", "ok": False, "output": hint})
@@ -6553,10 +6911,11 @@ async def local_status(request: Request) -> JSONResponse:
             {"error": "local session manager not initialised"}, status_code=500
         )
     status = dict(mgr.status())
-    status["restart_only"] = _restart_only(
-        getattr(request.app.state, "config", None),
-        dev_mode=bool(status.get("dev_mode", False)),
-    )
+    config = getattr(request.app.state, "config", None)
+    # Developer mode is a Settings toggle, so it is read live from the config
+    # the settings store overlays rather than captured at startup.
+    status["dev_mode"] = bool(getattr(config, "dev_mode", False))
+    status["restart_only"] = _restart_only(config, dev_mode=status["dev_mode"])
     return JSONResponse(status)
 
 
@@ -6833,13 +7192,13 @@ async def handover_merge(request: Request) -> JSONResponse:
 async def debug_issues(request: Request) -> JSONResponse:
     """Runtime issue report (server errors + failed job runs) for self-fix.
 
-    Only available when ``CIAO_DEV_MODE`` is set; hidden (404) otherwise so
+    Only available in developer mode (Settings); hidden (404) otherwise so
     the endpoint does not advertise itself on production instances.
     """
     config = request.app.state.config
     if not getattr(config, "dev_mode", False):
         return JSONResponse(
-            {"error": "debug endpoints require CIAO_DEV_MODE"}, status_code=404
+            {"error": "debug endpoints require developer mode"}, status_code=404
         )
     from ciao.debug_report import DEFAULT_LOG_LINES, build_issue_report
 
@@ -8860,7 +9219,8 @@ async def _update_task_rows(request: Request, workspace: str) -> list[dict[str, 
         workspace=workspace,
         installed_version=__version__,
     )
-    return [_update_task_row(status) for status in statuses]
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    return [_update_task_row(status, pcm) for status in statuses]
 
 
 async def _with_update_task_rows(
@@ -8886,7 +9246,7 @@ async def _with_update_task_rows(
     return payload
 
 
-def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
+def _update_task_row(status: "update_tasks.TaskStatus", pcm: Any) -> dict[str, Any]:
     """One task, its lifecycle, and the chat its attempt is in.
 
     ``status`` is the durable answer and ``applicability`` is the computed one,
@@ -8894,6 +9254,14 @@ def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
     can be ``applicable`` and ``dismissed`` (the operator decided against work
     that does apply), or ``not_applicable`` and ``completed``. A row with no
     record at all reports ``offered``, which is also what an absent record means.
+
+    ``chat_live`` answers a different question from ``chat_id``: the record names
+    the chat its attempt opened, but an archived or deleted one is no longer a
+    chat the operator can open, and a card that said "its chat is open" and
+    offered "Open its chat" against it would be describing something that is not
+    there. It reuses ``update_task_launch``'s own rule — the same one a start
+    uses to decide whether to mint a fresh chat — rather than inventing a second
+    definition of "live".
 
     Two timestamps, deliberately not merged. ``applicability_checked_at`` is when
     a detector last produced this row's answer, and inside the freshness window it
@@ -8903,8 +9271,11 @@ def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
     attempt, not a check. A surface that rendered one of them under the other's
     name would claim a task was re-checked when an operator merely declined it.
     """
+    from ciao.web.update_task_launch import _live_chat
+
     task = status.task
     state = status.state
+    chat_id = state.chat_id if state is not None else ""
     return {
         "id": task.id,
         "revision": task.revision,
@@ -8917,7 +9288,8 @@ def _update_task_row(status: "update_tasks.TaskStatus") -> dict[str, Any]:
         "applicability_checked_at": status.applicability.checked_at,
         "offered": status.offered,
         "suppressed": status.suppressed,
-        "chat_id": state.chat_id if state is not None else "",
+        "chat_id": chat_id,
+        "chat_live": _live_chat(pcm, state) is not None,
         "prompt_digest": state.prompt_digest if state is not None else "",
         "attempted_fingerprint": (
             state.attempted_fingerprint if state is not None else ""

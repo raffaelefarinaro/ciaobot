@@ -76,6 +76,35 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.find('#setup-workspace').exists()).toBe(false)
   })
 
+  it('asks for the password in plain words and links to how to find it', async () => {
+    mockApiGet.mockResolvedValue({ configured: true, bootstrap: false, mode: 'configured', providers: {} })
+    const wrapper = await mountLoginView()
+    const input = wrapper.get('#login-token')
+    expect(wrapper.get('label[for="login-token"]').text()).toBe('Password')
+    expect(input.attributes('type')).toBe('password')
+    expect(wrapper.text()).not.toContain('auth_token')
+    expect(wrapper.get('.login-submit').text()).toBe('Log in')
+    const help = wrapper.get('a.login-help')
+    expect(help.attributes('href')).toBe('https://www.raffaelefarinaro.com/ciaobot/guide.html#password')
+    expect(help.attributes('target')).toBe('_blank')
+  })
+
+  it('says a wrong password plainly instead of the server\'s "invalid token"', async () => {
+    mockApiGet.mockResolvedValue({ configured: true, bootstrap: false, mode: 'configured', providers: {} })
+    const wrapper = await mountLoginView()
+    mockApiPost.mockRejectedValueOnce(Object.assign(new Error('invalid token'), { status: 401 }))
+    await wrapper.get('#login-token').setValue('nope')
+    await wrapper.get('form.login-form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.get('#login-error').text()).toBe('That password did not work. Check it and try again.')
+    expect(wrapper.get('#login-token').attributes('aria-invalid')).toBe('true')
+
+    mockApiPost.mockRejectedValueOnce(Object.assign(new Error('rate limited'), { status: 429 }))
+    await wrapper.get('form.login-form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.get('#login-error').text()).toContain('Too many tries')
+  })
+
   it('renders setup wizard when bootstrap is true', async () => {
     mockApiGet.mockResolvedValue({
       configured: false,
@@ -320,6 +349,38 @@ describe('LoginView setup wizard tests', () => {
     expect((wrapper.find('#setup-workspace').element as HTMLInputElement).value).toBe(
       '/Users/me/ciaobot',
     )
+  })
+
+  it('shows the same install step for a missing opencode as for Claude', async () => {
+    // opencode's row used to report `auth: 'missing'` with a bare `opencode`
+    // command, so the wizard rendered an install instruction next to a command
+    // that installed nothing. It shares Claude's `not_installed` branch now.
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {
+        opencode: {
+          name: 'opencode',
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://opencode.ai/v2/install | bash',
+          detail: 'opencode is not installed on this machine.',
+          install_url: 'https://opencode.ai/download',
+          path_command: 'echo \'export PATH="$HOME/.opencode/bin:$PATH"\' >> ~/.zshrc',
+        },
+      },
+    })
+
+    const wrapper = await mountLoginView()
+    // The wizard defaults to the claude radio, so select opencode first.
+    await wrapper.findAll('.provider-choices input[type="radio"]')[1].setValue()
+
+    expect(wrapper.text()).toContain('[!] Not Installed')
+    expect(wrapper.text()).toContain('curl -fsSL https://opencode.ai/v2/install | bash')
+    expect(wrapper.text()).toContain('Not installed yet.')
+    const link = wrapper.find('.install-link')
+    expect(link.attributes('href')).toBe('https://opencode.ai/download')
   })
 
   it('asks for an install, with a docs link, when the provider CLI is missing', async () => {

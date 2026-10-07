@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useProposalsStore } from '../stores/proposals'
 import { useProjectStore } from '../stores/projects'
@@ -250,7 +251,7 @@ const filtersHideEverything = computed(
 
     <p v-if="store.historyError" class="ph-error" role="alert">{{ store.historyError }}</p>
 
-    <p v-if="store.historyLoading && !store.historyLoaded" class="ph-empty">Loading…</p>
+    <SkeletonLoader v-if="store.historyLoading && !store.historyLoaded" label="Loading history" :count="5" />
     <!-- A failed fetch shows the error alone. Falling through to the empty
          states printed "No decisions yet." under the error, which claims an
          empty ledger when the ledger merely could not be read. -->

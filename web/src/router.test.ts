@@ -42,4 +42,13 @@ describe('router', () => {
     expect(router.currentRoute.value.path).toBe('/memory/review')
     expect(router.currentRoute.value.query.show).toBe('suggested')
   })
+
+  it('addresses one task on the board', async () => {
+    const router = makeRouter()
+    await router.push('/tasks/0123456789abcdef0123456789abcdef')
+    expect(router.currentRoute.value.name).toBe('task-detail')
+    expect(router.currentRoute.value.params.taskId).toBe('0123456789abcdef0123456789abcdef')
+    await router.push('/tasks')
+    expect(router.currentRoute.value.name).toBe('tasks')
+  })
 })

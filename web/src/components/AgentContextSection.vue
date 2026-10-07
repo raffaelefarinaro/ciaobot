@@ -39,20 +39,17 @@
         <small>Could not be read just now: {{ guide.error }}</small>
       </div>
       <!-- General with no description or doc sends no brief at all. -->
-      <div v-if="project && briefLines.length" class="rail-item agent-context-row agent-context-brief">
+      <div v-if="project && briefText" class="rail-item agent-context-row agent-context-brief">
         <span class="agent-context-row-top">
           <router-link :to="`/project/${project.project_id}`" class="agent-context-name agent-context-project">{{ project.name }}</router-link>
           <span class="agent-context-meta">{{ formatTokens(briefTokens) }} tokens</span>
         </span>
-        <small>Project brief, sent at the start and when it changes:</small>
-        <pre class="agent-context-brief-text"><template v-for="line in briefLines" :key="line.key">{{ line.prefix }}<button
-          v-if="line.path"
-          type="button"
-          class="agent-context-link"
-          :title="`Open ${line.path}`"
-          @click="emit('open-file', line.path)"
-        >{{ line.value }}</button><template v-else>{{ line.value }}</template>
-</template></pre>
+        <p
+          v-if="project.context"
+          class="agent-context-description"
+          @click="openContextFile"
+          v-html="contextHtml"
+        ></p>
       </div>
     </div>
   </section>
@@ -61,6 +58,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { ProjectInfo } from '../lib/types'
+import { linkifyText } from '../lib/filePaths'
 import { fetchWorkspaceGuide, formatTokens, tokensFor, type WorkspaceGuide } from '../lib/workspaceGuide'
 
 const props = defineProps<{
@@ -85,22 +83,37 @@ watch(() => props.project?.workspace, loadGuide, { immediate: true })
 const guideName = computed(() => guide.value.path.split('/').pop() || 'AGENTS.md')
 const guideTokens = computed(() => tokensFor(guide.value.content.length))
 
-// The brief is the capsule's stable project lines (ciao/context/capsule.py),
-// rendered as sent: the name (General is implicit), the description and the
-// canonical doc's path. Not the doc itself. `field` mirrors capsule._field.
+// The brief is the capsule's stable project lines (ciao/context/capsule.py).
+// Count the capsule's sent text, not the readable presentation below the
+// project name. `field` mirrors capsule._field.
 function field(value: string, limit = 1200): string {
   return value.split(/\s+/).filter(Boolean).join(' ').slice(0, limit)
 }
-const briefLines = computed(() => {
+const briefText = computed(() => {
   const p = props.project
-  if (!p) return []
-  const lines: { key: string; prefix: string; value: string; path?: string }[] = []
-  if (p.name && p.name !== 'General') lines.push({ key: 'project', prefix: 'project=', value: `"${field(p.name, 180)}"` })
-  if (p.context) lines.push({ key: 'project_context', prefix: 'project_context=', value: field(p.context) })
-  if (p.vault_doc_path) lines.push({ key: 'canonical_doc', prefix: 'canonical_doc=', value: field(p.vault_doc_path, 300), path: p.vault_doc_path })
-  return lines
+  if (!p) return ''
+  const lines: string[] = []
+  if (p.name && p.name !== 'General') lines.push(`project="${field(p.name, 180)}"`)
+  if (p.context) lines.push(`project_context=${field(p.context)}`)
+  if (p.vault_doc_path) lines.push(`canonical_doc=${field(p.vault_doc_path, 300)}`)
+  return lines.join('\n')
 })
-const briefTokens = computed(() => tokensFor(briefLines.value.map((l) => l.prefix + l.value).join('\n').length))
+const briefTokens = computed(() => tokensFor(briefText.value.length))
+
+// Plain text is escaped by the shared linker; a canonical filename resolves
+// to its full path without adding another copy below the description.
+const contextHtml = computed(() => linkifyText(
+  props.project?.context || '',
+  props.project?.vault_doc_path ? [props.project.vault_doc_path] : [],
+))
+function openContextFile(event: MouseEvent) {
+  const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a.file-link')
+  const path = link?.getAttribute('data-file-path')
+  if (!path) return
+  event.preventDefault()
+  event.stopPropagation()
+  emit('open-file', path)
+}
 
 const contextPctLabel = computed(() => {
   const pct = props.contextPct
@@ -157,14 +170,9 @@ const contextPctLabel = computed(() => {
 .agent-context-row small { line-height: 1.4; }
 .agent-context-brief { cursor: default; }
 .agent-context-brief:hover { color: var(--fg); }
-.agent-context-brief-text {
+.agent-context-description {
   margin: 4px 0 0;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  background: var(--bg3);
   color: var(--fg2);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -180,11 +188,13 @@ const contextPctLabel = computed(() => {
   text-underline-offset: 2px;
   cursor: pointer;
 }
-.agent-context-brief-text .agent-context-link {
-  display: inline;
-  text-align: left;
+.agent-context-description :deep(a.file-link) {
   color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
 }
+.agent-context-description :deep(a.file-link:hover) { text-decoration-color: currentColor; }
 .agent-context-link:hover,
 .agent-context-project:hover { text-decoration-color: currentColor; }
 .agent-context-project {

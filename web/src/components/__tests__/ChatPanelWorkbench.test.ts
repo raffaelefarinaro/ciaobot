@@ -98,12 +98,12 @@ const TURNS: ChatMessage[] = [
   { role: 'assistant', content: 'second answer', timestamp: '2026-09-25T10:01:07Z', effective_model: 'sonnet', duration_ms: 7000 },
 ]
 
-async function mountPanel(messages: ChatMessage[] = []): Promise<VueWrapper> {
+async function mountPanel(messages: ChatMessage[] = [], chatOverrides: Partial<ChatInfo> = {}): Promise<VueWrapper> {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
   store.projects = [project()]
-  store.chats = [chat()]
+  store.chats = [{ ...chat(), ...chatOverrides }]
   store.activeChatId = 'chat-1'
   store.messages = { 'chat-1': messages }
   store.bootstrapped = true
@@ -182,90 +182,25 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
-  it('shows a message\'s actions only once it is selected, and Esc puts it back', async () => {
+  it('renders every message\'s actions in place, with no click-to-select', async () => {
     const wrapper = await mountPanel(TURNS)
     const replies = wrapper.findAll('.message-wrap.assistant')
     expect(replies).toHaveLength(2)
-    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-
-    // Click the reply (not a link or button inside it) to select it.
-    await replies[0].get('.message-row').trigger('click')
-    expect(replies[0].classes()).toContain('message-wrap--selected')
-    // Selection marks one message and nothing else: no backdrop ever covers the
-    // transcript, so the turns around the selected one stay readable.
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
-    const actions = replies[0].get('.message-actions')
+    // The footer is always laid out (CSS reveals it on hover or focus), so
+    // showing it never reflows the transcript.
+    const actions = replies[0].get('.message-row > .message-actions')
     expect(actions.text()).toContain('Copy')
     expect(actions.text()).toContain('Fork from here')
 
-    // The actions are the card's own footer, not a row floating under it: a
-    // selected message and the things you can do to it are one object, so the
-    // footer can bleed to the card's edges and share its left edge.
-    expect(replies[0].findAll('.message-row > .message-actions')).toHaveLength(1)
-
-    // Esc deselects without closing the chat, and still puts nothing over the
-    // transcript.
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
-    await nextTick()
-    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-    expect(wrapper.emitted('close')).toBeUndefined()
-
-    // Enter on a focused message selects it too; the user's own offers Copy only.
     const request = wrapper.findAll('.message-wrap.user')[0]
-    await request.get('.message-row').trigger('keydown', { key: 'Enter' })
-    expect(request.classes()).toContain('message-wrap--selected')
-    expect(request.get('.message-actions').text()).toContain('Copy')
+    expect(request.get('.message-row > .message-actions').text()).toContain('Copy')
     expect(request.get('.message-actions').text()).not.toContain('Fork')
-    // Same shape on a request: the chip rides inside the row that becomes the
-    // card, so a 44px touch target cannot reach into the turn below it.
-    expect(request.findAll('.message-row > .message-actions')).toHaveLength(1)
 
-    // The reply is no longer selected and the request is, so at most one message
-    // carries the outline at a time.
-    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
-
-    // Clicking the selected message again deselects it: there is no veil to
-    // click off now, so the toggle has to live on the message.
-    await request.get('.message-row').trigger('click')
+    // A message is not a control: clicking it selects nothing and it takes no
+    // tab stop of its own.
+    await replies[0].get('.message-row').trigger('click')
     expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('does not move the transcript when a message is selected', async () => {
-    const wrapper = await mountPanel(TURNS)
-    // The transcript's visible box: top 100, 600px tall, scrolled 40px down.
-    const transcript = wrapper.get('.messages').element as HTMLElement
-    transcript.getBoundingClientRect = () => ({ top: 100, bottom: 700 }) as DOMRect
-    Object.defineProperty(transcript, 'clientHeight', { configurable: true, value: 600 })
-    Object.defineProperty(transcript, 'scrollTop', { configurable: true, writable: true, value: 40 })
-
-    const reply = wrapper.findAll('.message-wrap.assistant').at(-1)!
-    const card = reply.get('.message-row')
-    // Selecting a reply grows it, and on a phone the new footer can land under
-    // the composer. Selection must not yank the transcript: the reader keeps
-    // their place, so the old reveal scroll is gone and the scroll position is
-    // untouched even when the card's bottom sits past the visible edge.
-    card.element.getBoundingClientRect = () => ({ top: 400, bottom: 760 }) as DOMRect
-    await card.trigger('click')
-    await nextTick()
-    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
-    expect(transcript.scrollTop).toBe(40)
-    expect(scrollCalls).toEqual([])
-
-    // Deselect and re-select the same card: still no scroll, and nothing laid
-    // over the transcript.
-    await card.trigger('click')
-    expect(wrapper.find('.message-wrap--selected').exists()).toBe(false)
-    await card.trigger('click')
-    await nextTick()
-    expect(scrollCalls).toEqual([])
-    expect(transcript.scrollTop).toBe(40)
-    expect(wrapper.find('.message-select-backdrop').exists()).toBe(false)
-    expect(wrapper.findAll('.message-wrap--selected')).toHaveLength(1)
+    expect(replies[0].get('.message-row').attributes('tabindex')).toBeUndefined()
     wrapper.unmount()
   })
 
@@ -291,6 +226,9 @@ describe('ChatPanel aligned layout', () => {
     expect(rail.findComponent({ name: 'AgentContextSection' }).exists()).toBe(true)
     expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)
     expect(rail.text()).not.toContain('Current state')
+    // The task origin note sits in the rail, and only there, while it shows.
+    const origins = wrapper.findAllComponents({ name: 'TaskOriginNote' })
+    expect(origins.map(o => o.props('variant'))).toEqual(['rail'])
 
     // The header carries Archive only, as an icon button (labelled on wide
     // panes, icon-only on narrow); the toggle lives with Work details.
@@ -312,5 +250,53 @@ describe('ChatPanel aligned layout', () => {
     // The drawer is the narrow-pane form; it does not open on a wide pane.
     expect(wrapper.find('.chat-work-inspector').exists()).toBe(false)
     wrapper.unmount()
+  })
+
+  describe('a delegated board task', () => {
+    const DELEGATION = {
+      helper: { kind: 'task_delegation' as const, task_id: 'ship', task_revision: 'r1', attempt_id: 'att-1' },
+    }
+    const PROMPT = 'Instruction.\n\nTitle: Ship the board\nTask id: ship\n\n<task-board-task>\n- land the types\n</task-board-task>'
+    const DELEGATED_TURNS: ChatMessage[] = [
+      { role: 'user', content: PROMPT, timestamp: '2026-09-25T10:00:00Z', turn_index: 0 },
+      { role: 'assistant', content: 'done', timestamp: '2026-09-25T10:00:05Z' },
+      { role: 'user', content: 'a follow-up', timestamp: '2026-09-25T10:01:00Z', turn_index: 1 },
+    ]
+
+    it('draws the first message as the task handed over, and later ones as typed', async () => {
+      const wrapper = await mountPanel(DELEGATED_TURNS, DELEGATION)
+      const card = wrapper.getComponent({ name: 'TaskHandoverCard' })
+      expect(card.props('handover')).toEqual({ title: 'Ship the board', description: '- land the types' })
+      expect(card.props('prompt')).toBe(PROMPT)
+      const users = wrapper.findAll('.message-wrap.user')
+      expect(users).toHaveLength(1)
+      expect(users[0].text()).toContain('a follow-up')
+      wrapper.unmount()
+    })
+
+    it('renders the first message normally when it carries no fenced description', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: 'Title: hand-typed', timestamp: '2026-09-25T10:00:00Z', turn_index: 0 },
+      ], DELEGATION)
+      expect(wrapper.findComponent({ name: 'TaskHandoverCard' }).exists()).toBe(false)
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(1)
+      wrapper.unmount()
+    })
+
+    it('leaves an ordinary chat\'s fenced text alone', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: PROMPT, timestamp: '2026-09-25T10:00:00Z', turn_index: 0 },
+      ])
+      expect(wrapper.findComponent({ name: 'TaskHandoverCard' }).exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('puts the task origin note above the transcript while the rail is hidden', async () => {
+      const wrapper = await mountPanel(DELEGATED_TURNS, DELEGATION)
+      const note = wrapper.getComponent({ name: 'TaskOriginNote' })
+      expect(note.props('variant')).toBe('note')
+      expect(note.props('chat')).toMatchObject({ chat_id: 'chat-1', helper: DELEGATION.helper })
+      wrapper.unmount()
+    })
   })
 })

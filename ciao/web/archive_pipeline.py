@@ -61,6 +61,7 @@ class ArchivePipelineHost(Protocol):
         project: ProjectInfo | None,
         archive_path: Path,
         doc_path: str,
+        focus: dict[str, str] | None = None,
     ) -> str | None: ...
 
 
@@ -114,9 +115,8 @@ class ArchivePipeline:
     def _insights_model_for(self, chat: ChatInfo, workspace: str) -> str:
         from ciao.insights import resolve_insights_model
 
-        insights_models = getattr(self._host._config, "provider_insights_models", {}) or {}
-        return insights_models.get(chat.provider or "", "") or resolve_insights_model(
-            self._host._config, workspace or None, chat.provider or None
+        return resolve_insights_model(
+            self._host._config, workspace or None, chat.provider or "claude"
         )
 
     @staticmethod
@@ -137,6 +137,7 @@ class ArchivePipeline:
         outcome: ArchiveOutcome,
         chat_meta: ChatInfo | None,
         project_meta: ProjectInfo | None,
+        focus: dict[str, str] | None = None,
     ) -> None:
         config = self._host._config
         from ciao.web import memory_pass
@@ -173,6 +174,7 @@ class ArchivePipeline:
                         project_meta,
                         outcome.path,
                         self._project_doc_path(chat, project_meta),
+                        focus,
                     )
                 except Exception:  # noqa: BLE001 — the archive already succeeded
                     logger.exception(

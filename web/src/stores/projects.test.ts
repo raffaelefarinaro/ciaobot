@@ -10,6 +10,8 @@ import {
   setListIndex,
   useProjectStore,
 } from './projects'
+import { useTaskSignalsStore } from './taskSignals'
+import { nextTick } from 'vue'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -1611,122 +1613,286 @@ describe('subagent thinking deltas', () => {
   })
 })
 
-describe('pinned file dismissal', () => {
-  const surfacedEvent = {
-    type: 'tool_use',
-    tool_name: 'file_surface',
-    tool_use_id: 'surface-1',
-    file_touch: {
-      file_path: '/workspace/report.md',
-      action: 'surfaced',
-    },
+describe('server-owned chat pins', () => {
+  function chatInfo(chatId: string, over: Partial<ChatInfo> = {}): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'T',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: false,
+      ...over,
+    }
   }
 
-  const otherSurfacedEvent = {
-    ...surfacedEvent,
-    tool_use_id: 'surface-2',
-    file_touch: {
-      file_path: '/workspace/plan.md',
-      action: 'surfaced',
-    },
-  }
+  const pinChanged = (over: Record<string, unknown> = {}) => ({
+    type: 'chat_pin_changed',
+    chat_id: 'c-pin',
+    path: '/workspace/report.md',
+    dismissed_paths: [],
+    revision: 1,
+    ...over,
+  })
 
-  test('keeps a user-closed pinned file closed when chat events replay', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-dismissal'
+  test('replayed surfaced touches no longer mutate server chat pin state', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true })
+    const chatId = 'c-surface'
     const store = useProjectStore()
+    store.chats = [chatInfo(chatId)]
     store.activeChatId = chatId
     store.connectWs(chatId)
 
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBe('/workspace/report.md')
-
-    store.unpinFile(chatId)
+    // A replayed `file_surface` tool call still renders an inline card, but it
+    // must not become the chat's pin: the engine's durable event is the only
+    // surface-intent writer.
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'file_surface',
+        tool_use_id: 'surface-1',
+        file_touch: { file_path: '/workspace/report.md', action: 'surfaced' },
+      }),
+    })
     expect(store.pinnedFileFor(chatId)).toBeUndefined()
-
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBeUndefined()
+    expect(apiPatch).not.toHaveBeenCalled()
   })
 
-  test('surfaces a different file after one was dismissed', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-next-artifact'
-    const store = useProjectStore()
-    store.activeChatId = chatId
-    store.connectWs(chatId)
-
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    store.unpinFile(chatId)
-
-    // A new deliverable is not the file the user closed, so it must open.
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(otherSurfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBe('/workspace/plan.md')
-  })
-
-  test('an explicit surface replaces whatever is already pinned', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-replace'
-    const store = useProjectStore()
-    store.activeChatId = chatId
-    store.connectWs(chatId)
-
-    store.pinFile(chatId, '/workspace/report.md')
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(otherSurfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBe('/workspace/plan.md')
-  })
-
-  test('persists the dismissal across store recreation until the user pins a file', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-reopen'
-    const firstStore = useProjectStore()
-    firstStore.activeChatId = chatId
-    firstStore.connectWs(chatId)
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    firstStore.unpinFile(chatId)
+  test('pin events synchronize two independent stores without feedback PATCH', () => {
+    setActivePinia(createPinia())
+    const storeA = useProjectStore()
+    storeA.chats = [chatInfo('c-pin')]
+    storeA.connectEventsWs()
 
     setActivePinia(createPinia())
-    const reopenedStore = useProjectStore()
-    reopenedStore.activeChatId = chatId
-    reopenedStore.connectWs(chatId)
-    fakeSockets[1].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    expect(reopenedStore.pinnedFileFor(chatId)).toBeUndefined()
+    const storeB = useProjectStore()
+    storeB.chats = [chatInfo('c-pin')]
+    storeB.connectEventsWs()
 
-    reopenedStore.pinFile(chatId, '/workspace/report.md')
-    expect(reopenedStore.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+    const evt = JSON.stringify(pinChanged())
+    fakeSockets[0].onmessage?.({ data: evt })
+    fakeSockets[1].onmessage?.({ data: evt })
+
+    expect(storeA.pinnedFileFor('c-pin')).toBe('/workspace/report.md')
+    expect(storeB.pinnedFileFor('c-pin')).toBe('/workspace/report.md')
+    // Syncing via the event must not write back to the server.
+    expect(apiPatch).not.toHaveBeenCalled()
   })
 
-  test('drops a legacy chat-wide dismissal so later surfaces still open', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-legacy'
-    // Written before the store is created: restoreState() runs on setup.
-    localStorage.setItem('ciao-dismissed-auto-pins', JSON.stringify({ [chatId]: true }))
-
-    setActivePinia(createPinia())
+  test('snapshot clears missed closed pins', () => {
     const store = useProjectStore()
-    store.activeChatId = chatId
-    store.connectWs(chatId)
+    store.chats = [chatInfo('c-pin')]
+    // Local state holds an open pin the client saw before its socket dropped.
+    store.applyChatPinState('c-pin', { path: '/workspace/report.md', dismissed_paths: [], revision: 2 }, { source: 'event' })
 
-    fakeSockets[fakeSockets.length - 1].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+    store.connectEventsWs()
+    fakeSockets[fakeSockets.length - 1].onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        active_streams: [],
+        chat_pins: { 'c-pin': { path: '', dismissed_paths: ['/workspace/report.md'], revision: 3 } },
+      }),
+    })
+    expect(store.pinnedFileFor('c-pin')).toBeUndefined()
+  })
+
+  test('stale list and PATCH responses cannot overwrite a newer event', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-pin')]
+    store.applyChatPinState('c-pin', { path: '/workspace/new.md', dismissed_paths: [], revision: 5 }, { source: 'event' })
+
+    // A GET that raced the event resolves with an older revision afterwards.
+    store.reconcileChatList([
+      chatInfo('c-pin', { pinned_file_path: '/workspace/old.md', pin_revision: 3, dismissed_pin_paths: [] }),
+    ])
+    expect(store.pinnedFileFor('c-pin')).toBe('/workspace/new.md')
+  })
+
+  test('agent surface from server restores on a fresh client', () => {
+    const store = useProjectStore()
+    store.reconcileChatList([
+      chatInfo('c-surface', { pinned_file_path: '/workspace/report.md', pin_revision: 1, dismissed_pin_paths: [] }),
+    ])
+    expect(store.pinnedFileFor('c-surface')).toBe('/workspace/report.md')
+  })
+
+  test('pin events never select or navigate chats', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-pin'), chatInfo('c-other')]
+    store.activeChatId = 'c-other'
+    store.connectEventsWs()
+    routerPush.mockClear()
+
+    fakeSockets[fakeSockets.length - 1].onmessage?.({ data: JSON.stringify(pinChanged()) })
+
+    expect(store.activeChatId).toBe('c-other')
+    expect(routerPush).not.toHaveBeenCalled()
+    expect(store.pinnedFileFor('c-pin')).toBe('/workspace/report.md')
+  })
+
+  test('deleted chat drops shared pin state', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-pin')]
+    store.applyChatPinState('c-pin', { path: '/workspace/report.md', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    store.connectEventsWs()
+
+    fakeSockets[fakeSockets.length - 1].onmessage?.({
+      data: JSON.stringify({ type: 'chat_deleted', chat_id: 'c-pin', project_id: 'p1' }),
+    })
+    expect(store.pinnedFileFor('c-pin')).toBeUndefined()
+  })
+
+  test('a 409 conflict adopts the server pin and surfaces the conflict', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-pin')]
+    store.applyChatPinState('c-pin', { path: '/workspace/a.md', dismissed_paths: [], revision: 4 }, { source: 'event' })
+
+    // Another device replaced the pin between read and write: the PATCH 409s
+    // with the server's truth.
+    apiPatch.mockRejectedValue(Object.assign(new Error('pin_revision_conflict'), {
+      status: 409,
+      payload: {
+        error: 'pin_revision_conflict',
+        pin: { path: '/workspace/other.md', dismissed_paths: ['/workspace/a.md'], revision: 7 },
+      },
+    }))
+
+    await store.unpinFile('c-pin')
+
+    // One PATCH, no retry; the server's pin is adopted…
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect(store.pinnedFileFor('c-pin')).toBe('/workspace/other.md')
+    // …and the loss is surfaced, not silently folded into the other device's choice.
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].title).toBe('Could not update pinned file')
+    expect(store.toasts[0].errorText).toBe('Pinned file was changed on another device')
   })
 })
 
 describe('chat closing', () => {
+  // #1116: Home is a view, not a request to destroy anything. This helper is
+  // what the route reconciliation in ChatLayout calls, and it must be strictly
+  // non-destructive where closeChat() is deliberately destructive.
+  describe('clearActiveChatView', () => {
+    function seedDraft() {
+      const chatId = 'chat-keep-draft'
+      const store = useProjectStore()
+      store.chats = [{
+        chat_id: chatId,
+        project_id: 'p1',
+        title: 'New Chat',
+        model: 'sonnet',
+        provider: 'claude',
+        mode: 'auto',
+        session_id: '',
+        created_at: '',
+        archived: false,
+      }]
+      store.messages[chatId] = []
+      store.activeChatId = chatId
+      store.pendingImages = ['img-1']
+      localStorage.setItem('ciao-chat-drafts', JSON.stringify({ [chatId]: 'half a thought' }))
+      store.applyChatPinState(chatId, { path: '/workspace/report.md', dismissed_paths: [], revision: 1 }, { source: 'test' })
+      return { store, chatId }
+    }
+
+    test('preserves chats, drafts, pins and running turns', () => {
+      const { store, chatId } = seedDraft()
+      // A turn in flight when the user clicks Home.
+      store.streaming[chatId] = true
+      const stopChat = vi.spyOn(store, 'stopChat')
+
+      store.clearActiveChatView()
+
+      // Only the view moved.
+      expect(store.activeChatId).toBeNull()
+      // The conversation, its unsent text and its staged screenshot survive.
+      expect(store.chats.map(c => c.chat_id)).toEqual([chatId])
+      expect(store.messages[chatId]).toEqual([])
+      expect(JSON.parse(localStorage.getItem('ciao-chat-drafts') || '{}')[chatId]).toBe('half a thought')
+      // Its pin is still stored, ready to come back with the chat.
+      expect(store.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+      // And nothing was stopped on the way out.
+      expect(store.streaming[chatId]).toBe(true)
+      expect(stopChat).not.toHaveBeenCalled()
+    })
+
+    test('makes no mutation call and pushes no route', () => {
+      const { store } = seedDraft()
+      routerPush.mockClear()
+
+      store.clearActiveChatView()
+
+      expect(apiDel).not.toHaveBeenCalled()
+      expect(apiPost).not.toHaveBeenCalled()
+      expect(apiPatch).not.toHaveBeenCalled()
+      expect(apiGet).not.toHaveBeenCalled()
+      // A view change the caller already navigated for: pushing again here
+      // would eject the user from wherever they have since gone.
+      expect(routerPush).not.toHaveBeenCalled()
+    })
+
+    test('detaches the selected chat socket but keeps global awareness', () => {
+      const { store, chatId } = seedDraft()
+      store.connectWs(chatId)
+      store.connectWs('chat-other')
+      store.connectEventsWs()
+      const chatSocket = fakeSockets.find(s => s.url.includes(`/ws/chat/${chatId}`))
+      const otherSocket = fakeSockets.find(s => s.url.includes('/ws/chat/chat-other'))
+      const eventsSocket = fakeSockets.find(s => s.url.includes('/ws/events'))
+      expect(chatSocket).toBeDefined()
+
+      store.clearActiveChatView()
+
+      // The selected chat has no pane left to stream into.
+      expect(chatSocket!.readyState).toBe(FakeWebSocket.CLOSED)
+      // Every other channel is untouched: awareness carries cross-chat events
+      // for chats with no pane open, and another chat may still be running.
+      expect(eventsSocket!.readyState).toBe(FakeWebSocket.OPEN)
+      expect(otherSocket!.readyState).toBe(FakeWebSocket.OPEN)
+    })
+
+    test('is a no-op with nothing selected', () => {
+      const store = useProjectStore()
+      routerPush.mockClear()
+
+      store.clearActiveChatView()
+
+      expect(store.activeChatId).toBeNull()
+      expect(routerPush).not.toHaveBeenCalled()
+      expect(apiDel).not.toHaveBeenCalled()
+    })
+
+    test('closeChat still deletes an empty draft', () => {
+      // The mirror image, and the reason the two paths must not be merged: the
+      // explicit Close gesture keeps its destructive policy.
+      const chatId = 'chat-really-empty'
+      const store = useProjectStore()
+      store.chats = [{
+        chat_id: chatId,
+        project_id: 'p1',
+        title: 'New Chat',
+        model: 'sonnet',
+        provider: 'claude',
+        mode: 'auto',
+        session_id: '',
+        created_at: '',
+        archived: false,
+      }]
+      store.messages[chatId] = []
+      store.activeChatId = chatId
+      apiDel.mockResolvedValue({ ok: true, deleted: true })
+
+      return store.closeChat().then(() => {
+        expect(apiDel).toHaveBeenCalledWith(`/api/chats/${chatId}?only_if_empty=1`)
+        expect(store.chats).toHaveLength(0)
+      })
+    })
+  })
+
   test('deletes an unused draft chat instead of leaving it in the sidebar', async () => {
     const store = useProjectStore()
     const chatId = 'chat-unused-draft'
@@ -3355,50 +3521,141 @@ describe('background agents indicator', () => {
         type: 'snapshot',
         active_streams: [],
         background_agents: { 'c-live': 2 },
+        chat_pins: {},
       }),
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
     expect(store.backgroundAgents['c-live']).toBe(2)
   })
 
-  test('tracked background runs get their own count, cleared at zero', () => {
+  test('tracked background runs carry their rows, cleared when none are left', () => {
+    vi.useFakeTimers()
     const store = useProjectStore()
     const chatId = 'c-run'
     store.activeChatId = chatId
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (running: number) =>
+    const row = (runId: string, over: Record<string, unknown> = {}) => ({
+      run_id: runId, label: 'clone', cmd: ['git', 'clone'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null, ...over,
+    })
+    const fire = (runs: unknown[], finished?: unknown) =>
       sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_background_runs', chat_id: chatId, project_id: 'p1', running }),
+        data: JSON.stringify({ type: 'chat_background_runs', chat_id: chatId, project_id: 'p1', runs, finished }),
       })
 
-    fire(1)
-    expect(store.activeBackgroundRuns).toBe(1)
+    fire([row('r1')])
+    expect(store.activeBackgroundRuns.map(r => r.run_id)).toEqual(['r1'])
     expect(store.chatHasBackgroundRuns(chatId)).toBe(true)
-    fire(2)
-    expect(store.activeBackgroundRuns).toBe(2)
-    fire(0)
+    fire([row('r1'), row('r2')])
+    expect(store.activeBackgroundRuns).toHaveLength(2)
+    fire([], row('r2', { status: 'error', exit_code: 1 }))
     expect(store.backgroundRuns[chatId]).toBeUndefined()
     expect(store.chatHasBackgroundRuns(chatId)).toBe(false)
+    // How the last run ended is held briefly for the composer, then dropped.
+    expect(store.finishedBackgroundRuns[chatId]?.exit_code).toBe(1)
+    vi.advanceTimersByTime(6000)
+    expect(store.finishedBackgroundRuns[chatId]).toBeUndefined()
     // Background agents are a separate signal; a run must not light that pill.
     expect(store.activeBackgroundAgents).toBe(0)
+    vi.useRealTimers()
   })
 
-  test('the snapshot re-seeds run counts for a client that missed the start', () => {
+  test('the snapshot re-seeds runs for a client that missed the start', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
-    store.backgroundRuns['c-stale'] = 3
+    store.backgroundRuns['c-stale'] = []
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
+    const live = { run_id: 'r1', label: '', cmd: ['uv', 'sync'], started_at: '', status: 'running', exit_code: null }
     sock.onmessage?.({
       data: JSON.stringify({
         type: 'snapshot',
         active_streams: [],
-        background_runs: { 'c-live': 1 },
+        background_runs: { 'c-live': [live] },
+        chat_pins: {},
       }),
     })
     expect(store.backgroundRuns['c-stale']).toBeUndefined()
-    expect(store.backgroundRuns['c-live']).toBe(1)
+    expect(store.backgroundRuns['c-live']).toEqual([live])
+  })
+})
+
+describe('projectChats order', () => {
+  function chat(chatId: string, createdAt: string, lastActivityAt?: string): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'p1',
+      title: chatId,
+      model: '',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: createdAt,
+      last_activity_at: lastActivityAt,
+      archived: false,
+    }
+  }
+
+  test('lists the most recently active chat first', () => {
+    const store = useProjectStore()
+    store.chats = [
+      chat('stale', '2026-01-15T00:00:00Z', '2026-01-20T00:00:00Z'),
+      chat('active', '2026-01-01T00:00:00Z', '2026-03-01T00:00:00Z'),
+      chat('created', '2026-02-01T00:00:00Z'),
+    ]
+    // created_at ascending would be active, stale, created.
+    // created_at descending would be created, stale, active.
+    expect(store.projectChats('p1').map(c => c.chat_id)).toEqual(['active', 'created', 'stale'])
+  })
+})
+
+describe('parked pending_queue chips', () => {
+  function chat(over: Partial<ChatInfo> & { chat_id: string }): ChatInfo {
+    return {
+      project_id: 'p1',
+      title: 'T',
+      model: '',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '2026-01-01T00:00:00Z',
+      archived: false,
+      ...over,
+      chat_id: over.chat_id,
+    }
+  }
+
+  test('an idle chat payload with pending_queue becomes chips', () => {
+    const store = useProjectStore()
+    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip' }]
+    store.reconcileChatList([
+      chat({
+        chat_id: 'idle',
+        pending_queue: [{ id: 'q-1', text: ' after the error ', images: ['shot.png'] }],
+      }),
+    ])
+    expect(store.queuedMessages.idle).toEqual([
+      { id: 'q-1', text: 'after the error', images: ['shot.png'] },
+    ])
+  })
+
+  test('an empty pending_queue during streaming does not clear existing chips', () => {
+    const store = useProjectStore()
+    store.streaming.live = true
+    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued' }]
+    store.reconcileChatList([
+      chat({ chat_id: 'live', pending_queue: [] }),
+    ])
+    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued' }])
+  })
+
+  test('an empty pending_queue on an idle chat clears parked chips', () => {
+    const store = useProjectStore()
+    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error' }]
+    store.reconcileChatList([
+      chat({ chat_id: 'idle', pending_queue: [] }),
+    ])
+    expect(store.queuedMessages.idle).toBeUndefined()
   })
 })
 
@@ -3643,6 +3900,7 @@ describe('server restart overlay', () => {
         type: 'snapshot',
         active_streams: [],
         restarting: true,
+        chat_pins: {},
       }),
     })
     expect(store.serverRestarting).toBe(true)
@@ -6151,5 +6409,136 @@ describe('memory pass surfaces', () => {
       label: 'needs attention',
       blocking: true,
     })
+  })
+})
+
+describe('delegated task signals', () => {
+  const ATTEMPT = 'a'.repeat(32)
+
+  function taskRow(over: Record<string, unknown> = {}) {
+    return {
+      id: 't1', title: 'Delegated', status: 'in_progress', project_id: '', due: '',
+      assignee: 'agent', chat_id: 'c-task', attempt_id: ATTEMPT, live_attempt_id: ATTEMPT,
+      created_at: '', updated_at: '', revision: 'r'.repeat(64), relative_path: 'Tasks/t1.md',
+      attempt_state: 'needs_you', attempt_outcome: 'needs_input', attempt_summary: '',
+      attempt_detail: '', changed_since_delegated: false,
+      ...over,
+    }
+  }
+
+  function tasksGet(rows: unknown[]) {
+    apiGet.mockImplementation((path: string) => (
+      path.startsWith('/api/tasks?')
+        ? Promise.resolve({ tasks: rows })
+        : Promise.resolve([])
+    ))
+  }
+
+  function taskReads(): string[] {
+    return apiGet.mock.calls.map(c => c[0] as string).filter(p => p.startsWith('/api/tasks?'))
+  }
+
+  async function seeded(rows: unknown[]) {
+    tasksGet(rows)
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'General', workspace: 'personal', order: 0 },
+    ] as unknown as typeof store.projects
+    store.chats = [
+      {
+        chat_id: 'c-task', project_id: 'p1', title: 'Delegated', archived: false, local: true,
+        helper: { kind: 'task_delegation', task_id: 't1', task_revision: 'r'.repeat(64), attempt_id: ATTEMPT },
+      },
+      { chat_id: 'c-plain', project_id: 'p1', title: 'Plain', archived: false, local: true },
+    ] as unknown as typeof store.chats
+    await useTaskSignalsStore().reload('personal')
+    return store
+  }
+
+  test('a chat whose task stopped for the user needs you, without a pending card', async () => {
+    const store = await seeded([taskRow()])
+    const chat = store.chats[0]
+    expect(store.chatNeedsYou('c-task')).toBe(true)
+    // No question or permission card: the card-driven signal stays off.
+    expect(store.chatNeedsInput('c-task')).toBe(false)
+    expect(store.chatIsAttentionItem(chat)).toBe(true)
+    expect(store.attentionChatCount).toBe(1)
+    expect(store.chatNeedsYou('c-plain')).toBe(false)
+  })
+
+  test('the project counts a chat whose task stopped for the user', async () => {
+    const store = await seeded([taskRow()])
+    for (const chat of store.chats) chat.created_at = '2026-10-05T08:00:00Z'
+    expect(store.projectNeedsInput('p1')).toBe(1)
+    expect(store.workspaceNeedsInput('personal')).toBe(1)
+  })
+
+  test('a running or review-ready task does not need you', async () => {
+    const store = await seeded([taskRow({ attempt_state: 'running', attempt_outcome: '' })])
+    expect(store.chatNeedsYou('c-task')).toBe(false)
+    expect(store.chatIsAttentionItem(store.chats[0])).toBe(false)
+
+    tasksGet([taskRow({ status: 'in_review', attempt_state: 'ready_for_review', attempt_outcome: 'done' })])
+    await useTaskSignalsStore().reload('personal')
+    expect(store.chatNeedsYou('c-task')).toBe(false)
+  })
+
+  test('a pending question still needs you on an ordinary chat', async () => {
+    const store = await seeded([])
+    store.chats[1].pending_question = JSON.stringify({ questions: [{ question: 'Which?' }] })
+    expect(store.chatNeedsYou('c-plain')).toBe(true)
+  })
+
+  test('tasks_changed for the active workspace re-reads the board, another workspace does not', async () => {
+    tasksGet([])
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+
+    sock.onmessage?.({ data: JSON.stringify({ type: 'tasks_changed', workspace: 'work' }) })
+    expect(taskReads()).toEqual([])
+
+    sock.onmessage?.({ data: JSON.stringify({ type: 'tasks_changed', workspace: 'personal' }) })
+    expect(taskReads()).toEqual(['/api/tasks?workspace=personal'])
+  })
+
+  test('an events snapshot after boot re-reads the board', () => {
+    tasksGet([])
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    const snapshot = JSON.stringify({ type: 'snapshot', active_streams: [], chat_pins: {} })
+
+    // Before boot the workspace is not known yet; fetchAll reads it then.
+    sock.onmessage?.({ data: snapshot })
+    expect(taskReads()).toEqual([])
+
+    store.bootstrapped = true
+    sock.onmessage?.({ data: snapshot })
+    expect(taskReads()).toEqual(['/api/tasks?workspace=personal'])
+  })
+
+  test('a workspace switch after boot re-reads the new workspace', async () => {
+    tasksGet([])
+    const store = useProjectStore()
+    store.bootstrapped = true
+    store.activeWorkspace = 'work'
+    await nextTick()
+    expect(taskReads()).toEqual(['/api/tasks?workspace=work'])
+  })
+
+  test('boot reads the resolved workspace', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') {
+        return Promise.resolve({ workspaces: [{ name: 'work' }], active: 'work' })
+      }
+      if (path.startsWith('/api/tasks?')) return Promise.resolve({ tasks: [] })
+      return Promise.resolve([])
+    })
+    const store = useProjectStore()
+    await store.fetchAll()
+    expect(taskReads()).toContain('/api/tasks?workspace=work')
+    expect(taskReads()).not.toContain('/api/tasks?workspace=personal')
   })
 })

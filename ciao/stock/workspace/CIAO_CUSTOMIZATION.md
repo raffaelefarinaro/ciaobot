@@ -69,12 +69,12 @@ how much a chat may do without asking: manual (ask for every action), auto
 
 ## API Keys and Secrets
 
-Provider keys live in `.env` or the provider's own OAuth store. Do not put keys in vault pages, docs, prompts, or git commits.
+Integration keys (MCP servers, third-party APIs) live in `.env`; provider sign-ins live in each provider CLI's own store. Do not put keys in vault pages, docs, prompts, or git commits.
 
 Common keys:
 
 - Claude Code authentication is owned by the Claude CLI; use Settings → Models & providers to connect or verify it.
-- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Models & providers. Claude Code also accepts `ANTHROPIC_API_KEY` from the process environment; Ciaobot has no API-key fields and never returns the value.
+- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Models & providers. Ciaobot has no API-key fields.
 
 Agents may check whether a key is set, but must not print the value.
 

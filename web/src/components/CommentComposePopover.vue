@@ -196,22 +196,6 @@ watch(
   { immediate: true },
 )
 
-function insertTextAtCursor(text: string): void {
-  const el = inputEl.value
-  if (!el) return
-  const start = el.selectionStart ?? 0
-  const end = el.selectionEnd ?? start
-  const before = props.modelValue.slice(0, start)
-  const after = props.modelValue.slice(end)
-  const next = before + text + after
-  emit('update:modelValue', next)
-  nextTick(() => {
-    el.focus()
-    const pos = start + text.length
-    el.setSelectionRange(pos, pos)
-  })
-}
-
 defineExpose({ focus })
 </script>
 

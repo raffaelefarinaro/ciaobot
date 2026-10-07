@@ -33,8 +33,7 @@ def _config(roots: dict[str, str] | None = None, *, primary: str = "personal"):
         primary_workspace=lambda: primary,
         agent_root=lambda name: roots.get(name, "/tmp"),
         # Model resolution for the LLM title fallback (resolve_insights_model).
-        insights_model_override="",
-        insights_model="sonnet",
+        provider_insights_models={},
         default_model_for_workspace=lambda workspace, provider="claude": "sonnet",
     )
 

@@ -58,6 +58,7 @@ function task(overrides: Partial<UpdateTaskRow> = {}): UpdateTaskRow {
     offered: true,
     suppressed: false,
     chat_id: '',
+    chat_live: false,
     prompt_digest: '',
     attempted_fingerprint: '',
     updated_at: '',

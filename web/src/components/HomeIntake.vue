@@ -129,6 +129,7 @@ import { isMemoryProject } from '../lib/memoryPass'
 import { providerForModelSection, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import ModelSelector from './ModelSelector.vue'
 import { importDesktopDrop, uploadChatAttachments } from '../lib/chatAttachments'
+import { useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { readSharedContent, removeSharedContent, sharedPrompt, type SharedContent } from '../lib/sharedContent'
 
 // Sentinel row for "no override": ModelSelector lists models, so the
@@ -222,8 +223,13 @@ function selectModel(value: string | string[], sectionKey: string): void {
 }
 
 // Same send chord as the chat composer: bare Enter is a newline everywhere.
-const sendChord = isApplePlatform() ? '⌘↩' : 'Ctrl+↩'
-const sendKeyshortcuts = isApplePlatform() ? 'Meta+Enter' : 'Control+Enter'
+const keyboard = useKeyboardSettings()
+const touchKeyboard = () => typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches
+const enterSends = () => keyboard.settings.value.keyboard_send_mode === 'enter' && !touchKeyboard()
+const sendChord = computed(() => enterSends() ? '↩' : (isApplePlatform() ? '⌘↩' : 'Ctrl+↩'))
+const sendKeyshortcuts = computed(() => enterSends() ? 'Enter' : (isApplePlatform() ? 'Meta+Enter' : 'Control+Enter'))
 
 // A workspace switch changes the project set underneath this form. Preserve
 // each scope's unsent prompt instead of carrying Personal text into Work (or
@@ -420,8 +426,10 @@ function onSubmit(): void {
 }
 
 function onPromptKeydown(event: KeyboardEvent): void {
-  if (event.key !== 'Enter' || event.isComposing) return
-  if (!(event.metaKey || event.ctrlKey) || event.altKey) return
+  if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229 || showModelPicker.value) return
+  const modifierSend = (event.metaKey || event.ctrlKey) && !event.altKey
+  const enterSend = enterSends() && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey
+  if (!modifierSend && !enterSend) return
   event.preventDefault()
   void startWork()
 }

@@ -5,8 +5,9 @@ Setup, dev workflow, testing, and change guidelines. For the system design, read
 ## Server install
 
 Linux production and every installer-managed macOS install restart the engine
-from Settings through `POST /api/admin/restart`; `CIAO_DEV_MODE=true` on a
-source checkout retains the source deploy workflow.
+from Settings through `POST /api/admin/restart`; developer mode (Settings →
+General → Developer, with the source checkout set there) on a source checkout
+retains the source deploy workflow.
 
 ```bash
 python3.12 -m venv .venv
@@ -188,7 +189,7 @@ is what stops the app's own agent from staying loaded next to the engine that
 replaced it. That path also settles the workspace before it takes any
 before-image or asks the app to quit, and only ever hands over the one the
 engine being replaced runs in: a `--workspace` naming a different directory, one
-that does not exist, or a directory with no `.env` in it is refused, no
+that does not exist, or a directory with no `.runtime/workspaces.json` in it (one `ciao setup` never provisioned; a pre-1.0 `.env` with a non-empty `CIAO_WORKSPACES` still counts) is refused, no
 workspace is created during a hand-over, and an `--as-host` override on a state
 whose workspace could not be recovered has to name an existing one rather than
 get a fresh `~/Ciaobot`. Taking a different workspace would start a second engine
@@ -206,6 +207,34 @@ which the first run already repointed. The ordinary, non-`--migrate` path is
 unchanged: there
 `--workspace` is how a workspace is named, and it is created. The workflow
 attaches it as the `install-engine.sh` release asset, and again as `install.sh`.
+
+When the signed manifest also carries a `server-host` entry (child E1 of
+#1008, `ciao/server_host_install.py`), the installer reads that entry through the
+verified wheel's own selector — the same "run the wheel's code" pattern the
+migration classifier uses, so no second copy of the selector ships in shell — and
+if one is present it downloads `ciaobot-server-host-macos-universal-v1.tar.gz`,
+checks its SHA-256 and size against the signed entry, and asks the wheel's module to
+install it. The module re-checks the archive, extracts it under `filter="data"`,
+inspects the staged `Ciaobot Server.app` with the B1 contract (plist identity and
+the read-only `/usr/bin/codesign` probes), writes the owner-only record at
+`~/.local/state/ciaobot/server-host.json` (`0600` in a `0700` directory) from the
+staged snapshot — **before** the atomic rename to `~/Applications/Ciaobot Server.app`
+— and re-verifies the installed host with `verify_owned_host`. It runs after the
+read-only preflight and never on a `--migrate --as-client` Mac. An existing verified
+host is a no-op. Only a refusal about the release — a manifest that did not verify,
+or an archive that does not match its signed digest — stops the run; every other
+host refusal (a disk full, a `codesign` probe that timed out, a bundle at the target
+the module cannot prove it owns) warns (module exit 3) and the engine install
+continues, because the host is optional and inert and must not abort the one-liner.
+Because the record is written before the rename, a process killed in that window
+leaves a consistent, verified host rather than a recordless bundle every later run
+reports as `host_exists`; a Python failure removes both the bundle and record the
+run placed. The host is **not activated**: no launchd, no
+plist, no service change, no permission prompt — activation is a later child.
+A wheel-only manifest (every historical release) prints nothing from the selector
+and installs the engine exactly as before, and so does an explicit `--version`
+naming a wheel cut before the host work: the shell probes for the module first,
+so an engine that predates it never aborts on a missing one.
 
 The classifier was the retired app's own hand-over bridge for that transition
 release (#604): its updater installed a signed `.app.tar.gz`, which cannot run a
@@ -260,6 +289,15 @@ not run `ciao desktop uninstall` yet.
   `-Uninstall`) stay advisory: a hosted runner has no interactive logon, so a
   task that does not start there is a datum, not a verdict. Known flaky
   Windows tests are listed in #696's C9 tracking comment.
+  The runner is elevated and has uv and Git's `usr\bin` on `PATH`; a
+  contributor's Windows account usually has neither the symlink privilege nor
+  the coreutils. Without Developer Mode, a test that creates a symlink of its
+  own is skipped ("cannot create a symlink here", `tests/conftest.py`) rather
+  than failing with WinError 1314, so a local run reports more skips than CI;
+  a symlink the engine itself makes still fails, since the engine must not
+  need one on Windows. The suite also points `LOCALAPPDATA` at each test's
+  home, so a machine with Ciaobot installed does not hand its real logon-task
+  workspace to config-discovery tests.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
@@ -283,7 +321,7 @@ scripts/prepare-release --apply --create-pr --ready
   checks, and opens a PR into `main`. Use
   `--bump minor` or `--version X.Y.Z` when needed.
 
-- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`) and attaches six engine assets: `install.sh`, `install-engine.sh`, `install.ps1`, the wheel, the manifest and its signature. Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the PWA and the engine wheel, verifies the wheel in a clean environment, signs the engine manifest with the release minisign key (`ciaobot-engine-manifest.json` + `.sig`, gated by `ciao.release_manifest verify`) and attaches seven engine assets: `install.sh`, `install-engine.sh`, `install.ps1`, the wheel, the manifest, its signature, and the universal server host archive the manifest authenticates (`ciaobot-server-host-macos-universal-v1.tar.gz`, built by `scripts/build-server-host.py`; see `docs/SERVER_HOST_RELEASE.md`). Since #653 it publishes no app, no `latest.json` feed, no native verifier and no bundled runtime, and its signer is `@tauri-apps/cli` run standalone, so it never depended on the now-deleted `desktop/` tree. It does not publish PyPI, Homebrew, or DMG artifacts. A follow-up job merges `main` back into `develop`.
 
 One-time GitHub setup for a fresh clone or repo admin:
 
@@ -467,7 +505,8 @@ complete anything, the confirmation says so, and the row stays reopenable in
 Settings. If you add a state, decide all four of those in the same change: what
 Home offers, what Settings lists, what a refusal says, and whether the outcome can
 be mistaken for "done".
-For Work details changes, verify the rail and the narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list, and the ⓘ toggle moves focus between the rail heading and the chat-body tab.
+For Work details changes, verify the docked rail and narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list. The × closes the surface; the ⓘ tab reopens it, restoring focus between the rail heading and chat-body tab. Project context is readable prose with file mentions linked in place, resolving the canonical filename to its full path without a separate link row; token estimates count the sent capsule.
+For task-board layout changes, preserve To do, In progress, In review, and Done on every width: four columns above 940px of pane width, the same groups stacked below it. A status filter selects one group; horizontal drag and Shift+Left/Right movement are only available while columns are side by side. Earlier done tasks remain behind Show all.
 For composer drag-and-drop changes, test the desktop-drop grant path end to
 end. Drops preserve the source file and add Markdown companions, and return
 bounded opaque file references rather than absolute paths; the server expands a
@@ -1703,7 +1742,7 @@ No shipped producer runs a DAG today — the weekly skill-evolution pass was the
 
 `ScheduleManager.catch_up()` runs once at server startup on the host; like `tick()`, it returns an empty list without touching anything when the legacy node-state startup gate says this machine is not the host (the one boot verdict from `ciao.legacy_node_state`, which is the whole gate now that no route can rewrite the role under a running server). It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`. Packaged system routines are excluded when the startup falls inside the post-setup grace window (`ciao/setup_marker.py`, 24h from a first-time setup): a brand-new install is greeted by its onboarding chat, and the routines fire at their next regular tick instead of all replaying missed runs in parallel. Cover that in `tests/test_setup_catch_up_grace.py`.
 
-The Work details *Subagents running* list (rail and drawer Activity tab; the left sidebar no longer lists them) is fed by `GET /api/subagents/running` (dispatch metadata only, active chats only) and the store's poll, which replaces the whole map so a finished agent's row disappears. Only agents the parent session can name get a row — background dispatches, plus opencode children; a foreground Task is recorded in the parent JSONL by its own completion, so it is never running by the time it is nameable. Their read-only view is `SubagentChatView.vue` on `/chat/:chatId/subagent/:agentId`, fed by `GET /api/chats/{id}/subagents`. Claude agent ids arrive bare from the parent JSONL and `agent-`-prefixed from the local transcript fallback, so both surfaces normalise before comparing or routing. Cover changes in `tests/test_running_subagents.py` and the ChatPanel Work details tests.
+The Work details *Running* list (rail and drawer Activity tab; the left sidebar no longer lists them) shows background command runs first, from the `chat_background_runs` event and the `/ws/events` snapshot (`BackgroundRun.summary()`: no pid, cwd or log path), with *Log* (`GET /api/chats/{id}/background-runs/{run_id}/log`) and *Stop* (`POST …/cancel`), both refusing another chat's run with 404. The subagent rows below them are fed by `GET /api/subagents/running` (dispatch metadata only, active chats only) and the store's poll, which replaces the whole map so a finished agent's row disappears. Only agents the parent session can name get a row — background dispatches, plus opencode children; a foreground Task is recorded in the parent JSONL by its own completion, so it is never running by the time it is nameable. Their read-only view is `SubagentChatView.vue` on `/chat/:chatId/subagent/:agentId`, fed by `GET /api/chats/{id}/subagents`. Claude agent ids arrive bare from the parent JSONL and `agent-`-prefixed from the local transcript fallback, so both surfaces normalise before comparing or routing. Cover changes in `tests/test_running_subagents.py` and the ChatPanel Work details tests.
 
 ## Agent control plane (CLI-first since S6)
 
@@ -1997,10 +2036,11 @@ against a fake manager over a temp packaged root.
 - **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `AGENTS.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.
 - **New API routes must be documented.** Add the route to `PWA_API.md`; state-changing routes also need an Agent recipe or an allowlist entry in `tests/test_pwa_api_docs.py`. New `CIAO_*` env vars must land in `INTEGRATIONS.md` or the allowlist in `tests/test_env_vars_documented.py`. Both are test-enforced.
 - **Never restart the ciao service yourself** from inside the PWA. Apply code changes and ask the operator to hit Deploy.
-- **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN` (the dashboard password; protection is on unless `PWA_AUTH_REQUIRED=false`).
+- **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN` (the dashboard password; protection is always on).
 - **Keep edits minimal and consistent with existing patterns.** Don't refactor unrelated code; if unrelated changes appear, pause and ask.
 - **Avoid destructive git** (force push, hard reset on shared branches) unless explicitly asked.
 - **Use the branch model in `CONTRIBUTING.md`.** Day-to-day PRs target `develop`; release PRs target `main`.
 - **Write tests** for new Python behavior; add to `tests/`. PWA changes verify via `npm run build` typecheck at minimum.
 - **Name the encoding.** Every text `open()`, `read_text()`, `write_text()`, `os.fdopen()` and every `subprocess` call that decodes (`text=True`) passes `encoding="utf-8"` — with `errors="replace"` only for tool output that is displayed or logged, never for output that is parsed. Windows' default is the ANSI code page, not UTF-8, and nothing may rely on Python's UTF-8 mode. `tests/test_explicit_encoding.py` fails on a new call without one.
 - **Verify UI accessibility.** For PWA layout changes, check keyboard operation, visible focus, browser zoom, and 44px mobile targets at a narrow-phone viewport in addition to the build.
+- Keyboard shortcut changes also need coverage for shared `/ws/events` updates, custom-binding conflicts, IME composition, picker precedence, and Enter behavior on touch layouts.

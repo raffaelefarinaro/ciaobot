@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import MemoryGuideBudget from '../MemoryGuideBudget.vue'
+import { tokensFor } from '../../lib/workspaceGuide'
 import { useProjectStore } from '../../stores/projects'
 
 vi.mock('../../lib/api', () => ({
@@ -128,6 +129,59 @@ describe('MemoryGuideBudget', () => {
 
     expect(guidePaths(fetchMock).slice(0, 2)).toEqual(['work/AGENTS.md', 'work/CLAUDE.md'])
     expect(wrapper.find('.guide-card-title').text()).toContain('AGENTS.md')
+  })
+
+  it('counts region bars from entry text and the token line from the whole file', async () => {
+    // Markers, the heading, and the prose outside the region are part of the
+    // file sent with every chat. They must not be in the region count. The
+    // token line must follow content.length: swapping it for the sum of the
+    // region entry lengths would show regionTokens instead of wholeTokens.
+    const memoryEntry = 'Remember the launch date'
+    const profileEntry = 'Lives in Rome'
+    const content = [
+      '# Guide',
+      '',
+      'x'.repeat(80),
+      '',
+      '<!-- ciao:memory:start cap=3000 -->',
+      '## Agent memory',
+      memoryEntry,
+      '<!-- ciao:memory:end -->',
+      '',
+      '<!-- ciao:profile:start cap=1375 -->',
+      '## User profile',
+      profileEntry,
+      '<!-- ciao:profile:end -->',
+      '',
+    ].join('\n')
+    // serializeLen adds the trailing newline the serializer writes.
+    const memoryChars = memoryEntry.length + 1
+    const profileChars = profileEntry.length + 1
+    const wholeTokens = tokensFor(content.length)
+    const regionTokens = tokensFor(memoryChars + profileChars)
+    const wholePhrase = `≈ ${wholeTokens.toLocaleString()} `
+    const regionPhrase = `≈ ${regionTokens.toLocaleString()} `
+    expect(wholeTokens).not.toBe(regionTokens)
+    expect(wholePhrase).not.toContain(regionPhrase)
+
+    stubWorkspaceFile({ 'work/AGENTS.md': content })
+    const wrapper = await mountBudget()
+
+    const memory = wrapper.findAll('.guide-region').find(r => r.text().includes('Agent memory'))
+    const profile = wrapper.findAll('.guide-region').find(r => r.text().includes('User profile'))
+    expect(memory).toBeTruthy()
+    expect(profile).toBeTruthy()
+    const memoryCount = memory!.get('.guide-region-count').text()
+    const profileCount = profile!.get('.guide-region-count').text()
+    expect(memoryCount.startsWith(`${memoryChars.toLocaleString()} /`)).toBe(true)
+    expect(profileCount.startsWith(`${profileChars.toLocaleString()} /`)).toBe(true)
+    expect(memoryCount.startsWith(`${content.length.toLocaleString()} /`)).toBe(false)
+
+    const note = wrapper.get('.rail-note').text()
+    expect(note).toContain(wholePhrase)
+    expect(note).not.toContain(regionPhrase)
+    expect(note).toContain('entry text inside the markers')
+    expect(note).toContain('whole file')
   })
 
   it('counts an impossible calendar date as malformed, not valid', async () => {

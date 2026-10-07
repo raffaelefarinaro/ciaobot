@@ -48,8 +48,25 @@ export const routes: RouteRecordRaw[] = [
   {
     // One route per memory section, listed in the sidebar like Settings'
     // tabs. Bare /memory lands on the last section visited (MemoryMapView).
-    path: '/memory/:section(review|map|categories|retired|history)?',
+    path: '/memory/:section(review|map|categories|import|retired|history)?',
     name: 'memory',
+    component: () => import('./components/ChatLayout.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
+    // The workspace task board. Its pane is a `viewMode` branch in
+    // ChatLayout like every other destination; this record only names the
+    // address and the auth gate.
+    path: '/tasks',
+    name: 'tasks',
+    component: () => import('./components/ChatLayout.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
+    // One task, open in the board's detail dialog: the address an agent links
+    // to (lib/appLinks.ts) and the one the dialog keeps while it is open.
+    path: '/tasks/:taskId',
+    name: 'task-detail',
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
   },

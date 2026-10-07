@@ -9,6 +9,7 @@ import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import ChatPanel from '../ChatPanel.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
+import { applyKeyboardSettings } from '../../composables/useKeyboardSettings'
 
 const PaneHeaderStub = defineComponent({
   name: 'PaneHeaderStub',
@@ -146,6 +147,7 @@ describe('ChatPanel send shortcut', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     localStorage.clear()
+    applyKeyboardSettings({ keyboard_shortcuts: {}, keyboard_send_mode: 'modifier' })
   })
 
   it('sends an attachments-only message with no typed text', async () => {
@@ -181,6 +183,21 @@ describe('ChatPanel send shortcut', () => {
 
     expect(wrapper.vm.handleSendShortcut()).toBe(false)
     expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('Enter sends only in the selected mode and leaves IME composition alone', async () => {
+    applyKeyboardSettings({ keyboard_send_mode: 'enter' })
+    const { wrapper, sendMessage } = await mountPanel()
+    const input = wrapper.get<HTMLTextAreaElement>('textarea.chat-input')
+    await input.setValue('hello')
+
+    await input.trigger('keydown', { key: 'Enter', isComposing: true })
+    expect(sendMessage).not.toHaveBeenCalled()
+
+    await input.trigger('keydown', { key: 'Enter' })
+    expect(sendMessage).toHaveBeenCalledOnce()
+    expect(sendMessage.mock.calls[0][1]).toBe('hello')
     wrapper.unmount()
   })
 })

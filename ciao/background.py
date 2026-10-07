@@ -196,6 +196,21 @@ class BackgroundRun:
         data: dict[str, Any] = asdict(self)
         return data
 
+    def summary(self) -> dict[str, Any]:
+        """What the PWA shows for a run: enough to name it, time it and stop it.
+
+        No pid, cwd or log path: those are host details the owner reaches
+        through the agent tools, and every connected client receives this.
+        """
+        return {
+            "run_id": self.run_id,
+            "label": self.label,
+            "cmd": list(self.cmd),
+            "started_at": self.started_at,
+            "status": self.status,
+            "exit_code": self.exit_code,
+        }
+
 
 # ── validation ────────────────────────────────────────────────────────────
 # Kept as module functions so they can be tested without a runner, and so the
@@ -358,6 +373,11 @@ def build_env(overrides: Any, *, run_id: str, workspace: str) -> dict[str, str]:
     env["CIAO_BACKGROUND_RUN_ID"] = run_id
     if workspace:
         env["CIAO_ACTIVE_WORKSPACE"] = workspace
+    # After overrides, so a caller-supplied PATH cannot remove it — the same
+    # resolve-before-overrides property ``resolve_executable`` documents. A
+    # nested ``ciao`` inside the command then runs the engine that launched it
+    # rather than a stale install earlier on the user's PATH.
+    env["PATH"] = prepend_engine_path(env.get("PATH"))
     return env
 
 
@@ -606,18 +626,24 @@ class BackgroundRunner:
         return self.active_counts().get(chat_id, 0)
 
     def active_counts(self) -> dict[str, int]:
-        """Live run count per owning chat (>0 only).
+        """Live run count per owning chat (>0 only)."""
+        return {chat_id: len(runs) for chat_id, runs in self.active_runs().items()}
+
+    def active_runs(self) -> dict[str, list[BackgroundRun]]:
+        """Live runs per owning chat, oldest first (chats with none omitted).
 
         Read straight off the registry rather than a cached tally, so a
-        client connecting mid-run paints the same number a restart replay
+        client connecting mid-run paints the same rows a restart replay
         would.
         """
-        counts: dict[str, int] = {}
+        runs: dict[str, list[BackgroundRun]] = {}
         for run in self._store.list():
             if run.is_terminal() or not run.parent_chat_id:
                 continue
-            counts[run.parent_chat_id] = counts.get(run.parent_chat_id, 0) + 1
-        return counts
+            runs.setdefault(run.parent_chat_id, []).append(run)
+        for chat_runs in runs.values():
+            chat_runs.sort(key=lambda r: r.started_at)
+        return runs
 
     def log_path(self, run_id: str) -> Path:
         return self._store.log_path(run_id)

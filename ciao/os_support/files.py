@@ -33,6 +33,7 @@ if sys.platform == "win32":
     import errno
     import msvcrt
     import stat
+    import time
     from ctypes import wintypes
     from typing import Any
 
@@ -85,6 +86,9 @@ if sys.platform == "win32":
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
     _FILE_ATTRIBUTE_TAG_INFO = 9
     _LINK_TAGS = frozenset({stat.IO_REPARSE_TAG_SYMLINK, stat.IO_REPARSE_TAG_MOUNT_POINT})
+    _ERROR_SHARING_VIOLATION = 32
+    # As long as `replace_file` keeps retrying the writer's side of the race.
+    _SHARING_DEADLINE_S = 2.0
 
     def _disposition(flags: int) -> int:
         """``CreateFileW``'s creation disposition for ``os.open`` flags, as the CRT maps them."""
@@ -134,17 +138,29 @@ if sys.platform == "win32":
                 disposition, truncate_after_check = _OPEN_ALWAYS, True
             elif disposition == _TRUNCATE_EXISTING:
                 disposition, truncate_after_check = _OPEN_EXISTING, True
-        handle = _CreateFileW(
-            name,
-            access,
-            _FILE_SHARE_READ_WRITE,
-            None if security_attributes is None else ctypes.byref(security_attributes),
-            disposition,
-            attributes,
-            None,
-        )
-        if handle == _INVALID_HANDLE_VALUE or not handle:
-            raise _error(ctypes.get_last_error(), name)
+        deadline = time.monotonic() + _SHARING_DEADLINE_S
+        delay = 0.005
+        while True:
+            handle = _CreateFileW(
+                name,
+                access,
+                _FILE_SHARE_READ_WRITE,
+                None if security_attributes is None else ctypes.byref(security_attributes),
+                disposition,
+                attributes,
+                None,
+            )
+            if handle != _INVALID_HANDLE_VALUE and handle:
+                break
+            code = ctypes.get_last_error()
+            # The stores read without their lock and trust the writer's atomic
+            # replace; while `MoveFileEx` is swapping the target in, opening it
+            # fails with a sharing violation, the reader's half of the refusal
+            # `replace_file` retries. POSIX never refuses here.
+            if code != _ERROR_SHARING_VIOLATION or time.monotonic() >= deadline:
+                raise _error(code, name)
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
         try:
             if not follow_symlinks:
                 info = _FileAttributeTagInfo()
@@ -205,7 +221,6 @@ else:
 _REPLACE_DEADLINE_S = 2.0
 
 if sys.platform == "win32":
-    import time
 
     def replace_file(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
         """``os.replace``, retrying the transient refusal a concurrent replace causes."""

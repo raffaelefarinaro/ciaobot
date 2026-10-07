@@ -22,7 +22,11 @@ from typing import Any
 
 import pytest
 
-from ciao.release_manifest import RELEASE_PUBLIC_KEY, build_manifest
+from ciao.release_manifest import (
+    RELEASE_PUBLIC_KEY,
+    SERVER_HOST_FILENAME,
+    build_manifest,
+)
 from tests.test_release_manifest import _keypair, _sign
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -85,6 +89,29 @@ def _manifest_bytes(filename: str = WHEEL_NAME, payload: bytes = WHEEL_BYTES) ->
                     "sha256": hashlib.sha256(payload).hexdigest(),
                     "size": len(payload),
                 }
+            ],
+            created="2026-09-25T10:00:00+00:00",
+        )
+    ).encode()
+
+
+def _host_manifest_bytes(host_archive: Path) -> bytes:
+    """A schema-1 manifest naming the wheel and `host_archive`."""
+    from ciao.release_manifest import server_host_artifact_entry
+
+    return json.dumps(
+        build_manifest(
+            VERSION,
+            [
+                {
+                    "filename": WHEEL_NAME,
+                    "kind": "wheel",
+                    "platform": "any",
+                    "arch": "any",
+                    "sha256": hashlib.sha256(WHEEL_BYTES).hexdigest(),
+                    "size": len(WHEEL_BYTES),
+                },
+                server_host_artifact_entry(host_archive),
             ],
             created="2026-09-25T10:00:00+00:00",
         )
@@ -274,6 +301,50 @@ case "${1:-}" in
                     ;;
             esac
         fi
+        # `python -I -m ciao.server_host_install install` runs the real B1
+        # inspector's native codesign probes, which only a Mac has and which the
+        # module itself refuses off it. The shell contract tests exercise the
+        # installer's acquisition wiring on every platform, so the install call
+        # is recorded and answered here; the module's own behaviour is proved in
+        # tests/test_server_host_install.py. `select` is pure and still runs for
+        # real, so the entry the script acts on is the canonical one.
+        case "$*" in
+            "-I -m ciao.server_host_install install "*)
+                printf '%s\\n' "$*" >> "$HOME/server-host-install.log"
+                if [ -f "$HOME/fail-server-host-install" ]; then
+                    printf 'server-host-install-failed\\n' >> "$HOME/trace.log"
+                    exit 1
+                fi
+                if [ -f "$HOME/existing-server-host" ]; then
+                    printf 'warning: there is already a host at the target\\n' >&2
+                    exit 3
+                fi
+                # The two warn-and-continue kinds the module maps to exit 3: a
+                # native inspection that failed (a codesign probe that timed out
+                # or parsed differently) and a local install failure (disk full,
+                # chmod EPERM). Both leave the engine install to carry on.
+                if [ -f "$HOME/warn-inspection-server-host" ]; then
+                    printf 'Error: the host bundle fails strict signature verification\\n' >&2
+                    exit 3
+                fi
+                if [ -f "$HOME/warn-install-server-host" ]; then
+                    printf 'Error: the ownership record could not be written: No space left on device\\n' >&2
+                    exit 3
+                fi
+                exit 0
+                ;;
+        esac
+        # An engine that predates the host work has no `ciao.server_host_install`
+        # module at all. The shell probes for it before reading the host entry, so
+        # this knob is what an older wheel answers.
+        if [ -f "$HOME/no-server-host-module" ]; then
+            case "$*" in
+                *"ciao.server_host_install"*)
+                    printf 'No module named ciao.server_host_install\\n' >&2
+                    exit 1
+                    ;;
+            esac
+        fi
         if [ "${1:-}" = "-I" ]; then shift; fi
         PYTHONPATH="__REPO_ROOT__" exec "__PYTHON__" "$@"
         ;;
@@ -441,17 +512,26 @@ exec "__CURL__" "$@"
 """
 
 
-def _harness(tmp_path: Path) -> dict[str, Any]:
+def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, Any]:
     """A signed release on `file://`, fake tools, a fake `$HOME`, and the script
-    itself with the embedded key swapped for the test key."""
+    itself with the embedded key swapped for the test key.
+
+    ``host_archive`` stages a signed ``server-host`` entry beside the wheel: the
+    archive is copied into the release under its fixed name, and the manifest is
+    rebuilt to authenticate it with the same test key.
+    """
     home = (tmp_path / "home").resolve()
     (home / ".local" / "bin").mkdir(parents=True)
     (home / "Ciaobot").mkdir(parents=True)
 
     release = tmp_path / "rel" / f"v{VERSION}"
     release.mkdir(parents=True)
-    raw = _manifest_bytes()
     private_key, public_key, key_id = _keypair()
+    if host_archive is None:
+        raw = _manifest_bytes()
+    else:
+        raw = _host_manifest_bytes(host_archive)
+        shutil.copyfile(host_archive, release / SERVER_HOST_FILENAME)
     (release / "ciaobot-engine-manifest.json").write_bytes(raw)
     (release / "ciaobot-engine-manifest.json.sig").write_text(
         _sign(raw, private_key, key_id), encoding="utf-8"
@@ -529,6 +609,7 @@ def _harness(tmp_path: Path) -> dict[str, Any]:
         "script": script,
         "release": release,
         "fakebin": fakebin,
+        "public_key": public_key,
         "env": {
             "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
             "HOME": str(home),
@@ -599,6 +680,204 @@ def test_engine_installer_end_to_end_with_fakes(tmp_path: Path) -> None:
     assert receipt["service_label"] == "com.ciao.server"
 
     assert f"Ciaobot engine {VERSION} installed." in result.stdout
+
+
+def test_verification_precedes_host_acquisition() -> None:
+    # The host archive's digest is checked against the signed entry, and the
+    # install runs only after the wheel's own digest and size have been checked.
+    wheel_verify = SCRIPT_TEXT.index("downloaded wheel does not match the signed manifest")
+    host_verify = SCRIPT_TEXT.index(
+        "downloaded server host does not match the signed manifest"
+    )
+
+    assert wheel_verify < host_verify
+
+
+def test_host_acquisition_follows_the_read_only_preflight() -> None:
+    # A preflight refusal (a bad --as-client, an untrusted receipt, a foreign
+    # `ciao` on PATH) must still leave this Mac untouched, so the host is only
+    # installed after every read-only check, and before the migration changes
+    # anything.
+    preflight = SCRIPT_TEXT.index("exists and was not installed by Ciaobot")
+    host_install = SCRIPT_TEXT.index("-m ciao.server_host_install install")
+    migration = SCRIPT_TEXT.index("# --- the migration ---")
+
+    assert preflight < host_install < migration
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_wheel_only_release_never_touches_the_host(tmp_path: Path) -> None:
+    # The historical shape: no server-host entry, so nothing is downloaded and
+    # the install command is never reached. The engine installs exactly as it
+    # did before the host existed.
+    harness = _harness(tmp_path)
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "tool install" in _log(harness, "uv-calls.log")
+    assert _log(harness, "server-host-install.log") == ""
+    assert "Ciaobot Server host installed and recorded." not in result.stdout
+    assert SERVER_HOST_FILENAME not in _log(harness, "trace.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_host_release_verifies_and_installs_the_host(tmp_path: Path) -> None:
+    # A signed server-host entry: the archive is downloaded from the release
+    # under the manifest's name, and the verified wheel's module is asked to
+    # install it. The install command is reached only after the wheel and host
+    # digests both matched.
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    install_log = _log(harness, "server-host-install.log")
+    assert "-I -m ciao.server_host_install install" in install_log
+    assert str(harness["release"] / SERVER_HOST_FILENAME) in _log(harness, "trace.log")
+    assert "Ciaobot Server host installed and recorded." in result.stdout
+    # The host is inert: no launchd, no plist and no service start for it.
+    assert "launchctl" not in _log(harness, "launchctl.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_tampered_host_archive_is_refused_before_install(tmp_path: Path) -> None:
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    (harness["release"] / SERVER_HOST_FILENAME).write_bytes(b"nobody signed this")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 1
+    assert "downloaded server host does not match the signed manifest" in result.stderr
+    assert _log(harness, "server-host-install.log") == ""
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_older_wheel_without_the_module_installs_the_engine(tmp_path: Path) -> None:
+    # A wheel cut before the host work has no `ciao.server_host_install`: the
+    # probe must fail open and the engine must install exactly as before, not
+    # abort on "No module named".
+    harness = _harness(tmp_path)
+    (harness["home"] / "no-server-host-module").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "tool install" in _log(harness, "uv-calls.log")
+    assert _log(harness, "server-host-install.log") == ""
+    assert "Ciaobot Server host installed and recorded." not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_failed_host_install_stops_the_engine_install(tmp_path: Path) -> None:
+    # The host is acquired before the engine install, so a host failure stops
+    # the run visibly rather than being silently skipped.
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    (harness["home"] / "fail-server-host-install").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 1
+    assert "the signed server host could not be installed" in result.stderr
+    assert "Ciaobot Server host installed and recorded." not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_an_existing_unowned_host_warns_and_the_engine_still_installs(
+    tmp_path: Path,
+) -> None:
+    # Exit 3 is the module leaving a target it cannot prove it owns untouched
+    # (a bundle orphaned by a killed run, a copied one). That is not a release
+    # that failed to verify, so it must not block the engine install - or every
+    # later update - until the user deletes the bundle by hand.
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    (harness["home"] / "existing-server-host").write_text("")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "the Ciaobot Server host was not installed" in result.stderr
+    assert "the engine install continues" in result.stderr
+    assert "Ciaobot Server host installed and recorded." not in result.stdout
+    assert "tool install" in _log(harness, "uv-calls.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+@pytest.mark.parametrize(
+    "knob",
+    ["warn-inspection-server-host", "warn-install-server-host"],
+)
+def test_a_non_security_host_failure_warns_and_the_engine_installs(
+    tmp_path: Path, knob: str
+) -> None:
+    # By the time `install` runs, the shell has already verified the manifest
+    # signature and the archive's sha256/size, so an INSTALL_FAILED (disk full,
+    # chmod EPERM) or an INSPECTION_FAILED (a codesign probe that timed out or
+    # parsed differently on this macOS release) is local or a signed-build
+    # defect, never attacker input. It must warn and let the engine install,
+    # not abort the one-liner for an optional, inert host.
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    (harness["home"] / knob).write_text("")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "the Ciaobot Server host was not installed" in result.stderr
+    assert "the engine install continues" in result.stderr
+    assert "Ciaobot Server host installed and recorded." not in result.stdout
+    assert "tool install" in _log(harness, "uv-calls.log")
+    assert f"Ciaobot engine {VERSION} installed." in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_the_host_install_gets_the_verified_manifest_archive_and_embedded_key(
+    tmp_path: Path,
+) -> None:
+    # The exact argv, not a substring: the module re-verifies the same signed
+    # manifest with the same embedded key and installs the archive that was just
+    # digest-checked, with no path or key override reaching it.
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    calls = _log(harness, "server-host-install.log").splitlines()
+    assert len(calls) == 1
+    argv = calls[0].split(" ")
+    assert argv[:4] == ["-I", "-m", "ciao.server_host_install", "install"]
+    options = dict(zip(argv[4::2], argv[5::2]))
+    assert set(options) == {"--manifest", "--signature", "--archive", "--public-key"}
+    assert options["--manifest"].endswith("/ciaobot-engine-manifest.json")
+    assert options["--signature"].endswith("/ciaobot-engine-manifest.json.sig")
+    assert Path(options["--archive"]).name == SERVER_HOST_FILENAME
+    assert Path(options["--archive"]).parent == Path(options["--manifest"]).parent
+    assert options["--public-key"] == harness["public_key"]
 
 
 @runs_the_sh_installer
@@ -812,6 +1091,7 @@ def _desktop_install(
     workspace = home / "Ciaobot"
     (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
     (workspace / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
     if node_state is not None:
         text = node_state if isinstance(node_state, str) else json.dumps(node_state)
         (workspace / ".runtime" / "node_state.json").write_text(text, encoding="utf-8")
@@ -1047,7 +1327,7 @@ def test_migrate_unreadable_state_never_guesses(
         )
     elif break_state == "missing-runtime-root":
         _desktop_install(harness, tmp_path)
-        (home / "Ciaobot" / ".runtime").rmdir()
+        shutil.rmtree(home / "Ciaobot" / ".runtime")
     else:
         _desktop_install(harness, tmp_path, {"role": "standby", "host_url": "https://"})
     untouched = _replaced_state(harness)
@@ -2805,6 +3085,7 @@ def test_migrate_host_refuses_a_different_workspace(
     another = home / "Another"
     (another / ".runtime").mkdir(parents=True)
     (another / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+    (another / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
 
     result = _run_installer(
         harness,
@@ -2944,6 +3225,7 @@ def test_migrate_as_host_with_no_recoverable_workspace_asks_for_one(
     existing = home / "KeepMe"
     (existing / ".runtime").mkdir(parents=True)
     (existing / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+    (existing / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
 
     accepted = _run_installer(
         harness,
@@ -2969,9 +3251,40 @@ def test_migrate_as_host_with_no_recoverable_workspace_asks_for_one(
 
 @runs_the_sh_installer
 @needs_local_tools
-def test_migrate_as_host_refuses_a_workspace_without_an_env(tmp_path: Path) -> None:
+def test_migrate_as_host_accepts_a_pre_1_0_workspace_with_only_ciao_workspaces(
+    tmp_path: Path,
+) -> None:
+    # Pre-1.0 path: an install configured only through CIAO_WORKSPACES in its
+    # `.env` has no registry until it first starts on a release that imports
+    # the variable, and is still the workspace to keep.
+    harness = _harness(tmp_path)
+    home = _desktop_install_without_a_workspace(harness, tmp_path)
+    legacy = home / "Legacy"
+    legacy.mkdir()
+    (legacy / ".env").write_text(
+        'PWA_PORT=8443\nCIAO_WORKSPACES=[{"name":"personal"}]\n', encoding="utf-8"
+    )
+
+    result = _run_installer(
+        harness,
+        "--version",
+        VERSION,
+        "--migrate",
+        "--as-host",
+        "--workspace",
+        str(legacy),
+        "--no-start",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _migration_receipt(harness)["workspace"] == str(legacy)
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_migrate_as_host_refuses_a_workspace_that_was_never_set_up(tmp_path: Path) -> None:
     # An existing directory is not yet a Ciaobot workspace. Handing an engine
-    # over to one with no `.env` would start it with a fresh password and a
+    # over to one with no `.runtime/workspaces.json` would start it with a fresh password and a
     # fresh runtime root next to the real ones, which is the same second
     # workspace as creating a new one - so it is refused here too, where it is
     # still a refusal and not an install.
@@ -2992,7 +3305,7 @@ def test_migrate_as_host_refuses_a_workspace_without_an_env(tmp_path: Path) -> N
     )
 
     assert result.returncode == 1
-    assert "no .env" in result.stderr
+    assert "no .runtime/workspaces.json" in result.stderr
     assert "Nothing on this Mac has been changed" in result.stderr
     assert "tool install" not in _log(harness, "uv-calls.log")
     assert _log(harness, "launchctl.log") == ""

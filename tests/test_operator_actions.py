@@ -9,6 +9,7 @@ it). The web routes are covered in ``test_web_housekeeping.py``.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -1131,16 +1132,20 @@ def test_env_vars_the_engine_no_longer_reads_are_surfaced(tmp_path: Path) -> Non
     for name in ("personal", "work"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
-    config.env_source = {"CIAO_DISALLOWED_TOOLS_WORK": "Bash", "CIAO_VAULT_ROOT": "x"}
+    config.env_source = {"PWA_AUTH_REQUIRED": "false", "CIAO_VAULT_ROOT": "x"}
 
     actions = [a for a in detect_actions(_context(tmp_path, config=config))
                if a.kind == "legacy-env-ignored"]
 
     assert len(actions) == 1
-    assert "CIAO_DISALLOWED_TOOLS_WORK" in actions[0].detail
+    assert "PWA_AUTH_REQUIRED" in actions[0].detail
     # A variable that IS still read must not be dragged in.
     assert "CIAO_VAULT_ROOT" not in actions[0].detail
-    assert not actions[0].run_label
+    # The engine owns `.env`, so the fix is a run button; the chat is an
+    # explainer, not the only way to clear the tile (#1134).
+    assert actions[0].run_label
+    assert actions[0].chat_prompt
+    assert "sandbox" in actions[0].chat_prompt
 
 
 def test_retired_ciao_workspaces_variable_is_surfaced(tmp_path: Path) -> None:
@@ -1158,6 +1163,55 @@ def test_retired_ciao_workspaces_variable_is_surfaced(tmp_path: Path) -> None:
     assert len(actions) == 1
     assert "CIAO_WORKSPACES" in actions[0].detail
     assert "Settings" in actions[0].chat_prompt
+
+
+def test_retired_auth_switch_is_surfaced(tmp_path: Path) -> None:
+    """Password protection is always on, so PWA_AUTH_REQUIRED=false no longer
+    does what the .env says."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"PWA_AUTH_REQUIRED": "false"}
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    assert "PWA_AUTH_REQUIRED" in actions[0].detail
+
+
+def test_server_variables_that_moved_to_settings_are_surfaced(tmp_path: Path) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {
+        "PWA_HOST": "127.0.0.1",
+        "CIAO_LOG_LEVEL": "debug",
+        "CIAO_DEV_MODE": "true",
+        "CIAO_APP_REPO": "/src",
+    }
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    for name in config.env_source:
+        assert name in actions[0].detail
+    assert "Settings" in actions[0].chat_prompt
+
+
+def test_lines_setup_wrote_itself_do_not_raise_the_tile(tmp_path: Path) -> None:
+    """Every pre-upgrade `.env` carries PWA_AUTH_REQUIRED=true and
+    CIAO_VAULT_MODE from setup; both still describe reality, so no tile."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"PWA_AUTH_REQUIRED": "true", "CIAO_VAULT_MODE": "scratch"}
+
+    assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))
 
 
 def test_no_legacy_env_vars_means_no_tile(tmp_path: Path) -> None:
@@ -1213,3 +1267,124 @@ def test_no_shared_mcp_config_means_no_tile(tmp_path: Path) -> None:
     assert "workspace-mcp-uncomposed" not in _kinds(_context(tmp_path, config=config))
 
 
+
+
+def test_a_moved_runtime_root_in_dotenv_raises_the_tile(tmp_path: Path) -> None:
+    """`.env` no longer sets the runtime root; a non-default value names a
+    runtime the engine does not use, so the operator has to hear about it."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {}
+    (tmp_path / ".env").write_text(
+        f"CIAO_RUNTIME_ROOT={tmp_path / 'elsewhere'}\n", encoding="utf-8"
+    )
+
+    actions = [a for a in detect_actions(_context(tmp_path, config=config))
+               if a.kind == "legacy-env-ignored"]
+
+    assert len(actions) == 1
+    assert "CIAO_RUNTIME_ROOT" in actions[0].detail
+
+
+async def test_removing_legacy_env_comments_the_lines_and_clears_the_tile(
+    tmp_path: Path,
+) -> None:
+    """The run handler is what makes the tile clearable (#1134).
+
+    The line must be commented, not deleted: the file also holds the password
+    and provider keys, whose lines must survive untouched.
+    """
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"CIAO_DEV_MODE": "true", "CIAO_APP_REPO": "/src"}
+    (tmp_path / ".env").write_text(
+        "PWA_AUTH_TOKEN=secret\n"
+        "CIAO_DEV_MODE=true\n"
+        "PWA_PORT=8443\n"
+        "CIAO_APP_REPO=/src\n",
+        encoding="utf-8",
+    )
+    context = _context(tmp_path, config=config)
+    assert [a.kind for a in detect_actions(context) if a.kind == "legacy-env-ignored"]
+
+    result, summary = await run_action("legacy-env-ignored", context)
+
+    assert set(result["keys"]) == {"CIAO_DEV_MODE", "CIAO_APP_REPO"}
+    assert "2 line(s)" in summary
+    text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "# CIAO_DEV_MODE=true" in text
+    assert "# CIAO_APP_REPO=/src" in text
+    # Untouched lines and their order are preserved.
+    assert "PWA_AUTH_TOKEN=secret" in text
+    assert "PWA_PORT=8443" in text
+    # Re-detection in the same pass sees the condition gone.
+    assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))
+
+
+async def test_removing_legacy_env_pops_the_process_environment(tmp_path: Path) -> None:
+    """Server startup loads `.env` into `os.environ`; detection reads that.
+
+    Without the pop, the re-detection in the run response would still see the
+    keys and the tile would survive the press that removed the lines.
+    """
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("CIAO_LOG_LEVEL=debug\n", encoding="utf-8")
+    with patch.dict(os.environ, {"CIAO_LOG_LEVEL": "debug"}):
+        await run_action("legacy-env-ignored", _context(tmp_path, config=config))
+        assert "CIAO_LOG_LEVEL" not in os.environ
+
+
+async def test_removing_legacy_env_is_idempotent(tmp_path: Path) -> None:
+    """A second press has nothing to do and reports so, never a crash."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    config.env_source = {"CIAO_DEV_MODE": "true"}
+    (tmp_path / ".env").write_text("CIAO_DEV_MODE=true\n", encoding="utf-8")
+    context = _context(tmp_path, config=config)
+
+    first = await run_action("legacy-env-ignored", context)
+    assert first[0]["commented"] == ["CIAO_DEV_MODE"]
+    # The variable is gone from the source, so there is no condition left.
+    assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))
+
+
+async def test_removing_legacy_env_without_a_dotenv_file_still_clears(tmp_path: Path) -> None:
+    """A key set only in the process environment has no line to comment."""
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    # No `.env` at all: the key exists only in the process environment.
+    with patch.dict(os.environ, {"CIAO_DEV_MODE": "true"}):
+        result, summary = await run_action("legacy-env-ignored", _context(tmp_path, config=config))
+        assert result["commented"] == []
+        assert "no line" in summary
+        assert "CIAO_DEV_MODE" not in os.environ
+
+
+
+@pytest.mark.parametrize(
+    "value", [".runtime", "./.runtime", "{root}/.runtime"]
+)
+def test_the_runtime_root_setup_wrote_stays_silent(tmp_path: Path, value: str) -> None:
+    config = _RerootedConfig(tmp_path)
+    for name in ("personal", "work"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "CLAUDE.md").write_text("# G\n", encoding="utf-8")
+    # The service definition sets it in the process environment; that is not
+    # a `.env` line and must not raise the tile either.
+    config.env_source = {"CIAO_RUNTIME_ROOT": str(tmp_path / "isolated")}
+    (tmp_path / ".env").write_text(
+        f"CIAO_RUNTIME_ROOT={value.format(root=tmp_path)}\n", encoding="utf-8"
+    )
+
+    assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))

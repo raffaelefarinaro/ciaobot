@@ -34,6 +34,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -345,6 +346,41 @@ def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
         path = Path(explicit).expanduser()
         return str(path.resolve()) if path.is_file() else None
     return resolve_tool("opencode")
+
+
+#: Where someone with no OpenCode at all is sent. The download page lists every
+#: installer for every platform, so a provider row links there rather than at a
+#: single method; the row's command carries the one-line form.
+OPENCODE_INSTALL_DOCS_URL = "https://opencode.ai/download"
+
+
+def opencode_install_command() -> str:
+    """The documented one-line installer for this platform.
+
+    ``resolve_opencode_binary`` finds the curl installer's ``~/.opencode/bin``
+    (via ``common_tool_dirs``, so no engine restart is needed) and npm's or
+    Homebrew's bins too, so any of the three documented installers is picked up
+    on the next status refresh.
+    """
+    if sys.platform == "win32":
+        # The POSIX one-liner is a bash script; npm's global shim is the
+        # documented Windows path and needs no extra shell.
+        return "npm install -g @opencode/cli"
+    return "curl -fsSL https://opencode.ai/v2/install | bash"
+
+
+def opencode_path_hint() -> str:
+    """PATH line for the curl installer's directory, or "" when none is needed.
+
+    Only that installer drops the binary somewhere no default PATH carries; the
+    npm shim and Homebrew already install into directories Ciaobot searches, and
+    a new Windows logon's PATH already holds npm's global dir.
+    """
+    if sys.platform == "win32":
+        return ""
+    from ciao.os_support.shell_hints import path_hint
+
+    return path_hint(str(Path.home() / ".opencode" / "bin"), persist=True)
 
 
 def auth_command(*, device_auth: bool = False) -> list[str]:
@@ -2855,6 +2891,10 @@ class OpencodeProvider(BaseSDKProvider):
         prompt_rejected = False
         prompt_receipt_error = ""
         terminal_seen = False
+        # Set by the degraded recovery below, never by the reconnect loop: a
+        # permission the reload re-emitted is still unanswered when the result is
+        # published (#1111).
+        recovered_with_pending = False
 
         async def _pump_once() -> AsyncGenerator[StreamEvent, None]:
             """One SSE subscription, pumped until idle or premature close."""
@@ -2988,6 +3028,11 @@ class OpencodeProvider(BaseSDKProvider):
             ):
                 for converted in await self._reload_pending_requests(client, session_id):
                     saw_output = True
+                    # A request this turn never saw is now up in the chat as a
+                    # live card, and the result below is published over it.
+                    recovered_with_pending = recovered_with_pending or isinstance(
+                        converted, (PermissionRequestEvent, ToolUseEvent)
+                    )
                     yield converted
                 self._turn_recovered_via_poll = False
                 async for converted in self._reconcile_interrupted_turn(
@@ -3018,6 +3063,7 @@ class OpencodeProvider(BaseSDKProvider):
             usage=self._usage,
             cost_usd=self._cost,
             fallback_final=(bool(error) and saw_output) or degraded_final,
+            recovered_with_pending=recovered_with_pending,
         )
 
     async def _augment_context_pct(
@@ -3500,11 +3546,12 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, Any]]:
+def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, Any]] | None:
     """`data` rows of a V2 list route, fetched through `opencode api`.
 
     Run from the home directory so the result is the global configuration,
-    not whatever project the engine happens to be started in.
+    not whatever project the engine happens to be started in. ``None`` when
+    the route could not be read, so a failure never passes for "none".
     """
     import subprocess
 
@@ -3515,9 +3562,9 @@ def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, An
         )
         payload = json.loads(result.stdout)
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
-        return []
+        return None
     rows = payload.get("data") if isinstance(payload, dict) else None
-    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else None
 
 
 def _row_names(rows: list[dict[str, Any]]) -> list[str]:
@@ -3529,20 +3576,39 @@ def _row_names(rows: list[dict[str, Any]]) -> list[str]:
     return names
 
 
-def _opencode_inventory(binary: str, *, timeout: float) -> tuple[list[str], list[str]]:
-    """Skills and plugins, and MCP servers, the opencode CLI loads globally.
+@dataclass(frozen=True)
+class _Inventory:
+    """What the opencode CLI loads globally; ``None`` fields could not be read."""
 
-    Built-in plugins are opencode internals, and a plugin that failed to load
-    (a duplicate ID, say) brings nothing, so both are left out.
+    skills: list[str] | None
+    bundled_skills: list[str] | None
+    mcps: list[str] | None
+
+
+def _opencode_inventory(binary: str, *, timeout: float) -> _Inventory:
+    """Skills and plugins, the skills opencode ships, and MCP servers.
+
+    A skill whose path is under ``/builtin/`` ships with opencode. Built-in
+    plugins are opencode internals, and a plugin that failed to load (a
+    duplicate ID, say) brings nothing, so both are left out.
     """
-    skills = _row_names(_server_list(binary, "/api/skill", timeout=timeout))
-    plugins = _row_names([
-        row for row in _server_list(binary, "/api/plugin", timeout=timeout)
-        if (row.get("source") or {}).get("type") != "builtin"
-        and (row.get("state") or {}).get("status", "active") == "active"
-    ])
-    mcps = _row_names(_server_list(binary, "/api/mcp", timeout=timeout))
-    return skills + [name for name in plugins if name not in skills], mcps
+    skill_rows = _server_list(binary, "/api/skill", timeout=timeout)
+    plugin_rows = _server_list(binary, "/api/plugin", timeout=timeout)
+    mcp_rows = _server_list(binary, "/api/mcp", timeout=timeout)
+    skills = bundled = None
+    if skill_rows is not None and plugin_rows is not None:
+        bundled = _row_names([
+            row for row in skill_rows if str(row.get("path") or "").startswith("/builtin/")
+        ])
+        own = [name for name in _row_names(skill_rows) if name not in bundled]
+        plugins = _row_names([
+            row for row in plugin_rows
+            if (row.get("source") or {}).get("type") != "builtin"
+            and (row.get("state") or {}).get("status", "active") == "active"
+        ])
+        skills = own + [name for name in plugins if name not in own]
+    mcps = _row_names(mcp_rows) if mcp_rows is not None else None
+    return _Inventory(skills=skills, bundled_skills=bundled, mcps=mcps)
 
 
 def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
@@ -3568,13 +3634,21 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
             version="unknown",
         )
     if not binary:
+        # The binary is absent, so this is an install step, not a login step:
+        # `not_installed` is the state the PWA and the setup wizard both render
+        # with the install command and the docs link. opencode's credentials are
+        # beside the binary, so a missing binary cannot also be a missing login.
         return _provider(
             name="opencode",
             ok=False,
-            auth="missing",
-            command="opencode",
-            detail="not installed",
+            auth="not_installed",
+            command=opencode_install_command(),
+            detail="opencode is not installed on this machine.",
             version="not installed",
+            install_url=OPENCODE_INSTALL_DOCS_URL,
+            # Mirrors Claude's row so the wizard offers one PATH line whatever
+            # the provider. Empty when the installer used needs none.
+            path_command=opencode_path_hint(),
         )
     version = ""
     try:
@@ -3607,7 +3681,7 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
     else:
         detail = "no credentials — free models only"
         auth = "free"
-    skills, mcps = _opencode_inventory(binary, timeout=timeout)
+    inventory = _opencode_inventory(binary, timeout=timeout)
     return _provider(
         name="opencode",
         ok=True,
@@ -3615,8 +3689,9 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
         command="opencode auth login",
         detail=detail,
         version=version or "unknown",
-        skills=skills,
-        mcps=mcps,
+        skills=inventory.skills,
+        bundled_skills=inventory.bundled_skills,
+        mcps=inventory.mcps,
     )
 
 

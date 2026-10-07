@@ -438,7 +438,7 @@ describe('MemoryCategoriesPanel', () => {
     const wrapper = mount(MemoryCategoriesPanel, { attachTo: document.body })
     await nextTick()
 
-    expect(wrapper.find('.cat-loading').exists()).toBe(true)
+    expect(wrapper.get('.skeleton').attributes('aria-label')).toBe('Loading categories')
     expect(wrapper.get('.cat-why').text()).toContain('Notes, by category')
     // …and it never reads as a claim about a vault with nothing in it.
     expect(wrapper.text()).not.toContain('no categories yet')

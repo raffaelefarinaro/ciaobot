@@ -12,6 +12,7 @@ from ciao.config import CiaoConfig
 from ciao.models import ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.setup_marker import write_setup_marker
 from ciao.web.project_chats import (
     AgentSurfaceUnavailableError,
     ProjectChatManager,
@@ -21,9 +22,12 @@ from ciao.web.project_chats import (
 from tests.conftest import attach_stub_mcp
 
 
-def _make_manager(tmp_path: Path) -> ProjectChatManager:
+def _make_manager(tmp_path: Path, *, vault_mode: str | None = None) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
+    if vault_mode is not None:
+        # What a first-time `ciao setup` records for the onboarding chat.
+        write_setup_marker(runtime, vault_mode=vault_mode)
     config = CiaoConfig(
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
@@ -72,8 +76,7 @@ def _write_registry(root: Path, overrides: str) -> None:
 def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    manager = _make_manager(tmp_path)
+    manager = _make_manager(tmp_path, vault_mode="existing")
 
     onboarding = next(
         chat for chat in manager._chats.values()
@@ -87,8 +90,7 @@ def test_existing_vault_onboarding_uses_current_layout_and_workspace_name(
     assert "`Templates/` and `personal/`/`work/` are not required" in prompt
     assert "Create Directory Structure" not in prompt
 
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    fresh_manager = _make_manager(tmp_path / "fresh")
+    fresh_manager = _make_manager(tmp_path / "fresh", vault_mode="scratch")
     fresh_onboarding = next(
         chat for chat in fresh_manager._chats.values()
         if chat.title == "Welcome to Ciaobot! 👋"
@@ -161,10 +163,8 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Scratch and existing-vault onboarding both teach the two memory layers."""
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    existing = _make_manager(tmp_path / "existing")
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    scratch = _make_manager(tmp_path / "scratch")
+    existing = _make_manager(tmp_path / "existing", vault_mode="existing")
+    scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")
 
     for manager, title in (
         (existing, "Connect Existing Vault 👋"),
@@ -186,8 +186,17 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
         # Undo is offered where the receipt is, and only as long as the note is
         # still as the pass left it — a note edited since is refused.
         assert "undo it while the note is still as the pass left it" in welcome
-        # No promise that past conversations are read, imported or filed.
-        assert "import" not in welcome.lower()
+        # No promise that past conversations are read, imported or filed. Since
+        # #1041 the welcome names the opt-in affordance, so this is no longer
+        # "the word import may not appear": C1's property was that nothing is
+        # filed on its own, and the welcome now carries that as a disclaimer —
+        # past conversations are not imported automatically, and nothing is read
+        # until the reader chooses. The pointer itself is pinned here too, so a
+        # welcome that dropped it (or one that promised an import had run) fails.
+        lowered = welcome.lower()
+        assert "[Import conversations](/memory/import)" in welcome
+        assert "are not imported automatically" in lowered
+        assert "nothing is read until you choose" in lowered
         # The interview still opens the chat, and memory comes before it.
         assert "What is your name" in welcome
         assert welcome.index("memory is organized") < welcome.index("What is your name")
@@ -197,7 +206,14 @@ def test_both_welcome_shapes_explain_memory_and_link_existing_categories(
         prompt, _ = _seeded_welcome(manager, title)
         assert "**Explain memory early**" in prompt
         assert "Do not run a second interview round about categories" in prompt
-        assert "do not scan past chats" in prompt
+        # Pinned with the clause that follows it. Since #1041 the same words also
+        # appear in `import_tour` ("do not scan past chats, and do not read any
+        # provider history yourself"), so the bare fragment no longer proves the
+        # memory step kept its own instruction.
+        assert "do not scan past chats, and do not import anything" in prompt
+        # The instruction that matters most since #1041, in the agent's own words:
+        # an onboarding turn must not run the import the user has to consent to.
+        assert "do not run an import for them" in prompt
         assert "Ask the user 2-3 important questions" in prompt
 
     # The existing-vault preservation and routing instructions are untouched.
@@ -221,10 +237,8 @@ def test_onboarding_asks_workspace_purpose_and_style(
     the same ordered interview, so one pass over the two covers an adopted vault
     and a brand-new one.
     """
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    existing = _make_manager(tmp_path / "existing")
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    scratch = _make_manager(tmp_path / "scratch")
+    existing = _make_manager(tmp_path / "existing", vault_mode="existing")
+    scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")
 
     for manager, title in (
         (existing, "Connect Existing Vault 👋"),
@@ -263,10 +277,8 @@ def test_onboarding_routes_purpose_to_context_and_style_to_profile(
     its home and rules the bounded regions out for it, while style and operating
     context go where the memory tool says they belong.
     """
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    existing = _make_manager(tmp_path / "existing")
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    scratch = _make_manager(tmp_path / "scratch")
+    existing = _make_manager(tmp_path / "existing", vault_mode="existing")
+    scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")
 
     for manager, title in (
         (existing, "Connect Existing Vault 👋"),
@@ -298,10 +310,8 @@ def test_onboarding_starting_knowledge_is_confirmed_facts_only(
     reading past conversations is the consent-gated memory job, which the user
     starts from Memory whenever they choose, not a side effect of onboarding.
     """
-    monkeypatch.setenv("CIAO_VAULT_MODE", "existing")
-    existing = _make_manager(tmp_path / "existing")
-    monkeypatch.setenv("CIAO_VAULT_MODE", "scratch")
-    scratch = _make_manager(tmp_path / "scratch")
+    existing = _make_manager(tmp_path / "existing", vault_mode="existing")
+    scratch = _make_manager(tmp_path / "scratch", vault_mode="scratch")
 
     for manager, title in (
         (existing, "Connect Existing Vault 👋"),

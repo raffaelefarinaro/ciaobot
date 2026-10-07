@@ -820,3 +820,34 @@ def test_session_check_compiles_under_ps51_and_answers_false_for_an_absent_accou
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip().splitlines()[-1] == "False"
+
+
+def test_printed_commands_go_through_format_command() -> None:
+    # "Run this later" lines are pasted back by the user; a bare `$ciao ...`
+    # under a "C:\Users\First Last" profile ran `C:\Users\First`.
+    printed = [
+        line for line in SCRIPT_TEXT.splitlines()
+        if line.strip().startswith(("Write-Host", "Fail ")) and "$ciao " in line
+    ]
+    assert printed
+    assert all("$(Format-Command $ciao @(" in line for line in printed), printed
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs Windows PowerShell 5.1")
+def test_format_command_parses_back_to_the_same_arguments() -> None:
+    program = r"C:\Users\First Last\.local\bin\ciao.exe"
+    arguments = ["setup", "--workspace", r"C:\Users\Jane O'Neil\Ciaobot", "--load-launchd"]
+    quoted = ", ".join("'" + value.replace("'", "''") + "'" for value in arguments)
+    probe = (
+        _ps1_function("Format-Command")
+        + f"\n$line = Format-Command '{program}' @({quoted})\n"
+        + "$ast = [System.Management.Automation.Language.Parser]::ParseInput($line, [ref]$null, [ref]$null)\n"
+        + "$command = $ast.Find({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true)\n"
+        + "$command.CommandElements | ForEach-Object { $_.Value }\n"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", probe],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == [program, *arguments]

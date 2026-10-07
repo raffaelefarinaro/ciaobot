@@ -281,6 +281,38 @@ def test_prompt_routes_categories_to_the_vocabulary_block() -> None:
     assert "instead of inventing a type" in prompt
 
 
+def test_superseded_guidance_is_rewritten_not_annotated() -> None:
+    """A later reader must not be left with two current instructions (#1132).
+
+    The pass prompt is what every memory pass reads, and the skill is what
+    "the way you normally would" points at. A rule in only one of them is how
+    the pass kept the old line and annotated the new one.
+    """
+    from importlib import resources
+
+    skill = (
+        resources.files("ciao.stock")
+        .joinpath("skills/ciao-memory/SKILL.md")
+        .read_text(encoding="utf-8")
+    )
+    architecture = (
+        Path(__file__).resolve().parents[1] / "docs" / "ARCHITECTURE.md"
+    ).read_text(encoding="utf-8")
+    phrases = (
+        "one instruction",
+        "source and date",
+        "remove the superseded line rather than annotating",
+        "genuinely conflict",
+        "let them decide instead of picking silently",
+    )
+    for phrase in phrases:
+        assert phrase in memory_pass.MEMORY_PASS_PROMPT, phrase
+        assert phrase in skill, phrase
+    # An unattended run queues the conflict; it does not write either line.
+    assert "writes neither as the current instruction" in skill
+    assert "removes the superseded line" in architecture
+
+
 def test_prompt_still_formats_every_placeholder() -> None:
     """A brace in the added sentence would raise on the next chat's first turn."""
     rendered = memory_pass.MEMORY_PASS_PROMPT.format(
@@ -1342,3 +1374,38 @@ def test_build_agent_request_marks_only_the_memory_pass(tmp_path: Path) -> None:
 
     assert manager.build_agent_request(pass_chat, prompt="p").memory_pass is True
     assert manager.build_agent_request(ordinary, prompt="p").memory_pass is False
+
+
+def test_an_approved_task_pass_extracts_the_procedure_and_is_its_own_pass(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """#1069: an approved delegated task's chat is a worked example. Its pass is
+    told so, handed both skill routes, and is not deduped against an ordinary
+    pass of the same chat."""
+    _register_work_workspace(tmp_path)
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_using(tmp_path, "notes")
+    project = manager.get_project(source.project_id)
+
+    ordinary = manager.enqueue_memory_pass(source, project, archive, "")
+    focused = manager.enqueue_memory_pass(
+        source, project, archive, "",
+        {"focus": "approved_task", "task_title": "Ship the runbook", "task_summary": "Wrote docs/run.md."},
+    )
+    again = manager.enqueue_memory_pass(
+        source, project, archive, "",
+        {"focus": "approved_task", "task_title": "Ship the runbook", "task_summary": "x"},
+    )
+
+    assert ordinary and focused and focused != ordinary
+    assert again is None
+    helper = manager.get_chat(focused).helper
+    assert helper["focus"] == "approved_task"
+    assert helper["task_title"] == "Ship the runbook"
+    prompt = memory_pass.MemoryPassCoordinator._focus_section(helper)
+    assert "APPROVED as done correctly" in prompt
+    assert "Wrote docs/run.md." in prompt
+    assert "ciao skill-proposal-add" in prompt and "ciao skill-draft-add" in prompt
+    # An ordinary pass carries no such section.
+    assert memory_pass.MemoryPassCoordinator._focus_section(manager.get_chat(ordinary).helper) == ""

@@ -269,15 +269,10 @@ class ScheduleDispatcher:
         )
         user_prompt = json.dumps(payload, ensure_ascii=False)
         try:
-            from ciao.insights import (
-                _resolve_insights_call,
-                resolve_insights_model,
-            )
+            from ciao.insights import resolve_insights_model
 
-            # Route through the shared resolver (same as ciao/insights.py) so an
-            # unavailable Apple on-device model is substituted rather than
-            # raising -- a raise here keeps the run visible instead of
-            # auto-archiving it.
+            # The classifier runs on the run provider's Session insights model.
+            # A raise here keeps the run visible instead of auto-archiving it.
             project_id: str | None = getattr(entry, "web_project_id", None)
             project = self._host._projects.get(project_id) if project_id else None
             workspace = project.workspace if project else None
@@ -290,33 +285,29 @@ class ScheduleDispatcher:
             )
             if classifier_provider not in supported_providers():
                 return True
-            insights_model = resolve_insights_model(self._host._config, workspace)
-            env: dict[str, str] = {}
-            model, classifier_provider, note = _resolve_insights_call(
-                self._host._config,
-                insights_model,
-                provider=classifier_provider,
+            model = resolve_insights_model(
+                self._host._config, workspace, classifier_provider
             )
         except Exception:  # noqa: BLE001
             logger.exception("Schedule attention classifier setup failed; keeping chat visible")
             return True
-        tracked_provider = classifier_provider
         async with job_runs.track(
             "schedule_attention_classifier",
             "Schedule attention classifier",
             model=model,
-            provider=tracked_provider,
+            provider=classifier_provider,
             extra={
                 "schedule_id": payload["schedule_id"],
                 "workspace": workspace or "",
             },
         ) as run:
-            if note:
-                run.extra["fallback_note"] = note
-                logger.info("Schedule attention classifier %s", note)
             try:
                 from ciao.providers.oneshot import run_oneshot
-                from ciao.insights import _DEFAULT_TIMEOUT_S, is_context_overflow
+                from ciao.insights import (
+                    _DEFAULT_TIMEOUT_S,
+                    is_context_overflow,
+                    is_model_refused,
+                )
 
                 # Same env-tunable budget as the other one-shot jobs: a slow
                 # local model can take minutes on a successful call, so a hard
@@ -326,7 +317,6 @@ class ScheduleDispatcher:
                     user_prompt,
                     system_prompt=system_prompt,
                     model=model,
-                    env=env,
                     timeout_s=_DEFAULT_TIMEOUT_S,
                     provider=classifier_provider,
                     cwd=self._host._config.workspace_root,
@@ -367,6 +357,22 @@ class ScheduleDispatcher:
                     logger.warning(
                         "Schedule attention classifier hit the context window "
                         "with model %s; keeping chat visible",
+                        model,
+                    )
+                elif is_model_refused(exc):
+                    # The configured insights model refused this one-shot call
+                    # (#1066). The conservative default is the right behaviour
+                    # and needs no traceback; what the operator needs is the
+                    # model named and the workaround pointed at. This is a text
+                    # match on the provider message, not proof the model can
+                    # never serve a call — hence "refused", not "unusable".
+                    run.extra["model_refused"] = True
+                    logger.warning(
+                        "Schedule attention classifier model %s was refused by "
+                        "the provider for a one-shot call, so this auto-archived "
+                        "run keeps its chat visible; picking a Session insights "
+                        "model that serves one-shots in Settings → Models avoids "
+                        "the warning on later runs",
                         model,
                     )
                 else:

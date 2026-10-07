@@ -51,6 +51,7 @@
             v-if="canPin"
             class="btn-icon"
             :class="{ active: isPinned }"
+            :disabled="pinPending"
             :title="isPinned ? 'Unpin from sidebar' : 'Pin to sidebar'"
             :aria-label="isPinned ? 'Unpin from sidebar' : 'Pin to sidebar'"
             @click="togglePin"
@@ -345,6 +346,7 @@ import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import { startFileDiscussion } from '../lib/fileDiscussion'
 import type { ArtifactHighlight } from '../lib/artifactBridge'
 import { writeClipboard } from '../lib/codeCopy'
+import { handleAppLinkClick } from '../lib/appLinks'
 import CommentComposePopover from './CommentComposePopover.vue'
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
@@ -358,7 +360,7 @@ async function requestClose(): Promise<void> {
   if (!store.isOpen || closePending) return
   closePending = true
   try {
-    await store.close()
+    await store.dismissSharedPin()
   } finally {
     closePending = false
   }
@@ -908,6 +910,9 @@ function editFromPopup(c: { id: string; comment: string; images?: string[] }): v
 function onMdClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
+  // The task opens behind this dialog, so the dialog closes first; a refused
+  // close (unsaved edits kept) leaves the user where they were.
+  if (handleAppLinkClick(e, () => store.close())) return
 
   const fileLink = target.closest('a.file-link') as HTMLAnchorElement | null
   if (fileLink) {
@@ -1001,14 +1006,18 @@ const isPinned = computed(() => {
   if (!activePinKey.value) return false
   return projectsStore.pinnedFileFor(activePinKey.value) === cleanPath(store.path)
 })
-function togglePin(): void {
+const pinPending = computed(() => {
   const key = activePinKey.value
-  if (!key) return
+  return !!key && projectsStore.isChatPinPending(key)
+})
+async function togglePin(): Promise<void> {
+  const key = activePinKey.value
+  if (!key || pinPending.value) return
   const path = cleanPath(store.path)
   if (isPinned.value) {
-    projectsStore.unpinFile(key)
+    await projectsStore.unpinFile(key)
   } else {
-    projectsStore.pinFile(key, path)
+    await projectsStore.pinFile(key, path)
     store.close()
   }
 }
@@ -1021,8 +1030,10 @@ watch(
     if (!isOpen || !currentPath) return
     const key = activePinKey.value
     if (canPin.value && key && !projectsStore.pinnedFileFor(key)) {
-      projectsStore.pinFile(key, cleanPath(currentPath))
-      store.close()
+      void (async () => {
+        await projectsStore.pinFile(key, cleanPath(currentPath))
+        store.close()
+      })()
     }
   },
   { immediate: true },

@@ -55,7 +55,10 @@ Verification:
   Lint is still worth running — it just will not fail the build for you.
 - For UI changes, verify keyboard focus, browser zoom, and mobile touch targets.
 - Workspace shortcuts map unmodified `1`–`9` to the visible sidebar order and
-  must remain inert while a text field is focused.
+  must remain inert while a text field is focused. The Settings keyboard
+  shortcuts card can disable or rebind them; preferences are shared through the
+  engine. Enter-to-send is also shared, but touch keyboards always insert a
+  newline. Preserve picker precedence and IME composition handling.
 - OpenCode provider changes must preserve the V2-only 2.0.16+ contract. Replay
   the V2 fixtures and run one tiny real turn against the installed OpenCode 2.x
   server; do not restore V1 route or response-shape fallbacks.
@@ -89,3 +92,14 @@ Use plain, factual engineering notes in commits and pull requests.
   gh issue create --repo raffaelefarinaro/ciaobot --title "[Agent] Brief summary of the issue" --body "Detailed description of the problem, reproducing steps, relevant code locations, and logs."
   ```
 - This helps maintain a continuous loop of improvements for the open-source repository.
+
+
+<!-- ciao:memory:start cap=3000 -->
+## Agent memory
+
+<!-- ciao:memory:end -->
+
+<!-- ciao:profile:start cap=1375 -->
+## User profile
+
+<!-- ciao:profile:end -->

@@ -61,6 +61,33 @@ class UnknownModelError(ValueError):
     """
 
 
+class ChatPinConflictError(Exception):
+    """A manual pin write quoted a ``expected_revision`` that is no longer current.
+
+    A pin is one shared selection per chat, so a write from a device that was
+    looking at an older selection must not replace it silently. Carries the
+    authoritative current pin state so the HTTP layer can answer 409 with what
+    is actually selected instead of making the client guess.
+    """
+
+    def __init__(self, pin: dict[str, Any]) -> None:
+        super().__init__("Pin revision conflict")
+        self.pin = pin
+
+
+def _restored_pin_paths(raw: Any) -> list[str]:
+    """Canonical dismissed-pin paths out of a registry record.
+
+    A record written before pins existed has no key at all, which restores as
+    "nothing dismissed" — the state a chat that never pinned anything is in
+    anyway. Entries that are not non-empty strings are dropped rather than
+    becoming identity keys nothing can match.
+    """
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if isinstance(item, str) and item]
+
+
 import yaml
 
 from ciao.os_support.media_types import guess_type as guess_media_type
@@ -476,6 +503,8 @@ class ChatInfo:
     # stashed here and re-seeded into the next stream — the user's answer turn
     # — so they still flush as follow-ups instead of being silently dropped.
     # Each entry is {"id": str, "text": str, "images": list[str]}.
+    # `to_dict` copies the list so a reload can show the chips; callers must
+    # not receive the live list.
     pending_queue: list[dict] = field(default_factory=list)
     # Provider-neutral conversation fork lineage. Forks are normal chats with
     # a fresh provider session; these fields only preserve their relationship
@@ -504,6 +533,25 @@ class ChatInfo:
     # {"steps": {"memory_pass": {"status": ..., "extra": {"chat_id": ...}}},
     #  "updated_at": iso}
     postprocess: dict = field(default_factory=dict)
+    # Durable pinned-file state for this chat (#1118), stored here so it
+    # survives both a browser change of device and an engine restart instead of
+    # living in one browser's storage.
+    #
+    # `pinned_file_path` is a canonical POSIX host path (`Path.resolve()
+    # .as_posix()`), never a display or relative form: paths are identity keys
+    # here, so there is no fuzzy matching and no extension guessing. Empty
+    # means the panel is closed.
+    # `dismissed_pin_paths` are the paths the user closed on purpose. Agent
+    # surfacing (`surface_chat_file`) leaves a dismissed path alone; a manual
+    # repin of that same path clears its own dismissal.
+    # `pin_revision` counts real changes to this pair and is what a manual write
+    # quotes as `expected_revision`, so a write that raced a newer selection
+    # conflicts instead of silently replacing it. A record written before this
+    # feature has none of the three keys and restores as "nothing pinned,
+    # nothing dismissed, revision 0".
+    pinned_file_path: str = ""
+    dismissed_pin_paths: list[str] = field(default_factory=list)
+    pin_revision: int = 0
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         d = {
@@ -523,6 +571,14 @@ class ChatInfo:
             "title_status": self.title_status,
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
+            "pending_queue": [
+                {
+                    "id": str(entry.get("id", "")),
+                    "text": str(entry.get("text", "")),
+                    "images": [str(ref) for ref in (entry.get("images") or [])],
+                }
+                for entry in self.pending_queue
+            ],
             "forked_from_chat_id": self.forked_from_chat_id,
             "forked_from_turn_index": self.forked_from_turn_index,
             "fork_root_chat_id": self.fork_root_chat_id,
@@ -531,6 +587,9 @@ class ChatInfo:
             "schedule_id": self.schedule_id,
             "schedule_title": self.schedule_title,
             "helper": dict(self.helper),
+            "pinned_file_path": self.pinned_file_path,
+            "dismissed_pin_paths": list(self.dismissed_pin_paths),
+            "pin_revision": self.pin_revision,
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -546,6 +605,24 @@ class ChatInfo:
         if local is not None:
             d["local"] = local
         return d
+
+
+def chat_pin_payload(chat: ChatInfo) -> dict[str, Any]:
+    """The one wire shape for a chat's pin state (#1118).
+
+    ``path`` is the canonical POSIX host path currently pinned ("" = closed),
+    ``dismissed_paths`` are the paths the user closed on purpose, and
+    ``revision`` is the per-chat counter a manual write has to quote. The list
+    is copied, so a caller holding the payload cannot mutate chat state through
+    it. This is what the chat-list/detail payloads, the `chat_pin_changed`
+    event, the 409 conflict body and the `/ws/events` snapshot all read, so
+    they cannot disagree about the answer.
+    """
+    return {
+        "path": chat.pinned_file_path,
+        "dismissed_paths": list(chat.dismissed_pin_paths),
+        "revision": chat.pin_revision,
+    }
 
 
 @dataclass(slots=True, frozen=True)
@@ -651,6 +728,18 @@ class ProjectChatManager:
         # service workers can dismiss already-delivered OS notifications for
         # that chat.
         self.clear_notifications_cb: Optional[Callable[[str], None]] = None
+        # `on_turn_started(chat_id, stream)` fires once per turn a person asked
+        # for: a delegated task's answer, a Send update, an approval the user
+        # answered in the composer, an ordinary message. The delegation service
+        # subscribes so a turn in a delegated chat is settled by *that* turn
+        # rather than only by the one it launched — the same injection point as
+        # the callbacks above, and for the same reason: the manager must not
+        # depend on the task board to know what a turn is.
+        self._turn_started: list[Callable[[str, "ChatStream"], None]] = []
+        # `on_chat_ended(chat_id, chat, how)` fires after a chat is archived or
+        # deleted, with `how` naming which. The delegation service subscribes so
+        # a task is not left pointing at a conversation that cannot go on.
+        self._chat_ended: list[Callable[[str, Any, str], None]] = []
         # Per-chat pending push tasks. Pushes are scheduled with a short
         # delay (30s) so that reading the
         # chat on any device within the window suppresses the buzz. New
@@ -834,6 +923,13 @@ class ProjectChatManager:
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
                 helper=chat_service._normalize_chat_helper(cd.get("helper")),
+                # A record written before pins existed (#1118) has none of
+                # these keys and restores unpinned at revision 0. Nothing is
+                # imported from any browser: the engine's registry is the only
+                # source of a pin.
+                pinned_file_path=str(cd.get("pinned_file_path", "") or ""),
+                dismissed_pin_paths=_restored_pin_paths(cd.get("dismissed_pin_paths")),
+                pin_revision=int(cd.get("pin_revision", 0) or 0),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
@@ -932,6 +1028,9 @@ class ProjectChatManager:
                     "schedule_title": c.schedule_title,
                     "helper": c.helper,
                     "postprocess": c.postprocess,
+                    "pinned_file_path": c.pinned_file_path,
+                    "dismissed_pin_paths": list(c.dismissed_pin_paths),
+                    "pin_revision": c.pin_revision,
                 }
                 for cid, c in self._chats.items()
             },
@@ -1266,8 +1365,9 @@ class ProjectChatManager:
         self._save()
 
     def _create_onboarding_chat(self, project_id: str) -> None:
-        import os
-        vault_mode = os.environ.get("CIAO_VAULT_MODE", "scratch").strip().lower()
+        from ciao.setup_marker import read_setup_vault_mode
+
+        vault_mode = read_setup_vault_mode(self._config.state_path.parent)
         project = self._projects.get(project_id)
         workspace_name = project.workspace if project is not None else "personal"
         vault_root = str(
@@ -1357,6 +1457,37 @@ class ProjectChatManager:
             "`Workspace/Memory-Proposals.md` instead of filing it."
         )
 
+        # One block, both shapes, for the same reason as `memory_intro` and
+        # `known_state` (#1041, C8): the import affordance is the same sentence
+        # whichever vault the user pointed us at, and the seeded welcome is the
+        # one place a first-run user meets a capability that is not automatic. It
+        # names the page and what happens there — choose, confirm, then every fact
+        # waits for a person — and it claims nothing that has not happened: this
+        # chat reads no provider history, and a welcome that said past
+        # conversations were imported would be promising a run nobody performed
+        # (DESIGN.md's onboarding rule).
+        import_intro = (
+            "**Your past conversations are not imported automatically.** If you "
+            "want what your Claude Code and OpenCode chats already know about you "
+            "in this workspace, that is a separate, explicit choice in "
+            "[Import conversations](/memory/import): you pick the conversations, "
+            "see exactly what would be read and which model would receive it "
+            "before anything runs, and every fact it finds waits for you in "
+            "**To decide**. Nothing is read until you choose, and nothing is sent "
+            "until you confirm. The same page is in Memory at any time."
+        )
+        # The matching agent instruction. It points at the page and stops: an
+        # onboarding turn that ran an import itself would read a user's history
+        # with no consent screen, which is the one thing this journey exists to
+        # make impossible.
+        import_tour = (
+            "Past conversations are not imported on their own. Name "
+            "**Memory → Import** as the place where they choose which "
+            "conversations Ciaobot may read, say that every fact waits for them "
+            "to accept, and stop there: do not run an import for them, do not "
+            "scan past chats, and do not read any provider history yourself."
+        )
+
         if vault_mode == "existing":
             title = "Connect Existing Vault 👋"
             user_msg = (
@@ -1373,7 +1504,7 @@ class ProjectChatManager:
                 f"6. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
                 f"7. **Starting knowledge**: {starting_knowledge}\n"
                 f"8. **Verify**: After the curation, run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available. Report what was created, moved, left untouched, and any unresolved findings.\n"
-                f"9. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"9. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime. {import_tour}\n\n"
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
             assistant_msg = (
@@ -1381,6 +1512,7 @@ class ProjectChatManager:
                 f"I've connected workspace **{workspace_name}** to your existing folder at `{vault_root}`. "
                 f"I'll first inspect what is already there, then help curate the clear, durable knowledge into Ciaobot's current structure while preserving the rest.\n\n"
                 f"{memory_intro}\n\n"
+                f"{import_intro}\n\n"
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To get started, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
@@ -1399,7 +1531,7 @@ class ProjectChatManager:
                 f"5. **Explain memory early**: Before or right after the interview, tell the user there are two layers: the bounded profile and preferences Ciaobot keeps in `AGENTS.md` and loads into every conversation, and durable notes filed by category (currently {category_names or 'the categories this workspace uses'}). Point them at Memory → Categories as the one place categories are added, renamed or turned off, and say that archiving a chat is what turns it into filed memories and proposals. Do not run a second interview round about categories, do not scan past chats, and do not import anything.\n"
                 f"6. **Starting knowledge**: {starting_knowledge}\n"
                 f"7. **Verify**: Run `ciao vault-index --write`, `ciao vault-lint`, and `ciao os-audit --json` when available, then report the resulting structure.\n"
-                f"8. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
+                f"8. **Capabilities tour**: Once the interview and initial curation are done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime. {import_tour}\n\n"
                 f"Introduce yourself to the user, explain that you are starting logical workspace **{workspace_name}** at `{vault_root}`, and ask the first onboarding questions to bootstrap their profile."
             )
             assistant_msg = (
@@ -1407,6 +1539,7 @@ class ProjectChatManager:
                 f"Welcome! I've initialized logical workspace **{workspace_name}** at `{vault_root}` from scratch. "
                 f"I'm ready to customize the current vault structure and curate your durable knowledge with you.\n\n"
                 f"{memory_intro}\n\n"
+                f"{import_intro}\n\n"
                 f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To begin, tell me: **What is your name, and what is your primary focus or life area right now?**"
             )
@@ -2896,6 +3029,115 @@ class ProjectChatManager:
             })
         return chat
 
+    # ── Chat pins (durable pinned-file state, #1118) ─────────────────────
+
+    @property
+    def chat_pin_states(self) -> dict[str, dict[str, Any]]:
+        """Pin state for every persisted chat, keyed by chat id.
+
+        Chats with no pin and archived chats are included deliberately: a
+        client reconnecting after a gap has to be able to *close* a pin the
+        engine no longer holds, and it cannot do that for a chat the map
+        omits. Absence is therefore never read as "keep whatever you had".
+        """
+        return {cid: chat_pin_payload(chat) for cid, chat in self._chats.items()}
+
+    def set_chat_pin(
+        self, chat_id: str, path: str, *, expected_revision: int
+    ) -> dict[str, Any] | None:
+        """Apply a manual pin change. Returns the new pin payload, or ``None``
+        for a chat that does not exist.
+
+        ``expected_revision`` is compared against the chat's current revision
+        *before* anything is mutated, and a mismatch raises
+        ``ChatPinConflictError``: a device that raced a newer selection must
+        not replace it silently. An empty ``path`` closes the panel and
+        dismisses the path the server currently has selected; a nonempty one
+        selects it and clears only that path's own dismissal.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        if expected_revision != chat.pin_revision:
+            raise ChatPinConflictError(chat_pin_payload(chat))
+        return self._apply_pin(chat, path, manual=True)
+
+    def surface_chat_file(self, chat_id: str, path: str) -> dict[str, Any] | None:
+        """Record a server-owned surfacing of ``path`` for this chat.
+
+        This is the only place explicit agent intent becomes durable state, and
+        it deliberately does not care whether a browser is attached: a surface
+        with zero viewers still has to be there when one shows up. It respects
+        a dismissal for that exact path and otherwise replaces the pin.
+
+        Returns the current pin payload, or ``None`` for a chat that does not
+        exist (an unscoped or stale principal must not create state).
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        return self._apply_pin(chat, path, manual=False)
+
+    def _apply_pin(
+        self, chat: ChatInfo, path: str, *, manual: bool
+    ) -> dict[str, Any]:
+        """The single pin mutation/save/publish path, synchronous and await-free.
+
+        One writer, one save and one event for both callers: a manual write and
+        a server-owned surface can land in the same tick without interleaving
+        half-applied state. A no-op leaves the revision alone and publishes
+        nothing, so an unchanged reconnect or a repeated surface is not an
+        event storm.
+        """
+        target = path.strip()
+        dismissed = list(chat.dismissed_pin_paths)
+        if target:
+            if manual:
+                # Selecting a path re-arms it: only its own dismissal goes.
+                dismissed = [known for known in dismissed if known != target]
+            elif target in dismissed:
+                # The user closed this exact path; surfacing it again would
+                # reopen what they dismissed. Nothing changed, so nothing fires.
+                return chat_pin_payload(chat)
+            pinned = target
+        else:
+            pinned = ""
+            if manual and chat.pinned_file_path:
+                # Dismiss what the SERVER had selected, not the empty string
+                # the caller sent, and record it once.
+                current = chat.pinned_file_path
+                if current not in dismissed:
+                    dismissed.append(current)
+        if pinned == chat.pinned_file_path and dismissed == chat.dismissed_pin_paths:
+            return chat_pin_payload(chat)
+
+        previous = (
+            chat.pinned_file_path,
+            list(chat.dismissed_pin_paths),
+            chat.pin_revision,
+        )
+        chat.pinned_file_path = pinned
+        chat.dismissed_pin_paths = dismissed
+        chat.pin_revision = previous[2] + 1
+        try:
+            self._save(reason="chat_pin")
+        except Exception:
+            # Nothing is published and nothing looks accepted: the pre-write
+            # fields go back, and `_last_local_payload` was never advanced past
+            # them, so the next save still sees the original baseline.
+            (
+                chat.pinned_file_path,
+                chat.dismissed_pin_paths,
+                chat.pin_revision,
+            ) = previous
+            raise
+        self._events.publish({
+            "type": "chat_pin_changed",
+            "chat_id": chat.chat_id,
+            **chat_pin_payload(chat),
+        })
+        return chat_pin_payload(chat)
+
     def _parse_transcript_messages(self, text: str) -> list[dict]:
         """Extract user and assistant messages from transcript markdown."""
         turns_data = []
@@ -3365,6 +3607,7 @@ class ProjectChatManager:
             "project_id": chat.project_id,
             "reason": "user",
         })
+        self._notify_chat_ended(chat_id, chat, "deleted")
         return True
 
     async def _maybe_archive_proposal_helper(self, chat_id: str) -> bool:
@@ -3415,8 +3658,9 @@ class ProjectChatManager:
         project: ProjectInfo | None,
         archive_path: Path,
         doc_path: str,
+        focus: dict[str, str] | None = None,
     ) -> str | None:
-        return self._memory_pass.enqueue(source, project, archive_path, doc_path)
+        return self._memory_pass.enqueue(source, project, archive_path, doc_path, focus)
 
     async def resume_memory_passes(self) -> None:
         self._memory_pass.resume()
@@ -3530,6 +3774,7 @@ class ProjectChatManager:
             "project_id": chat.project_id,
             "archive_path": chat.archive_path,
         })
+        self._notify_chat_ended(chat_id, chat, "archived")
         # Not keyed on `chat.schedule_id`: an interval entry bound to an
         # existing chat records it as its run chat without stamping the chat.
         if self.schedule_store is not None and settle_runs_for_archived_chat(
@@ -3566,9 +3811,10 @@ class ProjectChatManager:
         outcome: ArchiveOutcome,
         chat_meta: ChatInfo | None,
         project_meta: ProjectInfo | None,
+        focus: dict[str, str] | None = None,
     ) -> None:
         return self._archive_pipeline_for().run_archive_postprocess(
-            chat_id, outcome, chat_meta, project_meta
+            chat_id, outcome, chat_meta, project_meta, focus
         )
 
     def _run_archive_index_best_effort(
@@ -4460,7 +4706,18 @@ class ProjectChatManager:
                 env["CIAO_VAULT_ROOT"] = str(self._config.agent_vault_root(workspace))
         except (AttributeError, ValueError, OSError):
             logger.debug("could not resolve the agent vault root for %r", workspace)
-        env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
+        gws_profile = self._workspace_gws_profile(workspace)
+        env["GWS_PROFILE"] = gws_profile
+        # Point a bare `gws` at the same credential dir `ciao gws` would use.
+        # Without it, an agent that skips the wrapper reads `~/.config/gws`
+        # (often a stale keyring-encrypted login) and reports Google as
+        # unauthenticated while the workspace account is connected.
+        if gws_profile:
+            from ciao.gws_auth import profile_config_dir
+
+            config_dir = profile_config_dir(self._config, gws_profile)
+            if config_dir is not None:
+                env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
@@ -4897,6 +5154,12 @@ class ProjectChatManager:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
             if ref:
                 image_refs.append(str(ref))
+        if not str(text or "").strip() and not image_refs:
+            # Blank text with images left is a valid entry — it flushes as an
+            # image-only follow-up. Blank text with no images is not: refuse
+            # the edit instead of keeping a chip nothing would ever send
+            # (#1112).
+            return False
         stream = self._broker.get(chat_id)
         if stream is not None and not stream.background:
             if not stream.edit_pending(entry_id, text, image_refs):
@@ -5054,11 +5317,11 @@ class ProjectChatManager:
         return self._subagents.running_counts()
 
     @property
-    def background_run_counts(self) -> dict[str, int]:
-        """Live ``background_run_start`` count per chat (>0 only).
+    def background_runs(self) -> dict[str, list[dict[str, Any]]]:
+        """Live ``background_run_start`` runs per chat, as PWA summaries.
 
         Read from the runner's registry, not a cached tally, so a client
-        reconnecting mid-run gets the real number rather than whatever it had
+        reconnecting mid-run gets the real rows rather than whatever it had
         when its socket dropped. (A restart does not carry runs over:
         ``BackgroundRunner.start`` resolves every non-terminal run as an
         orphan before the server serves, so the registry is already honest by
@@ -5069,32 +5332,53 @@ class ProjectChatManager:
             return {}
         try:
             # ``_background_runner`` is typed Any (wired after construction),
-            # so the annotation is what keeps this a dict[str, int].
-            counts: dict[str, int] = runner.active_counts()
+            # so the annotation is what keeps this typed.
+            active: dict[str, list[Any]] = runner.active_runs()
         except Exception:  # noqa: BLE001 — an indicator must not break /ws/events
-            logger.exception("Background run counts unavailable")
+            logger.exception("Background runs unavailable")
             return {}
-        return counts
+        return {
+            chat_id: [run.summary() for run in runs]
+            for chat_id, runs in active.items()
+        }
 
-    def announce_background_runs(self, chat_id: str) -> None:
-        """Publish this chat's live background-run count to connected clients.
+    def _background_run_summaries(self, chat_id: str) -> list[dict[str, Any]]:
+        """One chat's live run summaries, without summarising every chat's."""
+        runner = self._background_runner
+        if runner is None:
+            return []
+        try:
+            active: dict[str, list[Any]] = runner.active_runs()
+        except Exception:  # noqa: BLE001 — an indicator must not break the edge
+            logger.exception("Background runs unavailable")
+            return []
+        return [run.summary() for run in active.get(chat_id, [])]
+
+    def announce_background_runs(
+        self, chat_id: str, *, finished: Any | None = None
+    ) -> None:
+        """Publish this chat's live background runs to connected clients.
 
         Called on both edges (a run starting, a run finishing). A background
         run is deliberately non-blocking, so the chat's turn ends while the
         command is still going; this event is the only thing that keeps the
         chat from looking finished. Distinct from ``chat_subagents_ready``:
-        these runs have no transcript and no agent to open, only a count and
-        a log.
+        these runs have no transcript and no agent to open, only a command
+        and a log. ``finished`` is the run that just ended, so the client can
+        say how it ended instead of the row silently vanishing.
         """
         if not chat_id:
             return
         chat = self._chats.get(chat_id)
-        self._events.publish({
+        event: dict[str, Any] = {
             "type": "chat_background_runs",
             "chat_id": chat_id,
             "project_id": chat.project_id if chat is not None else "",
-            "running": self.background_run_counts.get(chat_id, 0),
-        })
+            "runs": self._background_run_summaries(chat_id),
+        }
+        if finished is not None:
+            event["finished"] = finished.summary()
+        self._events.publish(event)
 
     def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
         """Move queued follow-ups off the (about-to-be-torn-down) stream onto
@@ -5112,6 +5396,10 @@ class ProjectChatManager:
         if chat is not None:
             chat.pending_queue = list(parked)
             self._save()
+            # The stream is about to be torn down. Publish the parked list
+            # itself — `stream.pending` is already empty, and an empty
+            # `queue_state` would clear the chips.
+            stream.publish_queue_state(chat.pending_queue)
 
     def _arm_retry(
         self,
@@ -5394,6 +5682,51 @@ class ProjectChatManager:
             return False
         return any(p.search(flat) for p in _INTERIM_SUBAGENT_PATTERNS)
 
+    def on_turn_started(
+        self, callback: Callable[[str, "ChatStream"], None]
+    ) -> None:
+        """Subscribe to "a turn a person is present for has begun".
+
+        Fired from :meth:`ChatStreaming.start_drive`, which is the one place a
+        turn begins — so it covers every route to the model (this manager's
+        ``start_stream``, the composer's WebSocket, an approval the user answered
+        in the chat) rather than the subset a caller happens to know about.
+
+        Only *attended* turns are announced. A background drain and an
+        unattended dispatch are the engine talking to itself in a chat, and
+        treating them as the user's continuation of a conversation would settle a
+        delegated attempt on work nobody asked for.
+
+        A callback that raises is logged and skipped: an observer cannot be
+        allowed to fail the turn it is watching.
+        """
+        self._turn_started.append(callback)
+
+    def on_chat_ended(self, callback: Callable[[str, Any, str], None]) -> None:
+        """Subscribe to "this chat was archived or deleted".
+
+        The callback gets the chat row as it was (a deleted chat is no longer in
+        the registry to look up) and ``"archived"`` or ``"deleted"``. A callback
+        that raises is logged and skipped: an observer cannot fail the archive.
+        """
+        self._chat_ended.append(callback)
+
+    def _notify_chat_ended(self, chat_id: str, chat: Any, how: str) -> None:
+        # `getattr`: fixtures built with `__new__` have no subscriber list.
+        for callback in tuple(getattr(self, "_chat_ended", ())):
+            try:
+                callback(chat_id, chat, how)
+            except Exception:
+                logger.exception("A chat-ended subscriber failed for chat %s", chat_id)
+
+    def notify_turn_started(self, chat_id: str, stream: ChatStream) -> None:
+        """Tell every subscriber a turn began here. Never raises."""
+        for callback in tuple(self._turn_started):
+            try:
+                callback(chat_id, stream)
+            except Exception:
+                logger.exception("A turn-start subscriber failed for chat %s", chat_id)
+
     def start_stream(
         self,
         chat_id: str,
@@ -5467,11 +5800,15 @@ class ProjectChatManager:
             if chat_meta.pending_queue:
                 for entry in chat_meta.pending_queue:
                     text = str(entry.get("text", ""))
-                    if not text:
+                    parked_refs = [str(ref) for ref in (entry.get("images") or [])]
+                    # Same rule as every other ingress point: an image-only
+                    # parked follow-up has something to send, only an entry
+                    # with neither text nor images does not (#1112).
+                    if not text.strip() and not parked_refs:
                         continue
                     stream.enqueue(
                         text,
-                        [str(ref) for ref in (entry.get("images") or [])],
+                        parked_refs,
                         entry_id=entry.get("id") or None,
                     )
                 chat_meta.pending_queue = []
@@ -6737,8 +7074,14 @@ class ProjectChatManager:
             payload["duration_ms"] = duration_ms
         return payload
 
-    async def stop_chat(self, chat_id: str) -> bool:
+    async def stop_chat(self, chat_id: str, *, park_queue: bool = False) -> bool:
         """Stop the chat's in-flight turn.
+
+        ``park_queue`` is for the task board's Stop and Detach: the stream is
+        flagged (``park_on_stop``) so the drive loop parks the queued follow-ups
+        on the chat (re-seeded by the next user turn) instead of running them,
+        including any queued while the stop is in flight. A composer Stop
+        leaves them to run, as before.
 
         Two layers, so Stop works with every provider and never hangs:
 
@@ -6749,11 +7092,23 @@ class ProjectChatManager:
            expires, cancel the turn task. The drive loop turns that into a
            synthetic result carrying the partial answer, so every client
            leaves streaming state immediately and queued follow-ups still
-           flush.
+           flush (unless ``park_queue``).
         """
+        # A Stop must also cancel any retry armed for this chat (quota /
+        # connection / startup / auth). The turn that armed it already errored,
+        # so no stream is live and the retry would otherwise replay after the
+        # stop (#1109). Only fire when a retry is actually pending: clearing
+        # unconditionally would stamp ``retry_status="stopped"`` (with no path
+        # back to "") and permanently refuse the archive-proposal helper and the
+        # memory pass after any plain Stop.
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.retry_status == "pending":
+            self.stop_chat_retry(chat_id)
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
+            if park_queue and not stream.background:
+                stream.park_on_stop = True
             if stream.background:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream).
@@ -6963,15 +7318,12 @@ class ProjectChatManager:
         if not user_text:
             return None
         try:
-            from ciao.insights import _resolve_insights_call, resolve_insights_model
+            from ciao.insights import resolve_insights_model
             from ciao.providers.oneshot import run_oneshot
 
             project = self._projects.get(chat.project_id)
             workspace = getattr(project, "workspace", None) if project else None
-            model = resolve_insights_model(self._config, workspace, provider=provider)
-            model, provider, _note = _resolve_insights_call(
-                self._config, model, provider=provider
-            )
+            model = resolve_insights_model(self._config, workspace, provider)
             reply = (assistant_text or "").strip()
             sections = [f"<user>{user_text[:1500]}</user>"]
             if reply:

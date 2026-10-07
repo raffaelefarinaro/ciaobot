@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import HomeIntake from '../HomeIntake.vue'
+import { applyKeyboardSettings } from '../../composables/useKeyboardSettings'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import type { ChatInfo } from '../../lib/types'
@@ -24,6 +25,7 @@ vi.mock('../../lib/sharedContent', async (importOriginal) => ({
 
 describe('HomeIntake', () => {
   beforeEach(() => {
+    applyKeyboardSettings({ keyboard_shortcuts: {}, keyboard_send_mode: 'modifier' })
     setActivePinia(createPinia())
     openPicker.mockReset()
     shared.read.mockReset()
@@ -244,6 +246,27 @@ describe('HomeIntake', () => {
     expect(store.newChatInProject).not.toHaveBeenCalled()
 
     await input.trigger('keydown', { key: 'Enter', ctrlKey: true })
+    await flushPromises()
+    expect(store.newChatInProject).toHaveBeenCalledWith('general')
+    wrapper.unmount()
+  })
+
+  it('supports Enter to send while Shift+Enter remains a newline', async () => {
+    applyKeyboardSettings({ keyboard_send_mode: 'enter' })
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'general', name: 'General', workspace: 'personal', order: 0 }] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+    vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'x' } as ChatInfo)
+    vi.spyOn(store, 'sendMessage').mockReturnValue(true)
+
+    const wrapper = mount(HomeIntake)
+    const input = wrapper.get<HTMLTextAreaElement>('#home-intake-prompt')
+    await input.setValue('Draft the plan')
+    await input.trigger('keydown', { key: 'Enter', shiftKey: true })
+    await flushPromises()
+    expect(store.newChatInProject).not.toHaveBeenCalled()
+
+    await input.trigger('keydown', { key: 'Enter' })
     await flushPromises()
     expect(store.newChatInProject).toHaveBeenCalledWith('general')
     wrapper.unmount()

@@ -50,28 +50,11 @@ def _tag_from_url(url: str) -> str:
     return ""
 
 
-def _github_token() -> str:
-    """Return a GitHub API token from the environment, if any.
-
-    Authenticated requests raise GitHub's rate limit from 60 to 5000 req/hr,
-    which matters on shared/NAT egress IPs where the unauthenticated pool is
-    easily exhausted by other clients.
-    """
-    for name in ("CIAO_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            return value
-    return ""
-
-
 def _github_request(url: str) -> urllib.request.Request:
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "ciaobot-package-updater",
     }
-    token = _github_token()
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
     return urllib.request.Request(url, headers=headers)
 
 

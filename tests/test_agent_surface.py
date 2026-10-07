@@ -1,6 +1,7 @@
 """The agent CLI surface: dispatcher, route, CLI mapping and prompt variant."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import inspect
 import io
@@ -161,6 +162,185 @@ def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> Non
     assert group <= set(service.operation_table)
 
 
+# ── The task board surface (#1021, B3) ────────────────────────────────────
+#
+# One workspace-scoped service behind both `ciao task …` and `/api/tasks*`, so
+# what an agent can do to a task is a property of the operation table and the
+# store, not of whichever surface asked.
+
+
+def _task_service(tmp_path: Path, *, mode: str = "auto"):
+    """A real control plane over two sibling workspaces, plus a dispatcher."""
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.control_plane import CiaoControlPlane
+
+    config = CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            "personal": WorkspaceConfig(name="personal", vault_root="memory-vault/personal"),
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+
+    class _Pcm:
+        """Only what the task service reads: one chat's mode, and the roots."""
+
+        def __init__(self) -> None:
+            self.chat = SimpleNamespace(mode=mode)
+
+        def _workspace_vault_root(self, workspace: str) -> Path:
+            return config.workspace_vault_root(workspace)
+
+        def get_chat(self, _chat_id: str):
+            return self.chat
+
+        def get_active_stream(self, _chat_id: str):
+            return None
+
+        def get_project(self, _project_id: str):
+            return None
+
+        def list_projects(self, _workspace: str | None = None):
+            return []
+
+    service, _fake = _service(tmp_path)
+    service.bind(
+        CiaoControlPlane(
+            config, project_chat_manager=_Pcm(), schedule_manager=SimpleNamespace()
+        )
+    )
+    return service
+
+
+def test_task_operations_register_as_two_reads_and_three_writes(tmp_path: Path) -> None:
+    """Reads are `_READ`, every write is `_WRITE` and mutating.
+
+    The annotations are what the plan-mode gate and the approval split read, so
+    a `_READ` entry on a write would let a plan-mode chat file a task. And
+    `task_action` is `_WRITE`, not `_DESTRUCTIVE`: the store refuses an agent's
+    completion outright, so it carries no reachable destructive effect.
+    `task_attempt_action` is the exception among the delegation pair and *is*
+    `_DESTRUCTIVE`, because its `stop` ends a turn irreversibly — the same reason
+    `chat_stop` is ask-class.
+    """
+    from ciao import mcp_server
+
+    service = _task_service(tmp_path)
+    assert {
+        "task_list", "task_get", "task_create", "task_update", "task_action",
+        "task_delegate", "task_attempt_action",
+    } <= set(service.operation_table)
+    for name in ("task_list", "task_get"):
+        assert mcp_server.OPERATIONS_BY_NAME[name].annotations == mcp_server._READ
+    for name in ("task_create", "task_update", "task_action", "task_delegate"):
+        annotations = mcp_server.OPERATIONS_BY_NAME[name].annotations
+        assert annotations == mcp_server._WRITE, name
+        assert annotations.readOnlyHint is False
+    assert (
+        mcp_server.OPERATIONS_BY_NAME["task_attempt_action"].annotations
+        == mcp_server._DESTRUCTIVE
+    )
+
+
+def test_an_agent_can_file_and_move_a_task_but_never_complete_one(tmp_path: Path) -> None:
+    """The store's completion rule, end to end through the CLI surface.
+
+    Filing and moving work; completing does not, however it is spelled, and the
+    refusal leaves the record exactly where it was.
+    """
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Review the diff", "due": "2026-10-20"})
+        assert created.status_code == 200, created.text
+        task = created.json()["data"]
+        assert task["title"] == "Review the diff"
+        assert task["due"] == "2026-10-20"
+
+        listed = _post(client, token, "task_list", {})
+        assert [row["id"] for row in listed.json()["data"]] == [task["id"]]
+
+        moved = _post(
+            client,
+            token,
+            "task_action",
+            {"action": "move", "task_id": task["id"], "status": "in_progress",
+             "expected_revision": task["revision"]},
+        )
+        assert moved.status_code == 200, moved.text
+        revision = moved.json()["data"]["revision"]
+
+        refused = _post(
+            client, token, "task_action",
+            {"action": "complete", "task_id": task["id"], "expected_revision": revision},
+        )
+        assert refused.status_code == 422
+        assert refused.json()["error"]["code"] == "task_completion_requires_user"
+
+        # Spelling it as a plain status edit is the same refusal, not a way in.
+        edited = _post(
+            client, token, "task_update",
+            {"task_id": task["id"], "expected_revision": revision, "status": "done"},
+        )
+        assert edited.json()["error"]["code"] == "task_completion_requires_user"
+        assert _post(client, token, "task_get", {"task_id": task["id"]}).json()["data"]["status"] == "in_progress"
+
+
+def test_a_stale_task_revision_is_a_retryable_refusal_over_the_cli(tmp_path: Path) -> None:
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Plan the launch"}).json()["data"]
+        first = _post(
+            client, token, "task_update",
+            {"task_id": created["id"], "expected_revision": created["revision"], "due": "2026-10-05"},
+        )
+        assert first.status_code == 200, first.text
+        stale = _post(
+            client, token, "task_update",
+            {"task_id": created["id"], "expected_revision": created["revision"], "title": "stale"},
+        )
+        assert stale.status_code == 422
+        error = stale.json()["error"]
+        assert error["code"] == "task_revision_conflict"
+        assert error["retryable"] is True
+        assert _post(client, token, "task_get", {"task_id": created["id"]}).json()["data"]["due"] == "2026-10-05"
+
+
+def test_a_task_in_another_workspace_is_not_reachable_from_this_chat(tmp_path: Path) -> None:
+    service = _task_service(tmp_path)
+    personal, work = _token(service), _token(service, "chat-w", workspace="work")
+    with _client(service) as client:
+        mine = _post(client, personal, "task_create", {"title": "Personal"}).json()["data"]
+        theirs = _post(client, work, "task_create", {"title": "Work"}).json()["data"]
+        assert [row["id"] for row in _post(client, personal, "task_list").json()["data"]] == [mine["id"]]
+        assert [row["id"] for row in _post(client, work, "task_list").json()["data"]] == [theirs["id"]]
+        cross = _post(client, work, "task_get", {"task_id": mine["id"]})
+    assert cross.status_code == 422
+    assert cross.json()["error"]["code"] == "task_not_found"
+
+
+def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
+    """The gate the annotations claim, checked on the operations it applies to."""
+    service = _task_service(tmp_path, mode="plan")
+    token = _token(service)
+    with _client(service) as client:
+        listed = _post(client, token, "task_list", {})
+        filed = _post(client, token, "task_create", {"title": "Not in plan mode"})
+        moved = _post(
+            client, token, "task_action",
+            {"action": "move", "task_id": "a" * 32, "status": "in_progress", "expected_revision": "r"},
+        )
+    assert listed.status_code == 200
+    for response in (filed, moved):
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "plan_mode_read_only"
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -197,6 +377,25 @@ def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> Non
         (["schedule", "resume", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "resume"})),
         (["schedule", "run", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "run"})),
         (["schedule", "delete", "s1"], ("schedule_action", {"schedule_id": "s1", "action": "delete"})),
+        (["webhook", "list"], ("webhook_list", {})),
+        # The prose travels as a file; only `--name` is required.
+        (["webhook", "create", "--name", "CI push"], ("webhook_create", {"name": "CI push"})),
+        (
+            ["webhook", "update", "a" * 32, "--revision", "3", "--name", "CI", "--disable"],
+            ("webhook_update", {"trigger_id": "a" * 32, "expected_revision": "3", "name": "CI", "enabled": False}),
+        ),
+        (
+            ["webhook", "update", "a" * 32, "--revision", "3", "--enable"],
+            ("webhook_update", {"trigger_id": "a" * 32, "expected_revision": "3", "enabled": True}),
+        ),
+        (
+            ["webhook", "rotate", "a" * 32, "--revision", "3"],
+            ("webhook_rotate", {"trigger_id": "a" * 32, "expected_revision": "3"}),
+        ),
+        (
+            ["webhook", "delete", "a" * 32, "--revision", "3"],
+            ("webhook_delete", {"trigger_id": "a" * 32, "expected_revision": "3"}),
+        ),
         (["chat", "continue", "--chat", "c3"], ("chat_continue", {"chat_id": "c3"})),
         (["chat", "retry"], ("chat_retry", {"chat_id": "", "action": "try_now", "prompt": ""})),
         (["chat", "update", "--model", "opus", "--thinking-level", "high"], ("chat_update", {"chat_id": "", "model": "opus", "thinking_level": "high"})),
@@ -207,6 +406,29 @@ def test_run_and_schedule_operations_dispatch_on_cli_only(tmp_path: Path) -> Non
         (["project", "update", "p1", "--vault-folder", "Projects/Q4"], ("project", {"action": "update", "project_id": "p1", "vault_folder": "Projects/Q4"})),
         (["project", "restore", "q4-launch"], ("project", {"action": "restore", "stem": "q4-launch"})),
         (["project", "complete", "p1"], ("project_action", {"action": "complete", "project_id": "p1"})),
+        (["task", "list"], ("task_list", {})),
+        (["task", "get", "a1b2"], ("task_get", {"task_id": "a1b2"})),
+        (["task", "create", "--title", "Ship the board"], ("task_create", {"title": "Ship the board"})),
+        (
+            ["task", "create", "--title", "Ship it", "--project", "p1", "--due", "2026-10-20"],
+            ("task_create", {"title": "Ship it", "project_id": "p1", "due": "2026-10-20"}),
+        ),
+        (
+            ["task", "update", "a1b2", "--revision", "rev1", "--title", "Ship the board"],
+            ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "title": "Ship the board"}),
+        ),
+        (
+            ["task", "update", "a1b2", "--revision", "rev1", "--status", "in_review"],
+            ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "status": "in_review"}),
+        ),
+        (
+            ["task", "move", "a1b2", "--to", "in_progress", "--revision", "rev1"],
+            ("task_action", {"action": "move", "task_id": "a1b2", "status": "in_progress", "expected_revision": "rev1"}),
+        ),
+        (
+            ["task", "complete", "a1b2", "--revision", "rev1"],
+            ("task_action", {"action": "complete", "task_id": "a1b2", "expected_revision": "rev1"}),
+        ),
         (
             ["run", "start", "--label", "report", "--timeout-s", "900", "--env", "A=1", "--", "bash", "-lc", "a && b"],
             ("background_run_start", {"cmd": ["bash", "-lc", "a && b"], "env": {"A": "1"}, "timeout_s": 900, "label": "report"}),
@@ -222,10 +444,14 @@ def test_cli_arguments_map_to_operations(argv: list[str], expected: tuple[str, d
     assert agent_cli.resolve(parser.parse_args(argv)) == expected
 
 
-def test_every_documented_command_parses() -> None:
+def test_every_documented_command_parses(tmp_path: Path) -> None:
     """The skill's telemetry table is the contract: each row must be a real command."""
     table = json.loads((Path(agent_cli._SKILL_PATH).parent / "commands.json").read_text(encoding="utf-8"))
     parser = agent_cli.build_parser()
+    # `task report` reads its summary at parse time, so it needs a real file
+    # rather than the placeholder names the flag-only rows get.
+    summary = tmp_path / "summary.md"
+    summary.write_text("did the thing\n", encoding="utf-8")
     required = {
         "memory update": ["--region", "memory", "--action", "add"],
         "vault search": ["q"], "vault review show": ["p"],
@@ -235,8 +461,18 @@ def test_every_documented_command_parses() -> None:
         "note verify": ["--payload-file", "p.json"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
-        "project complete": ["p"], "project delete": ["p"], "schedule update": ["s"], "schedule pause": ["s"],
+        "project complete": ["p"], "project delete": ["p"], "task create": ["--title", "t"],
+        "task get": ["a" * 32], "task update": ["a" * 32, "--revision", "r"],
+        "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
+        "task complete": ["a" * 32, "--revision", "r"],
+        "task delegate": ["a" * 32, "--revision", "r"],
+        "task report": ["a" * 32, "--outcome", "done", "--summary-file", str(summary)],
+        "task attempt": ["a" * 32, "stop"],
+        "schedule update": ["s"], "schedule pause": ["s"],
         "schedule resume": ["s"], "schedule run": ["s"], "schedule delete": ["s"],
+        "webhook create": ["--name", "n"], "webhook update": ["a" * 32, "--revision", "1"],
+        "webhook rotate": ["a" * 32, "--revision", "1"],
+        "webhook delete": ["a" * 32, "--revision", "1"],
         "run start": ["--", "true"], "run status": ["r"], "run cancel": ["r"],
     }
     for command, operation in table.items():
@@ -244,6 +480,43 @@ def test_every_documented_command_parses() -> None:
         assert agent_cli.is_agent_invocation(argv), command
         op, _arguments = agent_cli.resolve(parser.parse_args(argv))
         assert op == operation, command
+
+
+def test_every_agent_command_is_in_the_telemetry_table() -> None:
+    """The other direction: a command the parser offers is a command we name.
+
+    `test_every_documented_command_parses` walks the table into the parser, so
+    a verb the CLI dispatches but the table never listed passed it — and
+    `task report` (#1064) was exactly that for the life of the operation. The
+    cost is quiet and lands on the eval, not the CLI: `behavioral_eval`
+    normalizes a `ciao <noun> <verb>` invocation to its operation *through this
+    table*, by longest matching prefix, so an unlisted verb never becomes
+    `task_report` and a probe whose agent reported a delegated task scored as a
+    wrong tool. `ciao help` is the one deliberate exclusion: it is the long
+    reference `AGENT_CLI.md` points at, not an operation.
+    """
+
+    def subparsers(parser: argparse.ArgumentParser) -> list[dict[str, argparse.ArgumentParser]]:
+        return [
+            action.choices
+            for action in parser._actions
+            if isinstance(getattr(action, "choices", None), dict) and action.dest != "help"
+        ]
+
+    def leaves(
+        parser: argparse.ArgumentParser, prefix: list[str]
+    ) -> list[str]:
+        groups = subparsers(parser)
+        if not groups:
+            return [" ".join(prefix)]
+        return [
+            leaf for choices in groups for name, sub in choices.items()
+            for leaf in leaves(sub, [*prefix, name])
+        ]
+
+    table = json.loads((Path(agent_cli._SKILL_PATH).parent / "commands.json").read_text(encoding="utf-8"))
+    unlisted = sorted(set(leaves(agent_cli.build_parser(), [])) - set(table) - {"help"})
+    assert unlisted == [], f"agent commands missing from ciao-cli/commands.json: {unlisted}"
 
 
 def test_shared_nouns_route_only_their_agent_verbs() -> None:
@@ -364,8 +637,40 @@ def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
     # be described at all. A command with no line here is a command the model
     # does not know exists, which for this one means it hand-edits a note's
     # `updated:` and leaves no receipt behind: exactly the defect the child
-    # exists to close. Pay for the line, and keep the ceiling honest.
-    assert len(cli) < 9500
+    # exists to close. Raised to 10300 for the task board (#1021, B3), which is
+    # the same trade for six commands: an agent that never sees `task list`
+    # invents its own board in a note and there is no second source of truth for
+    # it to have come from. The revision discipline and the completion refusal
+    # have to travel with the verbs, or the first thing it does is overwrite a
+    # task nobody read. Pay for the line, and keep the ceiling honest.
+    # Raised again to 10600 for task delegation (#1033, B5), the same trade for two
+    # more: without `task delegate`/`task attempt` an agent handed "work on the
+    # board task" reaches for `task update` and edits the record by hand, which
+    # produces no chat, no attempt and no review — the three things that make a
+    # delegation a delegation. Two lines of prose had to come with them, because
+    # "attended, not bypassing" and "a finished turn waits for review" are the two
+    # properties a model cannot infer from a verb list.
+    # Raised again to 11000 for webhook triggers (#1039, A6), the same trade for five
+    # commands: the shown-once secret and the created-disabled rule are the two facts
+    # that keep an agent from pasting a credential into a note or enabling a trigger
+    # nobody asked to enable, and neither survives being left to `ciao help`.
+    # B5 (#1033) and A6 (#1039) added their lines on divergent branches and meet
+    # here, so this is 11400 rather than either's 10600/11000: both sets of prose
+    # have to travel or one feature's guarantee silently disappears.
+    # Raised again to 11700 after a real chat (2026-10-05) asked "what can I
+    # delegate to you?", did the work in its own turn, left every task untouched,
+    # and only found `in_review` from `--help`. The column names, the
+    # delegate-means-`task delegate` rule and the note-then-`in_review` rule for
+    # self-worked tasks are what that chat lacked; `ciao-capabilities` gets one
+    # line so feature questions stop being answered from general knowledge.
+    # Raised again to 12000 for `task report` (#1064), the same trade for one
+    # command: a delegated turn that ends without a report reads to the user as
+    # *Unfinished* rather than as a result to review, so the verb a delegated
+    # agent is required to call is exactly the one a verb list cannot imply. This
+    # is the fifth raise, and `docs/UPKEEP.md` records the standing argument that
+    # the next one should move a section OUT to the `ciao-cli` skill instead of
+    # buying a sixth. Pay for the line, and keep the ceiling honest.
+    assert len(cli) < 12000
 
 
 def test_ciao_entrypoint_routes_agent_nouns_before_the_operator_parser(
@@ -728,7 +1033,13 @@ def _two_workspace_plane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     # The seam the re-rooting migration flips: per-workspace directories.
     monkeypatch.setattr(CiaoConfig, "agent_root", lambda self, name: tmp_path / name)
-    pcm = SimpleNamespace(get_active_stream=lambda chat_id: None)
+    # `file_surface` records its intent through the manager for a chat-scoped
+    # principal (#1118), so this fake declares the method rather than relying on
+    # a production-side getattr shim that does not exist.
+    pcm = SimpleNamespace(
+        get_active_stream=lambda chat_id: None,
+        surface_chat_file=lambda chat_id, path: None,
+    )
     plane = CiaoControlPlane(
         config, project_chat_manager=pcm, schedule_manager=SimpleNamespace()
     )

@@ -6,7 +6,7 @@
         <span class="dot dot--y"></span>
         <span class="dot dot--g"></span>
         <span class="login-shell-title">
-          {{ isRestarting ? 'ciaobot@local · restarting' : (isBootstrap ? 'ciaobot@local · first-run setup' : 'ciaobot@local · session') }}
+          {{ isRestarting ? 'ciaobot@local · restarting' : (isBootstrap ? 'ciaobot@local · first-run setup' : 'ciaobot@local · log in') }}
         </span>
       </div>
 
@@ -62,7 +62,7 @@
             </li>
             <li>
               <strong>Archive into a second brain.</strong>
-              <span>Archive a chat and it remembers what should be: your preferences, the people and projects you mention. Notes are sorted by category, and you can change those categories any time after setup.</span>
+              <span>Archive a chat and it remembers what should be: your preferences, the people and projects you mention. Notes are sorted by category, and you can change those categories any time after setup. Past Claude Code and OpenCode conversations are not imported on their own — after setup, Memory → Import is where you choose which ones Ciaobot may read, and every fact waits for you to accept.</span>
             </li>
             <li>
               <strong>Files, with history.</strong>
@@ -381,39 +381,41 @@
       </form>
 
       <!-- STANDARD LOGIN FORM -->
-      <form v-else class="login-body" @submit.prevent="doLogin">
+      <!-- A plain labelled password field, not a terminal prompt: the old
+           "$ auth_token: paste token ↵" line hid that this is the password
+           the owner chose in setup, and people could not tell where to type. -->
+      <form v-else class="login-body login-form" @submit.prevent="doLogin">
         <p class="line line--banner">
           <span class="wordmark wordmark--md">ciaobot</span>
-          <span class="banner-meta">// personal assistant · auth required</span>
         </p>
-        <p class="line line--sys">connecting to Ciaobot<span v-if="loading"> ...</span></p>
-        <p class="line">
-          <span class="prompt">$</span>
-          <label class="prompt-label" for="login-token">auth_token:</label>
+        <h1 class="login-title">Enter your password</h1>
+        <p class="login-lede">This is the Ciaobot password you chose when you set it up.</p>
+        <label class="login-label" for="login-token">Password</label>
+        <div class="login-row">
           <input
             id="login-token"
             v-model="token"
             type="password"
-            class="prompt-input"
-            placeholder="paste token"
+            class="login-input"
             autofocus
             autocomplete="current-password"
+            :aria-invalid="error ? 'true' : undefined"
+            :aria-describedby="error ? 'login-error' : undefined"
             :disabled="loading"
           />
           <button
-            class="prompt-submit"
+            class="login-submit"
             :disabled="!token || loading"
             type="submit"
-            :title="loading ? 'Authenticating' : 'Submit'"
-            aria-label="Submit"
-          >{{ loading ? '…' : '↵' }}</button>
-        </p>
-        <p v-if="error" class="line line--error">
-          <span class="prompt prompt--err">!</span>{{ error }}
-        </p>
-        <p v-else-if="!loading" class="line line--hint">
-          <span class="caret"></span>
-        </p>
+          >{{ loading ? 'Logging in…' : 'Log in' }}</button>
+        </div>
+        <p v-if="error" id="login-error" class="login-error" role="alert">{{ error }}</p>
+        <a
+          class="login-help"
+          :href="PASSWORD_HELP_URL"
+          target="_blank"
+          rel="noopener"
+        >Forgot your password?</a>
       </form>
     </div>
   </div>
@@ -445,6 +447,20 @@ const apiFallback = ref(false)
 // rejects a setup without one), so the wizard asks for it up front instead of
 // hiding a toggle under Advanced.
 const minPasswordLength = 4
+
+// The website's answer to "where is my password": it lives in the host's
+// workspace .env. The login page links here because the person locked out is
+// exactly the one who cannot ask Ciaobot.
+const PASSWORD_HELP_URL = 'https://www.raffaelefarinaro.com/ciaobot/guide.html#password'
+
+// The server answers a wrong password with a bare "invalid token"; say what
+// happened in the words the page uses.
+function loginErrorMessage(e: unknown): string {
+  const status = (e as { status?: number } | null)?.status
+  if (status === 401) return 'That password did not work. Check it and try again.'
+  if (status === 429) return 'Too many tries. Wait a minute, then try again.'
+  return 'Could not reach Ciaobot. Check that it is running on the host computer.'
+}
 const password = ref('')
 const passwordConfirm = ref('')
 const passwordProblem = computed(() => {
@@ -624,9 +640,6 @@ const providerInstruction = computed(() => {
       ? 'The desktop app is installed, but Ciaobot drives the CLI. Install it in your Terminal:'
       : 'Not installed yet. Run this in your Terminal to install it:'
   }
-  if (provider.value === 'opencode' && setupStatus.value?.providers?.opencode?.auth === 'missing') {
-    return 'Install opencode if needed, then run this in your Terminal and refresh this check:'
-  }
   return 'To authorize, run this command in your Terminal:'
 })
 
@@ -643,7 +656,7 @@ async function doLogin() {
   try {
     await auth.login(token.value)
   } catch (e) {
-    error.value = errorMessage(e, 'login failed')
+    error.value = loginErrorMessage(e)
   } finally {
     loading.value = false
   }
@@ -939,34 +952,7 @@ onUnmounted(() => {
   color: var(--error);
 }
 
-.prompt-label {
-  color: var(--fg2);
-  flex-shrink: 0;
-}
 
-.prompt-input {
-  flex: 1;
-  min-width: 0;
-  border: none;
-  background: transparent;
-  padding: 4px 0;
-  color: var(--fg);
-  font-family: var(--font);
-  font-size: 16px;
-  caret-color: var(--accent);
-  border-radius: 0;
-  border-bottom: 1px solid transparent;
-  transition: border-color 120ms var(--ease);
-}
-.prompt-input:focus {
-  outline: none;
-  border-bottom-color: var(--accent);
-  box-shadow: none;
-}
-.prompt-input::placeholder {
-  color: var(--fg3);
-  opacity: 0.6;
-}
 
 .prompt-submit {
   flex-shrink: 0;
@@ -990,12 +976,99 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
-.line--error {
+/* Login: one field, said plainly. Sans throughout and the same input
+   vocabulary as the setup form, so it reads as a form, not a prompt. */
+.login-form {
+  gap: 0;
+  padding: 28px 28px 30px;
+}
+.login-form .line--banner { margin-bottom: 20px; }
+.login-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: calc(22px * var(--font-scale));
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+.login-lede {
+  margin: 6px 0 22px;
+  color: var(--fg2);
+  font-size: var(--text-base);
+  line-height: 1.5;
+}
+.login-label {
+  margin-bottom: 6px;
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+.login-row {
+  display: flex;
+  gap: 8px;
+}
+.login-input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--touch);
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  /* 16px keeps iOS from zooming into the field on focus. */
+  font-size: 16px;
+  caret-color: var(--accent);
+  transition: border-color 120ms var(--ease), box-shadow 120ms var(--ease);
+}
+.login-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.login-input[aria-invalid="true"] { border-color: var(--error); }
+.login-submit {
+  flex-shrink: 0;
+  min-height: var(--touch);
+  padding: 0 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-family: var(--font);
+  font-size: var(--text-base);
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms var(--ease), transform 120ms var(--ease);
+}
+.login-submit:hover:not(:disabled) { background: var(--accent-strong); }
+.login-submit:active:not(:disabled) { transform: scale(0.97); }
+.login-submit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.login-submit:disabled {
+  background: var(--bg3);
+  color: var(--fg3);
+  cursor: not-allowed;
+}
+.login-error {
+  margin: 10px 0 0;
   color: var(--error);
   font-size: var(--text-sm);
 }
-.line--hint {
-  min-height: 1.2em;
+.login-help {
+  align-self: flex-start;
+  margin-top: 18px;
+  color: var(--accent);
+  font-size: var(--text-base);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.login-help:hover { color: var(--accent-strong); }
+.login-help:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+
+.line--error {
+  color: var(--error);
+  font-size: var(--text-sm);
 }
 
 /* Form inputs styling */

@@ -27,12 +27,15 @@ web/
   src/
     main.ts               Vue bootstrap + iOS viewport / keyboard / zoom plumbing
     App.vue               root component, global CSS tokens (--bg, --fg, --accent), wordmark + caret, shared focus utilities
-    router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /memory, /settings, /settings/:tab
+    router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /tasks,
+                           /memory, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary,
-                           CommandPaletteModal, and FileViewerModal)
+                           CommandPaletteModal, FileViewerModal, and WebhookTriggers)
+    components/*.css      stylesheets two panes share, each pulled in with
+                           `<style scoped src>` (overviewSections.css, chatTrace.css)
     components/settings/  panels split out of SettingsView.vue (the host's start-at-sign-in row is
                            SettingsEngineLogin.vue), plus the scoped CSS they share with it
-    stores/               Pinia stores (auth, projects, tasks, fileViewer), and store
+    stores/               Pinia stores (auth, projects, tasks, taskBoard, webhooks, fileViewer), and store
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
@@ -126,9 +129,10 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 
 ## Conventions
 
-- **Headless primitives migration.** `ConfirmDialog.vue`, `PromptDialog.vue`, `NewChatPicker.vue`, and `FileViewerModal.vue` use `reka-ui`'s unstyled Dialog primitives for modal semantics, focus trapping, Escape/outside dismissal, and focus restoration while keeping token-based markup, themes, and 44px controls. `CommentComposePopover.vue` keeps its app-specific Teleport, dismissal, and visual-viewport placement, but uses a Reka focus scope so it composes safely inside the file-viewer dialog. `ModelSelector.vue` uses a non-modal Reka Popover (with its searchable listbox kept inside the popover) and delegates fixed collision placement to Reka's Popper, including the triggerless mobile sheet. `ProjectSidebar.vue` uses Reka DropdownMenu roots, items, and submenus: the visible action buttons provide keyboard/touch entry points, while a right-click supplies a virtual pointer reference. The hover-preview read surfaces in `ChatCommentPopover.vue` and `PinnedFilePanel.vue` deliberately use a non-trapping, app-specific `FocusScope` plus measured positioning instead of Popover because hover must not steal focus and a click can pin the surface. The file viewer's internal read-comment popup uses a trapped nested `FocusScope` because it is a dialog-in-dialog with its own Escape and focus-return boundary. These bridges keep hover/pin state, local dismissal, focus return, and visual-viewport clamping; do not replace them with a focus-stealing modal primitive without changing that contract. Use `@vueuse/core` for small browser-state helpers when it removes custom lifecycle code; keep iOS visual-viewport measurement and clamping in `lib/viewport.ts` and `composables/useViewportHeight.ts`. Prefer Reka for new accessible overlays, retain hand-rolled code for app-specific layout or measurement, and do not add Tailwind or a themed UI kit.
+- **Headless primitives migration.** `ConfirmDialog.vue`, `PromptDialog.vue`, `NewChatPicker.vue`, and `FileViewerModal.vue` use `reka-ui`'s unstyled Dialog primitives for modal semantics, focus trapping, Escape/outside dismissal, and focus restoration while keeping token-based markup, themes, and 44px controls. `CommentComposePopover.vue` keeps its app-specific Teleport, dismissal, and visual-viewport placement, but uses a Reka focus scope so it composes safely inside the file-viewer dialog. `ModelSelector.vue` uses a non-modal Reka Popover (with its searchable listbox kept inside the popover) and delegates fixed collision placement to Reka's Popper, including the triggerless mobile sheet. `ProjectSidebar.vue` uses Reka DropdownMenu roots, items, and submenus: the visible action buttons provide keyboard/touch entry points, while a right-click supplies a virtual pointer reference. The hover-preview read surfaces in `ChatCommentPopover.vue` and `PinnedFilePanel.vue` deliberately use a non-trapping, app-specific `FocusScope` plus measured positioning instead of Popover because hover must not steal focus and a click can pin the surface. The file viewer's internal read-comment popup uses a trapped nested `FocusScope` because it is a dialog-in-dialog with its own Escape and focus-return boundary. These bridges keep hover/pin state, local dismissal, focus return, and visual-viewport clamping; do not replace them with a focus-stealing modal primitive without changing that contract. Use `@vueuse/core` for small browser-state helpers when it removes custom lifecycle code; keep iOS visual-viewport measurement and clamping in `lib/viewport.ts` and `composables/useViewportHeight.ts`. Prefer Reka for new accessible overlays, retain hand-rolled code for app-specific layout or measurement, and do not add Tailwind or a themed UI kit. **A modal drawn inside a pane must put its `DialogOverlay` in a `DialogPortal`**: `.chat-main` declares `container-type: inline-size`, which makes it the containing block for `position: fixed`, so an in-place overlay dims and clips to the pane and leaves the sidebar live under a "modal" (`WebhookTriggers.vue` does this; `PromptDialog`/`ConfirmDialog` get it by living at the app root). Reka unmounts a closed dialog's content, so tests read a portalled dialog through `document`, never through `wrapper`.
 - One Vue SFC per pane. Keep `<script setup lang="ts">`, template, scoped `<style>`.
-- Load states are separate states. A list that fetches (`ProposalReviewPanel`, `ProposalHistoryList`, the Memory Map) must distinguish first-load in flight, first-load failure (inline error + Retry, never an empty-state claim), a failed refresh over existing rows (keep the rows, mark them stale, offer Retry), a filter hiding a non-empty set (offer to clear filters), and a genuinely empty set. Never derive "there is nothing here" from a filtered array alone — a failed or pending GET would then read as a cleared queue. Load errors live in their own store slot (`loadError`), apart from action errors (`error`), so a list refresh cannot clear an unread accept/dismiss failure. `useTaskStore` exposes the same contract for schedules through `scheduleLoading`, `scheduleLoadError`, and `schedulesLoaded`; Home, Project, and Automations consume that shared truth rather than maintaining competing local interpretations.
+- **Webhook triggers live in Automations**, not in a top-level inbox (#1034). `stores/webhooks.ts` owns one workspace's triggers through the same B4 load contract as `taskBoard` (`loadedWorkspace`, `loading`, `loadError`, `error`, a `requestSeq` read ticket and a `writeSeq` write ticket), and every write presents the `revision` the row was read at — a stale write is the server's 409 with the rows intact. **`mode`, `project_id` and `input_policy` are create-only**; `PATCH` accepts `name`, `instructions` and `enabled` and nothing else. **The store never holds a secret**: `create` and `rotate` return the one-time secret to their caller and no field keeps it, because `WebhookTriggers.vue` is the only surface allowed to show it, once. The receiver recipe (`lib/webhooks.ts`) carries the trigger's real id and a `<secret>` placeholder, never a credential — a recipe that outlived the copy button is not a place to keep one. The row, heading and section classes come from `components/overviewSections.css`, which both `SchedulePanel.vue` and the section pull in with `<style scoped src>`.
+- Load states are separate states. A list that fetches (`ProposalReviewPanel`, `ProposalHistoryList`, the Memory Map) must distinguish first-load in flight, first-load failure (inline error + Retry, never an empty-state claim), a failed refresh over existing rows (keep the rows, mark them stale, offer Retry), a filter hiding a non-empty set (offer to clear filters), and a genuinely empty set. Never derive "there is nothing here" from a filtered array alone — a failed or pending GET would then read as a cleared queue. Load errors live in their own store slot (`loadError`), apart from action errors (`error`), so a list refresh cannot clear an unread accept/dismiss failure. `useTaskStore` exposes the same contract for schedules through `scheduleLoading`, `scheduleLoadError`, and `schedulesLoaded`; Home, Project, and Automations consume that shared truth rather than maintaining competing local interpretations. The workspace task board's store is `taskBoard`, deliberately not a second half of `tasks`: schedules are automations the engine runs, task records are the user's own, and every write in the board presents the `revision` it read so a stale edit is the server's 409 with the rows intact rather than a lost update. Its pure half — column bucketing, ordering, the filters, and the `/api/tasks*` error envelope — is in `lib/taskBoard.ts`.
 - **A review row's available actions come from the payload, not from a re-derivation.** `VaultReviewPanel.vue` draws **Complete** in place of **Retire** when the candidate carries `completable: true`, and never draws both: a project that finished and a project that is wrong are different findings, and the user has to be able to tell them apart. The flag is computed in `ciao/vault_review.py` from the same helpers `complete_project_note` gates on, so the button that renders is a click the engine will honour. The PWA has no alias table and no view of the `projects/` layouts, so a client-side `evidence.type === 'project'` test is a second definition free to disagree with the first — and the disagreement is a refusal on a row that still looks actionable. The lede and the Discuss seed follow the same flag, so a project row is never asked whether it should be thrown away.
 - The core work model is **request → run → output → durable knowledge**. `HomeIntake.vue` starts an ordinary project chat and preserves unsent text per workspace; `HomeReviewSummary.vue` uses active-workspace counts and labels checking/current/stale/empty/failed state explicitly and, on the Today surface, sits in the `.home-workbench` side rail beside the request column (stacking below it at a 980px container width); `ChatPanel.vue` keeps the transcript dominant and opens a conditional, keyboard-operable Context / Activity / Output inspector. New UI should reinforce those relationships rather than introduce another top-level inbox or artifact silo.
 - **A memory pass is not a chat row.** It is an app-owned chat in a hidden project, and it used to be listed twice for one archived conversation: once in Home's tiers under its own internal title (`Memory pass · …`), once as the conversation it works on. It is now one row, in the `memory insights` section `HomeRecentChats.vue` renders below the tiers, and the store filters it out of `activeChatsAll`, `projectChats`, `totalUnread`, the sidebar and every schedule target. Put the whole derivation — one row per archived conversation, the archive pipeline and the pass joined, every phase and its wording — in `lib/memoryInsights.ts`, not in the component; only the signals come from the store (`memoryInsightRows`). `ChatPanel.vue` names the source conversation above the transcript (and at the top of the Work details rail, which shows it instead) and links the archived transcript, so an opened pass says what it is. `lib/memoryPass.ts` stays the only reader of the `memory_pass` helper kind.
@@ -179,10 +183,20 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `stores/chatAnnotations.ts` owns everything the user stages against the *next*
   message plus the notes and pins anchored to a file: the per-chat pending-image,
   pending-file-comment and pending-chat-comment buckets, the durable per-file
-  comment store, pinned paths, auto-pin dismissals, and the six `localStorage`
+  comment store, and the six `localStorage`
   keys behind them (`ciao-pending-images`, `ciao-pending-comments`,
   `ciao-pending-chat-comments`, `ciao-file-comments`, `ciao-pinned-files`,
-  `ciao-dismissed-auto-pins`). It also composes an outgoing message from that
+  `ciao-dismissed-auto-pins`). **Chat pins are server-owned** (#1119): a chat's
+  pinned file lives on the engine (`ChatInfo.pinned_file_path` /
+  `dismissed_pin_paths` / `pin_revision`), is hydrated from chat payloads, the
+  `chat_pin_changed` event and the `/ws/events` snapshot's `chat_pins`, and is
+  mutated only through `PATCH /api/chats/{id}` `{pin:{path,expected_revision}}`.
+  The browser never reads or writes a chat id from the two pin keys — those hold
+  *project* pins only, which remain browser-local and are pruned of any chat id
+  a pre-#1119 build left behind. Manual chat pin/unpin awaits the acknowledged
+  server state (a 409 adopts the server's truth and surfaces an error, no retry),
+  and a per-chat pending flag disables the control while the write is in flight.
+  It also composes an outgoing message from that
   material (`prepareMessage`) and clears it once sent
   (`consumePreparedAttachments`) — the send itself stays in the store. It is a
   plain `create*` factory, **not** a second Pinia store: `useProjectStore` calls
@@ -204,6 +218,31 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   reconciliation, every socket (per-chat and `/ws/events`) with its event
   handlers, unread and attention counts, the send path with its queue, deferred
   and unacked sends, the streaming timeline, toasts and package status.
+- **The route contract: Home is unselected.** Reaching Home (`/` or a bare
+  `/chat`) shows Home alone — no conversation, no pinned file — whatever was
+  selected before it (#1116). `ChatLayout.vue` reconciles the store against the
+  *path* (not only `params.chatId`, which is undefined on both sides of a
+  secondary-page → `/` move), and calls `store.clearActiveChatView()` there.
+  Secondary pages (Settings, Automations, Tasks, Memory, a project) still keep
+  the selection underneath them, so a chat left for Automations is waiting when
+  you come back; only the bare Home route clears it. Two rules follow:
+  **Home navigation is a view change, not a deletion** — the chat, its
+  composer draft, its staged attachments, its pin and any running turn survive,
+  and the conversation stays in the list. `clearActiveChatView()` is therefore
+  deliberately non-destructive (it detaches the selected chat's socket and clears
+  the id; the global `/ws/events` awareness socket stays connected), while
+  `closeChat()` keeps the destructive policy and remains the only path that
+  deletes an empty draft. An explicit Close (or Escape on a chat route) is a
+  request to discard that draft; clicking Home is not. **The pinned pane is
+  scoped to the route on screen** (`activePinKey` in `ChatLayout.vue`): the chat
+  id on a chat route, the project id on a project route, no key at all on Home,
+  so Home can never render a retained chat's pinned page for even one frame, and
+  reopening a conversation brings back *that* conversation's pin. **On a narrow
+  device the same server-owned pin is a compact in-chat opener** (`.narrow-pin-opener`
+  in `ChatLayout.vue`): a named, keyboard/touch-reachable button that opens the
+  existing viewer, never a forced split pane or an auto-opened modal. A remote
+  unpin removes the opener and, if its clean shared-pin preview is open, closes
+  that preview — a separately opened viewer or a dirty edit is left untouched.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General begins with a
   short capability-help section linking to the public feature guide and inviting
@@ -258,12 +297,14 @@ establish:
 | `workspace-shortcuts.spec.ts` | Where a typed character actually lands. The `1`-`9` shortcuts must follow the visible sidebar order and stay inert while a text field is focused; jsdom reports a focused textarea that no keystroke is routed to. Also walks Tab through the primary nav, which is how a click-only control gets caught. |
 | `narrow-viewport.spec.ts` | Layout at 390px. jsdom has no layout engine: every rect is 0x0 and `scrollWidth` is always 0, so neither the unbreakable-flex-child trap nor a tap target under `--touch: 44px` is visible from a mount. The memory-insight journey also measures the row that carries a second control (the retry beside the open control), which is the one place a row can grow past the pane. Selecting a reply measures the opposite case: the action footer is not in the layout until the message is selected, and selection must leave the transcript's `scrollTop` alone; the fixture's opt-in `comment` shape then measures that the selected card's accent outline does not bleed across the turn gap onto the comment-reference card below it. |
 | `browser-zoom.spec.ts` | Reflow under page zoom and at the largest in-app font scale, and that the viewport meta never disables pinch zoom. |
+| `webhook-actions.spec.ts` | Every trigger control and its delete menu stays within the viewport and passes corner hit-tests at desktop, 390px touch width and 200% page-zoom reflow, with History closed and open. Ancestor clipping can hide controls without causing document overflow. |
 | `events-reconnect.spec.ts` | That the *browser* notices a severed `/ws/events` socket, re-dials, and applies the snapshot the new socket carries. A vitest fake can only close itself. |
 | `archived-chat.spec.ts` | That an archived chat opens read-only from a deep link: no composer, and no chat socket opened for a session the provider has already reclaimed. |
 | `workbench-layout.spec.ts` | That Home's review rail sits beside the command surface, that the expanded sidebar stacks workspace scope, New chat and the destinations without overlap, and that every boundary between Home's sections is the same gap token at desktop and at 390px (a per-section `margin-top` under a shared `gap` reads as a doubled gap, which no unit test can see). |
 | `chat-loading-layout.spec.ts` | That the held history-loading skeleton has separated rows within the chat pane at desktop and phone widths. |
 | `reply-not-folded.spec.ts` | That a short closing reply followed by a reasoning-only step renders as a bubble after a phase-less history replay (OpenCode shape) instead of being folded into the collapsed Activity trace (#630). The fold is a render heuristic, so only a real render shows it. |
 | `note-verification.spec.ts` | That a review row which defers to a pending verification proposal lands on the proposal *in focus*. The link sets a row id and navigates, the queue's rows arrive with a fetch, and the panel is still behind the review filter's `v-show` for the first frames — a `nextTick` reveal focuses a `display: none` element, which is a silent no-op that no unit test can see. Also the copy, which is the only place a reader learns a dismissal declines rather than verifies, and the 44px touch minimum on a disclosure that reports a whole note's before/after. |
+| `import-list.spec.ts` | That Memory → Import stays usable with a long listing at 390px. The controls a person has to reach — Review, Cancel, the confirmation — sit *below* the rows, and as a card on the map pane a 60-row listing pushed them thousands of pixels past the fold of a pane that does not scroll. `toBeInViewport` on a control at the bottom of that listing is the assertion jsdom cannot make. The two import routes are mocked in the spec rather than added to the fixture, so 60 synthetic sessions never enter shared fixture state. |
 
 The fixture serves an empty chat history by default. A spec that needs real
 turns to select opts in per session with `POST /__fixture__/transcript`, so the

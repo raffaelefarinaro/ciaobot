@@ -294,22 +294,27 @@ def test_task_dir_follows_localappdata(
     assert ws.live_task_dir() == expected
 
 
-def test_current_user_uses_domain_and_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("USERDOMAIN", "D")
-    monkeypatch.setenv("USERNAME", "u")
-
-    assert ws.current_user() == "D\\u"
-
-    monkeypatch.delenv("USERDOMAIN", raising=False)
-    assert ws.current_user() == "u"
-
-
-def test_current_user_without_a_username_is_an_error(
+@pytest.mark.skipif(sys.platform != "win32", reason="the process token's SID")
+def test_current_user_is_the_process_sid_whatever_the_environment_says(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("USERNAME", raising=False)
+    from ciao.os_support.users import user_key
 
-    with pytest.raises(ws.WindowsServiceError, match="USERNAME"):
+    # What an OpenSSH session reports for a local account.
+    monkeypatch.setenv("USERDOMAIN", "WORKGROUP")
+    assert ws.current_user() == user_key()
+    assert ws.current_user().startswith("S-1-5-")
+
+
+def test_current_user_reports_an_unreadable_sid_as_a_service_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail() -> str:
+        raise OSError("access denied")
+
+    monkeypatch.setattr(ws, "user_key", fail)
+
+    with pytest.raises(ws.WindowsServiceError, match="SID"):
         ws.current_user()
 
 

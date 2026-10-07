@@ -30,8 +30,8 @@ from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
 #: gws passthrough), so those route only for the verbs in ``_SHARED_NOUN_VERBS``.
 AGENT_NOUNS: frozenset[str] = frozenset(
     {
-        "memory", "vault", "note", "file", "chat", "project", "schedule",
-        "workspace", "context", "help",
+        "memory", "vault", "note", "file", "chat", "project", "task", "schedule",
+        "workspace", "webhook", "context", "help",
     }
 )
 _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
@@ -67,6 +67,12 @@ _CHAT_UPDATE_FLAGS: tuple[tuple[str, str], ...] = (
     ("--thinking-level", "thinking_level"),
     ("--project", "project_id"),
 )
+
+#: The permission modes a trigger's own events run under. ``bypass`` is not
+#: among them and cannot be added here: it is what an *unattended* turn gets,
+#: and a webhook event is never dispatched unattended. The store refuses
+#: anything else anyway, so this is the first refusal rather than the last.
+_WEBHOOK_MODES: tuple[str, ...] = ("normal", "auto", "plan")
 
 
 class UsageError(Exception):
@@ -217,6 +223,46 @@ def build_parser() -> argparse.ArgumentParser:
         sub = project.add_parser(verb)
         sub.add_argument("project_id")
 
+    task = _verbs(nouns.add_parser("task", help="Tasks in the active workspace."))
+    task.add_parser("list")
+    tget = task.add_parser("get")
+    tget.add_argument("task_id")
+    tcreate = task.add_parser("create")
+    tcreate.add_argument("--title", required=True)
+    # The body is Markdown prose (description, links, acceptance criteria):
+    # a path, for the same reason `note verify --payload-file` is one.
+    tcreate.add_argument("--body-file", default=None, metavar="FILE", help="Markdown file holding the task body: @file.md or a plain path.")
+    tcreate.add_argument("--project", default=None)
+    tcreate.add_argument("--due", default=None, metavar="YYYY-MM-DD")
+    tupdate = task.add_parser("update")
+    tupdate.add_argument("task_id")
+    tupdate.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
+    tupdate.add_argument("--title", default=None)
+    tupdate.add_argument("--body-file", default=None, metavar="FILE")
+    tupdate.add_argument("--due", default=None, metavar="YYYY-MM-DD")
+    tupdate.add_argument("--assignee", default=None, choices=["user", "agent"])
+    tupdate.add_argument("--status", default=None, choices=["backlog", "in_progress", "in_review", "done"])
+    tmove = task.add_parser("move")
+    tmove.add_argument("task_id")
+    tmove.add_argument("--to", required=True, choices=["backlog", "in_progress", "in_review", "done"])
+    tmove.add_argument("--revision", required=True)
+    tcomplete = task.add_parser("complete")
+    tcomplete.add_argument("task_id")
+    tcomplete.add_argument("--revision", required=True)
+    tdelegate = task.add_parser("delegate")
+    tdelegate.add_argument("task_id")
+    tdelegate.add_argument("--revision", required=True, help="The revision you read; a stale one starts nothing.")
+    tdelegate.add_argument("--project", default=None, help="Override the chat's project; omit to use the task's own, else General.")
+    treport = task.add_parser("report", help="Report how far you got on the task this chat was handed.")
+    treport.add_argument("task_id")
+    treport.add_argument("--outcome", required=True, choices=["done", "blocked", "needs_input"])
+    treport.add_argument("--summary-file", required=True, metavar="FILE", help="Markdown: what you did, where the results are, what is left. @file.md or a plain path.")
+    tattempt = task.add_parser("attempt")
+    tattempt.add_argument("attempt_id")
+    tattempt.add_argument(
+        "action", choices=["stop", "resume", "retry", "detach"]
+    )
+
     schedule = _verbs(nouns.add_parser("schedule", help="Schedules in the active workspace."))
     schedule.add_parser("list")
     for verb in ("create", "preview"):
@@ -230,6 +276,35 @@ def build_parser() -> argparse.ArgumentParser:
     for verb in ("pause", "resume", "run", "delete"):
         sub = schedule.add_parser(verb)
         sub.add_argument("schedule_id")
+
+    webhook = _verbs(nouns.add_parser("webhook", help="Webhook triggers in the active workspace."))
+    webhook.add_parser("list")
+    wcreate = webhook.add_parser("create")
+    wcreate.add_argument("--name", required=True)
+    # The instructions are operator prose that the launched turn runs as: a
+    # path, for the same reason `task create --body-file` is one.
+    wcreate.add_argument(
+        "--instructions-file",
+        default=None,
+        metavar="FILE",
+        help="Markdown/text file holding the trigger's instructions: @file.md or a plain path.",
+    )
+    wcreate.add_argument("--project", default=None, metavar="P")
+    wcreate.add_argument("--mode", default=None, choices=_WEBHOOK_MODES)
+    wupdate = webhook.add_parser("update")
+    wupdate.add_argument("trigger_id")
+    wupdate.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
+    wupdate.add_argument("--name", default=None)
+    wupdate.add_argument("--instructions-file", default=None, metavar="FILE")
+    # Two flags rather than `--enabled true|false`: a boolean option cannot say
+    # "leave it alone", and a trigger that was enabled has to be stoppable
+    # without touching its name or instructions.
+    wupdate.add_argument("--enable", action="store_true", help="Make the trigger callable.")
+    wupdate.add_argument("--disable", action="store_true", help="Stop the trigger, including events already accepted.")
+    for verb in ("rotate", "delete"):
+        sub = webhook.add_parser(verb)
+        sub.add_argument("trigger_id")
+        sub.add_argument("--revision", required=True)
 
     run = _verbs(nouns.add_parser("run", help="Tracked background command runs."))
     start = run.add_parser("start", help="Run one command in a tracked background subprocess.")
@@ -293,6 +368,47 @@ def _handover_messages(raw: str | None) -> list[dict[str, Any]] | None:
     if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
         raise UsageError("--messages must be a JSON array of message objects.")
     return messages
+
+
+def _task_body(raw: str | None, *, flag: str = "--body-file") -> str | None:
+    """The task body from a Markdown file, or None when no file was given.
+
+    Read here rather than posted as a path because a task body is Markdown
+    prose, exactly the case `--payload-file` and `--messages` already handle:
+    as a shell argument it would be mangled by `$()`, backticks and quotes,
+    and it would sit in the process table. The same credential-adjacency check
+    applies, because a task body is written into the vault.
+
+    ``flag`` is the name to answer with: a refusal that says `--body-file` to a
+    caller who passed `--instructions-file` is a wrong answer, and these two
+    read the same kind of prose for the same reason.
+    """
+    if raw is None:
+        return None
+    path = Path(raw[1:]).expanduser() if raw.startswith("@") else Path(raw).expanduser()
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        raise UsageError(f"{flag} cannot be read: {exc}") from exc
+    if any(resolved.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS):
+        raise UsageError(
+            f"{flag} refuses credential-adjacent paths ({path}): "
+            "pass the content in a workspace file instead."
+        )
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise UsageError(f"{flag} must be a readable UTF-8 file: {exc}") from exc
+
+
+def _webhook_instructions(raw: str | None) -> str | None:
+    """The trigger's instructions from a file, or None when no file was given.
+
+    Same rule as ``--body-file``: instructions are operator prose that the
+    launched turn reads as its own, so as a shell argument they would be
+    mangled by ``$()``, backticks and quotes and would sit in the process table.
+    """
+    return _task_body(raw, flag="--instructions-file")
 
 
 def _run_start_arguments(args: argparse.Namespace) -> dict[str, Any]:
@@ -407,12 +523,105 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         if verb == "restore":
             return "project", {"action": "restore", "stem": args.stem}
         return "project_action", {"action": verb, "project_id": args.project_id}
+    if noun == "task":
+        if verb == "list":
+            return "task_list", {}
+        if verb == "get":
+            return "task_get", {"task_id": args.task_id}
+        if verb == "create":
+            arguments = {"title": args.title}
+            body = _task_body(args.body_file)
+            if body is not None:
+                arguments["body"] = body
+            if args.project is not None:
+                arguments["project_id"] = args.project
+            if args.due is not None:
+                arguments["due"] = args.due
+            return "task_create", arguments
+        if verb == "update":
+            arguments = {"task_id": args.task_id, "expected_revision": args.revision}
+            for param in ("title", "due", "assignee", "status"):
+                value = getattr(args, param)
+                if value is not None:
+                    arguments[param] = value
+            body = _task_body(args.body_file)
+            if body is not None:
+                arguments["body"] = body
+            return "task_update", arguments
+        if verb == "move":
+            return "task_action", {
+                "action": "move",
+                "task_id": args.task_id,
+                "status": args.to,
+                "expected_revision": args.revision,
+            }
+        if verb == "delegate":
+            arguments = {"task_id": args.task_id, "expected_revision": args.revision}
+            if args.project is not None:
+                arguments["project_id"] = args.project
+            return "task_delegate", arguments
+        if verb == "report":
+            return "task_report", {
+                "task_id": args.task_id,
+                "outcome": args.outcome,
+                "summary": _task_body(args.summary_file, flag="--summary-file") or "",
+            }
+        if verb == "attempt":
+            return "task_attempt_action", {
+                "attempt_id": args.attempt_id,
+                "action": args.action,
+            }
+        # `complete` stays its own verb even though the store refuses it: the
+        # refusal is the answer, and the agent needs a name for it to report
+        # rather than another route it has to guess at.
+        return "task_action", {
+            "action": "complete",
+            "task_id": args.task_id,
+            "expected_revision": args.revision,
+        }
     if noun == "schedule":
         if verb == "list":
             return "schedules_list", {}
         if verb in ("create", "update", "preview"):
             return "schedule", _schedule_arguments(args, verb)
         return "schedule_action", {"schedule_id": args.schedule_id, "action": verb}
+    if noun == "webhook":
+        if verb == "list":
+            return "webhook_list", {}
+        if verb == "create":
+            arguments = {"name": args.name}
+            instructions = _webhook_instructions(args.instructions_file)
+            if instructions is not None:
+                arguments["instructions"] = instructions
+            if args.project is not None:
+                arguments["project_id"] = args.project
+            if args.mode is not None:
+                arguments["mode"] = args.mode
+            return "webhook_create", arguments
+        if verb == "update":
+            arguments = {
+                "trigger_id": args.trigger_id,
+                "expected_revision": args.revision,
+            }
+            if args.name is not None:
+                arguments["name"] = args.name
+            instructions = _webhook_instructions(args.instructions_file)
+            if instructions is not None:
+                arguments["instructions"] = instructions
+            if args.enable and args.disable:
+                raise UsageError("webhook update takes --enable or --disable, not both.")
+            if args.enable:
+                arguments["enabled"] = True
+            elif args.disable:
+                arguments["enabled"] = False
+            return "webhook_update", arguments
+        # `rotate` and `delete` differ only in what they do to the trigger, and
+        # both are revision-checked edits of one record, so they read the same
+        # arguments here and the operation table says which is which.
+        return f"webhook_{verb}", {
+            "trigger_id": args.trigger_id,
+            "expected_revision": args.revision,
+        }
     if noun == "run":
         if verb == "start":
             return "background_run_start", _run_start_arguments(args)

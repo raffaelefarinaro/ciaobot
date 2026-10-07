@@ -28,6 +28,7 @@ from ciao import proposal_kinds
 from ciao import proposal_tracking
 from ciao import skill_proposals
 from ciao import vault_rehome
+from ciao.fact_candidates import external_anchor
 from ciao.memory_tool import resolve_region
 from ciao.workspace_guide import guide_path
 
@@ -1394,20 +1395,18 @@ async def _plan_accept_reconcile(
     person deciding whether to retry again, and a formatted string cannot be
     taken apart into them.
     """
-    from ciao.insights import _resolve_insights_call
     from ciao.memory_proposals import reconcile_region_fact
 
     model = str(getattr(config, "insights_model", "") or "").strip()
     if not model:
         return None, None
-    effective_model, provider, _note = _resolve_insights_call(config, model)
     try:
         decision = await reconcile_region_fact(
             guide,
             row.get("region") or row["kind"],
             row["text"],
-            model=effective_model,
-            provider=provider,
+            model=model,
+            provider="claude",
         )
     except Exception as exc:  # noqa: BLE001 — a failed retry must not write
         return None, {
@@ -1475,6 +1474,12 @@ async def _promote_region_row(
     writes the shared guide (and the row's ``leak_warning`` is why the UI asks
     for confirmation first) and afterwards that workspace's own.
 
+    The row's own ``_(from: …)_`` tail is handed on as the proposal's
+    ``source_section``, which is where an imported conversation's
+    ``provider:session_id:anchor`` lives. Without it an accepted import's receipt
+    carried ``source_anchors: []`` and ``section: "review"``, and the anchor the
+    queue row had been holding for a year reached nothing.
+
     ``reconcile`` runs one fresh reconcile call against the region's current
     entries first (:func:`_plan_accept_reconcile`) and applies its decision, so
     a fact an earlier reconcile deferred can be resolved on a retry instead
@@ -1535,6 +1540,14 @@ async def _promote_region_row(
             actor="operator",
             source="pwa",
             workspace=str(row.get("workspace") or ""),
+            # The row's own `_(from: …)_` tail, which is where an imported
+            # conversation's `provider:session_id:anchor` already is. Handing it
+            # over is what makes the accepted fact's receipt carry that anchor,
+            # so a reader years later can match it back to one specific message.
+            # `external_anchor` verifies the tag by code and returns "" for a
+            # Ciaobot chat id or any other row that is not an external import, so
+            # those keep the default "review" and stamp no anchor.
+            source_section=external_anchor(str(row.get("source") or "")) or "review",
             deferral_out=deferrals,
             receipt_out=receipt,
         )

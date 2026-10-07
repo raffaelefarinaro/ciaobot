@@ -516,6 +516,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["stopped"] = True
         if event.fallback_final:
             payload["fallback_final"] = True
+        if event.recovered_with_pending:
+            payload["recovered_with_pending"] = True
         if event.quota:
             payload["quota"] = event.quota
         return payload
@@ -553,6 +555,7 @@ class ChatStream:
         "_pending",
         "_pending_id_seq",
         "user_stopped",
+        "park_on_stop",
         "background",
         # The asyncio.Task currently iterating this stream's turn events.
         # Set by the drive loop before awaiting the turn; cleared when the
@@ -591,6 +594,10 @@ class ChatStream:
         # after an interrupted turn (a user stop is intentional, not an
         # error, so queued follow-ups should still go out).
         self.user_stopped: bool = False
+        # Set with `user_stopped` by a task-board Stop or Detach (#1103): the
+        # drive loop parks the queued follow-ups on the chat instead of
+        # running them, so a stopped delegated task stops working.
+        self.park_on_stop: bool = False
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
         # queued user messages — a user send while one is active
@@ -686,6 +693,17 @@ class ChatStream:
                 queue.put_nowait(payload)
             except asyncio.QueueFull:
                 logger.warning("Chat stream subscriber queue full, dropping event")
+
+    def publish_queue_state(self, queue: list[dict]) -> None:
+        """Publish a parked queue while this stream can still reach subscribers.
+
+        An empty list is not published: the client treats ``queue_state`` as
+        the whole queue and would clear the chips. A finished stream has
+        already delivered its end sentinel, so a late event never arrives.
+        """
+        if self._done or not queue:
+            return
+        self.publish({"type": "queue_state", "queue": list(queue)})
 
     def publish_live(self, payload: dict) -> None:
         """Fan out an ephemeral control event without adding it to replay."""

@@ -207,9 +207,7 @@
               <span class="settings-status">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
             </div>
           </div>
-          <div v-if="packageLoading && !packageStatus" class="loading">
-            Checking package status...
-          </div>
+          <SkeletonLoader v-if="packageLoading && !packageStatus" label="Checking package status" :count="2" />
           <div v-else-if="packageStatus">
             <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
               Update check failed: {{ packageStatus.error }}
@@ -384,12 +382,33 @@
           <div class="settings-card-header">
             <p class="section-title">Main workspace</p>
             <p class="hint">
-              The server filesystem root for routines, skills, scripts, and runtime state.
-              Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
+              The server filesystem root for routines, skills, scripts, runtime state, and the <code>.env</code> file.
               Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
             </p>
           </div>
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
+          <p v-if="workspaceMoveOutcome" class="hint workspace-move-outcome" :class="{ 'workspace-move-outcome--error': workspaceMoveOutcome.error }">
+            {{ workspaceMoveOutcome.text }}
+          </p>
+          <p v-if="workspaceMove?.admin_only" class="hint">
+            On Linux the administrator moves it: run
+            <code>sudo /opt/ciaobot/venv/bin/ciao workspace-move &lt;new folder&gt; --apply</code>
+            on the server.
+          </p>
+          <div v-else-if="workspaceMove?.local" class="workspace-move-row">
+            <button class="btn-small" type="button" @click="workspaceMoveOpen = true">Move&hellip;</button>
+          </div>
+          <p v-else-if="workspaceMove" class="hint">
+            To move it, open Settings on the computer running Ciaobot, or run
+            <code>ciao workspace-move &lt;new folder&gt;</code> there.
+          </p>
+          <WorkspaceMoveDialog
+            v-if="workspaceMove?.local && !workspaceMove.admin_only"
+            :open="workspaceMoveOpen"
+            :workspace-root="workspaceMove.workspace_root"
+            @close="workspaceMoveOpen = false"
+            @started="onWorkspaceMoveStarted"
+          />
         </div>
 
         <!-- Workspace health -->
@@ -403,7 +422,7 @@
               {{ workspaceHealth?.status || (agentAssetsLoaded ? 'unknown' : 'loading') }}
             </span>
           </div>
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Scanning&hellip;</span></div>
+          <SkeletonLoader v-if="!agentAssetsLoaded" label="Scanning workspace health" :count="3" />
           <p v-else-if="agentAssetsError" class="hint hint--warn">{{ agentAssetsError }}</p>
           <div v-else-if="workspaceHealth && prioritizedHealthChecks.length" class="health-list">
             <div
@@ -450,22 +469,11 @@
                 >Keeping it private</a>
               </p>
             </div>
-            <span
-              v-if="authSettings"
-              class="badge"
-              :class="authSettings.auth_required ? 'badge--success' : 'badge--warn'"
-            >
-              {{ authSettings.auth_required ? 'on' : 'off' }}
-            </span>
           </div>
-          <div v-if="!authSettings" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
           <template v-else>
             <div class="settings-form-panel">
-              <p v-if="!authSettings.auth_required" class="hint hint--warn">
-                This instance is running unprotected because PWA_AUTH_REQUIRED=false is set in the
-                workspace .env. Setting a password here turns protection back on.
-              </p>
-              <label v-if="authSettings.auth_required" class="settings-field">
+              <label class="settings-field">
                 <span class="ws-label">Current password</span>
                 <input
                   v-model="authCurrentPassword"
@@ -506,6 +514,14 @@
              computer. The one place to set the trusted HTTPS address. -->
         <SettingsDevices />
 
+        <!-- Network access and the developer switches: server settings that
+             used to live in the workspace .env. -->
+        <SettingsServer
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
+
         <!-- Installing is optional and the guidance is permanent: the Home setup
              reminder can be closed for good, so Settings keeps the steps. -->
         <SettingsAppInstall />
@@ -513,52 +529,7 @@
         <!-- Notifications. -->
         <SettingsNotifications />
 
-        <!-- Keyboard shortcuts -->
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">Keyboard shortcuts</p>
-            <p class="hint">Global shortcuts. Text fields keep their normal meaning: number keys stay typeable, Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
-          </div>
-          <ul id="settings-shortcut-list" class="shortcut-list">
-            <li>
-              <kbd>{{ webChord('N') }}</kbd>
-              <span>Open a new chat in the default General project</span>
-            </li>
-            <li>
-              <kbd>{{ webChord('M') }}</kbd>
-              <span>Open the model picker</span>
-            </li>
-            <li><kbd>1–9</kbd><span>Switch to the first through ninth workspace in the sidebar</span></li>
-            <template v-if="showAllShortcuts">
-              <li>
-                <kbd>{{ webChord('\u232B', 'Backspace') }}</kbd>
-                <span>Archive the open chat (asks to confirm)</span>
-              </li>
-              <li>
-                <kbd>{{ webChord('S') }}</kbd>
-                <span>Show or hide the sidebar</span>
-              </li>
-              <li>
-                <kbd>{{ webChord('=') }}</kbd>
-                <span>Increase the font size</span>
-              </li>
-              <li>
-                <kbd>{{ webChord('-') }}</kbd>
-                <span>Decrease the font size</span>
-              </li>
-              <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
-              <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats; stacked workspaces use up/down between lanes</span></li>
-              <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
-            </template>
-          </ul>
-          <button
-            type="button"
-            class="settings-disclosure"
-            aria-controls="settings-shortcut-list"
-            :aria-expanded="showAllShortcuts"
-            @click="showAllShortcuts = !showAllShortcuts"
-          >{{ showAllShortcuts ? 'Show fewer' : `Show all ${SHORTCUT_COUNT}` }}</button>
-        </div>
+        <SettingsKeyboardShortcuts />
 
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
@@ -661,8 +632,7 @@
                       <template v-if="conn.path_command">
                         , then put it on your PATH with
                         <code>{{ conn.path_command }}</code>
-                      </template>
-                      <a
+                      </template>&nbsp;<a
                         v-if="conn.install_url"
                         :href="conn.install_url"
                         target="_blank"
@@ -735,6 +705,22 @@
                         @update:model-value="saveProviderDefaultModel(String(connKey) as AliasProviderKey, $event)"
                       />
                       <span v-else class="hint hint--compact">Automatic — {{ (conn.label || connKey) }} picks its own default.</span>
+                    </div>
+                  </div>
+                  <div class="set-subrow">
+                    <span
+                      class="ws-label set-subrow-label"
+                      title="Reads archived chats into memory, names new chats, and checks schedule results for this provider."
+                    >Session insights</span>
+                    <div class="set-subrow-control">
+                      <ModelSelector
+                        v-if="getProviderSection(String(connKey))?.configurable"
+                        :model-value="providerInsightsModelSelectorValue(String(connKey) as AliasProviderKey)"
+                        :sections="providerInsightsModelSectionsFor(String(connKey) as AliasProviderKey)"
+                        :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
+                        @update:model-value="saveProviderInsightsModel(String(connKey) as AliasProviderKey, $event)"
+                      />
+                      <span v-else class="hint hint--compact">Automatic — same as the default model.</span>
                     </div>
                   </div>
                   <label class="set-subrow">
@@ -826,9 +812,24 @@
                       </template>
                       <template v-else>
                         <span class="hint hint--compact">
-                          {{ conn.ok ? 'None reported by this CLI' : 'Connect to discover' }}
+                          {{ !conn.ok ? 'Connect to discover' : conn.skills ? 'None reported by this CLI' : 'Could not read this list. Press Verify to try again.' }}
                         </span>
                       </template>
+                    </div>
+
+                    <!-- Skills the CLI ships itself, not installed by the user -->
+                    <div class="ws-connectors-header" style="margin-top: 10px;">
+                      <span class="ws-label">Built into {{ conn.label || connKey }} ({{ conn.bundled_skills?.length ?? 0 }})</span>
+                    </div>
+                    <div class="workspace-connector-pills">
+                      <template v-if="conn.bundled_skills && conn.bundled_skills.length">
+                        <span v-for="skill in conn.bundled_skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Ships with ${conn.label || connKey}: ${skill}`">
+                          <span class="pill-dot"></span> {{ skill }}
+                        </span>
+                      </template>
+                      <span v-else class="hint hint--compact">
+                        {{ !conn.ok ? 'Connect to discover' : conn.bundled_skills ? 'None reported by this CLI' : conn.skills ? 'Listed after the next chat with this CLI.' : 'Could not read this list. Press Verify to try again.' }}
+                      </span>
                     </div>
                   </div>
                 </details>
@@ -839,7 +840,7 @@
         </template>
 
         <!-- Background models -->
-        <div v-if="!routinesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <div v-if="!routinesLoaded" class="card"><SkeletonLoader label="Loading routines" :count="3" /></div>
         <template v-else-if="routinesError">
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
         </template>
@@ -849,37 +850,10 @@
             <div class="settings-card-header">
               <p class="section-title">Background models</p>
               <p class="hint">
-                These background tasks use their own model setting, separate from the chat defaults above.
-                "Automatic" keeps the built-in default.
+                The critique panel uses its own model setting, separate from the chat defaults above.
+                "Automatic" keeps the built-in default. Session insights, the model that reads archived
+                chats into memory, names new chats and checks schedule results, is set on each provider above.
               </p>
-            </div>
-
-            <div class="routine-row">
-              <div class="routine-info">
-                <span class="routine-name">Session insights</span>
-                <span class="routine-detail">Runs the end-of-conversation memory pass when a chat is archived.</span>
-              </div>
-              <div class="routine-model-controls">
-                <select
-                  class="routine-select routine-select--provider"
-                  :value="routineProviderValue('insights_model')"
-                  :disabled="routinesSaving"
-                  @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
-                >
-                  <option value="automatic">Automatic</option>
-                  <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
-                    {{ provider.label }}
-                  </option>
-                </select>
-                <ModelSelector
-                  v-if="routineProviderValue('insights_model') !== 'automatic'"
-                  :model-value="routineModelValue('insights_model')"
-                  :sections="routineModelSectionsFor('insights_model')"
-                  :disabled="routinesSaving"
-                  @update:model-value="saveRoutineModel('insights_model', $event)"
-                />
-                <span class="routine-model-hint">{{ routineModelSummary('insights_model') }}</span>
-              </div>
             </div>
 
             <div class="routine-row">
@@ -933,7 +907,7 @@
 
       <!-- WORKSPACES TAB -->
       <template v-if="currentTab === 'workspaces'">
-        <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <div v-if="!workspacesLoaded" class="card"><SkeletonLoader label="Loading workspaces" :count="3" /></div>
         <template v-else-if="workspacesError">
           <div class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
         </template>
@@ -1245,9 +1219,7 @@
               </span>
             </div>
 
-            <div v-if="!gwsIntegrationLoaded" class="loading">
-              Loading Google Workspace status&hellip;
-            </div>
+            <SkeletonLoader v-if="!gwsIntegrationLoaded" label="Loading Google Workspace status" :count="2" />
             <p v-else-if="gwsIntegrationError" class="hint hint--warn">
               {{ gwsIntegrationError }}
             </p>
@@ -1629,7 +1601,7 @@
             <div v-if="addSkillResult" class="action-result" :class="{ '--error': addSkillError }" role="alert">{{ addSkillResult }}</div>
           </div>
 
-          <div v-if="!skillsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <SkeletonLoader v-if="!skillsLoaded" label="Loading skills" :count="4" />
           <template v-else-if="skillsError">
             <p class="hint hint--warn">{{ skillsError }}</p>
           </template>
@@ -1746,7 +1718,7 @@
           </div>
           <div v-if="assetLifecycleResult" class="action-result" :class="{ '--error': assetLifecycleError }">{{ assetLifecycleResult }}</div>
 
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <SkeletonLoader v-if="!agentAssetsLoaded" label="Loading subagents" :count="3" />
           <template v-else-if="agentAssetsError">
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
@@ -1865,7 +1837,7 @@
 
           <div v-if="assetLifecycleResult" class="action-result" :class="{ '--error': assetLifecycleError }">{{ assetLifecycleResult }}</div>
 
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <SkeletonLoader v-if="!agentAssetsLoaded" label="Loading commands" :count="3" />
           <template v-else-if="agentAssetsError">
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
@@ -2017,12 +1989,12 @@
 </template>
 
 <script setup lang="ts">
+import SkeletonLoader from './SkeletonLoader.vue'
 import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
-import { isApplePlatform } from '../lib/platform'
 import {
   DEFAULT_FONT_SCALE,
   FONT_SCALE_STEP,
@@ -2080,11 +2052,14 @@ import {
 } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
+import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
+import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
+import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
@@ -2094,12 +2069,6 @@ import { isLoopbackHostname } from '../lib/loopback'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
-// The shortcuts bind altKey. Apple keyboards label that key Option (\u2325);
-// Windows and Linux keyboards label it Alt.
-const onApplePlatform = isApplePlatform()
-function webChord(key: string, nonAppleKey: string = key): string {
-  return onApplePlatform ? `\u2325${key}` : `Alt+${nonAppleKey}`
-}
 import {
   DEFAULT_WORKSPACE_COLOR,
   WORKSPACE_COLOR_PRESETS,
@@ -2138,8 +2107,6 @@ const currentTab = computed(() => {
 })
 
 // ── Keyboard shortcuts: the common four, the rest behind a disclosure ────
-const SHORTCUT_COUNT = 10
-const showAllShortcuts = ref(false)
 
 // ── On this page ─────────────────────────────────────────────────────────
 // Read from the rendered tab, not a hand-kept list: a section is any
@@ -2227,7 +2194,6 @@ function scrollToSection(id: string): void {
 }
 
 watch(currentTab, () => {
-  showAllShortcuts.value = false
   void nextTick(rebuildToc)
 })
 
@@ -2413,9 +2379,6 @@ const routinesResult = ref('')
 
 // Every provider with models is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
-type RoutineModelKey = 'insights_model'
-// The routine pickers offer Automatic and each available provider.
-type RoutineProviderValue = 'automatic' | AliasProviderKey
 
 type AliasProviderSection = {
   key: AliasProviderKey
@@ -2427,8 +2390,57 @@ type AliasProviderSection = {
   available: boolean
 }
 
-const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
-  insights_model: 'insights_model_effective',
+interface WorkspaceMoveOperation {
+  phase: string
+  source: string
+  target: string
+  error: string
+  updated_at: string
+}
+
+interface WorkspaceMoveStatus {
+  workspace_root: string
+  local: boolean
+  admin_only?: boolean
+  operation: WorkspaceMoveOperation | null
+}
+
+const workspaceMove = ref<WorkspaceMoveStatus | null>(null)
+const workspaceMoveOpen = ref(false)
+
+async function fetchWorkspaceMove() {
+  try {
+    workspaceMove.value = await api.get<WorkspaceMoveStatus>('/api/workspace-move')
+  } catch {
+    workspaceMove.value = null
+  }
+}
+
+// The last move's outcome, for a day after it: the page reloads while the
+// engine restarts, so this is where a move that finished — or was undone —
+// says so.
+const workspaceMoveOutcome = computed(() => {
+  const op = workspaceMove.value?.operation
+  if (!op) return null
+  const age = Date.now() - Date.parse(op.updated_at)
+  if (!(age < 24 * 60 * 60 * 1000)) return null
+  switch (op.phase) {
+    case 'done':
+      return { text: `Moved here from ${op.source}.`, error: false }
+    case 'failed':
+      return { text: `The move to ${op.target} did not start: ${op.error}`, error: true }
+    case 'rolled_back':
+      return { text: `The move to ${op.target} did not finish and was undone: ${op.error}`, error: true }
+    case 'rollback_failed':
+      return { text: `The move to ${op.target} failed and could not be undone: ${op.error}`, error: true }
+    default:
+      return null
+  }
+})
+
+function onWorkspaceMoveStarted() {
+  workspaceMoveOpen.value = false
+  restartAndReload('Moving the workspace. Ciaobot will restart from the new folder…')
 }
 
 async function fetchRoutines() {
@@ -2573,19 +2585,28 @@ function aliasSectionEntry(provider: string): ModelSection {
   }
 }
 
-function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
-  const effective = providerDefaultModelEffective(provider)
+// One provider's catalog behind a single "Default" entry, which the caller
+// names (the sentinel it stores as "unset" and the label it shows).
+function providerSectionsWithDefault(
+  provider: AliasProviderKey,
+  sentinel: string,
+  label: (effective: string) => string,
+): ModelSection[] {
   return [
     {
       key: 'default',
       label: 'Default',
-      models: [DEFAULT_MODEL_SELECTION],
-      modelLabels: {
-        [DEFAULT_MODEL_SELECTION]: effective ? `Automatic (${effective})` : 'Automatic',
-      },
+      models: [sentinel],
+      modelLabels: { [sentinel]: label(providerDefaultModelEffective(provider)) },
     },
     aliasSectionEntry(provider),
   ]
+}
+
+function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
+  return providerSectionsWithDefault(provider, DEFAULT_MODEL_SELECTION, (effective) =>
+    effective ? `Automatic (${effective})` : 'Automatic',
+  )
 }
 
 function providerDefaultModelEffective(provider: AliasProviderKey): string {
@@ -2674,108 +2695,28 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
   await saveRoutines({ provider_default_modes: modes })
 }
 
-function serializeRoutineModel(provider: RoutineProviderValue, model: string): string {
-  // Runtime-provider models need an explicit qualifier so the backend does not
-  // send a global routine override through Claude by default.
-  if (provider === 'opencode') {
-    return `${provider}:${model}`
-  }
-  return model
+// ── Per-provider Session insights model (Models tab) ────────────────
+// Automatic reads the session with the provider's own default chat model
+// (ciao/insights.py::resolve_insights_model).
+const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
+
+function providerInsightsModelSelectorValue(provider: AliasProviderKey): string {
+  return routines.value?.provider_insights_models?.[provider] || DEFAULT_INSIGHTS_SELECTION
 }
 
-function aliasProviderLabel(provider: AliasProviderKey): string {
-  return aliasProviderSections.value.find((section) => section.key === provider)?.label || provider
+function providerInsightsModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
+  return providerSectionsWithDefault(provider, DEFAULT_INSIGHTS_SELECTION, (effective) =>
+    effective ? `Same as default (${effective})` : 'Same as default model',
+  )
 }
 
-function routineEffectiveModel(key: RoutineModelKey): string {
-  const settings = routines.value
-  if (!settings) return ''
-  const effectiveKey = routineEffectiveKeys[key]
-  const value = settings[effectiveKey]
-  return typeof value === 'string' ? value : ''
-}
-
-function inferRoutineModel(model: string): { provider: RoutineProviderValue; model: string } {
-  const raw = model.trim()
-  if (!raw) return { provider: 'automatic', model: '' }
-  for (const provider of ['opencode'] as const) {
-    const prefix = `${provider}:`
-    if (raw.startsWith(prefix)) {
-      return { provider, model: raw.slice(prefix.length) }
-    }
-  }
-  // A bare Claude tier alias is a real model id on Claude.
-  if (['haiku', 'sonnet', 'opus', 'fable'].includes(raw)) {
-    return { provider: 'claude', model: raw }
-  }
-  // A concrete model id on the default provider (Claude).
-  return { provider: 'claude', model: raw }
-}
-
-function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
-  return inferRoutineModel(routines.value?.[key] || '').provider
-}
-
-function routineModelValue(key: RoutineModelKey): string {
-  const raw = routines.value?.[key] || ''
-  if (raw.trim()) return inferRoutineModel(raw).model
-  return routineEffectiveModel(key)
-}
-
-// The concrete-model sections for a routine once its provider is chosen.
-function routineModelSectionsFor(key: RoutineModelKey): ModelSection[] {
-  const provider = routineProviderValue(key)
-  if (provider === 'automatic') return []
-  return [aliasSectionEntry(provider)]
-}
-
-async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) {
-  const provider = providerValue as RoutineProviderValue
-  if (provider === 'automatic') {
-    await saveRoutines({ [key]: '' })
-    return
-  }
-  // Pick the provider's effective default model as the starting point.
-  const model = providerDefaultModelEffective(provider) || routineEffectiveModel(key)
-  await saveRoutines({ [key]: serializeRoutineModel(provider, model) })
-}
-
-async function saveRoutineModel(key: RoutineModelKey, value: string | string[]) {
+async function saveProviderInsightsModel(provider: AliasProviderKey, value: string | string[]) {
   const selected = Array.isArray(value) ? value[0] || '' : value
-  if (!selected) {
-    await saveRoutines({ [key]: '' })
-    return
-  }
-  await saveRoutines({ [key]: selected })
-}
-
-// Automatic does not pick one model: resolve_insights_model takes the chat's
-// workspace and reads that workspace's tier. Naming a single model here read
-// as a global choice and was wrong for every workspace but the primary one, so
-// say what it follows and list the per-workspace answers.
-function routineWorkspaceModels(key: RoutineModelKey): Array<[string, string]> {
-  const settings = routines.value
-  if (!settings) return []
-  return Object.entries(settings.insights_model_by_workspace || {})
-}
-
-function routineModelSummary(key: RoutineModelKey): string {
-  const provider = routineProviderValue(key)
-  if (provider === 'automatic') {
-    const perWorkspace = routineWorkspaceModels(key)
-    const distinct = new Set(perWorkspace.map(([, model]) => model))
-    if (distinct.size > 1) {
-      const parts = perWorkspace.map(([ws, model]) => `${ws}: ${model || 'default'}`)
-      return `Automatic — follows each chat's workspace (${parts.join(' · ')})`
-    }
-    if (distinct.size === 1) {
-      return `Automatic — follows each chat's workspace (currently ${[...distinct][0] || 'default'} for all)`
-    }
-    return `Automatic: ${routineEffectiveModel(key) || 'default'}`
-  }
-  const model = routineModelValue(key)
-  if (provider === 'opencode') return `opencode: ${model || 'default'}`
-  return `${aliasProviderLabel(provider)}: ${model || 'default'}`
+  const model = selected === DEFAULT_INSIGHTS_SELECTION ? '' : selected.trim()
+  const models = { ...(routines.value?.provider_insights_models || {}) }
+  if (model) models[provider] = model
+  else delete models[provider]
+  await saveRoutines({ provider_insights_models: models })
 }
 
 // ── Provider connections (Models tab, chat providers card) ───────────────────
@@ -2972,7 +2913,7 @@ async function gwsReloginStart(profileName: string) {
         'The sign-in tab was blocked by the browser. Open this link, then finish here:'
       gwsAuthUrls.value[profileName] = res.auth_url
     }
-    gwsPollRelogin(profileName)
+    gwsPollRelogin()
   } catch (e) {
     if (tab) tab.close()
     const msg = errorMessage(e, 'Could not start the sign-in flow.')
@@ -2999,7 +2940,7 @@ function gwsClearRelogin(profileName: string) {
   delete gwsRedirectUrls.value[profileName]
 }
 
-function gwsPollRelogin(profileName: string) {
+function gwsPollRelogin() {
   if (gwsReloginTimer) return
   gwsReloginTimer = setInterval(async () => {
     if (gwsReloginPolling) return
@@ -3202,8 +3143,11 @@ function providerBringsCounts(providerId: string, conn: ProviderConnection): str
   const mcps = connectionMcps(providerId).length
   const skills = conn.skills?.length ?? 0
   const mcpLabel = `${mcps} MCP ${mcps === 1 ? 'server' : 'servers'}`
-  const skillLabel = `${skills} ${skills === 1 ? 'skill or plugin' : 'skills & plugins'}`
-  return `${mcpLabel}, ${skillLabel}`
+  const skillLabel = conn.ok && !conn.skills
+    ? 'skills not read'
+    : `${skills} ${skills === 1 ? 'skill or plugin' : 'skills & plugins'}`
+  const bundled = conn.bundled_skills?.length
+  return bundled ? `${mcpLabel}, ${skillLabel}, ${bundled} built in` : `${mcpLabel}, ${skillLabel}`
 }
 
 
@@ -3808,32 +3752,6 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
   }
 }
 
-function workspaceModelSectionsForProvider(provider: WorkspaceProvider): ModelSection[] {
-  if (provider.startsWith('custom:')) {
-    const section = sectionsFromModelsResponse(workspaceModels.value)
-      .find((item) => item.key === provider)
-    return section ? [section] : []
-  }
-  if (provider === 'opencode') {
-    const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === provider)
-    return section ? [section] : []
-  }
-  // Claude's models are the tier aliases plus any configured concrete ids.
-  const section = sectionsFromModelsResponse(workspaceModels.value)
-    .find((item) => item.key === 'anthropic')
-  return section
-    ? [{ ...section }]
-    : [{
-        key: provider,
-        label: aliasProviderLabel(provider as AliasProviderKey),
-        models: [],
-      }]
-}
-
-function workspaceModelSectionsForForm(form: WorkspaceForm): ModelSection[] {
-  return workspaceModelSectionsForProvider(form.default_provider)
-}
-
 const workspaceForms = ref<WorkspaceForm[]>([])
 const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
 // One row "..." menu open at a time, keyed by row. Esc closes it here and
@@ -4101,6 +4019,7 @@ onMounted(async () => {
   })
   fetchAuthSettings()
   fetchRoutines()
+  fetchWorkspaceMove()
   fetchPackageStatus()
   fetchUpdateStatus()
   fetchProviderKeys().then(scrollToChatProvidersIfLinked)
@@ -4325,6 +4244,15 @@ async function fixIssuesInChat() {
 // ── Workspace git sync (current branch) ──────────────────────────────────
 const localStatus = ref<LocalStatus | null>(null)
 
+// Developer mode is a setting now; the Debug card reads it from the local
+// status, so a toggle refreshes that rather than waiting for a reload.
+watch(
+  () => routines.value?.dev_mode,
+  (current, previous) => {
+    if (previous !== undefined && current !== previous) void fetchLocalStatus()
+  },
+)
+
 async function fetchLocalStatus() {
   try {
     localStatus.value = await api.get<LocalStatus>('/api/local/status')
@@ -4335,7 +4263,6 @@ async function fetchLocalStatus() {
 
 // ── PWA password (Settings → home) ─────────────────────────────────────
 interface AuthSettings {
-  auth_required: boolean
   password_configured: boolean
 }
 
@@ -4346,12 +4273,12 @@ const authSettingsSaving = ref(false)
 const authSettingsResult = ref('')
 const authSettingsError = ref(false)
 
-// Protection is the default and cannot be switched off from here (the server
-// rejects `auth_required: false`), so this card only changes the password.
+// Protection is always on, so this card only changes the password, and the
+// server always asks for the current one.
 const canSaveAuthSettings = computed(() => {
   if (!authSettings.value) return false
   if (!authNewPassword.value.trim()) return false
-  if (authSettings.value.auth_required && !authCurrentPassword.value) return false
+  if (!authCurrentPassword.value) return false
   return true
 })
 
@@ -4374,7 +4301,6 @@ async function saveAuthSettings() {
       current_password: authCurrentPassword.value,
     })
     authSettings.value = {
-      auth_required: res.auth_required,
       password_configured: res.password_configured,
     }
     authCurrentPassword.value = ''
@@ -5402,6 +5328,15 @@ a.btn-secondary {
   background: var(--bg);
   color: var(--fg);
 }
+.workspace-move-row {
+  margin-top: var(--space-3);
+}
+.workspace-move-outcome {
+  margin-top: var(--space-3);
+}
+.workspace-move-outcome--error {
+  color: var(--error);
+}
 .workspace-root-path {
   display: block;
   margin-top: var(--space-3);
@@ -5411,41 +5346,6 @@ a.btn-secondary {
   background: color-mix(in srgb, var(--bg) 76%, transparent);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
-}
-.routine-model-controls {
-  width: 100%;
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 136px;
-  gap: 8px;
-  align-items: start;
-}
-.routine-model-controls .routine-select {
-  max-width: none;
-  min-width: 0;
-  width: 100%;
-}
-.routine-model-hint {
-  grid-column: 1 / -1;
-  min-width: 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-.routine-model-hint code {
-  font-size: var(--text-xs);
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--bg);
-  color: var(--fg);
-}
-.routine-model-hint a {
-  color: var(--accent);
-  text-decoration: underline;
-}
-.routine-model-hint a:hover {
-  color: var(--accent2);
 }
 .setting-row--flush {
   border-top: 0;
@@ -5882,15 +5782,6 @@ a.btn-secondary {
   .routine-row {
     grid-template-columns: 1fr;
     gap: var(--space-3);
-  }
-  .routine-model-controls {
-    max-width: none;
-    min-width: 0;
-    width: 100%;
-    grid-template-columns: 1fr;
-  }
-  .routine-model-hint {
-    grid-column: 1;
   }
   .critique-model-picker {
     max-width: none;

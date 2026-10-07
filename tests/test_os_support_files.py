@@ -183,6 +183,47 @@ def test_windows_replace_gives_up_after_its_deadline(
         files.replace_file(tmp_path / "a", tmp_path / "b")
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the retry is the Windows branch")
+def test_windows_read_waits_out_a_writer_holding_the_file(tmp_path: Path) -> None:
+    # A lock-free store read races the writer's replace; while the target is
+    # held without sharing, as during `MoveFileEx`, the open is refused with a
+    # sharing violation and has to be retried, not reported as a corrupt store.
+    import ctypes
+    import threading
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    target = tmp_path / "store.json"
+    target.write_bytes(b"{}")
+    exclusive = kernel32.CreateFileW(str(target), 0x80000000, 0, None, 3, 0x80, None)
+    assert exclusive not in (None, wintypes.HANDLE(-1).value)
+    releaser = threading.Timer(0.1, kernel32.CloseHandle, args=(exclusive,))
+    releaser.start()
+    try:
+        fd = open_fd(target, os.O_RDONLY, follow_symlinks=False)
+    finally:
+        releaser.join()
+    with os.fdopen(fd, "rb") as handle:
+        assert handle.read() == b"{}"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the retry is the Windows branch")
+def test_windows_read_does_not_retry_a_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao.os_support import files
+
+    monkeypatch.setattr(files.time, "sleep", lambda _s: pytest.fail("retried a missing file"))
+    with pytest.raises(FileNotFoundError):
+        open_fd(tmp_path / "absent", os.O_RDONLY, follow_symlinks=False)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="the POSIX branch is not defined on Windows")
 def test_posix_replace_is_os_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ciao.os_support import files

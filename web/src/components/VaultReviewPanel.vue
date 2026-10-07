@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useVaultReviewStore } from '../stores/vaultReview'
@@ -657,7 +658,7 @@ function clearedDate(note: VaultClearedNote): string {
     </div>
 
     <template v-if="props.section !== 'trash'">
-      <p v-if="showInitialLoading" class="vr-empty" role="status">Loading candidates…</p>
+      <SkeletonLoader v-if="showInitialLoading" label="Loading candidates" variant="cards" :count="3" />
       <div v-else-if="showInitialError" class="vr-load-state vr-load-state--error" role="alert">
         <span>Could not load notes to revisit. {{ store.loadError }}</span>
         <button type="button" class="btn-small" @click="refresh">Retry</button>
@@ -1090,7 +1091,7 @@ function clearedDate(note: VaultClearedNote): string {
     </template>
 
     <section v-else class="vr-trash" aria-label="Trash">
-      <p v-if="showInitialLoading" class="vr-empty" role="status">Loading retired notes…</p>
+      <SkeletonLoader v-if="showInitialLoading" label="Loading retired notes" :count="4" />
       <div v-else-if="showInitialError" class="vr-load-state vr-load-state--error" role="alert">
         <span>Could not load retired notes. {{ store.loadError }}</span>
         <button type="button" class="btn-small" @click="refresh">Retry</button>

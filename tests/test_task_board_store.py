@@ -78,7 +78,6 @@ def valid_frontmatter(
     title: str = "A task",
     status: str = "backlog",
     assignee: str = "user",
-    review: str = "none",
     due: str | None = None,
     project: str | None = None,
     chat: str | None = None,
@@ -89,14 +88,13 @@ def valid_frontmatter(
         return "null" if value is None else value
 
     lines = [
-        "schema: 1",
+        "schema: 2",
         f"id: {task_id}",
         f"title: {title}",
         f"status: {status}",
         f"project_id: {opt(project)}",
         f"due: {opt(due)}",
         f"assignee: {assignee}",
-        f"review_state: {review}",
         'created_at: "2026-10-03T12:00:00+00:00"',
         'updated_at: "2026-10-03T12:00:00+00:00"',
         f"chat_id: {opt(chat)}",
@@ -131,7 +129,6 @@ def test_create_get_and_list_have_stable_identity_and_defaults(tmp_path: Path) -
     assert created.record.title == "First task"
     assert created.record.status == "backlog"
     assert created.record.assignee == "user"
-    assert created.record.review_state == "none"
     assert created.record.project_id is None
     assert created.record.due is None
     assert created.record.chat_id is None
@@ -321,10 +318,10 @@ def test_invalid_duplicate_truncated_or_unsupported_metadata_is_visible_and_unto
     hand_file(vault, dup_id, dup_lines)
     trunc_id = "e" * 32
     task_path(vault, trunc_id).parent.mkdir(parents=True, exist_ok=True)
-    task_path(vault, trunc_id).write_bytes(b"---\nschema: 1\nid: " + trunc_id.encode() + b"\n")
+    task_path(vault, trunc_id).write_bytes(b"---\nschema: 2\nid: " + trunc_id.encode() + b"\n")
     schema_id = "f" * 32
     hand_file(vault, schema_id, valid_frontmatter(schema_id).copy())
-    schema_raw = task_path(vault, schema_id).read_bytes().replace(b"schema: 1", b"schema: 2")
+    schema_raw = task_path(vault, schema_id).read_bytes().replace(b"schema: 2", b"schema: 3")
     task_path(vault, schema_id).write_bytes(schema_raw)
     alias_id = "0" * 32
     alias_lines = valid_frontmatter(alias_id, extra=["anchor: &x 1", "copied: *x"])
@@ -546,13 +543,13 @@ def test_agent_cannot_complete_and_user_can_complete_manual_task(tmp_path: Path)
     assert done.record.chat_id is None and done.record.attempt_id is None
 
 
-def test_ready_requires_agent_in_progress_and_linked_live_completion_is_refused(
+def test_in_review_is_an_ordinary_column_and_linked_live_completion_is_refused(
     tmp_path: Path,
 ) -> None:
     vault = tmp_path / "vault"
     store = make_store(vault, tmp_path / "runtime", Clock())
     created = store.create(title="ops work")
-    # Ready on a backlog task owned by the user is refused.
+    # Review is a column (#1069): no separate flag, no pairing rule.
     with pytest.raises(TaskBoardError) as excinfo:
         store.update(
             created.record.id,
@@ -561,29 +558,21 @@ def test_ready_requires_agent_in_progress_and_linked_live_completion_is_refused(
             actor="user",
         )
     assert excinfo.value.code == "invalid_task"
-
-    in_progress = store.update(
+    in_review = store.update(
         created.record.id,
         expected_revision=created.revision,
-        changes={"status": "in_progress", "assignee": "agent"},
-        actor="user",
+        changes={"status": "in_review"},
+        actor="agent",
     )
-    ready = store.update(
-        created.record.id,
-        expected_revision=in_progress.revision,
-        changes={"review_state": "ready"},
-        actor="user",
-    )
-    assert ready.record.review_state == "ready"
-    # Leaving In progress without an explicit review change clears ready.
-    parked = store.update(
-        created.record.id,
-        expected_revision=ready.revision,
-        changes={"status": "on_hold"},
-        actor="user",
-    )
-    assert parked.record.status == "on_hold"
-    assert parked.record.review_state == "none"
+    assert in_review.record.status == "in_review"
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.update(
+            created.record.id,
+            expected_revision=in_review.revision,
+            changes={"status": "on_hold"},
+            actor="user",
+        )
+    assert excinfo.value.code == "invalid_task"
 
     # A task linked to a live attempt cannot be completed or reassigned
     # through this API, by either actor; the bytes stay untouched.
@@ -750,3 +739,158 @@ def test_indented_delimiter_inside_block_scalar_survives(tmp_path: Path) -> None
     changed = [index for index, (old, new) in enumerate(zip(before, after)) if old != new]
     assert len(changed) == 1
     assert b"title:" in after[changed[0]]
+
+
+# ── Removal (#1021, child B3 of #973) ────────────────────────────────────
+#
+# `DELETE /api/tasks/{task_id}` needs a store removal, which B1 deliberately
+# left out. It is added here rather than as an unlink beside the store: removal
+# has to take the same workspace lock, the same no-follow read (so a link where
+# the file must be is refused rather than followed), the same id validation and
+# the same revision check as every other managed write.
+
+
+def test_delete_removes_the_record_and_is_then_a_not_found(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    kept = store.create(title="kept")
+    removed = store.create(title="removed")
+
+    store.delete(removed.record.id, expected_revision=removed.revision)
+
+    assert not task_path(vault, removed.record.id).exists()
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.get(removed.record.id)
+    assert excinfo.value.code == "not_found"
+    # Only this store's task went; nothing else in the directory was touched.
+    assert [document.record.id for document in store.list().tasks] == [kept.record.id]
+    assert task_path(vault, kept.record.id).exists()
+
+    with pytest.raises(TaskBoardError) as again:
+        store.delete(removed.record.id, expected_revision=removed.revision)
+    assert again.value.code == "not_found"
+
+
+def test_delete_needs_the_current_revision_and_writes_nothing_when_stale(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    clock = Clock()
+    store = make_store(vault, tmp_path / "runtime", clock)
+    created = store.create(title="about to change")
+
+    # No revision at all is refused before the file is even opened: this store
+    # never removes a task nobody read.
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.delete(created.record.id, expected_revision="")
+    assert excinfo.value.code == "invalid_task"
+    assert task_path(vault, created.record.id).exists()
+
+    store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"title": "changed since the delete was planned"},
+        actor="user",
+    )
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.delete(created.record.id, expected_revision=created.revision)
+    assert excinfo.value.code == "revision_conflict"
+    assert task_path(vault, created.record.id).exists()
+    assert store.get(created.record.id).record.title == "changed since the delete was planned"
+
+
+def test_delete_refuses_an_unsafe_id_or_a_linked_file(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    for bad_id in ("", "../escape", "a" * 31, "G" * 32, "with space"):
+        with pytest.raises(TaskBoardError) as excinfo:
+            store.delete(bad_id, expected_revision="x")
+        assert excinfo.value.code == "unsafe_path"
+
+    real = store.create(title="real")
+    outside = tmp_path / "outside.md"
+    outside.write_text("not a task\n", encoding="utf-8")
+    link_id = "4" * 32
+    tasks_dir(vault).mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(outside, task_path(vault, link_id))
+    except OSError:
+        pytest.skip("this platform could not create a symlink for the test")
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.delete(link_id, expected_revision="x")
+    assert excinfo.value.code == "unsafe_path"
+    # The link target outside the task directory is untouched: a refused
+    # removal is not a removal, and a link is never followed.
+    assert outside.read_text(encoding="utf-8") == "not a task\n"
+    assert task_path(vault, real.record.id).exists()
+
+
+# ── Schema 1 → 2 (#1069) ─────────────────────────────────────────────
+
+
+def _schema_1(task_id: str, status: str, review: str, *, newline: str = "\n") -> bytes:
+    lines = [
+        "---",
+        "schema: 1",
+        f"id: {task_id}",
+        "title: legacy task",
+        f'status: "{status}"',
+        "project_id: null",
+        "due: null",
+        "assignee: agent",
+        f"review_state: {review}",
+        'created_at: "2026-10-03T12:00:00+00:00"',
+        'updated_at: "2026-10-03T12:00:00+00:00"',
+        "chat_id: null",
+        "attempt_id: null",
+        "# a comment the migration leaves alone",
+        "---",
+        "The body mentions status: on_hold and review_state: ready, untouched.",
+        "",
+    ]
+    return newline.join(lines).encode()
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_schema_1_files_are_rewritten_once_to_the_four_columns(tmp_path: Path, newline: str) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    held, reviewed, plain = "a" * 32, "b" * 32, "c" * 32
+    for task_id, status, review in (
+        (held, "on_hold", "none"),
+        (reviewed, "in_progress", "ready"),
+        (plain, "in_progress", "none"),
+    ):
+        path = task_path(vault, task_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_schema_1(task_id, status, review, newline=newline))
+    before = {task_id: task_path(vault, task_id).read_bytes() for task_id in (held, reviewed, plain)}
+
+    migrated = store.migrate_schema_1()
+
+    assert sorted(task_id for task_id, _old, _new in migrated) == sorted([held, reviewed, plain])
+    statuses = {document.record.id: document.record.status for document in store.list().tasks}
+    assert statuses == {held: "backlog", reviewed: "in_review", plain: "in_progress"}
+    for task_id in (held, reviewed, plain):
+        raw = task_path(vault, task_id).read_bytes()
+        assert b"review_state:" not in raw.split(b"---")[1]
+        assert b"schema: 2" in raw
+        # Everything else is the bytes it was: the comment, the body, the newlines.
+        assert b"# a comment the migration leaves alone" in raw
+        assert raw.endswith(before[task_id].split(b"---", 2)[2])
+        assert (b"\r\n" in raw) == (newline == "\r\n")
+    # Once: a second run finds nothing to do.
+    assert store.migrate_schema_1() == []
+
+
+def test_a_schema_1_file_the_migration_cannot_read_is_left_untouched(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    task_id = "d" * 32
+    path = task_path(vault, task_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = _schema_1(task_id, "someday", "none")
+    path.write_bytes(raw)
+    assert store.migrate_schema_1() == []
+    assert path.read_bytes() == raw
+    assert store.list().invalid[0].code == "unsupported_schema"

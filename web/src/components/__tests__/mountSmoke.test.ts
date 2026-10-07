@@ -18,11 +18,9 @@ import { api } from '../../lib/api'
 
 vi.mock('../../lib/api', () => {
   let routineSettings = {
-    insights_model: '',
     insights_enabled: true,
 
     critique_models: '',
-    insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
 
@@ -142,6 +140,9 @@ vi.mock('../../lib/api', () => {
     '/api/chats': [],
     '/api/tasks': { tasks: [] },
     '/api/schedules': [],
+    // The Automations overview reads the webhook triggers section on mount, so
+    // the shared fixture answers it. A bare `[]` would break `triggers.map`.
+    '/api/webhooks': { triggers: [] },
     '/api/workspaces': {
       workspaces: [],
       active: null,
@@ -236,6 +237,7 @@ function makeRouter() {
       { path: '/chat/:chatId?', name: 'chat-detail', component: Stub },
       { path: '/project/:projectId', name: 'project', component: Stub },
       { path: '/schedules', name: 'schedules', component: Stub },
+      { path: '/tasks', name: 'tasks', component: Stub },
       { path: '/memory', name: 'memory', component: Stub },
       { path: '/settings', name: 'settings', component: Stub },
       { path: '/settings/:tab', name: 'settings-tab', component: Stub },
@@ -352,6 +354,84 @@ describe('component mount smoke', () => {
     await nextTick()
 
     expect(wrapper.find('[data-testid="memory-map-stub"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('TaskBoardView mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../TaskBoardView.vue'))
+    expect(errors).toEqual([])
+  })
+
+  it('ChatLayout leaves Esc to an open dialog or menu, and leaves the page otherwise', async () => {
+    const router = makeRouter()
+    await router.push('/tasks')
+    await router.isReady()
+    const mod = await import('../ChatLayout.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    const esc = () => document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+
+    // Reka marks every open dialog, menu and popover this way; its own Esc
+    // listener runs after ChatLayout's, so the page must not act first.
+    const layer = document.createElement('div')
+    layer.setAttribute('data-dismissable-layer', '')
+    document.body.appendChild(layer)
+    esc()
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/tasks')
+
+    layer.remove()
+    esc()
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/')
+    wrapper.unmount()
+  })
+
+  it('ChatLayout renders the task board at /tasks', async () => {
+    const router = makeRouter()
+    await router.push('/tasks')
+    await router.isReady()
+    const mod = await import('../ChatLayout.vue')
+    const wrapper = mount(mod.default as never, {
+      global: {
+        plugins: [router],
+        stubs: { Teleport: true },
+      },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The pane is a `viewMode` branch, so the route is what puts it on screen.
+    // The shared `/api/tasks` fixture answers `{ tasks: [] }`, which is an empty
+    // board rather than a load error — the mount must not mistake one for the
+    // other and throw.
+    expect(wrapper.text()).toContain('No tasks in')
+    expect(wrapper.text()).not.toContain('Could not load')
+    wrapper.unmount()
+  })
+
+  it('WebhookTriggers mounts without throwing', async () => {
+    const errors = await mountAndSettle(() => import('../WebhookTriggers.vue'))
+    expect(errors).toEqual([])
+  })
+
+  it('WebhookTriggers renders the Automations section against the shared fixture', async () => {
+    // The section is mounted here rather than through SchedulePanel, which this
+    // file stubs out as an async no-op — the overview itself is covered by
+    // SchedulePanelCards.test.ts.
+    const mod = await import('../WebhookTriggers.vue')
+    const wrapper = mount(mod.default as never, { global: { stubs: { Teleport: true } } })
+    await flushPromises()
+    await nextTick()
+
+    // The shared `/api/webhooks` fixture answers `{ triggers: [] }`, which is an
+    // empty list rather than a load error: the mount must not mistake one for the
+    // other, or it will render a failure over a workspace that simply has none.
+    expect(wrapper.text()).toContain('Webhook triggers')
+    expect(wrapper.text()).toContain('No webhook triggers yet')
+    expect(wrapper.text()).not.toContain('Could not load webhook triggers')
     wrapper.unmount()
   })
 
@@ -754,6 +834,7 @@ describe('component mount smoke', () => {
           ...original.connections.claude,
           mcps: ['ciao-memory', 'github'],
           skills: ['frontend-design'],
+          bundled_skills: ['code-review', 'dataviz'],
         },
       },
     })
@@ -776,9 +857,11 @@ describe('component mount smoke', () => {
         expect(d.find('.provider-mcps-preview').exists()).toBe(true)
       }
       const claude = disclosures[0]!
-      expect(claude.find('summary').text()).toMatch(/What this CLI brings \(\d+ MCP servers?, 1 skill or plugin\)/)
+      expect(claude.find('summary').text()).toMatch(/What this CLI brings \(\d+ MCP servers?, 1 skill or plugin, 2 built in\)/)
       expect(claude.text()).toContain('frontend-design')
-      expect(disclosures[1]!.find('summary').text()).toContain('0 MCP servers, 0 skills & plugins')
+      expect(claude.text()).toMatch(/Built into .+ \(2\)/)
+      expect(claude.text()).toContain('dataviz')
+      expect(disclosures[1]!.find('summary').text()).toContain('0 MCP servers, 0 skills & plugins)')
       // The defaults and actions stay outside the disclosure.
       expect(wrapper.find('details.provider-brings .provider-inline-defaults').exists()).toBe(false)
       expect(wrapper.find('details.provider-brings .provider-connection-actions').exists()).toBe(false)
@@ -811,6 +894,68 @@ describe('component mount smoke', () => {
     const actions = opencodeRow.findAll('.provider-connection-actions button').map((b) => b.text())
     expect(actions).toEqual(['Connect', 'Verify'])
     wrapper.unmount()
+  })
+
+  it('SettingsView renders the shared install block for a missing provider CLI', async () => {
+    // Both providers share one branch: the install command, the PATH line, and
+    // the docs link. opencode used to report `auth: 'missing'` with a bare
+    // `opencode` command, so this block never rendered for it.
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const original = testApi.getResponse('/api/settings/providers') as {
+      connections: Record<string, unknown>
+    }
+    testApi.setResponse('/api/settings/providers', {
+      connections: {
+        ...original.connections,
+        claude: {
+          ...(original.connections.claude as object),
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://claude.ai/install.sh | bash',
+          detail: 'Claude Code is not installed on this machine.',
+          install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
+          path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc',
+        },
+        opencode: {
+          name: 'opencode',
+          label: 'opencode',
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://opencode.ai/v2/install | bash',
+          detail: 'opencode is not installed on this machine.',
+          version: 'not installed',
+          install_url: 'https://opencode.ai/download',
+          path_command: 'echo \'export PATH="$HOME/.opencode/bin:$PATH"\' >> ~/.zshrc',
+        },
+      },
+    })
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      const text = wrapper.text()
+      expect(text).toContain('curl -fsSL https://opencode.ai/v2/install | bash')
+      expect(text).toContain('Install it with')
+      // The link is not glued to the PATH code (the whitespace a newline-only
+      // text node used to swallow). `&nbsp;` renders as U+00A0.
+      expect(text).toMatch(/~\/\.zshrc\s+installation guide/)
+      const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
+      const link = opencodeRow.find('a[href="https://opencode.ai/download"]')
+      expect(link.exists()).toBe(true)
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
   })
 
   it('SettingsView renders no API-key entry UI even when the payload advertises keys', async () => {
@@ -867,8 +1012,9 @@ describe('component mount smoke', () => {
       provider_default_models: { claude: 'sonnet' },
     })
 
-    const selectors = wrapper.findAll('.provider-connections .model-selector')
-    const opencodeSelector = selectors[1]!
+    // Each card holds its default-model selector first, then Session insights.
+    const opencodeSelector = wrapper.findAll('.provider-inline-defaults')[1]!
+      .findAll('.model-selector')[0]!
     await opencodeSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
     const opencodeOption = opencodeSelector.findAll('.model-selector__item')
@@ -937,14 +1083,15 @@ describe('component mount smoke', () => {
       const inlineBlocks = wrapper.findAll('.provider-inline-defaults')
       expect(inlineBlocks.length).toBe(1)
       expect(wrapper.text()).toContain('Default model')
-      expect(wrapper.findAll('.provider-connections .model-selector')).toHaveLength(1)
+      // Claude's default model and Session insights model.
+      expect(wrapper.findAll('.provider-connections .model-selector')).toHaveLength(2)
     } finally {
       wrapper.unmount()
       testApi.setResponse('/api/models', originalModels)
     }
   })
 
-  it('SettingsView saves routine models by provider', async () => {
+  it('SettingsView saves the Session insights model per provider', async () => {
     const mockApi = api as typeof api & {
       getResponse(path: string): unknown
       setResponse(path: string, value: unknown): void
@@ -973,24 +1120,36 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    // insights_model carries a provider select.
-    const providerSelects = wrapper.findAll('.routine-model-controls .routine-select--provider')
-    expect(providerSelects.length).toBeGreaterThanOrEqual(1)
+    // Session insights is picked per provider, on that provider's card, and
+    // stores a bare model id for that provider.
+    expect(wrapper.find('.routine-select--provider').exists()).toBe(false)
+    const pick = async (card: number, model: string) => {
+      const selector = wrapper.findAll('.provider-inline-defaults')[card]!
+        .findAll('.model-selector')[1]!
+      await selector.find('.model-selector__trigger').trigger('click')
+      await flushPromises()
+      const option = selector.findAll('.model-selector__item')
+        .find((el) => el.attributes('data-model') === model)
+      expect(option).toBeTruthy()
+      await option!.trigger('click')
+      await flushPromises()
+    }
 
-    // Picking Claude stores the effective default as the concrete model.
-    await providerSelects[0].setValue('claude')
-    await flushPromises()
+    await pick(0, 'haiku')
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      insights_model: 'sonnet',
+      provider_insights_models: { claude: 'haiku' },
     })
 
-    // Picking opencode stores a provider-qualified concrete model.
-    await providerSelects[0].setValue('opencode')
-    await flushPromises()
-    const patchMock = api.patch as unknown as { mock: { calls: Array<[string, unknown]> } }
-    const last = patchMock.mock.calls[patchMock.mock.calls.length - 1]
-    const body = last[1] as Record<string, string>
-    expect(body.insights_model).toBe('opencode:opus')
+    await pick(1, 'anthropic/claude-opus-4.5')
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      provider_insights_models: { claude: 'haiku', opencode: 'anthropic/claude-opus-4.5' },
+    })
+
+    // Automatic clears just that provider's entry.
+    await pick(0, '__ciao_insights_default__')
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      provider_insights_models: { opencode: 'anthropic/claude-opus-4.5' },
+    })
 
     wrapper.unmount()
     mockApi.setResponse('/api/models', originalModels)

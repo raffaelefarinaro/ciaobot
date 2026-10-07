@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import tempfile
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -134,6 +134,7 @@ async def _run_claude_oneshot(
     model: str,
     env: dict[str, str] | None,
     max_turns: int = 2,
+    options_hook: Callable[[ClaudeAgentOptions], None] | None = None,
 ) -> str:
     # Titles / doc folds / critique never need agent tooling. Leaving
     # ``tools`` unset keeps the CLI's default Claude Code tool schemas in
@@ -166,6 +167,15 @@ async def _run_claude_oneshot(
         env=env or {},
     )
     parts: list[str] = []
+    # The no-tools contract above is currently only observable by patching this
+    # module's ``query`` import, which binds a test to an import name rather
+    # than to a contract. ``options_hook`` (#1012) is the narrow seam for that:
+    # it hands the constructed options to a caller before the turn starts. It
+    # adds no policy and changes no option — a hook that raises propagates,
+    # because a caller observing the options must not be able to swallow the
+    # turn it is observing.
+    if options_hook is not None:
+        options_hook(options)
     agen = query(prompt=prompt, options=options)
     try:
         async for msg in agen:
@@ -262,6 +272,7 @@ async def run_oneshot(
     max_retries: int = 1,
     retry_backoff_s: float = 0.5,
     max_turns: int = 2,
+    options_hook: Callable[[ClaudeAgentOptions], None] | None = None,
 ) -> str:
     """Run a single-turn model call and return the assistant's text.
 
@@ -273,6 +284,13 @@ async def run_oneshot(
     stray ``stop_reason=tool_use`` is absorbed; a caller that must count
     billable provider attempts (the behavioral eval's budget) passes 1 so one
     reserved slot is exactly one provider call.
+
+    ``options_hook`` is called with the constructed ``ClaudeAgentOptions`` just
+    before the Claude turn starts, so a caller can read the no-tools contract
+    off a real object instead of patching this module's ``query`` import
+    (#1012). It is an observation point and nothing else: it sets no option, no
+    existing caller passes it, and it is not called on the opencode path, whose
+    deny-all is derived at session-create time rather than in an options object.
 
     On a transient failure (an empty-body / ``is_error`` result) the call is
     retried up to ``max_retries``
@@ -317,6 +335,7 @@ async def run_oneshot(
                 model=model,
                 env=merged_env,
                 max_turns=max_turns,
+                options_hook=options_hook,
             )
     else:
         raise ValueError(f"Unknown one-shot provider '{provider}'")

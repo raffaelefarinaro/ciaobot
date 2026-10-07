@@ -41,6 +41,7 @@ class _Host:
         self._events_hub.publish = self.published.append  # type: ignore[method-assign]
         self.index_calls: list[str] = []
         self.enqueued: list[tuple[str, Path, str]] = []
+        self.focuses: list[dict[str, str] | None] = []
 
     @property
     def events(self) -> EventsHub:
@@ -64,9 +65,11 @@ class _Host:
         project: ProjectInfo | None,
         archive_path: Path,
         doc_path: str,
+        focus: dict[str, str] | None = None,
     ) -> str | None:
         del project
         self.enqueued.append((source.chat_id, archive_path, doc_path))
+        self.focuses.append(focus)
         return "memory-chat"
 
     def _make_archive_index_operation(

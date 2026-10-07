@@ -210,6 +210,32 @@
             </span>
             <span class="nav-item-label" aria-hidden="true">Memory</span>
           </router-link>
+          <!-- The board the workspace's own task records live on: four fixed
+               columns, filed by status, one row per task file. A destination
+               like Memory and Automations above it, so it gets the same rail
+               row and the same `mode`-driven active state. -->
+          <router-link
+            to="/tasks"
+            class="nav-item"
+            :class="{ 'nav-item--active': mode === 'tasks' }"
+            title="tasks"
+            :data-count="tasksCount || undefined"
+            :aria-label="tasksCount ? `tasks — ${tasksCount} waiting for review` : 'tasks'"
+          >
+            <!-- Clipboard with a check: the board's own subject, in the same
+                 rectilinear stroke as the rest of the rail. -->
+            <span class="nav-item-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="square" stroke-linejoin="miter">
+                <rect x="4" y="4" width="16" height="17" rx="1" />
+                <line x1="9" y1="2" x2="9" y2="6" />
+                <line x1="15" y1="2" x2="15" y2="6" />
+                <line x1="4" y1="9" x2="20" y2="9" />
+                <polyline points="8 15 11 18 16 13" />
+              </svg>
+            </span>
+            <span class="nav-item-label" aria-hidden="true">Tasks</span>
+          </router-link>
           <!-- mode, not active-class: every settings tab is its own route
                (/settings/models, /settings/workspaces, ...) and none of them match
                the /settings record, so active-class left this item inactive on
@@ -694,7 +720,7 @@
                     role="link"
                     :tabindex="chat.local === false ? -1 : 0"
                     :aria-disabled="chat.local === false"
-                    :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
+                    :title="chat.local === false ? `${chat.title}\nThis chat lives on another instance` : `${chat.title}\nDrag to move to another project`"
                   >
                     <span
                       v-if="chat.title_status === 'pending'"
@@ -707,6 +733,7 @@
                       class="chat-title"
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
+                    <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
                     <ChatSignals
                       :chat-id="chat.chat_id"
                       density="row"
@@ -871,6 +898,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useMemoryMapStore, memorySectionPath, type MemorySection } from '../stores/memoryMap'
 import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
+import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
@@ -884,7 +912,7 @@ import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
 import { homeNewChatProjectId, openNewChatPicker } from '../lib/newChat'
 
-const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' | 'memory' | 'proposals' }>()
+const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
 
 const store = useProjectStore()
@@ -894,6 +922,7 @@ const fileViewer = useFileViewerStore()
 const mm = useMemoryMapStore()
 const proposals = useProposalsStore()
 const vaultReview = useVaultReviewStore()
+const taskSignals = useTaskSignalsStore()
 
 // Memory's sections and their counts. Scoped counts come from the stores so
 // they use the same workspace rule as each page's list — a count that
@@ -910,6 +939,10 @@ const MEMORY_NAV: { label?: string; items: MemoryNavItem[] }[] = [
   { label: 'Explore', items: [
     { section: 'map', label: 'Map' },
     { section: 'categories', label: 'Categories' },
+    // The way conversations get in: a scan of this computer's own agent folders,
+    // opt-in, in its own page. No count — nothing is listed until it is asked
+    // for, so a number here would describe a scan nobody ran.
+    { section: 'import', label: 'Import' },
   ] },
   { label: 'Records', items: [
     { section: 'retired', label: 'Retired' },
@@ -932,6 +965,9 @@ function memoryNavCount(section: MemorySection): number | null {
     // ask for attention no click can clear, and the map's own note count already
     // says how much of the vault there is.
     case 'categories': return null
+    // Nothing is listed until the reader presses Find, so there is nothing to
+    // count before then and nothing stale to show after.
+    case 'import': return null
     case 'history': return historyLoaded ? proposals.historyTotal || null : null
   }
 }
@@ -1013,6 +1049,8 @@ const todayCount = computed(() => store.chats.reduce((sum, chat) => {
   return sum + (store.chatIsAttentionItem(chat) ? 1 : 0)
 }, 0))
 const automationsCount = computed(() => missedCountFor(store.activeWorkspace))
+// Delegated tasks the agent reported done, waiting for the user's Approve.
+const tasksCount = computed(() => taskSignals.inReviewCount(store.activeWorkspace))
 const memoryCount = computed(() => {
   const workspace = store.activeWorkspace
   const retirement = vaultReview.loadedWorkspace === workspace ? vaultReview.candidates.length : 0
@@ -2544,6 +2582,22 @@ async function confirmDeleteChat(chatId: string) {
   white-space: nowrap;
 }
 
+/* A delegated task's chat says so in words, as a small squared tag
+   (DESIGN.md: --radius-xs, the keycap's tokens) so it cannot read as a count.
+   It never shrinks; the title truncates first, and the tag stays short. */
+.chat-task-tag {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font: 600 calc(10px * var(--font-scale))/1 var(--font-mono);
+}
+
 /* Unread is full-strength text plus the row's dot, not bold: bold chat
    titles read as a second level of headings next to the projects. */
 .chat-title--unread {
@@ -2743,6 +2797,52 @@ async function confirmDeleteChat(chatId: string) {
 }
 @media (hover: none) {
   .chat-actions-btn { opacity: 0.6; }
+}
+
+/* With a mouse the actions button reserves no width: it overlays the row's
+   end while the row is hovered, focused or open, over a fade in the row's own
+   fill, so the title gets the full row the rest of the time. Coarse pointers
+   keep the reserved 44px slot above, always visible. */
+@media (hover: hover) and (pointer: fine) {
+  .chat-item {
+    position: relative;
+    --chat-row-fill: var(--bg2);
+  }
+  .chat-item:hover { --chat-row-fill: var(--bg-elev); }
+  .chat-item.active { --chat-row-fill: var(--bg3); }
+  .chat-actions-btn {
+    position: absolute;
+    top: 50%;
+    right: 4px;
+    width: 42px;
+    height: 32px;
+    margin: 0;
+    padding: 0 0 0 10px;
+    transform: translateY(-50%);
+    background: linear-gradient(to right, transparent, var(--chat-row-fill) 10px);
+    border-radius: 0 4px 4px 0;
+    pointer-events: none;
+  }
+  /* The selected row no longer shows it unasked: that would clip the one
+     title the user is most likely to want to read. */
+  .chat-item.active .chat-actions-btn { opacity: 0; }
+  .chat-item:hover .chat-actions-btn,
+  .chat-item:focus-within .chat-actions-btn,
+  .chat-item .chat-actions-btn[data-state='open'] {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .chat-actions-btn:hover {
+    color: var(--fg);
+    background: linear-gradient(to right, transparent, var(--chat-row-fill) 10px);
+  }
+  /* The button takes the place of the row's trailing marks while it shows,
+     rather than half-covering them; they keep their space so nothing shifts. */
+  .chat-item:hover :is(.chat-task-tag, .chat-signals, .remote-chip),
+  .chat-item:focus-within :is(.chat-task-tag, .chat-signals, .remote-chip),
+  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-signals, .remote-chip) {
+    visibility: hidden;
+  }
 }
 
 

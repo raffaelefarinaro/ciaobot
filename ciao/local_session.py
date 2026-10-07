@@ -1015,9 +1015,8 @@ class LocalSessionManager:
     creates or switches branches.
     """
 
-    def __init__(self, *, workspace: Path, runtime_root: Path, dev_mode: bool = False) -> None:
+    def __init__(self, *, workspace: Path, runtime_root: Path) -> None:
         self.workspace = Path(workspace)
-        self.dev_mode = dev_mode
 
     @property
     def branch(self) -> str | None:
@@ -1034,7 +1033,6 @@ class LocalSessionManager:
             "git_repo": repo,
             "branch": branch,
             "dirty": dirty,
-            "dev_mode": self.dev_mode,
         }
 
     async def commit_and_sync(self) -> dict:

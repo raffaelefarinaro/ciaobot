@@ -69,6 +69,8 @@ from ciao.web.routes_api import (
     chat_retry,
     chat_prompt,
     chat_stop,
+    chat_background_run_cancel,
+    chat_background_run_log,
     chat_new_session,
     chat_subagents,
     running_subagents,
@@ -110,10 +112,15 @@ from ciao.web.routes_api import (
     gws_relogin_cancel,
     provider_connection_action,
     provider_config_settings,
+    settings_keyboard,
     settings_routines,
     setup_finish_endpoint,
     setup_inspect_folder_endpoint,
     setup_list_dirs_endpoint,
+    workspace_move_dirs_endpoint,
+    workspace_move_plan_endpoint,
+    workspace_move_start_endpoint,
+    workspace_move_status_endpoint,
     setup_mkdir_endpoint,
     setup_status_endpoint,
     list_completed_projects,
@@ -182,7 +189,38 @@ from ciao.web.routes_push import (
     push_subscription_check,
     push_unsubscribe,
 )
+from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
+from ciao.web.routes_import import (
+    import_batch_cancel,
+    import_batch_delete,
+    import_batch_run,
+    import_batches_create,
+    import_batches_list,
+    import_preview,
+    import_sources,
+)
 from ciao.web.routes_service_login import service_login_status, service_login_update
+from ciao.web.routes_tasks import (
+    task_attempt_action,
+    task_attempts,
+    task_complete,
+    task_create,
+    task_delegate,
+    task_delete,
+    task_get,
+    task_list,
+    task_send_update,
+    task_update,
+)
+from ciao.web.routes_webhooks import (
+    webhook_create,
+    webhook_delete,
+    webhook_list,
+    webhook_receipts,
+    webhook_rotate,
+    webhook_trigger_receipts,
+    webhook_update,
+)
 from ciao.web.security import SecurityHeadersMiddleware
 
 logger = logging.getLogger(__name__)
@@ -277,6 +315,16 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/unread", chat_mark_unread, methods=["POST"]),
         Route("/api/chats/{chat_id}/retry", chat_retry, methods=["POST"]),
         Route("/api/chats/{chat_id}/stop", chat_stop, methods=["POST"]),
+        Route(
+            "/api/chats/{chat_id}/background-runs/{run_id}/log",
+            chat_background_run_log,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/chats/{chat_id}/background-runs/{run_id}/cancel",
+            chat_background_run_cancel,
+            methods=["POST"],
+        ),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
         Route("/api/chats/{chat_id}/messages", chat_messages, methods=["GET"]),
         Route("/api/chats/{chat_id}/messages/part", chat_message_part, methods=["GET"]),
@@ -310,6 +358,43 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
+        # Workspace task board (B3). Every route names a *workspace*, never a
+        # root: the service resolves the name to its own vault. The three
+        # state-changing routes require the `expected_revision` the caller
+        # read, so a card drawn from an older read is a 409 rather than a
+        # silent overwrite, and `/complete` acts as the signed-in user — the
+        # same operation through the agent CLI is refused by the store.
+        Route("/api/tasks", task_list, methods=["GET"]),
+        Route("/api/tasks", task_create, methods=["POST"]),
+        # Literal `complete` precedes the `{task_id}` pattern so it is not
+        # read as a task id.
+        Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+        # Delegation (B5). `delegate` hands the task to the agent as one ordinary
+        # chat with no attendance bypass and returns the attempt; the attempt
+        # routes act on it (stop/resume/retry/detach), and `attempts` is the
+        # history behind a retry. The literal verbs come before the `{action}`
+        # pattern so they are not read as an action name.
+        Route("/api/tasks/{task_id}/delegate", task_delegate, methods=["POST"]),
+        Route("/api/tasks/{task_id}/attempts", task_attempts, methods=["GET"]),
+        # Send update: one ordinary message into the attempt's own chat, then the
+        # attempt is rebound to the revision it was made at. Literal `update` before
+        # the `{action}` pattern, like `complete`, so it is not read as an action name.
+        Route(
+            "/api/tasks/{task_id}/attempt/{attempt_id}/update",
+            task_send_update,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/tasks/{task_id}/attempt/{attempt_id}/{action}",
+            task_attempt_action,
+            methods=["POST"],
+        ),
+        # Same path, three handlers: a GET reads one task with its description
+        # (the list carries none), a PATCH edits the record, a DELETE removes
+        # it, and both writes present the revision they read.
+        Route("/api/tasks/{task_id}", task_get, methods=["GET"]),
+        Route("/api/tasks/{task_id}", task_update, methods=["PATCH"]),
+        Route("/api/tasks/{task_id}", task_delete, methods=["DELETE"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
         Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
@@ -356,6 +441,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Models & Status
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
+        Route("/api/settings/keyboard", settings_keyboard, methods=["GET", "PATCH"]),
         Route("/api/settings/providers", provider_config_settings, methods=["GET"]),
         Route(
             "/api/settings/providers/{provider}/{action}",
@@ -394,6 +480,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
         Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
         Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
+        Route("/api/workspace-move", workspace_move_status_endpoint, methods=["GET"]),
+        Route("/api/workspace-move", workspace_move_start_endpoint, methods=["POST"]),
+        Route("/api/workspace-move/dirs", workspace_move_dirs_endpoint, methods=["GET"]),
+        Route("/api/workspace-move/plan", workspace_move_plan_endpoint, methods=["POST"]),
         Route("/api/stats", cli_stats, methods=["GET"]),
         Route("/api/agent/status", agent_status_endpoint, methods=["GET"]),
         Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
@@ -408,6 +498,51 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
+        # Webhook trigger management (A2). The literal `rotate` segment
+        # precedes the bare `{trigger_id}` pattern so rotation is not read
+        # as a trigger id. Management routes only; the receiver is
+        # `routes_hooks.py`. The two `receipts` reads (#1044) are the history
+        # surface over the ingress journal, and they precede `{trigger_id}`
+        # for the same reason `rotate` does: a workspace-wide `receipts` would
+        # otherwise be answered with a 405 by the bare `{trigger_id}` route
+        # registered below, since Starlette stops at the first partial match.
+        Route("/api/webhooks", webhook_list, methods=["GET"]),
+        Route("/api/webhooks", webhook_create, methods=["POST"]),
+        Route("/api/webhooks/receipts", webhook_receipts, methods=["GET"]),
+        Route(
+            "/api/webhooks/{trigger_id}/receipts",
+            webhook_trigger_receipts,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/webhooks/{trigger_id}/rotate", webhook_rotate, methods=["POST"]
+        ),
+        Route("/api/webhooks/{trigger_id}", webhook_update, methods=["PATCH"]),
+        Route("/api/webhooks/{trigger_id}", webhook_delete, methods=["DELETE"]),
+        # Import consent (C5): discovery is metadata only and the preview reads
+        # the *selected* conversations, so neither answers before a person has
+        # chosen what to process. Session-protected like every other /api route;
+        # no extraction lives here (C7); the batch store (C6) is the routes below.
+        Route("/api/import/sources", import_sources, methods=["GET"]),
+        Route("/api/import/preview", import_preview, methods=["POST"]),
+        # Import batches (C6): the private per-workspace batch store, and the
+        # run (C7) that drives one into the review queue. The literal `cancel`
+        # and `run` segments precede the bare `{batch_id}` pattern so neither is
+        # read as a batch id. `run` schedules the extraction and starts no turn
+        # in the request; the batch is the one-running-at-a-time gate.
+        Route("/api/import/batches", import_batches_create, methods=["POST"]),
+        Route("/api/import/batches", import_batches_list, methods=["GET"]),
+        Route(
+            "/api/import/batches/{batch_id}/run",
+            import_batch_run,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/import/batches/{batch_id}/cancel",
+            import_batch_cancel,
+            methods=["POST"],
+        ),
+        Route("/api/import/batches/{batch_id}", import_batch_delete, methods=["DELETE"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),
@@ -456,6 +591,26 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     # cookie. The MCP surface was removed in S6.
     routes.append(Route("/agent/v1/{op}", agent_dispatch_endpoint, methods=["POST"]))
 
+    # The webhook ingress receiver (A3). Bearer-authenticated by one trigger's own
+    # secret, so it is deliberately outside the PWA session cookie and outside
+    # `/api/*` — which is also why it owns its own origin check, body cap and
+    # anti-abuse bounds (see ciao/web/routes_hooks.py). Registered here, before
+    # the SPA catch-all below, so an unregistered `/hooks/...` path cannot 404
+    # as HTML.
+    routes.append(
+        Route("/hooks/v1/{trigger_id}", webhook_receive, methods=["POST"])
+    )
+    # The same path for every other method, answered with a 405. It has to be its
+    # own route: the catch-all below is a full match for every GET, so a
+    # `methods=["POST"]` route never gets to refuse one.
+    routes.append(
+        Route(
+            "/hooks/v1/{trigger_id}",
+            webhook_method_not_allowed,
+            methods=["GET", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"],
+        )
+    )
+
     # Serve Vite build output if it exists. The hashed-asset mount is only added
     # when the build output is present — assets/ is generated by `npm run build`
     # and absent in a fresh checkout / test run, where StaticFiles would raise.
@@ -467,7 +622,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
 
     middleware = [
         Middleware(SecurityHeadersMiddleware),
-        Middleware(AuthMiddleware, serializer=serializer, auth_required=config.pwa_auth_required),
+        Middleware(AuthMiddleware, serializer=serializer),
     ]
 
     @asynccontextmanager

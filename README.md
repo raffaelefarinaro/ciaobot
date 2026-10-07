@@ -28,17 +28,7 @@ During setup you choose the folder where Ciaobot keeps your notes and memory: a 
 irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
 ```
 
-No administrator rights needed. This installs the engine, puts `ciao` on your `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`), registers the logon task that starts the engine when you sign in, starts it, and prints the same one-time link.
-
-`iex` cannot take arguments, so any option goes through a script block: `-Workspace 'D:\Ciaobot'` to put the workspace elsewhere, `-NoStart` to install without registering the logon task or starting anything, and `-Uninstall` to remove what the installer added.
-
-```powershell
-& ([scriptblock]::Create((irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1))) -Uninstall
-```
-
-Uninstalling stops and unregisters the logon task, removes the engine and its receipt, and takes the `PATH` entry back out. Your workspace folder is kept, and the script prints where it is.
-
-Windows support is a **preview**: the first Windows releases are labelled that way and the label comes off after one release cycle with no Windows-specific regressions. Requirements, the logon task, logs, provider setup and troubleshooting are in [docs/WINDOWS.md](docs/WINDOWS.md). Engine updates on Windows are not available yet, so for now re-run the installer only to repair an install.
+No administrator rights needed. Open the printed link and follow the setup wizard. See the [Windows guide](docs/WINDOWS.md) for requirements, install options, updates, uninstalling, and troubleshooting.
 
 ### Connect your agent
 
@@ -49,25 +39,12 @@ Ciaobot has no model account of its own. It drives a CLI you have already signed
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors running from a git checkout: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-### Upgrading from the macOS app
+### Existing installs
 
-v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine. To move over and keep your workspace, password, chats and schedules, run the installer with `--migrate`:
-
-```bash
-curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --migrate
-```
-
-Details are in [INTEGRATIONS.md](INTEGRATIONS.md#install). Updates are the same one-liner again, or **Settings → General** in the PWA.
-
-### Uninstall
-
-To stop the engine, use its own service command:
-
-```bash
-ciao service stop
-```
-
-That stops the `com.ciao.server` LaunchAgent; your workspace folder is kept, and `ciao service start` brings it back. A leftover legacy `Ciaobot.app` is removed with `ciao desktop uninstall`.
+- **Upgrading from the retired macOS app:** follow the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app) to keep your workspace, password, chats, and schedules.
+- **Updates:** use **Settings → Home** in the PWA. See the [macOS update instructions](INTEGRATIONS.md#upgrading-from-the-macos-app) or [Windows update guide](docs/WINDOWS.md#update-and-rollback).
+- **Stop or start the engine:** run `ciao service stop` or `ciao service start`. Your workspace is kept. [Windows service details](docs/WINDOWS.md#how-the-engine-runs).
+- **Uninstall on Windows:** follow the [uninstall guide](docs/WINDOWS.md#uninstall). For a leftover legacy macOS app, see the [migration guide](INTEGRATIONS.md#upgrading-from-the-macos-app).
 
 ## How it works
 

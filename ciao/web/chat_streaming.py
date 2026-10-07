@@ -195,6 +195,8 @@ class ChatStreamingHost(Protocol):
     @staticmethod
     def _is_interim_subagent_text(text: str) -> bool: ...
 
+    def notify_turn_started(self, chat_id: str, stream: ChatStream) -> None: ...
+
     def _park_result_announce(
         self, chat_id: str, project_id: str, title: str, snippet: str
     ) -> int: ...
@@ -353,6 +355,11 @@ class ChatStreaming:
         is_retry: bool,
         unattended: bool,
     ) -> None:
+        # The one place a turn begins, so it is the one place a subscriber hears
+        # about it. Announced before the task exists: the drive loop is the turn,
+        # and a watcher that subscribes after it would miss the whole of it.
+        if not unattended:
+            self._host.notify_turn_started(chat_id, stream)
         task = asyncio.create_task(
             self.drive(
                 chat_id=chat_id,
@@ -648,12 +655,32 @@ class ChatStreaming:
                             else:
                                 turn_assistant_text = event.result or ""
 
-                turn_task = asyncio.create_task(
-                    _run_turn(), name=f"chat-turn-{chat_id}"
-                )
+                turn_task: asyncio.Task | None = None
+                if stream.user_stopped:
+                    # A Stop landed before the turn task existed (start-up or
+                    # between turns). Honour it without creating or running the
+                    # provider task (#1109): publish the stopped result and
+                    # leave the flag for the bottom-of-loop block below, which
+                    # also honours park_queue (a board Stop parks the queued
+                    # follow-ups instead of running them, #1103). Clearing the
+                    # carry-over keeps this turn from inheriting and
+                    # re-announcing the previous turn's answer.
+                    last_assistant_text = ""
+                    stream.publish(
+                        self._host._stop_result_payload(
+                            chat_id,
+                            turn_index=current_turn_index,
+                            text=turn_streamed_text,
+                        )
+                    )
+                else:
+                    turn_task = asyncio.create_task(
+                        _run_turn(), name=f"chat-turn-{chat_id}"
+                    )
                 stream.turn_task = turn_task
                 try:
-                    await turn_task
+                    if turn_task is not None:
+                        await turn_task
                 except asyncio.CancelledError:
                     if not stream.force_closing:
                         raise
@@ -801,6 +828,7 @@ class ChatStreaming:
                             if cm_park is not None:
                                 cm_park.pending_queue = list(parked)
                                 self._host._save()
+                                stream.publish_queue_state(cm_park.pending_queue)
                         break
                 finally:
                     stream.turn_task = None
@@ -815,19 +843,43 @@ class ChatStreaming:
                         if cm_park is not None:
                             cm_park.pending_queue = list(parked)
                             self._host._save()
+                            stream.publish_queue_state(cm_park.pending_queue)
                     break
 
                 next_pending = stream.drain_one()
+                skipped_blank = False
+                while next_pending is not None and not (
+                    str(next_pending.get("text", "")).strip()
+                    or next_pending.get("images")
+                ):
+                    # A follow-up with neither text nor images has nothing to
+                    # send. Continuing the turn loop with it would re-run the
+                    # previous prompt (#1102), so take the next entry instead.
+                    # Blank text alone is sendable when images ride along: the
+                    # turn goes out with an empty prompt and those images
+                    # rather than dropping them without a word (#1112).
+                    skipped_blank = True
+                    next_pending = stream.drain_one()
+                if skipped_blank:
+                    # Keep the entry we are about to run (or park) in the list:
+                    # its chip clears on its own user_echo.
+                    remaining = stream.pending
+                    if next_pending is not None:
+                        remaining = [next_pending, *remaining]
+                    stream.publish({"type": "queue_state", "queue": remaining})
+                # A task-board Stop or Detach ends the delegated work: what
+                # is queued is parked on the chat, not run (#1103).
+                park_rest = stream.user_stopped and stream.park_on_stop
                 if stream.user_stopped:
                     stream.user_stopped = False
-                    if next_pending is not None:
+                    if next_pending is not None and not park_rest:
                         had_error = False
-                if next_pending is None or had_error:
+                if next_pending is None or had_error or park_rest:
                     stream.accepting_queue = False
                     late = stream.drain_pending()
                     parked = (
                         [next_pending, *late]
-                        if had_error and next_pending is not None
+                        if (had_error or park_rest) and next_pending is not None
                         else late
                     )
                     if parked:
@@ -835,6 +887,7 @@ class ChatStreaming:
                         if cm_park is not None:
                             cm_park.pending_queue = list(parked)
                             self._host._save()
+                            stream.publish_queue_state(cm_park.pending_queue)
                     break
 
                 combined_text = next_pending.get("text", "").strip()
@@ -844,8 +897,6 @@ class ChatStreaming:
                     attachment = self._host.resolve_image_ref(ref)
                     if attachment:
                         merged_images.append(attachment)
-                if not combined_text:
-                    continue
 
                 turn_unattended = False
                 turn_index2: int | None = None
@@ -864,6 +915,7 @@ class ChatStreaming:
                     parked = [next_pending, *stream.drain_pending()]
                     chat_meta2.pending_queue = list(parked)
                     self._host._save()
+                    stream.publish_queue_state(chat_meta2.pending_queue)
                     break
                 if chat_meta2 is not None:
                     chat_meta2.pending_question = ""

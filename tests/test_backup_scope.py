@@ -285,6 +285,37 @@ def test_the_734_scope_table(tmp_path: Path) -> None:
         assert backup_scope.is_eligible(rel, config) is expected, f"{rel}: {reason}"
 
 
+def test_task_records_are_durable(tmp_path: Path) -> None:
+    """A task record is excluded from recall and kept by the backup (#1002).
+
+    The two halves of one decision, and they are easy to confuse. Task records
+    are reserved bookkeeping — out of the search index and the Memory Map —
+    but the board is user-owned work, and a backup scope that followed the
+    indexing exclusion would quietly stop preserving every task in the vault.
+    `memory-vault` is a durable scope base, so nothing about the path changes
+    the answer; the pin is here because the answer is load-bearing and silent.
+    Both layouts are asked, because a scope base is the agent root's own vault
+    and which of the two an install uses is not this test's decision to make.
+    """
+    _workspace, config = _rerooted_install(tmp_path)
+
+    assert (
+        backup_scope.is_eligible(
+            "memory-vault/Workspace/Tasks/9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c.md",
+            config,
+        )
+        is True
+    )
+    # The per-workspace layout is the same answer under a different base.
+    assert (
+        backup_scope.is_eligible(
+            "personal/memory-vault/Workspace/Tasks/9f2c4a1b7e3d4f6a8b5c2d1e0f3a4b6c.md",
+            config,
+        )
+        is True
+    )
+
+
 def test_the_archive_denial_wins_where_the_vault_is_the_archive(tmp_path: Path) -> None:
     """The guard on the archive rule, and the reason it is anchored rather than
     matched by name.

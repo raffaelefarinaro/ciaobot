@@ -324,6 +324,28 @@ async def test_archive_chat_publishes_event(tmp_path: Path) -> None:
     assert archived[0]["project_id"] == project.project_id
 
 
+async def test_archive_and_delete_tell_chat_ended_subscribers(tmp_path: Path) -> None:
+    """The delegation service learns a chat can no longer go on (#1064)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-ended", workspace="work")
+    archived = pcm.create_chat(project.project_id)
+    deleted = pcm.create_chat(project.project_id)
+    pcm._chats[deleted.chat_id].user_turn_count = 1
+    seen: list[tuple[str, str, str]] = []
+
+    def boom(_chat_id: str, _chat: object, _how: str) -> None:
+        raise RuntimeError("a subscriber cannot fail the archive")
+
+    pcm.on_chat_ended(boom)
+    pcm.on_chat_ended(lambda chat_id, chat, how: seen.append((chat_id, chat.chat_id, how)))
+    await pcm.archive_chat(archived.chat_id)
+    assert pcm.delete_chat(deleted.chat_id) is True
+    assert seen == [
+        (archived.chat_id, archived.chat_id, "archived"),
+        (deleted.chat_id, deleted.chat_id, "deleted"),
+    ]
+
+
 async def test_archiving_a_run_chat_clears_its_needs_you_flag(tmp_path: Path) -> None:
     """A "skipped" run points the operator at its chat; archiving it answers that.
 

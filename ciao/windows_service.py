@@ -32,6 +32,7 @@ from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 from ciao import macos_service
+from ciao.os_support.users import user_key
 
 TASK_NAME = "\\Ciaobot\\Engine"
 TASK_FILE_NAME = "Ciaobot-Engine.xml"
@@ -263,12 +264,18 @@ def windowless_python(python: str) -> str:
 
 
 def current_user() -> str:
-    """``DOMAIN\\name`` for the logged-on user, as Task Scheduler wants it."""
-    name = os.environ.get("USERNAME", "").strip()
-    if not name:
-        raise WindowsServiceError("USERNAME is not set; cannot name the task's user.")
-    domain = os.environ.get("USERDOMAIN", "").strip()
-    return f"{domain}\\{name}" if domain else name
+    """The logged-on user for a task's principal and logon trigger.
+
+    The SID of the account this process runs as, which Task Scheduler accepts
+    and resolves itself. ``USERDOMAIN\\USERNAME`` is what a desktop session
+    reports, but an OpenSSH session reports ``USERDOMAIN=WORKGROUP`` for a local
+    account, and `/Create` then fails with "No mapping between account names and
+    security IDs was done".
+    """
+    try:
+        return user_key()
+    except OSError as exc:
+        raise WindowsServiceError(f"could not read this account's SID: {exc}") from exc
 
 
 def default_task_dir() -> Path:

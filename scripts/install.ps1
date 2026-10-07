@@ -163,6 +163,20 @@ print(name, digest, size)
         return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
     }
 
+    # A command the user is told to run, as PowerShell can take it pasted back:
+    # every argument with a space or a quote is single-quoted, and the program
+    # gets `& ` because a quoted path alone is a string, not a call. The
+    # default profile folder is "First Last" for most people, so an unquoted
+    # `C:\Users\First Last\.local\bin\ciao.exe` ran `C:\Users\First`.
+    function Format-Command([string]$Program, [string[]]$Arguments) {
+        $parts = @(@($Program) + $Arguments | ForEach-Object {
+            if ($_ -match "[\s'`"]") { "'" + ($_ -replace "'", "''") + "'" } else { $_ }
+        })
+        $line = $parts -join ' '
+        if ($parts[0].StartsWith("'")) { $line = "& $line" }
+        return $line
+    }
+
     # `schtasks` messages are localized, so nothing here parses them: the exit
     # code of /Query is the only answer about a task this script can rely on,
     # exactly as ciao/windows_service.py decides it.
@@ -883,13 +897,13 @@ print(name, digest, size)
             Write-Host "Ciaobot $Version is installed: $ciao"
             Write-Host "Workspace: $workspace"
             Write-Host 'No logon task was registered and nothing was started. To register it later, run:'
-            Write-Host "  $ciao setup --workspace $workspace --load-launchd"
-            Write-Host "  $ciao service start --workspace $workspace"
+            Write-Host "  $(Format-Command $ciao @('setup', '--workspace', $workspace, '--load-launchd'))"
+            Write-Host "  $(Format-Command $ciao @('service', 'start', '--workspace', $workspace))"
             return
         }
 
         $started = Invoke-Native $ciao @('service', 'start', '--workspace', $workspace, '--json') $false
-        if ($started.ExitCode -ne 0) { Fail "could not start the engine; try: $ciao service status" }
+        if ($started.ExitCode -ne 0) { Fail "could not start the engine; try: $(Format-Command $ciao @('service', 'status'))" }
 
         # A slow first boot is not a failed install: the task is registered and
         # will come up. Say so instead of failing an install that did everything
@@ -924,7 +938,7 @@ print(name, digest, size)
         $url = ''
         if ($urlLines.Count -gt 0) { $url = ([string]$urlLines[-1]).Trim() }
         if (($urlOutput.ExitCode -ne 0) -or -not $url.StartsWith('http://')) {
-            Fail "could not create the sign-in link; run: $ciao setup-url --workspace $workspace"
+            Fail "could not create the sign-in link; run: $(Format-Command $ciao @('setup-url', '--workspace', $workspace))"
         }
 
         Write-Host ''
