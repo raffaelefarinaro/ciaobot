@@ -249,7 +249,16 @@ refuse_desktop_engine() {
         program=$("$PLISTBUDDY" -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null || true)
         case "$program" in
             *.app/*)
-                if [ -e "$program" ]; then
+                # The native host this installer installs is itself an .app
+                # (`Ciaobot Server.app`). The retired desktop app is the only
+                # bundle two agents must not share `com.ciao.server` over.
+                # Matching every `.app` refuses the update that re-runs this
+                # script after the host is already the LaunchAgent (#1141).
+                bundle=${program%%.app/*}.app
+                bundle_name=${bundle##*/}
+                if [ "$bundle_name" = "Ciaobot Server.app" ]; then
+                    :
+                elif [ -e "$program" ]; then
                     desktop_live=1
                     if [ "$migrate" -eq 0 ]; then
                         fail "Ciaobot.app manages the engine on this Mac (#576); to move it to the terminal engine, re-run with --migrate"
