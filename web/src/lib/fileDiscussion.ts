@@ -80,7 +80,7 @@ export async function startFileDiscussion(
       draft,
     )
     // Pin it so the chat opens split-view with the file itself visible.
-    store.pinFile(chat.chat_id, path)
+    await store.pinFile(chat.chat_id, path)
     return chat
   } catch (e) {
     // The switch is committed before the POST, so a rejected creation would

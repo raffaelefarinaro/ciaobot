@@ -1613,118 +1613,162 @@ describe('subagent thinking deltas', () => {
   })
 })
 
-describe('pinned file dismissal', () => {
-  const surfacedEvent = {
-    type: 'tool_use',
-    tool_name: 'file_surface',
-    tool_use_id: 'surface-1',
-    file_touch: {
-      file_path: '/workspace/report.md',
-      action: 'surfaced',
-    },
+describe('server-owned chat pins', () => {
+  function chatInfo(chatId: string, over: Partial<ChatInfo> = {}): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'T',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: '',
+      archived: false,
+      ...over,
+    }
   }
 
-  const otherSurfacedEvent = {
-    ...surfacedEvent,
-    tool_use_id: 'surface-2',
-    file_touch: {
-      file_path: '/workspace/plan.md',
-      action: 'surfaced',
-    },
-  }
+  const pinChanged = (over: Record<string, unknown> = {}) => ({
+    type: 'chat_pin_changed',
+    chat_id: 'c-pin',
+    path: '/workspace/report.md',
+    dismissed_paths: [],
+    revision: 1,
+    ...over,
+  })
 
-  test('keeps a user-closed pinned file closed when chat events replay', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-dismissal'
+  test('replayed surfaced touches no longer mutate server chat pin state', () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true })
+    const chatId = 'c-surface'
     const store = useProjectStore()
+    store.chats = [chatInfo(chatId)]
     store.activeChatId = chatId
     store.connectWs(chatId)
 
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBe('/workspace/report.md')
-
-    store.unpinFile(chatId)
+    // A replayed `file_surface` tool call still renders an inline card, but it
+    // must not become the chat's pin: the engine's durable event is the only
+    // surface-intent writer.
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'file_surface',
+        tool_use_id: 'surface-1',
+        file_touch: { file_path: '/workspace/report.md', action: 'surfaced' },
+      }),
+    })
     expect(store.pinnedFileFor(chatId)).toBeUndefined()
-
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBeUndefined()
+    expect(apiPatch).not.toHaveBeenCalled()
   })
 
-  test('surfaces a different file after one was dismissed', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-next-artifact'
-    const store = useProjectStore()
-    store.activeChatId = chatId
-    store.connectWs(chatId)
-
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    store.unpinFile(chatId)
-
-    // A new deliverable is not the file the user closed, so it must open.
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(otherSurfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBe('/workspace/plan.md')
-  })
-
-  test('an explicit surface replaces whatever is already pinned', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-replace'
-    const store = useProjectStore()
-    store.activeChatId = chatId
-    store.connectWs(chatId)
-
-    store.pinFile(chatId, '/workspace/report.md')
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(otherSurfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBe('/workspace/plan.md')
-  })
-
-  test('persists the dismissal across store recreation until the user pins a file', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-reopen'
-    const firstStore = useProjectStore()
-    firstStore.activeChatId = chatId
-    firstStore.connectWs(chatId)
-    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    firstStore.unpinFile(chatId)
+  test('pin events synchronize two independent stores without feedback PATCH', () => {
+    setActivePinia(createPinia())
+    const storeA = useProjectStore()
+    storeA.chats = [chatInfo('c-pin')]
+    storeA.connectEventsWs()
 
     setActivePinia(createPinia())
-    const reopenedStore = useProjectStore()
-    reopenedStore.activeChatId = chatId
-    reopenedStore.connectWs(chatId)
-    fakeSockets[1].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    expect(reopenedStore.pinnedFileFor(chatId)).toBeUndefined()
+    const storeB = useProjectStore()
+    storeB.chats = [chatInfo('c-pin')]
+    storeB.connectEventsWs()
 
-    reopenedStore.pinFile(chatId, '/workspace/report.md')
-    expect(reopenedStore.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+    const evt = JSON.stringify(pinChanged())
+    fakeSockets[0].onmessage?.({ data: evt })
+    fakeSockets[1].onmessage?.({ data: evt })
+
+    expect(storeA.pinnedFileFor('c-pin')).toBe('/workspace/report.md')
+    expect(storeB.pinnedFileFor('c-pin')).toBe('/workspace/report.md')
+    // Syncing via the event must not write back to the server.
+    expect(apiPatch).not.toHaveBeenCalled()
   })
 
-  test('drops a legacy chat-wide dismissal so later surfaces still open', () => {
-    Object.defineProperty(window, 'innerWidth', {
-      value: 1200,
-      configurable: true,
-    })
-    const chatId = 'chat-pinned-legacy'
-    // Written before the store is created: restoreState() runs on setup.
-    localStorage.setItem('ciao-dismissed-auto-pins', JSON.stringify({ [chatId]: true }))
-
-    setActivePinia(createPinia())
+  test('snapshot clears missed closed pins', () => {
     const store = useProjectStore()
-    store.activeChatId = chatId
-    store.connectWs(chatId)
+    store.chats = [chatInfo('c-pin')]
+    // Local state holds an open pin the client saw before its socket dropped.
+    store.applyChatPinState('c-pin', { path: '/workspace/report.md', dismissed_paths: [], revision: 2 }, { source: 'event' })
 
-    fakeSockets[fakeSockets.length - 1].onmessage?.({ data: JSON.stringify(surfacedEvent) })
-    expect(store.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+    store.connectEventsWs()
+    fakeSockets[fakeSockets.length - 1].onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        active_streams: [],
+        chat_pins: { 'c-pin': { path: '', dismissed_paths: ['/workspace/report.md'], revision: 3 } },
+      }),
+    })
+    expect(store.pinnedFileFor('c-pin')).toBeUndefined()
+  })
+
+  test('stale list and PATCH responses cannot overwrite a newer event', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-pin')]
+    store.applyChatPinState('c-pin', { path: '/workspace/new.md', dismissed_paths: [], revision: 5 }, { source: 'event' })
+
+    // A GET that raced the event resolves with an older revision afterwards.
+    store.reconcileChatList([
+      chatInfo('c-pin', { pinned_file_path: '/workspace/old.md', pin_revision: 3, dismissed_pin_paths: [] }),
+    ])
+    expect(store.pinnedFileFor('c-pin')).toBe('/workspace/new.md')
+  })
+
+  test('agent surface from server restores on a fresh client', () => {
+    const store = useProjectStore()
+    store.reconcileChatList([
+      chatInfo('c-surface', { pinned_file_path: '/workspace/report.md', pin_revision: 1, dismissed_pin_paths: [] }),
+    ])
+    expect(store.pinnedFileFor('c-surface')).toBe('/workspace/report.md')
+  })
+
+  test('pin events never select or navigate chats', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-pin'), chatInfo('c-other')]
+    store.activeChatId = 'c-other'
+    store.connectEventsWs()
+    routerPush.mockClear()
+
+    fakeSockets[fakeSockets.length - 1].onmessage?.({ data: JSON.stringify(pinChanged()) })
+
+    expect(store.activeChatId).toBe('c-other')
+    expect(routerPush).not.toHaveBeenCalled()
+    expect(store.pinnedFileFor('c-pin')).toBe('/workspace/report.md')
+  })
+
+  test('deleted chat drops shared pin state', () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-pin')]
+    store.applyChatPinState('c-pin', { path: '/workspace/report.md', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    store.connectEventsWs()
+
+    fakeSockets[fakeSockets.length - 1].onmessage?.({
+      data: JSON.stringify({ type: 'chat_deleted', chat_id: 'c-pin', project_id: 'p1' }),
+    })
+    expect(store.pinnedFileFor('c-pin')).toBeUndefined()
+  })
+
+  test('a 409 conflict adopts the server pin and surfaces the conflict', async () => {
+    const store = useProjectStore()
+    store.chats = [chatInfo('c-pin')]
+    store.applyChatPinState('c-pin', { path: '/workspace/a.md', dismissed_paths: [], revision: 4 }, { source: 'event' })
+
+    // Another device replaced the pin between read and write: the PATCH 409s
+    // with the server's truth.
+    apiPatch.mockRejectedValue(Object.assign(new Error('pin_revision_conflict'), {
+      status: 409,
+      payload: {
+        error: 'pin_revision_conflict',
+        pin: { path: '/workspace/other.md', dismissed_paths: ['/workspace/a.md'], revision: 7 },
+      },
+    }))
+
+    await store.unpinFile('c-pin')
+
+    // One PATCH, no retry; the server's pin is adopted…
+    expect(apiPatch).toHaveBeenCalledTimes(1)
+    expect(store.pinnedFileFor('c-pin')).toBe('/workspace/other.md')
+    // …and the loss is surfaced, not silently folded into the other device's choice.
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].title).toBe('Could not update pinned file')
+    expect(store.toasts[0].errorText).toBe('Pinned file was changed on another device')
   })
 })
 
@@ -1751,7 +1795,7 @@ describe('chat closing', () => {
       store.activeChatId = chatId
       store.pendingImages = ['img-1']
       localStorage.setItem('ciao-chat-drafts', JSON.stringify({ [chatId]: 'half a thought' }))
-      store.pinFile(chatId, '/workspace/report.md')
+      store.applyChatPinState(chatId, { path: '/workspace/report.md', dismissed_paths: [], revision: 1 }, { source: 'test' })
       return { store, chatId }
     }
 
@@ -3477,6 +3521,7 @@ describe('background agents indicator', () => {
         type: 'snapshot',
         active_streams: [],
         background_agents: { 'c-live': 2 },
+        chat_pins: {},
       }),
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
@@ -3527,6 +3572,7 @@ describe('background agents indicator', () => {
         type: 'snapshot',
         active_streams: [],
         background_runs: { 'c-live': [live] },
+        chat_pins: {},
       }),
     })
     expect(store.backgroundRuns['c-stale']).toBeUndefined()
@@ -3775,6 +3821,7 @@ describe('server restart overlay', () => {
         type: 'snapshot',
         active_streams: [],
         restarting: true,
+        chat_pins: {},
       }),
     })
     expect(store.serverRestarting).toBe(true)
@@ -6382,7 +6429,7 @@ describe('delegated task signals', () => {
     const store = useProjectStore()
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    const snapshot = JSON.stringify({ type: 'snapshot', active_streams: [] })
+    const snapshot = JSON.stringify({ type: 'snapshot', active_streams: [], chat_pins: {} })
 
     // Before boot the workspace is not known yet; fetchAll reads it then.
     sock.onmessage?.({ data: snapshot })

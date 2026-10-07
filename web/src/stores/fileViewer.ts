@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { useProjectStore } from './projects'
@@ -43,6 +43,12 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
 
   // `chatId` is kept for pin/open context (inline card).
   const chatId = ref('')
+
+  // When non-empty, this open is the chat's *shared* (server-owned) pin surface
+  // rather than an ordinary manual file open. A remote unpin/replacement
+  // reconciles only this surface, and only for this chat; a user close of it
+  // unpins through the server, whereas an ordinary dismiss stays local.
+  const sharedPinChatId = ref('')
 
   // Edit state. When `editing` is true the modal swaps the read-only viewer
   // for a textarea pre-filled with `content`. `editBuffer` holds the in-flight
@@ -100,6 +106,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     editError.value = ''
     pptxNeedsLibreoffice.value = false
     libreofficeInstallError.value = ''
+    sharedPinChatId.value = ''
   }
 
   async function checkLibreofficeStatus(): Promise<void> {
@@ -193,6 +200,40 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return true
   }
 
+  /**
+   * Open a file as the chat's shared-pin surface (the narrow opener, or the
+   * split panel). Marks the open so a remote unpin/replacement can reconcile it,
+   * and so a user close can unpin through the server instead of staying local.
+   */
+  async function openSharedPin(filePath: string, chat: string): Promise<boolean> {
+    const ok = await open(filePath, null, chat)
+    if (ok) sharedPinChatId.value = chat
+    else sharedPinChatId.value = ''
+    return ok
+  }
+
+  // Remote reconciliation: when the server pin for the chat this shared-pin
+  // preview represents changes (unpin or replacement), close a clean preview
+  // and never auto-open the replacement. A dirty editor is kept alive and the
+  // open is demoted to an ordinary preview (it is no longer the pin); nothing
+  // here issues a PATCH, so an event-driven close never writes back.
+  watch(
+    () => {
+      const cid = sharedPinChatId.value
+      return cid ? projectStore.pinnedFileFor(cid) : undefined
+    },
+    (serverPath) => {
+      const cid = sharedPinChatId.value
+      if (!cid) return
+      if (serverPath === path.value) return
+      if (isDirty.value) {
+        sharedPinChatId.value = ''
+        return
+      }
+      void close()
+    },
+  )
+
   // ── Artifact source (Code view) ────────────────────────────────────────
 
   async function loadSource(force = false): Promise<void> {
@@ -265,6 +306,22 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return true
   }
 
+  /**
+   * Close the viewer. When this open was the chat's shared-pin surface, closing
+   * it is a request to unpin that file through the server (one PATCH); an
+   * ordinary manual open just dismisses locally. Respects the dirty-edit guard
+   * before touching server state, and never double-pins or repins.
+   */
+  async function dismissSharedPin(): Promise<void> {
+    const cid = sharedPinChatId.value
+    if (!cid) {
+      await close()
+      return
+    }
+    if (!(await close())) return
+    await projectStore.unpinFile(cid)
+  }
+
   // ── Edit mode ──────────────────────────────────────────────────────────
 
   function startEditing(): void {
@@ -330,6 +387,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     error,
     loadToken,
     chatId,
+    sharedPinChatId,
     editing,
     isDirty,
     editBuffer,
@@ -345,9 +403,11 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     // actions
     open,
     openImage,
+    openSharedPin,
     loadSource,
     setHtmlView,
     close,
+    dismissSharedPin,
     loadMarkdownPaths,
     startEditing,
     cancelEditing,

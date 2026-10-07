@@ -183,10 +183,20 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `stores/chatAnnotations.ts` owns everything the user stages against the *next*
   message plus the notes and pins anchored to a file: the per-chat pending-image,
   pending-file-comment and pending-chat-comment buckets, the durable per-file
-  comment store, pinned paths, auto-pin dismissals, and the six `localStorage`
+  comment store, and the six `localStorage`
   keys behind them (`ciao-pending-images`, `ciao-pending-comments`,
   `ciao-pending-chat-comments`, `ciao-file-comments`, `ciao-pinned-files`,
-  `ciao-dismissed-auto-pins`). It also composes an outgoing message from that
+  `ciao-dismissed-auto-pins`). **Chat pins are server-owned** (#1119): a chat's
+  pinned file lives on the engine (`ChatInfo.pinned_file_path` /
+  `dismissed_pin_paths` / `pin_revision`), is hydrated from chat payloads, the
+  `chat_pin_changed` event and the `/ws/events` snapshot's `chat_pins`, and is
+  mutated only through `PATCH /api/chats/{id}` `{pin:{path,expected_revision}}`.
+  The browser never reads or writes a chat id from the two pin keys — those hold
+  *project* pins only, which remain browser-local and are pruned of any chat id
+  a pre-#1119 build left behind. Manual chat pin/unpin awaits the acknowledged
+  server state (a 409 adopts the server's truth and surfaces an error, no retry),
+  and a per-chat pending flag disables the control while the write is in flight.
+  It also composes an outgoing message from that
   material (`prepareMessage`) and clears it once sent
   (`consumePreparedAttachments`) — the send itself stays in the store. It is a
   plain `create*` factory, **not** a second Pinia store: `useProjectStore` calls
@@ -227,7 +237,12 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   scoped to the route on screen** (`activePinKey` in `ChatLayout.vue`): the chat
   id on a chat route, the project id on a project route, no key at all on Home,
   so Home can never render a retained chat's pinned page for even one frame, and
-  reopening a conversation brings back *that* conversation's pin.
+  reopening a conversation brings back *that* conversation's pin. **On a narrow
+  device the same server-owned pin is a compact in-chat opener** (`.narrow-pin-opener`
+  in `ChatLayout.vue`): a named, keyboard/touch-reachable button that opens the
+  existing viewer, never a forced split pane or an auto-opened modal. A remote
+  unpin removes the opener and, if its clean shared-pin preview is open, closes
+  that preview — a separately opened viewer or a dirty edit is left untouched.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General begins with a
   short capability-help section linking to the public feature guide and inviting
