@@ -677,8 +677,7 @@
                       <template v-if="conn.path_command">
                         , then put it on your PATH with
                         <code>{{ conn.path_command }}</code>
-                      </template>
-                      <a
+                      </template>&nbsp;<a
                         v-if="conn.install_url"
                         :href="conn.install_url"
                         target="_blank"

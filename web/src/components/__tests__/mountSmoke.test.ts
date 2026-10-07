@@ -896,6 +896,68 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
+  it('SettingsView renders the shared install block for a missing provider CLI', async () => {
+    // Both providers share one branch: the install command, the PATH line, and
+    // the docs link. opencode used to report `auth: 'missing'` with a bare
+    // `opencode` command, so this block never rendered for it.
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const original = testApi.getResponse('/api/settings/providers') as {
+      connections: Record<string, unknown>
+    }
+    testApi.setResponse('/api/settings/providers', {
+      connections: {
+        ...original.connections,
+        claude: {
+          ...(original.connections.claude as object),
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://claude.ai/install.sh | bash',
+          detail: 'Claude Code is not installed on this machine.',
+          install_url: 'https://code.claude.com/docs/en/quickstart#step-1-install-claude-code',
+          path_command: 'echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc',
+        },
+        opencode: {
+          name: 'opencode',
+          label: 'opencode',
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://opencode.ai/v2/install | bash',
+          detail: 'opencode is not installed on this machine.',
+          version: 'not installed',
+          install_url: 'https://opencode.ai/download',
+          path_command: 'echo \'export PATH="$HOME/.opencode/bin:$PATH"\' >> ~/.zshrc',
+        },
+      },
+    })
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    try {
+      const text = wrapper.text()
+      expect(text).toContain('curl -fsSL https://opencode.ai/v2/install | bash')
+      expect(text).toContain('Install it with')
+      // The link is not glued to the PATH code (the whitespace a newline-only
+      // text node used to swallow). `&nbsp;` renders as U+00A0.
+      expect(text).toMatch(/~\/\.zshrc\s+installation guide/)
+      const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
+      const link = opencodeRow.find('a[href="https://opencode.ai/download"]')
+      expect(link.exists()).toBe(true)
+    } finally {
+      wrapper.unmount()
+      testApi.setResponse('/api/settings/providers', original)
+    }
+  })
+
   it('SettingsView renders no API-key entry UI even when the payload advertises keys', async () => {
     const router = makeRouter()
     await router.push('/settings/models')

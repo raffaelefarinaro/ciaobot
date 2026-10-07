@@ -657,6 +657,8 @@ def test_common_tool_dirs_are_the_documented_fallback_directories(
     assert "/opt/homebrew/bin" in dirs
     assert "/usr/local/bin" in dirs
     assert str(home / ".local" / "bin") in dirs
+    # OpenCode's curl installer drops the binary here, beside its credentials.
+    assert str(home / ".opencode" / "bin") in dirs
     assert str(home / "nvm" / "bin") in dirs
 
 

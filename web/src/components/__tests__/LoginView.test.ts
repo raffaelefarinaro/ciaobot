@@ -351,6 +351,38 @@ describe('LoginView setup wizard tests', () => {
     )
   })
 
+  it('shows the same install step for a missing opencode as for Claude', async () => {
+    // opencode's row used to report `auth: 'missing'` with a bare `opencode`
+    // command, so the wizard rendered an install instruction next to a command
+    // that installed nothing. It shares Claude's `not_installed` branch now.
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {
+        opencode: {
+          name: 'opencode',
+          ok: false,
+          auth: 'not_installed',
+          command: 'curl -fsSL https://opencode.ai/v2/install | bash',
+          detail: 'opencode is not installed on this machine.',
+          install_url: 'https://opencode.ai/download',
+          path_command: 'echo \'export PATH="$HOME/.opencode/bin:$PATH"\' >> ~/.zshrc',
+        },
+      },
+    })
+
+    const wrapper = await mountLoginView()
+    // The wizard defaults to the claude radio, so select opencode first.
+    await wrapper.findAll('.provider-choices input[type="radio"]')[1].setValue()
+
+    expect(wrapper.text()).toContain('[!] Not Installed')
+    expect(wrapper.text()).toContain('curl -fsSL https://opencode.ai/v2/install | bash')
+    expect(wrapper.text()).toContain('Not installed yet.')
+    const link = wrapper.find('.install-link')
+    expect(link.attributes('href')).toBe('https://opencode.ai/download')
+  })
+
   it('asks for an install, with a docs link, when the provider CLI is missing', async () => {
     mockApiGet.mockResolvedValue({
       configured: false,

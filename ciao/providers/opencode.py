@@ -34,6 +34,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -345,6 +346,41 @@ def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
         path = Path(explicit).expanduser()
         return str(path.resolve()) if path.is_file() else None
     return resolve_tool("opencode")
+
+
+#: Where someone with no OpenCode at all is sent. The download page lists every
+#: installer for every platform, so a provider row links there rather than at a
+#: single method; the row's command carries the one-line form.
+OPENCODE_INSTALL_DOCS_URL = "https://opencode.ai/download"
+
+
+def opencode_install_command() -> str:
+    """The documented one-line installer for this platform.
+
+    ``resolve_opencode_binary`` finds the curl installer's ``~/.opencode/bin``
+    (via ``common_tool_dirs``, so no engine restart is needed) and npm's or
+    Homebrew's bins too, so any of the three documented installers is picked up
+    on the next status refresh.
+    """
+    if sys.platform == "win32":
+        # The POSIX one-liner is a bash script; npm's global shim is the
+        # documented Windows path and needs no extra shell.
+        return "npm install -g @opencode/cli"
+    return "curl -fsSL https://opencode.ai/v2/install | bash"
+
+
+def opencode_path_hint() -> str:
+    """PATH line for the curl installer's directory, or "" when none is needed.
+
+    Only that installer drops the binary somewhere no default PATH carries; the
+    npm shim and Homebrew already install into directories Ciaobot searches, and
+    a new Windows logon's PATH already holds npm's global dir.
+    """
+    if sys.platform == "win32":
+        return ""
+    from ciao.os_support.shell_hints import path_hint
+
+    return path_hint(str(Path.home() / ".opencode" / "bin"), persist=True)
 
 
 def auth_command(*, device_auth: bool = False) -> list[str]:
@@ -3598,13 +3634,21 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
             version="unknown",
         )
     if not binary:
+        # The binary is absent, so this is an install step, not a login step:
+        # `not_installed` is the state the PWA and the setup wizard both render
+        # with the install command and the docs link. opencode's credentials are
+        # beside the binary, so a missing binary cannot also be a missing login.
         return _provider(
             name="opencode",
             ok=False,
-            auth="missing",
-            command="opencode",
-            detail="not installed",
+            auth="not_installed",
+            command=opencode_install_command(),
+            detail="opencode is not installed on this machine.",
             version="not installed",
+            install_url=OPENCODE_INSTALL_DOCS_URL,
+            # Mirrors Claude's row so the wizard offers one PATH line whatever
+            # the provider. Empty when the installer used needs none.
+            path_command=opencode_path_hint(),
         )
     version = ""
     try:

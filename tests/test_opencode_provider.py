@@ -3103,6 +3103,56 @@ def test_extra_env_overlay_does_not_hide_an_exported_override(tmp_path, monkeypa
 # ── a wrapper that leads nowhere ──────────────────────────────────────────
 
 
+def test_opencode_install_command_matches_installer_to_platform(monkeypatch):
+    """The row's one-liner follows the platform, as Claude's does."""
+    import sys
+
+    from ciao.providers import opencode as mod
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert "opencode.ai/v2/install" in mod.opencode_install_command()
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert mod.opencode_install_command() == "npm install -g @opencode/cli"
+
+
+def test_login_status_reports_a_missing_binary_as_an_install_step(
+    tmp_path: Path, monkeypatch
+):
+    """No binary means no chats, so the row asks for an install, not a login.
+
+    The install branch is shared with Claude: `auth="not_installed"` with a
+    one-line installer, the download page, and a PATH line. Before this the row
+    said `auth="missing"` with a bare `opencode` command, so the provider page
+    and the wizard showed nothing a user could run.
+    """
+    from ciao.providers import opencode as mod
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: None)
+
+    row = mod.opencode_login_status()
+
+    assert row["ok"] is False
+    assert row["auth"] == "not_installed"
+    assert row["install_url"] == mod.OPENCODE_INSTALL_DOCS_URL
+    assert "opencode" in row["command"]
+    assert row["path_command"] == mod.opencode_path_hint()
+    assert "not installed" in row["detail"]
+
+
+def test_the_opencode_path_line_is_only_offered_for_the_curl_installer(monkeypatch):
+    """npm's shim and Homebrew bins are already searched, so only the curl
+    installer's ``~/.opencode/bin`` needs a PATH line — and Windows, where the
+    row offers npm, needs none at all."""
+    import sys
+
+    from ciao.providers import opencode as mod
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert ".opencode/bin" in mod.opencode_path_hint()
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert mod.opencode_path_hint() == ""
+
+
 def test_login_status_reports_a_broken_wrapper_as_broken_not_missing(
     tmp_path: Path, monkeypatch
 ):

@@ -640,9 +640,6 @@ const providerInstruction = computed(() => {
       ? 'The desktop app is installed, but Ciaobot drives the CLI. Install it in your Terminal:'
       : 'Not installed yet. Run this in your Terminal to install it:'
   }
-  if (provider.value === 'opencode' && setupStatus.value?.providers?.opencode?.auth === 'missing') {
-    return 'Install opencode if needed, then run this in your Terminal and refresh this check:'
-  }
   return 'To authorize, run this command in your Terminal:'
 })
 

@@ -503,6 +503,9 @@ else:
             "/usr/local/bin",
             "/usr/local/sbin",
             str(home / ".local" / "bin"),
+            # The documented OpenCode curl installer drops the binary here,
+            # beside the credentials, and it is on no default macOS PATH.
+            str(home / ".opencode" / "bin"),
             str(home / "bin"),
         ]
         # nvm installs globals under the active node version; we can't know which is
