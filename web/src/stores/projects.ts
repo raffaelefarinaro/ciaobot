@@ -1068,7 +1068,9 @@ export const useProjectStore = defineStore('projects', () => {
     // conversation that spawned it.
     return chats.value
       .filter(c => c.project_id === projectId && !c.archived && c.local !== false && !isMemoryPassChat(c))
-      .sort((a, b) => a.created_at.localeCompare(b.created_at))
+      // Newest activity on top, same timestamp as chatActivity() and the
+      // project page. Project drag order stays on workspaceProjects.
+      .sort((a, b) => (b.last_activity_at || b.created_at).localeCompare(a.last_activity_at || a.created_at))
   }
 
   function chatActivity(chat: ChatInfo): string {

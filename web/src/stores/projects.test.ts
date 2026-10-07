@@ -3580,6 +3580,35 @@ describe('background agents indicator', () => {
   })
 })
 
+describe('projectChats order', () => {
+  function chat(chatId: string, createdAt: string, lastActivityAt?: string): ChatInfo {
+    return {
+      chat_id: chatId,
+      project_id: 'p1',
+      title: chatId,
+      model: '',
+      provider: 'claude',
+      mode: '',
+      session_id: '',
+      created_at: createdAt,
+      last_activity_at: lastActivityAt,
+      archived: false,
+    }
+  }
+
+  test('lists the most recently active chat first', () => {
+    const store = useProjectStore()
+    store.chats = [
+      chat('stale', '2026-01-15T00:00:00Z', '2026-01-20T00:00:00Z'),
+      chat('active', '2026-01-01T00:00:00Z', '2026-03-01T00:00:00Z'),
+      chat('created', '2026-02-01T00:00:00Z'),
+    ]
+    // created_at ascending would be active, stale, created.
+    // created_at descending would be created, stale, active.
+    expect(store.projectChats('p1').map(c => c.chat_id)).toEqual(['active', 'created', 'stale'])
+  })
+})
+
 describe('memoryInsightRows', () => {
   // The pass is a real chat, so it used to be listed twice for one archived
   // conversation: once in the Home tiers under its own internal title, and
