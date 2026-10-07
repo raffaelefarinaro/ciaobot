@@ -1436,7 +1436,11 @@ async def test_a_board_stop_in_the_pre_task_window_parks_the_queue(
     but leave the flag for the loop to honour the park.
     """
     pcm = _make_manager(tmp_path)
-    pcm._STOP_GRACE_S = 0.05
+    # A realistic grace: the pre-task path returns wait_for_drive_cleanup, which
+    # does a real state save, so a sub-100ms window races the drive task on a
+    # loaded runner (notably Windows) and returns False spuriously. There is no
+    # hung provider to force-close here, so the production default costs nothing.
+    pcm._STOP_GRACE_S = 2.0
     project = pcm.create_project("stop-early-park", workspace="work")
     chat = pcm.create_chat(
         project.project_id, title="stop-early-park", provider="claude"
