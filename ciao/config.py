@@ -648,7 +648,7 @@ class CiaoConfig:
     provider_default_thinking: dict[str, str] = field(default_factory=dict)
     # Per-provider Session insights model (memory pass, chat titles, schedule
     # attention check), set on each provider's card in Settings → Models. A
-    # missing entry uses that provider's default chat model.
+    # missing entry uses the source chat's model.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
     pwa_port: int = 8443
     # The server binds all interfaces by default so the PWA is reachable over

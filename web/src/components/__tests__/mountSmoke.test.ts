@@ -135,6 +135,7 @@ vi.mock('../../lib/api', () => {
       provider_defaults: { claude: 'sonnet', opencode: 'opus' },
       opencode_models: ['openai/gpt-5.6-luna', 'anthropic/claude-sonnet-4-6'],
       backends: { opencode: true },
+      thinking_levels: { claude: ['low', 'medium', 'high', 'xhigh', 'max'], opencode: ['low', 'medium', 'high', 'max'] },
     },
     '/api/projects': [],
     '/api/chats': [],
@@ -1011,6 +1012,9 @@ describe('component mount smoke', () => {
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       provider_default_models: { claude: 'sonnet' },
     })
+    expect(claudeSelector.find('.model-selector__trigger').text()).toContain('sonnet')
+    expect(wrapper.findAll('.provider-inline-defaults')[0]!.text()).toContain('Automatic — same as chat model')
+    expect(wrapper.text()).not.toContain('Same as default')
 
     // Each card holds its default-model selector first, then Session insights.
     const opencodeSelector = wrapper.findAll('.provider-inline-defaults')[1]!
@@ -1028,6 +1032,60 @@ describe('component mount smoke', () => {
     })
 
     wrapper.unmount()
+  })
+
+  it('SettingsView keeps effort choices when a catalog refresh fails and saves effort', async () => {
+    const originalGet = vi.mocked(api.get).getMockImplementation()!
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path === '/api/models?refresh=1') return Promise.reject(new Error('catalog unavailable'))
+      return originalGet(path)
+    })
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    try {
+      await flushPromises()
+      const effort = wrapper.find('select[aria-labelledby="thinking-label-claude"]')
+      expect(effort.findAll('option').map((el) => el.attributes('value'))).toContain('high')
+      expect(wrapper.find('[role="alert"]').text()).toContain('catalog unavailable')
+      await effort.setValue('high')
+      await flushPromises()
+      expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+        provider_default_thinking: { claude: 'high' },
+      })
+      expect((effort.element as HTMLSelectElement).value).toBe('high')
+    } finally {
+      wrapper.unmount()
+      vi.mocked(api.get).mockImplementation(originalGet)
+    }
+  })
+
+  it('SettingsView reports catalog load failure instead of showing an Auto-only effort control', async () => {
+    const originalGet = vi.mocked(api.get).getMockImplementation()!
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path.startsWith('/api/models')) return Promise.reject(new Error('catalog unavailable'))
+      return originalGet(path)
+    })
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('Effort options unavailable.')
+      expect(wrapper.find('[role="alert"]').text()).toContain('catalog unavailable')
+      expect(wrapper.find('[aria-labelledby="thinking-label-claude"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+      vi.mocked(api.get).mockImplementation(originalGet)
+    }
   })
 
   it('SettingsView offers a per-provider default permission mode', async () => {

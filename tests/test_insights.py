@@ -67,3 +67,18 @@ def test_a_providers_insights_model_wins_over_its_default() -> None:
     assert insights.resolve_insights_model(config, "work", "opencode") == "vendor/insights"
     # A provider without its own pick reads the session with its chat default.
     assert insights.resolve_insights_model(config, "work", "claude") == "sonnet"
+
+
+def test_automatic_insights_inherits_the_source_model() -> None:
+    config = SimpleNamespace(
+        provider_insights_models={},
+        default_model_for_workspace=lambda workspace, provider: "default-model",
+    )
+    for provider, model in (("claude", "opus"), ("opencode", "vendor/chat-model")):
+        assert insights.resolve_insights_model(
+            config, "work", provider, source_model=model
+        ) == model
+        config.provider_insights_models[provider] = "chosen-insights"
+        assert insights.resolve_insights_model(
+            config, "work", provider, source_model=model
+        ) == "chosen-insights"

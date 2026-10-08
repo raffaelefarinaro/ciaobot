@@ -11,17 +11,20 @@ if TYPE_CHECKING:
 
 
 def resolve_insights_model(
-    config: CiaoConfig, workspace: str | None, provider: str
+    config: CiaoConfig, workspace: str | None, provider: str, *, source_model: str = ""
 ) -> str:
     """Pick the model for the memory pass and the one-shots that share it.
 
     ``provider`` is the chat's actual provider. Its Session insights model
     (Settings → Models → that provider's card, ``provider_insights_models``)
-    wins; Automatic falls through to the provider's default chat model.
+    wins; Automatic uses the source chat's model. Calls without a recorded
+    source model (for example history imports) use the workspace/provider default.
     """
     override = (config.provider_insights_models or {}).get(provider, "")
     if override:
         return override
+    if source_model:
+        return source_model
     return config.default_model_for_workspace(workspace, provider)
 
 

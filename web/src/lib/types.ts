@@ -785,8 +785,7 @@ export interface RoutineSettings {
   provider_default_modes?: Record<string, string>
   // Per-provider default thinking level for new chats; missing = provider default.
   provider_default_thinking?: Record<string, string>
-  // Per-provider Session insights models; missing = that provider's default
-  // chat model.
+  // Per-provider Session insights models; missing = the source chat's model.
   provider_insights_models?: Record<string, string>
 
   critique_models_effective: string

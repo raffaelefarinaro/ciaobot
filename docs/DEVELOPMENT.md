@@ -2,6 +2,12 @@
 
 Setup, dev workflow, testing, and change guidelines. For the system design, read `docs/ARCHITECTURE.md` first.
 
+Provider-settings regressions cover saved defaults and effort options even when
+catalog refresh fails. Automatic Session insights inherits the source chat model
+for archive memory, titles and schedule attention; an explicit per-provider
+insights model wins. History imports without a recorded model use the
+workspace/provider default.
+
 ## Server install
 
 Linux production and every installer-managed macOS install restart the engine

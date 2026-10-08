@@ -7323,7 +7323,9 @@ class ProjectChatManager:
 
             project = self._projects.get(chat.project_id)
             workspace = getattr(project, "workspace", None) if project else None
-            model = resolve_insights_model(self._config, workspace, provider)
+            model = resolve_insights_model(
+                self._config, workspace, provider, source_model=chat.model
+            )
             reply = (assistant_text or "").strip()
             sections = [f"<user>{user_text[:1500]}</user>"]
             if reply:
@@ -7428,11 +7430,12 @@ class ProjectChatManager:
         self._streaming.discard_drain_result(chat_id)
 
     async def _schedule_run_needs_user(
-        self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome
+        self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
+        *, chat_id: str = "",
     ) -> bool:
         """Delegate schedule attention classification to its collaborator."""
         return await self._schedule_dispatcher_for()._schedule_run_needs_user(
-            entry, outcome
+            entry, outcome, chat_id=chat_id
         )
 
     def prepare_schedule_chat(

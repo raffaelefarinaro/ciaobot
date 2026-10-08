@@ -224,8 +224,7 @@ class AppSettings:
     # provider's own default ("auto").
     provider_default_thinking: dict[str, str] | None = None
 
-    # Per-provider Session insights model. Missing entry = that provider's
-    # default chat model.
+    # Per-provider Session insights model. Missing entry = the source chat's model.
     provider_insights_models: dict[str, str] | None = None
 
     # Browser keyboard behavior is engine-owned so a person's clients share it.
