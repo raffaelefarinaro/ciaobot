@@ -101,6 +101,15 @@ _TASK_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 # A `prompt_digest`, at the width `update_tasks.FINGERPRINT_CHARS` keeps.
 _HEX_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
 
+# A memory pass whose source is a saved task resolution (#1154): the completion
+# id is the 32-hex mint from ``ciao.task_resolution``, the digest is the SHA-256
+# of the resolution text. ``MEMORY_PASS_RESOLUTION_MAX`` bounds that text, so a
+# resolution too long to fit a helper is refused at enqueue, not truncated.
+TASK_COMPLETION_SOURCE = "task_completion"
+MEMORY_PASS_RESOLUTION_MAX = 8000
+_COMPLETION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
 # A board task id / attempt id in a `task_delegation` helper, and the SHA-256 hex
 # of the task file's bytes. Deliberately re-declared rather than imported from
 # `ciao.task_board` / `ciao.task_attempts` for the same reason `_TASK_ID_RE` is:
@@ -537,6 +546,8 @@ def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
         return {}
     if str(value.get("archive_policy") or "") != "when_clean":
         return {}
+    if str(value.get("source_kind") or "") == TASK_COMPLETION_SOURCE:
+        return _normalize_task_completion_pass(value, state)
     source_chat_id = str(value.get("source_chat_id") or "")
     if not source_chat_id or len(source_chat_id) > 128:
         return {}
@@ -557,7 +568,55 @@ def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
         normalized["focus"] = "approved_task"
         normalized["task_title"] = str(value.get("task_title") or "")[:200]
         normalized["task_summary"] = str(value.get("task_summary") or "")[:4000]
+        normalized["completion_id"] = str(value.get("completion_id") or "")[:64]
+        normalized["completed_at"] = str(value.get("completed_at") or "")[:64]
+        normalized["user_resolution"] = str(value.get("user_resolution") or "")[
+            :MEMORY_PASS_RESOLUTION_MAX
+        ]
     return normalized
+
+
+def _normalize_task_completion_pass(value: dict[str, Any], state: str) -> dict[str, Any]:
+    """A task-completion pass (#1154): the pass reads a saved resolution, not a chat.
+
+    It has no source chat, so the task file and the completion id name what it
+    is about instead. Fail closed on every field the pass cites or hashes: a
+    resolution whose SHA-256 does not match the stored digest is a value this
+    code did not write, and a helper without it would be a pass with nothing to
+    read.
+    """
+    task_path = str(value.get("task_path") or "")
+    completion_id = str(value.get("completion_id") or "")
+    resolution = value.get("resolution")
+    digest = str(value.get("resolution_sha256") or "")
+    if not task_path or len(task_path) > 512:
+        return {}
+    if not _COMPLETION_ID_RE.fullmatch(completion_id):
+        return {}
+    if not isinstance(resolution, str) or not resolution.strip():
+        return {}
+    if len(resolution) > MEMORY_PASS_RESOLUTION_MAX:
+        return {}
+    if not _SHA256_RE.fullmatch(digest):
+        return {}
+    if hashlib.sha256(resolution.encode("utf-8")).hexdigest() != digest:
+        return {}
+    return {
+        "kind": "memory_pass",
+        "source_kind": TASK_COMPLETION_SOURCE,
+        "source_chat_id": "",
+        "task_path": task_path,
+        "completion_id": completion_id,
+        "completed_at": str(value.get("completed_at") or "")[:64],
+        "resolution": resolution,
+        "resolution_sha256": digest,
+        "archive_path": "",
+        "doc_path": "",
+        "source_title": "",
+        "source_project": "",
+        "state": state,
+        "archive_policy": "when_clean",
+    }
 
 
 def _normalize_update_task_helper(value: dict[str, Any]) -> dict[str, Any]:

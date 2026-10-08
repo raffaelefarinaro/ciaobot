@@ -550,6 +550,37 @@ async def task_complete(request: Request) -> JSONResponse:
     return JSONResponse({"workspace": workspace, "task": task})
 
 
+async def task_resolution_review(request: Request) -> JSONResponse:
+    """Ask for a learning pass over one task's saved resolution (#1154).
+
+    An edit to a resolution never queues a pass; this route is the explicit ask.
+    The same text on the same completion is not extracted twice. A resolution
+    holding the closing fence token is refused with a 400, and a task with no
+    resolution to review is a 400 too.
+    """
+    plane = _control_plane(request)
+    if plane is None:
+        return _unavailable()
+    body = await _body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    revision = _revision(body)
+    if isinstance(revision, JSONResponse):
+        return revision
+    workspace = _workspace(request.app.state.config, body.get("workspace"))
+    if workspace is None:
+        return _workspace_required()
+    try:
+        result = await plane.workspace_task_resolution_review(
+            workspace,
+            str(request.path_params.get("task_id") or ""),
+            expected_revision=revision,
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+    return JSONResponse({"workspace": workspace, **result})
+
+
 async def task_delete(request: Request) -> JSONResponse:
     """Remove one task record, at ``expected_revision``.
 

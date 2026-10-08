@@ -1463,6 +1463,41 @@ async def test_failed_form_reply_keeps_request_for_retry(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_permission_reply_404_is_reported_as_no_longer_active(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(provider, "permission.asked", LIVE_PERMISSION)
+    client.status_code = 404
+
+    result = await provider.send_permission_response("per_live1", True)
+
+    assert result.ok is False
+    assert result.retryable is False
+    assert result.error == "Permission request is no longer active"
+    assert "per_live1" not in provider._permission_requests
+
+
+@pytest.mark.asyncio
+async def test_form_reply_404_is_reported_as_no_longer_active(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_gone", "sessionID": "ses_1", "title": "Pick",
+            "fields": [{"key": "q", "title": "Which?", "type": "string"}],
+        }},
+    )
+    client.status_code = 404
+
+    result = await provider.send_question_response("frm_gone", {"q": ["answer"]})
+
+    assert result.ok is False
+    assert result.retryable is False
+    assert result.error == "Question request is no longer active"
+    assert "frm_gone" not in provider._question_requests
+
+
+@pytest.mark.asyncio
 async def test_form_reply_uses_field_keys_and_option_values(tmp_path):
     provider, client = _armed_provider(tmp_path)
     _convert(

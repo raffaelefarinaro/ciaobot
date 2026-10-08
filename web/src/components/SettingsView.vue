@@ -975,6 +975,13 @@
                     </option>
                   </select>
                 </label>
+                <label class="settings-field"><span class="ws-label">File access</span>
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.agent_fs_scope" :disabled="workspacesSaving === 'new'">
+                    <option value="workspace">Workspace only</option>
+                    <option value="machine">Whole machine</option>
+                  </select>
+                  <span class="hint hint--compact">{{ WORKSPACE_FS_SCOPE_COPY[newWorkspaceForm.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</span>
+                </label>
                 <label class="settings-field">
                   <div class="settings-label-row">
                     <span class="ws-label">Google profile</span>
@@ -1089,6 +1096,14 @@
                       </option>
                     </select>
                   </label>
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label">File access</span>
+                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.agent_fs_scope" :disabled="workspacesSaving === form.name">
+                      <option value="workspace">Workspace only</option>
+                      <option value="machine">Whole machine</option>
+                    </select>
+                  </label>
+                  <p class="hint hint--compact set-subrow-hint">{{ WORKSPACE_FS_SCOPE_COPY[form.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</p>
                   <label class="settings-field set-subrow">
                     <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
                     <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
@@ -3700,7 +3715,16 @@ type WorkspaceForm = {
   gws_profile: string
   disallowed_tools: string
   color: WorkspaceColorId
+  agent_fs_scope: 'workspace' | 'machine'
 }
+
+// Copy for the File access select. Workspace scope needs the sandbox on this
+// computer; the note says what a machine without one does.
+const WORKSPACE_FS_SCOPE_COPY: Record<'workspace' | 'machine', string> = {
+  workspace: 'Workspace only. The agent and its shell cannot read outside this workspace.',
+  machine: 'Whole machine. The agent can read any file this user can read.',
+}
+const WORKSPACE_FS_SANDBOX_NOTE = 'If this computer cannot sandbox, a workspace-only chat refuses to start until you choose whole machine.'
 
 function defaultWorkspaceProvider(): WorkspaceProvider {
   return projectStore.workspaceProviderOptions[0]?.value || 'claude'
@@ -3714,6 +3738,7 @@ function blankWorkspaceForm(): WorkspaceForm {
     gws_profile: '',
     disallowed_tools: '',
     color: DEFAULT_WORKSPACE_COLOR,
+    agent_fs_scope: 'workspace',
   }
 }
 
@@ -3735,6 +3760,7 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     gws_profile: ws.gws_profile || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     color: normalizeWorkspaceColor(ws.color),
+    agent_fs_scope: ws.agent_fs_scope === 'machine' ? 'machine' : 'workspace',
   }
 }
 
@@ -3880,6 +3906,7 @@ async function saveWorkspace(name: string) {
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       color: form.color,
+      agent_fs_scope: form.agent_fs_scope,
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     openWorkspace.value = null
@@ -3911,6 +3938,7 @@ async function createNewWorkspace() {
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       color: form.color,
+      agent_fs_scope: form.agent_fs_scope,
     })
     notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
     showNewWorkspace.value = false

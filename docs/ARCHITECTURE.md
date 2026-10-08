@@ -768,9 +768,11 @@ device installs its own engine and opens `/api/addresses` to find this one.
 There are no native commands left to grant: the macOS shell is retired (`#656`),
 so a page served from the engine origin has no capability surface at all. This is the
 direct browser/engine trust model that replaced the retired client-origin
-model: `docs/REMOTE_BOUNDARY.md` records what it is, and it is still not
-completion of the broader credential, file-confinement, or storage-isolation
-work tracked by #546.
+model: `docs/REMOTE_BOUNDARY.md` records what it is. Workspace filesystem scope
+(`agent_fs_scope`, #1133) confines the agent and its shell: workspace scope is the
+Claude `sandbox.filesystem` settings plus the OpenCode `sandbox-exec`/`bwrap`
+prefix, and machine scope is the previous unconfined behavior. The file viewer is
+not covered. Credential and storage-isolation work tracked by #546 is still open.
 
 Write/Edit/MultiEdit/NotebookEdit tool calls are tagged with `file_touch` by
 `ciao/web/chat_broker.py` and surface as standalone `_filecard` entries on

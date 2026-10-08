@@ -64,6 +64,32 @@ snapshots. If it has no configured identity, set `GIT_AUTHOR_NAME`,
 `.env` to the identity you want recorded for automation (for example `Ciaobot`
 and `ciaobot@localhost`). This does not change the administrator's Git settings.
 
+### Workspace file sandbox
+
+A workspace set to **Workspace only** runs the agent and its shell inside
+`bwrap` (bubblewrap). Install it, and on Ubuntu 23.10 and later give it an
+AppArmor profile: those releases block the unprivileged user namespaces `bwrap`
+needs, and chats then refuse to start with "bwrap is installed but cannot
+create a sandbox".
+
+```sh
+sudo apt-get install bubblewrap
+sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+sudo -u ciaobot -H bwrap --ro-bind / / -- true && echo sandbox-ok
+```
+
+The engine checks `bwrap` once at startup, so restart the service after adding
+the profile. Without a working `bwrap`, set the workspace to **Whole machine**.
+
 ## Service
 
 Generate and inspect the unit, then install it explicitly:

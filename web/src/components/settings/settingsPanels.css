@@ -555,6 +555,12 @@
   max-width: 360px;
 }
 
+/* A sentence explaining the subrow above it, on the same indent as its label. */
+.set-subrow-hint {
+  margin: 0;
+  padding: 0 0 6px 16px;
+}
+
 /* A section's "how this works" link. Layout only: colour and underline come
    from the global `a` rule, so it stays self-describing. Unlike `.set-link`
    it wraps (its label is a sentence, not a button) and keeps the same 44px

@@ -182,7 +182,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "allowed_mcp_servers": None,
         "gws_profile": "work",
         "color": "pink",
-        "agent_fs_scope": "machine",
+        "agent_fs_scope": "workspace",
     }
 
 
@@ -218,7 +218,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
             "color": "pink",
-            "agent_fs_scope": "machine",
+            "agent_fs_scope": "workspace",
         },
     ]
     assert pcm.refresh_count == 3
@@ -1750,10 +1750,10 @@ def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path):
     """The workspace filesystem scope persists, rejects unknowns, and defaults."""
     client, config, _pcm = _client(tmp_path)
 
-    assert config.workspace("personal").agent_fs_scope == "machine"
+    assert config.workspace("personal").agent_fs_scope == "workspace"
     listed = client.get("/api/workspaces").json()
     personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
-    assert personal["agent_fs_scope"] == "machine"
+    assert personal["agent_fs_scope"] == "workspace"
 
     patched = client.patch(
         "/api/workspaces/personal",
@@ -1790,4 +1790,33 @@ def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path):
             "CIAO_RUNTIME_ROOT": str(runtime),
         }
     )
-    assert fresh.workspace("personal").agent_fs_scope == "machine"
+    assert fresh.workspace("personal").agent_fs_scope == "workspace"
+
+
+def test_missing_agent_fs_scope_loads_as_workspace(tmp_path):
+    """A registry row with no agent_fs_scope loads as workspace; a stored machine stays machine."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps(
+            [
+                {"name": "personal", "vault_root": "memory-vault/personal"},
+                {
+                    "name": "work",
+                    "vault_root": "memory-vault/work",
+                    "agent_fs_scope": "machine",
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert config.workspace("personal").agent_fs_scope == "workspace"
+    assert config.workspace("work").agent_fs_scope == "machine"

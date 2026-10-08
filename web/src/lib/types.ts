@@ -58,6 +58,8 @@ export interface WorkspaceInfo {
   gws_profile: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
   color?: string
+  // Filesystem scope for the agent and its shell. Missing → workspace.
+  agent_fs_scope?: 'workspace' | 'machine'
 }
 
 export interface WorkspacesResponse {
