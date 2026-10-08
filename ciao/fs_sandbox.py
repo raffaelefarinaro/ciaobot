@@ -63,7 +63,11 @@ def claude_sandbox_settings(
 def _quote_seatbelt_subpath(root: str) -> str:
     if '"' in root or ")" in root:
         raise ValueError(f"unsafe sandbox root: {root!r}")
-    return root
+    # Seatbelt decodes backslash escapes inside quoted strings (e.g. `\n`
+    # becomes a newline), so a literal backslash in a root would otherwise
+    # redirect the grant to a different sibling path. Double every backslash
+    # to keep the grant on the supplied root.
+    return root.replace("\\", "\\\\")
 
 
 def _seatbelt_profile(roots: list[Path]) -> str:

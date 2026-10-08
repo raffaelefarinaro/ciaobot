@@ -10,6 +10,8 @@ import pytest
 from ciao.fs_sandbox import (
     SANDBOX_EXEC_PATH,
     FsSandboxUnavailable,
+    _quote_seatbelt_subpath,
+    _seatbelt_profile,
     claude_sandbox_settings,
     opencode_sandbox_prefix,
 )
@@ -134,3 +136,64 @@ def test_darwin_sandbox_exec_refuses_a_file_outside_the_root(tmp_path):
     )
     assert allowed.returncode == 0
     assert allowed.stdout == b"inside"
+
+
+def test_seatbelt_backslash_root_is_escaped(tmp_path, monkeypatch):
+    # POSIX crafted name (literal backslash + "n") and Windows-style roots
+    # must both be escaped for the Seatbelt string, never decoded.
+    assert _quote_seatbelt_subpath("root\\nbar") == "root\\\\nbar"
+    assert _quote_seatbelt_subpath("C:\\Users\\root") == "C:\\\\Users\\\\root"
+    with pytest.raises(ValueError):
+        _quote_seatbelt_subpath('ro"ot')
+    with pytest.raises(ValueError):
+        _quote_seatbelt_subpath("ro)ot")
+
+    tricky = tmp_path / "root\\nbar"
+    tricky.mkdir()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    fake_binary = tmp_path / "sandbox-exec"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr("ciao.fs_sandbox.SANDBOX_EXEC_PATH", str(fake_binary))
+    profile = opencode_sandbox_prefix(roots=[tricky])[2]
+    # The grant names the literal-backslash root (doubled backslash) and
+    # never the escape-decoded sibling (real newline).
+    assert "root\\\\nbar" in profile
+    assert "root\nbar" not in profile
+
+
+def test_darwin_seatbelt_backslash_root_stays_confined(tmp_path):
+    if sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file():
+        # Same platform branch as the live probe above: escaping is covered
+        # by the unit test on Linux/Windows, where sandbox-exec is absent.
+        assert _quote_seatbelt_subpath("a\\b") == "a\\\\b"
+        return
+
+    # Resolve: pytest tmp dirs live under /var (a symlink to /private/var),
+    # and seatbelt matches the resolved vnode path.
+    tricky = tmp_path / "root\\nbar"
+    tricky.mkdir()
+    resolved = tricky.resolve()
+    sibling = tmp_path / "root\nbar"
+    sibling.mkdir()
+    resolved_sibling = sibling.resolve()
+    profile = _seatbelt_profile([resolved])
+    granted = subprocess.run(
+        [SANDBOX_EXEC_PATH, "-p", profile, "/usr/bin/touch", str(resolved / "ok.txt")],
+        capture_output=True,
+        timeout=30,
+    )
+    assert granted.returncode == 0
+    assert (resolved / "ok.txt").is_file()
+    denied = subprocess.run(
+        [
+            SANDBOX_EXEC_PATH,
+            "-p",
+            profile,
+            "/usr/bin/touch",
+            str(resolved_sibling / "evil.txt"),
+        ],
+        capture_output=True,
+        timeout=30,
+    )
+    assert denied.returncode != 0
+    assert not (resolved_sibling / "evil.txt").is_file()
