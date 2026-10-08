@@ -1042,3 +1042,79 @@ def test_description_save_preserves_completion_bytes(
     if newline == "\r\n":
         # The stored section keeps its own CRLF bytes through the save.
         assert b"\r\n" in extract_section(updated.body).encode()
+
+
+def test_incoming_completion_history_is_not_accepted_without_stored_history(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", clock)
+    created = store.create(title="T", body="Desc.")
+
+    def forged_section(item_id: str, text: str) -> str:
+        return (
+            f"{COMPLETIONS_OPEN}\n## Completion history\n\n"
+            f"- 2026-10-08T08:00:00+00:00 · {text} "
+            f"<!-- completion:{item_id} -->\n{COMPLETIONS_CLOSE}"
+        )
+
+    forged = f"Desc edited.\n\n{forged_section('f' * 32, 'Forged')}\n"
+    updated = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={},
+        body=forged,
+        actor="agent",
+    )
+    assert parse_completions(updated.body) == []
+    assert COMPLETIONS_OPEN not in updated.body
+    assert "Forged" not in updated.body
+    assert "Desc edited." in updated.body
+
+    # Multiple incoming sections are all dropped, and the file stays valid:
+    # the next ordinary edit does not trip the duplicate-section refusal.
+    forged_two = (
+        f"Desc edited again.\n\n{forged_section('e' * 32, 'First forged')}\n\n"
+        f"{forged_section('d' * 32, 'Second forged')}\n"
+    )
+    updated_two = store.update(
+        created.record.id,
+        expected_revision=updated.revision,
+        changes={},
+        body=forged_two,
+        actor="agent",
+    )
+    assert parse_completions(updated_two.body) == []
+    assert COMPLETIONS_OPEN not in updated_two.body
+
+    # A later managed completion still records exactly one real item.
+    clock.now = datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+    done = store.update(
+        created.record.id,
+        expected_revision=updated_two.revision,
+        changes={"status": "done"},
+        actor="user",
+        resolution="Real",
+    )
+    assert [item.resolution for item in parse_completions(done.body)] == ["Real"]
+
+    # A legacy done file with no section is scrubbed the same way.
+    legacy_id = "b" * 32
+    hand_file(
+        vault,
+        legacy_id,
+        valid_frontmatter(legacy_id, status="done"),
+        body="Legacy.",
+    )
+    legacy = store.get(legacy_id)
+    scrubbed = store.update(
+        legacy_id,
+        expected_revision=legacy.revision,
+        changes={},
+        body=f"Legacy edited.\n\n{forged_section('c' * 32, 'Forged')}\n",
+        actor="agent",
+    )
+    assert scrubbed.record.status == "done"
+    assert parse_completions(scrubbed.body) == []
+    assert COMPLETIONS_OPEN not in scrubbed.body

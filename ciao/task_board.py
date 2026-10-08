@@ -1597,13 +1597,22 @@ class TaskBoardStore:
             working = body
             if working is not None and working != document.body:
                 # A description save carries the description only. Strip any
-                # completion section the caller echoed back and append the
-                # stored one, so the history survives the save byte for byte.
+                # completion section the caller sent — forged history on a
+                # task with none is still forged — and append back only the
+                # stored section, so the history survives the save byte for
+                # byte and nothing unrecorded becomes history. A body with no
+                # section passes through untouched.
+                stripped = (
+                    strip_completions(working)
+                    if extract_section(working)
+                    else working
+                )
                 kept = extract_section(document.body)
                 if kept:
-                    stripped = strip_completions(working)
                     head = stripped.rstrip()
                     working = f"{head}\n\n{kept}\n" if head else f"{kept}\n"
+                else:
+                    working = stripped
             stamp: datetime | None = None
             if current_status != "done" and patched_status == "done":
                 if stamp is None:

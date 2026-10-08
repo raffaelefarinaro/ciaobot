@@ -77,6 +77,38 @@ def mint_id() -> str:
     return uuid.uuid4().hex
 
 
+#: Rendered forms of the section markers inside resolution text. A resolution
+#: is user prose and may name the markers literally; embedding them verbatim
+#: would terminate the section early (the section match ends at the first
+#: closing marker), so the renderer escapes them and the parser restores
+#: them. The doubled form keeps an already-escaped literal unambiguous, so
+#: every input round-trips exactly.
+_ESCAPED_OPEN = "&lt;!-- ciao:task-completions --&gt;"
+_ESCAPED_CLOSE = "&lt;!-- /ciao:task-completions --&gt;"
+_DOUBLED_OPEN = "&amp;lt;!-- ciao:task-completions --&gt;"
+_DOUBLED_CLOSE = "&amp;lt;!-- /ciao:task-completions --&gt;"
+
+
+def _escape_markers(text: str) -> str:
+    """Resolution text with literal section markers escaped for rendering."""
+    for marker, escaped, doubled in (
+        (OPEN, _ESCAPED_OPEN, _DOUBLED_OPEN),
+        (CLOSE, _ESCAPED_CLOSE, _DOUBLED_CLOSE),
+    ):
+        text = text.replace(escaped, doubled).replace(marker, escaped)
+    return text
+
+
+def _unescape_markers(text: str) -> str:
+    """Parsed item text with escaped section markers restored to literals."""
+    for marker, escaped, doubled in (
+        (OPEN, _ESCAPED_OPEN, _DOUBLED_OPEN),
+        (CLOSE, _ESCAPED_CLOSE, _DOUBLED_CLOSE),
+    ):
+        text = text.replace(escaped, marker).replace(doubled, escaped)
+    return text
+
+
 def render_completion(completion: Completion) -> str:
     """One completion as a section item: a headline line, then its text indented.
 
@@ -84,10 +116,12 @@ def render_completion(completion: Completion) -> str:
     (or ``No resolution``), the attempt id when one is named, and the
     completion mark; a reworded resolution adds the ``edited`` stamp after it.
     The rest of the resolution follows as indented continuation lines, so a
-    multi-line resolution never reads as new items.
+    multi-line resolution never reads as new items. Literal section markers
+    in the resolution are escaped, so they stay user prose rather than
+    becoming section syntax.
     """
     when = completion.completed_at.astimezone(UTC).isoformat(timespec="seconds")
-    note = completion.resolution.strip()
+    note = _escape_markers(completion.resolution.strip())
     lines = note.splitlines() if note else []
     first = lines[0] if lines else NO_RESOLUTION
     headline = f"- {when} · {first}"
@@ -191,6 +225,8 @@ def _parse_item(item_id: str, text: str) -> Completion | None:
         # a lone "No resolution" headline with no continuation lines is the
         # absence of a resolution, not a resolution saying so.
         resolution = ""
+    else:
+        resolution = _unescape_markers(resolution)
     return Completion(
         id=item_id,
         completed_at=completed_at,
