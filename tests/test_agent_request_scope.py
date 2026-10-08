@@ -48,8 +48,12 @@ def test_build_agent_request_copies_workspace_scope_and_roots(tmp_path: Path) ->
     assert request.agent_roots[0] == str(agent_root)
 
 
-def test_build_agent_request_defaults_to_machine_scope_without_roots(tmp_path: Path) -> None:
+def test_build_agent_request_machine_scope_has_no_roots(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope="machine")
     project = manager.create_project("unscoped", workspace="personal")
     chat = manager.create_chat(project.project_id, provider="claude")
 

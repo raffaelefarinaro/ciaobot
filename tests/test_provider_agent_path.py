@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.models import AgentRequest
 from ciao.sessions import StateStore
 from ciao.tool_path import engine_bin_dir, prepend_engine_path
@@ -44,6 +44,16 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        # These tests check the turn env, not the sandbox: whole-machine scope
+        # keeps the spawn unwrapped on every platform (Linux CI has no bwrap,
+        # Windows has no sandbox).
+        workspaces={
+            "personal": WorkspaceConfig(
+                name="personal",
+                vault_root="memory-vault/personal",
+                agent_fs_scope="machine",
+            )
+        },
     )
     return attach_stub_mcp(ProjectChatManager(
         config,

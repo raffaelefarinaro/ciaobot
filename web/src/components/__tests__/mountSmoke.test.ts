@@ -649,9 +649,9 @@ describe('component mount smoke', () => {
     const providerOptions = wrapper.findAll('select.routine-input option').map((option) => option.text())
     expect(providerOptions).toContain('Anthropic (via Claude Code)')
     expect(providerOptions).toContain('opencode')
-    // Provider and GWS profile are native selects; Default model uses the
-    // custom ModelSelector component, not a third native <select>.
-    expect(wrapper.findAll('select.workspace-select')).toHaveLength(2)
+    // Provider, File access and GWS profile are native selects; Default model
+    // uses the custom ModelSelector component, not a fourth native <select>.
+    expect(wrapper.findAll('select.workspace-select')).toHaveLength(3)
 
     const providerField = wrapper.findAll('label.settings-field')
       .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
