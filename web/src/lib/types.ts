@@ -523,9 +523,10 @@ export type EventsWsMessage =
   // A board task or one of its attempts changed in `workspace` (the same name
   // `/api/tasks?workspace=` takes). No payload: the client re-reads the board.
   | { type: 'tasks_changed'; workspace: string }
-  // A workspace was archived or restored (here or on another device). No
-  // payload: the client refetches /api/workspaces.
-  | { type: 'workspaces_changed' }
+  // A workspace was archived, restored or renamed (here or on another
+  // device). Only a rename carries `from`/`to`; the client refetches
+  // /api/workspaces either way.
+  | { type: 'workspaces_changed'; from?: string; to?: string }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'server_restart_cancelled' }
