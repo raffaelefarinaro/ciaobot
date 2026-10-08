@@ -3662,6 +3662,23 @@ class ProjectChatManager:
     ) -> str | None:
         return self._memory_pass.enqueue(source, project, archive_path, doc_path, focus)
 
+    def enqueue_task_completion(
+        self,
+        *,
+        workspace: str,
+        task_path: str,
+        completion_id: str,
+        resolution: str,
+        completed_at: str,
+    ) -> str | None:
+        return self._memory_pass.enqueue_task_completion(
+            workspace=workspace,
+            task_path=task_path,
+            completion_id=completion_id,
+            resolution=resolution,
+            completed_at=completed_at,
+        )
+
     async def resume_memory_passes(self) -> None:
         self._memory_pass.resume()
 

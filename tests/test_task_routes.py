@@ -16,6 +16,8 @@ worker thread (see ``routes_tasks.task_delegate``).
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +42,7 @@ from ciao.web.routes_tasks import (
     task_delete,
     task_get,
     task_list,
+    task_resolution_review,
     task_send_update,
     task_update,
 )
@@ -196,6 +199,11 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             Route("/api/tasks", task_list, methods=["GET"]),
             Route("/api/tasks", task_create, methods=["POST"]),
             Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+            Route(
+                "/api/tasks/{task_id}/resolution-review",
+                task_resolution_review,
+                methods=["POST"],
+            ),
             Route("/api/tasks/{task_id}/delegate", task_delegate, methods=["POST"]),
             Route("/api/tasks/{task_id}/attempts", task_attempts, methods=["GET"]),
             Route(
@@ -1554,3 +1562,82 @@ async def test_an_unavailable_control_plane_is_a_503_on_delegation(
         )
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "unavailable"
+
+
+# ── Learning from a resolution (#1154) ──────────────────────────────────
+
+
+def test_resolution_review_queues_and_complete_still_succeeds_when_enqueue_raises(
+    world,
+) -> None:
+    """A queue failure never undoes Done, and a review queues the saved text once asked.
+
+    The completion queues its pass on the engine loop, so the loop is bound here
+    to a background thread the way the running engine has one. The fake fails
+    the first time, which is the case that must not reach the completion.
+    """
+    client, cookies, _config, pcm = world
+    plane = client.app.state.mcp_service.control_plane
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    plane._loop = loop
+    attempts: list[dict] = []
+    failing = {"on": True}
+
+    def enqueue(**kwargs):
+        attempts.append(kwargs)
+        if failing["on"]:
+            raise RuntimeError("the queue is down")
+        return "memory-chat-1"
+
+    pcm.enqueue_task_completion = enqueue
+    try:
+        task = _create(client, cookies, title="Ship the board")
+        done = client.post(
+            f"/api/tasks/{task['id']}/complete",
+            json={
+                "workspace": "personal",
+                "expected_revision": task["revision"],
+                "resolution": "Use the staging gate.",
+            },
+            cookies=cookies,
+        )
+        assert done.status_code == 200, done.text
+        assert done.json()["task"]["status"] == "done"
+        for _ in range(200):
+            if attempts:
+                break
+            time.sleep(0.01)
+        assert attempts and attempts[0]["resolution"] == "Use the staging gate."
+        settled = client.get(f"/api/tasks/{task['id']}?workspace=personal", cookies=cookies)
+        assert settled.json()["task"]["status"] == "done"
+
+        # The review is the explicit ask: it queues the saved text, and a stale
+        # revision is refused before anything is queued.
+        failing["on"] = False
+        revision = settled.json()["task"]["revision"]
+        stale = client.post(
+            f"/api/tasks/{task['id']}/resolution-review",
+            json={"workspace": "personal", "expected_revision": task["revision"]},
+            cookies=cookies,
+        )
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "task_revision_conflict"
+
+        review = client.post(
+            f"/api/tasks/{task['id']}/resolution-review",
+            json={"workspace": "personal", "expected_revision": revision},
+            cookies=cookies,
+        )
+        assert review.status_code == 200, review.text
+        body = review.json()
+        assert body["queued"] is True
+        assert body["memory_chat_id"] == "memory-chat-1"
+        assert body["completion_id"] == attempts[0]["completion_id"]
+        assert len(attempts) == 2
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+
