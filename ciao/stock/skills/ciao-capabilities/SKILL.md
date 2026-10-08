@@ -150,9 +150,9 @@ The file workflow is designed around model collaboration: keep a Markdown docume
 ### 7. Google Workspace (`gws`)
 
 - Ciaobot integrates with Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through the [`gws` CLI](https://github.com/googleworkspace/cli).
-- **Settings → Workspaces**: install `gws`, upload a GCP OAuth `client_secret.json` per profile, and connect Google accounts from the browser (no terminal required). The Google Workspace card (and its ⓘ panel) lives on that tab. In-chat, `ciao gws status` reports whether the active workspace's Google account is connected and its token valid before you promise a Google call will work.
+- **Settings → Workspaces**: install `gws`, upload a GCP OAuth `client_secret.json` per profile, and connect Google accounts from the browser (no terminal required). The Google Workspace card lives on that tab, with an inline setup checklist (add account → upload client → Sign in with Google → link a workspace); terminal and headless commands sit under Advanced. In-chat, `ciao gws status` reports whether the active workspace's Google account is connected and its token valid before you promise a Google call will work.
 - Separate **personal** and **work** profiles; each workspace picks which profile to use on the same Workspaces tab.
-- Stock **`gws-*` skills** ship with the app (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). Setup details: `gws-shared` skill and the ⓘ panel on the Google Workspace card.
+- Stock **`gws-*` skills** ship with the app (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). Setup details: `gws-shared` skill and the setup checklist on the Google Workspace card.
 
 ### 8. The task board (Tasks page)
 

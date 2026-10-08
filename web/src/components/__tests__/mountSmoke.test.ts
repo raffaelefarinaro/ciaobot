@@ -35,6 +35,13 @@ vi.mock('../../lib/api', () => {
   }
   const responses: Record<string, unknown> = {
     '/api/settings': {},
+    '/api/integrations/gws': {
+      installed: false,
+      binary_path: '',
+      default_profile: '',
+      cli_available: false,
+      profiles: [],
+    },
     '/api/settings/providers': {
       connections: {
         claude: {
