@@ -34,11 +34,12 @@ HEADING = "## Completion history"
 NO_RESOLUTION = "No resolution"
 
 _SECTION = re.compile(
-    re.escape(OPEN) + r".*?" + re.escape(CLOSE), re.DOTALL
+    "^" + re.escape(OPEN) + r"(?=\r?$).*?^" + re.escape(CLOSE) + r"(?=\r?$)",
+    re.DOTALL | re.MULTILINE,
 )
 _TAIL = re.compile(
     r"<!-- completion:([0-9a-f]{32}) -->"
-    r"\s*(<!-- edited:(.+?) -->)?\s*$"
+    r"\s*(<!-- edited:([^<>]+?) -->)?\s*$"
 )
 _ATTEMPT_SUFFIX = re.compile(r"^(?P<text>.*) · attempt `(?P<aid>[^`]+)`$")
 

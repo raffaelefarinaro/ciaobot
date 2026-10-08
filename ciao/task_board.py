@@ -1582,10 +1582,9 @@ class TaskBoardStore:
                     "the task changed since this edit was planned; nothing was written",
                 )
             document = parse_task(current_raw, expected_id=task_id)
-            if (
-                COMPLETIONS_OPEN in document.body
-                and document.body.count(COMPLETIONS_OPEN) != 1
-            ):
+            # Only standalone delimiters open managed sections; a description
+            # or an indented log report may mention the marker literally.
+            if document.body.splitlines().count(COMPLETIONS_OPEN) > 1:
                 raise TaskBoardError(
                     "invalid_task",
                     "task body has more than one completion history section; "
