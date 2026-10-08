@@ -408,8 +408,8 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
     if (dismissedChanged) persistDismissedAutoPins()
   }
 
-  async function mutateChatPinTo(chatId: string, path: string): Promise<void> {
-    if (chatPinPending.value[chatId]) return
+  async function mutateChatPinTo(chatId: string, path: string): Promise<boolean> {
+    if (chatPinPending.value[chatId]) return false
     // Capture the chat and target path now: the selection (or route) can move
     // while the PATCH is in flight, and the write must still land on the chat
     // the user acted on, never wherever the app has navigated to since.
@@ -418,6 +418,7 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
     try {
       const state = await mutateChatPin(chatId, path, expectedRevision)
       applyChatPinState(chatId, state, { source: 'mutation' })
+      return true
     } catch (e) {
       if (e instanceof ChatPinConflict) {
         // Another device won: adopt the server's truth and tell the user their
@@ -430,12 +431,13 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
         // explicit retry re-presents the same acknowledged revision.
         notifyPinError(chatId, e instanceof Error ? e.message : String(e))
       }
+      return false
     } finally {
       delete chatPinPending.value[chatId]
     }
   }
 
-  function pinFile(id: string, path: string): Promise<void> {
+  function pinFile(id: string, path: string): Promise<boolean> {
     if (ownerOf(id) === 'project') {
       pinnedFilePaths.value = { ...pinnedFilePaths.value, [id]: path }
       // Pinning a file the user had closed clears that path's dismissal.
@@ -449,11 +451,11 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
         persistDismissedAutoPins()
       }
       persistPinnedFiles()
-      return Promise.resolve()
+      return Promise.resolve(true)
     }
     return mutateChatPinTo(id, path)
   }
-  function unpinFile(id: string): Promise<void> {
+  async function unpinFile(id: string): Promise<void> {
     if (ownerOf(id) === 'project') {
       const next = { ...pinnedFilePaths.value }
       const closedPath = next[id]
@@ -472,7 +474,7 @@ export function createChatAnnotations(deps: ChatAnnotationsDeps) {
       persistPinnedFiles()
       return Promise.resolve()
     }
-    return mutateChatPinTo(id, '')
+    await mutateChatPinTo(id, '')
   }
   function pinnedFileFor(id: string): string | undefined {
     if (ownerOf(id) === 'chat') return serverChatPins.value[id]?.path || undefined

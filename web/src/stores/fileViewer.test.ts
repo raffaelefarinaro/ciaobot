@@ -5,14 +5,33 @@ import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import { fileViewerKindForPath, useFileViewerStore } from './fileViewer'
 import { useProjectStore } from './projects'
+import { api } from '../lib/api'
 
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  const originalGet = api.get
+  vi.spyOn(api, 'get').mockImplementation((url) => {
+    if (/\/api\/chats\/[^/]+\/file-path\?/.test(url)) {
+      return Promise.resolve({ path: new URL(url, 'http://localhost').searchParams.get('path') })
+    }
+    return originalGet(url)
+  })
 })
 
 describe('file viewer kind detection', () => {
+  test('resolves a chat link before loading the canonical file', async () => {
+    vi.mocked(api.get).mockResolvedValue({ path: '/install/work/memory-vault/draft.md' })
+    const fetchMock = vi.fn(async (_url: string) => new Response('Draft'))
+    vi.stubGlobal('fetch', fetchMock)
+    const store = useFileViewerStore()
+    await store.open('memory-vault/draft.md', null, 'chat-work')
+    expect(api.get).toHaveBeenCalledWith('/api/chats/chat-work/file-path?path=memory-vault%2Fdraft.md')
+    expect(store.path).toBe('/install/work/memory-vault/draft.md')
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/workspace-file?path=%2Finstall%2Fwork%2Fmemory-vault%2Fdraft.md')
+    expect(store.content).toBe('Draft')
+  })
   test('classifies files by extension', () => {
     expect(fileViewerKindForPath('/tmp/readme.md')).toBe('text')
     expect(fileViewerKindForPath('docs/report.pdf')).toBe('pdf')

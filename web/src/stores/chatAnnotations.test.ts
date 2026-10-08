@@ -40,6 +40,15 @@ function pinState(over: Partial<ChatPinState> = {}): ChatPinState {
   return { path: '', dismissed_paths: [], revision: 0, ...over }
 }
 
+test('pinFile reports failure without discarding the acknowledged pin', async () => {
+  const { a } = make('c1', {
+    chats: ['c1'], mutate: async () => { throw new Error('not found') },
+  })
+  a.applyChatPinState('c1', pinState({ path: '/old.md', revision: 2 }))
+  expect(await a.pinFile('c1', '/missing.md')).toBe(false)
+  expect(a.pinnedFileFor('c1')).toBe('/old.md')
+})
+
 describe('pending images', () => {
   test('adds, persists and removes by index', () => {
     const { a } = make()
