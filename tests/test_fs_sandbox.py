@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 
+import asyncio
+
 import pytest
 
 from ciao.fs_sandbox import (
@@ -12,7 +14,9 @@ from ciao.fs_sandbox import (
     FsSandboxUnavailable,
     _quote_seatbelt_subpath,
     _seatbelt_profile,
+    claude_file_tool_guard,
     claude_sandbox_settings,
+    path_outside_roots,
     opencode_sandbox_prefix,
 )
 
@@ -27,6 +31,7 @@ def test_claude_workspace_settings_allow_only_the_roots(tmp_path):
         "allowUnsandboxedCommands": False,
         "excludedCommands": [],
         "filesystem": {
+            "denyRead": [str(Path.home())],
             "allowRead": [str(roots[0]), str(roots[1])],
             "allowWrite": [str(roots[0]), str(roots[1])],
         },
@@ -61,7 +66,9 @@ def test_opencode_prefix_is_sandbox_exec_on_darwin(tmp_path, monkeypatch):
     assert profile.count("file-write*") == 1
     # Traversal of `/` itself is allowed (without it every child aborts under
     # `deny default`), and process rules carry no `*` suffix (a parse error).
-    assert '(allow file-read* (literal "/"))' in profile
+    # The /var and /tmp symlinks are readable too, so a path spelled through
+    # them (as $TMPDIR is) still resolves (#1174).
+    assert '(allow file-read* (literal "/") (literal "/var") (literal "/tmp"))' in profile
     assert "(allow process-exec)" in profile
     assert "(allow process-fork)" in profile
 
@@ -194,3 +201,87 @@ def test_darwin_seatbelt_backslash_root_stays_confined(tmp_path):
     )
     assert denied.returncode != 0
     assert not (resolved_sibling / "evil.txt").is_file()
+
+
+def test_read_only_dirs_are_readable_and_never_writable(tmp_path, monkeypatch):
+    root, config = tmp_path / "root", tmp_path / "config"
+    profile = _seatbelt_profile([root], read_only=[config])
+    assert f'(allow file-read* (subpath "{_quote_seatbelt_subpath(str(config))}"))' in profile
+    assert profile.count("file-write*") == 1
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    argv = opencode_sandbox_prefix(roots=[root], read_only=[config])
+    at = argv.index(str(config))
+    assert argv[at - 1] == "--ro-bind"
+    assert ["--bind", str(config), str(config)] not in [argv[i : i + 3] for i in range(len(argv))]
+
+
+def test_darwin_seatbelt_reaches_a_root_spelled_through_var(tmp_path):
+    if sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file():
+        assert '(literal "/var")' in _seatbelt_profile([tmp_path])
+        return
+    # $TMPDIR is spelled /var/folders/...; /var is a symlink to /private/var.
+    # Without read on the link itself every such path is refused (#1174).
+    unresolved = Path("/var") / tmp_path.resolve().relative_to("/private/var")
+    target = unresolved / "made.txt"
+    granted = subprocess.run(
+        [SANDBOX_EXEC_PATH, "-p", _seatbelt_profile([tmp_path.resolve()]),
+         "/usr/bin/touch", str(target)],
+        capture_output=True,
+        timeout=30,
+    )
+    assert granted.returncode == 0, granted.stderr
+    assert target.is_file()
+
+
+def test_tool_paths_outside_the_roots_are_detected(tmp_path):
+    root = (tmp_path / "root").resolve()
+    (root / "sub").mkdir(parents=True)
+    outside = (tmp_path / "outside").resolve()
+    outside.mkdir()
+
+    def out(value: str) -> bool:
+        return path_outside_roots(value, cwd=root, roots=[root])
+
+    assert not out("notes.md")
+    assert not out("**/*.py")
+    assert not out(str(root / "sub" / "*.md"))
+    assert out(str(outside / "secret.txt"))
+    assert out("../outside/secret.txt")
+    assert out("/**")
+    assert out("~/anything")
+    if sys.platform != "win32":
+        # Windows needs a privilege to create symlinks; the guard only runs on
+        # POSIX, where Claude workspace scope is available.
+        (root / "escape").symlink_to(outside)
+        assert out("escape/secret.txt")
+
+
+def _guard_decision(guard, tool_name: str, tool_input: dict) -> str:
+    result = asyncio.run(guard({"tool_name": tool_name, "tool_input": tool_input}, None, None))
+    return result.get("hookSpecificOutput", {}).get("permissionDecision", "allow")
+
+
+def test_claude_file_tool_guard_denies_paths_outside_the_roots(tmp_path):
+    root = (tmp_path / "root").resolve()
+    vault = (tmp_path / "vault").resolve()
+    root.mkdir()
+    vault.mkdir()
+    guard = claude_file_tool_guard(cwd=root, roots=[root, vault])
+
+    assert _guard_decision(guard, "Read", {"file_path": str(root / "a.md")}) == "allow"
+    assert _guard_decision(guard, "Edit", {"file_path": str(vault / "n.md")}) == "allow"
+    assert _guard_decision(guard, "Glob", {"pattern": "**/*.md"}) == "allow"
+    plan = Path.home() / ".claude" / "plans" / "p.md"
+    assert _guard_decision(guard, "Write", {"file_path": str(plan)}) == "allow"
+    assert _guard_decision(guard, "Bash", {"command": "cat /etc/hosts"}) == "allow"
+
+    assert _guard_decision(guard, "Read", {"file_path": "/etc/hosts"}) == "deny"
+    assert _guard_decision(guard, "Write", {"file_path": str(tmp_path / "x")}) == "deny"
+    assert _guard_decision(guard, "Grep", {"pattern": "x", "path": str(tmp_path)}) == "deny"
+    assert _guard_decision(guard, "Glob", {"pattern": f"{tmp_path}/**"}) == "deny"
+    assert _guard_decision(guard, "NotebookEdit", {"notebook_path": "/tmp/n.ipynb"}) == "deny"
+
+    with pytest.raises(ValueError):
+        claude_file_tool_guard(cwd=root, roots=[])
