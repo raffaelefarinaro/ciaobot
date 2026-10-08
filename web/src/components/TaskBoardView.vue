@@ -2,12 +2,12 @@
 /**
  * The workspace task board (`/tasks`).
  *
- * Four fixed columns — To do, In progress, In review, Done — on a wide pane, and
- * the same groups stacked on a narrow one. On the columns a card is dragged to
- * another lane, or moved one lane over with Shift+←/→ while its title has focus.
- * Everywhere, the editor's status control is the path a screen reader and a phone
- * use: a card carries no status control of its own, because its column already
- * says where it is.
+ * Four fixed columns — To do, In progress, In review, Done — side by side at every
+ * width. A narrow pane scrolls them sideways inside the board; the page itself does
+ * not scroll sideways. A card is dragged to another lane, or moved one lane over with
+ * Shift+←/→ while its title has focus, at any width. The editor's status control is
+ * the path a screen reader and a phone use: a card carries no status control of its
+ * own, because its column already says where it is.
  *
  * Every write goes through `stores/taskBoard.ts` at the `revision` this pane read,
  * so a board drawn from an older read gets the server's 409 with its rows intact
@@ -56,6 +56,7 @@ import {
   TASK_NO_PROJECT,
   TASK_STATUS_OPTIONS,
   buildTaskUpdateMessage,
+  formatCompletedAt,
   formatTaskDue,
   invalidTaskRows,
   isLiveAttemptState,
@@ -87,20 +88,13 @@ const board = useTaskBoardStore()
 const workspace = computed(() => projectStore.activeWorkspace)
 
 /**
- * Where the four columns become stacked status groups.
+ * Where the skeleton switches from column rows to card rows.
  *
- * One measurement, and it is the one the CSS below uses: the `chat-pane`
- * container's own inline size, against the same 940px the
- * `@container chat-pane (max-width: 940px)` rule uses. The window is not that
- * measurement — with the sidebar open or the split pane showing, a window
- * comfortably past any window threshold can still leave the pane under it, and
- * the measurement also disables horizontal drag and keyboard movement when
- * the status groups stack vertically.
- *
- * The pane root is a block that fills its container, so observing the root
- * measures the container. `contentRect` is the same inline-size the container
- * query resolves against; the window keeps a listener off this component
- * entirely, since the pane resizes when the sidebar drags, not only on resize.
+ * Only the loading placeholder reads this. The lanes stay side by side at every
+ * width and scroll inside the board, so no gesture is gated on it. The pane root is
+ * a block that fills the `chat-pane` container, so observing it measures the pane;
+ * the window keeps a listener off this component entirely, since the pane resizes
+ * when the sidebar drags.
  */
 const NARROW_PANE_PX = 940
 const paneEl = ref<HTMLElement | null>(null)
@@ -192,6 +186,7 @@ watch(() => taskSignals.tasks, () => {
 // was left, described by a task the new one has never seen.
 watch(workspace, () => {
   closeCreate()
+  resetResolution()
   void closeDetail({ discard: true })
   // Not `closeDelegate`: a gesture already in flight makes that one refuse, which
   // would leave the sheet marked open with nothing drawn and the focus trap still
@@ -239,7 +234,12 @@ const filteredEmpty = computed(
 const lanes = computed(() =>
   taskLanes(filtered.value, { status: statusFilter.value }),
 )
-const columnsShown = computed(() => lanes.value.length > 1 && !isNarrow.value)
+/**
+ * Whether the four status lanes are drawn (no status filter), which is where drag
+ * and Shift+←/→ move a card between columns. Independent of pane width: the lanes
+ * scroll sideways instead of stacking, so the gestures hold at every width.
+ */
+const columnsShown = computed(() => lanes.value.length > 1)
 
 /**
  * The workspace's auto-managed General project, which the board treats as the
@@ -400,7 +400,10 @@ async function onCardKeydown(task: Task, event: KeyboardEvent) {
   event.preventDefault()
   await moveTo(task, next)
   await nextTick()
-  paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${task.id}"] .task-open`)?.focus()
+  const moved = paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${task.id}"] .task-open`)
+  // The destination lane may be off the edge of the board's sideways scroll.
+  moved?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
+  moved?.focus()
 }
 
 /**
@@ -1024,6 +1027,159 @@ async function submitCreate() {
 
 // ── Detail ────────────────────────────────────────────────────────────────
 
+// ── Resolution ────────────────────────────────────────────────────────────
+//
+// A completion's note. Done stays one gesture (the card's check and the status
+// control). "Complete with resolution…" opens this sheet, and its submit sends the
+// status and the note in one POST, so a note never lands without the completion it
+// belongs to. Cancel posts nothing. A failed write keeps the draft: this sheet is
+// the only place that text lives until it lands.
+
+type ResolutionMode = 'complete' | 'edit'
+
+const resolutionOpen = ref(false)
+const resolutionEl = ref<HTMLElement | null>(null)
+const resolutionField = ref<HTMLTextAreaElement | null>(null)
+const resolutionMode = ref<ResolutionMode>('complete')
+const resolutionTaskId = ref('')
+const resolutionDraft = ref('')
+const resolutionError = ref('')
+const resolutionBusy = ref(false)
+/** The result of the last "Review resolution for learnings", said beside the detail. */
+const reviewNote = ref('')
+const reviewBusy = ref(false)
+
+const resolutionTask = computed(() => tasks.value.find((task) => task.id === resolutionTaskId.value) ?? null)
+const resolutionFocusActive = computed(() => resolutionOpen.value && !pendingConfirm.value)
+
+useModalFocus(resolutionEl, resolutionFocusActive, {
+  initialFocus: resolutionField,
+  onEscape: () => { if (!resolutionBusy.value) closeResolution() },
+})
+
+const resolutionTitle = computed(() => {
+  if (resolutionMode.value === 'edit') return 'Edit resolution'
+  return resolutionTask.value && isReviewReady(resolutionTask.value)
+    ? 'Approve with resolution'
+    : 'Complete with resolution'
+})
+const resolutionSubmitLabel = computed(() => {
+  if (resolutionMode.value === 'edit') return 'Save resolution'
+  return resolutionTask.value && isReviewReady(resolutionTask.value) ? 'Approve done' : 'Mark done'
+})
+
+/** Open the sheet for one task. `draft` is what the field starts with. */
+function openResolution(task: Task, mode: ResolutionMode, draft = '') {
+  board.clearError()
+  resolutionTaskId.value = task.id
+  resolutionMode.value = mode
+  resolutionDraft.value = draft
+  resolutionError.value = ''
+  resolutionOpen.value = true
+}
+
+/**
+ * Open the sheet to reword a done task's resolution.
+ *
+ * The field starts with the stored text, read first: a sheet opened empty over a
+ * note that exists would let a blank Save erase it. A failed read opens nothing;
+ * the board's own message says why.
+ */
+async function editResolution(task: Task) {
+  const read = await board.get(workspace.value, task.id)
+  if (!read) return
+  openResolution(task, 'edit', read.resolution)
+}
+
+/** Close without writing. Refused while a write is in flight. */
+function closeResolution() {
+  if (resolutionBusy.value) return
+  resetResolution()
+}
+
+function resetResolution() {
+  resolutionOpen.value = false
+  resolutionTaskId.value = ''
+  resolutionDraft.value = ''
+  resolutionError.value = ''
+}
+
+/**
+ * Submit the sheet: one write, at the revision read at the moment of the write.
+ *
+ * A linked task is released first, through the same confirm Done uses, because the
+ * store refuses to complete a task an attempt still holds. The revision is read
+ * after that release, since the release itself moves it. On any refusal the draft
+ * stays and the server's sentence is shown, with Refresh task beside it.
+ */
+async function submitResolution() {
+  const task = resolutionTask.value
+  if (!task || resolutionBusy.value) return
+  const text = resolutionDraft.value
+  resolutionBusy.value = true
+  resolutionError.value = ''
+  board.clearError()
+  let saved: TaskDetail | null = null
+  try {
+    if (resolutionMode.value === 'complete' && !(await releaseForDone(task))) {
+      resolutionError.value = board.error || ''
+      board.clearError()
+      return
+    }
+    const revision = board.revisionOf(task.id)
+    if (!revision) {
+      resolutionError.value = 'Refresh the task before saving this.'
+      return
+    }
+    saved = resolutionMode.value === 'edit'
+      ? await board.update(workspace.value, task.id, revision, { resolution: text })
+      : await board.complete(workspace.value, task.id, revision, text)
+  } finally {
+    resolutionBusy.value = false
+  }
+  if (!saved) {
+    resolutionError.value = board.error || 'Could not save the resolution.'
+    board.clearError()
+    return
+  }
+  if (detailOpen.value && detailId.value === saved.id) detailForm.status = saved.status
+  resetResolution()
+  board.clearError()
+}
+
+/**
+ * Refresh task: the record moved on under a conflict. Re-read the board and the
+ * task, so the next write presents the current revision. The draft is not touched.
+ */
+async function refreshResolutionTask() {
+  const id = resolutionTaskId.value
+  if (!id || resolutionBusy.value) return
+  resolutionError.value = ''
+  await board.reload(workspace.value)
+  const read = await board.get(workspace.value, id)
+  if (!read) {
+    resolutionError.value = board.error || board.loadError || 'Could not re-read the task.'
+    board.clearError()
+    return
+  }
+  board.clearError()
+}
+
+/** Queue the agent's read of a done task's resolution for learnings. */
+async function reviewTaskResolution(task: Task) {
+  const revision = board.revisionOf(task.id)
+  if (!revision || reviewBusy.value) return
+  board.clearError()
+  reviewNote.value = ''
+  reviewBusy.value = true
+  const result = await board.reviewResolution(workspace.value, task.id, revision)
+  reviewBusy.value = false
+  if (!result) return
+  reviewNote.value = result.queued
+    ? 'Review queued.'
+    : result.reason || 'The review was not queued.'
+}
+
 const detailOpen = ref(false)
 /** A status write the server refused, said beside the control that made it. */
 const statusError = ref('')
@@ -1067,7 +1223,9 @@ const detailForm = reactive({
  * the key. `detailSaving` is guarded separately, since an in-flight write is
  * this dialog's own business and the confirm is not involved.
  */
-const detailFocusActive = computed(() => detailOpen.value && !pendingConfirm.value)
+const detailFocusActive = computed(
+  () => detailOpen.value && !pendingConfirm.value && !resolutionOpen.value,
+)
 
 useModalFocus(detailEl, detailFocusActive, {
   initialFocus: detailTitleField,
@@ -1086,6 +1244,14 @@ const detailTask = computed(() => tasks.value.find((task) => task.id === detailI
  * was shown.
  */
 const detailDescribed = computed(() => Boolean(heldDescription(detailTask.value)))
+
+/** The open task's read, when it is the record at the row's revision: resolution, history, log. */
+const detailHeld = computed(() => heldDescription(detailTask.value))
+
+/** "Add" only when the read says there is no note; otherwise, or until read, "Edit". */
+const resolutionEditLabel = computed(() =>
+  detailHeld.value && !detailHeld.value.resolution ? 'Add resolution' : 'Edit resolution',
+)
 
 const detailValid = computed(() => detailForm.title.trim() !== '')
 
@@ -1180,6 +1346,7 @@ function openDetail(task: Task) {
   detailForm.project_id = ownProject(task.project_id)
   detailForm.body = held ? splitTaskLog(held.body).description : ''
   savedAt.value = 0
+  reviewNote.value = ''
   editingBody.value = false
   detailOpen.value = true
   syncTaskAddress(task.id)
@@ -1618,7 +1785,6 @@ const today = localDateKey()
 
           <p class="task-lede">
             {{ openCount }} open of {{ tasks.length }} in {{ workspace }}.
-            <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
           </p>
 
           <!-- A file the server could not read as a task is shown, never dropped:
@@ -1655,9 +1821,9 @@ const today = localDateKey()
             from the command line with <code>ciao task</code>.
           </p>
 
-          <!-- One card, one render path. Unfiltered status groups are columns
-               on wide panes and stacked sections on narrow panes. A status
-               filter selects one group on either layout. -->
+          <!-- One card, one render path. The unfiltered board is four lanes side
+               by side at every width, scrolling sideways inside the board; a
+               status filter draws its one group at full width. -->
           <div
             v-else
             class="task-lanes"
@@ -2215,6 +2381,69 @@ const today = localDateKey()
             </p>
           </div>
 
+          <!-- The completion record. Complete with resolution is the way to finish a
+               task and write its note in one step; a done task shows what it
+               recorded, kept apart from the description and the delegation log. -->
+          <section class="task-resolution" aria-labelledby="task-resolution-title">
+            <h4 id="task-resolution-title" class="task-delegate-title">Resolution</h4>
+            <template v-if="detailTask && detailTask.status !== 'done'">
+              <div class="task-resolution-actions">
+                <button
+                  type="button"
+                  class="btn-chip task-chip"
+                  :disabled="detailSaving || board.saving"
+                  @click="openResolution(detailTask!, 'complete')"
+                >{{ isReviewReady(detailTask) ? 'Approve with resolution…' : 'Complete with resolution…' }}</button>
+              </div>
+            </template>
+            <template v-else-if="detailTask">
+              <p class="hint">
+                Completed{{ formatCompletedAt(detailTask.completed_at) ? ` ${formatCompletedAt(detailTask.completed_at)}` : ' (no time recorded)' }}.
+              </p>
+              <p v-if="detailHeld?.resolution" class="task-resolution-text">{{ detailHeld.resolution }}</p>
+              <p v-else-if="detailHeld" class="hint">No resolution recorded.</p>
+              <p v-else-if="descriptionState === 'loading'" class="hint" role="status">Loading resolution…</p>
+              <p v-else class="hint">Open the task again to read its resolution.</p>
+              <div class="task-resolution-actions">
+                <button
+                  type="button"
+                  class="btn-chip task-chip"
+                  :disabled="detailSaving || board.saving"
+                  @click="editResolution(detailTask!)"
+                >{{ resolutionEditLabel }}</button>
+                <button
+                  v-if="detailHeld?.resolution"
+                  type="button"
+                  class="btn-chip task-chip"
+                  :disabled="reviewBusy || board.saving"
+                  @click="reviewTaskResolution(detailTask!)"
+                >Review resolution for learnings</button>
+              </div>
+              <p v-if="reviewNote" class="hint" role="status">{{ reviewNote }}</p>
+              <div v-if="detailHeld && detailHeld.completions.length > 1" class="task-completions">
+                <p class="task-field-label">Earlier completions</p>
+                <ol aria-label="Earlier completions, newest first">
+                  <li v-for="item in detailHeld.completions.slice(1)" :key="item.id" class="task-completion">
+                    <span class="hint">{{ formatCompletedAt(item.completed_at) || 'No time recorded' }}</span>
+                    <p class="task-resolution-text">{{ item.resolution || 'No resolution recorded.' }}</p>
+                  </li>
+                </ol>
+              </div>
+            </template>
+            <!-- The agent's own report, read only. It is never copied into the
+                 resolution field: the note is the user's words, the report is the
+                 agent's. -->
+            <div v-if="detailTask?.attempt_summary" class="task-agent-report">
+              <p class="task-field-label">Agent report</p>
+              <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+              <div class="task-history-summary markdown" aria-label="Agent report" v-html="renderUserMarkdown(detailTask.attempt_summary)"></div>
+            </div>
+            <details v-if="detailHeld?.delegation_log" class="task-log-details">
+              <summary>Delegation log</summary>
+              <pre class="task-log">{{ detailHeld.delegation_log }}</pre>
+            </details>
+          </section>
+
           <section class="task-delegate" aria-labelledby="task-agent-title">
             <h4 id="task-agent-title" class="task-delegate-title">Agent</h4>
             <p v-if="!detailAttemptState" class="hint task-delegate-explain">
@@ -2363,6 +2592,44 @@ const today = localDateKey()
               :disabled="detailSaving"
               @click="deleteTask"
             >Delete</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Resolution sheet: one note for one completion. Cancel posts nothing. -->
+    <div v-if="resolutionOpen && resolutionTask" class="modal-backdrop" @click.self="closeResolution">
+      <div
+        ref="resolutionEl"
+        class="modal-sheet task-sheet task-resolution-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-resolution-sheet-title"
+      >
+        <header class="task-sheet-head">
+          <h3 id="task-resolution-sheet-title">{{ resolutionTitle }}</h3>
+          <button type="button" class="btn-icon" aria-label="Close" :disabled="resolutionBusy" @click="closeResolution">×</button>
+        </header>
+        <form class="task-form" novalidate @submit.prevent="submitResolution">
+          <div class="form-group">
+            <label for="task-resolution-text">Resolution (optional)</label>
+            <p id="task-resolution-help" class="hint">How was this completed? What worked, and how did you check it?</p>
+            <textarea
+              id="task-resolution-text"
+              ref="resolutionField"
+              v-model="resolutionDraft"
+              rows="6"
+              aria-describedby="task-resolution-help"
+              :disabled="resolutionBusy"
+            ></textarea>
+          </div>
+          <div v-if="resolutionError" class="task-action-error" role="alert">
+            <span>{{ resolutionError }}</span>
+            <button type="button" class="btn-chip task-chip" :disabled="resolutionBusy" @click="refreshResolutionTask">Refresh task</button>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary" :disabled="resolutionBusy">{{ resolutionBusy ? 'Saving…' : resolutionSubmitLabel }}</button>
+            <button type="button" class="btn-small" :disabled="resolutionBusy" @click="closeResolution">Cancel</button>
           </div>
         </form>
       </div>
@@ -2526,21 +2793,21 @@ const today = localDateKey()
 
 /* ── Board ─────────────────────────────────────────────────────────────── */
 .task-lanes {
-  display: grid;
+  display: flex;
+  align-items: flex-start;
   gap: var(--space-3);
-  padding-bottom: var(--space-6);
-  align-items: start;
+  /* The board owns the sideways scroll: the four lanes sit in one row at every
+     width, and a narrow pane scrolls this element, not the page. */
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--space-1) var(--space-1) var(--space-6);
 }
-.task-lanes--columns { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.task-lanes--list { grid-template-columns: minmax(0, 1fr); }
-
-/* Narrow panes preserve the four headings and stack their groups. The same
-   940px measurement disables column-only interactions in the script. */
-@container chat-pane (max-width: 940px) {
-  .task-lanes--columns { grid-template-columns: minmax(0, 1fr); }
-  .task-lanes { row-gap: var(--space-5); }
-  .task-lanes .task-lane { min-height: 0; margin: 0; padding: 0; }
-}
+/* A lane is 320px, or the whole board when only one is drawn (a status filter).
+   On a pane narrower than one lane the first one fills it and the rest sit off
+   the edge, reached by the board's scroll. */
+.task-lanes > .task-lane { flex: 0 0 min(320px, 100%); }
+.task-lanes--list > .task-lane { flex: 1 1 100%; }
 
 .task-lane {
   display: flex;
@@ -2548,7 +2815,6 @@ const today = localDateKey()
   gap: var(--space-2);
   min-width: 0;
   min-height: 8rem;
-  margin: calc(-1 * var(--space-1));
   padding: var(--space-1);
   border-radius: var(--radius);
   transition: background-color 120ms ease-out, box-shadow 120ms ease-out;
@@ -3087,5 +3353,46 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   font-size: var(--text-sm);
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+/* ── Resolution ────────────────────────────────────────────────────────── */
+.task-resolution {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.task-resolution-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.task-resolution-text {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.task-completions { display: flex; flex-direction: column; gap: var(--space-2); }
+.task-completions ol { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); }
+.task-completion { display: flex; flex-direction: column; gap: var(--space-1); }
+.task-agent-report { display: flex; flex-direction: column; gap: var(--space-1); }
+.task-log-details summary { cursor: pointer; color: var(--fg3); font-size: var(--text-sm); }
+.task-log {
+  margin: var(--space-2) 0 0;
+  color: var(--fg2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (pointer: coarse) {
+  .task-resolution .task-chip,
+  .task-resolution-sheet .btn-primary,
+  .task-resolution-sheet .btn-small,
+  .task-resolution-sheet .task-chip { min-height: var(--touch); }
 }
 </style>

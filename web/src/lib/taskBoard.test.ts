@@ -26,6 +26,7 @@ import {
   statusCounts,
   taskApiErrorMessage,
   taskDetailFrom,
+  doneToday,
   taskLanes,
   titleSegments,
   splitTaskLog,
@@ -66,6 +67,8 @@ function task(overrides: Partial<Task> = {}): Task {
     attempt_detail: '',
     live_attempt_id: '',
     changed_since_delegated: false,
+    completed_at: null,
+    has_resolution: false,
     ...overrides,
   }
 }
@@ -396,9 +399,9 @@ describe('splitTaskLog / joinTaskLog', () => {
 describe('Done keeps to today on the unfiltered board', () => {
   it('leaves earlier done tasks to Show all, and counts them', () => {
     const rows = [
-      task({ id: 'today', status: 'done', updated_at: '2026-03-01T08:00:00Z' }),
-      task({ id: 'old', status: 'done', updated_at: '2026-02-20T08:00:00Z' }),
-      task({ id: 'open', status: 'backlog', updated_at: '2026-01-01T08:00:00Z' }),
+      task({ id: 'today', status: 'done', completed_at: '2026-03-01T08:00:00Z' }),
+      task({ id: 'old', status: 'done', completed_at: '2026-02-20T08:00:00Z' }),
+      task({ id: 'open', status: 'backlog' }),
     ]
     const done = taskLanes(rows, { status: 'all', now: FIXTURE_DAY }).find(l => l.status === 'done')!
     expect(done.tasks.map(t => t.id)).toEqual(['today'])
@@ -408,5 +411,27 @@ describe('Done keeps to today on the unfiltered board', () => {
     const all = taskLanes(rows, { status: 'done', now: FIXTURE_DAY })[0]!
     expect(all.tasks.map(t => t.id).sort()).toEqual(['old', 'today'])
     expect(all.earlierDone).toBe(0)
+  })
+
+  it('reads completion time, never the last edit', () => {
+    const rows = [
+      // Completed last week, edited today: not today's.
+      task({
+        id: 'edited', status: 'done',
+        completed_at: '2026-02-20T08:00:00Z', updated_at: '2026-03-01T08:00:00Z',
+      }),
+    ]
+    expect(doneToday(rows[0]!, FIXTURE_DAY)).toBe(false)
+    const done = taskLanes(rows, { status: 'all', now: FIXTURE_DAY }).find(l => l.status === 'done')!
+    expect(done.tasks).toEqual([])
+    expect(done.earlierDone).toBe(1)
+  })
+
+  it('keeps a done task with no completion stamp in the lane, and not as today', () => {
+    const untimed = task({ id: 'untimed', status: 'done', completed_at: null })
+    expect(doneToday(untimed, FIXTURE_DAY)).toBe(false)
+    const done = taskLanes([untimed], { status: 'all', now: FIXTURE_DAY }).find(l => l.status === 'done')!
+    expect(done.tasks.map(t => t.id)).toEqual(['untimed'])
+    expect(done.earlierDone).toBe(0)
   })
 })

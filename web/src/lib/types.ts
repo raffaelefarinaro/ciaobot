@@ -1264,6 +1264,14 @@ export interface Task {
   /** The engine's note on how the current attempt ended, when it says one. */
   attempt_detail: string
   /**
+   * When the latest completion was recorded (`completed_at`), or `null` for a task
+   * never completed. Done-today reads this, never `updated_at`: an edit to a done
+   * task moves `updated_at` without finishing anything.
+   */
+  completed_at: string | null
+  /** Whether the latest completion carries resolution text. */
+  has_resolution: boolean
+  /**
    * Non-empty only while an attempt actually holds the task.
    *
    * That is what tells the board whether Stop and Detach are available: a
@@ -1344,6 +1352,18 @@ export interface TaskAttemptsResponse {
   attempts: TaskAttempt[]
 }
 
+/**
+ * What `POST /api/tasks/{id}/resolution-review` answers with.
+ *
+ * `queued: true` names the completion the review will read. `queued: false`
+ * carries the server's reason (for example, a task with no resolution to review).
+ */
+export interface TaskResolutionReviewResponse {
+  queued: boolean
+  completion_id?: string
+  reason?: string
+}
+
 /** What `POST /delegate` answers with. `created: false` means nothing was started. */
 export interface TaskDelegateResponse {
   workspace: string
@@ -1414,7 +1434,24 @@ export interface TaskListResponse {
  * ever shows a description it actually holds.
  */
 export interface TaskDetail extends Task {
+  /** The description alone: the engine's completion and delegation sections are not in it. */
   body: string
+  /** The latest completion's resolution text, or `''`. */
+  resolution: string
+  /** Every completion, newest first. */
+  completions: TaskCompletion[]
+  /** The engine's delegation log as text, or `''`. */
+  delegation_log: string
+}
+
+/** One recorded completion of a task (`ciao/task_resolution.py`), as the get route serves it. */
+export interface TaskCompletion {
+  id: string
+  completed_at: string
+  resolution: string
+  /** When the resolution was last reworded, or `null` when it never was. */
+  edited_at: string | null
+  attempt_id: string
 }
 
 // ── Update tasks: the "After this update" group ────────────────────────────
