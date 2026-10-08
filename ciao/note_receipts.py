@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -850,6 +851,55 @@ def _heading_level(stripped: str) -> int | None:
     return count
 
 
+# A line that can hold a real ATX heading: at most three leading spaces
+# before the `#`. Four spaces (or a tab) make it indented code by the same
+# CommonMark rule the entry parser reads, so `    ## Notes` is content, not
+# a section. Checked on the raw line rather than the stripped one, which is
+# what makes the indentation visible at all.
+_HEADING_POSITION_RE = re.compile(r"^ {0,3}#")
+
+
+def _opaque_append_lines(text: str, starts: list[int]) -> frozenset[int]:
+    """Line indexes holding no readable heading: frontmatter and fenced code.
+
+    Frontmatter comes from :func:`ciao.note_entries.frontmatter_span` and
+    fences from :func:`ciao.note_entries.fenced_code_spans`, so the scan and
+    the entry parser agree on what is code. An unclosed fence runs to the end
+    of the note, exactly as the parser reads it.
+    """
+    spans: list[tuple[int, int]] = []
+    frontmatter = ne.frontmatter_span(text)
+    if frontmatter is not None:
+        spans.append(frontmatter)
+    for start, end in ne.fenced_code_spans(text):
+        spans.append((start, len(text) if end is None else end))
+    if not spans:
+        return frozenset()
+    return frozenset(
+        i
+        for i, line_start in enumerate(starts)
+        if any(span_start <= line_start < span_end for span_start, span_end in spans)
+    )
+
+
+def _refuse_open_fence(text: str, section: str, insert: int) -> None:
+    """Refuse an append whose bullet would land inside an unclosed fence.
+
+    A fence that never closes swallows the rest of the note, so a bullet
+    filed past its opener is code, not a fact: the receipt would say changed
+    while the entry parser finds no entries. ``insert`` is the offset the
+    bullet would go to; at or before the opener it is still outside the
+    fence and the write may proceed.
+    """
+    for start, end in ne.fenced_code_spans(text):
+        if end is None and insert > start:
+            raise mr.MemoryReceiptError(
+                f"## {section} cannot take a new bullet while the note holds "
+                "an unclosed code fence: the bullet would land inside code, "
+                "so nothing was composed"
+            )
+
+
 def _compose_note_append(text: str, section: str, item: str) -> str:
     """``text`` with ``item`` filed as a new bullet under ``## {section}``.
 
@@ -861,6 +911,14 @@ def _compose_note_append(text: str, section: str, item: str) -> str:
     matches the note's own newline spelling, so a CRLF note stays CRLF, and a
     file with no trailing newline gains one before the bullet rather than
     joining it onto its last line. Everything else is byte-identical.
+
+    Only real headings count: a heading-looking line inside frontmatter or a
+    fenced code block is opaque content, not a section, and one indented four
+    or more spaces in is indented code (a tab counts too — the match requires
+    at most three leading spaces before the ``#``). An unclosed fence makes
+    the destination unsafe: a bullet filed past its opener would land inside
+    code, where the entry parser cannot read it back, so that write is
+    refused rather than composed.
     """
     newline = "\r\n" if "\r\n" in text else "\n"
     heading = f"## {section}"
@@ -874,22 +932,29 @@ def _compose_note_append(text: str, section: str, item: str) -> str:
         text[start : starts[i + 1] if i + 1 < len(starts) else len(text)]
         for i, start in enumerate(starts)
     ]
+    opaque = _opaque_append_lines(text, starts)
     section_at: int | None = None
     for i, body in enumerate(bodies):
+        if i in opaque or not _HEADING_POSITION_RE.match(body):
+            continue
         if body.strip() == heading:
             section_at = i
             break
     if section_at is None:
+        _refuse_open_fence(text, section, len(text))
         sep = "" if text.endswith("\n") else newline
         return (
             text + sep + newline + heading + newline + newline + item + newline
         )
     insert = len(text)
     for i in range(section_at + 1, len(bodies)):
+        if i in opaque or not _HEADING_POSITION_RE.match(bodies[i]):
+            continue
         level = _heading_level(bodies[i].strip())
         if level is not None and level <= 2:
             insert = starts[i]
             break
+    _refuse_open_fence(text, section, insert)
     if insert == len(text):
         if text.endswith("\n"):
             return text + item + newline

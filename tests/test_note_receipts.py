@@ -1778,3 +1778,89 @@ def test_append_list_item_refuses_prose_and_unknown_sections(
             _append_item(vault, path, section=section, item=item)
     assert path.read_bytes() == before_bytes
     assert _rows(vault) == []
+
+
+def test_append_ignores_headings_inside_fenced_code(tmp_path: Path) -> None:
+    """A fenced `## Notes` is code, so the bullet files under a real section.
+
+    The new bullet must parse back as a supported entry in the requested
+    section: filing it inside the fence writes bytes the entry model can
+    never read.
+    """
+    vault = _vault(tmp_path)
+    body = "```markdown\n## Notes\n- example\n## Other\n```\n"
+    path = _write(vault, APPEND_NOTE, body)
+
+    receipt = _append_item(vault, path, section="Notes", item="- new fact")
+
+    assert receipt["changed"] is True
+    after = path.read_bytes().decode("utf-8")
+    assert after.startswith(body)
+    assert after.count("## Notes") == 2
+    document = ne.parse_note_entries(
+        after, note_path=APPEND_NOTE, workspace=WORKSPACE
+    )
+    matching = [
+        entry for entry in document.entries
+        if entry.section == "Notes" and entry.supported
+    ]
+    assert [entry.text for entry in matching] == ["- new fact"]
+
+
+def test_append_refuses_an_unclosed_fence_destination(tmp_path: Path) -> None:
+    """Past an unclosed opener every line is code: no write, no receipt."""
+    vault = _vault(tmp_path)
+    for body in (
+        # No section heading outside the fence, so a new one would open
+        # inside code.
+        "## Notes\n- existing\n```\ncode\n",
+        # The section is real but runs into the unclosed fence.
+        "# Topic\n\n## Notes\n- existing\n```\ncode\n",
+    ):
+        path = _write(vault, APPEND_NOTE, body)
+        with pytest.raises(mr.MemoryReceiptError):
+            _append_item(vault, path, section="Notes", item="- new fact")
+        assert path.read_bytes() == body.encode("utf-8")
+    assert _rows(vault) == []
+
+
+def test_append_files_before_a_real_boundary_past_a_closed_fence(
+    tmp_path: Path,
+) -> None:
+    """A fence that closes is content, not a trap: the bullet files above it."""
+    vault = _vault(tmp_path)
+    body = "## Notes\n- existing\n```\n## Notes\n```\n## Other\n- b\n"
+    path = _write(vault, APPEND_NOTE, body)
+
+    receipt = _append_item(vault, path, section="Notes", item="- new fact")
+
+    assert receipt["changed"] is True
+    after = path.read_bytes().decode("utf-8")
+    assert after == "## Notes\n- existing\n```\n## Notes\n```\n- new fact\n## Other\n- b\n"
+
+
+def test_append_ignores_frontmatter_and_indented_code_headings(
+    tmp_path: Path,
+) -> None:
+    """Frontmatter delimiters and indented code name no section.
+
+    The `---` delimiters and the indented `## Other` below never match or
+    bound a section: the bullet files at the end of the real `## Notes`,
+    and the frontmatter comes back byte-identical.
+    """
+    vault = _vault(tmp_path)
+    body = "---\ntags: [person]\n---\n# Topic\n\n## Notes\n- existing\n"
+    path = _write(vault, APPEND_NOTE, body)
+
+    receipt = _append_item(vault, path, section="Notes", item="- new fact")
+
+    assert receipt["changed"] is True
+    after = path.read_bytes().decode("utf-8")
+    assert after == body + "- new fact\n"
+    assert after.startswith("---\ntags: [person]\n---\n")
+
+    indented = "## Notes\n- existing\n    ## Other\n"
+    path = _write(vault, APPEND_NOTE, indented)
+    receipt = _append_item(vault, path, section="Notes", item="- new fact")
+    assert receipt["changed"] is True
+    assert path.read_bytes().decode("utf-8") == indented + "- new fact\n"

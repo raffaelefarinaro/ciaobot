@@ -64,6 +64,9 @@ Rules:
   - {"action":"update","index":1,"text":"- one bullet"} to reword entry 1.
     index is one of the numbered entries below.
 - text is one list item with no trailing newline.
+- Never add or change a `[verified: YYYY-MM-DD]` stamp: a new or reworded
+  bullet carries no stamp, and re-dating a bullet that already says the
+  fact is not an update.
 """
 
 
@@ -146,6 +149,62 @@ def _check_single_item(text: Any, *, note_path: str, workspace: str) -> str:
     if only.end != len(text) or document.uncovered or not only.supported:
         raise _FoldRefused("the fold reply was not a single entry edit")
     return text
+
+
+def _read_exact_text(note: Path) -> str:
+    """The note's exact decoded text, with no newline normalization.
+
+    ``Path.read_text`` universal-newlines the file on read, so a CRLF note
+    comes back with LF endings and its revision no longer matches the one a
+    byte-exact writer checks — every fold then fails as a conflict without
+    any concurrent edit. Reading bytes keeps CRLF pairs, a BOM and a missing
+    final newline exactly as they are, so the revision below and the undo
+    the receipt journals are byte-exact too.
+    """
+    from ciao import memory_receipts as mr
+
+    try:
+        return note.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise mr.MemoryReceiptError(f"{note} is not valid UTF-8: {exc}") from exc
+
+
+def _strip_opening_claim(text: str) -> str:
+    """``text`` with the proposed bullet's trailing verification claim cut.
+
+    Only the trailing claim on the opening line — the span the entry parser
+    reads as this entry's verification — goes. A date-shaped token further
+    left on the line is the fact's own prose about a date, and cutting it
+    would rewrite the fact.
+    """
+    from ciao import note_entries as ne
+
+    opening, separator, rest = text.partition("\n")
+    stripped = ne.strip_trailing_stamp(opening)
+    if stripped == opening:
+        return text
+    return stripped + separator + rest
+
+
+def _sanitize_fold_stamp(text: str, entry: Any | None) -> str:
+    """``text`` with only the verification stamp an ordinary fold may keep.
+
+    A fold is not a verification: nobody went and checked anything, so a
+    changed or new fact cannot gain or keep a ``[verified:]`` stamp — the
+    trailing claim is cut off the proposed bullet. An unchanged fact cannot
+    be re-dated either: when the proposed words fingerprint identically to
+    the entry they replace, the entry's own text is the replacement, stamp
+    and all, which makes the write the no-op it honestly is. Untouched
+    neighbors never enter this function — the write splices one span or
+    appends one bullet — so their bytes cannot move.
+    """
+    from ciao import note_entries as ne
+
+    if entry is None:
+        return _strip_opening_claim(text)
+    if ne.refresh_fingerprint(text) == entry.fingerprint:
+        return str(entry.text)
+    return _strip_opening_claim(text)
 
 
 def _parse_fold_reply(
@@ -235,7 +294,7 @@ async def update_project_doc(
             return False
 
         async with _lock_for(doc_path):
-            current = doc_path.read_text(encoding="utf-8")
+            current = _read_exact_text(doc_path)
             vault_root = _vault_for_note(doc_path)
             try:
                 relative_path = doc_path.relative_to(vault_root).as_posix()
@@ -280,29 +339,34 @@ async def update_project_doc(
 
             expected_revision = mr.content_revision(current)
             if decision.action == "add":
-                nr.append_list_item(
+                receipt = nr.append_list_item(
                     vault_root=vault_root,
                     relative_path=relative_path,
                     expected_revision=expected_revision,
                     section=decision.section,
-                    item=decision.text,
+                    item=_sanitize_fold_stamp(decision.text, None),
                     actor="proposal-accept",
                     source="fold",
                     workspace=workspace,
                 )
             else:
                 entry = entries[decision.index - 1]
-                nr.apply_entry_edit(
+                receipt = nr.apply_entry_edit(
                     vault_root=vault_root,
                     relative_path=relative_path,
                     expected_revision=expected_revision,
                     identity=entry.identity,
                     fingerprint=entry.fingerprint,
-                    replacement=decision.text,
+                    replacement=_sanitize_fold_stamp(decision.text, entry),
                     actor="proposal-accept",
                     source="fold",
                     workspace=workspace,
                 )
+            if not receipt.get("changed", True):
+                # The replacement spliced to the bytes already there (an
+                # update restating the entry, or a re-date put back): the
+                # receipt journals the no-change and nothing was replaced.
+                return False
             logger.info("project doc updated from insights: %s", doc_path)
             return True
     except _FoldRefused:
@@ -334,6 +398,9 @@ Rules:
   - {"action":"update","index":1,"text":"- one bullet"} to reword entry 1.
     index is one of the numbered entries below.
 - text is one list item with no trailing newline.
+- Never add or change a `[verified: YYYY-MM-DD]` stamp: a new or reworded
+  bullet carries no stamp, and re-dating a bullet that already says the
+  fact is not a merge.
 """
 
 
@@ -366,7 +433,7 @@ async def fold_fact_into_person_note(
         if not note_path.is_file() or not fact.strip():
             return False
         async with _lock_for(note_path):
-            current = note_path.read_text(encoding="utf-8")
+            current = _read_exact_text(note_path)
             vault_root = _vault_for_note(note_path)
             try:
                 relative_path = note_path.relative_to(vault_root).as_posix()
@@ -411,8 +478,10 @@ async def fold_fact_into_person_note(
                 return False
             # The per-path lock only serializes this process's folds. A hand
             # edit (or an agent's Edit) during the model call would otherwise be
-            # overwritten by a merge computed from the older text.
-            if note_path.read_text(encoding="utf-8") != current:
+            # overwritten by a merge computed from the older text. Compared by
+            # exact bytes: a text read would normalize a CRLF note and report
+            # a concurrent edit that never happened.
+            if _read_exact_text(note_path) != current:
                 if error_out is not None:
                     error_out.append(f"{note_path.name} changed during the fold; nothing was written")
                 return False
@@ -422,29 +491,38 @@ async def fold_fact_into_person_note(
 
             expected_revision = mr.content_revision(current)
             if decision.action == "add":
-                nr.append_list_item(
+                receipt = nr.append_list_item(
                     vault_root=vault_root,
                     relative_path=relative_path,
                     expected_revision=expected_revision,
                     section=decision.section,
-                    item=decision.text,
+                    item=_sanitize_fold_stamp(decision.text, None),
                     actor="proposal-accept",
                     source="fold",
                     workspace=workspace,
                 )
             else:
                 entry = entries[decision.index - 1]
-                nr.apply_entry_edit(
+                receipt = nr.apply_entry_edit(
                     vault_root=vault_root,
                     relative_path=relative_path,
                     expected_revision=expected_revision,
                     identity=entry.identity,
                     fingerprint=entry.fingerprint,
-                    replacement=decision.text,
+                    replacement=_sanitize_fold_stamp(decision.text, entry),
                     actor="proposal-accept",
                     source="fold",
                     workspace=workspace,
                 )
+            if not receipt.get("changed", True):
+                # The replacement spliced to the bytes already there (an
+                # update restating the entry, or a re-date put back): dismiss
+                # instead, like a covered reply.
+                if error_out is not None:
+                    error_out.append(
+                        "the fold reported no changes; dismiss instead"
+                    )
+                return False
             logger.info("person note updated from an accepted proposal: %s", note_path)
             return True
     except _FoldRefused as exc:

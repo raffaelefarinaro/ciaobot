@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from ciao import memory_receipts as mr
 from ciao import project_doc_update as pdu
 
 
@@ -363,3 +364,281 @@ def test_person_fold_reports_a_model_failure(
     assert wrote is False
     assert errors and "upstream down" in errors[-1]
     assert note.read_text(encoding="utf-8") == _NOTE
+
+
+# ── R1: fold entry invariants ────────────────────────────────────────────
+#
+# A fold is not a verification and reads exact bytes: CRLF notes fold
+# without a phantom conflict and undo byte for byte, a changed or new
+# fact cannot gain or keep a `[verified:]` stamp, an unchanged fact
+# cannot be re-dated, and an update that changes nothing is a
+# dismiss-instead no-change in both folds.
+
+_CRLF_DOC = b"## Open loops\r\n- Pick a queue backend.\r\n"
+_CRLF_NOTE = b"## Notes\r\n- Lives in Porto.\r\n"
+
+_STAMPED_NOTE = (
+    "# Mo\n\n## Notes\n"
+    "- Lives in Porto [verified: 2024-03-01]\n"
+    "- Likes tea.\n"
+)
+
+
+def _write_bytes(tmp_path: Path, name: str, data: bytes) -> Path:
+    (tmp_path / "Workspace").mkdir(exist_ok=True)
+    path = tmp_path / name
+    path.write_bytes(data)
+    return path
+
+
+def _undo_fold(vault: Path) -> None:
+    rows = mr.read_receipts(mr.journal_path(vault, None))
+    applied = [
+        row for row in rows
+        if row.get("kind") == "note_apply" and row.get("status") == mr.APPLIED
+    ]
+    assert applied, "the fold must journal exactly one applied note receipt"
+    undone = mr.undo_receipt(applied[-1]["id"], vault_root=vault)
+    assert undone["status"] == mr.UNDONE
+
+
+def test_project_fold_crlf_update_and_undo_are_byte_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = _write_bytes(tmp_path, "project.md", _CRLF_DOC)
+    _patch_oneshot(
+        monkeypatch,
+        json.dumps({
+            "action": "update",
+            "index": 1,
+            "text": "- Pick a queue backend. Resolved: Redis Streams.",
+        }),
+    )
+
+    wrote = asyncio.run(pdu.update_project_doc(
+        doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+    ))
+
+    assert wrote is True
+    assert doc.read_bytes() == (
+        b"## Open loops\r\n"
+        b"- Pick a queue backend. Resolved: Redis Streams.\r\n"
+    )
+    _undo_fold(tmp_path)
+    assert doc.read_bytes() == _CRLF_DOC
+
+
+def test_project_fold_crlf_add_and_undo_are_byte_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = _write_bytes(tmp_path, "project.md", _CRLF_DOC)
+    _patch_oneshot(
+        monkeypatch,
+        json.dumps({
+            "action": "add",
+            "section": "Decisions",
+            "text": "- Chose Redis Streams over Kafka.",
+        }),
+    )
+
+    wrote = asyncio.run(pdu.update_project_doc(
+        doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+    ))
+
+    assert wrote is True
+    after = doc.read_bytes()
+    assert b"\r\n" in after and b"- Chose Redis Streams over Kafka.\r\n" in after
+    assert after.startswith(_CRLF_DOC)
+    _undo_fold(tmp_path)
+    assert doc.read_bytes() == _CRLF_DOC
+
+
+def test_person_fold_crlf_update_and_undo_are_byte_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    note = _write_bytes(tmp_path, "Mo.md", _CRLF_NOTE)
+    _patch_oneshot(
+        monkeypatch,
+        json.dumps({
+            "action": "update",
+            "index": 1,
+            "text": "- Lives in Lisbon.",
+        }),
+    )
+
+    wrote = asyncio.run(pdu.fold_fact_into_person_note(
+        note_path=note, fact="Lives in Lisbon.", model="m",
+    ))
+
+    assert wrote is True
+    assert note.read_bytes() == b"## Notes\r\n- Lives in Lisbon.\r\n"
+    _undo_fold(tmp_path)
+    assert note.read_bytes() == _CRLF_NOTE
+
+
+def test_person_fold_crlf_add_and_undo_are_byte_exact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    note = _write_bytes(tmp_path, "Mo.md", _CRLF_NOTE)
+    _patch_oneshot(
+        monkeypatch,
+        json.dumps({
+            "action": "add",
+            "section": "Notes",
+            "text": "- Based in Lisbon.",
+        }),
+    )
+
+    wrote = asyncio.run(pdu.fold_fact_into_person_note(
+        note_path=note, fact="Based in Lisbon.", model="m",
+    ))
+
+    assert wrote is True
+    assert note.read_bytes() == _CRLF_NOTE + b"- Based in Lisbon.\r\n"
+    _undo_fold(tmp_path)
+    assert note.read_bytes() == _CRLF_NOTE
+
+
+@pytest.mark.parametrize("writer", ["project", "people"])
+def test_folds_cut_a_stamp_kept_on_a_changed_fact(
+    writer: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reworded fact is unverified, even when the reply keeps the stamp."""
+    if writer == "project":
+        doc = _write_bytes(
+            tmp_path, "project.md",
+            b"## Open loops\n- Lives in Porto [verified: 2024-03-01]\n- Likes tea.\n",
+        )
+        _patch_oneshot(
+            monkeypatch,
+            json.dumps({
+                "action": "update",
+                "index": 1,
+                "text": "- Lives in Lisbon [verified: 2024-03-01]",
+            }),
+        )
+        wrote = asyncio.run(pdu.update_project_doc(
+            doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+        ))
+        after = doc.read_bytes()
+    else:
+        note = _write_bytes(tmp_path, "Mo.md", _STAMPED_NOTE.encode("utf-8"))
+        _patch_oneshot(
+            monkeypatch,
+            json.dumps({
+                "action": "update",
+                "index": 1,
+                "text": "- Lives in Lisbon [verified: 2024-03-01]",
+            }),
+        )
+        wrote = asyncio.run(pdu.fold_fact_into_person_note(
+            note_path=note, fact="Lives in Lisbon.", model="m",
+        ))
+        after = note.read_bytes()
+
+    assert wrote is True
+    # The new words land without the verification claim, and the untouched
+    # neighbor keeps its exact bytes.
+    assert b"- Lives in Lisbon\n" in after
+    assert b"[verified:" not in after.split(b"- Likes tea.\n")[0]
+    assert after.endswith(b"- Likes tea.\n")
+
+
+@pytest.mark.parametrize("writer", ["project", "people"])
+def test_folds_cut_a_stamp_on_a_new_fact(
+    writer: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new bullet carries no verification, even when the reply stamps it."""
+    reply = json.dumps({
+        "action": "add",
+        "section": "Notes",
+        "text": "- Based in Lisbon [verified: 2024-03-01]",
+    })
+    if writer == "project":
+        doc = _write_doc(tmp_path)
+        _patch_oneshot(monkeypatch, reply)
+        wrote = asyncio.run(pdu.update_project_doc(
+            doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+        ))
+        after = doc.read_bytes()
+        assert wrote is True
+        assert b"- Based in Lisbon\n" in after
+        assert b"[verified:" not in after
+        assert b"- Pick a queue backend.\n" in after
+    else:
+        note = _write_note(tmp_path)
+        _patch_oneshot(monkeypatch, reply)
+        wrote = asyncio.run(pdu.fold_fact_into_person_note(
+            note_path=note, fact="Based in Lisbon.", model="m",
+        ))
+        after = note.read_bytes()
+        assert wrote is True
+        assert b"- Based in Lisbon\n" in after
+        assert b"[verified:" not in after
+        assert b"**Role:** Product Manager" in after
+
+
+@pytest.mark.parametrize("writer", ["project", "people"])
+def test_folds_do_not_redate_an_unchanged_fact(
+    writer: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-dating the same words is a no-change, not an update."""
+    reply = json.dumps({
+        "action": "update",
+        "index": 1,
+        "text": "- Lives in Porto [verified: 2025-01-01]",
+    })
+    if writer == "project":
+        before = b"## Open loops\n- Lives in Porto [verified: 2024-03-01]\n"
+        doc = _write_bytes(tmp_path, "project.md", before)
+        _patch_oneshot(monkeypatch, reply)
+        wrote = asyncio.run(pdu.update_project_doc(
+            doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+        ))
+        assert wrote is False
+        assert doc.read_bytes() == before
+    else:
+        before = b"## Notes\n- Lives in Porto [verified: 2024-03-01]\n"
+        note = _write_bytes(tmp_path, "Mo.md", before)
+        _patch_oneshot(monkeypatch, reply)
+        errors: list[str] = []
+        wrote = asyncio.run(pdu.fold_fact_into_person_note(
+            note_path=note, fact="Lives in Porto.", model="m",
+            error_out=errors,
+        ))
+        assert wrote is False
+        assert errors == ["the fold reported no changes; dismiss instead"]
+        assert note.read_bytes() == before
+
+
+@pytest.mark.parametrize("writer", ["project", "people"])
+def test_noop_update_returns_no_change(
+    writer: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An update restating the entry writes nothing and dismisses instead."""
+    reply = json.dumps({
+        "action": "update",
+        "index": 1,
+        "text": "- Lives in Porto.",
+    })
+    if writer == "project":
+        before = b"## Open loops\n- Lives in Porto.\n"
+        doc = _write_bytes(tmp_path, "project.md", before)
+        _patch_oneshot(monkeypatch, reply)
+        wrote = asyncio.run(pdu.update_project_doc(
+            doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+        ))
+        assert wrote is False
+        assert doc.read_bytes() == before
+    else:
+        before = b"## Notes\n- Lives in Porto.\n"
+        note = _write_bytes(tmp_path, "Mo.md", before)
+        _patch_oneshot(monkeypatch, reply)
+        errors: list[str] = []
+        wrote = asyncio.run(pdu.fold_fact_into_person_note(
+            note_path=note, fact="Lives in Porto.", model="m",
+            error_out=errors,
+        ))
+        assert wrote is False
+        assert errors == ["the fold reported no changes; dismiss instead"]
+        assert note.read_bytes() == before
