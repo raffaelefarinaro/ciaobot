@@ -250,7 +250,7 @@ def test_rerooted_rename_moves_the_agent_root_and_the_vault_prefix(
     assert config.workspaces["santo"].vault_root == "santo/memory-vault"
     run = runs.get("run-1")
     assert run is not None
-    assert run.cwd == str(tmp_path / "santo" / "sub")
+    assert run.cwd == (tmp_path / "santo" / "sub").as_posix()
 
 
 def test_absolute_vault_root_is_not_rewritten(tmp_path: Path) -> None:
