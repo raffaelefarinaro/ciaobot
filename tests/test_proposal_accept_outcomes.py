@@ -350,6 +350,32 @@ def test_add_category_is_a_destination_not_a_rehome(tmp_path):
     assert "justified" not in payload, "the re-home shape must not be reached"
 
 
+def test_add_category_carries_skipped_notes():
+    """Notes a category accept skipped reach the client; an accept that skipped
+    none carries no `skipped` key at all."""
+    from ciao import proposal_actions, proposal_kinds
+
+    accept = proposal_kinds.accept_for("category")
+    row = {"id": "p1", "kind": "category", "text": "Recipe Book"}
+    with_skips = proposal_actions.build_accept_result(
+        "p1",
+        accept,
+        row,
+        {"ok": True, "destination": "Recipes", "skipped": ["Two.md"]},
+        include_usage=True,
+    ).as_dict()
+    assert with_skips["skipped"] == ["Two.md"]
+
+    without = proposal_actions.build_accept_result(
+        "p1",
+        accept,
+        row,
+        {"ok": True, "destination": "Recipes"},
+        include_usage=True,
+    ).as_dict()
+    assert "skipped" not in without
+
+
 def test_project_keys(tmp_path, monkeypatch):
     config = _config(tmp_path)
     run = asyncio.run

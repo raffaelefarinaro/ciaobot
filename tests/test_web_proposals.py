@@ -2361,6 +2361,145 @@ def test_batch_accept_covers_a_category_row(tmp_path: Path) -> None:
     assert _CATEGORY_ID in _registry_ids(config)
 
 
+def test_accepting_a_category_skips_a_note_that_no_longer_exists(
+    tmp_path: Path,
+) -> None:
+    """A note trashed or deleted after the proposal was filed is skipped and
+    reported, and the rest of the cluster is accepted as usual."""
+    config = _category_vault(tmp_path)
+    journals = config.workspace_vault_root("personal") / "Journals"
+    (journals / "Two.md").unlink()
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 200, resp.json()
+    result = resp.json()["result"]
+    assert result["promoted"] is True
+    assert result["skipped"] == ["Two.md"]
+    assert _CATEGORY_ID in _registry_ids(config)
+    assert (journals / "One.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_CATEGORY_ID}\n---\n# One\n"
+    )
+    assert (journals / "Three.md").read_text(encoding="utf-8") == (
+        f"---\ntype: {_CATEGORY_ID}\n---\n# Three\n"
+    )
+    assert client.get("/api/proposals").json()["rows"] == []
+
+
+def test_a_category_whose_notes_are_all_gone_keeps_the_bullet(tmp_path: Path) -> None:
+    """A category with no notes behind it is not added, and the row stays queued
+    so the notes can be restored and the accept retried."""
+    config = _category_vault(tmp_path)
+    journals = config.workspace_vault_root("personal") / "Journals"
+    for name in ("One.md", "Two.md", "Three.md"):
+        (journals / name).unlink()
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409, resp.json()
+    assert "none of the 3 notes" in resp.json()["error"]
+    assert _CATEGORY_ID not in _registry_ids(config)
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_batch_accept_skips_a_missing_category_note(tmp_path: Path) -> None:
+    config = _category_vault(tmp_path)
+    (config.workspace_vault_root("personal") / "Journals" / "Two.md").unlink()
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(
+        "/api/proposals/batch", json={"action": "accept", "ids": [row["id"]]}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["results"][0]["promoted"] is True
+    assert resp.json()["results"][0]["skipped"] == ["Two.md"]
+    assert _CATEGORY_ID in _registry_ids(config)
+
+
+def test_a_category_preview_reports_notes_that_no_longer_exist(
+    tmp_path: Path,
+) -> None:
+    config = _category_vault(tmp_path)
+    (config.workspace_vault_root("personal") / "Journals" / "Two.md").unlink()
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    resp = client.post(f"/api/proposals/{row['id']}/preview")
+
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()["preview"]
+    assert body["can_accept"] is True
+    assert len(body["category"]["notes"]) == 2
+    assert body["category"]["missing"] == ["Two.md"]
+    assert "retypes 2 note(s)" in body["reason"]
+    assert "Two.md" in body["reason"]
+
+
+def test_a_note_trashed_before_a_category_accept_restores_untouched(
+    tmp_path: Path,
+) -> None:
+    """Trashing does not prune the sidecar, so the accept skips the note and
+    the note can still be restored from the trash with its original bytes."""
+    from ciao import vault_review
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    two = vault / "Journals" / "Two.md"
+    original = two.read_text(encoding="utf-8")
+    candidate = next(
+        item
+        for item in vault_review.generate_candidates(vault, workspace="personal")
+        if item.path.endswith("/Two.md")
+    )
+    vault_review.trash_note(vault, candidate)
+    client = _client(config)
+    row = _accept_kind_row(client, "category")
+
+    assert client.post(f"/api/proposals/{row['id']}/accept").status_code == 200
+    assert not two.exists()
+
+    vault_review.restore_note(vault, candidate.candidate_id)
+    assert two.read_text(encoding="utf-8") == original
+
+
+def test_undoing_a_partial_category_accept_restores_only_the_retyped_notes(
+    tmp_path: Path,
+) -> None:
+    from ciao.memory_receipts import journal_path, read_receipts
+
+    config = _category_vault(tmp_path)
+    vault = config.workspace_vault_root("personal")
+    journals = vault / "Journals"
+    (journals / "Two.md").unlink()
+    before = {note.name: note.read_text(encoding="utf-8") for note in journals.iterdir()}
+    client = _undo_client(config)
+    row = _accept_kind_row(client, "category")
+
+    accepted = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert accepted.status_code == 200, accepted.json()
+    receipt = [
+        r
+        for r in read_receipts(journal_path(vault, None))
+        if r["kind"] == "category_apply"
+    ][-1]
+    undo = client.post(
+        f"/api/memory/receipts/{receipt['id']}/undo", params={"workspace": "personal"}
+    )
+
+    assert undo.status_code == 200, undo.json()
+    assert _CATEGORY_ID not in _registry_ids(config)
+    assert not (journals / "Two.md").exists()
+    for name, text in before.items():
+        assert (journals / name).read_text(encoding="utf-8") == text
+
+
 # ---- note_edit proposals: a whole note, decided by a person ----------------
 #
 # The fixture FILES the proposal through the proposer rather than hand-writing

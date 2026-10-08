@@ -1670,6 +1670,8 @@ export interface ProposalActionResult {
   region?: string
   leak_warning?: boolean
   destination?: string
+  /** notes a category accept skipped because they no longer exist */
+  skipped?: string[]
   justified?: boolean
   promoted?: boolean
   duplicate?: boolean
@@ -1798,6 +1800,7 @@ export interface ProposalPreview {
     folder: string
     description: string
     notes: string[]
+    missing?: string[]
   }
 }
 
