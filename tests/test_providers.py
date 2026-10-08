@@ -15,6 +15,7 @@ from ciao.providers.base import (
     build_prompt,
 )
 from ciao.providers.claude import ClaudeProvider, _sdk_permission_mode
+from ciao.providers.opencode import OpencodeProvider
 
 
 @pytest.fixture
@@ -1267,3 +1268,121 @@ async def test_claude_scope_change_reconnects_live_process(
     assert captured["disconnects"] == 1
     assert captured["constructed"] == 1
     assert captured["options"].sandbox["enabled"] is True
+# -- OpenCode server filesystem scope (issue #1150) ---------------------------
+
+
+class _SpawnCaptured(Exception):
+    """Stops ``_start_server_once`` right after the spawn argv is recorded."""
+
+
+def _opencode_scope_fixture(tmp_path: Path, scope: str):
+    roots = (str(tmp_path / "agent"), str(tmp_path / "vault")) if scope == "workspace" else ()
+    request = AgentRequest(
+        prompt="hi",
+        model="model",
+        mode="auto",
+        agent_fs_scope=scope,
+        agent_roots=roots,
+    )
+    return OpencodeProvider(tmp_path), request
+
+
+def _capture_spawn(monkeypatch) -> list[tuple[str, ...]]:
+    spawned: list[tuple[str, ...]] = []
+
+    async def fake_spawn(*argv, **_kwargs):
+        spawned.append(argv)
+        raise _SpawnCaptured
+
+    monkeypatch.setattr("ciao.providers.opencode._spawn_server", fake_spawn)
+    return spawned
+
+
+async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypatch):
+    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    spawned = _capture_spawn(monkeypatch)
+    calls: list[list[Path]] = []
+
+    def fake_prefix(*, roots):
+        calls.append(list(roots))
+        return ["sandbox-exec", "-p", "PROFILE"]
+
+    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", fake_prefix)
+
+    with pytest.raises(_SpawnCaptured):
+        await provider._start_server_once(request, "/bin/opencode")
+
+    assert calls == [[tmp_path / "agent", tmp_path / "vault"]]
+    argv = spawned[0]
+    assert argv[:3] == ("sandbox-exec", "-p", "PROFILE")
+    assert argv[3:6] == ("/bin/opencode", "serve", "--port")
+    assert argv[7:] == ("--hostname", "127.0.0.1")
+
+
+async def test_opencode_machine_scope_spawns_the_binary_directly(tmp_path, monkeypatch):
+    provider, request = _opencode_scope_fixture(tmp_path, "machine")
+    spawned = _capture_spawn(monkeypatch)
+
+    def no_prefix(*, roots):
+        raise AssertionError("machine scope must not build a sandbox prefix")
+
+    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", no_prefix)
+
+    with pytest.raises(_SpawnCaptured):
+        await provider._start_server_once(request, "/bin/opencode")
+
+    argv = spawned[0]
+    assert argv[0] == "/bin/opencode"
+    assert argv[1:2] == ("serve",)
+    assert argv[-2:] == ("--hostname", "127.0.0.1")
+
+
+async def test_opencode_workspace_scope_does_not_spawn_when_the_sandbox_is_missing(
+    tmp_path, monkeypatch
+):
+    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    spawned = _capture_spawn(monkeypatch)
+
+    def missing_sandbox(*, roots):
+        raise FsSandboxUnavailable("no sandbox tool")
+
+    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", missing_sandbox)
+
+    with pytest.raises(FsSandboxUnavailable, match="no sandbox tool"):
+        await provider._start_server_once(request, "/bin/opencode")
+
+    assert spawned == []
+
+
+async def test_opencode_scope_change_restarts_the_live_server(tmp_path, monkeypatch):
+    from ciao.models import provider_reuse_key
+
+    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    live = object()
+    provider._client = live
+    provider._process = SimpleNamespace(returncode=None)
+    provider._mcp_token = provider_reuse_key(request)
+    provider._fs_scope_key = ("machine", ())
+    events: list[str] = []
+
+    async def fake_disconnect():
+        events.append("disconnect")
+        provider._client = None
+        provider._process = None
+
+    async def fake_start(req, binary):
+        events.append("start")
+        return "fresh"
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    monkeypatch.setattr(provider, "_start_server_once", fake_start)
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda env: "/bin/opencode")
+
+    assert await provider._ensure_server(request) == "fresh"
+    assert events == ["disconnect", "start"]
+
+    # Same scope and roots: the live server is reused.
+    provider._client = live
+    provider._process = SimpleNamespace(returncode=None)
+    provider._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+    assert await provider._ensure_server(request) is live

@@ -70,6 +70,7 @@ from ciao.providers.base import (
 from ciao.execution_modes import (
     opencode_credential_deny_rules,
 )
+from ciao.fs_sandbox import opencode_sandbox_prefix
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
 from ciao.providers._sse import SSEDecoder
 from ciao.tool_path import resolve_tool
@@ -1371,6 +1372,8 @@ class OpencodeProvider(BaseSDKProvider):
         self._tool_calls: dict[str, str] = {}
         self._settled_tool_ids: set[str] = set()
         self._mcp_token: str = ""
+        # Filesystem scope and roots the live server was started with.
+        self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
         # Per-turn stream state, reset by `_reset_turn_state`.
         self._emitted: dict[str, int] = {}
         # `assistantMessageID:ordinal` -> reasoning/text. V2 uses separate
@@ -1554,10 +1557,15 @@ class OpencodeProvider(BaseSDKProvider):
 
         A changed MCP token forces a full restart: opencode reads MCP
         configuration at server scope, so the running process cannot be
-        re-pointed at a new token.
+        re-pointed at a new token. A changed filesystem scope does too: the
+        sandbox wraps the server process itself.
         """
         if self._client is not None and self._process is not None:
-            if self._process.returncode is None and provider_reuse_key(request) == self._mcp_token:
+            if (
+                self._process.returncode is None
+                and provider_reuse_key(request) == self._mcp_token
+                and (request.agent_fs_scope, request.agent_roots) == self._fs_scope_key
+            ):
                 return self._client
             await self.disconnect()
 
@@ -1592,11 +1600,27 @@ class OpencodeProvider(BaseSDKProvider):
 
         raise AssertionError("unreachable opencode startup retry state")
 
+    def _server_argv(self, request: AgentRequest, binary: str, port: int) -> list[str]:
+        """The argv that starts this chat's ``opencode serve``.
+
+        A workspace-scoped request runs the server, and every child it spawns,
+        inside the sandbox profile for ``request.agent_roots`` (the chat's agent
+        root and its workspace vault, resolved by the engine). Machine scope
+        keeps the bare argv. A missing sandbox tool raises
+        ``FsSandboxUnavailable`` here, before any spawn.
+        """
+        argv = [binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"]
+        if request.agent_fs_scope != "workspace":
+            return argv
+        roots = [Path(root) for root in request.agent_roots]
+        return [*opencode_sandbox_prefix(roots=roots), *argv]
+
     async def _start_server_once(
         self, request: AgentRequest, binary: str
     ) -> httpx.AsyncClient:
         """Start, validate, and register one opencode server process."""
         port = _free_port()
+        argv = self._server_argv(request, binary, port)
         self._password = secrets.token_urlsafe(24)
         env = {
             **os.environ,
@@ -1604,6 +1628,7 @@ class OpencodeProvider(BaseSDKProvider):
             "OPENCODE_SERVER_PASSWORD": self._password,
         }
         self._mcp_token = provider_reuse_key(request)
+        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
 
         # Say it now, while the environment we are about to hand over is in
         # hand: an unresolved placeholder becomes an empty credential and only
@@ -1612,7 +1637,7 @@ class OpencodeProvider(BaseSDKProvider):
             logger.warning("opencode: %s", problem)
 
         self._process, self._tree = await _spawn_server(
-            binary, "serve", "--port", str(port), "--hostname", "127.0.0.1",
+            *argv,
             cwd=str(self.workspace_root),
             env=env,
             # stdout is discarded rather than piped: nothing consumes it, and an
@@ -1771,6 +1796,7 @@ class OpencodeProvider(BaseSDKProvider):
             reader.cancel()
         self._base_url = ""
         self._mcp_token = ""
+        self._fs_scope_key = ("machine", ())
         self._session_handover_context = ""
         self._reset_settings()
 
