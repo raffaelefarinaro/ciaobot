@@ -85,6 +85,7 @@ class AcceptOutcome:
     reason: str | None = None
     competing: Sequence[str] | None = None
     destination: str | None = None
+    skipped: Sequence[str] | None = None
     error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -118,6 +119,8 @@ class AcceptOutcome:
             payload["competing"] = list(self.competing)
         if self.destination is not None:
             payload["destination"] = self.destination
+        if self.skipped:
+            payload["skipped"] = list(self.skipped)
         if self.error is not None:
             payload["error"] = self.error
         return payload
@@ -1865,8 +1868,12 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
     source_type = sidecar["source_type"]
     planned: list[tuple[Path, str]] = []
     drifted: list[str] = []
+    missing: list[str] = []
     for rendered in sidecar["paths"]:
         path = _note_path_in_vault(vault, rendered)
+        if not path.is_file():
+            missing.append(path.name)
+            continue
         current = read_note_type(path)
         if current == category_id:
             continue  # Already typed: a retried accept, not a change.
@@ -1880,9 +1887,21 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
             continue
         try:
             image = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            missing.append(path.name)
+            continue
         except (OSError, UnicodeDecodeError) as exc:
             return AcceptOutcome(ok=False, error=f"could not read {path.name}: {exc}")
         planned.append((path, image))
+    if missing and len(missing) == len(sidecar["paths"]):
+        return AcceptOutcome(
+            ok=False,
+            error=(
+                f"none of the {len(missing)} notes behind {category_id} are in the "
+                "vault any more (" + ", ".join(missing) + "); restore them from "
+                "the vault-review trash, or dismiss this row to decline the category"
+            ),
+        )
     if drifted:
         return AcceptOutcome(
             ok=False,
@@ -1968,10 +1987,16 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
             workspace=str(row.get("workspace") or ""),
             vault_root=vault,
         )
+    if missing:
+        logger.warning(
+            "category %s: skipped %d missing note(s): %s",
+            category_id, len(missing), ", ".join(missing),
+        )
     return AcceptOutcome(
         ok=True,
         destination=sidecar["folder"],
         receipt_id=str(receipt.get("id", "")),
+        skipped=missing or None,
     )
 
 
@@ -2820,20 +2845,33 @@ def _category_preview(config, row: dict[str, Any]) -> dict[str, Any]:
             "this row and re-run curation to propose it again"
         )
         return out
+    present = [p for p in sidecar["paths"] if _note_path_in_vault(vault, p).is_file()]
+    missing = [Path(p).name for p in sidecar["paths"] if p not in present]
     out["category"] = {
         "id": sidecar["id"],
         "label": sidecar["label"],
         "folder": sidecar["folder"],
         "description": sidecar["description"],
-        "notes": list(sidecar["paths"]),
+        "notes": present,
+        "missing": missing,
     }
-    out["after"] = "\n".join(sidecar["paths"])
+    out["after"] = "\n".join(present)
     out["exact"] = True
-    out["can_accept"] = True
+    out["can_accept"] = bool(present)
     out["reason"] = (
-        f"adds the {sidecar['id']} category and retypes "
-        f"{len(sidecar['paths'])} note(s) in place; nothing is moved"
+        f"adds the {sidecar['id']} category and retypes {len(present)} note(s) "
+        "in place; nothing is moved"
     )
+    if missing:
+        out["reason"] += (
+            f"; {len(missing)} listed note(s) no longer exist and will be "
+            f"skipped: {', '.join(missing)}"
+        )
+    if not present:
+        out["reason"] = (
+            f"none of the notes behind {sidecar['id']} are in the vault any more; "
+            "restore them from the vault-review trash, or dismiss this row"
+        )
     return out
 
 
