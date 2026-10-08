@@ -606,6 +606,43 @@ def frontmatter_span(text: str) -> tuple[int, int] | None:
     return lines[0].start, lines[closing].full_end
 
 
+def fenced_code_spans(text: str) -> tuple[tuple[int, int | None], ...]:
+    """Character spans of the note's fenced code blocks, in document order.
+
+    Each span runs from the opening fence line's first character through the
+    closing fence line's own newline. A fence that never closes runs open:
+    its end is ``None`` rather than the end of the note, so a caller can tell
+    "a bullet appended after this lands inside code" apart from "a bullet
+    appended after a closed fence at end of file lands after it".
+
+    The same fence rule the entry walk uses (:func:`_fence_close` over
+    :func:`_split_lines`): an opener inside frontmatter is frontmatter
+    content, not a fence, and a four-space-indented fence marker is indented
+    code, not a fence. A section scan consults this so heading-looking lines
+    inside code are never read as headings or section boundaries.
+    """
+    lines = _split_lines(text)
+    frontmatter_closing = _frontmatter_end(lines)
+    skip_through = frontmatter_closing if frontmatter_closing is not None else -1
+    spans: list[tuple[int, int | None]] = []
+    index = 0
+    while index < len(lines):
+        if index <= skip_through:
+            index += 1
+            continue
+        if _fence_match(lines[index].view) is None:
+            index += 1
+            continue
+        start = lines[index].start
+        closed_at = _fence_close(lines, index)
+        if closed_at is None:
+            spans.append((start, None))
+            break
+        spans.append((start, lines[closed_at].full_end))
+        index = closed_at + 1
+    return tuple(spans)
+
+
 def entry_identity(entry: NoteEntry) -> str:
     """The stable id of one entry: what it is, and where it lives.
 

@@ -27,7 +27,8 @@ LOG_HEADING = "## Delegation log"
 
 _ITEM_MARK = re.compile(r"<!-- attempt:([0-9a-f]{32}) -->\s*$")
 _SECTION = re.compile(
-    re.escape(LOG_OPEN) + r".*?" + re.escape(LOG_CLOSE), re.DOTALL
+    "^" + re.escape(LOG_OPEN) + r"(?=\r?$).*?^" + re.escape(LOG_CLOSE) + r"(?=\r?$)",
+    re.DOTALL | re.MULTILINE,
 )
 
 #: What each attempt state, or reported outcome, is called in the log and on the
