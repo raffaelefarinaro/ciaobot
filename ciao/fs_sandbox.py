@@ -168,6 +168,13 @@ def _seatbelt_profile(roots: list[Path], read_only: Sequence[Path] = ()) -> str:
         "(deny default)",
         '(allow file-read* (literal "/") (literal "/var") (literal "/tmp"))',
     ]
+    # Tools resolve every directory above where they run (a realpath walk, a
+    # search for project files), so each ancestor of a granted path is
+    # readable as an entry: its name list, never the files inside it.
+    ancestors = sorted({str(p) for g in (*roots, *read_only) for p in Path(g).parents} - {"/"})
+    if ancestors:
+        listed = " ".join(f'(literal "{_quote_seatbelt_subpath(a)}")' for a in ancestors)
+        lines.append(f"(allow file-read* {listed})")
     for root in roots:
         quoted = _quote_seatbelt_subpath(str(root))
         lines.append(f'(allow file-read* file-write* (subpath "{quoted}"))')
@@ -176,6 +183,18 @@ def _seatbelt_profile(roots: list[Path], read_only: Sequence[Path] = ()) -> str:
         lines.append(f'(allow file-read* (subpath "{quoted}"))')
     system = " ".join(f'(subpath "{p}")' for p in _SYSTEM_READ_SUBPATHS)
     lines.append(f"(allow file-read* {system})")
+    # The devices every shell touches: redirects to /dev/null, the terminal a
+    # tool's process runs on, and the random sources. Without /dev/null a
+    # tool's `< /dev/null` fails and its spawn never returns (#1174).
+    lines.extend(
+        [
+            "(allow file-read* file-write* file-ioctl"
+            ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty")'
+            ' (literal "/dev/ptmx") (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))',
+            '(allow file-read* (literal "/dev/random") (literal "/dev/urandom"))',
+            "(allow pseudo-tty)",
+        ]
+    )
     lines.extend(
         [
             "(allow process-exec)",

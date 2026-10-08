@@ -21,6 +21,13 @@ from ciao.fs_sandbox import (
 )
 
 
+def _writable_rules(profile: str) -> int:
+    """Write grants outside the fixed device rule (/dev/null, the terminal)."""
+    return sum(
+        1 for line in profile.splitlines() if "file-write*" in line and "/dev/null" not in line
+    )
+
+
 def test_claude_workspace_settings_allow_only_the_roots(tmp_path):
     roots = [tmp_path / "root-a", tmp_path / "root-b"]
 
@@ -63,7 +70,7 @@ def test_opencode_prefix_is_sandbox_exec_on_darwin(tmp_path, monkeypatch):
     assert f'(subpath "{_quote_seatbelt_subpath(str(root))}")' in profile
     # Write access exists only on the given root: the system paths are
     # read-only and there is no global file-write allow.
-    assert profile.count("file-write*") == 1
+    assert _writable_rules(profile) == 1
     # Traversal of `/` itself is allowed (without it every child aborts under
     # `deny default`), and process rules carry no `*` suffix (a parse error).
     # The /var and /tmp symlinks are readable too, so a path spelled through
@@ -207,7 +214,7 @@ def test_read_only_dirs_are_readable_and_never_writable(tmp_path, monkeypatch):
     root, config = tmp_path / "root", tmp_path / "config"
     profile = _seatbelt_profile([root], read_only=[config])
     assert f'(allow file-read* (subpath "{_quote_seatbelt_subpath(str(config))}"))' in profile
-    assert profile.count("file-write*") == 1
+    assert _writable_rules(profile) == 1
 
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
@@ -285,3 +292,30 @@ def test_claude_file_tool_guard_denies_paths_outside_the_roots(tmp_path):
 
     with pytest.raises(ValueError):
         claude_file_tool_guard(cwd=root, roots=[])
+
+
+def test_seatbelt_lists_the_ancestors_of_granted_paths_only(tmp_path):
+    root = tmp_path / "a" / "b" / "root"
+    config = tmp_path / "cfg" / "opencode"
+    profile = _seatbelt_profile([root], read_only=[config])
+    for ancestor in (root.parent, root.parent.parent, config.parent):
+        assert f'(literal "{_quote_seatbelt_subpath(str(ancestor))}")' in profile
+    # An ancestor is an entry, never a subtree: nothing below it but the grant.
+    assert f'(subpath "{_quote_seatbelt_subpath(str(root.parent))}")' not in profile
+
+
+def test_darwin_seatbelt_allows_dev_null(tmp_path):
+    if sys.platform != "darwin" or not Path(SANDBOX_EXEC_PATH).is_file():
+        assert '(literal "/dev/null")' in _seatbelt_profile([tmp_path])
+        return
+    base = tmp_path.resolve()
+    root = base / "root"
+    root.mkdir()
+    (root / "inside.txt").write_text("inside", encoding="utf-8")
+    profile = _seatbelt_profile([root])
+    shell = subprocess.run(
+        [SANDBOX_EXEC_PATH, "-p", profile, "/bin/sh", "-c",
+         f"cat {root / 'inside.txt'} </dev/null >/dev/null && echo ok"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert shell.stdout.strip() == "ok", shell.stderr
