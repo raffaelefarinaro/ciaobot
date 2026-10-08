@@ -206,8 +206,10 @@ PYTHONPATH=$PWD python -m pytest tests/test_server_host.py -q
 
 The update/rollback ownership contract, release-manifest coverage of the host
 archive, and all live launchd/TCC validation are later children of #1008. Host
-acquisition and the ownership record are E1 (#1050); selecting the hosted
-service from a verified snapshot in `ciao setup` / service registration is E2
-(#1060, `tests/test_server_host_activation.py`) and changes no live service and
-runs no `launchctl`, `open` or live permission request. This document describes
+acquisition and the ownership record are E1 (#1050); E2 (#1060,
+`tests/test_server_host_activation.py`) selects the hosted service from a
+verified snapshot in `ciao setup` / service registration, and this child only
+changes the bundle id the hosted plist advertises. Live TCC remains operator
+work on #1008: E2 changes no live service and runs no `launchctl`, `open` or
+live permission request. This document describes
 the host itself, not the installer transaction.
