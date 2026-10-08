@@ -132,6 +132,12 @@ class AgentRequest:
     # Full stable context held aside for providers that have to replace a
     # missing/invalid resumed session after the request was built.
     stable_context_prefix: str = ""
+    # Filesystem scope of the owning workspace ("machine" or "workspace", see
+    # ``ciao.fs_sandbox``). ``agent_roots`` are the resolved directories a
+    # workspace-scoped turn may read and write: the agent root first, then the
+    # workspace vault root, de-duplicated. Machine scope ignores both.
+    agent_fs_scope: str = "machine"
+    agent_roots: tuple[str, ...] = ()
 
     @property
     def control_token(self) -> str:

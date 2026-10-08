@@ -4143,6 +4143,22 @@ class ProjectChatManager:
             workspace = self._config.primary_workspace()
         return self._config.agent_root(workspace)
 
+    def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
+        """The chat's workspace filesystem scope and the roots it confines to.
+
+        Roots are the chat's agent root and that workspace's vault root,
+        resolved and de-duplicated, agent root first. Machine scope never
+        reads them, so they are only computed for the workspace case.
+        """
+        workspace = self._workspace_for_chat(chat.chat_id)
+        config = self._config.workspace(workspace)
+        if config is None or config.agent_fs_scope != "workspace":
+            return "machine", ()
+        agent_root = self._config.agent_root(workspace).resolve()
+        vault_root = self._config.workspace_vault_root(workspace).resolve()
+        roots = tuple(dict.fromkeys((str(agent_root), str(vault_root))))
+        return "workspace", roots
+
     def _revoke_mcp_chat(self, chat_id: str) -> None:
         service = self._mcp_service
         registry = getattr(service, "registry", None)
@@ -4896,6 +4912,7 @@ class ProjectChatManager:
             extra_env[AGENT_URL_ENV] = agent_url
             extra_env[AGENT_TOKEN_ENV] = token
 
+        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
         return AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -4906,6 +4923,8 @@ class ProjectChatManager:
             images=images or [],
             extra_env=extra_env,
             disallowed_tools=self.disallowed_tools_for_chat(chat),
+            agent_fs_scope=fs_scope,
+            agent_roots=fs_roots,
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
             # stricter ruleset.
@@ -6383,6 +6402,7 @@ class ProjectChatManager:
             if prefix
             else _SUBAGENT_SYNTHESIS_NUDGE
         )
+        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
         request = AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -6392,6 +6412,8 @@ class ProjectChatManager:
             images=[],
             extra_env=self._build_extra_env(chat),
             disallowed_tools=self.disallowed_tools_for_chat(chat),
+            agent_fs_scope=fs_scope,
+            agent_roots=fs_roots,
             thinking_level=self._thinking_level_for_chat(chat),
         )
         try:

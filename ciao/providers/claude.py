@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import uuid
 import warnings
 from dataclasses import dataclass
@@ -51,8 +52,9 @@ from claude_agent_sdk import (
     ToolUseBlock,
     get_session_info,
 )
-from claude_agent_sdk.types import PermissionMode, SystemPromptPreset
+from claude_agent_sdk.types import PermissionMode, SandboxSettings, SystemPromptPreset
 
+from ciao.fs_sandbox import FsSandboxUnavailable, claude_sandbox_settings
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -435,6 +437,8 @@ class ClaudeProvider(BaseSDKProvider):
         # merge queue so late approvals can't land in a stale stream.
         self._permission_gate = PermissionGate()
         self._mcp_token = ""
+        # Filesystem scope and roots the live CLI process was started with.
+        self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
 
     def _stderr_handler(self, line: str) -> None:
         _route_cli_stderr(line)
@@ -456,12 +460,16 @@ class ClaudeProvider(BaseSDKProvider):
         if (
             self._client is not None
             and self._connected
-            and provider_reuse_key(request) != self._mcp_token
+            and (
+                provider_reuse_key(request) != self._mcp_token
+                or (request.agent_fs_scope, request.agent_roots) != self._fs_scope_key
+            )
         ):
-            # MCP configuration and the shell environment are fixed when the
-            # managed CLI process starts. Reconnect when a chat switches
-            # surfaces or receives a refreshed ephemeral token (on either
-            # surface); model/mode alone can still change in place.
+            # MCP configuration, the shell environment and the filesystem
+            # sandbox are fixed when the managed CLI process starts. Reconnect
+            # when a chat switches surfaces, receives a refreshed ephemeral
+            # token (on either surface), or its workspace scope changes;
+            # model/mode alone can still change in place.
             await self.disconnect()
         if (
             self._client is not None
@@ -499,11 +507,32 @@ class ClaudeProvider(BaseSDKProvider):
 
         system_prompt = system_prompt_payload("")
 
+        sandbox: SandboxSettings | None = None
+        add_dirs: list[str | Path] = []
+        if request.agent_fs_scope == "workspace":
+            if sys.platform == "win32":
+                raise FsSandboxUnavailable(
+                    "workspace filesystem sandbox is not available on Windows; "
+                    "set the workspace to whole machine"
+                )
+            roots = [Path(root) for root in request.agent_roots]
+            sandbox_dict: dict[str, Any] | None = claude_sandbox_settings(
+                scope=request.agent_fs_scope, mode=request.mode, roots=roots
+            )
+            sandbox = cast(SandboxSettings, sandbox_dict)
+            agent_root, *other_roots = request.agent_roots
+            add_dirs = [
+                root for root in other_roots if not Path(root).is_relative_to(agent_root)
+            ]
+        self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+
         options = ClaudeAgentOptions(
             model=requested_model,
             fallback_model=_fallback_model_for(requested_model),
             permission_mode=_sdk_permission_mode(request.mode),
             cwd=str(self.workspace_root),
+            sandbox=sandbox,
+            add_dirs=add_dirs,
             include_partial_messages=True,
             # Raise the CLI-stdout decode buffer above the SDK's 1 MiB default
             # so a single large tool result / content block doesn't kill the

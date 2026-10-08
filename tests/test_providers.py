@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ciao.execution_modes import harness_skill_overrides
+from ciao.fs_sandbox import FsSandboxUnavailable
 from ciao.models import AgentRequest, ImageAttachment
 from ciao.providers.base import (
     build_claude_message_content,
@@ -1094,3 +1096,167 @@ def test_extract_effective_model_keeps_first_entry_without_token_counts() -> Non
     msg = SimpleNamespace(model_usage={"claude-sonnet-5": {}, "claude-haiku-4-5": {}})
     assert ClaudeProvider._extract_effective_model(msg) == "claude-sonnet-5"
     assert ClaudeProvider._extract_effective_model(SimpleNamespace(model_usage=None)) == ""
+
+
+@pytest.mark.asyncio
+async def test_claude_workspace_scope_sets_sandbox_and_roots(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
+    monkeypatch.setattr(sys, "platform", "darwin")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    agent_root = tmp_path / "agent"
+    vault_root = tmp_path / "vault"
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(agent_root), str(vault_root)),
+    )
+
+    await provider._ensure_connected(request)
+
+    options = captured["options"]
+    sandbox = options.sandbox
+    assert sandbox["enabled"] is True
+    assert sandbox["autoAllowBashIfSandboxed"] is True
+    assert sandbox["allowUnsandboxedCommands"] is False
+    assert sandbox["excludedCommands"] == []
+    assert sandbox["filesystem"]["allowRead"] == [str(agent_root), str(vault_root)]
+    assert sandbox["filesystem"]["allowWrite"] == [str(agent_root), str(vault_root)]
+    # The vault sits outside the agent root, so the CLI also gets it as an add dir.
+    assert [str(path) for path in options.add_dirs] == [str(vault_root)]
+    assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
+
+
+@pytest.mark.asyncio
+async def test_claude_workspace_scope_keeps_vault_inside_agent_root_out_of_add_dirs(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
+    monkeypatch.setattr(sys, "platform", "darwin")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    agent_root = tmp_path / "agent"
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="normal",
+        agent_fs_scope="workspace",
+        agent_roots=(str(agent_root), str(agent_root / "memory-vault")),
+    )
+
+    await provider._ensure_connected(request)
+
+    options = captured["options"]
+    assert options.sandbox["autoAllowBashIfSandboxed"] is False
+    assert options.add_dirs == []
+
+
+@pytest.mark.asyncio
+async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(prompt="test", model="sonnet", mode="auto")
+
+    await provider._ensure_connected(request)
+
+    options = captured["options"]
+    assert options.sandbox is None
+    assert options.add_dirs == []
+    assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
+
+
+@pytest.mark.asyncio
+async def test_claude_workspace_scope_refuses_on_windows(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    constructed = []
+
+    class FakeClient:
+        def __init__(self, options):
+            constructed.append(options)
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    monkeypatch.setattr(sys, "platform", "win32")
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(tmp_path / "agent"),),
+    )
+
+    with pytest.raises(FsSandboxUnavailable):
+        await provider._ensure_connected(request)
+    assert constructed == []
+
+
+@pytest.mark.asyncio
+async def test_claude_scope_change_reconnects_live_process(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
+    monkeypatch.setattr(sys, "platform", "darwin")
+    from ciao.models import provider_reuse_key
+
+    captured = {"disconnects": 0, "constructed": 0}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["constructed"] += 1
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(tmp_path / "agent"),),
+    )
+    # A live machine-scope process, unsandboxed, with a matching control token.
+    provider._client = object()
+    provider._connected = True
+    provider._mcp_token = provider_reuse_key(request)
+    provider._fs_scope_key = ("machine", ())
+
+    async def fake_disconnect() -> None:
+        captured["disconnects"] += 1
+        provider._client = None
+        provider._connected = False
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+
+    await provider._ensure_connected(request)
+
+    assert captured["disconnects"] == 1
+    assert captured["constructed"] == 1
+    assert captured["options"].sandbox["enabled"] is True
