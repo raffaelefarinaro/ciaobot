@@ -332,12 +332,12 @@ def coerce_workspace_color(raw: object) -> str:
 
 
 def coerce_agent_fs_scope(raw: object) -> str:
-    """Normalize a workspace filesystem scope. Missing/empty → machine."""
+    """Normalize a workspace filesystem scope. Missing/empty → workspace."""
     if raw is None:
-        return "machine"
+        return "workspace"
     cleaned = str(raw).strip()
     if not cleaned:
-        return "machine"
+        return "workspace"
     if cleaned in AGENT_FS_SCOPES:
         return cleaned
     raise ValueError(
@@ -366,9 +366,10 @@ class WorkspaceConfig:
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
-    # Filesystem scope for agent tool execution. Defaults to whole machine
-    # (today's behavior); "workspace" confines the agent to the workspace.
-    agent_fs_scope: str = "machine"
+    # Filesystem scope for agent tool execution. Defaults to "workspace", which
+    # confines the agent and its shell to the workspace; "machine" is the
+    # whole-machine escape hatch.
+    agent_fs_scope: str = "workspace"
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -405,7 +406,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     try:
         agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
     except ValueError:
-        agent_fs_scope = "machine"
+        agent_fs_scope = "workspace"
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
