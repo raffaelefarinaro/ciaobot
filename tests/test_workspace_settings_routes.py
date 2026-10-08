@@ -10,7 +10,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.config import CiaoConfig, WorkspaceConfig, default_agent_fs_scope
 from ciao.execution_modes import credential_path_deny_rules
 from ciao.web.routes_api import (
     archive_workspace_setting,
@@ -183,7 +183,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "allowed_mcp_servers": None,
         "gws_profile": "work",
         "color": "pink",
-        "agent_fs_scope": "workspace",
+        "agent_fs_scope": default_agent_fs_scope(),
     }
 
 
@@ -219,7 +219,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
             "color": "pink",
-            "agent_fs_scope": "workspace",
+            "agent_fs_scope": default_agent_fs_scope(),
         },
     ]
     assert pcm.refresh_count == 3
