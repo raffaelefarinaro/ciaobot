@@ -977,6 +977,7 @@
                 </label>
                 <label class="settings-field"><span class="ws-label">File access</span>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.agent_fs_scope" :disabled="workspacesSaving === 'new'">
+                    <option value="">Default for this computer</option>
                     <option value="workspace">Workspace only</option>
                     <option value="machine">Whole machine</option>
                   </select>
@@ -3728,9 +3729,15 @@ type WorkspaceForm = {
   agent_fs_scope: 'workspace' | 'machine'
 }
 
+// A new workspace may leave File access to the server: '' means the key is
+// left out of the create payload, and the server applies its platform default.
+type FsScopeChoice = WorkspaceForm['agent_fs_scope'] | ''
+type NewWorkspaceForm = Omit<WorkspaceForm, 'agent_fs_scope'> & { agent_fs_scope: FsScopeChoice }
+
 // Copy for the File access select. Workspace scope needs the sandbox on this
 // computer; the note says what a machine without one does.
-const WORKSPACE_FS_SCOPE_COPY: Record<'workspace' | 'machine', string> = {
+const WORKSPACE_FS_SCOPE_COPY: Record<FsScopeChoice, string> = {
+  '': 'Default for this computer: whole machine on Windows, which has no sandbox; workspace only elsewhere.',
   workspace: 'Workspace only. The agent and its shell cannot read outside this workspace.',
   machine: 'Whole machine. The agent can read any file this user can read.',
 }
@@ -3740,7 +3747,7 @@ function defaultWorkspaceProvider(): WorkspaceProvider {
   return projectStore.workspaceProviderOptions[0]?.value || 'claude'
 }
 
-function blankWorkspaceForm(): WorkspaceForm {
+function blankWorkspaceForm(): NewWorkspaceForm {
   return {
     name: '',
     vault_root: '',
@@ -3748,7 +3755,7 @@ function blankWorkspaceForm(): WorkspaceForm {
     gws_profile: '',
     disallowed_tools: '',
     color: DEFAULT_WORKSPACE_COLOR,
-    agent_fs_scope: 'workspace',
+    agent_fs_scope: '',
   }
 }
 
@@ -3775,7 +3782,7 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
 }
 
 const workspaceForms = ref<WorkspaceForm[]>([])
-const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
+const newWorkspaceForm = ref<NewWorkspaceForm>(blankWorkspaceForm())
 // One row "..." menu open at a time, keyed by row. Esc closes it here and
 // marks the press handled: ChatLayout's window Esc handler leaves Settings
 // unless the event was already handled, and Reka's own window listener is
@@ -3979,7 +3986,8 @@ async function createNewWorkspace() {
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       color: form.color,
-      agent_fs_scope: form.agent_fs_scope,
+      // Sent only when the user picked a value, so the server applies its default.
+      ...(form.agent_fs_scope ? { agent_fs_scope: form.agent_fs_scope } : {}),
     })
     notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
     showNewWorkspace.value = false

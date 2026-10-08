@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
 // Settings > Workspaces: the "File access" select sets the workspace's
-// agent_fs_scope. Edit saves the chosen value, and a new workspace defaults to
-// "Workspace only" and sends it on create.
+// agent_fs_scope. Edit saves the chosen value. A new workspace starts on
+// "Default for this computer" and omits agent_fs_scope on create unless the
+// user picks one, so the server applies its platform default.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -125,7 +126,7 @@ describe('Settings > Workspaces file access', () => {
     }
   })
 
-  it('creates a new workspace with workspace scope by default', async () => {
+  it('creates a new workspace with the server default unless a scope is picked', async () => {
     const { api } = await import('../../lib/api')
     const wrapper = await mountWorkspacesTab()
     try {
@@ -135,16 +136,46 @@ describe('Settings > Workspaces file access', () => {
       await flushPromises()
 
       const newPanel = wrapper.get('#new-workspace')
-      expect(fileAccessSelect(newPanel).element.value).toBe('workspace')
+      const select = fileAccessSelect(newPanel)
+      expect(select.element.value).toBe('')
+      expect(select.findAll('option').map(o => o.text())).toEqual([
+        'Default for this computer',
+        'Workspace only',
+        'Whole machine',
+      ])
+      expect(newPanel.text()).toContain('whole machine on Windows')
 
       await newPanel.get('input[placeholder="letters, numbers, dashes, underscores"]').setValue('client-a')
       const create = wrapper.findAll('button').find(b => b.text() === 'Create workspace')
       await create!.trigger('click')
       await flushPromises()
 
+      const payload = vi.mocked(api.post).mock.calls.find(c => c[0] === '/api/workspaces')?.[1] as Record<string, unknown>
+      expect(payload).toMatchObject({ name: 'client-a' })
+      expect(payload).not.toHaveProperty('agent_fs_scope')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('sends an explicitly picked file access on create', async () => {
+    const { api } = await import('../../lib/api')
+    const wrapper = await mountWorkspacesTab()
+    try {
+      const addButton = wrapper.findAll('button').find(b => b.text() === 'New workspace')
+      await addButton!.trigger('click')
+      await flushPromises()
+
+      const newPanel = wrapper.get('#new-workspace')
+      await fileAccessSelect(newPanel).setValue('workspace')
+      await newPanel.get('input[placeholder="letters, numbers, dashes, underscores"]').setValue('client-b')
+      const create = wrapper.findAll('button').find(b => b.text() === 'Create workspace')
+      await create!.trigger('click')
+      await flushPromises()
+
       expect(api.post).toHaveBeenCalledWith(
         '/api/workspaces',
-        expect.objectContaining({ name: 'client-a', agent_fs_scope: 'workspace' }),
+        expect.objectContaining({ name: 'client-b', agent_fs_scope: 'workspace' }),
       )
     } finally {
       wrapper.unmount()

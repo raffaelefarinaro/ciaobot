@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -9,7 +10,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.config import CiaoConfig, WorkspaceConfig, default_agent_fs_scope
 from ciao.execution_modes import credential_path_deny_rules
 from ciao.web.routes_api import (
     archive_workspace_setting,
@@ -182,7 +183,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "allowed_mcp_servers": None,
         "gws_profile": "work",
         "color": "pink",
-        "agent_fs_scope": "workspace",
+        "agent_fs_scope": default_agent_fs_scope(),
     }
 
 
@@ -218,7 +219,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
             "color": "pink",
-            "agent_fs_scope": "workspace",
+            "agent_fs_scope": default_agent_fs_scope(),
         },
     ]
     assert pcm.refresh_count == 3
@@ -1746,8 +1747,9 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
     assert not (tmp_path / "beta").exists()
 
 
-def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path):
+def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path, monkeypatch):
     """The workspace filesystem scope persists, rejects unknowns, and defaults."""
+    monkeypatch.setattr(sys, "platform", "linux")
     client, config, _pcm = _client(tmp_path)
 
     assert config.workspace("personal").agent_fs_scope == "workspace"
@@ -1793,8 +1795,9 @@ def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path):
     assert fresh.workspace("personal").agent_fs_scope == "workspace"
 
 
-def test_missing_agent_fs_scope_loads_as_workspace(tmp_path):
+def test_missing_agent_fs_scope_loads_as_workspace(tmp_path, monkeypatch):
     """A registry row with no agent_fs_scope loads as workspace; a stored machine stays machine."""
+    monkeypatch.setattr(sys, "platform", "linux")
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     (runtime / "workspaces.json").write_text(
@@ -1820,3 +1823,82 @@ def test_missing_agent_fs_scope_loads_as_workspace(tmp_path):
     )
     assert config.workspace("personal").agent_fs_scope == "workspace"
     assert config.workspace("work").agent_fs_scope == "machine"
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_missing_agent_fs_scope_defaults_to_workspace_off_windows(tmp_path, monkeypatch, platform):
+    """Off Windows the sandbox exists, so a workspace with no stored scope is workspace-only."""
+    monkeypatch.setattr(sys, "platform", platform)
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]) + "\n",
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert config.workspace("personal").agent_fs_scope == "workspace"
+
+
+def test_missing_agent_fs_scope_defaults_to_machine_on_windows(tmp_path, monkeypatch):
+    """Windows has no sandbox, so a missing scope loads as whole machine, not a refusing workspace scope."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]) + "\n",
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert config.workspace("personal").agent_fs_scope == "machine"
+
+
+def test_stored_agent_fs_scope_is_kept_on_windows(tmp_path, monkeypatch):
+    """An explicit stored workspace scope survives the Windows default."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "personal",
+                    "vault_root": "memory-vault/personal",
+                    "agent_fs_scope": "workspace",
+                }
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert config.workspace("personal").agent_fs_scope == "workspace"
+
+
+def test_workspace_create_without_fs_scope_stores_platform_default_on_windows(tmp_path, monkeypatch):
+    """A create with no agent_fs_scope key stores the Windows default, whole machine."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    client, _config, _pcm = _client(tmp_path)
+
+    response = client.post("/api/workspaces", json={"name": "Research"})
+
+    assert response.status_code == 201
+    created = next(w for w in response.json()["workspaces"] if w["name"] == "Research")
+    assert created["agent_fs_scope"] == "machine"
