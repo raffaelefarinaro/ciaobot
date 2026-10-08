@@ -18,7 +18,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -243,6 +243,12 @@ _ATTEMPT_ERROR_CODES: dict[str, tuple[str, bool]] = {
     "invalid_attempt": ("task_invalid", False),
     "read_failed": ("task_read_failed", True),
 }
+
+
+def _latest_completion(body: str) -> Completion | None:
+    """The task's newest completion record, or ``None`` when it has none."""
+    completions = parse_completions(body)
+    return completions[0] if completions else None
 
 
 def _task_error(exc: TaskBoardError) -> ControlPlaneError:
@@ -2899,7 +2905,7 @@ class CiaoControlPlane:
             )
             if reviewed is not None:
                 return reviewed
-        return self.workspace_task_update(
+        task = self.workspace_task_update(
             workspace,
             task_id,
             expected_revision=expected_revision,
@@ -2907,6 +2913,9 @@ class CiaoControlPlane:
             actor=actor,
             resolution=resolution,
         )
+        if verb == "complete" and (resolution or "").strip():
+            self._learn_from_task_completion(workspace, task_id)
+        return task
 
     def workspace_task_complete_reviewed(
         self,
@@ -3001,14 +3010,22 @@ class CiaoControlPlane:
             )
             raise
         self._release_attempt(workspace, attempt.attempt_id)
-        self._learn_from_approved(workspace, attempt, document.record.title)
         # Read again rather than returning the completion's own row: the reply is
         # what a board paints, and a completed card still naming a live attempt
         # would keep drawing Stop and Detach over a task with no chat to open.
         done: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
+        self._learn_from_approved(
+            workspace, attempt, document.record.title, _latest_completion(done.body)
+        )
         return self._task_with_attempt(workspace, done, include_body=True)
 
-    def _learn_from_approved(self, workspace: str, attempt: TaskAttempt, title: str) -> None:
+    def _learn_from_approved(
+        self,
+        workspace: str,
+        attempt: TaskAttempt,
+        title: str,
+        completion: Completion | None,
+    ) -> None:
         """Archive an approved task's chat and run a procedure-focused memory pass.
 
         The user approving a delegated result says this conversation is how that
@@ -3026,18 +3043,20 @@ class CiaoControlPlane:
         handed to the loop this plane was built on — the same one
         ``tasks_changed`` is published on. Without one (a test calling the
         service outside any loop) it does nothing.
+
+        ``completion`` is the task's latest completion record (#1154). Its
+        resolution rides in the focus as the user's own words, separate from the
+        agent's summary, and empty when the approval saved none.
         """
-        try:
-            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
-            on_loop = True
-        except RuntimeError:
-            loop, on_loop = self._loop, False
-        if loop is None or loop.is_closed():
-            return
         focus = {
             "focus": "approved_task",
             "task_title": title,
             "task_summary": attempt.summary,
+            "completion_id": completion.id if completion is not None else "",
+            "completed_at": (
+                completion.completed_at.isoformat() if completion is not None else ""
+            ),
+            "user_resolution": completion.resolution if completion is not None else "",
         }
 
         async def _run() -> None:
@@ -3068,8 +3087,27 @@ class CiaoControlPlane:
                     "tasks: could not learn from the approved task in chat %s", attempt.chat_id
                 )
 
+        self._run_on_engine_loop(f"task-learn-{attempt.attempt_id[:8]}", _run)
+
+    def _run_on_engine_loop(
+        self, name: str, run: Callable[[], Coroutine[Any, Any, None]]
+    ) -> None:
+        """Schedule *run* on the engine's loop, from a loop or from a worker thread.
+
+        The board's complete route runs in a worker thread (``asyncio.to_thread``),
+        where there is no running loop, so the work is handed to the loop this
+        plane was built on. Without one, nothing runs.
+        """
+        try:
+            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            loop, on_loop = self._loop, False
+        if loop is None or loop.is_closed():
+            return
+
         def _spawn() -> None:
-            task = loop.create_task(_run(), name=f"task-learn-{attempt.attempt_id[:8]}")
+            task: asyncio.Task[None] = loop.create_task(run(), name=name)
             self._watchers.add(task)
             task.add_done_callback(self._watchers.discard)
 
@@ -3079,10 +3117,90 @@ class CiaoControlPlane:
         try:
             loop.call_soon_threadsafe(_spawn)
         except RuntimeError:
-            logger.warning(
-                "tasks: the loop closed before the approved task in chat %s could be archived",
-                attempt.chat_id,
+            logger.warning("tasks: the loop closed before %s could run", name)
+
+    def _learn_from_task_completion(self, workspace: str, task_id: str) -> None:
+        """Queue a learning pass for the resolution a manual completion saved (#1154).
+
+        Runs after the completion is written, so nothing here can undo Done: a
+        read failure, a refused resolution or a queue failure is logged and the
+        completion stands. The enqueue itself runs on the engine loop, because
+        starting the pass's turn needs one.
+        """
+        try:
+            document = self._task_call(workspace, lambda store: store.get(task_id))
+            latest = _latest_completion(document.body)
+        except Exception:  # noqa: BLE001 — the completion already stands
+            logger.exception("tasks: could not read task %s to learn from it", task_id)
+            return
+        if latest is None:
+            return
+        task_path = document.relative_path
+
+        async def _queue() -> None:
+            try:
+                self._enqueue_task_resolution(workspace, task_path, latest)
+            except Exception:  # noqa: BLE001 — the completion already stands
+                logger.exception(
+                    "tasks: could not queue a learning pass for task %s", task_id
+                )
+
+        self._run_on_engine_loop(f"task-resolution-{task_id[:8]}", _queue)
+
+    def _enqueue_task_resolution(
+        self, workspace: str, task_path: str, completion: Completion
+    ) -> str | None:
+        """Hand one saved resolution to the memory pass queue (#1154)."""
+        queued: str | None = self.pcm.enqueue_task_completion(
+            workspace=workspace,
+            task_path=task_path,
+            completion_id=completion.id,
+            resolution=completion.resolution,
+            completed_at=completion.completed_at.isoformat(),
+        )
+        return queued
+
+    async def workspace_task_resolution_review(
+        self, workspace: str, task_id: str, *, expected_revision: str
+    ) -> dict[str, Any]:
+        """Queue a learning pass for a task's saved resolution, on request (#1154).
+
+        Editing a resolution never queues a pass by itself. This is the explicit
+        ask, and it answers from the queue: the same text on the same completion
+        returns the pass already queued rather than extracting it twice. Runs on
+        the engine loop, so a queue failure reaches the caller instead of being
+        logged; a refused resolution raises ``invalid_task``.
+        """
+        clean = str(task_id or "").strip()
+        task_path, latest = await asyncio.to_thread(
+            self._resolution_to_review, workspace, clean, str(expected_revision or "")
+        )
+        if not self.config.insights_enabled:
+            return {"queued": False, "reason": "session insights off"}
+        try:
+            chat_id = self._enqueue_task_resolution(workspace, task_path, latest)
+        except ValueError as exc:
+            raise ControlPlaneError("invalid_task", str(exc)) from exc
+        return {
+            "queued": chat_id is not None,
+            "completion_id": latest.id,
+            "memory_chat_id": chat_id or "",
+        }
+
+    def _resolution_to_review(
+        self, workspace: str, task_id: str, expected_revision: str
+    ) -> tuple[str, Completion]:
+        """The task's path and latest completion, once the caller's read is current."""
+        document = self._task_call(workspace, lambda store: store.get(task_id))
+        if document.revision != expected_revision:
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "The task changed since you read it: re-read it and try again.",
             )
+        latest = _latest_completion(document.body)
+        if latest is None or not latest.resolution.strip():
+            raise ControlPlaneError("invalid_task", "nothing to review: no resolution is saved.")
+        return document.relative_path, latest
 
     def _relink_after_refusal(
         self,

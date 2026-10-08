@@ -205,6 +205,7 @@ from ciao.web.routes_tasks import (
     task_attempt_action,
     task_attempts,
     task_complete,
+    task_resolution_review,
     task_create,
     task_delegate,
     task_delete,
@@ -371,6 +372,11 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Literal `complete` precedes the `{task_id}` pattern so it is not
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+        Route(
+            "/api/tasks/{task_id}/resolution-review",
+            task_resolution_review,
+            methods=["POST"],
+        ),
         # Delegation (B5). `delegate` hands the task to the agent as one ordinary
         # chat with no attendance bypass and returns the attempt; the attempt
         # routes act on it (stop/resume/retry/detach), and `attempts` is the

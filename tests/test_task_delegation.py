@@ -2819,10 +2819,15 @@ async def test_approving_a_delegated_result_archives_its_chat_and_queues_a_learn
         await asyncio.sleep(0)
 
     assert archived == [outcome["chat_id"]]
-    assert postprocessed == [(
-        outcome["chat_id"],
-        {"focus": "approved_task", "task_title": "Learnable work", "task_summary": "Did the work."},
-    )]
+    assert [chat_id for chat_id, _ in postprocessed] == [outcome["chat_id"]]
+    focus = postprocessed[0][1]
+    assert focus["focus"] == "approved_task"
+    assert focus["task_title"] == "Learnable work"
+    assert focus["task_summary"] == "Did the work."
+    # The approval sent no resolution: the key is still there, and empty, and the
+    # completion it snapshots is the one this approval wrote.
+    assert focus["user_resolution"] == ""
+    assert focus["completion_id"]
 
 
 async def test_approving_a_review_records_the_resolution_on_the_same_write(
