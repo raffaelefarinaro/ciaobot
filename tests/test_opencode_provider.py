@@ -1984,6 +1984,10 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
     class Request:
         extra_env: dict = {}
         mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
 
     with pytest.raises(RuntimeError, match="incompatible build"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -2043,6 +2047,10 @@ async def test_database_lock_during_startup_retries_after_contention(tmp_path, m
     class Request:
         extra_env: dict = {}
         mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -2106,6 +2114,10 @@ async def test_never_healthy_server_gets_startup_retries(tmp_path, monkeypatch):
     class Request:
         extra_env: dict = {}
         mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
@@ -2200,6 +2212,10 @@ async def test_missing_binary_says_how_to_fix_it(tmp_path, monkeypatch):
     class Request:
         extra_env: dict = {}
         mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
 
     with pytest.raises(FileNotFoundError, match="login shell PATH"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -2248,6 +2264,10 @@ async def test_the_servers_stderr_is_drained_and_kept_for_errors(tmp_path, monke
     class Request:
         extra_env: dict = {}
         mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
 
     with pytest.raises(RuntimeError, match="port already in use"):
         await provider._ensure_server(Request())  # type: ignore[arg-type]
@@ -2294,6 +2314,8 @@ async def test_opencode_process_does_not_inherit_the_agent_token(tmp_path, monke
     class Request:
         extra_env: dict = {"CIAO_AGENT_TOKEN": "stale-from-request-env"}
         mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
 
     await provider._ensure_server(Request())  # type: ignore[arg-type]
 
