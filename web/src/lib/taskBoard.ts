@@ -655,8 +655,9 @@ export interface TaskLane {
  *
  * Read from `completed_at`, the stamp of the latest completion. `updated_at` is
  * not a stand-in: an edit to an old done task (a title fix, a resolution reword)
- * moves it without finishing anything. A done task with no completion stamp is
- * not counted as today; {@link withDoneToday} keeps it in the lane anyway.
+ * moves it without finishing anything. A done task with no completion stamp
+ * (every task completed before completion records existed) is not today's either:
+ * it is counted behind Show all, like any earlier-dated one.
  */
 export function doneToday(task: Task, now: Date = new Date()): boolean {
   if (!task.completed_at) return false
@@ -672,15 +673,17 @@ export function doneToday(task: Task, now: Date = new Date()): boolean {
  * card visibly lands, not a history that grows for ever. The Done filter
  * lists every done task.
  *
- * A done task with no completion stamp is kept in the lane rather than hidden
- * under Show all: it is done, the record does not say when, and hiding it would
- * make it vanish from the board that shows it as finished.
+ * A done task that is not finished today, undated ones included, sits behind
+ * Show all and is counted there. An undated one is never labelled or counted as
+ * today, and it is not kept in the lane: after upgrade, every task completed
+ * before completion records existed is undated, and keeping them would flood the
+ * column for good.
  */
 function withDoneToday(tasks: Task[], now: Date): { kept: Task[]; earlierDone: number } {
   const kept: Task[] = []
   let earlierDone = 0
   for (const task of tasks) {
-    if (task.status === 'done' && task.completed_at && !doneToday(task, now)) earlierDone += 1
+    if (task.status === 'done' && !doneToday(task, now)) earlierDone += 1
     else kept.push(task)
   }
   return { kept, earlierDone }

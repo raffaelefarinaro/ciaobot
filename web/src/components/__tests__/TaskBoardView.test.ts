@@ -72,7 +72,9 @@ function task(overrides: Partial<Task> = {}): Task {
     attempt_detail: '',
     live_attempt_id: '',
     changed_since_delegated: false,
-    completed_at: null,
+    // A done fixture is finished today, as the board's own fixtures say; a test that
+    // needs an undated done task passes `completed_at: null` explicitly.
+    completed_at: overrides.status === 'done' ? '2026-03-01T08:00:00Z' : null,
     has_resolution: false,
     ...overrides,
   }
@@ -211,19 +213,21 @@ describe('TaskBoardView', () => {
         id: 'old', title: 'Landed last week', status: 'done',
         completed_at: '2026-02-20T09:00:00+00:00', updated_at: '2026-03-01T09:00:00+00:00',
       }),
-      // No completion stamp: it stays in the lane, and is not counted as today.
+      // No completion stamp (completed before records existed): not today's, so it
+      // sits behind Show all with the earlier one.
       task({ id: 'untimed', title: 'Done without a stamp', status: 'done', completed_at: null }),
     ])
     const done = lanes(wrapper).find((lane) => lane.get('.task-lane-label').text() === 'Done')!
     expect(done.text()).toContain('Landed today')
-    expect(done.text()).toContain('Done without a stamp')
+    expect(done.text()).not.toContain('Done without a stamp')
     expect(done.text()).not.toContain('Landed last week')
     const more = done.get('.task-lane-more')
-    expect(more.text()).toBe('1 done earlier · Show all')
+    expect(more.text()).toBe('2 done earlier · Show all')
 
     await more.trigger('click')
     await nextTick()
     expect(wrapper.text()).toContain('Landed last week')
+    expect(wrapper.text()).toContain('Done without a stamp')
     expect(wrapper.find('.task-lane-more').exists()).toBe(false)
   })
 
@@ -1924,6 +1928,8 @@ describe('TaskBoardView', () => {
         task: {
           ...reviewed,
           status: 'done',
+          // The completion just recorded its stamp, as the server does.
+          completed_at: '2026-03-01T12:00:00+00:00',
           chat_id: '',
           attempt_id: '',
           attempt_state: 'ready_for_review',

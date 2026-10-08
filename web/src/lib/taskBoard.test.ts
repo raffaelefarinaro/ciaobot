@@ -67,7 +67,9 @@ function task(overrides: Partial<Task> = {}): Task {
     attempt_detail: '',
     live_attempt_id: '',
     changed_since_delegated: false,
-    completed_at: null,
+    // A done fixture is finished today, as the board's own fixtures say; a test that
+    // needs an undated done task passes `completed_at: null` explicitly.
+    completed_at: overrides.status === 'done' ? '2026-03-01T08:00:00Z' : null,
     has_resolution: false,
     ...overrides,
   }
@@ -427,11 +429,14 @@ describe('Done keeps to today on the unfiltered board', () => {
     expect(done.earlierDone).toBe(1)
   })
 
-  it('keeps a done task with no completion stamp in the lane, and not as today', () => {
+  it('counts an undated done task behind Show all, never as today, and lists it under the Done filter', () => {
     const untimed = task({ id: 'untimed', status: 'done', completed_at: null })
     expect(doneToday(untimed, FIXTURE_DAY)).toBe(false)
     const done = taskLanes([untimed], { status: 'all', now: FIXTURE_DAY }).find(l => l.status === 'done')!
-    expect(done.tasks.map(t => t.id)).toEqual(['untimed'])
-    expect(done.earlierDone).toBe(0)
+    expect(done.tasks).toEqual([])
+    expect(done.earlierDone).toBe(1)
+    const filtered = taskLanes([untimed], { status: 'done', now: FIXTURE_DAY })[0]!
+    expect(filtered.tasks.map(t => t.id)).toEqual(['untimed'])
+    expect(filtered.earlierDone).toBe(0)
   })
 })
