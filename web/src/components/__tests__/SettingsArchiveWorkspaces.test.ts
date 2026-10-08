@@ -27,6 +27,15 @@ vi.mock('../../lib/api', () => {
         ? Promise.reject(new Error('HTTP 500'))
         : Promise.resolve({ archived: state.archived })
     }
+    if (path === '/api/integrations/gws') {
+      return Promise.resolve({
+        installed: false,
+        binary_path: '',
+        default_profile: '',
+        cli_available: false,
+        profiles: [],
+      })
+    }
     return Promise.resolve({})
   })
   return {
