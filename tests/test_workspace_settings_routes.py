@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from urllib.parse import urlparse
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -1474,6 +1475,275 @@ def test_the_shared_vault_root_is_not_treated_as_an_owner(tmp_path):
     assert vault_root_owner(config, shared / "newcomer") is None
     # The shared root itself is still owned — that is equality, not nesting.
     assert vault_root_owner(config, shared) == "legacy"
+
+
+class _RenameEvents:
+    def __init__(self) -> None:
+        self.published: list[dict] = []
+
+    def publish(self, payload: dict) -> None:
+        self.published.append(payload)
+
+
+class _RenamePCM:
+    """The slice of ProjectChatManager a workspace rename touches."""
+
+    def __init__(self) -> None:
+        from ciao.web.project_chats import ProjectInfo
+
+        self._projects = {
+            "proj-1": ProjectInfo(
+                project_id="proj-1", name="Work", workspace="alpha"
+            )
+        }
+        self.events = _RenameEvents()
+        self.refresh_count = 0
+
+    def refresh_workspaces(self) -> None:
+        self.refresh_count += 1
+
+    def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
+        return []
+
+    def _save(self, *, reason: str = "registry_mutation") -> None:
+        return None
+
+
+def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path):
+    """PATCH with a different name renames the workspace and reports the pair.
+
+    The response carries ``renamed`` as ``{from, to}``, every reference
+    follows the new name, and a second client event — beside the response —
+    carries both names so other tabs can follow the workspace.
+    """
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.background import BackgroundRun, BackgroundRunStore
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.import_store import ImportStore, engine_store_path
+    from ciao.schedules import ScheduleStore
+    from ciao.webhooks import WebhookStore
+
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "alpha": WorkspaceConfig(
+                name="alpha", vault_root="memory-vault/alpha"
+            ),
+            "work": WorkspaceConfig(
+                name="work", vault_root="memory-vault/work"
+            ),
+        },
+    )
+    config.persist_workspace_registry()
+    runtime = tmp_path / ".runtime"
+
+    schedules = ScheduleStore(runtime)
+    user = schedules.create(
+        daily_time_utc="10:00",
+        prompt="morning brief",
+        model="",
+        mode="auto",
+        chat_id=0,
+        workspace="alpha",
+        title="Brief",
+    )
+    webhooks = WebhookStore(runtime / "webhooks.json")
+    trigger, secret = webhooks.create(
+        name="hook", workspace="alpha", instructions="do the thing"
+    )
+    imports = ImportStore(engine_store_path(config))
+    batch = imports.create(
+        workspace="alpha",
+        sources=[{"provider": "claude_code", "source_id": "sess-1"}],
+    )
+    runs = BackgroundRunStore(runtime)
+    runs.replace(
+        BackgroundRun(
+            run_id="run-1",
+            parent_chat_id="chat-1",
+            project_id="proj-1",
+            workspace="alpha",
+            label="job",
+            cmd=["echo", "hi"],
+            cwd="",
+            status="ok",
+            started_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    pcm = _RenamePCM()
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/workspaces/{name}",
+                upsert_workspace_setting,
+                methods=["PATCH"],
+            ),
+        ]
+    )
+    app.state.config = config
+    app.state.project_chat_manager = pcm
+    client = TestClient(app, client=("127.0.0.1", 50000))
+
+    resp = client.patch(
+        "/api/workspaces/alpha", json={"name": "beta", "color": "cyan"}
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["renamed"] == {"from": "alpha", "to": "beta"}
+    assert sorted(entry["name"] for entry in body["workspaces"]) == [
+        "beta",
+        "work",
+    ]
+    beta = next(entry for entry in body["workspaces"] if entry["name"] == "beta")
+    assert beta["color"] == "cyan"
+    assert pcm.events.published == [
+        {"type": "workspaces_changed", "from": "alpha", "to": "beta"}
+    ]
+    assert pcm._projects["proj-1"].workspace == "beta"
+    assert schedules.get(user.schedule_id) is not None
+    assert schedules.get(user.schedule_id).workspace == "beta"  # type: ignore[union-attr]
+    assert webhooks.get(trigger.trigger_id).workspace == "beta"
+    assert imports.get(batch.batch_id).workspace == "beta"
+    stored_run = runs.get("run-1")
+    assert stored_run is not None
+    assert stored_run.workspace == "beta"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"default_provider": "invalid"},
+        {"color": "chartreuse"},
+        {"disallowed_tools": 123},
+    ],
+)
+def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
+    """A rename carrying an invalid setting is refused before any write.
+
+    The 400 leaves the registry, every reference, the agent directory and
+    the emitted events exactly as they were: validation runs against the
+    proposed renamed record before the rename itself runs.
+    """
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.background import BackgroundRun, BackgroundRunStore
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.import_store import ImportStore, engine_store_path
+    from ciao.schedules import ScheduleStore
+    from ciao.webhooks import WebhookStore
+
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "alpha": WorkspaceConfig(
+                name="alpha", vault_root="memory-vault/alpha"
+            ),
+            "work": WorkspaceConfig(
+                name="work", vault_root="memory-vault/work"
+            ),
+        },
+    )
+    config.persist_workspace_registry()
+    runtime = tmp_path / ".runtime"
+
+    schedules = ScheduleStore(runtime)
+    user = schedules.create(
+        daily_time_utc="10:00",
+        prompt="morning brief",
+        model="",
+        mode="auto",
+        chat_id=0,
+        workspace="alpha",
+        title="Brief",
+    )
+    webhooks = WebhookStore(runtime / "webhooks.json")
+    trigger, secret = webhooks.create(
+        name="hook", workspace="alpha", instructions="do the thing"
+    )
+    trigger = webhooks.update(
+        trigger.trigger_id, expected_revision=trigger.revision, enabled=True
+    )
+    imports = ImportStore(engine_store_path(config))
+    batch = imports.create(
+        workspace="alpha",
+        sources=[{"provider": "claude_code", "source_id": "sess-1"}],
+    )
+    runs = BackgroundRunStore(runtime)
+    runs.replace(
+        BackgroundRun(
+            run_id="run-1",
+            parent_chat_id="chat-1",
+            project_id="proj-1",
+            workspace="alpha",
+            label="job",
+            cmd=["echo", "hi"],
+            cwd="",
+            status="ok",
+            started_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    pcm = _RenamePCM()
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/workspaces/{name}",
+                upsert_workspace_setting,
+                methods=["PATCH"],
+            ),
+        ]
+    )
+    app.state.config = config
+    app.state.project_chat_manager = pcm
+    client = TestClient(app, client=("127.0.0.1", 50000))
+
+    before = {
+        path.name: path.read_bytes()
+        for path in (
+            runtime / "workspaces.json",
+            runtime / "schedules.json",
+            runtime / "webhooks.json",
+            engine_store_path(config),
+            runtime / "background" / "state.json",
+        )
+    }
+
+    resp = client.patch("/api/workspaces/alpha", json={"name": "beta", **extra})
+
+    assert resp.status_code == 400
+    assert sorted(config.workspace_names()) == ["alpha", "work"]
+    assert config.workspace("beta") is None
+    for path in (
+        runtime / "workspaces.json",
+        runtime / "schedules.json",
+        runtime / "webhooks.json",
+        engine_store_path(config),
+        runtime / "background" / "state.json",
+    ):
+        assert path.read_bytes() == before[path.name]
+    assert pcm.events.published == []
+    assert pcm._projects["proj-1"].workspace == "alpha"
+    assert schedules.get(user.schedule_id).workspace == "alpha"  # type: ignore[union-attr]
+    assert webhooks.get(trigger.trigger_id).workspace == "alpha"
+    assert webhooks.authenticate(trigger.trigger_id, secret) is not None
+    assert imports.get(batch.batch_id).workspace == "alpha"
+    stored_run = runs.get("run-1")
+    assert stored_run is not None
+    assert stored_run.workspace == "alpha"
+    assert not (tmp_path / "beta").exists()
 
 
 def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path):
