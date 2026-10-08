@@ -100,4 +100,16 @@ describe('gwsSetupProgress', () => {
     expect(progress.focus).toBeNull()
     expect(progress.steps.every((step) => step.state === 'done')).toBe(true)
   })
+
+  it('keeps ready accounts done while gws itself is missing', () => {
+    const progress = gwsSetupProgress(integration([profile()], false))
+    expect(progress.complete).toBe(false)
+    expect(states(integration([profile()], false))).toEqual({
+      install: 'current',
+      account: 'done',
+      client: 'done',
+      signin: 'done',
+      link: 'done',
+    })
+  })
 })

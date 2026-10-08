@@ -10,7 +10,7 @@ const progress = computed(() => gwsSetupProgress(props.integration))
 const COPY: Record<GwsSetupStepId, { title: string; detail: string }> = {
   install: {
     title: 'Install gws',
-    detail: 'Use Install in Chat below, or run `npm install -g @googleworkspace/cli`.',
+    detail: 'Use Install in Chat below, or run npm install -g @googleworkspace/cli.',
   },
   account: {
     title: 'Add a Google account',

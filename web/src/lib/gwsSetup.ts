@@ -24,14 +24,16 @@ export function gwsProfileReady(p: GwsIntegrationProfile): boolean {
  */
 export function gwsSetupProgress(s: GwsIntegrationSettings): GwsSetupProgress {
   const focus = s.profiles.find((p) => !gwsProfileReady(p)) ?? null
-  const complete = s.installed && s.profiles.length > 0 && focus === null
+  // Every account ready: the per-account steps are done even while gws itself is missing.
+  const allReady = s.profiles.length > 0 && focus === null
+  const complete = s.installed && allReady
 
   const done: Record<GwsSetupStepId, boolean> = {
     install: s.installed,
     account: s.profiles.length > 0,
-    client: !!focus && (focus.client_secret_present || focus.configured),
-    signin: !!focus && focus.configured && !focus.needs_relogin,
-    link: !!focus && focus.workspaces.length > 0,
+    client: allReady || (!!focus && (focus.client_secret_present || focus.configured)),
+    signin: allReady || (!!focus && focus.configured && !focus.needs_relogin),
+    link: allReady || (!!focus && focus.workspaces.length > 0),
   }
 
   let currentFound = false
