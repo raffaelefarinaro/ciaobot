@@ -2126,6 +2126,11 @@ class OpencodeProvider(BaseSDKProvider):
             return QuestionResponseResult(False, str(exc), True)
         if response.status_code in {200, 204, 409}:
             return QuestionResponseResult(True)
+        if response.status_code == 404:
+            # OpenCode dropped the request (e.g. idle reclaim); treat it as stale.
+            return QuestionResponseResult(
+                False, "Permission request is no longer active", False
+            )
         return QuestionResponseResult(
             False,
             _sanitize_error(getattr(response, "text", ""))
@@ -2151,7 +2156,7 @@ class OpencodeProvider(BaseSDKProvider):
         result = await self._reply_permission(
             pending, "once" if approved else "reject", message
         )
-        if result.ok:
+        if result.ok or result.error == "Permission request is no longer active":
             self._permission_requests.pop(request_id, None)
         return result
 
@@ -2168,6 +2173,10 @@ class OpencodeProvider(BaseSDKProvider):
             return QuestionResponseResult(False, str(exc), True)
         if response.status_code in {200, 204, 409}:
             return QuestionResponseResult(True)
+        if response.status_code == 404:
+            return QuestionResponseResult(
+                False, "Question request is no longer active", False
+            )
         return QuestionResponseResult(
             False,
             _sanitize_error(getattr(response, "text", ""))
@@ -2193,6 +2202,10 @@ class OpencodeProvider(BaseSDKProvider):
             return QuestionResponseResult(False, str(exc), True)
         if response.status_code in {200, 204, 409}:
             return QuestionResponseResult(True)
+        if response.status_code == 404:
+            return QuestionResponseResult(
+                False, "Question request is no longer active", False
+            )
         return QuestionResponseResult(
             False,
             _sanitize_error(getattr(response, "text", ""))
@@ -2233,7 +2246,7 @@ class OpencodeProvider(BaseSDKProvider):
             except _FormValidationError as exc:
                 return QuestionResponseResult(False, str(exc), False)
             result = await self._reply_question(pending, answer)
-        if result.ok:
+        if result.ok or result.error == "Question request is no longer active":
             self._question_requests.pop(request_id, None)
         return result
 
