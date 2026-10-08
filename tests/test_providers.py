@@ -1132,7 +1132,7 @@ async def test_claude_workspace_scope_sets_sandbox_and_roots(
     assert sandbox["autoAllowBashIfSandboxed"] is True
     assert sandbox["allowUnsandboxedCommands"] is False
     assert sandbox["excludedCommands"] == []
-    assert sandbox["filesystem"]["allowRead"] == [str(agent_root), str(vault_root)]
+    assert sandbox["filesystem"]["allowRead"][:2] == [str(agent_root), str(vault_root)]
     assert sandbox["filesystem"]["allowWrite"] == [str(agent_root), str(vault_root)]
     assert sandbox["filesystem"]["denyRead"] == [str(Path.home())]
     # The vault sits outside the agent root, so the CLI also gets it as an add dir.

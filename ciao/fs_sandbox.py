@@ -8,6 +8,7 @@ and argv prefixes; the only process it runs is the one-time check that
 from __future__ import annotations
 
 import functools
+import os
 import shutil
 import subprocess
 import sys
@@ -36,12 +37,34 @@ _SYSTEM_READ_SUBPATHS = (
 
 _BWRAP_RO_DIRS = ("/usr", "/bin", "/lib", "/lib64", "/etc")
 
+# /etc entries that commonly point outside /etc and that name resolution needs.
+_BWRAP_ETC_LINKS = ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf")
+
 
 _BWRAP_BLOCKED = (
     "bwrap is installed but cannot create a sandbox on this machine "
     "(Ubuntu 23.10 and later block it with AppArmor until bwrap has a profile; "
     "see docs/LINUX.md); set the workspace to whole machine"
 )
+
+
+def _bwrap_link_targets() -> list[str]:
+    """Folders outside the bound system dirs that /etc symlinks point into.
+
+    On systemd-resolved hosts (Ubuntu by default) ``/etc/resolv.conf`` links
+    to ``/run/systemd/resolve/stub-resolv.conf``. ``/run`` is not bound, so
+    without its target every DNS lookup inside the sandbox fails (#1186).
+    """
+    targets: list[str] = []
+    for link in _BWRAP_ETC_LINKS:
+        if not os.path.islink(link):
+            continue
+        parent = os.path.dirname(os.path.realpath(link))
+        if any(parent == d or parent.startswith(d + "/") for d in _BWRAP_RO_DIRS):
+            continue
+        if os.path.isdir(parent) and parent not in targets:
+            targets.append(parent)
+    return targets
 
 
 class FsSandboxUnavailable(RuntimeError):
@@ -68,6 +91,55 @@ def _bwrap_usable(bwrap: str) -> bool:
     return probe.returncode == 0
 
 
+def _symlink_hops(start: Path) -> list[Path]:
+    """Every symlink met while resolving *start*, in order.
+
+    Seatbelt checks each link it traverses, not only the final target, so a
+    grant on the resolved path alone still refuses the exec.
+    """
+    hops: list[Path] = []
+    pending = [start.absolute()]
+    while pending and len(hops) < 40:
+        path = pending.pop()
+        current = Path(path.anchor)
+        for index, part in enumerate(path.parts[1:], start=1):
+            current = current / part
+            if current.is_symlink():
+                hops.append(current)
+                target = Path(os.readlink(current))
+                if not target.is_absolute():
+                    target = current.parent / target
+                rest = path.parts[index + 1:]
+                pending.append(target.joinpath(*rest) if rest else target)
+                break
+    return hops
+
+
+def engine_read_roots() -> list[Path]:
+    """The running engine's install, readable (never writable) in workspace scope.
+
+    The agent PATH starts with the engine's bin dir (``prepend_engine_path``),
+    and the installer puts that environment under the home folder (a uv tool
+    venv in ``~/.local/share/uv/tools``, its interpreter in
+    ``~/.local/share/uv/python``). Without these a workspace-scoped turn cannot
+    run its own ``ciao`` CLI (#1185). ``sys.prefix`` is the venv and
+    ``sys.base_prefix`` the interpreter it links to. uv links a venv's
+    ``python`` through a version alias (``cpython-3.13-…`` → ``cpython-3.13.13-…``),
+    so every link on the way to the interpreter is granted as well, and so is
+    the ``ciao`` package folder, which an editable install keeps outside the venv.
+    """
+    seen: list[Path] = []
+    # The ``ciao`` package itself: inside the venv for a wheel install, but in
+    # the source checkout for an editable one (docs/LINUX.md installs ``-e``).
+    package = Path(__file__).resolve().parent
+    candidates = [Path(sys.prefix), Path(sys.base_prefix).resolve(), package]
+    candidates += _symlink_hops(Path(sys.executable))
+    for path in candidates:
+        if path not in seen:
+            seen.append(path)
+    return seen
+
+
 def claude_sandbox_settings(
     *, scope: str, mode: str, roots: list[Path]
 ) -> dict[str, Any] | None:
@@ -88,7 +160,7 @@ def claude_sandbox_settings(
             # ``allowRead`` alone confines nothing: deny the home directory
             # and re-allow the roots inside it (#1174).
             "denyRead": [str(Path.home())],
-            "allowRead": [str(p) for p in roots],
+            "allowRead": [str(p) for p in [*roots, *engine_read_roots()]],
             "allowWrite": [str(p) for p in roots],
         },
     }
@@ -245,10 +317,12 @@ def opencode_sandbox_prefix(
 
     ``roots`` are read-write; ``read_only`` are readable and never writable
     (the server's own install and config, which an unconfined server later
-    loads as code).
+    loads as code). The engine's own install is always added read-only, so the
+    agent can run ``ciao`` (#1185).
     """
     if not roots:
         raise ValueError("roots must not be empty")
+    read_only = [*read_only, *engine_read_roots()]
     platform = sys.platform
     if platform == "darwin":
         if Path(SANDBOX_EXEC_PATH).is_file():
@@ -265,8 +339,19 @@ def opencode_sandbox_prefix(
             for candidate in _BWRAP_RO_DIRS:
                 if Path(candidate).exists():
                     argv.extend(["--ro-bind", candidate, candidate])
+            for candidate in _bwrap_link_targets():
+                argv.extend(["--ro-bind", candidate, candidate])
+            bound: list[str] = list(_BWRAP_RO_DIRS)
             for root in read_only:
                 text = str(root)
+                # bwrap cannot bind onto a symlink, and needs no grant for one:
+                # a link inside a bound folder resolves on its own. Seatbelt
+                # does need the hops, which is why they are in ``read_only``.
+                if Path(text).is_symlink() or any(
+                    text == d or text.startswith(d.rstrip("/") + "/") for d in bound
+                ):
+                    continue
+                bound.append(text)
                 argv.extend(["--ro-bind", text, text])
             for root in roots:
                 text = str(root)

@@ -16,6 +16,7 @@ from ciao.fs_sandbox import (
     _seatbelt_profile,
     claude_file_tool_guard,
     claude_sandbox_settings,
+    engine_read_roots,
     path_outside_roots,
     opencode_sandbox_prefix,
 )
@@ -39,7 +40,9 @@ def test_claude_workspace_settings_allow_only_the_roots(tmp_path):
         "excludedCommands": [],
         "filesystem": {
             "denyRead": [str(Path.home())],
-            "allowRead": [str(roots[0]), str(roots[1])],
+            # The engine's own install is readable so the agent can run
+            # `ciao` (#1185); it is never writable.
+            "allowRead": [str(roots[0]), str(roots[1]), *map(str, engine_read_roots())],
             "allowWrite": [str(roots[0]), str(roots[1])],
         },
     }
@@ -360,3 +363,70 @@ def test_bwrap_usable_reads_the_probe_exit_code(monkeypatch):
         assert calls[0][0] == "/usr/bin/bwrap"
     finally:
         fs_sandbox._bwrap_usable.cache_clear()
+
+
+def test_engine_read_roots_cover_the_venv_and_every_interpreter_link(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        # Platform branch, not a skip marker: Windows has no sandbox, so these
+        # grants are never used there, and its symlinks resolve differently.
+        return
+    from ciao import fs_sandbox
+
+    real = tmp_path / "python" / "cpython-3.13.13"
+    (real / "bin").mkdir(parents=True)
+    (real / "bin" / "python3.13").write_text("")
+    alias = tmp_path / "python" / "cpython-3.13"
+    alias.symlink_to(real)
+    venv = tmp_path / "tools" / "ciaobot"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin" / "python").symlink_to(alias / "bin" / "python3.13")
+    monkeypatch.setattr(fs_sandbox.sys, "prefix", str(venv))
+    monkeypatch.setattr(fs_sandbox.sys, "base_prefix", str(real))
+    monkeypatch.setattr(fs_sandbox.sys, "executable", str(venv / "bin" / "python"))
+
+    granted = engine_read_roots()
+
+    # The venv, the interpreter, and the version alias uv links through: seatbelt
+    # refuses the exec unless each link on the way is readable (#1185).
+    assert venv in granted
+    assert real.resolve() in granted
+    assert alias in granted
+    # The package folder: an editable install keeps it outside the venv.
+    assert Path(fs_sandbox.__file__).resolve().parent in granted
+
+
+def test_engine_install_is_read_only_in_every_profile(tmp_path, monkeypatch):
+    engine = tmp_path / "engine"
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [engine])
+    root = tmp_path / "root"
+
+    settings = claude_sandbox_settings(scope="workspace", mode="auto", roots=[root])
+    assert str(engine) in settings["filesystem"]["allowRead"]
+    assert str(engine) not in settings["filesystem"]["allowWrite"]
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    argv = opencode_sandbox_prefix(roots=[root])
+    at = argv.index(str(engine))
+    assert argv[at - 1] == "--ro-bind"
+
+
+def test_bwrap_binds_where_resolv_conf_points(tmp_path, monkeypatch):
+    run = tmp_path / "run" / "systemd" / "resolve"
+    run.mkdir(parents=True)
+    (run / "stub-resolv.conf").write_text("nameserver 127.0.0.53\n")
+    link = tmp_path / "resolv.conf"
+    link.symlink_to(run / "stub-resolv.conf")
+    monkeypatch.setattr("ciao.fs_sandbox._BWRAP_ETC_LINKS", (str(link),))
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+
+    argv = opencode_sandbox_prefix(roots=[tmp_path / "root"])
+
+    # systemd-resolved links /etc/resolv.conf into /run, which is not bound;
+    # without its target every lookup in the sandbox fails (#1186).
+    target = str(run.resolve())
+    at = argv.index(target)
+    assert argv[at - 1] == "--ro-bind"
