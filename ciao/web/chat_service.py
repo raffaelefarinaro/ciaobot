@@ -570,9 +570,11 @@ def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
         normalized["task_summary"] = str(value.get("task_summary") or "")[:4000]
         normalized["completion_id"] = str(value.get("completion_id") or "")[:64]
         normalized["completed_at"] = str(value.get("completed_at") or "")[:64]
-        normalized["user_resolution"] = str(value.get("user_resolution") or "")[
-            :MEMORY_PASS_RESOLUTION_MAX
-        ]
+        # Over-length is dropped, not sliced: a cut resolution reads as the user's words.
+        resolution = str(value.get("user_resolution") or "")
+        normalized["user_resolution"] = (
+            resolution if len(resolution) <= MEMORY_PASS_RESOLUTION_MAX else ""
+        )
     return normalized
 
 

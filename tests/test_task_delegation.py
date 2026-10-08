@@ -2830,6 +2830,52 @@ async def test_approving_a_delegated_result_archives_its_chat_and_queues_a_learn
     assert focus["completion_id"]
 
 
+async def test_approving_with_an_over_length_resolution_drops_it_from_the_focus(
+    tmp_path: Path,
+) -> None:
+    """#1182: a resolution over the pass limit is dropped, never cut to fit.
+
+    The approval still succeeds and the pass still runs on the transcript; only
+    the user's own words are left out, rather than a truncated copy passed on as
+    them.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Long resolution")
+    outcome = _delegate(plane, task)
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    archived: list[str] = []
+    postprocessed: list[tuple[str, Any]] = []
+
+    async def archive_chat(chat_id: str) -> Any:
+        archived.append(chat_id)
+        return SimpleNamespace(path=tmp_path / "archive.md", turn_count=3)
+
+    pcm.archive_chat = archive_chat  # type: ignore[attr-defined]
+    pcm.run_archive_postprocess = (  # type: ignore[attr-defined]
+        lambda chat_id, outcome, chat, project, focus=None: postprocessed.append((chat_id, focus))
+    )
+    current = _get_task(plane, task["id"])
+
+    await asyncio.to_thread(
+        plane.workspace_task_action,
+        "personal",
+        "complete",
+        task["id"],
+        expected_revision=current["revision"],
+        actor="user",
+        resolution="x" * 8001,
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    assert [chat_id for chat_id, _ in postprocessed] == [outcome["chat_id"]]
+    focus = postprocessed[0][1]
+    assert focus["focus"] == "approved_task"
+    assert focus["user_resolution"] == ""
+    assert focus["completion_id"]
+
+
 async def test_approving_a_review_records_the_resolution_on_the_same_write(
     tmp_path: Path,
 ) -> None:

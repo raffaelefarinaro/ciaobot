@@ -383,9 +383,7 @@ def test_lesson_routing_section_formats_every_placeholder() -> None:
     A JSON example spelled out here would be read as a field and raise on the
     first turn of every pass that reaches this path.
     """
-    rendered = memory_pass.LESSON_ROUTING_PROMPT.format(
-        inventory="notes, web-research", routing=memory_pass.DRAFT_COMMAND
-    )
+    rendered = _rendered_chat_lesson_routing()
     assert "notes, web-research" in rendered
     assert memory_pass.DRAFT_COMMAND in rendered
     assert "{" not in rendered and "}" not in rendered
@@ -400,7 +398,7 @@ def test_the_lesson_path_is_a_separate_candidate_set_not_a_relaxed_one() -> None
     the conversation it came from. Dropping either turns this into the failure
     the change was made to fix.
     """
-    prompt = memory_pass.LESSON_ROUTING_PROMPT
+    prompt = _rendered_chat_lesson_routing()
     assert "CANDIDATE, never proof" in prompt
     assert "whether or not this conversation happened to load it" in prompt
     assert "Never record it as a `sources` entry or a `turn`" in prompt
@@ -422,7 +420,7 @@ def test_the_lesson_path_names_both_non_owned_destinations() -> None:
     name a target that does not exist. Both need a destination and both are
     `[review]` drafts a person acts on.
     """
-    prompt = memory_pass.LESSON_ROUTING_PROMPT
+    prompt = _rendered_chat_lesson_routing()
     assert "NOT this workspace's own" in prompt
     assert "discarded by the next sync" in prompt
     assert "`[review]` draft" in prompt
@@ -435,6 +433,82 @@ def test_the_lesson_path_names_both_non_owned_destinations() -> None:
     # And the two attended actions are named as attended.
     assert "the draft is where your turn ends" in prompt
     assert "neither may the nightly Workspace care run" in prompt
+
+
+def _rendered_chat_lesson_routing() -> str:
+    """The lesson section as a chat pass renders it, for the phrase checks above."""
+    return memory_pass.LESSON_ROUTING_PROMPT.format(
+        inventory="notes, web-research",
+        routing=memory_pass.DRAFT_COMMAND,
+        source="conversation",
+        evidence="transcript",
+    )
+
+
+# The lesson section as it rendered before the {source} and {evidence} fields
+# (#1182), for the listing "notes" and the routing command. A chat pass must keep
+# producing exactly this text.
+_CHAT_LESSON_ROUTING_BEFORE = """A lesson is a different kind of finding. This workspace's `Workspace/Learnings.md` holds reusable lessons, and a `/remember` of one lands in that same document, so read it before you decide a lesson has nowhere to go. A lesson applies to a skill whether or not this conversation happened to load it, and that is a path of its own: LISTING_SENTINEL
+
+An inventory match is a CANDIDATE, never proof. Read the skill's current source, and file only when you can say both why it applies to this lesson and what the conversation actually showed — the failure, the correction, or the step whose absence changed the result. If the skill already says it, file nothing: an already-covered lesson needs no proposal, and one that repeats guidance is noise a person has to read to dismiss.
+
+When one of those owned skills is the answer, file a proposal for it rather than an edit. Write a JSON object to a scratch file — a `title`, a `problem` saying what went wrong, a `change` giving the exact instruction to add or replace, and a `rationale` — then run `ciao skill-proposal-add NAME --input-file FILE`, where NAME is that skill's own name and there is one file per skill. Add an `origins` list to the same object, where every entry carries the `learning_id` that the learning's own `ciao:learning` comment in `Workspace/Learnings.md` already holds, a `finding` naming the one specific thing in that entry this change addresses, the `source_revision` being the sha256 of that entry's own canonical line — the exact bytes of the bullet you read, `ciao:learning` comment included — and a one-line `summary` of the change. It is that entry's line and not the whole document because a revision is what proves the finding was written against text that is still there: any other edit to `Learnings.md` leaves your entry untouched and must not cancel it, and conversely a later rewording of *this* entry must. Never record it as a `sources` entry or a `turn` for a skill this conversation never used: that would claim the transcript demonstrated something it did not, and a fabricated source is worse than an unlinked finding. Every one of those fields is text you read, so none of it may travel as a shell argument, and never write into the `Workspace/Skill-Proposals/` folder by hand.
+
+When the skill a lesson applies to is NOT this workspace's own — a packaged or mirrored copy under `.claude/skills`, a shared source, or a skill of another project — it is not yours to edit: a local edit there is discarded by the next sync. File a `[review]` draft instead, through `ciao skill-draft-add --input-file FILE`. It names the skill, the owning repository and version when you can identify them, and a `body` that is the lesson written so a stranger could reproduce it: what was done, what went wrong, and the instruction that would have prevented it. No transcript excerpt, no chat or vault path, no name, no credential — a public issue is public, and the draft keeps your private evidence locally either way. If you cannot identify the owning repository, say so in the draft rather than guessing at one.
+
+When no skill fits at all and the lesson is a reusable workflow, file a `[review]` draft for a new skill with the same command: a proposed `skill` name, the `change` holding the purpose, the trigger that should load it and the instruction it should carry. A person creates the file, reads it back and syncs it; you do not create a directory, and you do not aim the edit-only `ciao skill-proposal-add` at a name that does not exist yet — it refuses that on purpose. Either way the draft is where your turn ends: you do not open the issue or create the skill, and neither may the nightly Workspace care run, which files the same drafts and reports them for a person to approve."""
+
+
+def test_chat_pass_lesson_routing_text_is_unchanged(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """A chat pass renders the lesson section byte-identical to before #1182."""
+    _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
+    _write_owned_skill(tmp_path, "notes")
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    archive = _archive_file(tmp_path)
+
+    manager.enqueue_memory_pass(
+        source, manager.get_project(source.project_id), archive, ""
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    listing = (
+        "These are the skills this workspace owns, and any of them may be the one "
+        "a lesson applies to: notes"
+    )
+    expected = "\n\n" + _CHAT_LESSON_ROUTING_BEFORE.replace("LISTING_SENTINEL", listing)
+    assert prompt.endswith(expected)
+
+
+def test_task_completion_pass_lesson_routing_names_the_resolution_not_a_conversation(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """A task-completion pass has no conversation or transcript to point at.
+
+    Its only source is the user's quoted resolution, so the lesson section must
+    name that, and must not claim a conversation or transcript was read.
+    """
+    _register_work_workspace(tmp_path)
+    _write_learnings(tmp_path)
+    _write_owned_skill(tmp_path, "notes")
+    manager = _make_manager(tmp_path)
+    manager.enqueue_task_completion(
+        workspace="work",
+        task_path=_TASK_PATH,
+        completion_id=_COMPLETION_ID,
+        resolution=_RESOLUTION,
+        completed_at="2026-10-08T10:00:00+00:00",
+    )
+
+    prompt = str(streams.calls[0]["prompt"])
+    section = prompt[prompt.index("A lesson is a different kind") :]
+    assert "These are the skills this workspace owns" in section
+    assert "whether or not this resolution happened to load it" in section
+    assert "conversation" not in section
+    assert "transcript" not in section
 
 
 def test_a_lesson_with_an_applicable_but_unused_skill_reaches_the_pass(
@@ -1521,3 +1595,22 @@ def test_approved_focus_fences_the_user_resolution_and_round_trips() -> None:
     assert "</quoted-resolution>" not in memory_pass.MemoryPassCoordinator._focus_section(
         hostile
     )
+
+
+def test_over_length_user_resolution_is_dropped_not_truncated() -> None:
+    """A resolution over the limit is dropped; a cut one would read as the user's words."""
+    at_limit = "x" * chat_service.MEMORY_PASS_RESOLUTION_MAX
+    over = "x" * (chat_service.MEMORY_PASS_RESOLUTION_MAX + 1)
+    base = {
+        "kind": "memory_pass",
+        "source_chat_id": "chat-1",
+        "state": "queued",
+        "archive_policy": "when_clean",
+        "focus": "approved_task",
+        "task_title": "Ship the board",
+        "task_summary": "Did the work.",
+    }
+    kept = chat_service._normalize_chat_helper({**base, "user_resolution": at_limit})
+    dropped = chat_service._normalize_chat_helper({**base, "user_resolution": over})
+    assert kept["user_resolution"] == at_limit
+    assert dropped["user_resolution"] == ""

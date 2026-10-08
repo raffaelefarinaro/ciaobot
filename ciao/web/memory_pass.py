@@ -236,6 +236,12 @@ SKILL_REVIEW_PROMPT = (
 #: new one, because the edit-only filer cannot name a target that does not exist
 #: and the resolver must keep refusing to.
 #:
+#: ``{source}`` and ``{evidence}`` name what the section reads from: a chat pass
+#: fills them with ``conversation`` and ``transcript``, a task-completion pass
+#: with ``resolution`` for both, because it has no conversation or transcript,
+#: only the user's quoted resolution. The articles stay literal in the text, so a
+#: chat pass renders byte-identical to the text from before the fields existed.
+#:
 #: ``{inventory}`` is the whole owned catalog or a sentence saying there is none,
 #: and it is deliberately the *inventory* rather than a shortlist: choosing which
 #: of a workspace's skills a lesson applies to is the judgement, and a backend
@@ -254,11 +260,11 @@ LESSON_ROUTING_PROMPT = (
     "\n\nA lesson is a different kind of finding. This workspace's "
     "`Workspace/Learnings.md` holds reusable lessons, and a `/remember` of one "
     "lands in that same document, so read it before you decide a lesson has "
-    "nowhere to go. A lesson applies to a skill whether or not this conversation "
+    "nowhere to go. A lesson applies to a skill whether or not this {source} "
     "happened to load it, and that is a path of its own: {inventory}\n\n"
     "An inventory match is a CANDIDATE, never proof. Read the skill's current "
     "source, and file only when you can say both why it applies to this lesson "
-    "and what the conversation actually showed — the failure, the correction, or "
+    "and what the {source} actually showed — the failure, the correction, or "
     "the step whose absence changed the result. If the skill already says it, "
     "file nothing: an already-covered lesson needs no proposal, and one that "
     "repeats guidance is noise a person has to read to dismiss.\n\n"
@@ -278,7 +284,7 @@ LESSON_ROUTING_PROMPT = (
     "is still there: any other edit to `Learnings.md` leaves your entry untouched "
     "and must not cancel it, and conversely a later rewording of *this* entry must. "
     "Never record it as a `sources` entry or a `turn` "
-    "for a skill this conversation never used: that would claim the transcript "
+    "for a skill this {source} never used: that would claim the {evidence} "
     "demonstrated something it did not, and a fabricated source is worse than an "
     "unlinked finding. Every one of those fields is text you read, so none of it "
     "may travel as a shell argument, and never write into the "
@@ -290,7 +296,7 @@ LESSON_ROUTING_PROMPT = (
     "names the skill, the owning repository and version when you can identify "
     "them, and a `body` that is the lesson written so a stranger could reproduce "
     "it: what was done, what went wrong, and the instruction that would have "
-    "prevented it. No transcript excerpt, no chat or vault path, no name, no "
+    "prevented it. No {evidence} excerpt, no chat or vault path, no name, no "
     "credential — a public issue is public, and the draft keeps your private "
     "evidence locally either way. If you cannot identify the owning repository, "
     "say so in the draft rather than guessing at one.\n\n"
@@ -739,8 +745,17 @@ class MemoryPassCoordinator:
                 "the one a lesson applies to: "
                 + ", ".join(inventory)
             )
+        # A task-completion pass has no conversation and no transcript, only the
+        # quoted resolution, so the section must name that and nothing else.
+        if helper.get("source_kind") == chat_service.TASK_COMPLETION_SOURCE:
+            source, evidence = "resolution", "resolution"
+        else:
+            source, evidence = "conversation", "transcript"
         return section + LESSON_ROUTING_PROMPT.format(
-            inventory=listing, routing=DRAFT_COMMAND
+            inventory=listing,
+            routing=DRAFT_COMMAND,
+            source=source,
+            evidence=evidence,
         )
 
     def _reviewable_skills(self, chat: ChatInfo, helper: dict) -> list[str]:

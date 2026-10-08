@@ -74,6 +74,7 @@ from ciao.task_resolution import (
     parse_completions,
     strip_completions,
 )
+from ciao.web.chat_service import MEMORY_PASS_RESOLUTION_MAX
 from ciao.web.routes_webhooks import webhook_store
 from ciao.webhooks import (
     WebhookStore,
@@ -3048,6 +3049,18 @@ class CiaoControlPlane:
         resolution rides in the focus as the user's own words, separate from the
         agent's summary, and empty when the approval saved none.
         """
+        resolution = completion.resolution if completion is not None else ""
+        if len(resolution) > MEMORY_PASS_RESOLUTION_MAX:
+            # Dropped, not sliced: a cut resolution would reach the pass as the
+            # user's words. The pass still runs on the transcript.
+            logger.warning(
+                "Resolution for task %r is %d characters, over the %d limit; "
+                "the approved-task pass runs without it",
+                title,
+                len(resolution),
+                MEMORY_PASS_RESOLUTION_MAX,
+            )
+            resolution = ""
         focus = {
             "focus": "approved_task",
             "task_title": title,
@@ -3056,7 +3069,7 @@ class CiaoControlPlane:
             "completed_at": (
                 completion.completed_at.isoformat() if completion is not None else ""
             ),
-            "user_resolution": completion.resolution if completion is not None else "",
+            "user_resolution": resolution,
         }
 
         async def _run() -> None:
