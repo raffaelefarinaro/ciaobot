@@ -1057,6 +1057,65 @@ def test_literal_completion_and_edited_comments_survive_managed_resolution_edits
         current = edited
 
 
+@pytest.mark.parametrize("attempt_id", ["", "b" * 32])
+@pytest.mark.parametrize("multiline", [False, True])
+def test_literal_attempt_suffix_survives_managed_completion_and_edits(
+    tmp_path: Path, attempt_id: str, multiline: bool,
+) -> None:
+    clock = Clock()
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", clock)
+    literal = " · attempt `" + "a" * 32 + "`"
+    resolution = "Fixed" + literal
+    if multiline:
+        resolution += f"\nMention {COMPLETIONS_OPEN} and {COMPLETIONS_CLOSE}\nLast" + literal
+    created = store.create(title="T", body="Description.")
+    done = store.update(
+        created.record.id, expected_revision=created.revision,
+        changes={"status": "done"}, actor="user", resolution=resolution,
+        attempt_id=attempt_id,
+    )
+    original = parse_completions(store.get(done.record.id).body)[0]
+    assert original.resolution.encode() == resolution.encode()
+    assert original.attempt_id == attempt_id
+    current = done
+    for hour, text in ((9, "Edited " + resolution), (10, "Reworded" + literal)):
+        clock.now = datetime(2026, 10, 9, hour, tzinfo=UTC)
+        edited = store.update(
+            current.record.id, expected_revision=current.revision,
+            changes={}, actor="user", resolution=text,
+        )
+        assert edited.revision != current.revision
+        parsed = parse_completions(store.get(edited.record.id).body)[0]
+        assert parsed.resolution.encode() == text.encode()
+        assert parsed.attempt_id == attempt_id
+        assert parsed.id == original.id
+        assert parsed.completed_at == original.completed_at
+        assert parsed.edited_at == clock.now
+        prompt = build_prompt(
+            title="T", status="done", due="", project_id="",
+            task_id=edited.record.id, task_revision=edited.revision,
+            relative_path="Workspace/Tasks/task.md", body=edited.body,
+        )
+        assert "Description." in prompt
+        assert "Reworded" not in prompt
+        assert "Edited" not in prompt
+        assert "<!-- completion:" not in prompt
+        assert COMPLETIONS_OPEN not in prompt
+        assert COMPLETIONS_CLOSE not in prompt
+        assert literal not in prompt
+        current = edited
+    # Rewording without any suffix must not carry an invented attempt forward.
+    plain = store.update(
+        current.record.id, expected_revision=current.revision,
+        changes={}, actor="user", resolution="Plain resolution",
+    )
+    parsed = parse_completions(plain.body)[0]
+    assert parsed.resolution == "Plain resolution"
+    assert parsed.attempt_id == attempt_id
+    assert parsed.id == original.id
+    assert parsed.completed_at == original.completed_at
+
+
 def test_moving_to_done_records_a_completion_and_a_replay_does_not(
     tmp_path: Path,
 ) -> None:

@@ -281,3 +281,60 @@ def test_marker_escape_is_injective_for_raw_escaped_and_doubled() -> None:
         assert len(refound) == 1
         assert refound[0].resolution == resolution + " v2"
         assert refound[0].completed_at == completion.completed_at
+
+
+@pytest.mark.parametrize("attempt_id", ["", "b" * 32])
+def test_attempt_prose_encoding_is_injective_and_survives_rewrites(
+    attempt_id: str,
+) -> None:
+    literal = " · attempt `" + "a" * 32 + "`"
+    cases = [
+        "Fixed" + literal,
+        "Fixed" + literal + literal,
+        "First" + literal + "\nLast" + literal,
+        "Fixed" + literal + "\n" + OPEN + "\n" + CLOSE,
+        "&amp;copy; stays unrelated",
+    ]
+    encoded = [
+        "&" + "amp;" * depth + "middot; attempt `" + "a" * 32 + "`"
+        for depth in range(101)
+    ]
+    cases.extend(encoded)
+    cases.append("Mixed" + literal + "\n" + "\n".join(encoded))
+    rendered: set[str] = set()
+    for resolution in cases:
+        completion = Completion(
+            id="c" * 32,
+            completed_at=datetime(2026, 10, 8, 8, tzinfo=UTC),
+            resolution=resolution,
+            attempt_id=attempt_id,
+        )
+        body = append_completion("Description.", completion)
+        assert body not in rendered
+        rendered.add(body)
+        assert parse_completions(body) == [completion]
+        edited_at = datetime(2026, 10, 9, 9, tzinfo=UTC)
+        edited = replace_resolution(body, completion.id, resolution, edited_at)
+        found = parse_completions(edited)
+        assert len(found) == 1
+        assert found[0].resolution.encode() == resolution.encode()
+        assert found[0].attempt_id == attempt_id
+        assert found[0].id == completion.id
+        assert found[0].completed_at == completion.completed_at
+        assert found[0].edited_at == edited_at
+        assert strip_completions(edited) == "Description.\n"
+
+
+def test_existing_plain_resolution_and_engine_attempt_suffix_still_parse() -> None:
+    body = (
+        f"{OPEN}\n{HEADING}\n\n"
+        "- 2026-10-08T08:00:00+00:00 · Original resolution · attempt `"
+        + "b" * 32
+        + "` <!-- completion:"
+        + "c" * 32
+        + f" -->\n{CLOSE}\n"
+    )
+    assert parse_completions(body) == [Completion(
+        id="c" * 32, completed_at=datetime(2026, 10, 8, 8, tzinfo=UTC),
+        resolution="Original resolution", attempt_id="b" * 32,
+    )]

@@ -77,7 +77,7 @@ def mint_id() -> str:
     return uuid.uuid4().hex
 
 
-#: Rendered forms of the section markers inside resolution text. A resolution
+#: Rendered forms of metadata-like prose inside resolution text. A resolution
 #: is user prose and may name the markers literally; embedding them verbatim
 #: would terminate the section early (the section match ends at the first
 #: closing marker), so the renderer escapes them and the parser restores
@@ -88,30 +88,41 @@ def mint_id() -> str:
 #: and every input round-trips exactly.
 _ESCAPED_OPEN = "&lt;!-- ciao:task-completions --&gt;"
 _ESCAPED_CLOSE = "&lt;!-- /ciao:task-completions --&gt;"
+_ATTEMPT_TEXT = "· attempt `"
+_ESCAPED_ATTEMPT = "&middot; attempt `"
 
-#: ``&`` plus any stacked ``amp;`` levels plus either encoded-marker tail.
-#: Matches only the two marker encodings, so unrelated entities such as
+#: ``&`` plus any stacked ``amp;`` levels plus an encoded metadata tail.
+#: Matches only these encodings, so unrelated entities such as
 #: ``&amp;copy;`` pass through untouched.
-_ENCODED_TAIL = re.compile(r"&((?:amp;)*)(lt;!-- /?ciao:task-completions --&gt;)")
+_ENCODED_TAIL = re.compile(
+    r"&((?:amp;)*)(lt;!-- /?ciao:task-completions --&gt;|middot; attempt `)"
+)
 
 
 def _escape_markers(text: str) -> str:
-    """Resolution text with literal section markers escaped for rendering."""
+    """Escape section markers and attempt prose without conflating encodings."""
     stacked = _ENCODED_TAIL.sub(
         lambda match: "&amp;" + match.group(1) + match.group(2), text
     )
-    return stacked.replace(OPEN, _ESCAPED_OPEN).replace(CLOSE, _ESCAPED_CLOSE)
+    return (
+        stacked.replace(OPEN, _ESCAPED_OPEN)
+        .replace(CLOSE, _ESCAPED_CLOSE)
+        .replace(_ATTEMPT_TEXT, _ESCAPED_ATTEMPT)
+    )
 
 
 def _unescape_markers(text: str) -> str:
-    """Parsed item text with escaped section markers restored to literals."""
+    """Restore prose only after the parser has removed engine metadata."""
     parts: list[str] = []
     position = 0
     for match in _ENCODED_TAIL.finditer(text):
         parts.append(text[position : match.start()])
         stacked, tail = match.group(1), match.group(2)
         if not stacked:
-            parts.append(OPEN if tail == _ESCAPED_OPEN[1:] else CLOSE)
+            if tail == _ESCAPED_ATTEMPT[1:]:
+                parts.append(_ATTEMPT_TEXT)
+            else:
+                parts.append(OPEN if tail == _ESCAPED_OPEN[1:] else CLOSE)
         else:
             parts.append("&" + stacked[4:] + tail)
         position = match.end()
@@ -128,7 +139,8 @@ def render_completion(completion: Completion) -> str:
     The rest of the resolution follows as indented continuation lines, so a
     multi-line resolution never reads as new items. Literal section markers
     in the resolution are escaped, so they stay user prose rather than
-    becoming section syntax.
+    becoming section syntax. Literal attempt suffixes are escaped too, so only
+    the raw suffix appended by the engine can attribute the completion.
     """
     when = completion.completed_at.astimezone(UTC).isoformat(timespec="seconds")
     note = _escape_markers(completion.resolution.strip())
