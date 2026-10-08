@@ -13,6 +13,7 @@ import type {
   TaskAttempt,
   TaskAttemptOutcome,
   TaskAttemptState,
+  TaskCompletion,
   TaskDetail,
   TaskInvalidRow,
   TaskRow,
@@ -171,6 +172,8 @@ function taskFrom(raw: Partial<Task> | null | undefined): Task {
     attempt_detail: asString(row.attempt_detail),
     live_attempt_id: asString(row.live_attempt_id),
     changed_since_delegated: row.changed_since_delegated === true,
+    completed_at: row.completed_at ? asString(row.completed_at) : null,
+    has_resolution: row.has_resolution === true,
   }
 }
 
@@ -216,11 +219,45 @@ export function taskRowsFrom(json: unknown): TaskRow[] {
  * editor would then refuse to trim.
  */
 export function taskDetailFrom(json: unknown): TaskDetail {
-  const raw = (json ?? {}) as Partial<Task> & { body?: unknown }
+  const raw = (json ?? {}) as Partial<Task> & {
+    body?: unknown
+    resolution?: unknown
+    completions?: unknown
+    delegation_log?: unknown
+  }
   // An unreadable-file row has no task fields at all; reading it as a task would
   // put an empty card on the board.
   const base = isTaskInvalidRow(raw as TaskRow) ? emptyTask() : taskFrom(raw)
-  return { ...base, body: typeof raw.body === 'string' ? raw.body : '' }
+  return {
+    ...base,
+    body: typeof raw.body === 'string' ? raw.body : '',
+    resolution: asString(raw.resolution),
+    completions: taskCompletionsFrom(raw.completions),
+    delegation_log: asString(raw.delegation_log),
+  }
+}
+
+/**
+ * The completion history a get answers with, newest first as the server sends it.
+ *
+ * Each entry is read defensively; an entry with no id or no stamp is dropped rather
+ * than drawn as an undated completion.
+ */
+export function taskCompletionsFrom(raw: unknown): TaskCompletion[] {
+  if (!Array.isArray(raw)) return []
+  const out: TaskCompletion[] = []
+  for (const entry of raw) {
+    const item = (entry ?? {}) as Partial<TaskCompletion>
+    if (!item.id || !item.completed_at) continue
+    out.push({
+      id: asString(item.id),
+      completed_at: asString(item.completed_at),
+      resolution: asString(item.resolution),
+      edited_at: item.edited_at ? asString(item.edited_at) : null,
+      attempt_id: asString(item.attempt_id),
+    })
+  }
+  return out
 }
 
 /** The readable tasks in a row list, in the order the server sent them. */
@@ -261,6 +298,8 @@ export function toTaskListRow(detail: TaskDetail | Task): Task {
     attempt_detail: detail.attempt_detail,
     live_attempt_id: detail.live_attempt_id,
     changed_since_delegated: detail.changed_since_delegated,
+    completed_at: detail.completed_at,
+    has_resolution: detail.has_resolution,
   }
 }
 
@@ -614,12 +653,15 @@ export interface TaskLane {
 /**
  * Whether a done task was finished today, in the viewer's own day.
  *
- * The record has no completion stamp, so its last write stands in for one:
- * completing a task writes it, and an edit to an old done task brings it back
- * for the day, which is the honest reading of "touched today".
+ * Read from `completed_at`, the stamp of the latest completion. `updated_at` is
+ * not a stand-in: an edit to an old done task (a title fix, a resolution reword)
+ * moves it without finishing anything. A done task with no completion stamp
+ * (every task completed before completion records existed) is not today's either:
+ * it is counted behind Show all, like any earlier-dated one.
  */
 export function doneToday(task: Task, now: Date = new Date()): boolean {
-  const at = new Date(task.updated_at)
+  if (!task.completed_at) return false
+  const at = new Date(task.completed_at)
   if (Number.isNaN(at.getTime())) return false
   return at.getFullYear() === now.getFullYear()
     && at.getMonth() === now.getMonth()
@@ -630,6 +672,12 @@ export function doneToday(task: Task, now: Date = new Date()): boolean {
  * The unfiltered board keeps Done to today: the column is where a finished
  * card visibly lands, not a history that grows for ever. The Done filter
  * lists every done task.
+ *
+ * A done task that is not finished today, undated ones included, sits behind
+ * Show all and is counted there. An undated one is never labelled or counted as
+ * today, and it is not kept in the lane: after upgrade, every task completed
+ * before completion records existed is undated, and keeping them would flood the
+ * column for good.
  */
 function withDoneToday(tasks: Task[], now: Date): { kept: Task[]; earlierDone: number } {
   const kept: Task[] = []
@@ -641,12 +689,21 @@ function withDoneToday(tasks: Task[], now: Date): { kept: Task[]; earlierDone: n
   return { kept, earlierDone }
 }
 
+/** When a completion was recorded, as a card reads it; empty when the stamp is unusable. */
+export function formatCompletedAt(completedAt: string | null): string {
+  if (!completedAt) return ''
+  const date = new Date(completedAt)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  })
+}
+
 /**
  * The lanes the board draws.
  *
- * With no status picked, both layouts keep the four fixed status groups.
- * Layout decides whether they sit beside each other or stack vertically.
- * Picking a status narrows either layout to that one group.
+ * With no status picked, the board keeps the four fixed status groups, side by
+ * side at every pane width. Picking a status narrows the board to that one group.
  */
 export function taskLanes(
   tasks: Task[],

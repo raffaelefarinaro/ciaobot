@@ -72,6 +72,10 @@ function task(overrides: Partial<Task> = {}): Task {
     attempt_detail: '',
     live_attempt_id: '',
     changed_since_delegated: false,
+    // A done fixture is finished today, as the board's own fixtures say; a test that
+    // needs an undated done task passes `completed_at: null` explicitly.
+    completed_at: overrides.status === 'done' ? '2026-03-01T08:00:00Z' : null,
+    has_resolution: false,
     ...overrides,
   }
 }
@@ -201,20 +205,29 @@ describe('TaskBoardView', () => {
     expect(boardReads()).toBe(before + 1)
   })
 
-  it('keeps Done to today, with the rest one click away', async () => {
+  it('keeps Done to today by completion time, with the rest one click away', async () => {
     const wrapper = await mountBoard([
-      task({ id: 'today', title: 'Landed today', status: 'done' }),
-      task({ id: 'old', title: 'Landed last week', status: 'done', updated_at: '2026-02-20T09:00:00+00:00' }),
+      task({ id: 'today', title: 'Landed today', status: 'done', completed_at: '2026-03-01T08:00:00Z' }),
+      // Completed last week, edited today: the edit does not make it today's.
+      task({
+        id: 'old', title: 'Landed last week', status: 'done',
+        completed_at: '2026-02-20T09:00:00+00:00', updated_at: '2026-03-01T09:00:00+00:00',
+      }),
+      // No completion stamp (completed before records existed): not today's, so it
+      // sits behind Show all with the earlier one.
+      task({ id: 'untimed', title: 'Done without a stamp', status: 'done', completed_at: null }),
     ])
     const done = lanes(wrapper).find((lane) => lane.get('.task-lane-label').text() === 'Done')!
     expect(done.text()).toContain('Landed today')
+    expect(done.text()).not.toContain('Done without a stamp')
     expect(done.text()).not.toContain('Landed last week')
     const more = done.get('.task-lane-more')
-    expect(more.text()).toBe('1 done earlier · Show all')
+    expect(more.text()).toBe('2 done earlier · Show all')
 
     await more.trigger('click')
     await nextTick()
     expect(wrapper.text()).toContain('Landed last week')
+    expect(wrapper.text()).toContain('Done without a stamp')
     expect(wrapper.find('.task-lane-more').exists()).toBe(false)
   })
 
@@ -271,16 +284,19 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
-  it('names each narrow group in its heading without repeating status on cards', async () => {
+  it('names each lane in its heading, without repeating status on cards, at a narrow pane', async () => {
     const wrapper = await mountBoard()
     reportPaneWidth(390)
     await nextTick()
     expect(lanes(wrapper)).toHaveLength(4)
+    // The four lanes share one row; the board scrolls them sideways.
+    expect(wrapper.findAll('.task-lanes')).toHaveLength(1)
+    expect(wrapper.get('.task-lanes').classes()).toContain('task-lanes--columns')
     const review = lanes(wrapper).find(lane => lane.get('.task-lane-label').text() === 'In review')!
     expect(review.text()).toContain('Wait on a key')
     expect(card(wrapper, 'Wait on a key').find('.task-status-badge').exists()).toBe(false)
-    // Stacked groups do not offer horizontal drag gestures.
-    expect(card(wrapper, 'Wait on a key').attributes('draggable')).toBe('false')
+    // The lanes stay side by side at every width, so drag holds at a narrow pane.
+    expect(card(wrapper, 'Wait on a key').attributes('draggable')).toBe('true')
     wrapper.unmount()
   })
 
@@ -1107,6 +1123,94 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
+  it('does not render Reload on a healthy board', async () => {
+    const wrapper = await mountBoard()
+    expect(wrapper.get('.task-lede').text()).toContain('3 open of 4')
+    expect(wrapper.findAll('button').some((b) => b.text() === 'Reload')).toBe(false)
+    wrapper.unmount()
+  })
+
+  /** Serve one task's detail read for the open dialog, and the board list for everything else. */
+  function mockShipDetail() {
+    apiGet.mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/tasks/ship?')
+        ? detailAnswer(task(), '')
+        : url.includes('/api/tasks?') ? { workspace: 'personal', tasks: BOARD } : {},
+    ))
+  }
+
+  /** Open the "Ship the board" dialog and its resolution sheet. */
+  async function openResolutionSheet(wrapper: ReturnType<typeof mount>) {
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    const start = wrapper.findAll('.task-resolution button').find((b) => b.text() === 'Complete with resolution…')!
+    await start.trigger('click')
+    await nextTick()
+  }
+
+  it('completes with a resolution in one request, and cancel does not post', async () => {
+    const wrapper = await mountBoard()
+    mockShipDetail()
+    apiPost.mockResolvedValue({
+      workspace: 'personal',
+      task: { ...task({ status: 'done', completed_at: '2026-03-01T12:00:00+00:00', has_resolution: true }), revision: THIRD_REVISION, body: '', resolution: 'Checked it', completions: [], delegation_log: '' },
+    })
+    await openResolutionSheet(wrapper)
+
+    // Cancel first: the sheet closes and nothing is sent.
+    const sheet = () => wrapper.find('.task-resolution-sheet')
+    expect(sheet().exists()).toBe(true)
+    await sheet().findAll('button').find((b) => b.text() === 'Cancel')!.trigger('click')
+    await nextTick()
+    expect(sheet().exists()).toBe(false)
+    expect(apiPost).not.toHaveBeenCalled()
+
+    // Reopen, write the note, and submit: one POST carrying status and note.
+    await openResolutionSheet(wrapper)
+    await wrapper.get('#task-resolution-text').setValue('Checked the export by hand')
+    await sheet().get('form').trigger('submit')
+    await flushPromises()
+    await nextTick()
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
+      workspace: 'personal',
+      expected_revision: NEXT_REVISION,
+      resolution: 'Checked the export by hand',
+    })
+    expect(apiPatch).not.toHaveBeenCalled()
+    expect(sheet().exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the resolution draft when the complete request conflicts, and Refresh task keeps it too', async () => {
+    const wrapper = await mountBoard()
+    mockShipDetail()
+    apiPost.mockRejectedValue(Object.assign(new Error('HTTP 409'), {
+      payload: { error: { code: 'task_revision_conflict', message: 'that task changed on disk', retryable: true } },
+    }))
+    await openResolutionSheet(wrapper)
+    await wrapper.get('#task-resolution-text').setValue('Draft note')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
+    await flushPromises()
+    await nextTick()
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('.task-resolution-sheet .task-action-error').text()).toContain('that task changed on disk')
+    expect((wrapper.get('#task-resolution-text').element as HTMLTextAreaElement).value).toBe('Draft note')
+
+    // Refresh task re-reads the board and the task; the draft is still there and
+    // no second write went out on its own.
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Refresh task')!.trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect((wrapper.get('#task-resolution-text').element as HTMLTextAreaElement).value).toBe('Draft note')
+    expect(wrapper.find('.task-resolution-sheet .task-action-error').exists()).toBe(false)
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
   it('offers a Reload beside a refused write, and recovers from the 409', async () => {
     const wrapper = await mountBoard()
     apiPatch.mockRejectedValue(Object.assign(new Error('HTTP 409'), {
@@ -1217,7 +1321,7 @@ describe('TaskBoardView', () => {
 
   // The pane's own width decides, at the same 940px the CSS breakpoint uses.
   // A wide window can still have a narrow pane with the sidebar open.
-  it('preserves status groups when the pane narrows and disables column gestures', async () => {
+  it('keeps the four lanes side by side, with column gestures on, when the pane narrows', async () => {
     const original = window.innerWidth
     Object.defineProperty(window, 'innerWidth', { value: 1600, configurable: true })
     try {
@@ -1226,14 +1330,16 @@ describe('TaskBoardView', () => {
       await nextTick()
       expect(lanes(wrapper)).toHaveLength(4)
 
-      // Narrow pane, wide window: the same four groups, stacked by CSS.
+      // Narrow pane, wide window: the same four groups, still one row. The board
+      // scrolls them sideways; nothing is stacked and no gesture is switched off.
       reportPaneWidth(700)
       await nextTick()
       expect(lanes(wrapper).map(lane => lane.get('.task-lane-label').text()))
         .toEqual(['To do', 'In progress', 'In review', 'Done'])
+      expect(wrapper.findAll('.task-lanes')).toHaveLength(1)
       expect(wrapper.findAll('.task-card')).toHaveLength(4)
-      expect(wrapper.findAll('.task-card').every(card => card.attributes('draggable') === 'false')).toBe(true)
-      expect(wrapper.get('.task-open').attributes('aria-keyshortcuts')).toBeUndefined()
+      expect(wrapper.findAll('.task-card').every(card => card.attributes('draggable') === 'true')).toBe(true)
+      expect(wrapper.get('.task-open').attributes('aria-keyshortcuts')).toBe('Shift+ArrowLeft Shift+ArrowRight')
       // …and picking a status is how the list narrows.
       await wrapper.findAll('.task-chip').find((c) => c.text().startsWith('Done'))!.trigger('click')
       await nextTick()
@@ -1822,6 +1928,8 @@ describe('TaskBoardView', () => {
         task: {
           ...reviewed,
           status: 'done',
+          // The completion just recorded its stamp, as the server does.
+          completed_at: '2026-03-01T12:00:00+00:00',
           chat_id: '',
           attempt_id: '',
           attempt_state: 'ready_for_review',

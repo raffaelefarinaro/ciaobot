@@ -18,7 +18,7 @@ For task-oriented reading paths, start with the [documentation hub](README.md).
 
 The chat's Work details rail is a closable docked window, using the pinned file viewer's visual vocabulary. `AgentContextSection.vue` shares readable project context and the canonical-document link between the rail and narrow-pane drawer; the underlying capsule and its token estimate are unchanged.
 Chat file links resolve an exact canonical identity via `/api/chats/{chat_id}/file-path`, using the same agent root the provider executes in. Manual pin requests use that root too. Once resolved, text, image, binary and HTML viewers all consume the absolute identity; pin failures never dismiss the preview (#1167).
-The task board derives four status groups regardless of pane width. CSS stacks them below 940px; the pane measurement gates column-only drag and keyboard gestures, not task grouping.
+The task board derives four status groups and draws them as four lanes side by side at every pane width. A narrow pane scrolls the lanes sideways inside the board element, so the page never scrolls sideways; drag and Shift+Left/Right do not depend on pane width. Done is one gesture, and Complete with resolution sends the note on the same POST as the status.
 
 ## App repo layout
 
