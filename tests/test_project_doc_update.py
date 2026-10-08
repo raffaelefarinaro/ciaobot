@@ -560,7 +560,9 @@ def test_folds_cut_a_stamp_on_a_new_fact(
         wrote = asyncio.run(pdu.update_project_doc(
             doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
         ))
-        after = doc.read_bytes()
+        # Newline-agnostic: on Windows the fixture lands as CRLF bytes and
+        # the appended bullet takes the note's own spelling.
+        after = doc.read_bytes().replace(b"\r\n", b"\n")
         assert wrote is True
         assert b"- Based in Lisbon\n" in after
         assert b"[verified:" not in after
@@ -571,7 +573,7 @@ def test_folds_cut_a_stamp_on_a_new_fact(
         wrote = asyncio.run(pdu.fold_fact_into_person_note(
             note_path=note, fact="Based in Lisbon.", model="m",
         ))
-        after = note.read_bytes()
+        after = note.read_bytes().replace(b"\r\n", b"\n")
         assert wrote is True
         assert b"- Based in Lisbon\n" in after
         assert b"[verified:" not in after

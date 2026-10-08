@@ -752,11 +752,15 @@ def test_the_fold_writer_strips_stamps_before_it_writes(tmp_path: Path) -> None:
     relative = "notes/mo.md"
     note = vault / relative
     note.parent.mkdir(parents=True, exist_ok=True)
-    note.write_text(
-        "- Landlord is Mr Silva [verified: 2020-01-01]\n- Speaks Greek\n",
-        encoding="utf-8",
+    # Byte-exact IO: the revision below must hash the file's own bytes, and
+    # `write_text`/`read_text` translate newlines on Windows, which would
+    # hand the writer a revision of text the file does not hold.
+    note.write_bytes(
+        "- Landlord is Mr Silva [verified: 2020-01-01]\n- Speaks Greek\n".encode(
+            "utf-8"
+        )
     )
-    text = note.read_text(encoding="utf-8")
+    text = note.read_bytes().decode("utf-8")
     entries = ne.parse_note_entries(
         text, note_path=relative, workspace="personal"
     ).entries
@@ -771,7 +775,7 @@ def test_the_fold_writer_strips_stamps_before_it_writes(tmp_path: Path) -> None:
         source="fold",
         workspace="personal",
     )
-    assert note.read_text(encoding="utf-8").splitlines(keepends=True)[0] == (
+    assert note.read_bytes().decode("utf-8").splitlines(keepends=True)[0] == (
         "- Landlord is Mr Silva [verified: 2020-01-01]\n"
     )
 
@@ -791,11 +795,13 @@ def test_the_fold_writer_puts_a_redated_bullet_back(tmp_path: Path) -> None:
     relative = "notes/mo.md"
     note = vault / relative
     note.parent.mkdir(parents=True, exist_ok=True)
-    note.write_text(
-        "# Mo\n\n## Notes\n- Prefers terse replies [verified: 2024-03-01]\n",
-        encoding="utf-8",
+    # Byte-exact IO, as above: a translated revision is a different revision.
+    note.write_bytes(
+        "# Mo\n\n## Notes\n- Prefers terse replies [verified: 2024-03-01]\n".encode(
+            "utf-8"
+        )
     )
-    text = note.read_text(encoding="utf-8")
+    text = note.read_bytes().decode("utf-8")
     nr.append_list_item(
         vault_root=vault,
         relative_path=relative,
@@ -806,7 +812,7 @@ def test_the_fold_writer_puts_a_redated_bullet_back(tmp_path: Path) -> None:
         source="fold",
         workspace="personal",
     )
-    after = note.read_text(encoding="utf-8")
+    after = note.read_bytes().decode("utf-8")
     assert "- Prefers terse replies [verified: 2024-03-01]\n" in after
     assert "- Based in Lisbon.\n" in after
 
