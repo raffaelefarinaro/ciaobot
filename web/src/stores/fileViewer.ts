@@ -154,13 +154,22 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     loading.value = true
     loadToken.value++
     const seq = ++fetchSeq
-    const isMarkdownFile = /\.(md|markdown)$/i.test(filePath.replace(/:\d+$/, ''))
-    const pathsPromise = isMarkdownFile ? loadMarkdownPaths() : Promise.resolve([])
     try {
-      kind.value = fileViewerKindForPath(filePath)
+      let resolvedPath = filePath
+      if (chat) {
+        const resolved = await api.get<{ path: string }>(
+          `/api/chats/${encodeURIComponent(chat)}/file-path?path=${encodeURIComponent(filePath)}`,
+        )
+        if (seq !== fetchSeq) return true
+        resolvedPath = resolved.path
+        path.value = resolvedPath
+      }
+      const isMarkdownFile = /\.(md|markdown)$/i.test(resolvedPath.replace(/:\d+$/, ''))
+      const pathsPromise = isMarkdownFile ? loadMarkdownPaths() : Promise.resolve([])
+      kind.value = fileViewerKindForPath(resolvedPath)
       if (kind.value === 'pdf') {
         content.value = ''
-        if (/\.pptx$/i.test(filePath.replace(/:\d+$/, ''))) void checkLibreofficeStatus()
+        if (/\.pptx$/i.test(resolvedPath.replace(/:\d+$/, ''))) void checkLibreofficeStatus()
         return true
       }
       if (kind.value === 'html') {
@@ -168,7 +177,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
         content.value = ''
         return true
       }
-      const url = `/api/workspace-file?path=${encodeURIComponent(filePath)}`
+      const url = `/api/workspace-file?path=${encodeURIComponent(resolvedPath)}`
       const [resp] = await Promise.all([
         fetch(url, { credentials: 'same-origin' }),
         pathsPromise,
@@ -286,6 +295,21 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     path.value = filePath
     chatId.value = chat
     loadToken.value++
+    const seq = ++fetchSeq
+    loading.value = true
+    try {
+      if (chat) {
+        const resolved = await api.get<{ path: string }>(
+          `/api/chats/${encodeURIComponent(chat)}/file-path?path=${encodeURIComponent(filePath)}`,
+        )
+        if (seq !== fetchSeq) return true
+        path.value = resolved.path
+      }
+    } catch (e) {
+      if (seq === fetchSeq) error.value = e instanceof Error ? e.message : String(e)
+    } finally {
+      if (seq === fetchSeq) loading.value = false
+    }
     return true
   }
 
@@ -300,6 +324,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       }
     }
     isOpen.value = false
+    fetchSeq++
     path.value = ''
     chatId.value = ''
     _reset()

@@ -2188,7 +2188,7 @@ def _chat_pin_request(body: dict) -> tuple[str, int]:
     return raw_path.strip(), revision
 
 
-def _resolve_pin_path(config, raw_path: str) -> Path | Response:
+def _resolve_pin_path(config, raw_path: str, *, agent_root: Path | None = None) -> Path | Response:
     """Resolve a nonempty manual pin path to the identity that gets stored.
 
     Reuses the viewer's resolver with fuzzy matching off. A pin is an identity
@@ -2198,6 +2198,8 @@ def _resolve_pin_path(config, raw_path: str) -> Path | Response:
     directory is answered with its own 404 and needs no second check here.
     """
     roots = _allowed_roots(config)
+    if agent_root is not None:
+        roots = [agent_root, *roots]
     resolved = _resolve_workspace_path(roots, raw_path, allow_fuzzy=False)
     if isinstance(resolved, Response):
         return resolved
@@ -2296,7 +2298,9 @@ async def _chat_pin_patch(
 
     path = ""
     if raw_path:
-        resolved = _resolve_pin_path(request.app.state.config, raw_path)
+        resolved = _resolve_pin_path(
+            request.app.state.config, raw_path, agent_root=pcm._agent_root_for_chat(chat_id)
+        )
         if isinstance(resolved, Response):
             return resolved
         # Store the canonical absolute POSIX identity: relative and `~` forms
@@ -3156,6 +3160,28 @@ _WORKSPACE_IMAGE_EXTS = frozenset({
 _WORKSPACE_IMAGE_MAX_BYTES = 15 * 1024 * 1024  # 15 MB
 
 
+
+
+async def chat_file_path(request: Request) -> Response:
+    """Canonical file identity for a link emitted in a chat's agent root.
+
+    Resolution is exact: a missing file must not match a same-named file in
+    another workspace. Absolute paths retain the viewer's existing policy.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "chat not found"}, status_code=404)
+    root = pcm._agent_root_for_chat(chat_id)
+    result = _resolve_workspace_path(
+        [root], request.query_params.get("path", "").strip(), allow_fuzzy=False
+    )
+    if isinstance(result, Response):
+        return result
+    extensions = _WORKSPACE_FILE_EXTS | _WORKSPACE_IMAGE_EXTS | _WORKSPACE_BINARY_EXTS
+    if result.suffix.lower() not in extensions:
+        return JSONResponse({"error": "unsupported type"}, status_code=415)
+    return JSONResponse({"path": result.as_posix()})
 
 
 async def workspace_file(request: Request) -> Response:

@@ -4,6 +4,12 @@ Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, serv
 
 The file viewer is Vue-first. Text, Markdown, CSV, PDF/PPTX (via a binary preview), and HTML artifacts all render through native Vue components (`HtmlArtifactViewer.vue`, `CsvViewer.vue`, plus text/iframe previews). Diagrams live inside HTML artifacts as inline SVG; `.excalidraw` is no longer a viewer type. History and Diff operate on the raw file snapshots.
 
+Chat-originated file opens resolve a canonical absolute path through
+`/api/chats/{chat_id}/file-path` before rendering or pinning. Relative paths are
+anchored to that chat's agent root, never the sidebar's selected workspace.
+Pins report success explicitly; failed pins keep the modal open, and an older
+pin request cannot close a newer file preview.
+
 ## Dev workflow
 
 ```bash

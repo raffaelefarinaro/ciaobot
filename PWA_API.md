@@ -63,6 +63,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/attachments` | Upload chat files; supported documents become Markdown in the active project folder; the browser receives bounded `file_refs`, not server paths |
 | GET | `/api/images/{ref}` | Read uploaded image blob |
 | GET | `/api/workspace-file` | Read allowed text file |
+| GET | `/api/chats/{chat_id}/file-path?path=...` | Resolve an allowlisted chat file to its canonical absolute identity, relative to the chat agent root; no fuzzy lookup |
 | POST | `/api/workspace-file` | Write user-edited text file (allowlist + snapshot) |
 | GET | `/api/workspace-html` | Render an `.html` artifact as `text/html` in a sandboxing CSP (panel Preview) |
 | GET | `/api/workspace-image` | Read allowed image file |
@@ -1517,7 +1518,7 @@ Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged
 - WS `/ws/chat/{chat_id}` `tool_use` event: adds optional `file_touch: {file_path, action}` when the tool mutates a file on disk. Detection lives in `extract_file_touch` (`ciao/web/chat_broker.py`); `action` is `written | edited`.
 - `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Both provider readers honour this.
 - Refused or failed calls get no card. `file_touch` is attached when a call is *requested*, so a denied `Write` used to paint an Outputs chip for a file that was never created. Live: the server publishes `tool_denied {tool_use_id}` on a deny and strips the touch from the replay buffer (the permission gate keys requests by `tool_use_id`, which is the same id the `tool_use` event carries). On reload: `/messages` and the subagent renderer skip the card when that call's `tool_result` came back `is_error`. The activity row stays either way, so the attempt is still visible.
-- Card click opens `/api/workspace-file` (text/code) or `/api/workspace-image` (images by extension). The classification is advisory only. The viewer endpoints have no workspace sandbox: they serve any allowlisted-extension file on disk (relative paths anchor to `workspace_root`). The extension allowlist (no `.env`) and size caps are the only guards.
+- Chat card/link clicks first resolve `/api/chats/{chat_id}/file-path?path=...`, then open the canonical absolute path through `/api/workspace-file` (text/code), `/api/workspace-image`, or the binary/HTML viewer. Resolution is exact and anchors relative paths to that chat's agent root. A missing chat/file returns 404; a disallowed extension returns 415. The signed-session API boundary is unchanged. Standalone viewer requests still anchor relative paths to `workspace_root`; absolute paths retain the intentional unrestricted host-path policy and extension/size guards. A failed manual or automatic pin leaves the viewer open.
 
 **HTML artifacts (`GET /api/workspace-html`)**
 

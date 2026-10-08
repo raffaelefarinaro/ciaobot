@@ -8,6 +8,10 @@ for archive memory, titles and schedule attention; an explicit per-provider
 insights model wins. History imports without a recorded model use the
 workspace/provider default.
 
+Chat file-link regressions cover separate agent roots, exact identities across
+text/image/binary/HTML previews, failed pins preserving the modal, and stale pin
+completions not dismissing a newer file (#1167).
+
 ## Server install
 
 Linux production and every installer-managed macOS install restart the engine

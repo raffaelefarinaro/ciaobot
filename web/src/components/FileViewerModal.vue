@@ -999,7 +999,7 @@ const openExternalState = ref<'' | 'loading' | 'ok'>('')
 const canOpenExternally = isLoopbackPage()
 
 const activePinKey = computed(() => {
-  return projectsStore.activeChatId || projectsStore.activeChat?.project_id || ''
+  return store.chatId || projectsStore.activeChatId || projectsStore.activeChat?.project_id || ''
 })
 const canPin = computed(() => !!activePinKey.value && window.innerWidth > 768)
 const isPinned = computed(() => {
@@ -1017,22 +1017,24 @@ async function togglePin(): Promise<void> {
   if (isPinned.value) {
     await projectsStore.unpinFile(key)
   } else {
-    await projectsStore.pinFile(key, path)
-    store.close()
+    const generation = store.loadToken
+    const pinned = await projectsStore.pinFile(key, path)
+    if (pinned && store.loadToken === generation && cleanPath(store.path) === path) void store.close()
   }
 }
 
 // Automatically pin opened documents to the side panel if desktop split view is available
 // and no file is currently pinned in the active chat/project, bypassing the modal overlay.
 watch(
-  [() => store.isOpen, () => store.path],
-  ([isOpen, currentPath]) => {
-    if (!isOpen || !currentPath) return
+  [() => store.isOpen, () => store.path, () => store.loading],
+  ([isOpen, currentPath, loading]) => {
+    if (!isOpen || !currentPath || loading || store.error) return
     const key = activePinKey.value
     if (canPin.value && key && !projectsStore.pinnedFileFor(key)) {
       void (async () => {
-        await projectsStore.pinFile(key, cleanPath(currentPath))
-        store.close()
+        const generation = store.loadToken
+        const pinned = await projectsStore.pinFile(key, cleanPath(currentPath))
+        if (pinned && store.loadToken === generation && store.path === currentPath) void store.close()
       })()
     }
   },

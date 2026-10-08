@@ -427,6 +427,10 @@ Session insights models are chosen per provider in Settings → Models & provide
 Automatic uses the source chat's model for archive memory, chat titles and
 schedule attention. Choose a specific model there to override it. History
 imports without a recorded source model use the workspace/provider default.
+
+Chat file links use the chat's agent root for relative-path resolution. A
+resolved absolute identity is shared by previews and pins; this is anchoring,
+not a new filesystem sandbox. Existing viewer extension and size guards remain.
 - `ciao gws-auth-helper <profile>`: interactive headless OAuth re-authentication when `gws auth login` cannot open a browser.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` / `CLAUDE_DEFAULT_MODEL_WORK` / `CIAO_DISALLOWED_TOOLS_PERSONAL` / `CIAO_DISALLOWED_TOOLS_WORK`: **removed 2026-08-20 and no longer read.** They configured the two hardcoded `personal`/`work` entries of the bootstrap registry, which now derives its workspaces from the vault instead, so they could not describe a workspace named anything else. Put `disallowed_tools` on the workspace in `.runtime/workspaces.json`, which works for any name; the default model is now a per-provider operator setting (Settings → Models), not a per-workspace one.
 - `CIAO_MEMORY_DIR`: legacy override for the old `~/.ciao/memory.md` + `user.md` directory during the one-release migration window. Default `~/.ciao`. Not used for new writes; safe to unset after migration.
