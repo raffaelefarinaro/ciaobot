@@ -20,6 +20,8 @@ for (const width of [1440, 900, 390]) {
             title: `${labels[index]} example`,
             status,
             updated_at: new Date().toISOString(),
+            // Done keeps to tasks completed today, so the done card needs a stamp.
+            completed_at: status === 'done' ? new Date().toISOString() : null,
           })),
         } })
       })
@@ -34,7 +36,8 @@ for (const width of [1440, 900, 390]) {
       }
       // One horizontal scroller holds the row, and the board scrolls it, not the page.
       await expect(page.locator('.task-lanes')).toHaveCount(1)
-      if (width < 1440) expect(await page.locator('.task-lanes').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true)
+      // A wide pane fits all four lanes; a narrower one scrolls them sideways.
+      expect(await page.locator('.task-lanes').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(width < 1440)
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
       await expect(page.locator('.task-card[draggable="true"]')).toHaveCount(4)
       await page.screenshot({ path: testInfo.outputPath('status-groups.png'), fullPage: true, animations: 'disabled' })

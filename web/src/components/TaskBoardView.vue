@@ -2803,11 +2803,15 @@ const today = localDateKey()
   -webkit-overflow-scrolling: touch;
   padding: var(--space-1) var(--space-1) var(--space-6);
 }
-/* A lane is 320px, or the whole board when only one is drawn (a status filter).
-   On a pane narrower than one lane the first one fills it and the rest sit off
-   the edge, reached by the board's scroll. */
-.task-lanes > .task-lane { flex: 0 0 min(320px, 100%); }
-.task-lanes--list > .task-lane { flex: 1 1 100%; }
+/* Lanes share a wide pane and never get narrower than 248px; below that the
+   board scrolls sideways. On a phone-width pane one lane takes most of the
+   board, so the next one peeks in at the edge. A status filter draws its one
+   lane at full width. */
+.task-lanes > .task-lane { flex: 1 1 320px; min-width: 248px; }
+.task-lanes--list > .task-lane { flex: 1 1 100%; min-width: 0; }
+@container chat-pane (max-width: 640px) {
+  .task-lanes--columns > .task-lane { flex: 0 0 85%; min-width: 0; }
+}
 
 .task-lane {
   display: flex;
