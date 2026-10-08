@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 # `_WORKSPACE_EVIDENCE_DIRS`) without a cycle.
 from ciao.entity_types import stock_entity_type_registry
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, credential_path_deny_rules
+from ciao.fs_sandbox import AGENT_FS_SCOPES
 from ciao.models import BridgeMode
 from ciao.os_support.paths import resolve_path
 from ciao.providers.opencode import OpencodeSettings
@@ -330,6 +331,20 @@ def coerce_workspace_color(raw: object) -> str:
     )
 
 
+def coerce_agent_fs_scope(raw: object) -> str:
+    """Normalize a workspace filesystem scope. Missing/empty → machine."""
+    if raw is None:
+        return "machine"
+    cleaned = str(raw).strip()
+    if not cleaned:
+        return "machine"
+    if cleaned in AGENT_FS_SCOPES:
+        return cleaned
+    raise ValueError(
+        f"agent_fs_scope must be one of: {', '.join(AGENT_FS_SCOPES)}"
+    )
+
+
 @dataclass(slots=True)
 class WorkspaceConfig:
     """Config for one logical chat workspace."""
@@ -351,6 +366,9 @@ class WorkspaceConfig:
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
+    # Filesystem scope for agent tool execution. Defaults to whole machine
+    # (today's behavior); "workspace" confines the agent to the workspace.
+    agent_fs_scope: str = "machine"
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -384,6 +402,10 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         color = coerce_workspace_color(data.get("color"))
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
+    try:
+        agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
+    except ValueError:
+        agent_fs_scope = "machine"
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
@@ -394,6 +416,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         ),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
+        agent_fs_scope=agent_fs_scope,
     )
 
 
@@ -1067,6 +1090,7 @@ class CiaoConfig:
                 "allowed_mcp_servers": workspace.allowed_mcp_servers,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
+                "agent_fs_scope": workspace.agent_fs_scope,
             }
             for workspace in self.workspaces.values()
         ]

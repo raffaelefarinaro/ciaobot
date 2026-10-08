@@ -197,6 +197,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "disallowed_tools": None,
                 "allowed_mcp_servers": None,
                 "color": "pink",
+                "agent_fs_scope": "machine",
             },
             {
                 "name": "work",
@@ -206,6 +207,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "disallowed_tools": [],
                 "allowed_mcp_servers": None,
                 "color": "pink",
+                "agent_fs_scope": "machine",
             },
         ],
         "active": "personal",
