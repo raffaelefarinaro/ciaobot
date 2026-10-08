@@ -330,11 +330,28 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         if route_name and requested and requested != route_name:
             # A PATCH carrying a different name renames the workspace first;
             # the rest of the save below then applies to the new record.
+            # The submitted settings are validated against the renamed record
+            # BEFORE the rename runs: otherwise an invalid provider, color or
+            # tool list would 400 after the registry, the references and (on
+            # a re-rooted install) the directory had already moved.
             from ciao.workspace_rename import (  # noqa: PLC0415
                 WorkspaceRenameBusy,
+                preview_renamed_config,
                 rename_workspace,
             )
 
+            old_existing = config.workspace(str(route_name))
+            if old_existing is not None:
+                try:
+                    _workspace_from_request(
+                        {**body, "name": requested},
+                        config=config,
+                        existing=preview_renamed_config(
+                            old_existing, old=str(route_name), new=requested
+                        ),
+                    )
+                except ValueError as exc:
+                    return JSONResponse({"error": str(exc)}, status_code=400)
             try:
                 renamed = rename_workspace(
                     config,

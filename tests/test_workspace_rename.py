@@ -399,3 +399,291 @@ def test_renaming_personal_changes_primary_workspace(tmp_path: Path) -> None:
     )
 
     assert config.primary_workspace() == "work"
+
+
+def _rollback_files(tmp_path: Path, config: CiaoConfig) -> dict[str, Path]:
+    runtime = tmp_path / ".runtime"
+    return {
+        "registry": runtime / "workspaces.json",
+        "schedules": runtime / "schedules.json",
+        "system": runtime / "system_schedules_state.json",
+        "webhooks": runtime / "webhooks.json",
+        "imports": engine_store_path(config),
+        "runs": runtime / "background" / "state.json",
+    }
+
+
+def _assert_rolled_back(
+    config: CiaoConfig,
+    tmp_path: Path,
+    projects: _Projects,
+    ids: dict[str, object],
+    before: dict[str, bytes],
+) -> None:
+    """Every persisted and in-memory reference is back on the old workspace."""
+    from ciao.import_store import ImportStore, engine_store_path
+    from ciao.schedules import ScheduleStore
+    from ciao.webhooks import WebhookStore
+
+    runtime = tmp_path / ".runtime"
+    for key, path in _rollback_files(tmp_path, config).items():
+        assert path.read_bytes() == before[key], key
+    assert sorted(config.workspace_names()) == ["personal", "work"]
+    assert config.workspace("santo") is None
+    assert projects._projects["proj-1"].workspace == "personal"
+
+    schedules = ScheduleStore(
+        runtime, include_system=True, workspace_names=config.workspace_names
+    )
+    schedule_id = str(ids["schedule_id"])
+    user_rows = [
+        entry
+        for entry in schedules.list_entries()
+        if entry.schedule_id == schedule_id
+    ]
+    assert len(user_rows) == 1
+    assert user_rows[0].workspace == "personal"
+    system_state = json.loads(
+        (runtime / "system_schedules_state.json").read_text(encoding="utf-8")
+    )["schedules"]
+    assert "system-memory-curation@santo" not in system_state
+    assert system_state["system-memory-curation@personal"]["workspace"] == "personal"
+
+    webhooks = WebhookStore(runtime / "webhooks.json")
+    trigger_id = str(ids["trigger_id"])
+    trigger = webhooks.get(trigger_id)
+    assert trigger.workspace == "personal"
+    assert trigger.revision == ids["revision"]
+    assert webhooks.authenticate(trigger_id, str(ids["secret"])) is not None
+
+    imports = ImportStore(engine_store_path(config))
+    batch = imports.get(str(ids["batch_id"]))
+    assert batch.workspace == "personal"
+
+    run = _stores(config, tmp_path)[3].get("run-1")
+    assert run is not None
+    assert run.workspace == "personal"
+    assert run.cwd == ""
+    assert not (tmp_path / "santo").exists()
+
+
+def test_failed_project_save_restores_registry(tmp_path: Path) -> None:
+    """A project save failure leaves the registry and every file as they were."""
+    config = _shared_config(tmp_path, ["personal", "work"])
+    config.persist_workspace_registry()
+    projects = _Projects()
+    ids = _seed_all(config, tmp_path, projects)
+    before = {
+        key: path.read_bytes()
+        for key, path in _rollback_files(tmp_path, config).items()
+    }
+
+    def _boom(*, reason: str = "registry_mutation") -> None:
+        raise OSError("disk full")
+
+    projects._save = _boom  # type: ignore[method-assign]
+    with pytest.raises(OSError, match="disk full"):
+        rename_workspace(
+            config,
+            old="personal",
+            new="santo",
+            projects=projects,
+            schedules=_stores(config, tmp_path)[0],
+            webhooks=_stores(config, tmp_path)[1],
+            imports=_stores(config, tmp_path)[2],
+            runs=_stores(config, tmp_path)[3],
+        )
+
+    _assert_rolled_back(config, tmp_path, projects, ids, before)
+
+
+def test_failed_schedule_write_restores_projects_and_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A schedule failure after the project save restores projects too."""
+    config = _shared_config(tmp_path, ["personal", "work"])
+    config.persist_workspace_registry()
+    projects = _Projects()
+    ids = _seed_all(config, tmp_path, projects)
+    before = {
+        key: path.read_bytes()
+        for key, path in _rollback_files(tmp_path, config).items()
+    }
+    schedules, webhooks, imports, runs = _stores(config, tmp_path)
+
+    def _boom(self: ScheduleStore, old: str, new: str) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ScheduleStore, "rename_workspace", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        rename_workspace(
+            config,
+            old="personal",
+            new="santo",
+            projects=projects,
+            schedules=schedules,
+            webhooks=webhooks,
+            imports=imports,
+            runs=runs,
+        )
+
+    _assert_rolled_back(config, tmp_path, projects, ids, before)
+
+
+def test_failed_webhook_write_restores_schedules_and_projects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A webhook failure after schedules were rewritten restores them exactly."""
+    config = _shared_config(tmp_path, ["personal", "work"])
+    config.persist_workspace_registry()
+    projects = _Projects()
+    ids = _seed_all(config, tmp_path, projects)
+    before = {
+        key: path.read_bytes()
+        for key, path in _rollback_files(tmp_path, config).items()
+    }
+    schedules, webhooks, imports, runs = _stores(config, tmp_path)
+
+    original = WebhookStore.rename_workspace
+
+    def _write_then_fail(self: WebhookStore, old: str, new: str) -> int:
+        original(self, old, new)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(WebhookStore, "rename_workspace", _write_then_fail)
+    with pytest.raises(OSError, match="disk full"):
+        rename_workspace(
+            config,
+            old="personal",
+            new="santo",
+            projects=projects,
+            schedules=schedules,
+            webhooks=webhooks,
+            imports=imports,
+            runs=runs,
+        )
+
+    # The revision bump from the half-applied webhook write is undone as well:
+    # the secret still verifies at the original revision.
+    _assert_rolled_back(config, tmp_path, projects, ids, before)
+
+
+def test_failed_import_write_restores_webhooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An import failure after webhooks were rewritten restores them exactly."""
+    config = _shared_config(tmp_path, ["personal", "work"])
+    config.persist_workspace_registry()
+    projects = _Projects()
+    ids = _seed_all(config, tmp_path, projects)
+    before = {
+        key: path.read_bytes()
+        for key, path in _rollback_files(tmp_path, config).items()
+    }
+    schedules, webhooks, imports, runs = _stores(config, tmp_path)
+
+    original = ImportStore.rename_workspace
+
+    def _write_then_fail(self: ImportStore, old: str, new: str) -> int:
+        original(self, old, new)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ImportStore, "rename_workspace", _write_then_fail)
+    with pytest.raises(OSError, match="disk full"):
+        rename_workspace(
+            config,
+            old="personal",
+            new="santo",
+            projects=projects,
+            schedules=schedules,
+            webhooks=webhooks,
+            imports=imports,
+            runs=runs,
+        )
+
+    _assert_rolled_back(config, tmp_path, projects, ids, before)
+
+
+def test_failed_run_write_restores_everything_including_rerooted_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run failure after every other store restores all of them on re-root."""
+    from ciao.background import BackgroundRunStore
+
+    config = _rerooted_config(
+        tmp_path, {"personal": "personal", "work": "work"}
+    )
+    (tmp_path / "personal" / "memory-vault").mkdir(parents=True)
+    (tmp_path / "personal" / "sub").mkdir(parents=True)
+    config.persist_workspace_registry()
+    projects = _Projects()
+    schedules, webhooks, imports, runs = _stores(config, tmp_path)
+    runs.replace(
+        BackgroundRun(
+            run_id="run-1",
+            parent_chat_id="chat-1",
+            project_id="proj-1",
+            workspace="personal",
+            label="job",
+            cmd=["echo", "hi"],
+            cwd=str(tmp_path / "personal" / "sub"),
+            status="ok",
+            started_at="2026-01-01T00:00:00Z",
+        )
+    )
+    runs.replace(
+        BackgroundRun(
+            run_id="run-2",
+            parent_chat_id="chat-2",
+            project_id="proj-1",
+            workspace="other",
+            label="job",
+            cmd=["echo", "hi"],
+            cwd="",
+            status="ok",
+            started_at="2026-01-01T00:00:00Z",
+        )
+    )
+    before: dict[str, bytes | None] = {}
+    for key, path in _rollback_files(tmp_path, config).items():
+        before[key] = path.read_bytes() if path.is_file() else None
+
+    original = BackgroundRunStore.replace
+    calls: list[str] = []
+
+    def _write_first_then_fail(self: BackgroundRunStore, run: BackgroundRun) -> None:
+        calls.append(run.run_id)
+        original(self, run)
+        if len(calls) == 1:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(BackgroundRunStore, "replace", _write_first_then_fail)
+    with pytest.raises(OSError, match="disk full"):
+        rename_workspace(
+            config,
+            old="personal",
+            new="santo",
+            projects=projects,
+            schedules=schedules,
+            webhooks=webhooks,
+            imports=imports,
+            runs=runs,
+        )
+
+    for key, path in _rollback_files(tmp_path, config).items():
+        if before[key] is None:
+            assert not path.exists(), key
+        else:
+            assert path.read_bytes() == before[key], key
+    assert sorted(config.workspace_names()) == ["personal", "work"]
+    assert (tmp_path / "personal" / "sub").is_dir()
+    assert not (tmp_path / "santo").exists()
+    assert config.workspaces["personal"].vault_root == "personal/memory-vault"
+    fresh = BackgroundRunStore(tmp_path / ".runtime")
+    first = fresh.get("run-1")
+    assert first is not None
+    assert first.workspace == "personal"
+    assert first.cwd == str(tmp_path / "personal" / "sub")
+    second = fresh.get("run-2")
+    assert second is not None
+    assert second.workspace == "other"
