@@ -1287,11 +1287,13 @@ def _opencode_scope_fixture(tmp_path: Path, scope: str):
     return OpencodeProvider(tmp_path), request
 
 
-def _capture_spawn(monkeypatch) -> list[tuple[str, ...]]:
+def _capture_spawn(monkeypatch, envs: list[dict] | None = None) -> list[tuple[str, ...]]:
     spawned: list[tuple[str, ...]] = []
 
-    async def fake_spawn(*argv, **_kwargs):
+    async def fake_spawn(*argv, **kwargs):
         spawned.append(argv)
+        if envs is not None:
+            envs.append(kwargs.get("env") or {})
         raise _SpawnCaptured
 
     monkeypatch.setattr("ciao.providers.opencode._spawn_server", fake_spawn)
@@ -1300,22 +1302,41 @@ def _capture_spawn(monkeypatch) -> list[tuple[str, ...]]:
 
 async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypatch):
     provider, request = _opencode_scope_fixture(tmp_path, "workspace")
-    spawned = _capture_spawn(monkeypatch)
-    calls: list[list[Path]] = []
+    envs: list[dict] = []
+    spawned = _capture_spawn(monkeypatch, envs)
+    calls: list[tuple[list[Path], list[Path]]] = []
+    xdg = tmp_path / "xdg"
+    for name in ("DATA", "STATE", "CONFIG"):
+        monkeypatch.setenv(f"XDG_{name}_HOME", str(xdg / name.lower()))
+    (xdg / "config" / "opencode").mkdir(parents=True)
+    binary = tmp_path / "install" / "bin" / "opencode"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("", encoding="utf-8")
 
-    def fake_prefix(*, roots):
-        calls.append(list(roots))
+    def fake_prefix(*, roots, read_only=()):
+        calls.append((list(roots), list(read_only)))
         return ["sandbox-exec", "-p", "PROFILE"]
 
     monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", fake_prefix)
 
     with pytest.raises(_SpawnCaptured):
-        await provider._start_server_once(request, "/bin/opencode")
+        await provider._start_server_once(request, str(binary))
 
-    assert calls == [[tmp_path / "agent", tmp_path / "vault"]]
+    roots, read_only = calls[0]
+    assert roots[:2] == [tmp_path / "agent", tmp_path / "vault"]
+    sandbox_cache = Path.home() / ".cache" / "ciaobot-opencode-sandbox"
+    # The server writes its data and state, and a cache no unconfined server
+    # loads. Its config and install are code an unconfined server runs later,
+    # so they are readable only (#1174).
+    assert (xdg / "data" / "opencode").resolve() in roots
+    assert (xdg / "state" / "opencode").resolve() in roots
+    assert (sandbox_cache / "opencode").resolve() in roots
+    assert read_only == [(xdg / "config" / "opencode").resolve(), (tmp_path / "install").resolve()]
+    assert not set(read_only) & set(roots)
+    assert envs[0]["XDG_CACHE_HOME"] == str(sandbox_cache)
     argv = spawned[0]
     assert argv[:3] == ("sandbox-exec", "-p", "PROFILE")
-    assert argv[3:6] == ("/bin/opencode", "serve", "--port")
+    assert argv[3:6] == (str(binary), "serve", "--port")
     assert argv[7:] == ("--hostname", "127.0.0.1")
 
 
@@ -1323,7 +1344,7 @@ async def test_opencode_machine_scope_spawns_the_binary_directly(tmp_path, monke
     provider, request = _opencode_scope_fixture(tmp_path, "machine")
     spawned = _capture_spawn(monkeypatch)
 
-    def no_prefix(*, roots):
+    def no_prefix(*, roots, read_only=()):
         raise AssertionError("machine scope must not build a sandbox prefix")
 
     monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", no_prefix)
@@ -1343,7 +1364,7 @@ async def test_opencode_workspace_scope_does_not_spawn_when_the_sandbox_is_missi
     provider, request = _opencode_scope_fixture(tmp_path, "workspace")
     spawned = _capture_spawn(monkeypatch)
 
-    def missing_sandbox(*, roots):
+    def missing_sandbox(*, roots, read_only=()):
         raise FsSandboxUnavailable("no sandbox tool")
 
     monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", missing_sandbox)

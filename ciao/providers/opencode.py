@@ -35,6 +35,7 @@ import re
 import secrets
 import socket
 import sys
+import tempfile
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -1310,6 +1311,53 @@ def _validate_form_answer(
     return answer
 
 
+def _sandboxed_server_dirs(binary: str) -> tuple[list[Path], list[Path], Path]:
+    """The folders a sandboxed ``opencode serve`` needs beyond the workspace.
+
+    Read-write: its data folder (login and session database), its state folder
+    and its temp folder. Read-only: its config folder and its install, which
+    an unconfined server later loads as code, so a confined agent must not be
+    able to change them. Its cache (plugin packages and helper binaries) is
+    code too, so a sandboxed server gets its own: ``XDG_CACHE_HOME`` points at
+    a cache only sandboxed servers use. Returns ``(writable, read_only,
+    cache_home)``.
+    """
+    home = Path.home()
+
+    def xdg(name: str, default: Path) -> Path:
+        value = os.environ.get(name, "")
+        return Path(value) if value else default
+
+    cache_home = home / ".cache" / "ciaobot-opencode-sandbox"
+    writable = [
+        xdg("XDG_DATA_HOME", home / ".local" / "share") / "opencode",
+        xdg("XDG_STATE_HOME", home / ".local" / "state") / "opencode",
+        cache_home / "opencode",
+        Path(tempfile.gettempdir()) / "opencode",
+    ]
+    install = Path(binary).resolve().parent
+    if install.name == "bin":
+        install = install.parent
+    read_only = [
+        folder
+        for folder in (
+            xdg("XDG_CONFIG_HOME", home / ".config") / "opencode",
+            install,
+            # The user's own skills and instructions, which opencode loads the
+            # way Claude Code does.
+            home / ".claude" / "skills",
+            home / ".claude" / "CLAUDE.md",
+            home / ".agents" / "skills",
+        )
+        if folder.exists()
+    ]
+    return (
+        [folder.resolve() for folder in writable],
+        [folder.resolve() for folder in read_only],
+        cache_home,
+    )
+
+
 class OpencodeProvider(BaseSDKProvider):
     """Runs a chat turn against a per-chat ``opencode serve`` process."""
 
@@ -1600,31 +1648,39 @@ class OpencodeProvider(BaseSDKProvider):
 
         raise AssertionError("unreachable opencode startup retry state")
 
-    def _server_argv(self, request: AgentRequest, binary: str, port: int) -> list[str]:
-        """The argv that starts this chat's ``opencode serve``.
+    def _server_launch(
+        self, request: AgentRequest, binary: str, port: int
+    ) -> tuple[list[str], dict[str, str]]:
+        """The argv that starts this chat's ``opencode serve``, and its extra env.
 
         A workspace-scoped request runs the server, and every child it spawns,
         inside the sandbox profile for ``request.agent_roots`` (the chat's agent
-        root and its workspace vault, resolved by the engine). Machine scope
+        root and its workspace vault, resolved by the engine) plus the folders
+        the server itself needs (``_sandboxed_server_dirs``). Machine scope
         keeps the bare argv. A missing sandbox tool raises
         ``FsSandboxUnavailable`` here, before any spawn.
         """
         argv = [binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"]
         if request.agent_fs_scope != "workspace":
-            return argv
-        roots = [Path(root) for root in request.agent_roots]
-        return [*opencode_sandbox_prefix(roots=roots), *argv]
+            return argv, {}
+        writable, read_only, cache_home = _sandboxed_server_dirs(binary)
+        roots = [Path(root) for root in request.agent_roots] + writable
+        prefix = opencode_sandbox_prefix(roots=roots, read_only=read_only)
+        for folder in writable:
+            folder.mkdir(parents=True, exist_ok=True)
+        return [*prefix, *argv], {"XDG_CACHE_HOME": str(cache_home)}
 
     async def _start_server_once(
         self, request: AgentRequest, binary: str
     ) -> httpx.AsyncClient:
         """Start, validate, and register one opencode server process."""
         port = _free_port()
-        argv = self._server_argv(request, binary, port)
+        argv, sandbox_env = self._server_launch(request, binary, port)
         self._password = secrets.token_urlsafe(24)
         env = {
             **os.environ,
             **(request.extra_env or {}),
+            **sandbox_env,
             "OPENCODE_SERVER_PASSWORD": self._password,
         }
         self._mcp_token = provider_reuse_key(request)
