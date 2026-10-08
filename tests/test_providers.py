@@ -1102,6 +1102,8 @@ def test_extract_effective_model_keeps_first_entry_without_token_counts() -> Non
 async def test_claude_workspace_scope_sets_sandbox_and_roots(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
+    monkeypatch.setattr(sys, "platform", "darwin")
     captured = {}
 
     class FakeClient:
@@ -1140,6 +1142,8 @@ async def test_claude_workspace_scope_sets_sandbox_and_roots(
 async def test_claude_workspace_scope_keeps_vault_inside_agent_root_out_of_add_dirs(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
+    monkeypatch.setattr(sys, "platform", "darwin")
     captured = {}
 
     class FakeClient:
@@ -1217,6 +1221,8 @@ async def test_claude_workspace_scope_refuses_on_windows(
 async def test_claude_scope_change_reconnects_live_process(
     tmp_path: Path, monkeypatch,
 ) -> None:
+    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
+    monkeypatch.setattr(sys, "platform", "darwin")
     from ciao.models import provider_reuse_key
 
     captured = {"disconnects": 0, "constructed": 0}
