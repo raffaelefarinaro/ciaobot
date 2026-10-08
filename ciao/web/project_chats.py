@@ -4150,17 +4150,14 @@ class ProjectChatManager:
         resolved and de-duplicated, agent root first. Machine scope never
         reads them, so they are only computed for the workspace case.
         """
-        project = self._projects.get(chat.project_id)
-        workspace = project.workspace if project else ""
-        if not self._is_known_workspace(workspace):
-            workspace = self._config.primary_workspace()
-        scope = str(getattr(self._config.workspace(workspace), "agent_fs_scope", "machine"))
-        if scope != "workspace":
-            return scope, ()
+        workspace = self._workspace_for_chat(chat.chat_id)
+        config = self._config.workspace(workspace)
+        if config is None or config.agent_fs_scope != "workspace":
+            return "machine", ()
         agent_root = self._config.agent_root(workspace).resolve()
         vault_root = self._config.workspace_vault_root(workspace).resolve()
         roots = tuple(dict.fromkeys((str(agent_root), str(vault_root))))
-        return scope, roots
+        return "workspace", roots
 
     def _revoke_mcp_chat(self, chat_id: str) -> None:
         service = self._mcp_service
