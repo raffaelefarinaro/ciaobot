@@ -229,8 +229,9 @@ continues, because the host is optional and inert and must not abort the one-lin
 Because the record is written before the rename, a process killed in that window
 leaves a consistent, verified host rather than a recordless bundle every later run
 reports as `host_exists`; a Python failure removes both the bundle and record the
-run placed. The host is **not activated**: no launchd, no
-plist, no service change, no permission prompt — activation is a later child.
+run placed. The host install is inert: it writes no launchd job itself;
+activation is `ciao setup` registering the hosted plist when a verified host
+is installed. No step requests a permission prompt.
 A wheel-only manifest (every historical release) prints nothing from the selector
 and installs the engine exactly as before, and so does an explicit `--version`
 naming a wheel cut before the host work: the shell probes for the module first,

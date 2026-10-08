@@ -432,7 +432,7 @@ the child; the engine's restart/backoff loop stays in `ciao/supervise.py`, and
 launchd remains the final job-group owner. This child ships the host and its
 artifact builder only — the installer, the update/rollback ownership contract,
 release-manifest coverage, and every live launchd/TCC gate are later children of
-#1008, so nothing activates the host yet.
+#1008. `ciao setup` registers a hosted plist when `verify_owned_host` succeeds.
 
 **Windows lifecycle (#696).** There is no LaunchAgent or systemd unit on
 Windows. `ciao setup --load-launchd` (the flag name is historical: on macOS
