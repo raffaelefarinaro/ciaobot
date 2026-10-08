@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -55,7 +55,7 @@ def test_opencode_prefix_is_sandbox_exec_on_darwin(tmp_path, monkeypatch):
     assert argv[0] == str(fake_binary)
     assert argv[1] == "-p"
     profile = argv[2]
-    assert f'(subpath "{root}")' in profile
+    assert f'(subpath "{_quote_seatbelt_subpath(str(root))}")' in profile
     # Write access exists only on the given root: the system paths are
     # read-only and there is no global file-write allow.
     assert profile.count("file-write*") == 1
@@ -138,7 +138,7 @@ def test_darwin_sandbox_exec_refuses_a_file_outside_the_root(tmp_path):
     assert allowed.stdout == b"inside"
 
 
-def test_seatbelt_backslash_root_is_escaped(tmp_path, monkeypatch):
+def test_seatbelt_backslash_root_is_escaped():
     # POSIX crafted name (literal backslash + "n") and Windows-style roots
     # must both be escaped for the Seatbelt string, never decoded.
     assert _quote_seatbelt_subpath("root\\nbar") == "root\\\\nbar"
@@ -148,13 +148,10 @@ def test_seatbelt_backslash_root_is_escaped(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         _quote_seatbelt_subpath("ro)ot")
 
-    tricky = tmp_path / "root\\nbar"
-    tricky.mkdir()
-    monkeypatch.setattr(sys, "platform", "darwin")
-    fake_binary = tmp_path / "sandbox-exec"
-    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
-    monkeypatch.setattr("ciao.fs_sandbox.SANDBOX_EXEC_PATH", str(fake_binary))
-    profile = opencode_sandbox_prefix(roots=[tricky])[2]
+    # Keep the crafted POSIX name literal on Windows without creating a file:
+    # Windows treats a backslash as a path separator, not a filename character.
+    tricky = PurePosixPath("/root\\nbar")
+    profile = _seatbelt_profile([tricky])
     # The grant names the literal-backslash root (doubled backslash) and
     # never the escape-decoded sibling (real newline).
     assert "root\\\\nbar" in profile
