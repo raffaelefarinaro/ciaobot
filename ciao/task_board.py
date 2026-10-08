@@ -95,6 +95,15 @@ from ciao.async_reads import keyed_lock
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import carry_mode
+from ciao.task_resolution import (
+    OPEN as COMPLETIONS_OPEN,
+    Completion,
+    append_completion,
+    extract_section,
+    parse_completions,
+    replace_resolution,
+    strip_completions,
+)
 
 SCHEMA_VERSION = 2
 """The only frontmatter schema this store implements.
@@ -175,7 +184,7 @@ class TaskBoardError(Exception):
 
     ``code`` is one of ``invalid_task``, ``unsupported_schema``,
     ``not_found``, ``revision_conflict``, ``unsafe_path``,
-    ``completion_requires_user`` or ``read_failed``:
+    ``completion_requires_user``, ``bad_request`` or ``read_failed``:
 
     - ``invalid_task``: the file or the requested change does not satisfy
       the schema (bad enum, bad date, bad title, duplicate keys, alias or
@@ -190,6 +199,8 @@ class TaskBoardError(Exception):
       real file must be, a non-regular file, or a path escaping the vault.
     - ``completion_requires_user``: the agent caller tried to set status
       ``done`` through the managed API.
+    - ``bad_request``: a managed-API argument has the wrong type (a
+      non-string ``resolution`` or ``attempt_id`` on ``update``).
     - ``read_failed``: store I/O failed (directory traversal, read, lock
       or write). Parse problems are ``invalid_task``, never this.
     """
@@ -1499,6 +1510,8 @@ class TaskBoardStore:
         changes: Mapping[str, object],
         body: str | None = None,
         actor: Actor,
+        resolution: str | None = None,
+        attempt_id: str = "",
     ) -> TaskDocument:
         """Apply managed field edits (and optionally a body) to one task.
 
@@ -1507,6 +1520,21 @@ class TaskBoardStore:
         raises ``revision_conflict`` and the prior bytes are unchanged, as
         they are on any parse or write failure. Title edits never rename
         the file.
+
+        ``resolution`` is the user's completion text for this write, and
+        ``attempt_id`` the attempt it closes when one is named. A managed
+        transition into ``done`` appends one completion to the task's
+        completion history (#1152) even when ``resolution`` is None or
+        ``""``; replaying an already-``done`` task appends nothing. Passing a
+        string ``resolution`` while the task is already ``done`` rewords the
+        latest completion instead (its ``edited`` stamp moves, its
+        ``completed_at`` does not). A non-string ``resolution`` or
+        ``attempt_id`` is ``bad_request`` — values are never stringified.
+
+        A supplied body carries the description only: any completion section
+        in it is stripped on the way in and the stored section is appended
+        back, so a description save never drops the history. Reopening
+        (``done`` to another status) keeps the section.
 
         Managed-operation rules (they bind this API, not direct file
         editors):
@@ -1525,6 +1553,18 @@ class TaskBoardStore:
             raise TaskBoardError("invalid_task", f"actor must be 'user' or 'agent', not {actor!r}")
         if body is not None and not isinstance(body, str):
             raise TaskBoardError("invalid_task", "task body must be a string or None")
+        if resolution is not None and not isinstance(resolution, str):
+            raise TaskBoardError(
+                "bad_request",
+                f"resolution must be a string or null, not {type(resolution).__name__}",
+            )
+        if attempt_id is None:
+            attempt_id = ""
+        if not isinstance(attempt_id, str):
+            raise TaskBoardError(
+                "bad_request",
+                f"attempt_id must be a string, not {type(attempt_id).__name__}",
+            )
         if not isinstance(changes, Mapping):
             raise TaskBoardError("invalid_task", "changes must be a mapping")
         path = self._task_path(task_id)
@@ -1542,8 +1582,56 @@ class TaskBoardStore:
                     "the task changed since this edit was planned; nothing was written",
                 )
             document = parse_task(current_raw, expected_id=task_id)
+            if (
+                COMPLETIONS_OPEN in document.body
+                and document.body.count(COMPLETIONS_OPEN) != 1
+            ):
+                raise TaskBoardError(
+                    "invalid_task",
+                    "task body has more than one completion history section; "
+                    "refusing to guess which one the write should keep",
+                )
             effective = self._plan_changes(document, dict(changes), actor)
-            body_unchanged = body is None or body == document.body
+            current_status = document.record.status
+            patched_status = effective.get("status", current_status)
+            working = body
+            if working is not None and working != document.body:
+                # A description save carries the description only. Strip any
+                # completion section the caller echoed back and append the
+                # stored one, so the history survives the save byte for byte.
+                kept = extract_section(document.body)
+                if kept:
+                    stripped = strip_completions(working)
+                    head = stripped.rstrip()
+                    working = f"{head}\n\n{kept}\n" if head else f"{kept}\n"
+            stamp: datetime | None = None
+            if current_status != "done" and patched_status == "done":
+                if stamp is None:
+                    stamp = self._now()
+                completion = Completion(
+                    id=uuid.uuid4().hex,
+                    completed_at=stamp.replace(microsecond=0),
+                    resolution=resolution or "",
+                    attempt_id=attempt_id,
+                )
+                base = working if working is not None else document.body
+                working = append_completion(base, completion)
+            elif (
+                current_status == "done"
+                and patched_status == "done"
+                and isinstance(resolution, str)
+            ):
+                base = working if working is not None else document.body
+                latest = parse_completions(base)
+                if latest:
+                    if stamp is None:
+                        stamp = self._now()
+                    working = replace_resolution(
+                        base, latest[0].id, resolution, stamp
+                    )
+            if working is not None and working == document.body:
+                working = None
+            body_unchanged = working is None
             if body_unchanged and all(
                 _change_is_noop(key, _normalize_change(key, value), document.record)
                 for key, value in effective.items()
@@ -1551,8 +1639,8 @@ class TaskBoardStore:
                 # No effective change other than a clock bump: return the
                 # unchanged document without rewriting or advancing.
                 return document
-            effective["updated_at"] = self._now()
-            new_raw = patch_task(document, effective, body=body)
+            effective["updated_at"] = stamp if stamp is not None else self._now()
+            new_raw = patch_task(document, effective, body=working)
             if new_raw == current_raw:
                 return document
             reread = self._read_file_bytes(path, task_id)

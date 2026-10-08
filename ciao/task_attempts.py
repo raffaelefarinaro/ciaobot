@@ -81,6 +81,7 @@ from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import mkstemp_private
 from ciao.task_log import attempt_label, strip_log
+from ciao.task_resolution import strip_completions
 
 SCHEMA_VERSION = 1
 """The only attempt-document schema this store implements."""
@@ -1405,7 +1406,9 @@ def build_prompt(
 
     The body's own delegation log is stripped before it is quoted: the history is
     handed over in its own section (*previous_attempts*, newest first), framed as
-    what was tried rather than as part of the work to do.
+    what was tried rather than as part of the work to do. The completion
+    history is stripped for the same reason: a past resolution is not
+    instructions for the next attempt.
 
     *instructions* is what the user typed into the delegation sheet for this one
     hand-over — how to go about it, what they expect when it is finished. It is
@@ -1427,7 +1430,7 @@ def build_prompt(
         "work to do.",
         "",
         DELEGATION_FENCE_OPEN,
-        _neutralize(strip_log(body)).strip(),
+        _neutralize(strip_completions(strip_log(body))).strip(),
         DELEGATION_FENCE_CLOSE,
     ]
     note = instructions.strip()

@@ -24,6 +24,14 @@ from ciao.task_board import (
     parse_task,
     patch_task,
 )
+from ciao.task_resolution import (
+    CLOSE as COMPLETIONS_CLOSE,
+    OPEN as COMPLETIONS_OPEN,
+    Completion,
+    append_completion,
+    extract_section,
+    parse_completions,
+)
 
 
 class Clock:
@@ -894,3 +902,143 @@ def test_a_schema_1_file_the_migration_cannot_read_is_left_untouched(tmp_path: P
     assert store.migrate_schema_1() == []
     assert path.read_bytes() == raw
     assert store.list().invalid[0].code == "unsupported_schema"
+
+
+# ── Completion history (#1152) ───────────────────────────────────────
+
+
+def test_moving_to_done_records_a_completion_and_a_replay_does_not(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", clock)
+    created = store.create(title="T", body="Do the thing.")
+    clock.now = datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+
+    done = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"status": "done"},
+        actor="user",
+        resolution="All green\nsecond line.",
+    )
+    assert done.record.status == "done"
+    found = parse_completions(done.body)
+    assert len(found) == 1
+    assert found[0].completed_at == datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+    assert found[0].resolution == "All green\nsecond line."
+    assert len(found[0].id) == 32
+    # The file bytes outside the new section match the pre-image's body.
+    start = done.body.index(COMPLETIONS_OPEN)
+    end = done.body.index(COMPLETIONS_CLOSE) + len(COMPLETIONS_CLOSE)
+    assert (done.body[:start] + done.body[end:]).strip() == created.body.strip()
+
+    # Replaying done is a no-op: no second item, not even a new revision.
+    replay = store.update(
+        created.record.id,
+        expected_revision=done.revision,
+        changes={"status": "done"},
+        actor="user",
+    )
+    assert replay.revision == done.revision
+    assert len(parse_completions(replay.body)) == 1
+
+    # An ordinary edit while done still adds no item; the section is untouched.
+    clock.now = datetime(2026, 10, 8, 9, 0, 0, tzinfo=UTC)
+    retitled = store.update(
+        created.record.id,
+        expected_revision=replay.revision,
+        changes={"title": "T2"},
+        actor="user",
+    )
+    assert len(parse_completions(retitled.body)) == 1
+    assert extract_section(retitled.body) == extract_section(done.body)
+
+
+def test_reopen_keeps_history_and_the_next_done_appends(tmp_path: Path) -> None:
+    clock = Clock()
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", clock)
+    created = store.create(title="T", body="Do the thing.")
+    clock.now = datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+    done = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"status": "done"},
+        actor="user",
+        resolution="First",
+    )
+    clock.now = datetime(2026, 10, 8, 9, 0, 0, tzinfo=UTC)
+    reopened = store.update(
+        created.record.id,
+        expected_revision=done.revision,
+        changes={"status": "in_progress"},
+        actor="user",
+    )
+    assert reopened.record.status == "in_progress"
+    assert len(parse_completions(reopened.body)) == 1
+    assert COMPLETIONS_OPEN in reopened.body
+
+    clock.now = datetime(2026, 10, 8, 10, 0, 0, tzinfo=UTC)
+    redone = store.update(
+        created.record.id,
+        expected_revision=reopened.revision,
+        changes={"status": "done"},
+        actor="user",
+        resolution="Second",
+    )
+    found = parse_completions(redone.body)
+    assert len(found) == 2
+    assert found[0].id != found[1].id
+    assert [item.resolution for item in found] == ["Second", "First"]
+    assert found[0].completed_at == datetime(2026, 10, 8, 10, 0, 0, tzinfo=UTC)
+    assert found[1].completed_at == datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("bom", [False, True])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_description_save_preserves_completion_bytes(
+    tmp_path: Path, bom: bool, newline: str
+) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    task_id = "d" * 32
+    body = append_completion(
+        "Original description.",
+        Completion(
+            id="5" * 32,
+            completed_at=datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC),
+            resolution="Done well.",
+        ),
+    )
+    if newline == "\r\n":
+        body = body.replace("\n", "\r\n")
+    hand_file(
+        vault,
+        task_id,
+        valid_frontmatter(task_id),
+        body=body,
+        newline=newline,
+        bom=bom,
+    )
+    document = store.get(task_id)
+    assert len(parse_completions(document.body)) == 1
+
+    updated = store.update(
+        task_id,
+        expected_revision=document.revision,
+        changes={},
+        body="Edited description.",
+        actor="user",
+    )
+    assert len(parse_completions(updated.body)) == 1
+    assert parse_completions(updated.body)[0].resolution == "Done well."
+    assert extract_section(updated.body) == extract_section(document.body)
+
+    after = task_path(vault, task_id).read_bytes()
+    assert after.startswith(b"\xef\xbb\xbf") == bom
+    assert b"Edited description." in after
+    assert b"Original description." not in after
+    if newline == "\r\n":
+        # The stored section keeps its own CRLF bytes through the save.
+        assert b"\r\n" in extract_section(updated.body).encode()
