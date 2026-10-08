@@ -34,12 +34,23 @@ from ciao import project_doc_update as pdu
 def windows_text(monkeypatch: pytest.MonkeyPatch) -> None:
     """Windows text-mode newline translation for ``Path`` IO, on any host.
 
-    Only the default ``newline=None`` translates; an explicit ``newline``
-    (which every production write passes as ``""``) goes through untouched,
-    exactly as on Windows.
+    Byte-based rather than delegating to the real ``read_text``/``write_text``:
+    those only grew a ``newline`` parameter in Python 3.13, so forwarding one
+    breaks on the 3.12 CI runs. Only the default ``newline=None`` translates;
+    an explicit ``newline`` (which every production write passes as ``""``)
+    goes through untouched, exactly as on Windows.
     """
-    real_write = pathlib.Path.write_text
-    real_read = pathlib.Path.read_text
+    import locale
+
+    def default_encoding(encoding: str | None) -> str:
+        if encoding is not None:
+            return encoding
+        return locale.getpreferredencoding(False)
+
+    def default_errors(errors: str | None) -> str:
+        if errors is not None:
+            return errors
+        return "strict"
 
     def write_text(
         self: Path,
@@ -48,11 +59,15 @@ def windows_text(monkeypatch: pytest.MonkeyPatch) -> None:
         errors: str | None = None,
         newline: str | None = None,
     ) -> int:
-        if newline is None and isinstance(data, str):
-            return real_write(
-                self, data.replace("\n", "\r\n"), encoding, errors, ""
-            )
-        return real_write(self, data, encoding, errors, newline)
+        if newline is None:
+            # What a Windows text-mode write does: every `\n` becomes
+            # `\r\n`, including the `\n` of an already-CRLF pair.
+            data = data.replace("\n", "\r\n")
+        self.write_bytes(
+            data.encode(default_encoding(encoding), default_errors(errors))
+        )
+        # `write_text` reports characters, not bytes.
+        return len(data)
 
     def read_text(
         self: Path,
@@ -60,10 +75,16 @@ def windows_text(monkeypatch: pytest.MonkeyPatch) -> None:
         errors: str | None = None,
         newline: str | None = None,
     ) -> str:
+        # Raw CRLF first: decoding already-translated text would hide the
+        # bytes a caller must hash.
+        raw = self.read_bytes().decode(
+            default_encoding(encoding), default_errors(errors)
+        )
         if newline is None:
-            raw = real_read(self, encoding, errors, "")
             return raw.replace("\r\n", "\n").replace("\r", "\n")
-        return real_read(self, encoding, errors, newline)
+        if newline == "":
+            return raw
+        return raw.replace(newline, "\n")
 
     monkeypatch.setattr(pathlib.Path, "write_text", write_text)
     monkeypatch.setattr(pathlib.Path, "read_text", read_text)
