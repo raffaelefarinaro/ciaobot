@@ -1668,6 +1668,10 @@ class OpencodeProvider(BaseSDKProvider):
         prefix = opencode_sandbox_prefix(roots=roots, read_only=read_only)
         for folder in writable:
             folder.mkdir(parents=True, exist_ok=True)
+        # Exec the resolved binary: an npm install puts a symlink in
+        # ~/.local/bin, which is outside every granted folder, so bwrap cannot
+        # follow it. The resolved file is inside the read-only install.
+        argv[0] = str(Path(binary).resolve())
         return [*prefix, *argv], {"XDG_CACHE_HOME": str(cache_home)}
 
     async def _start_server_once(

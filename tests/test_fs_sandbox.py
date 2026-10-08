@@ -83,6 +83,7 @@ def test_opencode_prefix_is_sandbox_exec_on_darwin(tmp_path, monkeypatch):
 def test_opencode_prefix_is_bwrap_on_linux(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
 
     root = tmp_path / "root"
     argv = opencode_sandbox_prefix(roots=[root])
@@ -218,6 +219,7 @@ def test_read_only_dirs_are_readable_and_never_writable(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
     argv = opencode_sandbox_prefix(roots=[root], read_only=[config])
     at = argv.index(str(config))
     assert argv[at - 1] == "--ro-bind"
@@ -319,3 +321,42 @@ def test_darwin_seatbelt_allows_dev_null(tmp_path):
         capture_output=True, text=True, timeout=30,
     )
     assert shell.stdout.strip() == "ok", shell.stderr
+
+
+def test_bwrap_mounts_the_fresh_tmp_before_the_roots(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    root = Path("/tmp/ciao-workspace")
+
+    argv = opencode_sandbox_prefix(roots=[root])
+
+    # A root under /tmp must survive the fresh /tmp, so the tmpfs comes first.
+    assert argv.index("--tmpfs") < argv.index(str(root))
+
+
+def test_a_bwrap_that_cannot_sandbox_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: False)
+
+    with pytest.raises(FsSandboxUnavailable, match="AppArmor"):
+        opencode_sandbox_prefix(roots=[tmp_path])
+
+
+def test_bwrap_usable_reads_the_probe_exit_code(monkeypatch):
+    from ciao import fs_sandbox
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, b"", b"bwrap: setting up uid map: Permission denied")
+
+    monkeypatch.setattr(fs_sandbox.subprocess, "run", fake_run)
+    fs_sandbox._bwrap_usable.cache_clear()
+    try:
+        assert fs_sandbox._bwrap_usable("/usr/bin/bwrap") is False
+        assert calls[0][0] == "/usr/bin/bwrap"
+    finally:
+        fs_sandbox._bwrap_usable.cache_clear()
