@@ -2823,3 +2823,67 @@ async def test_approving_a_delegated_result_archives_its_chat_and_queues_a_learn
         outcome["chat_id"],
         {"focus": "approved_task", "task_title": "Learnable work", "task_summary": "Did the work."},
     )]
+
+
+async def test_approving_a_review_records_the_resolution_on_the_same_write(
+    tmp_path: Path,
+) -> None:
+    """The resolution rides the one write that makes the card Done.
+
+    The review approval is three writes (unlink, the completion, release). The
+    resolution goes with the completion, so the recorded note and the Done status
+    cannot disagree, and the attempt keeps the result the user reviewed.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Review with a note")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    settled = _get_task(plane, task["id"])
+    assert settled["attempt_state"] == "ready_for_review"
+
+    done = plane.workspace_task_action(
+        "personal",
+        "complete",
+        task["id"],
+        expected_revision=settled["revision"],
+        actor="user",
+        resolution="Reviewed the result; it holds.",
+    )
+
+    assert done["status"] == "done"
+    assert done["attempt_id"] is None
+    assert done["resolution"] == "Reviewed the result; it holds."
+    assert [item["attempt_id"] for item in done["completions"]] == [""]
+    assert _attempt_store(plane).get(attempt_id).state == "ready_for_review"
+
+
+async def test_a_refused_resolution_leaves_the_review_linked_and_open(
+    tmp_path: Path,
+) -> None:
+    """A malformed resolution is refused before the unlink, so nothing is released."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Refuse a bad note")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    settled = _get_task(plane, task["id"])
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_action(
+            "personal",
+            "complete",
+            task["id"],
+            expected_revision=settled["revision"],
+            actor="user",
+            resolution=["not", "text"],
+        )
+
+    assert excinfo.value.code == "invalid_task"
+    still = _get_task(plane, task["id"])
+    assert still["status"] == "in_review"
+    assert still["attempt_id"] == settled["attempt_id"]
+    assert still["revision"] == settled["revision"]
+    assert _attempt_store(plane).get(attempt_id).state == "ready_for_review"

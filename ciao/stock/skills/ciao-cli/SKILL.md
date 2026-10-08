@@ -134,7 +134,7 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 
 | Command | Purpose | Guard |
 |---|---|---|
-| `task list` | List this workspace's board: valid tasks in board order (dated first), then one row per file that is not a readable task, carrying `code` instead of task fields. | Read-only. A malformed file is always reported, never dropped, so an empty-looking board is never the truth. |
+| `task list [--completed-since ISO] [--completed-before ISO]` | List this workspace's board: valid tasks in board order (dated first), then one row per file that is not a readable task, carrying `code` instead of task fields. The two bounds keep tasks with a completion in `[since, before)`, by when they were completed, not last edited; a task never completed is left out of a filtered list. | Read-only. A malformed file is always reported when no bound is given, never dropped, so an empty-looking board is never the truth. |
 | `task get TASK_ID` | Get one task, description/links body included. | Read-only. |
 | `task create --title TITLE [--body-file FILE.md] [--project P] [--due YYYY-MM-DD]` | File a task. `--project` takes an id or a name and must belong to this workspace; `--due` is a calendar day, never an instant. | The body is Markdown prose, so it travels as a file — never as a shell argument. A project in another workspace is `project_not_found`. |
 | `task update TASK_ID --revision REV [--title T] [--body-file FILE.md] [--due D] [--assignee user\|agent] [--status STATUS]` | Edit one task; only the fields passed change. `REV` is the `revision` you read. | `task_revision_conflict` (retryable) means the file moved: re-read and re-plan, never resend the same revision. An unknown field is refused. |

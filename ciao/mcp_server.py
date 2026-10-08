@@ -1023,7 +1023,11 @@ async def _op_schedule_action(service: CiaoMcpService, schedule_id: str, action:
     return await service._invoke("schedule_action", op, mutating=True)
 
 
-async def _op_task_list(service: CiaoMcpService) -> dict[str, Any]:
+async def _op_task_list(
+    service: CiaoMcpService,
+    completed_since: str | None = None,
+    completed_before: str | None = None,
+) -> dict[str, Any]:
     """List this workspace's tasks in board order.
 
     Every task row carries its `revision` (the SHA-256 of the file's bytes),
@@ -1031,8 +1035,21 @@ async def _op_task_list(service: CiaoMcpService) -> dict[str, Any]:
     directory that is not a readable task is returned as a row carrying
     `code` instead of task fields: it is never dropped, so a malformed file
     cannot read as an empty board.
+
+    Args:
+        completed_since: ISO-8601 start, inclusive. Keeps tasks with a
+            completion at or after it.
+        completed_before: ISO-8601 end, exclusive. Keeps tasks with a
+            completion before it. Either bound filters the list by when
+            tasks were completed, not when they were last edited; a task
+            never completed is left out of a filtered list.
     """
-    return await service._invoke("task_list", lambda cp, p: cp.task_list(p))
+    return await service._invoke(
+        "task_list",
+        lambda cp, p: cp.task_list(
+            p, completed_since=completed_since, completed_before=completed_before
+        ),
+    )
 
 
 async def _op_task_get(service: CiaoMcpService, task_id: str) -> dict[str, Any]:

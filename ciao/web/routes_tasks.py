@@ -154,6 +154,21 @@ async def _body(request: Request) -> dict[str, Any] | JSONResponse:
     return body
 
 
+def _resolution(body: dict[str, Any]) -> str | None | JSONResponse:
+    """The completion text a write carries, or the 400 to answer with.
+
+    Absent means ``None`` (no note). Present must be a string: an explicit
+    ``null``, a number, an object or a list is refused rather than stringified,
+    so a client cannot record ``"None"`` or ``"{}"`` as a resolution.
+    """
+    if "resolution" not in body:
+        return None
+    value = body["resolution"]
+    if not isinstance(value, str):
+        return _refusal("invalid_task", "resolution must be a string", 400)
+    return value
+
+
 def _revision(body: dict[str, Any]) -> str | JSONResponse:
     """The revision a write must present, or the 400 to answer with.
 
@@ -172,7 +187,12 @@ def _revision(body: dict[str, Any]) -> str | JSONResponse:
 
 
 async def task_list(request: Request) -> JSONResponse:
-    """One workspace's board rows; ``?workspace=`` names the workspace."""
+    """One workspace's board rows; ``?workspace=`` names the workspace.
+
+    ``?completed_since=`` and ``?completed_before=`` (ISO-8601) narrow the list to
+    tasks with a completion in ``[since, before)``. A bound that does not parse is
+    a 400, not an ignored filter.
+    """
     plane = _control_plane(request)
     if plane is None:
         return _unavailable()
@@ -182,7 +202,12 @@ async def task_list(request: Request) -> JSONResponse:
     try:
         # In a thread: a list reads and parses every task file, which is the
         # event loop's time to spend, not its own.
-        rows = await asyncio.to_thread(plane.workspace_task_list, workspace)
+        rows = await asyncio.to_thread(
+            plane.workspace_task_list,
+            workspace,
+            completed_since=request.query_params.get("completed_since"),
+            completed_before=request.query_params.get("completed_before"),
+        )
     except ControlPlaneError as exc:
         return _error(exc)
     return JSONResponse({"workspace": workspace, "tasks": rows})
@@ -247,7 +272,12 @@ async def task_create(request: Request) -> JSONResponse:
 
 
 async def task_update(request: Request) -> JSONResponse:
-    """Edit one task at ``expected_revision``; only the fields sent change."""
+    """Edit one task at ``expected_revision``; only the fields sent change.
+
+    ``resolution`` is the one extra field: it rewords the latest completion of a
+    task that is already done. It is not a body replacement and it does not
+    move ``completed_at``. A task that is not done is refused for it.
+    """
     plane = _control_plane(request)
     if plane is None:
         return _unavailable()
@@ -258,7 +288,9 @@ async def task_update(request: Request) -> JSONResponse:
     if isinstance(revision, JSONResponse):
         return revision
     unknown = sorted(
-        key for key in body if key not in _WRITE_KEYS and key not in _PATCHABLE
+        key
+        for key in body
+        if key not in _WRITE_KEYS and key not in _PATCHABLE and key != "resolution"
     )
     if unknown:
         return _refusal(
@@ -273,9 +305,14 @@ async def task_update(request: Request) -> JSONResponse:
     # A `body` that is present but not a string is a no-op rather than an edit,
     # so it does not count as "something to change" either.
     description = body.get("body") if isinstance(body.get("body"), str) else None
-    if not changes and description is None:
+    resolution = _resolution(body)
+    if isinstance(resolution, JSONResponse):
+        return resolution
+    if not changes and description is None and resolution is None:
         return _refusal(
-            "nothing_to_change", "Send at least one editable field, or a body.", 400
+            "nothing_to_change",
+            "Send at least one editable field, a body, or a resolution.",
+            400,
         )
     try:
         task = await asyncio.to_thread(
@@ -286,6 +323,7 @@ async def task_update(request: Request) -> JSONResponse:
             changes=changes,
             body=description,
             actor="user",
+            resolution=resolution,
         )
     except ControlPlaneError as exc:
         return _error(exc)
@@ -491,6 +529,9 @@ async def task_complete(request: Request) -> JSONResponse:
     revision = _revision(body)
     if isinstance(revision, JSONResponse):
         return revision
+    resolution = _resolution(body)
+    if isinstance(resolution, JSONResponse):
+        return resolution
     workspace = _workspace(request.app.state.config, body.get("workspace"))
     if workspace is None:
         return _workspace_required()
@@ -502,6 +543,7 @@ async def task_complete(request: Request) -> JSONResponse:
             str(request.path_params.get("task_id") or ""),
             expected_revision=revision,
             actor="user",
+            resolution=resolution,
         )
     except ControlPlaneError as exc:
         return _error(exc)

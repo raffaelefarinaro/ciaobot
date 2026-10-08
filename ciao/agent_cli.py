@@ -224,7 +224,9 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("project_id")
 
     task = _verbs(nouns.add_parser("task", help="Tasks in the active workspace."))
-    task.add_parser("list")
+    tlist = task.add_parser("list")
+    tlist.add_argument("--completed-since", default=None, metavar="ISO-8601", help="Keep tasks completed at or after this time (inclusive).")
+    tlist.add_argument("--completed-before", default=None, metavar="ISO-8601", help="Keep tasks completed before this time (exclusive).")
     tget = task.add_parser("get")
     tget.add_argument("task_id")
     tcreate = task.add_parser("create")
@@ -525,7 +527,12 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         return "project_action", {"action": verb, "project_id": args.project_id}
     if noun == "task":
         if verb == "list":
-            return "task_list", {}
+            window: dict[str, str] = {}
+            if args.completed_since is not None:
+                window["completed_since"] = args.completed_since
+            if args.completed_before is not None:
+                window["completed_before"] = args.completed_before
+            return "task_list", window
         if verb == "get":
             return "task_get", {"task_id": args.task_id}
         if verb == "create":

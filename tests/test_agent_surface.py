@@ -407,6 +407,10 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["project", "restore", "q4-launch"], ("project", {"action": "restore", "stem": "q4-launch"})),
         (["project", "complete", "p1"], ("project_action", {"action": "complete", "project_id": "p1"})),
         (["task", "list"], ("task_list", {})),
+        (
+            ["task", "list", "--completed-since", "2026-10-08", "--completed-before", "2026-10-09T00:00:00Z"],
+            ("task_list", {"completed_since": "2026-10-08", "completed_before": "2026-10-09T00:00:00Z"}),
+        ),
         (["task", "get", "a1b2"], ("task_get", {"task_id": "a1b2"})),
         (["task", "create", "--title", "Ship the board"], ("task_create", {"title": "Ship the board"})),
         (
