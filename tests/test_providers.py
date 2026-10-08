@@ -1133,8 +1133,14 @@ async def test_claude_workspace_scope_sets_sandbox_and_roots(
     assert sandbox["excludedCommands"] == []
     assert sandbox["filesystem"]["allowRead"] == [str(agent_root), str(vault_root)]
     assert sandbox["filesystem"]["allowWrite"] == [str(agent_root), str(vault_root)]
+    assert sandbox["filesystem"]["denyRead"] == [str(Path.home())]
     # The vault sits outside the agent root, so the CLI also gets it as an add dir.
     assert [str(path) for path in options.add_dirs] == [str(vault_root)]
+    # The CLI's own file tools are outside the Bash sandbox; a hook confines them.
+    matchers = options.hooks["PreToolUse"]
+    guard = [m for m in matchers if "Read" in (m.matcher or "").split("|")]
+    assert len(guard) == 1
+    assert set(guard[0].matcher.split("|")) >= {"Read", "Write", "Edit", "Glob", "Grep"}
     assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
 
 
@@ -1187,6 +1193,7 @@ async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -
     options = captured["options"]
     assert options.sandbox is None
     assert options.add_dirs == []
+    assert [m.matcher for m in options.hooks["PreToolUse"]] == ["Bash", "Monitor"]
     assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
 
 

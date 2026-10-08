@@ -54,7 +54,12 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import PermissionMode, SandboxSettings, SystemPromptPreset
 
-from ciao.fs_sandbox import FsSandboxUnavailable, claude_sandbox_settings
+from ciao.fs_sandbox import (
+    CLAUDE_FILE_TOOL_PATH_KEYS,
+    FsSandboxUnavailable,
+    claude_file_tool_guard,
+    claude_sandbox_settings,
+)
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -509,6 +514,7 @@ class ClaudeProvider(BaseSDKProvider):
 
         sandbox: SandboxSettings | None = None
         add_dirs: list[str | Path] = []
+        file_tool_hooks: list[HookMatcher] = []
         if request.agent_fs_scope == "workspace":
             if sys.platform == "win32":
                 raise FsSandboxUnavailable(
@@ -524,6 +530,12 @@ class ClaudeProvider(BaseSDKProvider):
             add_dirs = [
                 root for root in other_roots if not Path(root).is_relative_to(agent_root)
             ]
+            # The sandbox covers Bash only; the CLI's own file tools are
+            # confined to the same roots by this hook.
+            file_tool_hooks = [HookMatcher(
+                matcher="|".join(CLAUDE_FILE_TOOL_PATH_KEYS),
+                hooks=[claude_file_tool_guard(cwd=Path(self.workspace_root), roots=roots)],
+            )]
         self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
 
         options = ClaudeAgentOptions(
@@ -570,7 +582,7 @@ class ClaudeProvider(BaseSDKProvider):
                 ), HookMatcher(
                     matcher="Monitor",
                     hooks=[build_monitor_deny_hook()],
-                )],
+                ), *file_tool_hooks],
             },
             # Auto mode's classifier handles most tool calls silently, but
             # escalations (blocked actions the model keeps insisting on)
