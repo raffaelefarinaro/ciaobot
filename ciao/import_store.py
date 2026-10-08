@@ -1291,6 +1291,25 @@ class ImportStore:
             self._write(batches, kept)
             return len(expired)
 
+    def rename_workspace(self, old: str, new: str) -> int:
+        """Point every batch filed under ``old`` at ``new``.
+
+        Only ``workspace`` changes; ``destination`` is left alone.
+        Idempotent: a second call sees no ``old`` rows and writes nothing.
+        """
+        with self._mutation():
+            batches, retained = self._read()
+            stamp = self._stamp()
+            renamed = 0
+            for batch_id, batch in list(batches.items()):
+                if batch.workspace != old:
+                    continue
+                batches[batch_id] = _touch(batch, stamp, workspace=new)
+                renamed += 1
+            if renamed:
+                self._write(batches, retained)
+            return renamed
+
     # -- clock ------------------------------------------------------------
 
     def _stamp(self) -> str:

@@ -267,6 +267,51 @@ def _refresh_project_manager_workspaces(request: Request) -> None:
         refresh()
 
 
+def _rename_schedule_store(request: Request) -> Any:
+    """The schedule store a workspace rename rewrites.
+
+    The live manager's store when the app has one, else a store on the same
+    file: the store is stateless and re-reads under its locks, so both spell
+    the same rows.
+    """
+    from ciao.schedules import ScheduleStore  # noqa: PLC0415
+
+    manager = _schedule_manager(request)
+    if manager is not None:
+        inner = getattr(manager, "_store", None)
+        return inner if inner is not None else manager
+    config = request.app.state.config
+    return ScheduleStore(Path(config.state_path).parent)
+
+
+def _rename_webhook_store(request: Request) -> Any:
+    from ciao.web.routes_webhooks import webhook_store  # noqa: PLC0415
+
+    return webhook_store(request.app.state.config)
+
+
+def _rename_import_store(request: Request) -> Any:
+    from ciao.import_store import ImportStore, engine_store_path  # noqa: PLC0415
+
+    return ImportStore(engine_store_path(request.app.state.config))
+
+
+def _rename_run_store(request: Request) -> Any:
+    """The background-run store a workspace rename rewrites.
+
+    The live runner's store when the app has one, else a store on the same
+    file.
+    """
+    from ciao.background import BackgroundRunStore  # noqa: PLC0415
+
+    runner = getattr(request.app.state, "background_runner", None)
+    if runner is not None:
+        inner = getattr(runner, "_store", None)
+        return inner if inner is not None else runner
+    config = request.app.state.config
+    return BackgroundRunStore(Path(config.state_path).parent)
+
+
 async def upsert_workspace_setting(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -276,10 +321,38 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "expected an object"}, status_code=400)
     route_name = request.path_params.get("name")
+    requested = str(body.get("name") or "").strip() if route_name else ""
     if route_name:
         body = {**body, "name": route_name}
     # Serialized with archive and restore; see ``_workspace_archive_lock``.
     async with _workspace_archive_lock(request):
+        renamed: dict[str, str] | None = None
+        if route_name and requested and requested != route_name:
+            # A PATCH carrying a different name renames the workspace first;
+            # the rest of the save below then applies to the new record.
+            from ciao.workspace_rename import (  # noqa: PLC0415
+                WorkspaceRenameBusy,
+                rename_workspace,
+            )
+
+            try:
+                renamed = rename_workspace(
+                    config,
+                    old=str(route_name),
+                    new=requested,
+                    projects=getattr(
+                        request.app.state, "project_chat_manager", None
+                    ),
+                    schedules=_rename_schedule_store(request),
+                    webhooks=_rename_webhook_store(request),
+                    imports=_rename_import_store(request),
+                    runs=_rename_run_store(request),
+                )
+            except WorkspaceRenameBusy as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            body = {**body, "name": requested}
         existing = config.workspace(str(body.get("name", "")).strip())
         try:
             workspace = _workspace_from_request(body, config=config, existing=existing)
@@ -296,6 +369,8 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         _persist_workspaces(config)
         _refresh_project_manager_workspaces(request)
         payload = _workspaces_payload(config)
+        if renamed is not None:
+            payload["renamed"] = renamed
         if created:
             payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
         elif profile_changed:
@@ -326,6 +401,8 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
                     "Could not resync skills for workspace %s after profile change",
                     workspace.name,
                 )
+        if renamed is not None:
+            _publish_workspaces_changed(request, renamed["from"], renamed["to"])
         return JSONResponse(payload, status_code=201 if created else 200)
 
 
@@ -413,20 +490,28 @@ def _publish_automations_changed(request: Request) -> None:
         logger.debug("Could not publish automations_changed", exc_info=True)
 
 
-def _publish_workspaces_changed(request: Request) -> None:
+def _publish_workspaces_changed(
+    request: Request, old: str | None = None, new: str | None = None
+) -> None:
     """Tell every open client the workspace registry changed.
 
     Other tabs and devices only see ``project_*`` frames when a workspace is
     archived or restored; without this their workspace list and active
-    workspace stayed stale until a reload. Carries no payload: clients refetch
-    ``/api/workspaces``. Fire-and-forget, like ``schedules_changed``.
+    workspace stayed stale until a reload. Carries no payload by default:
+    clients refetch ``/api/workspaces``. A rename passes the pair, so a
+    client can follow the workspace without a second fetch.
+    Fire-and-forget, like ``schedules_changed``.
     """
     pcm = getattr(request.app.state, "project_chat_manager", None)
     events = getattr(pcm, "events", None)
     if events is None:
         return
     try:
-        events.publish({"type": "workspaces_changed"})
+        payload: dict[str, str] = {"type": "workspaces_changed"}
+        if old and new:
+            payload["from"] = old
+            payload["to"] = new
+        events.publish(payload)
     except Exception:  # noqa: BLE001 - a missed nudge only delays a refresh
         logger.debug("Could not publish workspaces_changed", exc_info=True)
 

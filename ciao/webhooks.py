@@ -1023,6 +1023,35 @@ class WebhookStore:
                 self._write(records)
             return revoked
 
+    def rename_workspace(self, old: str, new: str) -> int:
+        """Point every trigger filed under ``old`` at ``new``.
+
+        The trigger keeps its id, verifier and enabled state; only
+        ``workspace`` changes and the revision advances, so a holder of a
+        stale copy re-reads. Nothing is revoked. Idempotent: a second call
+        sees no ``old`` rows and writes nothing.
+        """
+        with self._mutation():
+            records = self._read()
+            stamp = self._stamp()
+            renamed = 0
+            for trigger_id, record in list(records.items()):
+                if record.trigger.workspace != old:
+                    continue
+                records[trigger_id] = _StoredTrigger(
+                    trigger=replace(
+                        record.trigger,
+                        workspace=new,
+                        revision=record.trigger.revision + 1,
+                        updated_at=stamp,
+                    ),
+                    secret_sha256=record.secret_sha256,
+                )
+                renamed += 1
+            if renamed:
+                self._write(records)
+            return renamed
+
     # -- authenticating ---------------------------------------------------
 
     def authenticate(self, trigger_id: str, secret: str) -> WebhookTrigger | None:
