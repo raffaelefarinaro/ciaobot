@@ -20,6 +20,7 @@ from ciao.config import (
     WorkspaceConfig,
     coerce_agent_fs_scope,
     coerce_workspace_color,
+    default_agent_fs_scope,
 )
 
 WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -90,10 +91,10 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         color = DEFAULT_WORKSPACE_COLOR
     try:
         agent_fs_scope = coerce_agent_fs_scope(
-            getattr(workspace, "agent_fs_scope", "workspace")
+            getattr(workspace, "agent_fs_scope", default_agent_fs_scope())
         )
     except ValueError:
-        agent_fs_scope = "workspace"
+        agent_fs_scope = default_agent_fs_scope()
     # A stored value naming a removed backend (e.g. pre-refactor "ollama") is
     # reported as the provider that actually runs the workspace. The PWA
     # renders this into a <select> limited to the provider options, so an
@@ -223,9 +224,9 @@ def workspace_from_request(
     if "agent_fs_scope" in data:
         agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
     elif existing is not None:
-        agent_fs_scope = getattr(existing, "agent_fs_scope", "workspace") or "workspace"
+        agent_fs_scope = getattr(existing, "agent_fs_scope", "") or default_agent_fs_scope()
     else:
-        agent_fs_scope = "workspace"
+        agent_fs_scope = default_agent_fs_scope()
     return WorkspaceConfig(
         name=name,
         # Vault locations are not an editable Settings field. Updating a

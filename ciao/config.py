@@ -6,6 +6,7 @@ import logging
 import json
 import os
 import secrets
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -331,13 +332,23 @@ def coerce_workspace_color(raw: object) -> str:
     )
 
 
+def default_agent_fs_scope() -> str:
+    """Filesystem scope for a workspace with none stored.
+
+    Windows has no sandbox, so workspace scope would refuse every chat there;
+    it defaults to whole machine. Elsewhere the sandbox exists and the default
+    is workspace. A stored value is never overridden by this.
+    """
+    return "machine" if sys.platform == "win32" else "workspace"
+
+
 def coerce_agent_fs_scope(raw: object) -> str:
-    """Normalize a workspace filesystem scope. Missing/empty → workspace."""
+    """Normalize a workspace filesystem scope. Missing/empty → the platform default."""
     if raw is None:
-        return "workspace"
+        return default_agent_fs_scope()
     cleaned = str(raw).strip()
     if not cleaned:
-        return "workspace"
+        return default_agent_fs_scope()
     if cleaned in AGENT_FS_SCOPES:
         return cleaned
     raise ValueError(
@@ -366,10 +377,10 @@ class WorkspaceConfig:
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
-    # Filesystem scope for agent tool execution. Defaults to "workspace", which
-    # confines the agent and its shell to the workspace; "machine" is the
-    # whole-machine escape hatch.
-    agent_fs_scope: str = "workspace"
+    # Filesystem scope for agent tool execution. Defaults per platform (see
+    # default_agent_fs_scope): "workspace" confines the agent and its shell to
+    # the workspace; "machine" is the whole-machine escape hatch.
+    agent_fs_scope: str = field(default_factory=default_agent_fs_scope)
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -406,7 +417,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     try:
         agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
     except ValueError:
-        agent_fs_scope = "workspace"
+        agent_fs_scope = default_agent_fs_scope()
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
