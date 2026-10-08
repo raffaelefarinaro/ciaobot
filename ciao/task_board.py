@@ -95,6 +95,7 @@ from ciao.async_reads import keyed_lock
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import carry_mode
+from ciao.task_log import extract_log
 from ciao.task_resolution import (
     OPEN as COMPLETIONS_OPEN,
     Completion,
@@ -1533,8 +1534,9 @@ class TaskBoardStore:
 
         A supplied body carries the description only: any completion section
         in it is stripped on the way in and the stored section is appended
-        back, so a description save never drops the history. Reopening
-        (``done`` to another status) keeps the section.
+        back, so a description save never drops the history. The delegation
+        log (#1064) is kept the same way when the body omits it. Reopening
+        (``done`` to another status) keeps both sections.
 
         Managed-operation rules (they bind this API, not direct file
         editors):
@@ -1606,10 +1608,15 @@ class TaskBoardStore:
                     if extract_section(working)
                     else working
                 )
+                # The delegation log is the engine's too: a description read
+                # carries no log, so a save that omits it gets the stored one
+                # back. A body that does carry a log (the log's own write) is
+                # taken as given.
                 kept = extract_section(document.body)
-                if kept:
+                kept_log = "" if extract_log(working) else extract_log(document.body)
+                if kept or kept_log:
                     head = stripped.rstrip()
-                    working = f"{head}\n\n{kept}\n" if head else f"{kept}\n"
+                    working = "\n\n".join(s for s in (head, kept, kept_log) if s) + "\n"
                 else:
                     working = stripped
             stamp: datetime | None = None

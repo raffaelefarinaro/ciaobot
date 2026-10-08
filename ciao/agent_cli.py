@@ -224,7 +224,9 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("project_id")
 
     task = _verbs(nouns.add_parser("task", help="Tasks in the active workspace."))
-    task.add_parser("list")
+    tlist = task.add_parser("list")
+    tlist.add_argument("--completed-since", default=None, metavar="ISO-8601", help="Keep tasks completed at or after this time (inclusive).")
+    tlist.add_argument("--completed-before", default=None, metavar="ISO-8601", help="Keep tasks completed before this time (exclusive).")
     tget = task.add_parser("get")
     tget.add_argument("task_id")
     tcreate = task.add_parser("create")
@@ -249,6 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     tcomplete = task.add_parser("complete")
     tcomplete.add_argument("task_id")
     tcomplete.add_argument("--revision", required=True)
+    tcomplete.add_argument("--resolution", default=None, help="The resolution note, as the user gives it. Refused to you like any completion.")
     tdelegate = task.add_parser("delegate")
     tdelegate.add_argument("task_id")
     tdelegate.add_argument("--revision", required=True, help="The revision you read; a stale one starts nothing.")
@@ -525,7 +528,12 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         return "project_action", {"action": verb, "project_id": args.project_id}
     if noun == "task":
         if verb == "list":
-            return "task_list", {}
+            window: dict[str, str] = {}
+            if args.completed_since is not None:
+                window["completed_since"] = args.completed_since
+            if args.completed_before is not None:
+                window["completed_before"] = args.completed_before
+            return "task_list", window
         if verb == "get":
             return "task_get", {"task_id": args.task_id}
         if verb == "create":
@@ -574,11 +582,14 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         # `complete` stays its own verb even though the store refuses it: the
         # refusal is the answer, and the agent needs a name for it to report
         # rather than another route it has to guess at.
-        return "task_action", {
+        arguments = {
             "action": "complete",
             "task_id": args.task_id,
             "expected_revision": args.revision,
         }
+        if args.resolution is not None:
+            arguments["resolution"] = args.resolution
+        return "task_action", arguments
     if noun == "schedule":
         if verb == "list":
             return "schedules_list", {}

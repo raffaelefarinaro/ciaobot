@@ -123,6 +123,24 @@ def strip_log(body: str) -> str:
     return _SECTION.sub("", body or "").rstrip() + ("\n" if (body or "").strip() else "")
 
 
+def extract_log(body: str) -> str:
+    """The log section span (markers included), or ``""`` when absent."""
+    match = _SECTION.search(body or "")
+    return match.group(0) if match is not None else ""
+
+
+def log_text(body: str) -> str:
+    """The log's items as Markdown, without its markers or heading; ``""`` when absent."""
+    section = extract_log(body)
+    if not section:
+        return ""
+    inner = section[len(LOG_OPEN) : -len(LOG_CLOSE)].strip("\n")
+    lines = inner.split("\n")
+    if lines and lines[0] == LOG_HEADING:
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
 def _items(section_inner: str) -> list[tuple[str, str]]:
     """``(attempt_id or "", text)`` per item, in order, from the section's inside.
 
