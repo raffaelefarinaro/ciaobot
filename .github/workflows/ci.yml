@@ -30,12 +30,12 @@ jobs:
   linux-server:
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
       with:
         python-version: '3.12'
         cache: 'pip'
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@v7
       with:
         node-version: '22'
         cache: 'npm'
@@ -64,12 +64,12 @@ jobs:
       run:
         shell: bash
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
       with:
         python-version: '3.12'
         cache: 'pip'
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@v7
       with:
         node-version: '22'
         cache: 'npm'
@@ -292,7 +292,7 @@ jobs:
         fi
     - name: Upload results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: windows-results
         path: windows-*.txt
@@ -306,16 +306,16 @@ jobs:
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: macos-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up Python 3.12
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.12'
         cache: 'pip'
 
     - name: Set up Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v7
       with:
         node-version: '22'
         cache: 'npm'
@@ -370,7 +370,7 @@ jobs:
     # Playwright version.
     - name: Cache Playwright browsers
       id: playwright-cache
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/Library/Caches/ms-playwright
         key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
@@ -390,7 +390,7 @@ jobs:
 
     - name: Upload browser test traces
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: playwright-traces
         path: web/test-results/
@@ -398,7 +398,7 @@ jobs:
         if-no-files-found: ignore
 
     - name: Set up uv
-      uses: astral-sh/setup-uv@v6
+      uses: astral-sh/setup-uv@v10.2.0
 
     # The release ships the engine wheel and nothing else (#653), so the
     # macOS-only coverage is the engine too: build the wheel this branch would
