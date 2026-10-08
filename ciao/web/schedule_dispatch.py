@@ -109,7 +109,8 @@ class ScheduleDispatchHost(Protocol):
     ) -> tuple[bool, bool]: ...
 
     async def _schedule_run_needs_user(
-        self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome
+        self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
+        *, chat_id: str = "",
     ) -> bool: ...
 
     async def _wait_for_drain_result(
@@ -245,7 +246,8 @@ class ScheduleDispatcher:
         return running == 0, had_async
 
     async def _schedule_run_needs_user(
-        self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome
+        self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
+        *, chat_id: str = "",
     ) -> bool:
         """Return True when an auto-archive schedule result deserves attention.
 
@@ -276,7 +278,7 @@ class ScheduleDispatcher:
             project_id: str | None = getattr(entry, "web_project_id", None)
             project = self._host._projects.get(project_id) if project_id else None
             workspace = project.workspace if project else None
-            fixed_chat_id: str | None = getattr(entry, "web_chat_id", None)
+            fixed_chat_id: str | None = chat_id or getattr(entry, "web_chat_id", None)
             fixed_chat = self._host._chats.get(fixed_chat_id) if fixed_chat_id else None
             classifier_provider = (
                 fixed_chat.provider if fixed_chat is not None
@@ -286,7 +288,8 @@ class ScheduleDispatcher:
             if classifier_provider not in supported_providers():
                 return True
             model = resolve_insights_model(
-                self._host._config, workspace, classifier_provider
+                self._host._config, workspace, classifier_provider,
+                source_model=fixed_chat.model if fixed_chat is not None else entry.model,
             )
         except Exception:  # noqa: BLE001
             logger.exception("Schedule attention classifier setup failed; keeping chat visible")
@@ -716,7 +719,9 @@ class ScheduleDispatcher:
 
         needs_user = False
         if getattr(entry, "archive_policy", "manual") == "auto" and chat_service._schedule_run_clean(outcome):
-            needs_user = await self._host._schedule_run_needs_user(entry, outcome)
+            needs_user = await self._host._schedule_run_needs_user(
+                entry, outcome, chat_id=target_id
+            )
 
         if chat_service._should_auto_archive_schedule_run(entry, outcome, needs_user=needs_user):
             chat_meta = self._host._chats.get(target_id)

@@ -889,6 +889,7 @@ async def test_postprocess_enqueues_and_skips_one_shot_when_enabled(
 ) -> None:
     manager = _make_manager(tmp_path)
     source = _source(manager)
+    source.model = "sonnet"
     project = manager.get_project(source.project_id)
     archive = _archive_file(tmp_path)
 
@@ -921,6 +922,7 @@ async def test_postprocess_enqueues_and_skips_one_shot_when_enabled(
     # Resolved exactly the way the one-shot stage resolved it.
     assert memory_chat.provider == source.provider
     assert memory_chat.model == manager._insights_model_for(source, "work")
+    assert memory_chat.model == "sonnet"
     assert memory_chat.title == "Memory pass · Pricing rework"
     assert streams.chat_ids == [memory_chat.chat_id]
 

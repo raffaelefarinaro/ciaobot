@@ -162,7 +162,7 @@ class _ScheduleHost:
         return True, False
 
     async def _schedule_run_needs_user(
-        self, entry: ScheduleEntry, outcome
+        self, entry: ScheduleEntry, outcome, *, chat_id: str = ""
     ) -> bool:
         del outcome
         self.needs_user_calls.append(entry)

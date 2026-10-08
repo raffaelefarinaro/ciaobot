@@ -143,6 +143,8 @@ def test_list_models_exposes_thinking_levels(monkeypatch) -> None:
     monkeypatch.setattr(OpencodeProvider, "model_catalog", AsyncMock(return_value=[]))
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     config = CiaoConfig.from_env()
+    config.claude_default_model = "opus"
+    config.provider_default_models = {"claude": "sonnet"}
     scope = {"type": "http", "method": "GET", "path": "/api/models", "headers": [], "query_string": b""}
 
     class _App:
@@ -155,3 +157,5 @@ def test_list_models_exposes_thinking_levels(monkeypatch) -> None:
 
     data = json.loads(asyncio.run(list_models(request)).body)
     assert data["thinking_levels"]["claude"] == list(THINKING_LEVELS["claude"])
+    assert data["default"] == "sonnet"
+    assert data["provider_defaults"]["claude"] == "sonnet"

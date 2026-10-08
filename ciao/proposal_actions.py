@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ciao import proposal_kinds
 
@@ -74,6 +74,7 @@ class ProposalActionResult:
     written: str | None = None
     duplicate: bool = False
     destination: str | None = None
+    skipped: Sequence[str] | None = None
     justified: bool | None = None
     already_moved: bool | None = None
     error: str | None = None
@@ -100,6 +101,8 @@ class ProposalActionResult:
             payload["duplicate"] = True
         if self.destination is not None:
             payload["destination"] = self.destination
+        if self.skipped:
+            payload["skipped"] = list(self.skipped)
         if self.justified is not None:
             payload["justified"] = self.justified
         if self.already_moved is not None:
@@ -168,6 +171,7 @@ def build_accept_result(
             dismissed=dismissed,
             promoted=bool(outcome.get("ok")),
             destination=str(outcome.get("destination", "")),
+            skipped=list(outcome.get("skipped") or []) or None,
             error=(
                 str(outcome.get("error", "could not write the destination"))
                 if failed

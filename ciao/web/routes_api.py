@@ -5328,15 +5328,11 @@ async def list_models(request: Request) -> JSONResponse:
     # Claude Code serves one upstream, so its models are a single list rather
     # than the work/personal split the routing-backend era needed.
     claude_models = list(CLAUDE_MODELS)
-    claude_default = (
-        config.claude_default_model
-        if config.claude_default_model in claude_models
-        else claude_models[0]
-    )
+    claude_default = config.default_model_for_provider("claude") or config.claude_default_model
 
     return JSONResponse({
         "models": list(CLAUDE_MODELS),
-        "default": config.claude_default_model,
+        "default": claude_default,
         "provider_models": {
             "claude": claude_models,
             "opencode": opencode_models,
@@ -5391,7 +5387,7 @@ def _routines_payload(config, app_settings) -> dict:
         # Per-provider default thinking level for new chats, as stored.
         "provider_default_thinking": s.provider_default_thinking or {},
         # Per-provider Session insights models, as stored (missing = that
-        # provider's default chat model).
+        # source chat's model).
         "provider_insights_models": s.provider_insights_models or {},
         "critique_models_effective": critique_effective,
         # Server settings that used to be workspace `.env` variables, as

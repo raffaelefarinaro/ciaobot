@@ -616,6 +616,7 @@
               </div>
             </div>
 
+            <p v-if="workspaceModelsError" class="hint hint--warn" role="alert">{{ workspaceModelsError }}</p>
             <div v-if="providerKeys.connections" class="provider-connections set-list">
               <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
                 <div class="set-row-head provider-row-head">
@@ -720,7 +721,7 @@
                         :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                         @update:model-value="saveProviderInsightsModel(String(connKey) as AliasProviderKey, $event)"
                       />
-                      <span v-else class="hint hint--compact">Automatic — same as the default model.</span>
+                      <span v-else class="hint hint--compact">Automatic — same as the chat model.</span>
                     </div>
                   </div>
                   <label class="set-subrow">
@@ -742,7 +743,11 @@
                       <!-- A short closed set reads best as a segmented control; a
                            long provider list falls back to a select. -->
                       <div
-                        v-if="providerThinkingOptions(String(connKey) as AliasProviderKey).length <= 5"
+                        v-if="!workspaceModels"
+                        class="hint hint--compact"
+                      >{{ workspaceModelsError ? 'Effort options unavailable.' : 'Loading effort options…' }}</div>
+                      <div
+                        v-else-if="providerThinkingOptions(String(connKey) as AliasProviderKey).length <= 5"
                         class="set-seg"
                         role="radiogroup"
                         :aria-labelledby="`thinking-label-${connKey}`"
@@ -853,6 +858,7 @@
                 The critique panel uses its own model setting, separate from the chat defaults above.
                 "Automatic" keeps the built-in default. Session insights, the model that reads archived
                 chats into memory, names new chats and checks schedule results, is set on each provider above.
+                Automatic uses the chat's own model; choose a model to override it.
               </p>
             </div>
 
@@ -1174,15 +1180,6 @@
                         personal chat never inherits work Drive or calendar access. Each
                         workspace picks which account it uses.
                       </p>
-                      <p><strong>One-time setup per account</strong></p>
-                      <ol class="field-info-steps">
-                        <li>Install <code>gws</code> (button below or <code>npm install -g @googleworkspace/cli</code>).</li>
-                        <li>Add the account below and give it a short name.</li>
-                        <li>
-                          Click <strong>Sign in with Google</strong> on the account card and approve access in the browser
-                          tab that opens. It connects automatically (no copy-paste).
-                        </li>
-                      </ol>
                       <p><strong>Alternative setups</strong></p>
                       <ul class="field-info-steps">
                         <li>
@@ -1233,6 +1230,7 @@
                 </div>
                 <p class="hint hint--compact">Opens a chat that walks through <code>npm install -g @googleworkspace/cli</code> with you — Ciaobot does not run package installs on its own.</p>
               </div>
+              <GwsSetupChecklist :integration="gwsIntegration" />
               <div class="gws-account-add">
                 <span class="ws-label">Add a Google account</span>
                 <div class="gws-account-add-row">
@@ -1320,30 +1318,20 @@
                   </div>
 
                   <!--
-                    Recovery commands. They are only useful while the account is
-                    not connected, so once it is authenticated they collapse
-                    behind a "Manual setup" disclosure instead of adding noise.
+                    Terminal and headless commands are not the main path, so they
+                    sit in a closed disclosure on every card, whatever its state.
                   -->
-                  <div
+                  <details
                     v-if="profile.setup_command || profile.headless_auth_command"
-                    class="gws-manual-block"
+                    class="gws-advanced"
                   >
-                    <button
-                      v-if="profile.configured"
-                      type="button"
-                      class="gws-manual-toggle"
-                      :aria-expanded="gwsManualOpen[profile.name] ? 'true' : 'false'"
-                      :aria-controls="`gws-manual-${profile.name}`"
-                      @click="toggleGwsManual(profile.name)"
-                    >
-                      <span class="gws-manual-toggle-icon" aria-hidden="true">i</span>
-                      Manual setup
-                    </button>
-                    <div
-                      v-if="!profile.configured || gwsManualOpen[profile.name]"
-                      :id="`gws-manual-${profile.name}`"
-                      class="gws-profile-meta gws-manual-panel"
-                    >
+                    <summary class="gws-advanced-summary">Advanced / headless setup</summary>
+                    <div :id="`gws-manual-${profile.name}`" class="gws-profile-meta gws-advanced-panel">
+                      <div v-if="!profile.client_secret_present">
+                        <span class="dev-label">Create client</span>
+                        <code class="gws-command">ciao gws {{ profile.name }} auth setup</code>
+                        <span class="hint hint--compact">Needs the <a :href="gwsReloginHelpUrl()" target="_blank" rel="noopener noreferrer">gcloud CLI</a>.</span>
+                      </div>
                       <div v-if="profile.setup_command">
                         <span class="dev-label">Login</span>
                         <code class="gws-command">{{ profile.setup_command }}</code>
@@ -1353,18 +1341,14 @@
                         <code class="gws-command">{{ profile.headless_auth_command }}</code>
                       </div>
                     </div>
-                  </div>
+                  </details>
 
                   <!-- Interactive account connection controls -->
                   <div class="gws-profile-actions">
                     <!-- State 1: Needs client_secret.json -->
                     <template v-if="!profile.client_secret_present">
                       <p class="gws-action-hint">
-                        First, create an OAuth client. Easiest: run
-                        <code>ciao gws {{ profile.name }} auth setup</code>
-                        in a terminal with the
-                        <a :href="gwsReloginHelpUrl()" target="_blank" rel="noopener noreferrer">gcloud CLI</a>
-                        installed — it creates the client for you. Or upload one you made in
+                        Upload the OAuth client (<code>client_secret.json</code>) you created in
                         <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console</a>.
                       </p>
                       <label class="btn-small file-upload-btn">
@@ -1377,6 +1361,13 @@
                           :disabled="gwsSavingProfile === profile.name"
                         />
                       </label>
+                      <button
+                        type="button"
+                        class="btn-primary btn-small"
+                        disabled
+                        :aria-describedby="`gws-signin-reason-${profile.name}`"
+                      >Sign in with Google</button>
+                      <span :id="`gws-signin-reason-${profile.name}`" class="gws-action-hint">Upload an OAuth client first.</span>
                     </template>
 
                     <!-- State 2: Ready to authenticate -->
@@ -2059,6 +2050,7 @@ import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
+import GwsSetupChecklist from './settings/GwsSetupChecklist.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
@@ -2610,6 +2602,8 @@ function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSecti
 }
 
 function providerDefaultModelEffective(provider: AliasProviderKey): string {
+  const selected = providerDefaultModelOverride(provider)
+  if (selected) return selected
   const explicit = workspaceModels.value?.provider_defaults?.[provider]
   if (explicit) return explicit
   // Fall back to the provider's first discovered model so a routine pick can
@@ -2696,7 +2690,7 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
 }
 
 // ── Per-provider Session insights model (Models tab) ────────────────
-// Automatic reads the session with the provider's own default chat model
+// Automatic reads the session with that chat's own model
 // (ciao/insights.py::resolve_insights_model).
 const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
 
@@ -2705,8 +2699,8 @@ function providerInsightsModelSelectorValue(provider: AliasProviderKey): string 
 }
 
 function providerInsightsModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
-  return providerSectionsWithDefault(provider, DEFAULT_INSIGHTS_SELECTION, (effective) =>
-    effective ? `Same as default (${effective})` : 'Same as default model',
+  return providerSectionsWithDefault(provider, DEFAULT_INSIGHTS_SELECTION, () =>
+    'Automatic — same as chat model',
   )
 }
 
@@ -2736,15 +2730,6 @@ function gwsProfileStatus(profile: GwsProfile): string {
   if (profile.configured) return 'Authenticated'
   if (profile.client_secret_present) return 'Ready to auth'
   return 'Needs OAuth client'
-}
-
-// Per-profile disclosure state for the recovery commands. Authenticated
-// profiles keep them collapsed; unauthenticated ones render them inline and
-// never consult this map.
-const gwsManualOpen = ref<Record<string, boolean>>({})
-
-function toggleGwsManual(name: string): void {
-  gwsManualOpen.value = { ...gwsManualOpen.value, [name]: !gwsManualOpen.value[name] }
 }
 
 function gwsProfileBadgeClass(profile: GwsProfile): string {
@@ -3706,6 +3691,7 @@ watch(
   { immediate: true },
 )
 const workspaceModels = ref<ModelsResponse | null>(null)
+const workspaceModelsError = ref('')
 
 type WorkspaceForm = {
   name: string
@@ -3873,8 +3859,9 @@ async function fetchWorkspaceModels(force = false) {
     workspaceModels.value = await api.get<ModelsResponse>(
       force ? '/api/models?refresh=1' : '/api/models',
     )
-  } catch {
-    workspaceModels.value = null
+    workspaceModelsError.value = ''
+  } catch (e) {
+    workspaceModelsError.value = `Could not load model and effort options: ${errorMessage(e)}`
   }
 }
 
@@ -3897,6 +3884,7 @@ async function saveWorkspace(name: string) {
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     openWorkspace.value = null
     await fetchWorkspacesList()
+    void fetchGwsIntegration()
   } catch (e) {
     const detail = apiErrorMessage(e, 'The workspace could not be saved.')
     workspacesResult.value = `Error: ${detail}`
@@ -3928,6 +3916,7 @@ async function createNewWorkspace() {
     showNewWorkspace.value = false
     newWorkspaceForm.value = blankWorkspaceForm()
     await fetchWorkspacesList()
+    void fetchGwsIntegration()
   } catch (e) {
     const detail = apiErrorMessage(e, 'The workspace could not be created.')
     workspacesResult.value = `Error: ${detail}`
@@ -5638,42 +5627,41 @@ a.btn-secondary {
   flex-direction: column;
   gap: var(--space-2);
 }
-.gws-manual-block {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-.gws-manual-toggle {
+/* Terminal and headless commands: a native disclosure drawn like the install
+   card's, so its summary is a real button with a 44px touch target. */
+.gws-advanced-summary {
   display: inline-flex;
   align-items: center;
-  align-self: flex-start;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: transparent;
+  min-height: var(--touch);
   color: var(--fg2);
+  font-size: var(--text-sm);
   cursor: pointer;
-  font-family: var(--font);
-  font-size: var(--text-xs);
-  font-weight: 600;
+  list-style: none;
 }
-.gws-manual-toggle:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  color: var(--accent);
+.gws-advanced-summary::-webkit-details-marker { display: none; }
+.gws-advanced-summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin: 0 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms var(--ease);
 }
-.gws-manual-toggle-icon {
-  display: grid;
-  place-items: center;
-  width: var(--space-4);
-  height: var(--space-4);
-  border: 1px solid currentColor;
-  border-radius: 50%;
-  font-size: var(--text-xs);
-  font-weight: 700;
-  line-height: 1;
+.gws-advanced[open] > .gws-advanced-summary::before { transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) {
+  .gws-advanced-summary::before { transition: none; }
 }
-.gws-manual-panel {
+.gws-advanced-summary:hover { color: var(--fg); }
+.gws-advanced-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.gws-advanced-panel {
   border-top: none;
   padding-top: 0;
 }
@@ -5752,7 +5740,7 @@ a.btn-secondary {
   .gws-profile-card .btn-small,
   .gws-profile-card .btn-primary,
   .gws-profile-card .file-upload-btn,
-  .gws-manual-toggle,
+  .gws-advanced-summary,
   .critique-picker-header .btn-small,
   .critique-chip,
   .routine-row :deep(.model-selector__trigger) {

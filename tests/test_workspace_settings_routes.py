@@ -182,6 +182,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "allowed_mcp_servers": None,
         "gws_profile": "work",
         "color": "pink",
+        "agent_fs_scope": "machine",
     }
 
 
@@ -217,6 +218,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "allowed_mcp_servers": None,
             "gws_profile": "personal",
             "color": "pink",
+            "agent_fs_scope": "machine",
         },
     ]
     assert pcm.refresh_count == 3
@@ -1742,3 +1744,50 @@ def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
     assert stored_run is not None
     assert stored_run.workspace == "alpha"
     assert not (tmp_path / "beta").exists()
+
+
+def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path):
+    """The workspace filesystem scope persists, rejects unknowns, and defaults."""
+    client, config, _pcm = _client(tmp_path)
+
+    assert config.workspace("personal").agent_fs_scope == "machine"
+    listed = client.get("/api/workspaces").json()
+    personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
+    assert personal["agent_fs_scope"] == "machine"
+
+    patched = client.patch(
+        "/api/workspaces/personal",
+        json={"agent_fs_scope": "workspace"},
+    )
+    assert patched.status_code == 200
+    updated = next(
+        w for w in patched.json()["workspaces"] if w["name"] == "personal"
+    )
+    assert updated["agent_fs_scope"] == "workspace"
+    assert config.workspace("personal").agent_fs_scope == "workspace"
+
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert next(w for w in stored if w["name"] == "personal")["agent_fs_scope"] == "workspace"
+
+    bad = client.patch(
+        "/api/workspaces/personal",
+        json={"agent_fs_scope": "telepathy"},
+    )
+    assert bad.status_code == 400
+
+    runtime = tmp_path / ".runtime"
+    (runtime / "workspaces.json").write_text(
+        json.dumps(
+            [{"name": "personal", "vault_root": "memory-vault/personal"}]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fresh = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert fresh.workspace("personal").agent_fs_scope == "machine"

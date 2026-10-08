@@ -116,7 +116,8 @@ class ArchivePipeline:
         from ciao.insights import resolve_insights_model
 
         return resolve_insights_model(
-            self._host._config, workspace or None, chat.provider or "claude"
+            self._host._config, workspace or None, chat.provider or "claude",
+            source_model=chat.model,
         )
 
     @staticmethod
@@ -261,4 +262,3 @@ class ArchivePipeline:
                 outcome.path,
                 chat_id,
             )
-

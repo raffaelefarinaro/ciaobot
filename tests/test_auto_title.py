@@ -43,6 +43,7 @@ def _chat(chat_id="chat-1", *, provider="claude", session_id="sess-1", title="Ne
         chat_id=chat_id,
         project_id="project-1",
         provider=provider,
+        model="opus" if provider == "claude" else "vendor/chat-model",
         session_id=session_id,
         title=title,
     )
@@ -576,6 +577,7 @@ async def test_llm_fallback_titles_chat_when_native_never_lands(monkeypatch) -> 
     assert manager._chats["chat-1"].title == "Zendesk Ticket Thread Follow-Up"
     assert len(calls) == 1
     assert "Check Zendesk ticket 152025" in calls[0]["prompt"]
+    assert calls[0]["model"] == "opus"
 
 
 @pytest.mark.asyncio

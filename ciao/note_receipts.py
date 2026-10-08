@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -826,6 +827,225 @@ def apply_entry_edit(
         source=source,
         workspace=workspace,
         provenance=provenance,
+    )
+
+
+# Sections a fold may file a new bullet under. Anything else is not a
+# destination an accept may write to, and is refused like a bad compose.
+APPEND_SECTIONS = ("Decisions", "Open loops", "Notes")
+
+
+def _heading_level(stripped: str) -> int | None:
+    """The ATX level of one stripped line, or ``None`` when it is no heading.
+
+    A run of ``#`` is only a heading with a space (or nothing) behind it, so
+    ``#tag`` stays prose. Setext underlines are not headings here: the fold
+    sections are always ATX ``##`` lines.
+    """
+    count = len(stripped) - len(stripped.lstrip("#"))
+    if count < 1 or count > 6:
+        return None
+    rest = stripped[count:]
+    if rest and rest[0] not in (" ", "\t"):
+        return None
+    return count
+
+
+# A line that can hold a real ATX heading: at most three leading spaces
+# before the `#`. Four spaces (or a tab) make it indented code by the same
+# CommonMark rule the entry parser reads, so `    ## Notes` is content, not
+# a section. Checked on the raw line rather than the stripped one, which is
+# what makes the indentation visible at all.
+_HEADING_POSITION_RE = re.compile(r"^ {0,3}#")
+
+
+def _opaque_append_lines(text: str, starts: list[int]) -> frozenset[int]:
+    """Line indexes holding no readable heading: frontmatter and fenced code.
+
+    Frontmatter comes from :func:`ciao.note_entries.frontmatter_span` and
+    fences from :func:`ciao.note_entries.fenced_code_spans`, so the scan and
+    the entry parser agree on what is code. An unclosed fence runs to the end
+    of the note, exactly as the parser reads it.
+    """
+    spans: list[tuple[int, int]] = []
+    frontmatter = ne.frontmatter_span(text)
+    if frontmatter is not None:
+        spans.append(frontmatter)
+    for start, end in ne.fenced_code_spans(text):
+        spans.append((start, len(text) if end is None else end))
+    if not spans:
+        return frozenset()
+    return frozenset(
+        i
+        for i, line_start in enumerate(starts)
+        if any(span_start <= line_start < span_end for span_start, span_end in spans)
+    )
+
+
+def _refuse_open_fence(text: str, section: str, insert: int) -> None:
+    """Refuse an append whose bullet would land inside an unclosed fence.
+
+    A fence that never closes swallows the rest of the note, so a bullet
+    filed past its opener is code, not a fact: the receipt would say changed
+    while the entry parser finds no entries. ``insert`` is the offset the
+    bullet would go to; at or before the opener it is still outside the
+    fence and the write may proceed.
+    """
+    for start, end in ne.fenced_code_spans(text):
+        if end is None and insert > start:
+            raise mr.MemoryReceiptError(
+                f"## {section} cannot take a new bullet while the note holds "
+                "an unclosed code fence: the bullet would land inside code, "
+                "so nothing was composed"
+            )
+
+
+def _compose_note_append(text: str, section: str, item: str) -> str:
+    """``text`` with ``item`` filed as a new bullet under ``## {section}``.
+
+    The section's own heading, when present, is matched on the stripped line,
+    and the bullet goes immediately before the next level-1/2 heading, or at
+    end of file when there is none. A deeper heading (``###``) belongs to the
+    section, so it does not stop the scan. When the heading is absent it is
+    created with one blank line on each side. The inserted line terminator
+    matches the note's own newline spelling, so a CRLF note stays CRLF, and a
+    file with no trailing newline gains one before the bullet rather than
+    joining it onto its last line. Everything else is byte-identical.
+
+    Only real headings count: a heading-looking line inside frontmatter or a
+    fenced code block is opaque content, not a section, and one indented four
+    or more spaces in is indented code (a tab counts too — the match requires
+    at most three leading spaces before the ``#``). An unclosed fence makes
+    the destination unsafe: a bullet filed past its opener would land inside
+    code, where the entry parser cannot read it back, so that write is
+    refused rather than composed.
+    """
+    newline = "\r\n" if "\r\n" in text else "\n"
+    heading = f"## {section}"
+    # Line starts, so the insert offset always lands on a line boundary.
+    starts = [0]
+    index = text.find("\n")
+    while index != -1:
+        starts.append(index + 1)
+        index = text.find("\n", index + 1)
+    bodies = [
+        text[start : starts[i + 1] if i + 1 < len(starts) else len(text)]
+        for i, start in enumerate(starts)
+    ]
+    opaque = _opaque_append_lines(text, starts)
+    section_at: int | None = None
+    for i, body in enumerate(bodies):
+        if i in opaque or not _HEADING_POSITION_RE.match(body):
+            continue
+        if body.strip() == heading:
+            section_at = i
+            break
+    if section_at is None:
+        _refuse_open_fence(text, section, len(text))
+        sep = "" if text.endswith("\n") else newline
+        return (
+            text + sep + newline + heading + newline + newline + item + newline
+        )
+    insert = len(text)
+    for i in range(section_at + 1, len(bodies)):
+        if i in opaque or not _HEADING_POSITION_RE.match(bodies[i]):
+            continue
+        level = _heading_level(bodies[i].strip())
+        if level is not None and level <= 2:
+            insert = starts[i]
+            break
+    _refuse_open_fence(text, section, insert)
+    if insert == len(text):
+        if text.endswith("\n"):
+            return text + item + newline
+        return text + newline + item + newline
+    return text[:insert] + item + newline + text[insert:]
+
+
+def append_list_item(
+    *,
+    vault_root: Path,
+    relative_path: str,
+    expected_revision: str,
+    section: str,
+    item: str,
+    actor: str,
+    source: str,
+    workspace: str = "",
+) -> dict[str, Any]:
+    """File one new bullet under ``## {section}``, journaled like any note write.
+
+    The append half of :func:`apply_entry_edit`: where that splices one
+    existing entry's span, this files one new list item at the end of a
+    section, composed by :func:`_compose_note_append` and written by
+    :func:`commit_note_change` unchanged, so the receipt holds both full
+    images and :func:`undo_note_receipt` restores the whole file byte for
+    byte.
+
+    ``section`` is one of :data:`APPEND_SECTIONS`; ``item`` is exactly one
+    supported list item and nothing else — the same one-item check
+    :func:`compose_entry_edit` applies to a replacement, minus the indent
+    comparison, which has no entry to compare against here. Both refusals
+    raise :class:`ciao.memory_receipts.MemoryReceiptError` with nothing
+    written, exactly as a refused compose does.
+    """
+    root = canonical_vault(vault_root)
+    target = resolve_note_path(root, relative_path)
+    stored_path = target.relative_to(root).as_posix()
+    expected = str(expected_revision or "").strip()
+    if not expected:
+        # Same rule as every other write here: no blind overwrites.
+        raise mr.MemoryReceiptError(
+            "an expected revision is required; this primitive never overwrites a "
+            "note it has not read"
+        )
+    if section not in APPEND_SECTIONS:
+        raise mr.MemoryReceiptError(
+            f"a fold may only append under {', '.join(APPEND_SECTIONS)}; "
+            f"{section!r} is not one of them, so nothing was composed"
+        )
+    document = ne.parse_note_entries(
+        str(item), note_path=stored_path, workspace=workspace
+    )
+    if len(document.entries) != 1 or document.entries[0].start != 0:
+        raise mr.MemoryReceiptError(
+            f"the new bullet holds {len(document.entries)} list items rather "
+            "than one, so it is not a single fact; nothing was composed"
+        )
+    only = document.entries[0]
+    if only.end != len(item) or document.uncovered:
+        # Same reading as a replacement: a trailing newline, a paragraph or a
+        # heading beside the bullet is content the caller did not ask to write.
+        raise mr.MemoryReceiptError(
+            f"the new bullet holds {len(str(item)) - only.end} character(s) "
+            "beside its one list item — a trailing newline, a paragraph or a "
+            "heading is not part of the fact being filed; nothing was composed"
+        )
+    if not only.supported:
+        raise mr.MemoryReceiptError(
+            "the new bullet carries a construct this entry model does not "
+            "describe (a nested block, a second block, or nothing but a stamp); "
+            "nothing was composed"
+        )
+    with mr.queue_lock(target):
+        text = _read_note_text(target)
+        current = mr.content_revision(text)
+        if current != expected:
+            raise mr.RevisionConflict(
+                "the note changed since this append was planned; nothing was "
+                "written"
+            )
+        after_text = _compose_note_append(text, section, str(item))
+    # Outside the lock, as in `apply_entry_edit`: the composition is pure
+    # text, and `commit_note_change` re-checks the revision under its own lock.
+    return commit_note_change(
+        vault_root=root,
+        relative_path=stored_path,
+        expected_revision=expected,
+        after_text=after_text,
+        actor=actor,
+        source=source,
+        workspace=workspace,
     )
 
 

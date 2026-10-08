@@ -785,8 +785,7 @@ export interface RoutineSettings {
   provider_default_modes?: Record<string, string>
   // Per-provider default thinking level for new chats; missing = provider default.
   provider_default_thinking?: Record<string, string>
-  // Per-provider Session insights models; missing = that provider's default
-  // chat model.
+  // Per-provider Session insights models; missing = the source chat's model.
   provider_insights_models?: Record<string, string>
 
   critique_models_effective: string
@@ -1670,6 +1669,8 @@ export interface ProposalActionResult {
   region?: string
   leak_warning?: boolean
   destination?: string
+  /** notes a category accept skipped because they no longer exist */
+  skipped?: string[]
   justified?: boolean
   promoted?: boolean
   duplicate?: boolean
@@ -1798,6 +1799,7 @@ export interface ProposalPreview {
     folder: string
     description: string
     notes: string[]
+    missing?: string[]
   }
 }
 
