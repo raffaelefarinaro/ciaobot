@@ -9,6 +9,7 @@ save cannot leave a `[verified:]` stamp on text it changed.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import textwrap
@@ -735,85 +736,144 @@ def test_a_neighbour_is_left_alone_while_a_redated_sibling_is_put_back() -> None
 
 
 def test_the_fold_writer_strips_stamps_before_it_writes(tmp_path: Path) -> None:
-    """The accept path, not the prompt, is what makes the rule true.
+    """An entry update touches one span; a stamp it did not touch survives.
 
-    The system prompt asks the model to leave the stamps alone; a model asked to
-    rewrite a note will sometimes not. So the writer drops the stamps a save did
-    not earn, on the result, before it reaches the disk.
+    The folds no longer rewrite the file, so there is no rewritten whole to
+    scrub: a `[verified:]` stamp on an untouched bullet is unchanged because
+    its bytes are unchanged. This pins that through the update half of the
+    fold write.
     """
-    from ciao.project_doc_update import _invalidate_stamps
+    from ciao import memory_receipts as mr
+    from ciao import note_entries as ne
+    from ciao import note_receipts as nr
 
-    current = "- Landlord is Mr Silva [verified: 2020-01-01]\n"
-    updated = "- Landlord is Mr Costa [verified: 2020-01-01]\n"
-    assert _invalidate_stamps(current, updated) == "- Landlord is Mr Costa\n"
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True)
+    relative = "notes/mo.md"
+    note = vault / relative
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "- Landlord is Mr Silva [verified: 2020-01-01]\n- Speaks Greek\n",
+        encoding="utf-8",
+    )
+    text = note.read_text(encoding="utf-8")
+    entries = ne.parse_note_entries(
+        text, note_path=relative, workspace="personal"
+    ).entries
+    nr.apply_entry_edit(
+        vault_root=vault,
+        relative_path=relative,
+        expected_revision=mr.content_revision(text),
+        identity=entries[1].identity,
+        fingerprint=entries[1].fingerprint,
+        replacement="- Speaks Portuguese",
+        actor="proposal-accept",
+        source="fold",
+        workspace="personal",
+    )
+    assert note.read_text(encoding="utf-8").splitlines(keepends=True)[0] == (
+        "- Landlord is Mr Silva [verified: 2020-01-01]\n"
+    )
 
 
 def test_the_fold_writer_puts_a_redated_bullet_back(tmp_path: Path) -> None:
-    """The `people` accept, on the re-date: a bullet nobody touched.
+    """An appended bullet does not move the stamps already in the note.
 
-    A model rewriting a person note is the most likely source of this, because
-    it re-emits the whole file and has today's date in whatever context it was
-    given. The writer is shared by the two accept paths, so this asserts the
-    shared helper here and the `project` path below pins that the call site is
-    wired in both places.
+    The add half of the fold write: the new bullet lands under `## Notes`
+    and the untouched bullet keeps the exact stamp it carried, including its
+    date.
     """
-    from ciao.project_doc_update import _invalidate_stamps
+    from ciao import memory_receipts as mr
+    from ciao import note_receipts as nr
 
-    current = "- Landlord is Mr Silva [verified: 2020-01-01]\n"
-    updated = "- Landlord is Mr Silva [verified: 2026-09-30]\n"
-    assert _invalidate_stamps(current, updated) == current
+    vault = tmp_path / "vault"
+    (vault / "Workspace").mkdir(parents=True)
+    relative = "notes/mo.md"
+    note = vault / relative
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "# Mo\n\n## Notes\n- Prefers terse replies [verified: 2024-03-01]\n",
+        encoding="utf-8",
+    )
+    text = note.read_text(encoding="utf-8")
+    nr.append_list_item(
+        vault_root=vault,
+        relative_path=relative,
+        expected_revision=mr.content_revision(text),
+        section="Notes",
+        item="- Based in Lisbon.",
+        actor="proposal-accept",
+        source="fold",
+        workspace="personal",
+    )
+    after = note.read_text(encoding="utf-8")
+    assert "- Prefers terse replies [verified: 2024-03-01]\n" in after
+    assert "- Based in Lisbon.\n" in after
 
 
-@pytest.mark.parametrize(
-    "writer, current, updated, expected",
-    [
-        # `update_project_doc`: a project doc folded from a session's insights.
-        (
-            "project",
-            "- Ships monthly [verified: 2024-03-01]\n",
-            "- Ships monthly [verified: 2026-09-30]\n",
-            "- Ships monthly [verified: 2024-03-01]\n",
-        ),
-        (
-            "project",
-            "- Owner is Dana [verified: 2024-03-01]\n",
-            "- Owner is Rae [verified: 2026-09-30]\n",
-            "- Owner is Rae\n",
-        ),
-        # `fold_fact_into_person_note`: a fact merged into a person note.
-        (
-            "people",
-            "- Prefers terse replies [verified: 2024-03-01]\n",
-            "- Prefers terse replies [verified: 2026-09-30]\n",
-            "- Prefers terse replies [verified: 2024-03-01]\n",
-        ),
-        (
-            "people",
-            "- Based in Porto [verified: 2024-03-01]\n",
-            "- Based in Lisbon [verified: 2026-09-30]\n",
-            "- Based in Lisbon\n",
-        ),
-    ],
-)
+@pytest.mark.parametrize("writer", ["project", "people"])
 def test_both_accept_paths_run_the_invalidator(
-    writer: str, current: str, updated: str, expected: str
+    writer: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both writers, both shapes, through the helper they each call.
+    """Neither fold rewrites the file, so no writer strips stamps anymore.
 
-    `update_project_doc` and `fold_fact_into_person_note` are separate call
-    sites for one rule, and a rule enforced at one of them is a rule the other
-    does not have. Asserting the *shared* helper once would not catch a call site
-    that stopped calling it, which is the failure this pair exists to prevent.
+    Both accepts write a single entry through the note receipts — an update
+    splices one span, an add appends one bullet — and every other bullet,
+    stamped or not, is never touched. An untouched bullet's `[verified:]`
+    stamp is unchanged because its bytes are unchanged, not because a
+    whole-file rewrite was scrubbed afterwards.
     """
     import inspect
 
     from ciao import project_doc_update as pdu
 
+    assert not hasattr(pdu, "_invalidate_stamps")
     source = inspect.getsource(
         pdu.update_project_doc if writer == "project" else pdu.fold_fact_into_person_note
     )
-    assert "_invalidate_stamps(" in source, f"the {writer} writer stopped calling it"
-    assert pdu._invalidate_stamps(current, updated) == expected
+    assert "_invalidate_stamps(" not in source, f"the {writer} writer strips stamps"
+
+    async def fake_oneshot(prompt, *, system_prompt, model, **kwargs):
+        return fake_oneshot.reply
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    (tmp_path / "Workspace").mkdir(exist_ok=True)
+    if writer == "project":
+        doc = tmp_path / "project.md"
+        doc.write_text(
+            "---\ntags: [project]\n---\n# T\n\n## Open loops\n"
+            "- Ships monthly [verified: 2024-03-01]\n"
+            "- Pick a queue backend.\n",
+            encoding="utf-8",
+        )
+        fake_oneshot.reply = json.dumps({
+            "action": "update",
+            "index": 2,
+            "text": "- Pick a queue backend. Resolved: Redis Streams.",
+        })
+        wrote = asyncio.run(pdu.update_project_doc(
+            doc_path=doc, insights_md="## Decisions\n- x\n", model="m",
+        ))
+        assert wrote is True
+        text = doc.read_text(encoding="utf-8")
+    else:
+        note = tmp_path / "Mo.md"
+        note.write_text(
+            "---\ntags: [person]\n---\n# Mo\n\n## Notes\n"
+            "- Prefers terse replies [verified: 2024-03-01]\n",
+            encoding="utf-8",
+        )
+        fake_oneshot.reply = json.dumps({
+            "action": "add",
+            "section": "Notes",
+            "text": "- Based in Lisbon.",
+        })
+        wrote = asyncio.run(pdu.fold_fact_into_person_note(
+            note_path=note, fact="Based in Lisbon.", model="m",
+        ))
+        assert wrote is True
+        text = note.read_text(encoding="utf-8")
+    assert "[verified: 2024-03-01]" in text
 
 
 def test_the_authoring_guidance_names_the_entry_contract() -> None:

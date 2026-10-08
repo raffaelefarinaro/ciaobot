@@ -1693,11 +1693,23 @@ async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
     # function hardcodes.
     destination = note.relative_to(notes_root).as_posix()
     if note.exists():
+        from ciao.insights import resolve_insights_model
+
         errors: list[str] = []
+        workspace = str(row.get("workspace") or "")
+        try:
+            provider = config.default_provider_for_workspace(workspace or None)
+            model = resolve_insights_model(config, workspace or None, provider)
+            cwd = config.agent_root(workspace)
+        except (AttributeError, ValueError) as exc:
+            return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
         wrote = await fold_fact_into_person_note(
             note_path=note,
             fact=row["text"],
-            model=getattr(config, "insights_model", "") or "sonnet",
+            model=model,
+            provider=provider,
+            cwd=cwd,
+            workspace=workspace,
             error_out=errors,
         )
         if errors:
@@ -2391,12 +2403,13 @@ def decline_category_row(config, row: dict[str, Any]) -> str:
 async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Fold an accepted `[project]` bullet into its canonical doc.
 
-    Reuses the fold's guards, NO_CHANGES sentinel and per-doc lock with just
+    Reuses the fold's single-entry writes and per-doc lock with just
     this bullet as input. ``False`` back means the model judged the
-    doc already covers the fact or a guard rejected the rewrite — ambiguous
-    enough that dropping the row silently would be wrong, so the caller keeps
-    it queued and the operator decides.
+    doc already covers the fact or its reply was not a single entry
+    edit — ambiguous enough that dropping the row silently would be
+    wrong, so the caller keeps it queued and the operator decides.
     """
+    from ciao.insights import resolve_insights_model
     from ciao.project_doc_update import update_project_doc
 
     doc_raw = str(row.get("target") or "").strip()
@@ -2410,10 +2423,15 @@ async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
         return AcceptOutcome(ok=False, error=f"project doc not found: {doc_raw}")
     insights = f"## Decisions\n- {row['text']}\n"
     try:
+        workspace = str(row.get("workspace") or "")
+        provider = config.default_provider_for_workspace(workspace or None)
         wrote = await update_project_doc(
             doc_path=doc,
             insights_md=insights,
-            model=getattr(config, "insights_model", "") or "sonnet",
+            model=resolve_insights_model(config, workspace or None, provider),
+            provider=provider,
+            cwd=config.agent_root(workspace),
+            workspace=workspace,
         )
     except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row
         return AcceptOutcome(ok=False, error=f"fold failed: {exc}")

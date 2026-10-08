@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,7 @@ _INSIGHTS_NOISE_ONLY = """\
 
 
 def _write_doc(tmp_path: Path) -> Path:
+    (tmp_path / "Workspace").mkdir(exist_ok=True)
     doc = tmp_path / "project.md"
     doc.write_text(_DOC, encoding="utf-8")
     return doc
@@ -101,7 +103,7 @@ def test_no_changes_sentinel_leaves_doc_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     doc = _write_doc(tmp_path)
-    _patch_oneshot(monkeypatch, "NO_CHANGES")
+    _patch_oneshot(monkeypatch, json.dumps({"action": "covered"}))
 
     wrote = asyncio.run(pdu.update_project_doc(
         doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
@@ -115,72 +117,76 @@ def test_material_update_is_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     doc = _write_doc(tmp_path)
-    updated = _DOC.replace(
-        "- Pick a queue backend.",
-        "- ~~Pick a queue backend~~ Resolved: Redis Streams (ops overhead vs Kafka).",
-    ).strip()
     calls: list = []
-    _patch_oneshot(monkeypatch, updated, calls)
-
-    wrote = asyncio.run(pdu.update_project_doc(
-        doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
-    ))
-
-    assert wrote is True
-    text = doc.read_text(encoding="utf-8")
-    assert "Redis Streams" in text
-    assert text.startswith("---")
-    # Prompt carried both the current doc and the insights.
-    assert "Store Intelligence Platform" in calls[0]
-    assert "Chose Redis Streams" in calls[0]
-
-
-def test_code_fenced_output_is_unwrapped(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    doc = _write_doc(tmp_path)
-    updated = _DOC.strip() + "\n\n## Decisions\n- Redis Streams over Kafka."
-    _patch_oneshot(monkeypatch, f"```markdown\n{updated}\n```")
-
-    wrote = asyncio.run(pdu.update_project_doc(
-        doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
-    ))
-
-    assert wrote is True
-    text = doc.read_text(encoding="utf-8")
-    assert "```" not in text
-    assert text.startswith("---")
-
-
-def test_dropped_frontmatter_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    doc = _write_doc(tmp_path)
     _patch_oneshot(
         monkeypatch,
-        "# Store Intelligence Platform\n\nRewritten without frontmatter but "
-        "otherwise long enough to pass the size guard easily, with plenty of "
-        "extra words to make sure length is not the failing check here.",
+        json.dumps({
+            "action": "update",
+            "index": 1,
+            "text": "- Pick a queue backend. Resolved: Redis Streams.",
+        }),
+        calls,
     )
 
     wrote = asyncio.run(pdu.update_project_doc(
         doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
     ))
 
-    assert wrote is False
-    assert doc.read_text(encoding="utf-8") == _DOC
+    assert wrote is True
+    text = doc.read_text(encoding="utf-8")
+    # The Open loops bullet is the only change: frontmatter and prose survive.
+    assert "- Pick a queue backend. Resolved: Redis Streams.\n" in text
+    assert text.replace(
+        "- Pick a queue backend. Resolved: Redis Streams.",
+        "- Pick a queue backend.",
+    ) == _DOC
+    # Prompt carried the numbered entry, not a file to return.
+    assert "1. section: Open loops" in calls[0]
+    assert "- Pick a queue backend." in calls[0]
+    assert "complete updated doc" not in calls[0]
 
 
-def test_truncated_rewrite_is_rejected(
+def test_add_appends_a_bullet_under_decisions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     doc = _write_doc(tmp_path)
-    _patch_oneshot(monkeypatch, "---\ntags: [project]\n---\n# Stub")
+    _patch_oneshot(
+        monkeypatch,
+        json.dumps({
+            "action": "add",
+            "section": "Decisions",
+            "text": "- Chose Redis Streams over Kafka (ops overhead).",
+        }),
+    )
 
     wrote = asyncio.run(pdu.update_project_doc(
         doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
     ))
 
+    assert wrote is True
+    text = doc.read_text(encoding="utf-8")
+    assert text.startswith("---\ntags: [project]\n---\n")
+    assert "- Pick a queue backend.\n" in text
+    assert "- Chose Redis Streams over Kafka (ops overhead).\n" in text
+    assert text.count("## Decisions") == 1
+
+
+def test_code_fenced_output_is_unwrapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    doc = _write_doc(tmp_path)
+    reply = json.dumps({
+        "action": "add",
+        "section": "Decisions",
+        "text": "- Chose Redis Streams over Kafka.",
+    })
+    _patch_oneshot(monkeypatch, f"```json\n{reply}\n```")
+
+    wrote = asyncio.run(pdu.update_project_doc(
+        doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+    ))
+
+    # A fenced JSON reply is a parse failure and does not write.
     assert wrote is False
     assert doc.read_text(encoding="utf-8") == _DOC
 
@@ -253,6 +259,7 @@ tags: [person]
 
 
 def _write_note(tmp_path: Path) -> Path:
+    (tmp_path / "Workspace").mkdir(exist_ok=True)
     note = tmp_path / "Laurene-Racine.md"
     note.write_text(_NOTE, encoding="utf-8")
     return note
@@ -262,17 +269,27 @@ def test_person_fold_writes_the_merged_note(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     note = _write_note(tmp_path)
-    merged = _NOTE.strip() + "\n**Q4 2026:** committed to Handoff Intelligence."
     calls: list = []
-    _patch_oneshot(monkeypatch, merged, calls)
+    _patch_oneshot(
+        monkeypatch,
+        json.dumps({
+            "action": "add",
+            "section": "Notes",
+            "text": "- Q4 2026 capacity is committed to Handoff Intelligence.",
+        }),
+        calls,
+    )
 
     wrote = asyncio.run(pdu.fold_fact_into_person_note(
         note_path=note, fact="Her Q4 2026 capacity is committed to Handoff Intelligence.", model="m",
     ))
 
     assert wrote is True
-    assert "Handoff Intelligence" in note.read_text(encoding="utf-8")
-    assert "Laurene Racine" in calls[0]
+    text = note.read_text(encoding="utf-8")
+    # The prose note keeps its prose and gains a bullet under ## Notes.
+    assert "**Role:** Product Manager" in text
+    assert "- Q4 2026 capacity is committed to Handoff Intelligence.\n" in text
+    assert text.count("## Notes") == 1
     assert "Handoff Intelligence" in calls[0]
 
 
@@ -280,7 +297,7 @@ def test_person_fold_no_changes_leaves_the_note(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     note = _write_note(tmp_path)
-    _patch_oneshot(monkeypatch, "NO_CHANGES")
+    _patch_oneshot(monkeypatch, json.dumps({"action": "covered"}))
     errors: list[str] = []
 
     wrote = asyncio.run(pdu.fold_fact_into_person_note(
@@ -288,26 +305,8 @@ def test_person_fold_no_changes_leaves_the_note(
     ))
 
     assert wrote is False
-    assert errors == []
+    assert errors == ["the fold reported no changes; dismiss instead"]
     assert note.read_text(encoding="utf-8") == _NOTE
-
-
-def test_person_fold_rejects_a_rewrite_that_drops_frontmatter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    note = _write_note(tmp_path)
-    _patch_oneshot(monkeypatch, "# Laurene Racine\n\n**Role:** Product Manager\nNew fact.")
-
-    errors: list[str] = []
-
-    wrote = asyncio.run(pdu.fold_fact_into_person_note(
-        note_path=note, fact="New fact.", model="m", error_out=errors,
-    ))
-
-    assert wrote is False
-    assert note.read_text(encoding="utf-8") == _NOTE
-    # A guard refusal is not "already covered", so it must not read as a no-op.
-    assert errors and "rejected" in errors[-1]
 
 
 def test_person_fold_keeps_an_edit_made_during_the_model_call(
@@ -315,12 +314,25 @@ def test_person_fold_keeps_an_edit_made_during_the_model_call(
 ) -> None:
     note = _write_note(tmp_path)
     edited = _NOTE + "\nHand edit while the model ran.\n"
+    entry_calls: list[str] = []
 
     async def slow(prompt, **kwargs):
         note.write_text(edited, encoding="utf-8")
-        return _NOTE.strip() + "\nNew fact."
+        return json.dumps(
+            {"action": "add", "section": "Notes", "text": "- New fact."}
+        )
+
+    def _spy_apply(**kwargs):
+        entry_calls.append("apply")
+        raise AssertionError("must not be called after a concurrent edit")
+
+    def _spy_append(**kwargs):
+        entry_calls.append("append")
+        raise AssertionError("must not be called after a concurrent edit")
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", slow)
+    monkeypatch.setattr("ciao.note_receipts.apply_entry_edit", _spy_apply)
+    monkeypatch.setattr("ciao.note_receipts.append_list_item", _spy_append)
     errors: list[str] = []
 
     wrote = asyncio.run(pdu.fold_fact_into_person_note(
@@ -330,6 +342,7 @@ def test_person_fold_keeps_an_edit_made_during_the_model_call(
     assert wrote is False
     assert note.read_text(encoding="utf-8") == edited
     assert errors and "changed during the fold" in errors[-1]
+    assert entry_calls == []
 
 
 def test_person_fold_reports_a_model_failure(
