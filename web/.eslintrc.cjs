@@ -10,7 +10,7 @@ module.exports = {
     // Keep the first adoption focused on correctness. The full recommended
     // preset also enforces thousands of formatting rules against the existing
     // templates, drowning out actionable findings.
-    'plugin:vue/vue3-essential',
+    'plugin:vue/essential',
     'plugin:@typescript-eslint/recommended',
   ],
   parser: 'vue-eslint-parser',

@@ -616,6 +616,7 @@
               </div>
             </div>
 
+            <p v-if="workspaceModelsError" class="hint hint--warn" role="alert">{{ workspaceModelsError }}</p>
             <div v-if="providerKeys.connections" class="provider-connections set-list">
               <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
                 <div class="set-row-head provider-row-head">
@@ -720,7 +721,7 @@
                         :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                         @update:model-value="saveProviderInsightsModel(String(connKey) as AliasProviderKey, $event)"
                       />
-                      <span v-else class="hint hint--compact">Automatic — same as the default model.</span>
+                      <span v-else class="hint hint--compact">Automatic — same as the chat model.</span>
                     </div>
                   </div>
                   <label class="set-subrow">
@@ -742,7 +743,11 @@
                       <!-- A short closed set reads best as a segmented control; a
                            long provider list falls back to a select. -->
                       <div
-                        v-if="providerThinkingOptions(String(connKey) as AliasProviderKey).length <= 5"
+                        v-if="!workspaceModels"
+                        class="hint hint--compact"
+                      >{{ workspaceModelsError ? 'Effort options unavailable.' : 'Loading effort options…' }}</div>
+                      <div
+                        v-else-if="providerThinkingOptions(String(connKey) as AliasProviderKey).length <= 5"
                         class="set-seg"
                         role="radiogroup"
                         :aria-labelledby="`thinking-label-${connKey}`"
@@ -853,6 +858,7 @@
                 The critique panel uses its own model setting, separate from the chat defaults above.
                 "Automatic" keeps the built-in default. Session insights, the model that reads archived
                 chats into memory, names new chats and checks schedule results, is set on each provider above.
+                Automatic uses the chat's own model; choose a model to override it.
               </p>
             </div>
 
@@ -2610,6 +2616,8 @@ function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSecti
 }
 
 function providerDefaultModelEffective(provider: AliasProviderKey): string {
+  const selected = providerDefaultModelOverride(provider)
+  if (selected) return selected
   const explicit = workspaceModels.value?.provider_defaults?.[provider]
   if (explicit) return explicit
   // Fall back to the provider's first discovered model so a routine pick can
@@ -2696,7 +2704,7 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
 }
 
 // ── Per-provider Session insights model (Models tab) ────────────────
-// Automatic reads the session with the provider's own default chat model
+// Automatic reads the session with that chat's own model
 // (ciao/insights.py::resolve_insights_model).
 const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
 
@@ -2705,8 +2713,8 @@ function providerInsightsModelSelectorValue(provider: AliasProviderKey): string 
 }
 
 function providerInsightsModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
-  return providerSectionsWithDefault(provider, DEFAULT_INSIGHTS_SELECTION, (effective) =>
-    effective ? `Same as default (${effective})` : 'Same as default model',
+  return providerSectionsWithDefault(provider, DEFAULT_INSIGHTS_SELECTION, () =>
+    'Automatic — same as chat model',
   )
 }
 
@@ -3706,6 +3714,7 @@ watch(
   { immediate: true },
 )
 const workspaceModels = ref<ModelsResponse | null>(null)
+const workspaceModelsError = ref('')
 
 type WorkspaceForm = {
   name: string
@@ -3873,8 +3882,9 @@ async function fetchWorkspaceModels(force = false) {
     workspaceModels.value = await api.get<ModelsResponse>(
       force ? '/api/models?refresh=1' : '/api/models',
     )
-  } catch {
-    workspaceModels.value = null
+    workspaceModelsError.value = ''
+  } catch (e) {
+    workspaceModelsError.value = `Could not load model and effort options: ${errorMessage(e)}`
   }
 }
 
