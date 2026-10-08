@@ -1,13 +1,15 @@
 """Workspace filesystem sandbox profiles (issue #1148).
 
-Builds the sandbox shapes the providers enforce. This module never spawns
-a process: it only returns settings dicts / argv prefixes. Provider children
-call these functions; this child does not wire them into either provider.
+Builds the sandbox shapes the providers enforce. It returns settings dicts
+and argv prefixes; the only process it runs is the one-time check that
+``bwrap`` can create a sandbox on this host (``_bwrap_usable``).
 """
 
 from __future__ import annotations
 
+import functools
 import shutil
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -35,8 +37,35 @@ _SYSTEM_READ_SUBPATHS = (
 _BWRAP_RO_DIRS = ("/usr", "/bin", "/lib", "/lib64", "/etc")
 
 
+_BWRAP_BLOCKED = (
+    "bwrap is installed but cannot create a sandbox on this machine "
+    "(Ubuntu 23.10 and later block it with AppArmor until bwrap has a profile; "
+    "see docs/LINUX.md); set the workspace to whole machine"
+)
+
+
 class FsSandboxUnavailable(RuntimeError):
     """Raised when scope is workspace but no sandbox tool exists here."""
+
+
+@functools.cache
+def _bwrap_usable(bwrap: str) -> bool:
+    """Whether ``bwrap`` can set up a user namespace on this host.
+
+    Ubuntu 23.10+ restricts unprivileged user namespaces through AppArmor, so
+    an installed ``bwrap`` still fails with ``setting up uid map: Permission
+    denied``. Checked once per process; installing the profile takes effect
+    on the next engine start.
+    """
+    try:
+        probe = subprocess.run(
+            [bwrap, "--ro-bind", "/", "/", "--", "true"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0
 
 
 def claude_sandbox_settings(
@@ -228,7 +257,11 @@ def opencode_sandbox_prefix(
     if platform.startswith("linux"):
         bwrap = shutil.which("bwrap")
         if bwrap:
-            argv = [bwrap, "--die-with-parent"]
+            if not _bwrap_usable(bwrap):
+                raise FsSandboxUnavailable(_BWRAP_BLOCKED)
+            # The fresh /tmp goes first: mounted after the binds it would hide
+            # any root (or OpenCode's temp folder) that lives under /tmp.
+            argv = [bwrap, "--die-with-parent", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
             for candidate in _BWRAP_RO_DIRS:
                 if Path(candidate).exists():
                     argv.extend(["--ro-bind", candidate, candidate])
@@ -238,7 +271,7 @@ def opencode_sandbox_prefix(
             for root in roots:
                 text = str(root)
                 argv.extend(["--bind", text, text])
-            argv.extend(["--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--"])
+            argv.append("--")
             return argv
         raise FsSandboxUnavailable(_FS_SANDBOX_UNAVAILABLE)
     raise FsSandboxUnavailable(_FS_SANDBOX_UNAVAILABLE)
