@@ -25,6 +25,7 @@ import urllib.request
 
 from ciao import dev, gws_wrapper, package_smoke, public_release, release, service_backend
 from ciao.server_host import (
+    BUNDLE_ID,
     EXIT_TIMEOUT_SECONDS,
     HostOwnership,
     ServerHostError,
@@ -247,6 +248,9 @@ def _render_launchd_plist(
     # PATH from setup time into the plist for optional deploy tooling.
     resolved_path = path or os.environ.get("PATH", "")
     replacements = {
+        "{{ASSOCIATED_BUNDLE_ID}}": html.escape(
+            BUNDLE_ID if host is not None else "local.ciaobot.app", quote=False
+        ),
         "{{CIAO_WORKSPACE}}": html.escape(str(workspace), quote=False),
         "{{CIAO_RUNTIME_ROOT}}": html.escape(
             str((runtime_root or (workspace / ".runtime")).resolve()), quote=False

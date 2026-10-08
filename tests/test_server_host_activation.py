@@ -463,3 +463,27 @@ def test_register_launchd_service_render_refusal_is_a_message(
 
     with pytest.raises(RuntimeError, match="interpreter"):
         cli._register_launchd_service(workspace)
+
+
+def test_hosted_plist_advertises_the_server_bundle_id(tmp_path: Path) -> None:
+    """A hosted render names the host bundle id inside
+    ``AssociatedBundleIdentifiers``; the direct shape keeps the app id."""
+    hosted = cli._render_launchd_plist(
+        workspace=tmp_path / "ws",
+        port=8443,
+        host=_verified_host(),
+        host_python=_ENGINE_PYTHON,
+    )
+    assert "<key>AssociatedBundleIdentifiers</key>" in hosted
+    assert f"<string>{BUNDLE_ID}</string>" in hosted
+    assert BUNDLE_ID == "local.ciaobot.server"
+    assert "local.ciaobot.app" not in hosted
+    assert "{{ASSOCIATED_BUNDLE_ID}}" not in hosted
+
+    direct = cli._render_launchd_plist(
+        workspace=tmp_path / "ws",
+        python_path="/opt/ciaobot/venv/bin/python3.12",
+        port=8443,
+    )
+    assert "<string>local.ciaobot.app</string>" in direct
+    assert "{{ASSOCIATED_BUNDLE_ID}}" not in direct
