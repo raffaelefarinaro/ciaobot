@@ -1208,8 +1208,7 @@ async def _op_task_attempt_action(service: CiaoMcpService, attempt_id: str,
 async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
                           expected_revision: str, status: str | None = None,
                           assignee: str | None = None, project_id: str | None = None,
-                          due: str | None = None,
-                          resolution: str | None = None) -> dict[str, Any]:
+                          due: str | None = None) -> dict[str, Any]:
     """Move, complete or reassign one task, at the revision you read.
 
     action:
@@ -1226,15 +1225,12 @@ async def _op_task_action(service: CiaoMcpService, action: str, task_id: str,
 
     Args:
         project_id, due: Applied with the gesture when given.
-        resolution: Only with `complete`, and always refused to you (see
-            above); it is how the user's note would be recorded.
     """
     return await service._invoke(
         "task_action",
         lambda cp, p: cp.task_action(
             p, action, task_id, expected_revision=expected_revision,
             status=status, assignee=assignee, project_id=project_id, due=due,
-            resolution=resolution,
         ),
         mutating=True,
     )

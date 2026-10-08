@@ -251,7 +251,6 @@ def build_parser() -> argparse.ArgumentParser:
     tcomplete = task.add_parser("complete")
     tcomplete.add_argument("task_id")
     tcomplete.add_argument("--revision", required=True)
-    tcomplete.add_argument("--resolution", default=None, help="The resolution note, as the user gives it. Refused to you like any completion.")
     tdelegate = task.add_parser("delegate")
     tdelegate.add_argument("task_id")
     tdelegate.add_argument("--revision", required=True, help="The revision you read; a stale one starts nothing.")
@@ -582,14 +581,11 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         # `complete` stays its own verb even though the store refuses it: the
         # refusal is the answer, and the agent needs a name for it to report
         # rather than another route it has to guess at.
-        arguments = {
+        return "task_action", {
             "action": "complete",
             "task_id": args.task_id,
             "expected_revision": args.revision,
         }
-        if args.resolution is not None:
-            arguments["resolution"] = args.resolution
-        return "task_action", arguments
     if noun == "schedule":
         if verb == "list":
             return "schedules_list", {}

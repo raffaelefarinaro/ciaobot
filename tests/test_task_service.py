@@ -18,6 +18,7 @@ models, no services.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -561,16 +562,11 @@ def test_a_read_separates_the_description_history_and_log(tmp_path: Path) -> Non
 
 def test_a_resolution_is_the_users_and_only_on_a_done_task(tmp_path: Path) -> None:
     plane = _world(tmp_path)
-    principal = _principal()
     task = _create(plane, "personal", title="Mine to close")
 
-    # An agent cannot record a resolution by any route.
-    with pytest.raises(ControlPlaneError) as excinfo:
-        plane.task_action(
-            principal, "complete", task["id"],
-            expected_revision=task["revision"], resolution="I did it.",
-        )
-    assert excinfo.value.code == "task_completion_requires_user"
+    # The agent surface has no resolution parameter, and the shared update
+    # path refuses one from an agent actor.
+    assert "resolution" not in inspect.signature(plane.task_action).parameters
     with pytest.raises(ControlPlaneError) as excinfo:
         _update(
             plane, "personal", task["id"],
@@ -632,7 +628,9 @@ def test_a_completion_window_is_inclusive_and_refuses_a_bad_bound(
         expected_revision=task["revision"], actor="user",
     )
 
-    ids = lambda **kw: [row["id"] for row in plane.workspace_task_list("personal", **kw)]
+    def ids(**kw: str) -> list[str]:
+        return [row["id"] for row in plane.workspace_task_list("personal", **kw)]
+
     assert ids(completed_since="2026-10-07T23:59:59+00:00") == [task["id"]]
     assert ids(completed_since="2026-10-08T00:00:00+00:00") == []
     assert ids(completed_before="2026-10-07T23:59:59+00:00") == []

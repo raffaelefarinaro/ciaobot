@@ -4782,7 +4782,6 @@ class CiaoControlPlane:
         assignee: str | None = None,
         project_id: str | None = None,
         due: str | None = None,
-        resolution: str | None = None,
     ) -> dict[str, Any]:
         """Move, complete or reassign one task; an agent completion is refused."""
         return _ok(
@@ -4796,7 +4795,6 @@ class CiaoControlPlane:
                 project_id=project_id,
                 due=due,
                 actor="agent",
-                resolution=resolution,
             )
         )
 

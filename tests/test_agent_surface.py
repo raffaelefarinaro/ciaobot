@@ -434,10 +434,6 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
             ("task_action", {"action": "complete", "task_id": "a1b2", "expected_revision": "rev1"}),
         ),
         (
-            ["task", "complete", "a1b2", "--revision", "rev1", "--resolution", "Shipped."],
-            ("task_action", {"action": "complete", "task_id": "a1b2", "expected_revision": "rev1", "resolution": "Shipped."}),
-        ),
-        (
             ["run", "start", "--label", "report", "--timeout-s", "900", "--env", "A=1", "--", "bash", "-lc", "a && b"],
             ("background_run_start", {"cmd": ["bash", "-lc", "a && b"], "env": {"A": "1"}, "timeout_s": 900, "label": "report"}),
         ),
