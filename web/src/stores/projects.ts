@@ -2147,15 +2147,29 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function updateWorkspace(name: WorkspaceName, payload: Partial<WorkspaceInfo>) {
-    const res = await api.patch<WorkspacesResponse>(`/api/workspaces/${encodeURIComponent(name)}`, payload)
+    const res = await api.patch<WorkspacesResponse & { renamed?: { from: string; to: string } }>(
+      `/api/workspaces/${encodeURIComponent(name)}`,
+      payload,
+    )
     workspaces.value = res.workspaces || []
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    if (res.renamed && activeWorkspace.value === res.renamed.from) {
+      followRenamedWorkspace(res.renamed.from, res.renamed.to)
+    }
     if (activeWorkspace.value && !workspaces.value.some(w => w.name === activeWorkspace.value)) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
     return res
+  }
+
+  // A rename keeps the workspace selected under its new name. Persisted so a
+  // reload restores it rather than falling back to the first workspace.
+  function followRenamedWorkspace(from: WorkspaceName, to: WorkspaceName) {
+    if (activeWorkspace.value !== from) return
+    activeWorkspace.value = to
+    persistState()
   }
 
   // Archive, never delete: the server unregisters the workspace, archives its
@@ -4441,9 +4455,13 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'workspaces_changed': {
-        // A workspace was archived or restored in another tab or device.
-        // Refetch the registry so the sidebar and pickers stop offering it
-        // (or show it again) without a reload.
+        // A workspace was archived, restored or renamed in another tab or
+        // device. Refetch the registry so the sidebar and pickers stop
+        // offering it (or show it again) without a reload. A rename also
+        // moves the selection, so the renamed workspace stays selected here.
+        if (msg.from !== undefined && msg.to !== undefined && activeWorkspace.value === msg.from) {
+          followRenamedWorkspace(msg.from, msg.to)
+        }
         scheduleWorkspacesRefetch()
         break
       }

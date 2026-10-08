@@ -1033,7 +1033,7 @@
                       class="set-link"
                       :aria-label="`Edit workspace ${form.name}`"
                       :aria-expanded="false"
-                      @click="openWorkspace = form.name"
+                      @click="openWorkspaceEditor(form.name)"
                     >Edit</button>
                     <DropdownMenuRoot
                       v-if="workspaceArchivable(form.name)"
@@ -1065,6 +1065,16 @@
                 </div>
 
                 <div v-if="openWorkspace === form.name" class="set-row-body">
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label">Name</span>
+                    <input
+                      class="routine-input set-subrow-control"
+                      v-model="workspaceNameDraft"
+                      :disabled="workspacesSaving === form.name"
+                      :aria-describedby="`workspace-name-hint-${form.name}`"
+                    />
+                  </label>
+                  <p :id="`workspace-name-hint-${form.name}`" class="hint hint--compact set-subrow-hint">Letters, numbers, dashes, underscores.</p>
                   <div class="set-subrow">
                     <span class="set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
                     <div
@@ -3786,10 +3796,21 @@ function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
 // the saved form, so Save appears only once something actually changed.
 const openWorkspace = ref<string | null>(null)
 const workspaceBaseline = ref<Record<string, string>>({})
+// The Name field of the open row. It is a draft kept beside `form.name`, not
+// bound to it: `form.name` is the row's identity (baseline, key, PATCH path),
+// and changing it mid-edit would re-key the card and lose focus.
+const workspaceNameDraft = ref('')
+
+function openWorkspaceEditor(name: string): void {
+  openWorkspace.value = name
+  workspaceNameDraft.value = name
+}
 
 function workspaceDirty(form: WorkspaceForm): boolean {
   const saved = workspaceBaseline.value[form.name]
-  return saved !== undefined && saved !== JSON.stringify(form)
+  if (saved === undefined) return false
+  if (openWorkspace.value === form.name && workspaceNameDraft.value.trim() !== form.name) return true
+  return saved !== JSON.stringify(form)
 }
 
 function discardWorkspace(name: string): void {
@@ -3891,24 +3912,44 @@ async function fetchWorkspaceModels(force = false) {
   }
 }
 
+function renameConfirmMessage(from: string, to: string): string {
+  const message = `Rename "${from}" to "${to}". Projects and automations keep their ids and follow the new name.`
+  return from === 'personal' ? `${message} It will no longer be the main workspace.` : message
+}
+
 async function saveWorkspace(name: string) {
   const form = workspaceForms.value.find((f) => f.name === name)
   if (!form) return
+  const target = workspaceNameDraft.value.trim()
+  const renaming = target !== name
+  // An empty name would otherwise be read by the server as "no rename" and
+  // dropped silently, so refuse it here.
+  if (renaming && !target) {
+    workspacesResult.value = 'Enter a workspace name.'
+    return
+  }
+  if (renaming && !await askConfirm(renameConfirmMessage(name, target), {
+    title: 'Rename workspace',
+    confirmLabel: 'Rename',
+    destructive: false,
+  })) return
   workspacesSaving.value = name
   workspacesResult.value = ''
   try {
     await projectStore.updateWorkspace(name, {
+      // Only a changed name is sent; an unchanged save is the plain patch.
+      ...(renaming ? { name: target } : {}),
       // Send what the form holds. Overwriting it with the workspace name
       // silently discarded any vault path the user had set, and reset an
       // adopted workspace's `memory-vault/<name>` root to a bare name.
-      vault_root: form.vault_root.trim() || name,
+      vault_root: form.vault_root.trim() || target,
       default_provider: form.default_provider,
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       color: form.color,
       agent_fs_scope: form.agent_fs_scope,
     })
-    notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
+    notifySaved(renaming ? `Workspace "${name}" renamed to "${target}".` : `Workspace "${name}" saved.`, 'Workspaces')
     openWorkspace.value = null
     await fetchWorkspacesList()
     void fetchGwsIntegration()
