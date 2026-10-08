@@ -36,7 +36,6 @@ NO_RESOLUTION = "No resolution"
 _SECTION = re.compile(
     re.escape(OPEN) + r".*?" + re.escape(CLOSE), re.DOTALL
 )
-_ID_MARK = re.compile(r"<!-- completion:([0-9a-f]{32}) -->")
 _TAIL = re.compile(
     r"<!-- completion:([0-9a-f]{32}) -->"
     r"\s*(<!-- edited:(.+?) -->)?\s*$"
@@ -81,32 +80,42 @@ def mint_id() -> str:
 #: is user prose and may name the markers literally; embedding them verbatim
 #: would terminate the section early (the section match ends at the first
 #: closing marker), so the renderer escapes them and the parser restores
-#: them. The doubled form keeps an already-escaped literal unambiguous, so
-#: every input round-trips exactly.
+#: them. Encoding stacks one ``amp;`` level onto any pre-existing
+#: ``&``-prefixed encoding of the same tail (``&lt;...`` becomes
+#: ``&amp;lt;...``, which becomes ``&amp;amp;lt;...``, and so on), so a raw
+#: marker, an escaped literal and a doubled literal all render differently
+#: and every input round-trips exactly.
 _ESCAPED_OPEN = "&lt;!-- ciao:task-completions --&gt;"
 _ESCAPED_CLOSE = "&lt;!-- /ciao:task-completions --&gt;"
-_DOUBLED_OPEN = "&amp;lt;!-- ciao:task-completions --&gt;"
-_DOUBLED_CLOSE = "&amp;lt;!-- /ciao:task-completions --&gt;"
+
+#: ``&`` plus any stacked ``amp;`` levels plus either encoded-marker tail.
+#: Matches only the two marker encodings, so unrelated entities such as
+#: ``&amp;copy;`` pass through untouched.
+_ENCODED_TAIL = re.compile(r"&((?:amp;)*)(lt;!-- /?ciao:task-completions --&gt;)")
 
 
 def _escape_markers(text: str) -> str:
     """Resolution text with literal section markers escaped for rendering."""
-    for marker, escaped, doubled in (
-        (OPEN, _ESCAPED_OPEN, _DOUBLED_OPEN),
-        (CLOSE, _ESCAPED_CLOSE, _DOUBLED_CLOSE),
-    ):
-        text = text.replace(escaped, doubled).replace(marker, escaped)
-    return text
+    stacked = _ENCODED_TAIL.sub(
+        lambda match: "&amp;" + match.group(1) + match.group(2), text
+    )
+    return stacked.replace(OPEN, _ESCAPED_OPEN).replace(CLOSE, _ESCAPED_CLOSE)
 
 
 def _unescape_markers(text: str) -> str:
     """Parsed item text with escaped section markers restored to literals."""
-    for marker, escaped, doubled in (
-        (OPEN, _ESCAPED_OPEN, _DOUBLED_OPEN),
-        (CLOSE, _ESCAPED_CLOSE, _DOUBLED_CLOSE),
-    ):
-        text = text.replace(escaped, marker).replace(doubled, escaped)
-    return text
+    parts: list[str] = []
+    position = 0
+    for match in _ENCODED_TAIL.finditer(text):
+        parts.append(text[position : match.start()])
+        stacked, tail = match.group(1), match.group(2)
+        if not stacked:
+            parts.append(OPEN if tail == _ESCAPED_OPEN[1:] else CLOSE)
+        else:
+            parts.append("&" + stacked[4:] + tail)
+        position = match.end()
+    parts.append(text[position:])
+    return "".join(parts)
 
 
 def render_completion(completion: Completion) -> str:
@@ -174,8 +183,13 @@ def _items(section_inner: str) -> list[tuple[str, str]]:
 
 def _finish(lines: list[str]) -> tuple[str, str]:
     text = "\n".join(lines).rstrip()
-    match = _ID_MARK.search(lines[0]) if lines[0].startswith("- ") else None
-    return (match.group(1) if match else "", text)
+    if not lines[0].startswith("- "):
+        return ("", text)
+    # The authoritative id is the trailing item mark the renderer wrote, not
+    # the first completion-looking comment in the headline: the resolution is
+    # user prose and may name a literal ``<!-- completion:<id> -->``.
+    tail = _TAIL.search(lines[0])
+    return (tail.group(1) if tail else "", text)
 
 
 def _parse_item(item_id: str, text: str) -> Completion | None:

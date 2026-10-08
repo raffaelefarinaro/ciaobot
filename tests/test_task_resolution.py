@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 import pytest
 
 from ciao.task_attempts import build_prompt
+from ciao.task_log import LOG_CLOSE, LOG_OPEN, render_item, upsert_item
 from ciao.task_resolution import (
     CLOSE,
     HEADING,
@@ -22,6 +23,39 @@ from ciao.task_resolution import (
     replace_resolution,
     strip_completions,
 )
+
+
+def _prompt(body: str) -> str:
+    return build_prompt(
+        title="T",
+        status="backlog",
+        due="",
+        project_id="",
+        task_id="8" * 32,
+        task_revision="rev",
+        relative_path="Workspace/Tasks/x.md",
+        body=body,
+    )
+
+
+def _log_section() -> str:
+    body = upsert_item(
+        "Description.",
+        "b" * 32,
+        render_item(
+            attempt_id="b" * 32,
+            state="running",
+            outcome="",
+            summary="Did delegated work.",
+            detail="",
+            created_at="2026-10-08T10:00:00+00:00",
+            ended_at="2026-10-08T10:01:00+00:00",
+            chat_id="c",
+            chat_title="t",
+            archive_path="",
+        ),
+    )
+    return body[body.index(LOG_OPEN) :]
 
 
 def test_append_parse_and_strip_round_trip() -> None:
@@ -146,3 +180,104 @@ def test_resolution_with_section_markers_round_trips_and_strips_cleanly() -> Non
         2026, 10, 8, 8, 0, 0, tzinfo=UTC
     )
     assert "tail" not in strip_completions(edited)
+
+
+def test_completion_before_delegation_log_does_not_leak_into_prompt() -> None:
+    resolution = (
+        "SECRET PAST RESOLUTION\n"
+        f"Mention {LOG_OPEN} literally\n"
+        f"and {LOG_CLOSE} too."
+    )
+    completion = Completion(
+        id="a" * 32,
+        completed_at=datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC),
+        resolution=resolution,
+    )
+    section = append_completion("Description.", completion)
+    section = section[len("Description.") :].lstrip()
+
+    # Completion history first, delegation log second.
+    first = append_completion("Description.", completion).rstrip()
+    first = f"{first}\n\n{_log_section().strip()}\n"
+    # Delegation log first, completion history second.
+    log_first = _log_section()
+    second = f"Description.\n\n{log_first.strip()}\n\n{section.strip()}\n"
+
+    for body in (first, second):
+        found = parse_completions(body)
+        assert len(found) == 1
+        assert found[0].resolution == resolution
+        assert "SECRET PAST RESOLUTION" not in strip_completions(body)
+        prompt = _prompt(body)
+        assert "SECRET PAST RESOLUTION" not in prompt
+        assert "Description." in prompt
+
+
+def test_literal_completion_item_marker_round_trips_and_edits() -> None:
+    literal = "<!-- completion:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+    completion = Completion(
+        id="c" * 32,
+        completed_at=datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC),
+        resolution=f"Fixed {literal} here",
+    )
+    body = append_completion("Desc.", completion)
+    found = parse_completions(body)
+    assert len(found) == 1
+    assert found[0].id == "c" * 32
+    assert found[0].resolution == f"Fixed {literal} here"
+
+    edited = replace_resolution(
+        body,
+        "c" * 32,
+        f"Edited {literal} again",
+        datetime(2026, 10, 9, 9, 30, 0, tzinfo=UTC),
+    )
+    refound = parse_completions(edited)
+    assert len(refound) == 1
+    assert refound[0].id == "c" * 32
+    assert refound[0].resolution == f"Edited {literal} again"
+    assert refound[0].completed_at == datetime(
+        2026, 10, 8, 8, 0, 0, tzinfo=UTC
+    )
+    assert "again" not in strip_completions(edited)
+
+
+def test_marker_escape_is_injective_for_raw_escaped_and_doubled() -> None:
+    cases = [
+        OPEN,
+        CLOSE,
+        f"note {OPEN} inline",
+        "tail " + CLOSE,
+        "&lt;!-- ciao:task-completions --&gt;",
+        "&lt;!-- /ciao:task-completions --&gt;",
+        "&amp;lt;!-- ciao:task-completions --&gt;",
+        "&amp;lt;!-- /ciao:task-completions --&gt;",
+        "&amp;amp;lt;!-- ciao:task-completions --&gt;",
+        f"mix {OPEN} then &lt;!-- ciao:task-completions --&gt; "
+        "then &amp;lt;!-- ciao:task-completions --&gt; "
+        f"then {CLOSE} end",
+        "&amp;copy; stays unrelated",
+    ]
+    for index, resolution in enumerate(cases):
+        completion = Completion(
+            id=f"{0xB0 + index:032x}",
+            completed_at=datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC),
+            resolution=resolution,
+        )
+        body = append_completion("D.", completion)
+        assert body.count(OPEN) == 1
+        assert body.count(CLOSE) == 1
+        found = parse_completions(body)
+        assert len(found) == 1
+        assert found[0].resolution == resolution
+
+        rewritten = replace_resolution(
+            body,
+            completion.id,
+            resolution + " v2",
+            datetime(2026, 10, 9, 9, 30, 0, tzinfo=UTC),
+        )
+        refound = parse_completions(rewritten)
+        assert len(refound) == 1
+        assert refound[0].resolution == resolution + " v2"
+        assert refound[0].completed_at == completion.completed_at

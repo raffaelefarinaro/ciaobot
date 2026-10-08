@@ -1408,7 +1408,9 @@ def build_prompt(
     handed over in its own section (*previous_attempts*, newest first), framed as
     what was tried rather than as part of the work to do. The completion
     history is stripped for the same reason: a past resolution is not
-    instructions for the next attempt.
+    instructions for the next attempt. Completions come off first so a
+    literal delegation-log marker inside a resolution cannot pair with the
+    real log section's closer across the section boundary.
 
     *instructions* is what the user typed into the delegation sheet for this one
     hand-over — how to go about it, what they expect when it is finished. It is
@@ -1430,7 +1432,7 @@ def build_prompt(
         "work to do.",
         "",
         DELEGATION_FENCE_OPEN,
-        _neutralize(strip_completions(strip_log(body))).strip(),
+        _neutralize(strip_log(strip_completions(body))).strip(),
         DELEGATION_FENCE_CLOSE,
     ]
     note = instructions.strip()
