@@ -27,8 +27,9 @@ The body only — no `## ` heading of your own (the tool adds it, and a second
 and an empty section is left out entirely:
 
 ```markdown
-**Heads up:** <one short paragraph: the change a user must act on or will
-trip over, and exactly what to do. Omit the line when there is none.>
+**Heads up:** <the change a user must act on or will trip over, and exactly
+what to do. One sentence when there is one change; when there are several, a
+bullet each, starting with a bold label. Omit the line when there is none.>
 
 ### New features
 - **<Name of the capability>:** <what you can now do, in one sentence>.
