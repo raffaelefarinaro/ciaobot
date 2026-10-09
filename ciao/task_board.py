@@ -95,7 +95,7 @@ from ciao.async_reads import keyed_lock
 from ciao.os_support.files import open_fd, replace_file
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import carry_mode
-from ciao.task_log import extract_log
+from ciao.task_log import extract_log, strip_log
 from ciao.task_resolution import (
     OPEN as COMPLETIONS_OPEN,
     Completion,
@@ -104,6 +104,13 @@ from ciao.task_resolution import (
     parse_completions,
     replace_resolution,
     strip_completions,
+)
+from ciao.task_updates import (
+    TaskUpdate,
+    append_update,
+    extract_section as extract_updates,
+    replace_update,
+    strip_updates,
 )
 
 SCHEMA_VERSION = 2
@@ -1619,6 +1626,25 @@ class TaskBoardStore:
                     working = "\n\n".join(s for s in (head, kept, kept_log) if s) + "\n"
                 else:
                     working = stripped
+                # Progress notes are not part of the description. A save that
+                # omits them gets the stored section back, after the prose and
+                # before the other engine sections.
+                stored_updates = extract_updates(document.body)
+                if stored_updates and working is not None and not extract_updates(working):
+                    prose = strip_updates(strip_completions(strip_log(working))).rstrip()
+                    working = (
+                        "\n\n".join(
+                            part
+                            for part in (
+                                prose,
+                                stored_updates,
+                                extract_section(working),
+                                extract_log(working),
+                            )
+                            if part.strip()
+                        )
+                        + "\n"
+                    )
             stamp: datetime | None = None
             if current_status != "done" and patched_status == "done":
                 if stamp is None:
@@ -1664,6 +1690,102 @@ class TaskBoardStore:
                     "revision_conflict",
                     "the task changed while the edit was being prepared; nothing was written",
                 )
+            self._atomic_write(path, new_raw, existing=path)
+            return parse_task(new_raw, expected_id=task_id)
+
+    def add_update(
+        self,
+        task_id: str,
+        *,
+        expected_revision: str,
+        actor: Actor,
+        text: str,
+        attempt_id: str = "",
+        chat_id: str = "",
+    ) -> TaskDocument:
+        """Append one progress note. The description is not edited.
+
+        Allowed only while the task is ``in_progress`` or ``in_review``. A
+        note is not a completion, and it does not change the requested work.
+        """
+        if actor not in ("user", "agent"):
+            raise TaskBoardError("invalid_task", f"actor must be 'user' or 'agent', not {actor!r}")
+        if not isinstance(text, str) or not text.strip():
+            raise TaskBoardError("invalid_task", "a progress note must be text")
+        path = self._task_path(task_id)
+        expected = str(expected_revision or "").strip()
+        if not expected:
+            raise TaskBoardError(
+                "invalid_task",
+                "an expected revision is required; this store never overwrites a task it has not read",
+            )
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            current_raw = self._read_file_bytes(path, task_id)
+            if _revision(current_raw) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed since this note was planned; nothing was written",
+                )
+            document = parse_task(current_raw, expected_id=task_id)
+            if document.record.status not in ("in_progress", "in_review"):
+                raise TaskBoardError(
+                    "invalid_task",
+                    "progress notes are recorded while a task is in progress or in review",
+                )
+            try:
+                body = append_update(
+                    document.body,
+                    TaskUpdate(
+                        id=uuid.uuid4().hex,
+                        recorded_at=self._now().replace(microsecond=0),
+                        actor=actor,
+                        text=text.strip(),
+                        attempt_id=str(attempt_id or ""),
+                        chat_id=str(chat_id or ""),
+                    ),
+                )
+            except ValueError as exc:
+                raise TaskBoardError("invalid_task", str(exc)) from None
+            new_raw = patch_task(document, {"updated_at": self._now()}, body=body)
+            self._atomic_write(path, new_raw, existing=path)
+            return parse_task(new_raw, expected_id=task_id)
+
+    def edit_update(
+        self,
+        task_id: str,
+        update_id: str,
+        *,
+        expected_revision: str,
+        text: str,
+    ) -> TaskDocument:
+        """Reword one progress note. Its author and recorded time stay."""
+        if not isinstance(text, str):
+            raise TaskBoardError("invalid_task", "a progress note must be text")
+        path = self._task_path(task_id)
+        expected = str(expected_revision or "").strip()
+        if not expected:
+            raise TaskBoardError(
+                "invalid_task",
+                "an expected revision is required; this store never overwrites a task it has not read",
+            )
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            current_raw = self._read_file_bytes(path, task_id)
+            if _revision(current_raw) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed since this note was planned; nothing was written",
+                )
+            document = parse_task(current_raw, expected_id=task_id)
+            try:
+                body = replace_update(
+                    document.body,
+                    str(update_id or ""),
+                    text.strip(),
+                    self._now().replace(microsecond=0),
+                )
+            except ValueError as exc:
+                raise TaskBoardError("invalid_task", str(exc)) from None
+            new_raw = patch_task(document, {"updated_at": self._now()}, body=body)
             self._atomic_write(path, new_raw, existing=path)
             return parse_task(new_raw, expected_id=task_id)
 

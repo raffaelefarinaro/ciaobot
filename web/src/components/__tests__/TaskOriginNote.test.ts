@@ -104,13 +104,16 @@ describe('TaskOriginNote', () => {
     ))
     await wrapper.get('button').trigger('click')
     await flushPromises()
+    expect(apiPost).not.toHaveBeenCalled()
+    await wrapper.findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
 
     expect(askConfirm).toHaveBeenCalledTimes(1)
     expect(apiPost.mock.calls.map((c) => c[0])).toEqual([
       '/api/tasks/ship/attempt/att-1/detach',
       '/api/tasks/ship/complete',
     ])
-    expect(apiPost.mock.calls[1]![1]).toEqual({ workspace: 'personal', expected_revision: NEXT })
+    expect(apiPost.mock.calls[1]![1]).toEqual({ workspace: 'personal', expected_revision: NEXT, resolution: '' })
     expect(wrapper.emitted('marked-done')).toHaveLength(1)
   })
 
@@ -119,6 +122,9 @@ describe('TaskOriginNote', () => {
     const wrapper = mountNote([task({ attempt_state: 'interrupted', live_attempt_id: '' })])
     await wrapper.get('button').trigger('click')
     await flushPromises()
+    await wrapper.findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
+    expect(askConfirm).toHaveBeenCalledTimes(1)
     expect(apiPost).not.toHaveBeenCalled()
     expect(wrapper.emitted('marked-done')).toBeUndefined()
   })
@@ -136,8 +142,10 @@ describe('TaskOriginNote', () => {
     apiGet.mockResolvedValue({ workspace: 'personal', tasks: [{ ...reviewed, status: 'done', live_attempt_id: '' }] })
     await button.trigger('click')
     await flushPromises()
+    await wrapper.findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
 
-    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', { workspace: 'personal', expected_revision: REVISION })
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', { workspace: 'personal', expected_revision: REVISION, resolution: '' })
     expect(apiGet).toHaveBeenCalledWith('/api/tasks?workspace=personal')
     expect(wrapper.find('button').exists()).toBe(false)
     expect(wrapper.get('.task-origin-status').text()).toBe('Done')
@@ -149,6 +157,8 @@ describe('TaskOriginNote', () => {
     apiPost.mockRejectedValue(Object.assign(new Error('conflict'), { status: 409 }))
     apiGet.mockResolvedValue({ workspace: 'personal', tasks: [{ ...reviewed, revision: 'b'.repeat(64) }] })
     await wrapper.get('button').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
     await flushPromises()
 
     expect(wrapper.get('[role="alert"]').text()).toBe('This task changed since it was read. Check it and approve again.')

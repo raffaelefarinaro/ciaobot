@@ -332,9 +332,14 @@ describe('TaskBoardView', () => {
     const wrapper = await mountBoard()
     apiPost.mockResolvedValue({ workspace: 'personal', task: { ...task({ status: 'done' }), revision: NEXT_REVISION, body: '' } })
     await dragCard(wrapper, 'Ship the board', 3)
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(wrapper.get('.task-resolution-sheet').text()).toContain('Complete with resolution')
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
       workspace: 'personal',
       expected_revision: REVISION,
+      resolution: '',
     })
     expect(apiPatch).not.toHaveBeenCalled()
     wrapper.unmount()
@@ -366,10 +371,14 @@ describe('TaskBoardView', () => {
     await card(wrapper, 'Ship the board').get('button[aria-label="Mark Ship the board done"]').trigger('click')
     await flushPromises()
     await nextTick()
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
+    await nextTick()
 
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
       workspace: 'personal',
       expected_revision: REVISION,
+      resolution: '',
     })
     expect(lanes(wrapper)[3]!.text()).toContain('Ship the board')
     wrapper.unmount()
@@ -897,9 +906,15 @@ describe('TaskBoardView', () => {
     await nextTick()
 
     expect(apiPatch).not.toHaveBeenCalled()
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-status="done"]').attributes('aria-checked')).toBe('false')
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
+    await nextTick()
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
       workspace: 'personal',
       expected_revision: NEXT_REVISION,
+      resolution: '',
     })
     expect(wrapper.get('[data-status="done"]').attributes('aria-checked')).toBe('true')
     wrapper.unmount()
@@ -1144,7 +1159,7 @@ describe('TaskBoardView', () => {
     await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
     await flushPromises()
     await nextTick()
-    const start = wrapper.findAll('.task-resolution button').find((b) => b.text() === 'Complete with resolution…')!
+    const start = wrapper.findAll('.task-resolution button').find((b) => b.text() === 'Complete…')!
     await start.trigger('click')
     await nextTick()
   }
@@ -1989,12 +2004,15 @@ describe('TaskBoardView', () => {
 
       await chip(wrapper, 'Wire the store', 'Approve Done').trigger('click')
       await flushPromises()
+      await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+      await flushPromises()
 
       // One request, the completion route — no attempt gesture in between.
       expect(apiPost).toHaveBeenCalledTimes(1)
       expect(apiPost).toHaveBeenCalledWith('/api/tasks/doing/complete', {
         workspace: 'personal',
         expected_revision: THIRD_REVISION,
+        resolution: '',
       })
       // And the card moved, which is the whole point of the gesture.
       expect(
@@ -2035,10 +2053,13 @@ describe('TaskBoardView', () => {
       expect(control, 'Approve Done in the editor').toBeTruthy()
       await control!.trigger('click')
       await flushPromises()
+      await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+      await flushPromises()
 
       expect(apiPost).toHaveBeenCalledWith('/api/tasks/doing/complete', {
         workspace: 'personal',
         expected_revision: THIRD_REVISION,
+        resolution: '',
       })
       wrapper.unmount()
     })
@@ -2429,6 +2450,8 @@ describe('TaskBoardView', () => {
 
     await card(wrapper, 'Broke halfway').get('.task-check').trigger('click')
     await flushPromises()
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
 
     expect(askConfirm).toHaveBeenCalledTimes(1)
     expect(String(askConfirm.mock.calls[0]![0])).toContain('still linked to its last attempt (Interrupted)')
@@ -2445,9 +2468,12 @@ describe('TaskBoardView', () => {
 
     await card(wrapper, 'Never delegated').get('.task-check').trigger('click')
     await flushPromises()
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
 
     expect(askConfirm).not.toHaveBeenCalled()
-    expect(toast).toHaveBeenCalledWith('Could not mark the task done', expect.any(String))
+    expect(wrapper.get('.task-resolution-sheet .task-action-error').text()).toContain('the task store is busy')
+    expect(toast).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
@@ -2484,6 +2510,8 @@ describe('TaskBoardView', () => {
 
     await wrapper.get('.task-status-opt[data-status="done"]').trigger('click')
     await flushPromises()
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
 
     expect(askConfirm).toHaveBeenCalledTimes(1)
     const posts = apiPost.mock.calls.map((c) => String(c[0]))
@@ -2502,9 +2530,10 @@ describe('TaskBoardView', () => {
 
     await wrapper.get('.task-status-opt[data-status="done"]').trigger('click')
     await flushPromises()
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
 
-    const group = wrapper.get('.task-status-seg').element.parentElement!
-    expect(group.querySelector('.task-action-error')?.textContent).toBeTruthy()
+    expect(wrapper.get('.task-resolution-sheet .task-action-error').text()).toContain('the attempt could not be detached')
     wrapper.unmount()
   })
 

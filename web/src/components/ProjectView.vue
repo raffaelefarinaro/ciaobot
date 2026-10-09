@@ -326,6 +326,50 @@
         </section>
       </aside>
     </div>
+
+    <div v-if="closureOpen" class="modal-backdrop" @click.self="closeClosure">
+      <div
+        ref="closureEl"
+        class="modal-sheet"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="project-closure-title"
+      >
+        <header class="task-sheet-head">
+          <h3 id="project-closure-title">Close {{ project.name }}</h3>
+          <button type="button" class="btn-icon" aria-label="Close" :disabled="closureBusy" @click="closeClosure">×</button>
+        </header>
+        <form class="task-form" novalidate @submit.prevent="submitClosure(false)">
+          <fieldset class="form-group">
+            <legend>How did it end?</legend>
+            <label><input v-model="closureOutcome" type="radio" value="completed" :disabled="closureBusy" /> Completed</label>
+            <label><input v-model="closureOutcome" type="radio" value="stopped" :disabled="closureBusy" /> Stopped</label>
+          </fieldset>
+          <div class="form-group">
+            <label for="project-closure-note">Note (optional)</label>
+            <p id="project-closure-help" class="hint">How it finished, or why it stopped. Chats will be archived. Open tasks stay on the board.</p>
+            <textarea
+              id="project-closure-note"
+              ref="closureNoteField"
+              v-model="closureNote"
+              rows="5"
+              aria-describedby="project-closure-help"
+              :disabled="closureBusy"
+            ></textarea>
+          </div>
+          <p class="hint">
+            {{ activeChats.length }} chat{{ activeChats.length === 1 ? '' : 's' }} will be archived.
+            <template v-if="openTaskCount !== null"> {{ openTaskCount }} open task{{ openTaskCount === 1 ? '' : 's' }} stay on the board.</template>
+          </p>
+          <p v-if="closureError" class="task-action-error" role="alert">{{ closureError }}</p>
+          <div class="form-actions">
+            <button type="submit" class="btn-primary" :disabled="closureBusy || !closureNote.trim()">{{ closureBusy ? 'Closing…' : (closureOutcome === 'stopped' ? 'Stop project' : 'Complete project') }}</button>
+            <button type="button" class="btn-small" :disabled="closureBusy" @click="submitClosure(true)">Close without note</button>
+            <button type="button" class="btn-small" :disabled="closureBusy" @click="closeClosure">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
   </div>
   <div v-else class="empty-state">Project not found.</div>
 </template>
@@ -338,6 +382,8 @@ import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { askConfirm } from '../lib/confirm'
+import { api } from '../lib/api'
+import { useModalFocus } from '../composables/useModalFocus'
 import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { colorForWorkspace } from '../lib/workspaceColors'
@@ -640,15 +686,66 @@ function openArchive(chat: { archive_path?: string }) {
   fileViewer.open(chat.archive_path)
 }
 
+const closureOpen = ref(false)
+const closureEl = ref<HTMLElement | null>(null)
+const closureNoteField = ref<HTMLTextAreaElement | null>(null)
+const closureOutcome = ref<'completed' | 'stopped'>('completed')
+const closureNote = ref('')
+const closureBusy = ref(false)
+const closureError = ref('')
+const openTaskCount = ref<number | null>(null)
+
+useModalFocus(closureEl, closureOpen, {
+  initialFocus: closureNoteField,
+  onEscape: () => { if (!closureBusy.value) closeClosure() },
+})
+
+function closeClosure() {
+  if (closureBusy.value) return
+  closureOpen.value = false
+}
+
 async function doComplete() {
   if (!project.value) return
   closeProjectActions(false)
-  if (!await askConfirm(`Complete "${project.value.name}"? This will move the vault entry to completed/ and remove the project from the PWA.`, {
-    title: 'Complete project',
-    confirmLabel: 'Complete project',
-  })) return
-  await store.completeProject(project.value.project_id)
-  emit('close')
+  closureOutcome.value = 'completed'
+  closureNote.value = ''
+  closureError.value = ''
+  openTaskCount.value = null
+  closureOpen.value = true
+  const workspace = project.value.workspace
+  const projectId = project.value.project_id
+  try {
+    const data = await api.get<{ tasks?: Array<{ id?: string; project_id?: string; status?: string }> }>(
+      `/api/tasks?workspace=${encodeURIComponent(workspace)}`,
+    )
+    if (project.value?.project_id !== projectId) return
+    openTaskCount.value = (data?.tasks ?? []).filter(
+      (task) => task.id && task.project_id === projectId && task.status && task.status !== 'done',
+    ).length
+  } catch {
+    if (project.value?.project_id === projectId) openTaskCount.value = null
+  }
+}
+
+async function submitClosure(withoutNote: boolean) {
+  if (!project.value || closureBusy.value) return
+  const note = withoutNote ? '' : closureNote.value.trim()
+  if (!withoutNote && !note) return
+  closureBusy.value = true
+  closureError.value = ''
+  try {
+    await store.completeProject(project.value.project_id, {
+      outcome: closureOutcome.value,
+      note,
+    })
+    closureOpen.value = false
+    emit('close')
+  } catch (e) {
+    closureError.value = e instanceof Error ? e.message : 'Could not close the project'
+  } finally {
+    closureBusy.value = false
+  }
 }
 
 async function doDelete() {
@@ -845,6 +942,21 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   flex-direction: column;
   overflow-y: auto;
   min-width: 0;
+}
+
+.project-view fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.project-view fieldset label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
 }
 
 .project-grid {

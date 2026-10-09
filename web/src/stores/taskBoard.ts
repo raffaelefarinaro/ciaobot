@@ -479,6 +479,71 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
   }
 
   /**
+   * Append one progress note, at the revision the caller read.
+   *
+   * `send` also delivers it to the live attempt's chat. A note is not a
+   * description edit and does not complete the task.
+   */
+  async function addUpdate(
+    workspace: string,
+    taskId: string,
+    expectedRevision: string,
+    text: string,
+    send = false,
+  ): Promise<TaskDetail | null> {
+    if (!workspace || !taskId || !expectedRevision || !text.trim()) return null
+    descriptionSeq++
+    saving.value = true
+    error.value = ''
+    try {
+      const data = await api.post<{ task?: unknown }>(`${taskUrl(taskId)}/updates`, {
+        workspace,
+        expected_revision: expectedRevision,
+        text,
+        send,
+      })
+      if (!drawingWorkspace(workspace)) return null
+      const task = adopt(data?.task)
+      if (task.id && described.value?.id === task.id) described.value = task
+      return task
+    } catch (e) {
+      error.value = taskApiErrorMessage(e, 'Could not save the progress note')
+      return null
+    } finally {
+      saving.value = false
+    }
+  }
+
+  /** Reword one progress note. Its author and recorded time stay. */
+  async function editUpdate(
+    workspace: string,
+    taskId: string,
+    updateId: string,
+    expectedRevision: string,
+    text: string,
+  ): Promise<TaskDetail | null> {
+    if (!workspace || !taskId || !updateId || !expectedRevision) return null
+    descriptionSeq++
+    saving.value = true
+    error.value = ''
+    try {
+      const data = await api.patch<{ task?: unknown }>(
+        `${taskUrl(taskId)}/updates/${encodeURIComponent(updateId)}`,
+        { workspace, expected_revision: expectedRevision, text },
+      )
+      if (!drawingWorkspace(workspace)) return null
+      const task = adopt(data?.task)
+      if (task.id && described.value?.id === task.id) described.value = task
+      return task
+    } catch (e) {
+      error.value = taskApiErrorMessage(e, 'Could not save the progress note')
+      return null
+    } finally {
+      saving.value = false
+    }
+  }
+
+  /**
    * Ask the agent to read a done task's resolution for learnings, at the revision read.
    *
    * Answers `{queued, completion_id}` when the review was queued, or `{queued: false,
@@ -721,7 +786,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     rows, loadedWorkspace, loading, loadError, error, saving, described,
     attempts, attemptsTaskId, attemptsLoading, attemptsLoaded, attemptsError,
     reload, revisionOf, get,
-    create, update, complete, reviewResolution, remove, clearError,
+    create, update, complete, addUpdate, editUpdate, reviewResolution, remove, clearError,
     delegate, attemptAction, sendUpdate,
     ensureAttempts, invalidateAttempts, resetAttempts,
   }

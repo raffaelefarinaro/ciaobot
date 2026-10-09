@@ -72,7 +72,23 @@ const canMarkDone = computed(() => {
 
 const emit = defineEmits<{ (e: 'marked-done'): void }>()
 
-async function markDone(): Promise<void> {
+const approving = ref(false)
+const approveError = ref('')
+const noteOpen = ref(false)
+const noteDraft = ref('')
+watch(taskId, () => {
+  approveError.value = ''
+  noteOpen.value = false
+  noteDraft.value = ''
+})
+
+function beginClosure(): void {
+  noteOpen.value = true
+  noteDraft.value = ''
+  approveError.value = ''
+}
+
+async function markDone(resolution: string): Promise<void> {
   const t = task.value
   const workspace = taskSignals.loadedWorkspace
   if (!t || !workspace || approving.value) return
@@ -97,8 +113,10 @@ async function markDone(): Promise<void> {
     await api.post(`/api/tasks/${encodeURIComponent(t.id)}/complete`, {
       workspace,
       expected_revision: revision,
+      resolution,
     })
     done = true
+    noteOpen.value = false
   } catch (e) {
     approveError.value = (e as { status?: number } | null)?.status === 409
       ? 'This task changed since it was read. Check it and try again.'
@@ -110,11 +128,7 @@ async function markDone(): Promise<void> {
   if (done) emit('marked-done')
 }
 
-const approving = ref(false)
-const approveError = ref('')
-watch(taskId, () => { approveError.value = '' })
-
-async function approve(): Promise<void> {
+async function approve(resolution: string): Promise<void> {
   const t = task.value
   const workspace = taskSignals.loadedWorkspace
   if (!t || !workspace || approving.value) return
@@ -124,7 +138,9 @@ async function approve(): Promise<void> {
     await api.post(`/api/tasks/${encodeURIComponent(t.id)}/complete`, {
       workspace,
       expected_revision: t.revision,
+      resolution,
     })
+    noteOpen.value = false
   } catch (e) {
     approveError.value = (e as { status?: number } | null)?.status === 409
       ? 'This task changed since it was read. Check it and approve again.'
@@ -135,6 +151,13 @@ async function approve(): Promise<void> {
   // Either way the record is newer than what this note drew: a refusal means it
   // moved on, a success moved it to Done.
   await taskSignals.reload(workspace)
+}
+
+function submitNote(withoutNote: boolean): void {
+  const resolution = withoutNote ? '' : noteDraft.value.trim()
+  if (!withoutNote && !resolution) return
+  if (canApprove.value) void approve(resolution)
+  else void markDone(resolution)
 }
 </script>
 
@@ -147,22 +170,47 @@ async function approve(): Promise<void> {
         <template v-else>This chat works on <router-link class="task-origin-link" :to="{ name: 'task-detail', params: { taskId } }">a task on the board</router-link>.</template>
       </p>
       <p v-if="statusWords" class="task-origin-status">{{ statusWords }}</p>
+      <template v-if="noteOpen">
+        <label class="task-origin-note-label" for="task-origin-resolution">How was this completed?</label>
+        <textarea
+          id="task-origin-resolution"
+          v-model="noteDraft"
+          class="task-origin-note"
+          rows="3"
+          :disabled="approving"
+        ></textarea>
+        <div class="task-origin-actions">
+          <button
+            type="button"
+            class="btn-small task-origin-approve"
+            :disabled="approving || !noteDraft.trim()"
+            @click="submitNote(false)"
+          >{{ approving ? 'Saving…' : (canApprove ? 'Approve Done' : 'Mark done') }}</button>
+          <button
+            type="button"
+            class="btn-small"
+            :disabled="approving"
+            @click="submitNote(true)"
+          >Complete without note</button>
+          <button type="button" class="btn-small" :disabled="approving" @click="noteOpen = false">Cancel</button>
+        </div>
+      </template>
       <button
-        v-if="canApprove"
+        v-else-if="canApprove"
         type="button"
         class="btn-small task-origin-approve"
         :disabled="approving"
         :aria-label="`Approve the result of ${task!.title} and mark it done`"
-        @click="approve"
-      >{{ approving ? 'Approving…' : 'Approve Done' }}</button>
+        @click="beginClosure"
+      >Approve Done</button>
       <button
         v-else-if="canMarkDone"
         type="button"
         class="btn-small task-origin-approve"
         :disabled="approving"
         :aria-label="`Mark ${task!.title} done and archive this chat`"
-        @click="markDone"
-      >{{ approving ? 'Marking done…' : 'Mark done' }}</button>
+        @click="beginClosure"
+      >Mark done</button>
       <p v-if="approveError" class="task-origin-error" role="alert">{{ approveError }}</p>
     </div>
   </div>
@@ -213,6 +261,22 @@ async function approve(): Promise<void> {
   font-size: var(--text-sm);
 }
 .task-origin-approve { margin-top: 8px; }
+.task-origin-note-label {
+  display: block;
+  margin-top: 8px;
+  font-size: var(--text-xs);
+}
+.task-origin-note {
+  width: 100%;
+  margin-top: 4px;
+  min-height: 44px;
+}
+.task-origin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
 .task-origin-approve:disabled { opacity: 0.6; cursor: default; }
 .task-origin-error {
   margin: 6px 0 0;
@@ -221,7 +285,8 @@ async function approve(): Promise<void> {
 }
 /* The link is inline in a sentence, which the target-size rule exempts. */
 @media (pointer: coarse) {
-  .task-origin-approve { min-height: 44px; }
+  .task-origin-approve,
+  .task-origin-actions .btn-small { min-height: 44px; }
   .task-origin--note { padding-right: calc(var(--touch) + 12px); }
 }
 </style>

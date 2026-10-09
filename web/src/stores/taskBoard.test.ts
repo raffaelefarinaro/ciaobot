@@ -62,7 +62,17 @@ function task(overrides: Partial<Task> = {}): Task {
 
 /** A write's answer: the record as stored, description included. */
 function stored(overrides: Partial<TaskDetail> = {}): { task: TaskDetail } {
-  return { task: { ...task(), revision: NEXT_REVISION, body: '', resolution: '', completions: [], delegation_log: '', ...overrides } }
+  const detail = {
+    ...task(),
+    revision: NEXT_REVISION,
+    body: '',
+    resolution: '',
+    completions: [],
+    delegation_log: '',
+    updates: [] as TaskDetail['updates'],
+    ...overrides,
+  }
+  return { task: { ...detail, updates: detail.updates ?? [] } }
 }
 
 /** A promise the test resolves by hand, so a write can be held in flight. */

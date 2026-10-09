@@ -18,6 +18,7 @@ import type {
   TaskInvalidRow,
   TaskRow,
   TaskStatus,
+  TaskUpdate,
 } from './types'
 
 /** The board's four fixed columns, in board order. */
@@ -224,6 +225,7 @@ export function taskDetailFrom(json: unknown): TaskDetail {
     resolution?: unknown
     completions?: unknown
     delegation_log?: unknown
+    updates?: unknown
   }
   // An unreadable-file row has no task fields at all; reading it as a task would
   // put an empty card on the board.
@@ -234,6 +236,7 @@ export function taskDetailFrom(json: unknown): TaskDetail {
     resolution: asString(raw.resolution),
     completions: taskCompletionsFrom(raw.completions),
     delegation_log: asString(raw.delegation_log),
+    updates: taskUpdatesFrom(raw.updates),
   }
 }
 
@@ -243,6 +246,26 @@ export function taskDetailFrom(json: unknown): TaskDetail {
  * Each entry is read defensively; an entry with no id or no stamp is dropped rather
  * than drawn as an undated completion.
  */
+/** Progress notes a get answers with, newest first as the server sends them. */
+export function taskUpdatesFrom(raw: unknown): TaskUpdate[] {
+  if (!Array.isArray(raw)) return []
+  const out: TaskUpdate[] = []
+  for (const entry of raw) {
+    const item = (entry ?? {}) as Partial<TaskUpdate>
+    if (!item.id || !item.recorded_at) continue
+    out.push({
+      id: asString(item.id),
+      recorded_at: asString(item.recorded_at),
+      actor: asString(item.actor),
+      text: asString(item.text),
+      edited_at: item.edited_at ? asString(item.edited_at) : null,
+      attempt_id: asString(item.attempt_id),
+      chat_id: asString(item.chat_id),
+    })
+  }
+  return out
+}
+
 export function taskCompletionsFrom(raw: unknown): TaskCompletion[] {
   if (!Array.isArray(raw)) return []
   const out: TaskCompletion[] = []

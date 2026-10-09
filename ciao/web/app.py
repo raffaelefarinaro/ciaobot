@@ -202,9 +202,11 @@ from ciao.web.routes_import import (
 )
 from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.routes_tasks import (
+    task_add_update,
     task_attempt_action,
     task_attempts,
     task_complete,
+    task_edit_update,
     task_resolution_review,
     task_create,
     task_delegate,
@@ -372,6 +374,12 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Literal `complete` precedes the `{task_id}` pattern so it is not
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+        Route("/api/tasks/{task_id}/updates", task_add_update, methods=["POST"]),
+        Route(
+            "/api/tasks/{task_id}/updates/{update_id}",
+            task_edit_update,
+            methods=["PATCH"],
+        ),
         Route(
             "/api/tasks/{task_id}/resolution-review",
             task_resolution_review,

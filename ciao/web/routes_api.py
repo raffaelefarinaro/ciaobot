@@ -1716,8 +1716,22 @@ async def project_detail(request: Request) -> JSONResponse:
 async def project_complete(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
+    raw = await request.body()
+    if raw:
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    else:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    outcome = body.get("outcome", "completed")
+    note = body.get("note", "")
+    if not isinstance(outcome, str) or not isinstance(note, str):
+        return JSONResponse({"error": "outcome and note must be strings"}, status_code=400)
     try:
-        result = pcm.complete_project(project_id)
+        result = pcm.complete_project(project_id, outcome=outcome, note=note)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(result)
