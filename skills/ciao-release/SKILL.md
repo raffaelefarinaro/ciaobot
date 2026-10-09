@@ -165,12 +165,17 @@ Plan-only first. It writes nothing, so it is safe against a dirty tree:
 env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" --bump <patch|minor|major>
 ```
 
-Read the plan. It is the last chance to catch a wrong bump or a changelog that
-does not match the diff. Then:
+Read the plan. It is the last chance to catch a wrong bump.
+
+**Write the release notes.** The plan's changelog is the raw commit list; users
+read the notes. Run **`/ciao-release-notes`** for the range
+`<last-tag>..origin/develop`, write the body to
+`$TMPDIR/release-notes-vX.Y.Z.md`, and show it to the operator before cutting.
+The notes become the `CHANGELOG.md` section and the GitHub release body. Then:
 
 ```bash
 env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" \
-  --bump <patch|minor|major> --apply \
+  --bump <patch|minor|major> --notes-file "$TMPDIR/release-notes-vX.Y.Z.md" --apply \
   --commit --push --create-pr --ready > /tmp/release.log 2>&1
 echo "EXIT=$?"
 grep -nE "ReleaseError|command failed|/pull/" /tmp/release.log
@@ -182,7 +187,8 @@ see traps). Defaults: `--source develop` (cuts `release/vX.Y.Z` from
 
 What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`,
 `web/package.json`, `web/package-lock.json` and the service-worker cache names
-in both `web/public/sw.js` and `ciao/web/static/sw.js`; refreshes `CHANGELOG.md`;
+in both `web/public/sw.js` and `ciao/web/static/sw.js`; writes the notes into
+`CHANGELOG.md` (or, without `--notes-file`, the commit list);
 auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the
 installed `gws` CLI differs from the pin; runs the full check suite; commits
 `release: prepare vX.Y.Z`; pushes; opens the PR into `main`.
@@ -200,14 +206,14 @@ watches the logs. Read that skill and follow it; do not improvise. Do it **after
 the final source change** so what you smoke-test is what gets cut.
 
 Then **drive the running app like a user**, with `browser-use`, following the
-task files in `tasks/`:
+task files in `skills/ciao-release/tasks/`:
 
 ```
-tasks/01-boot-and-home.md        first paint, workspace, what-needs-you
-tasks/02-chat-and-turns.md       start a chat, real turns, streaming, stop
-tasks/03-archive-and-memory.md   archive, reopen, the archived footer
-tasks/04-projects-and-schedule.md  a plain app project, an isolated vault note completion, a schedule row
-tasks/05-settings-and-assets.md  every Settings route loads, the scoped asset lists
+skills/ciao-release/tasks/01-boot-and-home.md        first paint, workspace, what-needs-you
+skills/ciao-release/tasks/02-chat-and-turns.md       start a chat, real turns, streaming, stop
+skills/ciao-release/tasks/03-archive-and-memory.md   archive, reopen, the archived footer
+skills/ciao-release/tasks/04-projects-and-schedule.md  a plain app project, an isolated vault note completion, a schedule row
+skills/ciao-release/tasks/05-settings-and-assets.md  every Settings route loads, the scoped asset lists
 ```
 
 The operator types the dashboard password once, into the visible browser, at the
