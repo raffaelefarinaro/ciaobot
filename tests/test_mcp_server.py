@@ -1923,6 +1923,18 @@ def test_webhook_operations_are_registered_in_the_shared_table() -> None:
     assert declared["webhook_delete"] == mcp_server._DESTRUCTIVE
 
 
+def test_webhook_create_refuses_a_mode_instead_of_dropping_it(tmp_path: Path) -> None:
+    """The MCP tool must reject a `mode` argument, not accept and ignore it."""
+    from ciao.webhooks import MODE_REMOVED_ERROR
+
+    service, _control_plane = _service(tmp_path)
+    result = _dispatcher_call(
+        service, "webhook_create", {"name": "CI push", "instructions": "", "mode": "plan"}
+    )
+    assert result["envelope"]["ok"] is False
+    assert MODE_REMOVED_ERROR in json.dumps(result["envelope"])
+
+
 def test_tools_list_reports_the_whole_catalog(tmp_path: Path) -> None:
     """Every registered operation is present in the shared table.
 

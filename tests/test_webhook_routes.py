@@ -26,7 +26,7 @@ from ciao.web.routes_webhooks import (
     webhook_rotate,
     webhook_update,
 )
-from ciao.webhooks import WebhookStore
+from ciao.webhooks import MODE_REMOVED_ERROR, WebhookStore
 
 
 class _PCM:
@@ -258,6 +258,29 @@ def test_a_body_that_is_not_a_dict_is_rejected(
         ).status_code
         == 400
     )
+
+
+def test_a_create_naming_a_mode_is_refused_not_silently_dropped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A removed `mode` field must fail loudly: ignoring it would let a caller
+    believe it had asked for `plan` while the trigger runs in the default mode."""
+    client, cookies, _config = _world(tmp_path, monkeypatch)
+    for mode in ("plan", "bypassPermissions", None):
+        resp = client.post(
+            "/api/webhooks",
+            json={
+                "workspace": "personal",
+                "name": "CI push",
+                "instructions": "File the intake note",
+                "mode": mode,
+            },
+            cookies=cookies,
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json() == {"error": MODE_REMOVED_ERROR}
+    listed = client.get("/api/webhooks?workspace=personal", cookies=cookies)
+    assert listed.json()["triggers"] == []
 
 
 def test_archiving_a_workspace_revokes_its_triggers(

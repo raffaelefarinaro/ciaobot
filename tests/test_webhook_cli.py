@@ -456,7 +456,9 @@ def test_the_operations_are_declared_with_the_shape_the_cli_sends() -> None:
     }
     assert signatures == {
         "webhook_list": set(),
-        "webhook_create": {"name", "instructions", "project_id"},
+        # ``mode`` is declared only so a caller who still sends it gets a
+        # refusal rather than a silent drop; the CLI never sends it.
+        "webhook_create": {"name", "instructions", "project_id", "mode"},
         "webhook_update": {
             "trigger_id",
             "expected_revision",

@@ -40,6 +40,7 @@ from ciao.web.routes_mcp import (
     _observed_project_mcp_tools,
     _probe_http_mcp_tools,
 )
+from ciao.webhooks import MODE_REMOVED_ERROR
 
 
 logger = logging.getLogger(__name__)
@@ -1248,7 +1249,8 @@ async def _op_webhook_list(service: CiaoMcpService) -> dict[str, Any]:
 
 
 async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: str = "",
-                             project_id: str | None = None) -> dict[str, Any]:
+                             project_id: str | None = None,
+                             mode: str | None = None) -> dict[str, Any]:
     """Configure a webhook trigger in this workspace.
 
     Args:
@@ -1262,6 +1264,9 @@ async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: s
             General project. Stored as given — a project that no longer exists
             or belongs to another workspace fails the event's launch rather than
             quietly running it somewhere else.
+        mode: Not supported. Always rejected: the permission mode is no longer
+            a per-trigger setting, so passing one is an error rather than a
+            silent drop.
 
     The launched turn runs in the permission mode a new chat defaults to
     (Settings → Models & providers). A sender can never choose it.
@@ -1272,16 +1277,18 @@ async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: s
     authorizes nothing until you `webhook_update --enable` it at its revision.
     That is deliberate: being configured is not being callable.
     """
-    return await service._invoke(
-        "webhook_create",
-        lambda cp, p: cp.webhook_create(
-            p,
+
+    def create(cp: CiaoControlPlane, principal: AgentPrincipal) -> dict[str, Any]:
+        if mode is not None:
+            raise ValueError(MODE_REMOVED_ERROR)
+        return cp.webhook_create(
+            principal,
             name=name,
             instructions=instructions,
             project_id=project_id,
-        ),
-        mutating=True,
-    )
+        )
+
+    return await service._invoke("webhook_create", create, mutating=True)
 
 
 async def _op_webhook_update(service: CiaoMcpService, trigger_id: str,
