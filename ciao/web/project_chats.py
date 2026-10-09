@@ -149,7 +149,11 @@ from ciao.web.chat_broker import (
 from ciao.web.archive_pipeline import ArchivePipeline
 from ciao.web.chat_streaming import ChatStreaming
 from ciao.web.chat_streaming import StreamOutcome as _StreamOutcome
-from ciao.web.memory_pass import MemoryPassCoordinator, is_memory_pass_chat
+from ciao.web.memory_pass import (
+    CLOSURE_FENCE_CLOSE,
+    MemoryPassCoordinator,
+    is_memory_pass_chat,
+)
 from ciao.web.schedule_dispatch import ScheduleDispatcher
 from ciao.web.document_conversion import convert_document, is_anydoc_document
 from ciao.web.file_snapshots import SnapshotStore
@@ -2663,6 +2667,8 @@ class ProjectChatManager:
             raise ValueError("note is too long")
         if "<!-- /ciao:project-closure -->" in note or "<!-- ciao:project-closure -->" in note:
             raise ValueError("note contains the closure fence token")
+        if CLOSURE_FENCE_CLOSE in note:
+            raise ValueError("note contains the quoted-closure fence token")
         project = self._projects.get(project_id)
         if project is None:
             raise ValueError("Project not found.")

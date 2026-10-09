@@ -2900,14 +2900,16 @@ class CiaoControlPlane:
         attempt_id = ""
         linked_chat = ""
         if actor == "agent":
-            if live is not None and live.chat_id != chat_id:
+            # Same gate as `task report`: an agent note is that agent's word about
+            # its own work, so only the chat holding a live attempt may write one.
+            if live is None or live.chat_id != chat_id:
                 raise ControlPlaneError(
                     "task_report_not_holder",
-                    "only the chat working on this task can add a progress note to it.",
+                    "only the chat working on this task can add a progress note to it; "
+                    "this chat does not hold a live attempt for it.",
                 )
-            if live is not None and live.chat_id == chat_id:
-                attempt_id = live.attempt_id
-                linked_chat = live.chat_id
+            attempt_id = live.attempt_id
+            linked_chat = live.chat_id
         if send and (live is None or not live.is_live):
             raise ControlPlaneError(
                 "invalid_action",

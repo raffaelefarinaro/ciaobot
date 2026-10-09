@@ -2669,6 +2669,49 @@ async def test_only_the_chat_holding_the_task_may_report_on_it(tmp_path: Path) -
         plane.task_report(_principal(), task["id"], outcome="done", summary="x")
 
 
+async def test_an_agent_progress_note_needs_a_live_attempt(tmp_path: Path) -> None:
+    """`task add-update` refuses the agent the way `task report` does: no live
+    attempt on the task means no holder, so the note is not written."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Nobody is on it")
+    with pytest.raises(ControlPlaneError) as refused:
+        plane.task_add_update(
+            _principal(), task["id"], expected_revision=task["revision"], text="Progress."
+        )
+    assert refused.value.code == "task_report_not_holder"
+    assert _get_task(plane, task["id"])["revision"] == task["revision"]
+
+
+async def test_the_holder_with_a_live_attempt_may_add_a_progress_note(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Being worked")
+    outcome = _delegate(plane, task)
+    current = _get_task(plane, task["id"])
+    written = plane.workspace_task_add_update(
+        "personal",
+        task["id"],
+        expected_revision=current["revision"],
+        text="Halfway through.",
+        actor="agent",
+        chat_id=outcome["chat_id"],
+    )
+    assert written["revision"] != current["revision"]
+    body = (_tasks_dir(plane) / f"{task['id']}.md").read_text(encoding="utf-8")
+    assert "Halfway through." in body
+    assert f"attempt:{outcome['attempt']['attempt_id']}" in body
+    # A different chat, even with the task's live attempt, is still refused.
+    with pytest.raises(ControlPlaneError) as other:
+        plane.workspace_task_add_update(
+            "personal",
+            task["id"],
+            expected_revision=written["revision"],
+            text="Not mine.",
+            actor="agent",
+            chat_id="someone-else",
+        )
+    assert other.value.code == "task_report_not_holder"
+
+
 async def test_the_task_body_logs_each_attempt_without_tripping_changed_since_delegated(
     tmp_path: Path,
 ) -> None:
