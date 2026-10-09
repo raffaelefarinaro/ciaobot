@@ -357,10 +357,17 @@ class MemoryPassCoordinator:
         """
         from ciao.web.project_chats import ProjectInfo
 
-        pid = chat_service._stable_vault_project_id(workspace, _MEMORY_VAULT_FOLDER)
-        existing = self._host._projects.get(pid)
+        existing = next(
+            (
+                p
+                for p in self._host._projects.values()
+                if p.kind == MEMORY_PROJECT_KIND and p.workspace == workspace
+            ),
+            None,
+        )
         if existing is not None:
             return existing
+        pid = self._host._unused_vault_project_id(workspace, _MEMORY_VAULT_FOLDER)
         project = ProjectInfo(
             project_id=pid,
             name=MEMORY_PROJECT_NAME,

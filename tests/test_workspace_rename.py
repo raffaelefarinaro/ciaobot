@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -11,7 +12,9 @@ from ciao.background import BackgroundRun, BackgroundRunStore
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.import_store import ImportStore, engine_store_path
 from ciao.schedules import ScheduleStore
-from ciao.web.project_chats import ProjectInfo
+from ciao.sessions import StateStore
+from ciao.transcripts import TranscriptStore
+from ciao.web.project_chats import ProjectChatManager, ProjectInfo
 from ciao.webhooks import WebhookStore
 from ciao.workspace_rename import WorkspaceRenameBusy, rename_workspace
 from ciao.workspace_reroot import write_receipt
@@ -24,9 +27,14 @@ class _Projects:
         self._projects: dict[str, ProjectInfo] = {}
         self.saved_reasons: list[str] = []
         self.busy: dict[str, list[str]] = {}
+        self.evicted: list[str] = []
 
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
         return list(self.busy.get(workspace, []))
+
+    def evict_workspace_providers(self, workspace: str) -> list[str]:
+        self.evicted.append(workspace)
+        return []
 
     def _save(self, *, reason: str = "registry_mutation") -> None:
         self.saved_reasons.append(reason)
@@ -380,7 +388,7 @@ def test_failed_persist_after_the_directory_rename_moves_it_back(
     assert sorted(config.workspace_names()) == ["personal", "work"]
 
 
-def test_renaming_personal_changes_primary_workspace(tmp_path: Path) -> None:
+def test_renaming_personal_keeps_it_the_primary_workspace(tmp_path: Path) -> None:
     config = _shared_config(tmp_path, ["personal", "work"])
     assert config.primary_workspace() == "personal"
     config.persist_workspace_registry()
@@ -398,7 +406,8 @@ def test_renaming_personal_changes_primary_workspace(tmp_path: Path) -> None:
         runs=runs,
     )
 
-    assert config.primary_workspace() == "work"
+    # The renamed workspace keeps its first position, so it stays primary.
+    assert config.primary_workspace() == "santo"
 
 
 def _rollback_files(tmp_path: Path, config: CiaoConfig) -> dict[str, Path]:
@@ -687,3 +696,127 @@ def test_failed_run_write_restores_everything_including_rerooted_cwd(
     second = fresh.get("run-2")
     assert second is not None
     assert second.workspace == "other"
+
+
+class _StubProvider:
+    """Stands in for ProviderService; records that it was torn down."""
+
+    def __init__(self) -> None:
+        self.disconnected = False
+
+    async def disconnect(self) -> None:
+        self.disconnected = True
+
+
+def _manager(tmp_path: Path, config: CiaoConfig) -> ProjectChatManager:
+    runtime = tmp_path / ".runtime"
+    return ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+
+
+def _general_id(manager: ProjectChatManager, workspace: str) -> str:
+    return next(
+        p.project_id
+        for p in manager._projects.values()
+        if p.workspace == workspace and p.name == "General"
+    )
+
+
+def test_rename_keeps_the_workspace_position_in_memory_and_on_disk(
+    tmp_path: Path,
+) -> None:
+    config = _shared_config(tmp_path, ["alpha", "personal", "work"])
+    config.persist_workspace_registry()
+    projects = _Projects()
+    schedules, webhooks, imports, runs = _stores(config, tmp_path)
+
+    rename_workspace(
+        config,
+        old="personal",
+        new="santo",
+        projects=projects,
+        schedules=schedules,
+        webhooks=webhooks,
+        imports=imports,
+        runs=runs,
+    )
+
+    assert config.workspace_names() == ["alpha", "santo", "work"]
+    stored = json.loads(
+        (tmp_path / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
+    )
+    assert [entry["name"] for entry in stored] == ["alpha", "santo", "work"]
+
+
+def test_old_name_recreated_after_rename_does_not_take_over_projects(
+    tmp_path: Path,
+) -> None:
+    config = _shared_config(tmp_path, ["work", "personal"])
+    config.persist_workspace_registry()
+    manager = _manager(tmp_path, config)
+    renamed_general = _general_id(manager, "work")
+    chat_id = manager.create_chat(renamed_general, title="Chat").chat_id
+    renamed_memory = manager._memory_pass.ensure_project("work").project_id
+    schedules, webhooks, imports, runs = _stores(config, tmp_path)
+
+    rename_workspace(
+        config,
+        old="work",
+        new="acme",
+        projects=manager,
+        schedules=schedules,
+        webhooks=webhooks,
+        imports=imports,
+        runs=runs,
+    )
+    config.workspaces["work"] = WorkspaceConfig(name="work", vault_root="memory-vault/work")
+    manager.refresh_workspaces()
+    new_memory = manager._memory_pass.ensure_project("work")
+
+    assert manager._projects[renamed_general].workspace == "acme"
+    assert manager._chats[chat_id].project_id == renamed_general
+    assert manager._projects[renamed_memory].workspace == "acme"
+    new_general = _general_id(manager, "work")
+    assert new_general != renamed_general
+    assert manager._projects[new_general].workspace == "work"
+    assert new_memory.project_id not in (renamed_memory,)
+    assert new_memory.workspace == "work"
+
+
+@pytest.mark.asyncio
+async def test_rename_evicts_cached_providers_of_the_renamed_workspace(
+    tmp_path: Path,
+) -> None:
+    config = _shared_config(tmp_path, ["personal", "work"])
+    config.persist_workspace_registry()
+    manager = _manager(tmp_path, config)
+    renamed_chat = manager.create_chat(_general_id(manager, "personal"), title="A").chat_id
+    other_chat = manager.create_chat(_general_id(manager, "work"), title="B").chat_id
+    renamed_provider = _StubProvider()
+    other_provider = _StubProvider()
+    manager._providers[renamed_chat] = renamed_provider  # type: ignore[assignment]
+    manager._providers[other_chat] = other_provider  # type: ignore[assignment]
+    schedules, webhooks, imports, runs = _stores(config, tmp_path)
+
+    rename_workspace(
+        config,
+        old="personal",
+        new="santo",
+        projects=manager,
+        schedules=schedules,
+        webhooks=webhooks,
+        imports=imports,
+        runs=runs,
+    )
+    await asyncio.sleep(0)
+
+    assert renamed_provider.disconnected
+    assert renamed_chat not in manager._providers
+    assert not other_provider.disconnected
+    assert manager._providers[other_chat] is other_provider
+    assert manager._chats[renamed_chat].project_id == _general_id(manager, "santo")
+

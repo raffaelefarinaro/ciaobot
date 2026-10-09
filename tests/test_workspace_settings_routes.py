@@ -1506,6 +1506,9 @@ class _RenamePCM:
     def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
         return []
 
+    def evict_workspace_providers(self, workspace: str) -> list[str]:
+        return []
+
     def _save(self, *, reason: str = "registry_mutation") -> None:
         return None
 
