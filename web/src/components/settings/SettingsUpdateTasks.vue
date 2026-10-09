@@ -25,6 +25,7 @@ const loading = ref(false)
 const loadError = ref('')
 const actionError = ref('')
 const pending = ref<Set<string>>(new Set())
+const showDone = ref(false)
 let loadSeq = 0
 
 /** The workspace this list is about, or '' before one is known.
@@ -62,6 +63,22 @@ const historyRows = computed(() =>
   ),
 )
 
+/** A finished row: verified done, and nothing uncertain about it.
+ *
+ * Collapsed by default. It asks nothing of anyone, and a list that leads with
+ * settled work buries the hidden, failed and unknown rows that might. An
+ * `unknown` applicability keeps a row in view whatever its status, for the
+ * reason `historyRows` lets it in at all. */
+function isDone(row: UpdateTaskRow): boolean {
+  return row.status === 'completed' && row.applicability !== 'unknown'
+}
+
+const doneCount = computed(() => historyRows.value.filter(isDone).length)
+
+const visibleRows = computed(() =>
+  showDone.value ? historyRows.value : historyRows.value.filter((row) => !isDone(row)),
+)
+
 /** The history, split by what owns the record.
  *
  * Install first: a task the whole engine owns is a smaller set and a bigger
@@ -72,7 +89,7 @@ const historyRows = computed(() =>
 const groups = computed(() => {
   const install: UpdateTaskRow[] = []
   const workspaceRows: UpdateTaskRow[] = []
-  for (const row of historyRows.value) {
+  for (const row of visibleRows.value) {
     if (row.scope === 'install') install.push(row)
     else workspaceRows.push(row)
   }
@@ -230,6 +247,7 @@ watch(workspace, (next, previous) => {
     loadError.value = ''
     actionError.value = ''
     pending.value = new Set()
+    showDone.value = false
     void load()
   }
 })
@@ -341,6 +359,15 @@ watch(workspace, (next, previous) => {
         </div>
       </div>
     </template>
+
+    <div v-if="doneCount" class="set-done-toggle">
+      <button
+        type="button"
+        class="btn-secondary btn-small"
+        :aria-expanded="showDone"
+        @click="showDone = !showDone"
+      >{{ showDone ? 'Hide done' : `Show ${doneCount} done` }}</button>
+    </div>
   </div>
 </template>
 
@@ -372,5 +399,9 @@ watch(workspace, (next, previous) => {
 
 .set-row-sub {
   margin-top: 2px;
+}
+
+.set-done-toggle {
+  margin-top: var(--space-3);
 }
 </style>
