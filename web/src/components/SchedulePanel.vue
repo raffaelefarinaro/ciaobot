@@ -486,7 +486,7 @@
             <strong :class="{ 'rail-attention': scheduleNeedsAttention(schedule) }">{{ scheduleStateLabel(schedule) }}</strong>
           </div>
           <div v-if="schedule.frequency !== 'manual'" class="rail-kv">
-            <span>Next run</span><strong>{{ schedule.enabled && schedule.next_run ? relativeWhen(schedule.next_run, schedule.timezone_name) : '—' }}</strong>
+            <span>Next run</span><strong>{{ schedule.enabled && schedule.next_run ? relativeWhen(schedule.next_run) : '—' }}</strong>
           </div>
           <div class="rail-kv">
             <span>Last run</span><strong>{{ schedule.last_dispatched_at ? relativeWhen(schedule.last_dispatched_at) : (schedule.last_triggered_on || 'never') }}</strong>
@@ -552,7 +552,7 @@
                 </span>
                 <span class="ov-sub">{{ cadenceSummary(s) }} · {{ deliverySummary(s) }}</span>
               </span>
-              <span class="ov-when">{{ relativeWhen(s.next_run, s.timezone_name) }}</span>
+              <span class="ov-when">{{ relativeWhen(s.next_run) }}</span>
             </router-link>
             <p v-if="!upcomingRoutines.length" class="ov-empty">
               Nothing scheduled. The rest run only when you click Run now, or are paused.
@@ -588,7 +588,7 @@
                 <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span class="ov-sub">{{ cadenceSummary(s) }}<template v-if="!s.enabled"> · paused</template></span>
               </span>
-              <span v-if="s.enabled && s.next_run" class="ov-when">{{ relativeWhen(s.next_run, s.timezone_name) }}</span>
+              <span v-if="s.enabled && s.next_run" class="ov-when">{{ relativeWhen(s.next_run) }}</span>
             </router-link>
           </section>
 
@@ -913,20 +913,15 @@ function formatWhen(iso: string | null): string {
 }
 
 // Short relative form for rows and the rail: "Fri 10:00 · in 10h".
-// Upcoming slots are shown in the automation's own timezone, the one its
-// "At" row names, so the list, the rail and the detail rows agree.
-function relativeWhen(iso: string | null | undefined, timeZone?: string): string {
+// Times are in the browser's local zone, the same as Home's next-run line. The
+// automation's own zone is named once, in the "At" row of its detail.
+function relativeWhen(iso: string | null | undefined): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
   const diffMs = d.getTime() - Date.now()
   const absMin = Math.round(Math.abs(diffMs) / 60000)
-  let clock: string
-  try {
-    clock = d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false, timeZone })
-  } catch {
-    clock = d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
-  }
+  const clock = d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
   if (absMin < 1) return `${clock} · now`
   let rel: string
   if (absMin < 60) rel = `${absMin}m`
@@ -1055,11 +1050,10 @@ function nextRunLabel(s: Schedule): string {
   try {
     const d = new Date(s.next_run)
     const when = new Intl.DateTimeFormat(undefined, {
-      timeZone: s.timezone_name,
       weekday: 'short', day: 'numeric', month: 'short',
       hour: '2-digit', minute: '2-digit', hour12: false,
     }).format(d)
-    const rel = relativeWhen(s.next_run, s.timezone_name).split(' · ')[1]
+    const rel = relativeWhen(s.next_run).split(' · ')[1]
     return rel ? `${when} · ${rel}` : when
   } catch {
     return s.next_run
