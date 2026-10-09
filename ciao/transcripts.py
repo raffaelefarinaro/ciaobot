@@ -692,15 +692,11 @@ class TranscriptStore:
                     "",
                     "### User",
                     "",
-                    "```text",
-                    str(turn.get("prompt", "")),
-                    "```",
+                    *_text_block(str(turn.get("prompt", ""))),
                     "",
                     "### Assistant",
                     "",
-                    "```text",
-                    str(turn.get("response", "")),
-                    "```",
+                    *_text_block(str(turn.get("response", ""))),
                     "",
                 ]
             )
@@ -897,7 +893,7 @@ def _rendered_turn_skills(lines: list[str], start: int) -> list[str] | None:
     is not all of that is not a turn's.
 
     That is what keeps pasted text out. The renderer writes user and assistant
-    text *raw* inside one ```` ```text ```` fence, so a pasted document, a
+    text *raw* inside a ``text`` fence, so a pasted document, a
     pasted transcript or a snippet is prose that happens to hold a ``## Turn
     N`` and a ``- Skills:`` line — and prose that opens a fence of its own,
     closes one, or leaves one unbalanced decides nothing here. The heading and
@@ -933,6 +929,137 @@ def _rendered_turn_skills(lines: list[str], start: int) -> list[str] | None:
     if index >= len(lines) or _ARCHIVE_USER_RE.match(lines[index]) is None:
         return None
     return names
+
+
+#: The opening fence the renderer writes around a user or assistant message.
+#: Its length is chosen per message by :func:`_text_block`, so the reader
+#: accepts any run of three or more backticks.
+_ARCHIVE_TEXT_OPEN_RE = re.compile(r"^(`{3,})text\s*$")
+#: A closing fence per CommonMark: at most three spaces of indent, a run of
+#: backticks, then nothing but spaces.
+_ARCHIVE_FENCE_RUN_RE = re.compile(r"^ {0,3}(`{3,})\s*$")
+#: Lines that end a legacy (three-backtick) message body: the next turn, or a
+#: sub-heading the renderer writes after a message.
+_ARCHIVE_BOUNDARY_RE = re.compile(r"^(?:## Turn \d+|### (?:User|Assistant|Usage|Quota))\s*$")
+_ARCHIVE_TURN_LINE_RE = re.compile(r"^## Turn \d+\s*$")
+_ARCHIVE_TIME_RE = re.compile(r"^- Time:\s*(.+)$")
+
+
+def _text_block(body: str) -> list[str]:
+    """Lines that carry ``body`` verbatim inside a fenced ``text`` block.
+
+    The fence is one backtick longer than the longest backtick run in the body
+    (never shorter than three), so no line of the body can close it: a
+    CommonMark closing fence must be at least as long as the opener. A reply
+    that holds its own fenced code block therefore stays inside the turn.
+    """
+    longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return [f"{fence}text", body, fence]
+
+
+def _read_text_block(lines: list[str], start: int) -> tuple[str, int] | None:
+    """The message body whose ``text`` fence opens after ``start``.
+
+    ``start`` is the index of the line after a ``### User`` or
+    ``### Assistant`` heading. Returns the body and the index just past its
+    closing fence, or ``None`` when no fence opens there or it never closes.
+
+    A fence of four or more backticks is closed by the first line that is a
+    closing fence of at least that length, which the renderer guarantees is the
+    wrapper: no line of the body can be one. A three-backtick fence is the
+    legacy shape, written before the fence grew, and its body may hold fences of
+    its own. Its close is the last closing fence before the next section
+    boundary (:data:`_ARCHIVE_BOUNDARY_RE`), and a boundary with no fence before
+    it is passed over for the next one, so a stray ``## Turn`` inside a legacy
+    body does not truncate it.
+    """
+    index = start
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index >= len(lines):
+        return None
+    opening = _ARCHIVE_TEXT_OPEN_RE.match(lines[index])
+    if opening is None:
+        return None
+    length = len(opening.group(1))
+    close: int | None = None
+    if length >= 4:
+        for candidate in range(index + 1, len(lines)):
+            run = _ARCHIVE_FENCE_RUN_RE.match(lines[candidate])
+            if run is not None and len(run.group(1)) >= length:
+                close = candidate
+                break
+    else:
+        for boundary in range(index + 1, len(lines) + 1):
+            if boundary < len(lines) and _ARCHIVE_BOUNDARY_RE.match(lines[boundary]) is None:
+                continue
+            for candidate in range(boundary - 1, index, -1):
+                if _ARCHIVE_FENCE_RUN_RE.match(lines[candidate]) is not None:
+                    close = candidate
+                    break
+            if close is not None:
+                break
+    if close is None:
+        return None
+    return "\n".join(lines[index + 1 : close]), close + 1
+
+
+def _section_at(lines: list[str], start: int, heading: str) -> tuple[str | None, int]:
+    """The fenced body under ``heading`` within one turn, and where to go on.
+
+    Scans from ``start`` up to the next turn heading. Returns the body (or
+    ``None`` when the heading or its fence is absent) and the index to resume
+    from, which is past the body so a ``## Turn`` line inside it is never read
+    as a turn.
+    """
+    index = start
+    while index < len(lines) and not _ARCHIVE_TURN_LINE_RE.match(lines[index]):
+        if lines[index].rstrip() == heading:
+            block = _read_text_block(lines, index + 1)
+            if block is None:
+                return None, index + 1
+            return block
+        index += 1
+    return None, index
+
+
+def parse_archive_turns(text: str) -> list[dict[str, Any]]:
+    """The turns of an archived transcript, in order, read fence-aware.
+
+    Each turn is ``{"timestamp", "user", "assistant", "trailer"}``: ``user``
+    and ``assistant`` are the raw message bodies (``None`` when absent), and
+    ``trailer`` is the text after the assistant body up to the next turn, which
+    carries the ``### Usage`` and ``### Quota`` sections. Works on both the
+    current shape (see :func:`_text_block`) and transcripts written before it.
+    """
+    lines = text.split("\n")
+    turns: list[dict[str, Any]] = []
+    index = 0
+    while index < len(lines):
+        if _ARCHIVE_TURN_LINE_RE.match(lines[index]) is None:
+            index += 1
+            continue
+        index += 1
+        meta_start = index
+        user, index = _section_at(lines, index, "### User")
+        timestamp = ""
+        for row in lines[meta_start:index]:
+            match = _ARCHIVE_TIME_RE.match(row)
+            if match is not None:
+                timestamp = match.group(1).strip()
+                break
+        assistant, index = _section_at(lines, index, "### Assistant")
+        trailer_start = index
+        while index < len(lines) and not _ARCHIVE_TURN_LINE_RE.match(lines[index]):
+            index += 1
+        turns.append({
+            "timestamp": timestamp,
+            "user": user,
+            "assistant": assistant,
+            "trailer": "\n".join(lines[trailer_start:index]),
+        })
+    return turns
 
 
 def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
