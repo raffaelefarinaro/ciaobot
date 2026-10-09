@@ -481,7 +481,7 @@ def test_seatbelt_gives_claude_md_metadata_only_in_ancestors(tmp_path):
     # unreadable, so it is a metadata grant and never a read grant.
     root = tmp_path / "workspace" / "agent"
     profile = _seatbelt_profile([root])
-    claude_md = _quote_seatbelt_subpath(str(tmp_path / "workspace" / "CLAUDE.md"))
+    claude_md = _quote_seatbelt_subpath(f"{tmp_path / 'workspace'}/CLAUDE.md")
     literal = f'(literal "{claude_md}")'
     metadata = [line for line in profile.splitlines() if "file-read-metadata" in line]
     assert any(literal in line for line in metadata)
