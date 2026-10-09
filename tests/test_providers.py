@@ -991,7 +991,7 @@ def test_opencode_manual_and_plan_modes_add_no_allow_rules(mode: str) -> None:
     """The same carve-out on the other provider."""
     from ciao.providers.opencode import mode_settings
 
-    _agent, rules = mode_settings(mode)  # type: ignore[arg-type]
+    _agent, rules = mode_settings(mode)
     resources = " ".join(str(rule.get("resource") or "") for rule in rules)
     assert "ciao schedule create" not in resources
     assert "ciao memory update" not in resources
@@ -1097,6 +1097,28 @@ def test_extract_effective_model_keeps_first_entry_without_token_counts() -> Non
     msg = SimpleNamespace(model_usage={"claude-sonnet-5": {}, "claude-haiku-4-5": {}})
     assert ClaudeProvider._extract_effective_model(msg) == "claude-sonnet-5"
     assert ClaudeProvider._extract_effective_model(SimpleNamespace(model_usage=None)) == ""
+
+
+def test_turn_model_is_the_main_call_not_a_helper_with_more_output() -> None:
+    # Issue #1224: a one-line sonnet reply lost to a haiku helper call that
+    # produced more output tokens, so the footer named haiku.
+    result = SimpleNamespace(
+        model_usage={
+            "claude-sonnet-5-5": {"outputTokens": 6},
+            "claude-haiku-5-5": {"outputTokens": 40},
+        }
+    )
+    main = SimpleNamespace(model="claude-sonnet-5-5")
+    assert ClaudeProvider._extract_effective_model(result) == "claude-haiku-5-5"
+    assert ClaudeProvider._turn_effective_model(result, main) == "claude-sonnet-5-5"
+
+
+def test_turn_model_falls_back_to_model_usage_without_a_main_call() -> None:
+    result = SimpleNamespace(
+        model_usage={"claude-opus-5-5": {"outputTokens": 533}, "claude-haiku-5-5": {"outputTokens": 40}}
+    )
+    assert ClaudeProvider._turn_effective_model(result, None) == "claude-opus-5-5"
+    assert ClaudeProvider._turn_effective_model(None, None) == ""
 
 
 @pytest.mark.asyncio
