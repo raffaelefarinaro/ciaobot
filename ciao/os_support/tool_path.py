@@ -146,6 +146,26 @@ def engine_bin_dir() -> str:
     return str(Path(sysconfig.get_path("scripts")))
 
 
+def dedupe_path(path: str) -> str:
+    """``path`` with each directory once, at its first position, empties dropped.
+
+    Directories are compared the way the OS compares them (``normcase``, which is
+    the identity on POSIX). Every place that composes a PATH to hand on, to a child
+    process or to a service definition, goes through here, so a directory the
+    inherited value already repeats is never multiplied by the next composition.
+    """
+    entries: list[str] = []
+    seen: set[str] = set()
+    for entry in path.split(os.pathsep):
+        if not entry:
+            continue
+        key = os.path.normcase(entry)
+        if key not in seen:
+            seen.add(key)
+            entries.append(entry)
+    return os.pathsep.join(entries)
+
+
 def prepend_engine_path(path: str | None = None) -> str:
     """``path`` (or the process PATH) with :func:`engine_bin_dir` moved to the front.
 
@@ -156,16 +176,9 @@ def prepend_engine_path(path: str | None = None) -> str:
     (for example an older uv-tool ``ciao``) earlier on the user's PATH.
     """
     current = os.environ.get("PATH", "") if path is None else path
-    entries = [entry for entry in current.split(os.pathsep) if entry]
-    bin_dir = engine_bin_dir()
-    remaining = [
-        entry
-        for entry in entries
-        if os.path.normcase(entry) != os.path.normcase(bin_dir)
-    ]
-    # Always exactly one engine entry, first: an already-first dir keeps its
-    # place and a repeated one elsewhere is not duplicated.
-    return os.pathsep.join([bin_dir, *remaining])
+    # The engine dir is first, so the dedupe keeps it there and drops any later
+    # copy of it; the rest keeps its order, one occurrence each.
+    return dedupe_path(os.pathsep.join([engine_bin_dir(), current]))
 
 
 # npm writes the shim's own directory into the wrapper it generates, spelled

@@ -283,13 +283,12 @@ def _ensure_tool_dirs_on_path() -> None:
     this exact problem and includes what a hardcoded Homebrew pair misses -
     notably nvm's ``node/*/bin``, the most common way node is installed.
     """
+    from ciao.os_support.tool_path import dedupe_path
     from ciao.tool_path import common_tool_dirs
 
     parts = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
     seen = set(parts)
     missing = [d for d in common_tool_dirs() if d not in seen]
-    if not missing:
-        return
     if os.environ.get("CIAO_BUNDLED_APP") == "1":
         # The bundled launcher puts its own bin first on purpose, so child
         # `ciao` commands resolve to the interpreter that owns the bundled
@@ -299,9 +298,13 @@ def _ensure_tool_dirs_on_path() -> None:
         # dependency tree via its ciao_bundled_site hook rather than through an
         # exported PYTHONPATH, so a child on a different CPython is merely a
         # different install now, not a crash.
-        os.environ["PATH"] = os.pathsep.join([*parts, *missing])
+        composed = [*parts, *missing]
     else:
-        os.environ["PATH"] = os.pathsep.join([*missing, *parts])
+        composed = [*missing, *parts]
+    # Deduped even when nothing was missing: an inherited PATH that already
+    # repeats a directory must not reach the engine's children, or the service
+    # definition, with the repeat still in it.
+    os.environ["PATH"] = dedupe_path(os.pathsep.join(composed))
 
 
 #: How long the restart watchdog lets asyncio cleanup run before forcing the restart.

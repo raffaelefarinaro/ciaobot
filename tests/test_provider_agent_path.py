@@ -133,6 +133,21 @@ def test_prepend_engine_path_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> N
     assert entries[1:] == ["/user/bin"]
 
 
+def test_prepend_engine_path_does_not_multiply_inherited_repeats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PATH that already repeats a directory comes back with each one once, the
+    engine dir first, however many times it is composed."""
+    node_bin = "/Users/u/.nvm/versions/node/v22.23.2/bin"
+    monkeypatch.setenv("PATH", os.pathsep.join([node_bin, node_bin, "/user/bin", node_bin]))
+
+    once = prepend_engine_path()
+    twice = prepend_engine_path(once)
+
+    assert twice == once
+    assert once.split(os.pathsep) == [engine_bin_dir(), node_bin, "/user/bin"]
+
+
 def test_prepend_engine_path_accepts_an_explicit_path() -> None:
     result = prepend_engine_path(os.pathsep.join(["/a", "/b"]))
     assert result.split(os.pathsep) == [engine_bin_dir(), "/a", "/b"]
