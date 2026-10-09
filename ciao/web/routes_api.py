@@ -3239,7 +3239,7 @@ async def image_blob(request: Request) -> Response:
 _WORKSPACE_FILE_EXTS = frozenset({
     ".md", ".markdown", ".txt",
     ".py", ".ts", ".tsx", ".js", ".jsx", ".vue",
-    ".css", ".html", ".json",
+    ".css", ".html", ".htm", ".json",
     ".yaml", ".yml", ".toml",
     ".sh", ".rs", ".go", ".java", ".xml", ".sql",
     ".cfg", ".ini", ".log", ".csv",
@@ -3264,20 +3264,42 @@ _WORKSPACE_IMAGE_MAX_BYTES = 15 * 1024 * 1024  # 15 MB
 
 
 
-async def chat_file_path(request: Request) -> Response:
-    """Canonical file identity for a link emitted in a chat's agent root.
+def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
+    """Resolve a chat link against the chat's own roots only.
 
-    Resolution is exact: a missing file must not match a same-named file in
-    another workspace. Absolute paths retain the viewer's existing policy.
+    Each root is tried on its own, exact matches before fuzzy ones, so a
+    fuzzy match can only land inside a root the chat owns. Passing the roots
+    together would let relative-path fuzzy search reach just the first one,
+    and a single-root call per attempt keeps every search inside its root.
+    """
+    attempts = [(root, False) for root in roots] + [(root, True) for root in roots]
+    result: Path | Response = JSONResponse({"error": "not found"}, status_code=404)
+    for root, fuzzy in attempts:
+        result = _resolve_workspace_path([root], raw, allow_fuzzy=fuzzy)
+        if not isinstance(result, Response) or result.status_code != 404:
+            return result
+    return result
+
+
+async def chat_file_path(request: Request) -> Response:
+    """Canonical file identity for a link emitted in a chat's workspace.
+
+    Resolves against the chat's agent root and its workspace vault root, and
+    nothing else. A missing file must not match a same-named file in another
+    workspace, so fuzzy matching is confined to those two roots. Absolute
+    paths retain the viewer's existing policy.
     """
     pcm = request.app.state.project_chat_manager
+    config = request.app.state.config
     chat_id = request.path_params["chat_id"]
     if pcm.get_chat(chat_id) is None:
         return JSONResponse({"error": "chat not found"}, status_code=404)
-    root = pcm._agent_root_for_chat(chat_id)
-    result = _resolve_workspace_path(
-        [root], request.query_params.get("path", "").strip(), allow_fuzzy=False
-    )
+    workspace = pcm._workspace_for_chat(chat_id)
+    roots = list(dict.fromkeys([
+        config.agent_root(workspace).resolve(),
+        config.workspace_vault_root(workspace).resolve(),
+    ]))
+    result = _resolve_chat_file(roots, request.query_params.get("path", "").strip())
     if isinstance(result, Response):
         return result
     extensions = _WORKSPACE_FILE_EXTS | _WORKSPACE_IMAGE_EXTS | _WORKSPACE_BINARY_EXTS
