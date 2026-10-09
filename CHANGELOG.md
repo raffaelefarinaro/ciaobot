@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.3.0 - 2026-10-09
+
+**Heads up:**
+- **The agent works inside the workspace folder by default ("Workspace only"):** it can no longer read or change other files on your computer. If a workflow needs more, switch it in Settings → Workspaces → File access. On Windows the default stays "Whole machine". On Ubuntu 23.10 and later, follow the one-time sandbox setup in the Linux guide.
+- **Webhook triggers no longer have their own permission mode:** events now run in the mode a new chat starts in (Settings → Models & providers), so if that default is bypass, webhook events run in bypass too. If you created a webhook trigger before this release, webhooks, workspace archive and rename will fail until you delete `.runtime/webhooks.json` in your workspace and create the trigger again.
+
+### New features
+- **File access per workspace:** confine the agent and its shell to the workspace folder, or allow the whole machine.
+- **Rename a workspace** from Settings → Workspaces → Edit. Projects, automations and chats follow the new name.
+- **Task resolutions and progress notes:** marking a task done asks how it was resolved, and an in-progress task keeps a log of progress notes from you or the working agent. Ciaobot learns from both, and can propose a reusable skill for you to review.
+- **Project closure notes:** closing a project asks whether it was completed or stopped and records a short note in the project document for Ciaobot to learn from.
+
+### Improvements
+- Settings → General opens with Updates (a compact "Up to date" when there is nothing to install), followed by app install, notifications and keyboard shortcuts.
+- The task board has horizontal lanes and refreshes on its own, with no manual Reload.
+- Google Workspace setup is a step-by-step checklist, with sign-in first and terminal commands under Advanced.
+- Accepting a project or people note folds the change in as one edit instead of rewriting the note.
+- Update task history collapses finished rows.
+- The send button says what it does ("Send" or "New chat") for screen readers.
+- The website links to these release notes.
+
+### Bug fixes
+- Links to files in a chat failed to pin, and the viewer closed ([#1167](https://github.com/raffaelefarinaro/ciaobot/issues/1167))
+- Answering an OpenCode permission request after it expired showed "not found" ([#1170](https://github.com/raffaelefarinaro/ciaobot/issues/1170))
+- Accepting a category proposal failed when one of its notes was missing ([#1157](https://github.com/raffaelefarinaro/ciaobot/issues/1157))
+- The background service showed the wrong app identity in macOS settings ([#1156](https://github.com/raffaelefarinaro/ciaobot/issues/1156))
+- `ciao setup` repeated folders in the service's `PATH` ([#1199](https://github.com/raffaelefarinaro/ciaobot/issues/1199))
+
+[Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.2.1...v1.3.0)
+
 ## v1.2.1 - 2026-10-08
 
 ### Bug fixes
