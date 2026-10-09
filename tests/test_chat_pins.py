@@ -176,6 +176,56 @@ def test_chat_file_same_name_in_other_workspace_is_404(tmp_path, monkeypatch):
     assert client.get(url, params={"path": "people/ana.md"}).status_code == 404
 
 
+def test_chat_file_fuzzy_stem_only_match_is_404(tmp_path, monkeypatch):
+    """A missing report.md must not open scripts/report.py."""
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    roots = _route_workspaces(manager, monkeypatch, tmp_path)
+    (roots["work"] / "scripts").mkdir()
+    (roots["work"] / "scripts" / "report.py").write_text("print('not the note')")
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": "report.md"}
+    )
+    assert response.status_code == 404
+
+
+def test_chat_file_fuzzy_same_suffix_in_other_folder_resolves(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    roots = _route_workspaces(manager, monkeypatch, tmp_path)
+    (roots["work"] / "notes").mkdir()
+    (roots["work"] / "notes" / "report.md").write_text("the note")
+    (roots["work"] / "scripts").mkdir()
+    (roots["work"] / "scripts" / "report.py").write_text("print('not the note')")
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": "report.md"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"path": (roots["work"] / "notes" / "report.md").as_posix()}
+
+
+def test_chat_file_fuzzy_walks_nested_vault_once(tmp_path, monkeypatch):
+    """The vault sits under the agent root, so only the agent root is searched."""
+    import ciao.web.routes_helpers as helpers
+
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    roots = _route_workspaces(manager, monkeypatch, tmp_path)
+    searched: list[list[Path]] = []
+    real_find = helpers._find_fuzzy_match
+
+    def recording_find(search_roots, candidate):
+        searched.append(list(search_roots))
+        return real_find(search_roots, candidate)
+
+    monkeypatch.setattr(helpers, "_find_fuzzy_match", recording_find)
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": "missing.md"}
+    )
+    assert response.status_code == 404
+    assert searched == [[roots["work"]]]
+
+
 def _registry(tmp_path: Path) -> dict:
     return json.loads(
         (tmp_path / ".runtime" / "web_projects.json").read_text(encoding="utf-8")

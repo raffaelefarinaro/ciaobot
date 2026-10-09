@@ -237,6 +237,44 @@ describe('Settings > Workspaces rename from Edit', () => {
     }
   })
 
+  it('renaming a workspace to personal says it becomes the main workspace', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    state.workspaces = workspaces(['work', 'home'], 'work')
+    const wrapper = await mountWorkspacesTab()
+    try {
+      const nameInput = await openEditor(wrapper, 'home')
+      await nameInput.setValue('personal')
+      await cardFor(wrapper, 'home').find('.workspace-save').trigger('click')
+      await nextTick()
+
+      expect(pendingConfirm.value!.message).toBe(
+        'Rename "home" to "personal". Projects and automations keep their ids and follow the new name. It becomes the main workspace.',
+      )
+      pendingConfirm.value!.resolve(false)
+      await flushPromises()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('renaming the current main workspace to personal says nothing about the main workspace', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    state.workspaces = workspaces(['work', 'home'], 'work')
+    const wrapper = await mountWorkspacesTab()
+    try {
+      const nameInput = await openEditor(wrapper, 'work')
+      await nameInput.setValue('personal')
+      await cardFor(wrapper, 'work').find('.workspace-save').trigger('click')
+      await nextTick()
+
+      expect(pendingConfirm.value!.message).not.toContain('main workspace')
+      pendingConfirm.value!.resolve(false)
+      await flushPromises()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('an empty name is refused before any confirmation or request', async () => {
     const { api } = await import('../../lib/api')
     const { pendingConfirm } = await import('../../lib/confirm')

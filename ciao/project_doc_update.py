@@ -208,7 +208,7 @@ def _sanitize_fold_stamp(text: str, entry: Any | None) -> str:
     return _strip_opening_claim(text)
 
 
-_WHOLE_FENCE = re.compile(r"```[A-Za-z0-9_+-]*\n(.*)\n```", re.S)
+_WHOLE_FENCE = re.compile(r"```[A-Za-z0-9_+-]*[ \t]*\r?\n(.*?)\r?\n```", re.S)
 
 
 def _unwrap_fold_fence(output: str) -> str:

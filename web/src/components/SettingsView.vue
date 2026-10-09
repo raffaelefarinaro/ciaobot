@@ -3941,8 +3941,10 @@ function renameConfirmMessage(from: string, to: string): string {
   // Without a workspace named `personal`, the first one in the list is the
   // main workspace, and a rename keeps its place in the list (#1188).
   const first = workspaceForms.value[0]?.name
-  if (from !== 'personal' || first === from) return message
-  return `${message} "${first}" becomes the main workspace.`
+  if (from === 'personal' && first !== from) return `${message} "${first}" becomes the main workspace.`
+  // A workspace named `personal` is the main one whatever its place in the list.
+  if (to === 'personal' && (primaryWorkspace.value ?? first) !== from) return `${message} It becomes the main workspace.`
+  return message
 }
 
 async function saveWorkspace(name: string) {
