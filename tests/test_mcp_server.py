@@ -1923,6 +1923,15 @@ def test_webhook_operations_are_registered_in_the_shared_table() -> None:
     assert declared["webhook_delete"] == mcp_server._DESTRUCTIVE
 
 
+def test_webhook_create_refuses_a_mode_instead_of_dropping_it(tmp_path: Path) -> None:
+    """`mode` is not a parameter of the MCP tool, so a call naming it fails."""
+    service, _control_plane = _service(tmp_path)
+    result = _dispatcher_call(
+        service, "webhook_create", {"name": "CI push", "instructions": "", "mode": "plan"}
+    )
+    assert result["envelope"]["ok"] is False
+
+
 def test_tools_list_reports_the_whole_catalog(tmp_path: Path) -> None:
     """Every registered operation is present in the shared table.
 

@@ -109,6 +109,13 @@ SECRET_BYTES = 32
 #: below it and no legitimate token is ever rejected by this bound.
 MAX_SECRET_LENGTH = 128
 
+#: Refusal for a request that still names a per-trigger permission mode. Events
+#: always run in the new-chat default mode, so a silently ignored ``mode`` would
+#: let a caller believe it had chosen one.
+MODE_REMOVED_ERROR = (
+    "mode is no longer supported; webhook events use the new-chat default mode"
+)
+
 # Stable error codes. They are part of the contract a later route and its tests
 # match on, so they are module constants rather than free strings.
 INVALID_TRIGGER = "invalid_trigger"
