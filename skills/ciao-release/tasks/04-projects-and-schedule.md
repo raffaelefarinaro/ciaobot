@@ -125,6 +125,13 @@ Report any row whose label and link disagree.
 
 Do not create, edit or delete a real schedule. Reading rows is the whole task.
 
+## Step 4 — the Webhook triggers section
+
+On `/schedules`, the Webhook triggers section must be present, below the
+schedule list. Read it only: its rows and the empty state should render with no
+error. Do not create a trigger. If one is created to test the section, delete it
+in the same step.
+
 ## Checkpoints
 
 - `04-projects-01-created.png` — the plain app project page with its sidebar

@@ -43,6 +43,13 @@ scroll. A rail that names another route's cards is a finding.
 **Every section must load without hanging.** A section that never resolves is a
 finding; do not wait on it more than once.
 
+## Step 1b — File access per workspace
+
+Open `/settings/workspaces`. Each workspace row must show a **File access** tag
+with the effective value (*Workspace only* or *Whole machine*). Open **Edit** on
+one workspace and confirm the **File access** select offers *Default*, *Workspace
+only* and *Whole machine*. Close it without saving. Do not change the value.
+
 ## Step 2 — the four asset lists are scoped to one workspace
 
 This is the point of the task. **Skills, Subagents, Commands and MCP servers all
