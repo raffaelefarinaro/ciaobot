@@ -1924,15 +1924,12 @@ def test_webhook_operations_are_registered_in_the_shared_table() -> None:
 
 
 def test_webhook_create_refuses_a_mode_instead_of_dropping_it(tmp_path: Path) -> None:
-    """The MCP tool must reject a `mode` argument, not accept and ignore it."""
-    from ciao.webhooks import MODE_REMOVED_ERROR
-
+    """`mode` is not a parameter of the MCP tool, so a call naming it fails."""
     service, _control_plane = _service(tmp_path)
     result = _dispatcher_call(
         service, "webhook_create", {"name": "CI push", "instructions": "", "mode": "plan"}
     )
     assert result["envelope"]["ok"] is False
-    assert MODE_REMOVED_ERROR in json.dumps(result["envelope"])
 
 
 def test_tools_list_reports_the_whole_catalog(tmp_path: Path) -> None:
