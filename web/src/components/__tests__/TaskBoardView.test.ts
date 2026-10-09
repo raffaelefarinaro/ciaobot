@@ -1149,6 +1149,49 @@ describe('TaskBoardView', () => {
     await nextTick()
   }
 
+  it('offers no resolution action on a legacy done task, and keeps it on one with a completion (#1189)', async () => {
+    // A done task from before completion records has no completion: its row says
+    // `completed_at: null` and its read has an empty history, so the action row is
+    // left out. A done task with a completion keeps its Edit resolution action.
+    const legacy = task({ id: 'legacy', title: 'Old finished work', status: 'done', completed_at: null })
+    const timed = task({
+      id: 'timed', title: 'Recent finished work', status: 'done',
+      completed_at: '2026-03-01T08:00:00+00:00', has_resolution: true,
+    })
+    apiGet.mockImplementation((url: string) => {
+      if (url.startsWith('/api/tasks/legacy?')) {
+        return Promise.resolve({ workspace: 'personal', task: { ...legacy, revision: NEXT_REVISION, body: '', resolution: '', completions: [], delegation_log: '' } })
+      }
+      if (url.startsWith('/api/tasks/timed?')) {
+        return Promise.resolve({ workspace: 'personal', task: { ...timed, revision: NEXT_REVISION, body: '', resolution: 'Checked it', completions: [{ id: 'a'.repeat(32), completed_at: '2026-03-01T08:00:00+00:00', resolution: 'Checked it', edited_at: null, attempt_id: '' }], delegation_log: '' } })
+      }
+      return Promise.resolve(url.includes('/api/tasks?') ? { workspace: 'personal', tasks: [legacy, timed] } : {})
+    })
+    const wrapper = mount(TaskBoardView, { attachTo: document.body })
+    await flushPromises()
+    await nextTick()
+    // A done task without a completion stamp sits behind Show all.
+    await wrapper.get('.task-lane-more').trigger('click')
+    await nextTick()
+
+    await card(wrapper, 'Old finished work').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.get('.task-resolution').text()).toContain('(no time recorded)')
+    expect(wrapper.findAll('.task-resolution button').map((b) => b.text())).toEqual([])
+    wrapper.unmount()
+
+    const second = mount(TaskBoardView, { attachTo: document.body })
+    await flushPromises()
+    await nextTick()
+    await card(second, 'Recent finished work').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(second.get('.task-resolution').text()).not.toContain('(no time recorded)')
+    expect(second.findAll('.task-resolution button').map((b) => b.text())).toContain('Edit resolution')
+    second.unmount()
+  })
+
   it('completes with a resolution in one request, and cancel does not post', async () => {
     const wrapper = await mountBoard()
     mockShipDetail()
