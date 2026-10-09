@@ -76,18 +76,9 @@
             placeholder="What the trigger should do with each event. Optional."
           />
         </label>
-        <label class="wh-field">
-          <span class="wh-label">Mode</span>
-          <select v-model="draft.mode" class="wh-input" :disabled="store.saving">
-            <option v-for="option in MODE_OPTIONS" :key="option.value" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
-        <!-- Mode and project are said here or nowhere: the row has no Edit, and both
-             are create-only on the route, so this form is the only place the
-             choice is ever explained. -->
-        <p class="wh-hint wh-field--wide">{{ modeHint }} Project and mode cannot be changed after the trigger is created.</p>
+        <!-- The project is said here or nowhere: the row has no Edit and it is
+             create-only on the route. -->
+        <p class="wh-hint wh-field--wide">Each event opens a new chat with the same permissions as any new chat. The project cannot be changed after the trigger is created.</p>
         <div class="wh-actions wh-field--wide">
           <button type="button" class="btn-small" :disabled="store.saving" @click="closeForm">
             Cancel
@@ -396,15 +387,8 @@ import { useWebhookStore } from '../stores/webhooks'
 import { writeClipboard } from '../lib/codeCopy'
 import { askConfirm } from '../lib/confirm'
 import { formatRelative } from '../lib/time'
-import { webhookModeHint, webhookModeLabel, webhookRecipe } from '../lib/webhooks'
-import type { WebhookMode, WebhookReceipt, WebhookReceiptStatus, WebhookTrigger } from '../lib/types'
-
-/** The store's `WEBHOOK_MODES`, with the labels the create form shows. */
-const MODE_OPTIONS: { value: WebhookMode; label: string }[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'normal', label: 'Normal' },
-  { value: 'plan', label: 'Plan' },
-]
+import { webhookRecipe } from '../lib/webhooks'
+import type { WebhookReceipt, WebhookReceiptStatus, WebhookTrigger } from '../lib/types'
 
 const store = useWebhookStore()
 const projectStore = useProjectStore()
@@ -429,8 +413,7 @@ const firstLoadFailed = computed(() => Boolean(store.loadError) && !store.loaded
 const showFormArea = computed(() => store.loaded || (!store.loading && !firstLoadFailed.value))
 
 const showForm = ref(false)
-const draft = ref({ name: '', projectId: '', instructions: '', mode: 'auto' as WebhookMode })
-const modeHint = computed(() => webhookModeHint(draft.value.mode))
+const draft = ref({ name: '', projectId: '', instructions: '' })
 /** The one trigger whose write is in flight, so only its row reports progress. */
 const pendingId = ref('')
 
@@ -503,7 +486,6 @@ function rowSummary(t: WebhookTrigger): string {
     : 'General'
   return [
     target,
-    `${webhookModeLabel(t.mode)} mode`,
     `updated ${formatRelative(t.updated_at) || 'never'}`,
   ].join(' · ')
 }
@@ -514,7 +496,7 @@ function toggleForm() {
   showForm.value = !showForm.value
   if (showForm.value) {
     store.clearError()
-    draft.value = { name: '', projectId: '', instructions: '', mode: 'auto' }
+    draft.value = { name: '', projectId: '', instructions: '' }
   }
 }
 
@@ -529,7 +511,6 @@ async function submitCreate() {
     workspace: workspace.value,
     instructions: draft.value.instructions,
     project_id: draft.value.projectId || null,
-    mode: draft.value.mode,
   })
   // `null` is a refusal (the server's sentence is in `store.error`, the form stays
   // open with what was typed) or a workspace switch that overtook the POST.

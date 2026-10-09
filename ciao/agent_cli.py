@@ -68,12 +68,6 @@ _CHAT_UPDATE_FLAGS: tuple[tuple[str, str], ...] = (
     ("--project", "project_id"),
 )
 
-#: The permission modes a trigger's own events run under. ``bypass`` is not
-#: among them and cannot be added here: it is what an *unattended* turn gets,
-#: and a webhook event is never dispatched unattended. The store refuses
-#: anything else anyway, so this is the first refusal rather than the last.
-_WEBHOOK_MODES: tuple[str, ...] = ("normal", "auto", "plan")
-
 
 class UsageError(Exception):
     """A caller mistake caught before any request is sent (exit 2)."""
@@ -224,7 +218,9 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("project_id")
 
     task = _verbs(nouns.add_parser("task", help="Tasks in the active workspace."))
-    task.add_parser("list")
+    tlist = task.add_parser("list")
+    tlist.add_argument("--completed-since", default=None, metavar="ISO-8601", help="Keep tasks completed at or after this time (inclusive).")
+    tlist.add_argument("--completed-before", default=None, metavar="ISO-8601", help="Keep tasks completed before this time (exclusive).")
     tget = task.add_parser("get")
     tget.add_argument("task_id")
     tcreate = task.add_parser("create")
@@ -253,6 +249,10 @@ def build_parser() -> argparse.ArgumentParser:
     tdelegate.add_argument("task_id")
     tdelegate.add_argument("--revision", required=True, help="The revision you read; a stale one starts nothing.")
     tdelegate.add_argument("--project", default=None, help="Override the chat's project; omit to use the task's own, else General.")
+    tnote = task.add_parser("add-update", help="Append a progress note. This does not complete the task.")
+    tnote.add_argument("task_id")
+    tnote.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
+    tnote.add_argument("--text-file", required=True, metavar="FILE", help="Markdown file holding the progress note.")
     treport = task.add_parser("report", help="Report how far you got on the task this chat was handed.")
     treport.add_argument("task_id")
     treport.add_argument("--outcome", required=True, choices=["done", "blocked", "needs_input"])
@@ -290,7 +290,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Markdown/text file holding the trigger's instructions: @file.md or a plain path.",
     )
     wcreate.add_argument("--project", default=None, metavar="P")
-    wcreate.add_argument("--mode", default=None, choices=_WEBHOOK_MODES)
     wupdate = webhook.add_parser("update")
     wupdate.add_argument("trigger_id")
     wupdate.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
@@ -525,7 +524,12 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         return "project_action", {"action": verb, "project_id": args.project_id}
     if noun == "task":
         if verb == "list":
-            return "task_list", {}
+            window: dict[str, str] = {}
+            if args.completed_since is not None:
+                window["completed_since"] = args.completed_since
+            if args.completed_before is not None:
+                window["completed_before"] = args.completed_before
+            return "task_list", window
         if verb == "get":
             return "task_get", {"task_id": args.task_id}
         if verb == "create":
@@ -560,6 +564,12 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             if args.project is not None:
                 arguments["project_id"] = args.project
             return "task_delegate", arguments
+        if verb == "add-update":
+            return "task_add_update", {
+                "task_id": args.task_id,
+                "expected_revision": args.revision,
+                "text": _task_body(args.text_file, flag="--text-file") or "",
+            }
         if verb == "report":
             return "task_report", {
                 "task_id": args.task_id,
@@ -595,8 +605,6 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 arguments["instructions"] = instructions
             if args.project is not None:
                 arguments["project_id"] = args.project
-            if args.mode is not None:
-                arguments["mode"] = args.mode
             return "webhook_create", arguments
         if verb == "update":
             arguments = {

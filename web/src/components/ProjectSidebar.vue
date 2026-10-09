@@ -323,7 +323,7 @@
                 active-class="active"
               >
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
-                <span class="schedule-time">{{ s.run_at_date?.slice(5) }} {{ s.daily_time_utc }}</span>
+                <span class="schedule-time">{{ oneOffWhen(s) }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
             </div>
@@ -904,6 +904,7 @@ import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
+import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
@@ -1163,7 +1164,7 @@ function cadenceBadge(s: Schedule): string {
   if (!s.enabled) return 'off'
   if (s.frequency === 'interval') return `${s.interval_minutes}m`
   if (s.frequency === 'manual') return '·'
-  return s.daily_time_utc
+  return scheduleClock(s)
 }
 
 const oneOffSchedules = computed(() => {
@@ -1171,9 +1172,7 @@ const oneOffSchedules = computed(() => {
     .filter(s => s.frequency === 'once')
     .slice()
     .sort((a, b) => {
-      const ka = `${a.run_at_date || ''} ${a.daily_time_utc || ''}`
-      const kb = `${b.run_at_date || ''} ${b.daily_time_utc || ''}`
-      return ka.localeCompare(kb)
+      return oneOffSortKey(a).localeCompare(oneOffSortKey(b))
     })
 })
 const userRoutines = computed(() =>

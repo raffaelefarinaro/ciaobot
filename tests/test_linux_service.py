@@ -58,6 +58,18 @@ def test_service_keeps_virtualenv_and_escapes_systemd_expansions(tmp_path):
     assert "EnvironmentFile=" not in unit  # dotenv owns parsing of the workspace file
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a systemd unit names POSIX paths (/usr/bin), which are not absolute on Windows")
+def test_service_path_lists_each_directory_once(tmp_path):
+    # #1208: the interpreter's folder is often /usr/bin already, and the unit PATH
+    # is composed through dedupe_path like every other PATH this package hands on.
+    python = Path("/usr/bin/python3")
+    unit = render_service(
+        workspace=tmp_path / "workspace", user="ciaobot",
+        home=Path("/var/lib/ciaobot"), python=python,
+    )
+    assert 'Environment="PATH=/usr/bin:/var/lib/ciaobot/.local/bin:/usr/local/bin:/bin"' in unit
+
+
 @pytest.mark.parametrize("overrides", [
     {"user": "root"}, {"user": "bad\nExecStart=oops"},
     {"workspace": Path("relative")}, {"home": Path("/home/bad\npath")},

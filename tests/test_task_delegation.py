@@ -2669,6 +2669,49 @@ async def test_only_the_chat_holding_the_task_may_report_on_it(tmp_path: Path) -
         plane.task_report(_principal(), task["id"], outcome="done", summary="x")
 
 
+async def test_an_agent_progress_note_needs_a_live_attempt(tmp_path: Path) -> None:
+    """`task add-update` refuses the agent the way `task report` does: no live
+    attempt on the task means no holder, so the note is not written."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Nobody is on it")
+    with pytest.raises(ControlPlaneError) as refused:
+        plane.task_add_update(
+            _principal(), task["id"], expected_revision=task["revision"], text="Progress."
+        )
+    assert refused.value.code == "task_report_not_holder"
+    assert _get_task(plane, task["id"])["revision"] == task["revision"]
+
+
+async def test_the_holder_with_a_live_attempt_may_add_a_progress_note(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Being worked")
+    outcome = _delegate(plane, task)
+    current = _get_task(plane, task["id"])
+    written = plane.workspace_task_add_update(
+        "personal",
+        task["id"],
+        expected_revision=current["revision"],
+        text="Halfway through.",
+        actor="agent",
+        chat_id=outcome["chat_id"],
+    )
+    assert written["revision"] != current["revision"]
+    body = (_tasks_dir(plane) / f"{task['id']}.md").read_text(encoding="utf-8")
+    assert "Halfway through." in body
+    assert f"attempt:{outcome['attempt']['attempt_id']}" in body
+    # A different chat, even with the task's live attempt, is still refused.
+    with pytest.raises(ControlPlaneError) as other:
+        plane.workspace_task_add_update(
+            "personal",
+            task["id"],
+            expected_revision=written["revision"],
+            text="Not mine.",
+            actor="agent",
+            chat_id="someone-else",
+        )
+    assert other.value.code == "task_report_not_holder"
+
+
 async def test_the_task_body_logs_each_attempt_without_tripping_changed_since_delegated(
     tmp_path: Path,
 ) -> None:
@@ -2819,7 +2862,122 @@ async def test_approving_a_delegated_result_archives_its_chat_and_queues_a_learn
         await asyncio.sleep(0)
 
     assert archived == [outcome["chat_id"]]
-    assert postprocessed == [(
-        outcome["chat_id"],
-        {"focus": "approved_task", "task_title": "Learnable work", "task_summary": "Did the work."},
-    )]
+    assert [chat_id for chat_id, _ in postprocessed] == [outcome["chat_id"]]
+    focus = postprocessed[0][1]
+    assert focus["focus"] == "approved_task"
+    assert focus["task_title"] == "Learnable work"
+    assert focus["task_summary"] == "Did the work."
+    # The approval sent no resolution: the key is still there, and empty, and the
+    # completion it snapshots is the one this approval wrote.
+    assert focus["user_resolution"] == ""
+    assert focus["completion_id"]
+
+
+async def test_approving_with_an_over_length_resolution_drops_it_from_the_focus(
+    tmp_path: Path,
+) -> None:
+    """#1182: a resolution over the pass limit is dropped, never cut to fit.
+
+    The approval still succeeds and the pass still runs on the transcript; only
+    the user's own words are left out, rather than a truncated copy passed on as
+    them.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Long resolution")
+    outcome = _delegate(plane, task)
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    archived: list[str] = []
+    postprocessed: list[tuple[str, Any]] = []
+
+    async def archive_chat(chat_id: str) -> Any:
+        archived.append(chat_id)
+        return SimpleNamespace(path=tmp_path / "archive.md", turn_count=3)
+
+    pcm.archive_chat = archive_chat  # type: ignore[attr-defined]
+    pcm.run_archive_postprocess = (  # type: ignore[attr-defined]
+        lambda chat_id, outcome, chat, project, focus=None: postprocessed.append((chat_id, focus))
+    )
+    current = _get_task(plane, task["id"])
+
+    await asyncio.to_thread(
+        plane.workspace_task_action,
+        "personal",
+        "complete",
+        task["id"],
+        expected_revision=current["revision"],
+        actor="user",
+        resolution="x" * 8001,
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    assert [chat_id for chat_id, _ in postprocessed] == [outcome["chat_id"]]
+    focus = postprocessed[0][1]
+    assert focus["focus"] == "approved_task"
+    assert focus["user_resolution"] == ""
+    assert focus["completion_id"]
+
+
+async def test_approving_a_review_records_the_resolution_on_the_same_write(
+    tmp_path: Path,
+) -> None:
+    """The resolution rides the one write that makes the card Done.
+
+    The review approval is three writes (unlink, the completion, release). The
+    resolution goes with the completion, so the recorded note and the Done status
+    cannot disagree, and the attempt keeps the result the user reviewed.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Review with a note")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    settled = _get_task(plane, task["id"])
+    assert settled["attempt_state"] == "ready_for_review"
+
+    done = plane.workspace_task_action(
+        "personal",
+        "complete",
+        task["id"],
+        expected_revision=settled["revision"],
+        actor="user",
+        resolution="Reviewed the result; it holds.",
+    )
+
+    assert done["status"] == "done"
+    assert done["attempt_id"] is None
+    assert done["resolution"] == "Reviewed the result; it holds."
+    assert [item["attempt_id"] for item in done["completions"]] == [""]
+    assert _attempt_store(plane).get(attempt_id).state == "ready_for_review"
+
+
+async def test_a_refused_resolution_leaves_the_review_linked_and_open(
+    tmp_path: Path,
+) -> None:
+    """A malformed resolution is refused before the unlink, so nothing is released."""
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Refuse a bad note")
+    outcome = _delegate(plane, task)
+    attempt_id = outcome["attempt"]["attempt_id"]
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    settled = _get_task(plane, task["id"])
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_action(
+            "personal",
+            "complete",
+            task["id"],
+            expected_revision=settled["revision"],
+            actor="user",
+            resolution=["not", "text"],
+        )
+
+    assert excinfo.value.code == "invalid_task"
+    still = _get_task(plane, task["id"])
+    assert still["status"] == "in_review"
+    assert still["attempt_id"] == settled["attempt_id"]
+    assert still["revision"] == settled["revision"]
+    assert _attempt_store(plane).get(attempt_id).state == "ready_for_review"

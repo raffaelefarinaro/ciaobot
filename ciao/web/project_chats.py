@@ -136,6 +136,7 @@ from ciao.transcripts import (
     TurnJournal,
     _claude_projects_dir,
     _global_session_matches,
+    parse_archive_turns,
 )
 from ciao.web import chat_service
 from ciao.web.chat_broker import (
@@ -149,7 +150,11 @@ from ciao.web.chat_broker import (
 from ciao.web.archive_pipeline import ArchivePipeline
 from ciao.web.chat_streaming import ChatStreaming
 from ciao.web.chat_streaming import StreamOutcome as _StreamOutcome
-from ciao.web.memory_pass import MemoryPassCoordinator, is_memory_pass_chat
+from ciao.web.memory_pass import (
+    CLOSURE_FENCE_CLOSE,
+    MemoryPassCoordinator,
+    is_memory_pass_chat,
+)
 from ciao.web.schedule_dispatch import ScheduleDispatcher
 from ciao.web.document_conversion import convert_document, is_anydoc_document
 from ciao.web.file_snapshots import SnapshotStore
@@ -635,6 +640,47 @@ class ArchiveOutcome:
 
     path: Path
     turn_count: int
+
+
+_CLOSURE_OPEN = "<!-- ciao:project-closure -->"
+_CLOSURE_CLOSE = "<!-- /ciao:project-closure -->"
+
+
+def _append_project_closure(
+    folder: Path,
+    vault_folder: str,
+    *,
+    outcome: str,
+    note: str,
+    recorded_at: str,
+) -> None:
+    """Append the closure section to the canonical project document.
+
+    The document is ``<folder>/<stem>.md``, or ``README.md`` when that is the
+    file that already exists. A folder with neither file is left untouched:
+    the closure note still travels with the memory pass.
+    """
+    candidates = (folder / f"{vault_folder}.md", folder / "README.md")
+    target = next((path for path in candidates if path.is_file()), None)
+    if target is None:
+        return
+    text = target.read_text(encoding="utf-8")
+    if _CLOSURE_OPEN in text:
+        close_at = text.find(_CLOSURE_CLOSE)
+        open_at = text.find(_CLOSURE_OPEN)
+        if close_at < open_at:
+            raise ValueError("This project already has a closure note.")
+        text = (text[:open_at] + text[close_at + len(_CLOSURE_CLOSE):]).strip() + "\n"
+    safe = note.replace(_CLOSURE_OPEN, "&lt;!-- ciao:project-closure --&gt;").replace(
+        _CLOSURE_CLOSE, "&lt;!-- /ciao:project-closure --&gt;"
+    )
+    lines = [f"\n\n{_CLOSURE_OPEN}", "## Closure", "", f"- {recorded_at} · {outcome}", ""]
+    if safe.strip():
+        lines.extend(f"  {line}" if line else "" for line in safe.splitlines())
+        lines.append("")
+    lines.append(_CLOSURE_CLOSE)
+    lines.append("")
+    target.write_text(text.rstrip() + "\n".join(lines), encoding="utf-8", newline="")
 
 
 # ── Manager ──────────────────────────────────────────────────────────────
@@ -1281,6 +1327,23 @@ class ProjectChatManager:
         except ValueError:
             return str(root)
 
+    def _unused_vault_project_id(self, workspace: str, folder: str) -> str:
+        """The stable id for a vault-bound project, never one already in use.
+
+        ``_stable_vault_project_id`` keys on the workspace name, so after a
+        workspace is renamed away and a new one takes its old name, the id
+        computed for the new one is the id the renamed workspace's projects
+        still hold. The stable id is only the starting point: when it is taken,
+        a salted id is derived instead. Existing projects are never re-id'd,
+        because their ids are referenced by chats, schedules and runs.
+        """
+        pid = chat_service._stable_vault_project_id(workspace, folder)
+        salt = 1
+        while pid in self._projects:
+            salt += 1
+            pid = chat_service._stable_vault_project_id(workspace, f"{folder}#{salt}")
+        return pid
+
     def _ensure_defaults(self) -> None:
         """Ensure each workspace has its auto-managed `General` project.
 
@@ -1304,7 +1367,7 @@ class ProjectChatManager:
                 None,
             )
             if general is None:
-                pid = chat_service._stable_vault_project_id(ws, "general")
+                pid = self._unused_vault_project_id(ws, "general")
                 general = ProjectInfo(
                     project_id=pid,
                     name="General",
@@ -2424,7 +2487,7 @@ class ProjectChatManager:
                     })
                     continue
 
-                pid = chat_service._stable_vault_project_id(ws, stem)
+                pid = self._unused_vault_project_id(ws, stem)
                 project = ProjectInfo(
                     project_id=pid,
                     name=name,
@@ -2572,25 +2635,50 @@ class ProjectChatManager:
         })
         return sequence
 
-    def complete_project(self, project_id: str) -> dict:
+    def complete_project(
+        self,
+        project_id: str,
+        *,
+        outcome: str = "completed",
+        note: str = "",
+    ) -> dict:
         """Move a project's vault entry to completed/, then delete the PWA project.
 
         Both workspaces share the same convention: a vault entry is a folder
         ``projects/active/<stem>/`` that gets moved to
-        ``projects/completed/<stem>/``. After the move, ``status: active`` in
-        the main project markdown's frontmatter is rewritten to
-        ``status: completed``.
+        ``projects/completed/<stem>/``. Before the move, the canonical project
+        document receives a closure section (outcome plus the optional note).
+        After the move, ``status: active`` in that document's frontmatter is
+        rewritten to ``status: completed``. Chats are archived by the removal,
+        which queues their memory passes; this method then queues one
+        project-closure pass behind them.
 
-        Returns a dict with ``ok``, ``vault_moved`` (bool), and ``vault_folder`` (str | None).
+        ``outcome`` is ``completed`` or ``stopped``. ``note`` may be empty.
+        Open tasks are not completed.
+
+        Returns a dict with ``ok``, ``vault_moved`` (bool), ``vault_folder``
+        (str | None), ``outcome``, and ``memory_pass`` (the pass chat id, or
+        None when Session insights is off or there is no vault folder).
         """
         if project_id == _CC_CLI_PROJECT_ID:
             raise ValueError("The Claude Code CLI project cannot be completed.")
+        if outcome not in {"completed", "stopped"}:
+            raise ValueError("outcome must be completed or stopped")
+        if len(note) > chat_service.MEMORY_PASS_RESOLUTION_MAX:
+            raise ValueError("note is too long")
+        if "<!-- /ciao:project-closure -->" in note or "<!-- ciao:project-closure -->" in note:
+            raise ValueError("note contains the closure fence token")
+        if CLOSURE_FENCE_CLOSE in note:
+            raise ValueError("note contains the quoted-closure fence token")
         project = self._projects.get(project_id)
         if project is None:
             raise ValueError("Project not found.")
 
         vault_moved = False
         vault_folder = project.vault_folder or None
+        workspace = project.workspace
+        project_name = project.name
+        recorded_at = datetime.now(UTC).isoformat()
 
         if vault_folder and self._is_known_workspace(project.workspace):
             # Defence in depth: even though update_project validates
@@ -2612,12 +2700,19 @@ class ProjectChatManager:
                     raise ValueError(
                         f"vault_folder {vault_folder!r} resolves outside the projects tree."
                     )
+                _append_project_closure(
+                    src,
+                    vault_folder,
+                    outcome=outcome,
+                    note=note,
+                    recorded_at=recorded_at,
+                )
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(src), str(dst))
 
                 # Update status frontmatter in the main project markdown
-                # (<dst>/<stem>.md). Falls back to README.md if that's where
-                # the frontmatter lives.
+                # (<dst>/<stem>.md). README.md is the other place the
+                # frontmatter lives.
                 for candidate in (dst / f"{vault_folder}.md", dst / "README.md"):
                     if candidate.exists():
                         text = candidate.read_text(encoding="utf-8")
@@ -2629,8 +2724,25 @@ class ProjectChatManager:
         # Use the internal remover: by this point the vault entry has been
         # moved (or was already absent), so the public delete_project guard
         # against vault-backed deletion would either misfire or block us.
+        # Archiving the chats queues their memory passes first.
         self._remove_project(project_id)
-        return {"ok": True, "vault_moved": vault_moved, "vault_folder": vault_folder}
+        memory_pass_id: str | None = None
+        if vault_folder and self._is_known_workspace(workspace):
+            memory_pass_id = self.enqueue_project_closure(
+                workspace=workspace,
+                vault_folder=vault_folder,
+                project_name=project_name,
+                outcome=outcome,
+                note=note,
+                recorded_at=recorded_at,
+            )
+        return {
+            "ok": True,
+            "vault_moved": vault_moved,
+            "vault_folder": vault_folder,
+            "outcome": outcome,
+            "memory_pass": memory_pass_id,
+        }
 
     def list_completed_projects(self, workspace: str | None = None) -> list[dict]:
         """List completed projects by scanning the ``projects/completed/`` tree.
@@ -3141,19 +3253,13 @@ class ProjectChatManager:
     def _parse_transcript_messages(self, text: str) -> list[dict]:
         """Extract user and assistant messages from transcript markdown."""
         turns_data = []
-        parts = re.split(r'^## Turn \d+', text, flags=re.MULTILINE)
 
-        for part in parts[1:]:
-            user_match = re.search(r'### User\s*\n\s*```text\n(.*?)\n```', part, re.DOTALL)
-            assistant_match = re.search(r'### Assistant\s*\n\s*```text\n(.*?)\n```', part, re.DOTALL)
+        for turn in parse_archive_turns(text):
+            timestamp = turn["timestamp"]
+            usage = self._parse_transcript_usage(turn["trailer"])
 
-            time_match = re.search(r'-\s*Time:\s*([^\n]+)', part)
-            timestamp = time_match.group(1).strip() if time_match else ""
-
-            usage = self._parse_transcript_usage(part)
-
-            if user_match:
-                user_content = user_match.group(1)
+            if turn["user"] is not None:
+                user_content = turn["user"]
                 user_content = re.sub(r'(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*', '', user_content)
                 if user_content.strip():
                     turns_data.append({
@@ -3162,8 +3268,8 @@ class ProjectChatManager:
                         "timestamp": timestamp,
                     })
 
-            if assistant_match:
-                assistant_content = assistant_match.group(1)
+            if turn["assistant"] is not None:
+                assistant_content = turn["assistant"]
                 if assistant_content.strip():
                     row = {
                         "role": "assistant",
@@ -3662,6 +3768,42 @@ class ProjectChatManager:
     ) -> str | None:
         return self._memory_pass.enqueue(source, project, archive_path, doc_path, focus)
 
+    def enqueue_task_completion(
+        self,
+        *,
+        workspace: str,
+        task_path: str,
+        completion_id: str,
+        resolution: str,
+        completed_at: str,
+    ) -> str | None:
+        return self._memory_pass.enqueue_task_completion(
+            workspace=workspace,
+            task_path=task_path,
+            completion_id=completion_id,
+            resolution=resolution,
+            completed_at=completed_at,
+        )
+
+    def enqueue_project_closure(
+        self,
+        *,
+        workspace: str,
+        vault_folder: str,
+        project_name: str,
+        outcome: str,
+        note: str,
+        recorded_at: str,
+    ) -> str | None:
+        return self._memory_pass.enqueue_project_closure(
+            workspace=workspace,
+            vault_folder=vault_folder,
+            project_name=project_name,
+            outcome=outcome,
+            note=note,
+            recorded_at=recorded_at,
+        )
+
     async def resume_memory_passes(self) -> None:
         self._memory_pass.resume()
 
@@ -3926,6 +4068,24 @@ class ProjectChatManager:
         self._provider_disconnect_failures.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
 
+    def evict_workspace_providers(self, workspace: str) -> list[str]:
+        """Disconnect and forget the cached providers of *workspace*'s chats.
+
+        A provider is built with its chat's agent root and workspace name, so
+        a rename leaves it pointing at both old values. The chat row and its
+        ``session_id`` are untouched, so the next turn builds a fresh provider
+        and resumes the same session. The disconnect is scheduled, not awaited,
+        the same way ``_schedule_provider_cleanup`` runs it; the caller must
+        have checked that no chat in the workspace is busy. Returns the evicted
+        chat ids.
+        """
+        _project_ids, chat_ids = self.workspace_scope(workspace)
+        evicted = sorted(cid for cid in chat_ids if cid in self._providers)
+        for chat_id in evicted:
+            provider = self._pop_provider(chat_id)
+            asyncio.ensure_future(self._disconnect_provider(chat_id, provider))
+        return evicted
+
     # ── Idle provider reaping ────────────────────────────────────────────
 
     def _ensure_provider_reaper(self) -> None:
@@ -4142,6 +4302,22 @@ class ProjectChatManager:
         if not self._is_known_workspace(workspace):
             workspace = self._config.primary_workspace()
         return self._config.agent_root(workspace)
+
+    def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
+        """The chat's workspace filesystem scope and the roots it confines to.
+
+        Roots are the chat's agent root and that workspace's vault root,
+        resolved and de-duplicated, agent root first. Machine scope never
+        reads them, so they are only computed for the workspace case.
+        """
+        workspace = self._workspace_for_chat(chat.chat_id)
+        config = self._config.workspace(workspace)
+        if config is None or config.effective_agent_fs_scope() != "workspace":
+            return "machine", ()
+        agent_root = self._config.agent_root(workspace).resolve()
+        vault_root = self._config.workspace_vault_root(workspace).resolve()
+        roots = tuple(dict.fromkeys((str(agent_root), str(vault_root))))
+        return "workspace", roots
 
     def _revoke_mcp_chat(self, chat_id: str) -> None:
         service = self._mcp_service
@@ -4896,6 +5072,7 @@ class ProjectChatManager:
             extra_env[AGENT_URL_ENV] = agent_url
             extra_env[AGENT_TOKEN_ENV] = token
 
+        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
         return AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -4906,6 +5083,8 @@ class ProjectChatManager:
             images=images or [],
             extra_env=extra_env,
             disallowed_tools=self.disallowed_tools_for_chat(chat),
+            agent_fs_scope=fs_scope,
+            agent_roots=fs_roots,
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
             # stricter ruleset.
@@ -6383,6 +6562,7 @@ class ProjectChatManager:
             if prefix
             else _SUBAGENT_SYNTHESIS_NUDGE
         )
+        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
         request = AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -6392,6 +6572,8 @@ class ProjectChatManager:
             images=[],
             extra_env=self._build_extra_env(chat),
             disallowed_tools=self.disallowed_tools_for_chat(chat),
+            agent_fs_scope=fs_scope,
+            agent_roots=fs_roots,
             thinking_level=self._thinking_level_for_chat(chat),
         )
         try:
@@ -7323,7 +7505,9 @@ class ProjectChatManager:
 
             project = self._projects.get(chat.project_id)
             workspace = getattr(project, "workspace", None) if project else None
-            model = resolve_insights_model(self._config, workspace, provider)
+            model = resolve_insights_model(
+                self._config, workspace, provider, source_model=chat.model
+            )
             reply = (assistant_text or "").strip()
             sections = [f"<user>{user_text[:1500]}</user>"]
             if reply:
@@ -7428,11 +7612,12 @@ class ProjectChatManager:
         self._streaming.discard_drain_result(chat_id)
 
     async def _schedule_run_needs_user(
-        self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome
+        self, entry: ScheduleEntry, outcome: chat_service.ScheduleRunOutcome,
+        *, chat_id: str = "",
     ) -> bool:
         """Delegate schedule attention classification to its collaborator."""
         return await self._schedule_dispatcher_for()._schedule_run_needs_user(
-            entry, outcome
+            entry, outcome, chat_id=chat_id
         )
 
     def prepare_schedule_chat(

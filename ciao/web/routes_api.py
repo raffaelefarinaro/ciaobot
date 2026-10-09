@@ -59,6 +59,7 @@ from ciao.config import (
     MAX_IMAGE_SIZE_BYTES,
     RESTART_EXIT_CODE,
     WorkspaceConfig,
+    default_agent_fs_scope,
 )
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
@@ -244,6 +245,9 @@ def _workspaces_payload(config) -> dict:
         # button rather than offering an action the server refuses.
         "primary": config.primary_workspace() or None,
         "provider_options": _workspace_provider_options(config),
+        # What a workspace that never chose a File access scope runs under on
+        # this engine. The PWA labels its "Default" option from this value.
+        "default_agent_fs_scope": default_agent_fs_scope(),
     }
 
 
@@ -267,6 +271,51 @@ def _refresh_project_manager_workspaces(request: Request) -> None:
         refresh()
 
 
+def _rename_schedule_store(request: Request) -> Any:
+    """The schedule store a workspace rename rewrites.
+
+    The live manager's store when the app has one, else a store on the same
+    file: the store is stateless and re-reads under its locks, so both spell
+    the same rows.
+    """
+    from ciao.schedules import ScheduleStore  # noqa: PLC0415
+
+    manager = _schedule_manager(request)
+    if manager is not None:
+        inner = getattr(manager, "_store", None)
+        return inner if inner is not None else manager
+    config = request.app.state.config
+    return ScheduleStore(Path(config.state_path).parent)
+
+
+def _rename_webhook_store(request: Request) -> Any:
+    from ciao.web.routes_webhooks import webhook_store  # noqa: PLC0415
+
+    return webhook_store(request.app.state.config)
+
+
+def _rename_import_store(request: Request) -> Any:
+    from ciao.import_store import ImportStore, engine_store_path  # noqa: PLC0415
+
+    return ImportStore(engine_store_path(request.app.state.config))
+
+
+def _rename_run_store(request: Request) -> Any:
+    """The background-run store a workspace rename rewrites.
+
+    The live runner's store when the app has one, else a store on the same
+    file.
+    """
+    from ciao.background import BackgroundRunStore  # noqa: PLC0415
+
+    runner = getattr(request.app.state, "background_runner", None)
+    if runner is not None:
+        inner = getattr(runner, "_store", None)
+        return inner if inner is not None else runner
+    config = request.app.state.config
+    return BackgroundRunStore(Path(config.state_path).parent)
+
+
 async def upsert_workspace_setting(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -276,10 +325,55 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "expected an object"}, status_code=400)
     route_name = request.path_params.get("name")
+    requested = str(body.get("name") or "").strip() if route_name else ""
     if route_name:
         body = {**body, "name": route_name}
     # Serialized with archive and restore; see ``_workspace_archive_lock``.
     async with _workspace_archive_lock(request):
+        renamed: dict[str, str] | None = None
+        if route_name and requested and requested != route_name:
+            # A PATCH carrying a different name renames the workspace first;
+            # the rest of the save below then applies to the new record.
+            # The submitted settings are validated against the renamed record
+            # BEFORE the rename runs: otherwise an invalid provider, color or
+            # tool list would 400 after the registry, the references and (on
+            # a re-rooted install) the directory had already moved.
+            from ciao.workspace_rename import (  # noqa: PLC0415
+                WorkspaceRenameBusy,
+                preview_renamed_config,
+                rename_workspace,
+            )
+
+            old_existing = config.workspace(str(route_name))
+            if old_existing is not None:
+                try:
+                    _workspace_from_request(
+                        {**body, "name": requested},
+                        config=config,
+                        existing=preview_renamed_config(
+                            old_existing, old=str(route_name), new=requested
+                        ),
+                    )
+                except ValueError as exc:
+                    return JSONResponse({"error": str(exc)}, status_code=400)
+            try:
+                renamed = rename_workspace(
+                    config,
+                    old=str(route_name),
+                    new=requested,
+                    projects=getattr(
+                        request.app.state, "project_chat_manager", None
+                    ),
+                    schedules=_rename_schedule_store(request),
+                    webhooks=_rename_webhook_store(request),
+                    imports=_rename_import_store(request),
+                    runs=_rename_run_store(request),
+                )
+            except WorkspaceRenameBusy as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            body = {**body, "name": requested}
         existing = config.workspace(str(body.get("name", "")).strip())
         try:
             workspace = _workspace_from_request(body, config=config, existing=existing)
@@ -296,6 +390,8 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         _persist_workspaces(config)
         _refresh_project_manager_workspaces(request)
         payload = _workspaces_payload(config)
+        if renamed is not None:
+            payload["renamed"] = renamed
         if created:
             payload["bootstrapped"] = await _bootstrap_new_agent_root(config, workspace.name)
         elif profile_changed:
@@ -326,6 +422,8 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
                     "Could not resync skills for workspace %s after profile change",
                     workspace.name,
                 )
+        if renamed is not None:
+            _publish_workspaces_changed(request, renamed["from"], renamed["to"])
         return JSONResponse(payload, status_code=201 if created else 200)
 
 
@@ -413,20 +511,28 @@ def _publish_automations_changed(request: Request) -> None:
         logger.debug("Could not publish automations_changed", exc_info=True)
 
 
-def _publish_workspaces_changed(request: Request) -> None:
+def _publish_workspaces_changed(
+    request: Request, old: str | None = None, new: str | None = None
+) -> None:
     """Tell every open client the workspace registry changed.
 
     Other tabs and devices only see ``project_*`` frames when a workspace is
     archived or restored; without this their workspace list and active
-    workspace stayed stale until a reload. Carries no payload: clients refetch
-    ``/api/workspaces``. Fire-and-forget, like ``schedules_changed``.
+    workspace stayed stale until a reload. Carries no payload by default:
+    clients refetch ``/api/workspaces``. A rename passes the pair, so a
+    client can follow the workspace without a second fetch.
+    Fire-and-forget, like ``schedules_changed``.
     """
     pcm = getattr(request.app.state, "project_chat_manager", None)
     events = getattr(pcm, "events", None)
     if events is None:
         return
     try:
-        events.publish({"type": "workspaces_changed"})
+        payload: dict[str, str] = {"type": "workspaces_changed"}
+        if old and new:
+            payload["from"] = old
+            payload["to"] = new
+        events.publish(payload)
     except Exception:  # noqa: BLE001 - a missed nudge only delays a refresh
         logger.debug("Could not publish workspaces_changed", exc_info=True)
 
@@ -1610,8 +1716,22 @@ async def project_detail(request: Request) -> JSONResponse:
 async def project_complete(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
+    raw = await request.body()
+    if raw:
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    else:
+        body = {}
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    outcome = body.get("outcome", "completed")
+    note = body.get("note", "")
+    if not isinstance(outcome, str) or not isinstance(note, str):
+        return JSONResponse({"error": "outcome and note must be strings"}, status_code=400)
     try:
-        result = pcm.complete_project(project_id)
+        result = pcm.complete_project(project_id, outcome=outcome, note=note)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(result)
@@ -2188,7 +2308,7 @@ def _chat_pin_request(body: dict) -> tuple[str, int]:
     return raw_path.strip(), revision
 
 
-def _resolve_pin_path(config, raw_path: str) -> Path | Response:
+def _resolve_pin_path(config, raw_path: str, *, agent_root: Path | None = None) -> Path | Response:
     """Resolve a nonempty manual pin path to the identity that gets stored.
 
     Reuses the viewer's resolver with fuzzy matching off. A pin is an identity
@@ -2198,6 +2318,8 @@ def _resolve_pin_path(config, raw_path: str) -> Path | Response:
     directory is answered with its own 404 and needs no second check here.
     """
     roots = _allowed_roots(config)
+    if agent_root is not None:
+        roots = [agent_root, *roots]
     resolved = _resolve_workspace_path(roots, raw_path, allow_fuzzy=False)
     if isinstance(resolved, Response):
         return resolved
@@ -2296,7 +2418,9 @@ async def _chat_pin_patch(
 
     path = ""
     if raw_path:
-        resolved = _resolve_pin_path(request.app.state.config, raw_path)
+        resolved = _resolve_pin_path(
+            request.app.state.config, raw_path, agent_root=pcm._agent_root_for_chat(chat_id)
+        )
         if isinstance(resolved, Response):
             return resolved
         # Store the canonical absolute POSIX identity: relative and `~` forms
@@ -3133,7 +3257,7 @@ async def image_blob(request: Request) -> Response:
 _WORKSPACE_FILE_EXTS = frozenset({
     ".md", ".markdown", ".txt",
     ".py", ".ts", ".tsx", ".js", ".jsx", ".vue",
-    ".css", ".html", ".json",
+    ".css", ".html", ".htm", ".json",
     ".yaml", ".yml", ".toml",
     ".sh", ".rs", ".go", ".java", ".xml", ".sql",
     ".cfg", ".ini", ".log", ".csv",
@@ -3156,6 +3280,83 @@ _WORKSPACE_IMAGE_EXTS = frozenset({
 _WORKSPACE_IMAGE_MAX_BYTES = 15 * 1024 * 1024  # 15 MB
 
 
+
+
+def _is_same_chat_target(requested: str, found: Path) -> bool:
+    """Whether a fuzzy match is the file a chat link named.
+
+    Fuzzy search may drop leading directories or the extension, which can pick
+    `scripts/report.py` for a missing `report.md`. A match is accepted only
+    when it has the requested basename, or when its trailing path parts equal
+    the requested ones. Case is ignored in both comparisons.
+    """
+    wanted = Path(requested)
+    if found.name.lower() == wanted.name.lower():
+        return True
+    count = len(wanted.parts)
+    if count > len(found.parts):
+        return False
+    return [p.lower() for p in found.parts[-count:]] == [p.lower() for p in wanted.parts]
+
+
+def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
+    """Resolve a chat link against the chat's own roots only.
+
+    Each root is tried on its own, exact matches before fuzzy ones, so a
+    fuzzy match can only land inside a root the chat owns. Passing the roots
+    together would let relative-path fuzzy search reach just the first one,
+    and a single-root call per attempt keeps every search inside its root.
+    A fuzzy match is kept only if it is the requested file (see
+    ``_is_same_chat_target``). A root nested inside an earlier root is skipped
+    for the fuzzy pass, since that earlier root's search already covers it.
+    """
+    for root in roots:
+        result = _resolve_workspace_path([root], raw, allow_fuzzy=False)
+        if not isinstance(result, Response) or result.status_code != 404:
+            return result
+    requested = _LINE_SUFFIX_RE.sub("", raw)
+    fuzzy_roots = [
+        root for index, root in enumerate(roots)
+        if not any(root.is_relative_to(earlier) for earlier in roots[:index])
+    ]
+    for root in fuzzy_roots:
+        found = _resolve_workspace_path([root], raw, allow_fuzzy=True)
+        if isinstance(found, Path):
+            if _is_same_chat_target(requested, found):
+                return found
+        elif found.status_code != 404:
+            return found
+    return JSONResponse({"error": "not found"}, status_code=404)
+
+
+async def chat_file_path(request: Request) -> Response:
+    """Canonical file identity for a link emitted in a chat's workspace.
+
+    Resolves against the chat's agent root and its workspace vault root, and
+    nothing else. A missing file must not match a same-named file in another
+    workspace, so fuzzy matching is confined to those two roots. Absolute
+    paths retain the viewer's existing policy.
+    """
+    pcm = request.app.state.project_chat_manager
+    config = request.app.state.config
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "chat not found"}, status_code=404)
+    workspace = pcm._workspace_for_chat(chat_id)
+    roots = list(dict.fromkeys([
+        config.agent_root(workspace).resolve(),
+        config.workspace_vault_root(workspace).resolve(),
+    ]))
+    # The fuzzy pass walks the directory tree, so it runs off the event loop.
+    result = await asyncio.to_thread(
+        _resolve_chat_file, roots, request.query_params.get("path", "").strip()
+    )
+    if isinstance(result, Response):
+        return result
+    extensions = _WORKSPACE_FILE_EXTS | _WORKSPACE_IMAGE_EXTS | _WORKSPACE_BINARY_EXTS
+    if result.suffix.lower() not in extensions:
+        return JSONResponse({"error": "unsupported type"}, status_code=415)
+    return JSONResponse({"path": result.as_posix()})
 
 
 async def workspace_file(request: Request) -> Response:
@@ -5226,15 +5427,11 @@ async def list_models(request: Request) -> JSONResponse:
     # Claude Code serves one upstream, so its models are a single list rather
     # than the work/personal split the routing-backend era needed.
     claude_models = list(CLAUDE_MODELS)
-    claude_default = (
-        config.claude_default_model
-        if config.claude_default_model in claude_models
-        else claude_models[0]
-    )
+    claude_default = config.default_model_for_provider("claude") or config.claude_default_model
 
     return JSONResponse({
         "models": list(CLAUDE_MODELS),
-        "default": config.claude_default_model,
+        "default": claude_default,
         "provider_models": {
             "claude": claude_models,
             "opencode": opencode_models,
@@ -5289,7 +5486,7 @@ def _routines_payload(config, app_settings) -> dict:
         # Per-provider default thinking level for new chats, as stored.
         "provider_default_thinking": s.provider_default_thinking or {},
         # Per-provider Session insights models, as stored (missing = that
-        # provider's default chat model).
+        # source chat's model).
         "provider_insights_models": s.provider_insights_models or {},
         "critique_models_effective": critique_effective,
         # Server settings that used to be workspace `.env` variables, as
@@ -9271,6 +9468,7 @@ def _update_task_row(status: "update_tasks.TaskStatus", pcm: Any) -> dict[str, A
     attempt, not a check. A surface that rendered one of them under the other's
     name would claim a task was re-checked when an operator merely declined it.
     """
+    from ciao.update_task_catalog import shown_since_version
     from ciao.web.update_task_launch import _live_chat
 
     task = status.task
@@ -9282,7 +9480,7 @@ def _update_task_row(status: "update_tasks.TaskStatus", pcm: Any) -> dict[str, A
         "scope": task.scope,
         "title": task.title,
         "why": task.why,
-        "since_version": task.since_version,
+        "since_version": shown_since_version(task.since_version),
         "status": state.lifecycle if state is not None else "offered",
         "applicability": status.applicability.status,
         "applicability_checked_at": status.applicability.checked_at,

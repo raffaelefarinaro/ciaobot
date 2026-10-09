@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from ciao.execution_modes import harness_skill_overrides
+from ciao.fs_sandbox import FsSandboxUnavailable
 from ciao.models import AgentRequest, ImageAttachment
 from ciao.providers.base import (
     build_claude_message_content,
     build_prompt,
 )
 from ciao.providers.claude import ClaudeProvider, _sdk_permission_mode
+from ciao.providers.opencode import OpencodeProvider
 
 
 @pytest.fixture
@@ -988,7 +991,7 @@ def test_opencode_manual_and_plan_modes_add_no_allow_rules(mode: str) -> None:
     """The same carve-out on the other provider."""
     from ciao.providers.opencode import mode_settings
 
-    _agent, rules = mode_settings(mode)  # type: ignore[arg-type]
+    _agent, rules = mode_settings(mode)
     resources = " ".join(str(rule.get("resource") or "") for rule in rules)
     assert "ciao schedule create" not in resources
     assert "ciao memory update" not in resources
@@ -1094,3 +1097,335 @@ def test_extract_effective_model_keeps_first_entry_without_token_counts() -> Non
     msg = SimpleNamespace(model_usage={"claude-sonnet-5": {}, "claude-haiku-4-5": {}})
     assert ClaudeProvider._extract_effective_model(msg) == "claude-sonnet-5"
     assert ClaudeProvider._extract_effective_model(SimpleNamespace(model_usage=None)) == ""
+
+
+def test_turn_model_is_the_main_call_not_a_helper_with_more_output() -> None:
+    # Issue #1224: a one-line sonnet reply lost to a haiku helper call that
+    # produced more output tokens, so the footer named haiku.
+    result = SimpleNamespace(
+        model_usage={
+            "claude-sonnet-5-5": {"outputTokens": 6},
+            "claude-haiku-5-5": {"outputTokens": 40},
+        }
+    )
+    main = SimpleNamespace(model="claude-sonnet-5-5")
+    assert ClaudeProvider._extract_effective_model(result) == "claude-haiku-5-5"
+    assert ClaudeProvider._turn_effective_model(result, main) == "claude-sonnet-5-5"
+
+
+def test_turn_model_falls_back_to_model_usage_without_a_main_call() -> None:
+    result = SimpleNamespace(
+        model_usage={"claude-opus-5-5": {"outputTokens": 533}, "claude-haiku-5-5": {"outputTokens": 40}}
+    )
+    assert ClaudeProvider._turn_effective_model(result, None) == "claude-opus-5-5"
+    assert ClaudeProvider._turn_effective_model(None, None) == ""
+
+
+@pytest.mark.asyncio
+async def test_claude_workspace_scope_sets_sandbox_and_roots(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
+    monkeypatch.setattr(sys, "platform", "darwin")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    agent_root = tmp_path / "agent"
+    vault_root = tmp_path / "vault"
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(agent_root), str(vault_root)),
+    )
+
+    await provider._ensure_connected(request)
+
+    options = captured["options"]
+    sandbox = options.sandbox
+    assert sandbox["enabled"] is True
+    assert sandbox["autoAllowBashIfSandboxed"] is True
+    assert sandbox["allowUnsandboxedCommands"] is False
+    assert sandbox["excludedCommands"] == []
+    assert sandbox["filesystem"]["allowRead"][:2] == [str(agent_root), str(vault_root)]
+    assert sandbox["filesystem"]["allowWrite"] == [str(agent_root), str(vault_root)]
+    assert sandbox["filesystem"]["denyRead"] == [str(Path.home())]
+    # The vault sits outside the agent root, so the CLI also gets it as an add dir.
+    assert [str(path) for path in options.add_dirs] == [str(vault_root)]
+    # The CLI's own file tools are outside the Bash sandbox; a hook confines them.
+    matchers = options.hooks["PreToolUse"]
+    guard = [m for m in matchers if "Read" in (m.matcher or "").split("|")]
+    assert len(guard) == 1
+    assert set(guard[0].matcher.split("|")) >= {"Read", "Write", "Edit", "Glob", "Grep"}
+    assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
+
+
+@pytest.mark.asyncio
+async def test_claude_workspace_scope_keeps_vault_inside_agent_root_out_of_add_dirs(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
+    monkeypatch.setattr(sys, "platform", "darwin")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    agent_root = tmp_path / "agent"
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="normal",
+        agent_fs_scope="workspace",
+        agent_roots=(str(agent_root), str(agent_root / "memory-vault")),
+    )
+
+    await provider._ensure_connected(request)
+
+    options = captured["options"]
+    assert options.sandbox["autoAllowBashIfSandboxed"] is False
+    assert options.add_dirs == []
+
+
+@pytest.mark.asyncio
+async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(prompt="test", model="sonnet", mode="auto")
+
+    await provider._ensure_connected(request)
+
+    options = captured["options"]
+    assert options.sandbox is None
+    assert options.add_dirs == []
+    assert [m.matcher for m in options.hooks["PreToolUse"]] == ["Bash", "Monitor"]
+    assert options.settings == json.dumps({"skillOverrides": harness_skill_overrides()})
+
+
+@pytest.mark.asyncio
+async def test_claude_workspace_scope_refuses_on_windows(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    constructed = []
+
+    class FakeClient:
+        def __init__(self, options):
+            constructed.append(options)
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    monkeypatch.setattr(sys, "platform", "win32")
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(tmp_path / "agent"),),
+    )
+
+    with pytest.raises(FsSandboxUnavailable):
+        await provider._ensure_connected(request)
+    assert constructed == []
+
+
+@pytest.mark.asyncio
+async def test_claude_scope_change_reconnects_live_process(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    # The sandbox is POSIX-only; Windows refuses workspace scope (its own test).
+    monkeypatch.setattr(sys, "platform", "darwin")
+    from ciao.models import provider_reuse_key
+
+    captured = {"disconnects": 0, "constructed": 0}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["constructed"] += 1
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(tmp_path / "agent"),),
+    )
+    # A live machine-scope process, unsandboxed, with a matching control token.
+    provider._client = object()
+    provider._connected = True
+    provider._mcp_token = provider_reuse_key(request)
+    provider._fs_scope_key = ("machine", ())
+
+    async def fake_disconnect() -> None:
+        captured["disconnects"] += 1
+        provider._client = None
+        provider._connected = False
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+
+    await provider._ensure_connected(request)
+
+    assert captured["disconnects"] == 1
+    assert captured["constructed"] == 1
+    assert captured["options"].sandbox["enabled"] is True
+# -- OpenCode server filesystem scope (issue #1150) ---------------------------
+
+
+class _SpawnCaptured(Exception):
+    """Stops ``_start_server_once`` right after the spawn argv is recorded."""
+
+
+def _opencode_scope_fixture(tmp_path: Path, scope: str):
+    roots = (str(tmp_path / "agent"), str(tmp_path / "vault")) if scope == "workspace" else ()
+    request = AgentRequest(
+        prompt="hi",
+        model="model",
+        mode="auto",
+        agent_fs_scope=scope,
+        agent_roots=roots,
+    )
+    return OpencodeProvider(tmp_path), request
+
+
+def _capture_spawn(monkeypatch, envs: list[dict] | None = None) -> list[tuple[str, ...]]:
+    spawned: list[tuple[str, ...]] = []
+
+    async def fake_spawn(*argv, **kwargs):
+        spawned.append(argv)
+        if envs is not None:
+            envs.append(kwargs.get("env") or {})
+        raise _SpawnCaptured
+
+    monkeypatch.setattr("ciao.providers.opencode._spawn_server", fake_spawn)
+    return spawned
+
+
+async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypatch):
+    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    envs: list[dict] = []
+    spawned = _capture_spawn(monkeypatch, envs)
+    calls: list[tuple[list[Path], list[Path]]] = []
+    xdg = tmp_path / "xdg"
+    for name in ("DATA", "STATE", "CONFIG"):
+        monkeypatch.setenv(f"XDG_{name}_HOME", str(xdg / name.lower()))
+    (xdg / "config" / "opencode").mkdir(parents=True)
+    binary = tmp_path / "install" / "bin" / "opencode"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("", encoding="utf-8")
+
+    def fake_prefix(*, roots, read_only=()):
+        calls.append((list(roots), list(read_only)))
+        return ["sandbox-exec", "-p", "PROFILE"]
+
+    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", fake_prefix)
+
+    with pytest.raises(_SpawnCaptured):
+        await provider._start_server_once(request, str(binary))
+
+    roots, read_only = calls[0]
+    assert roots[:2] == [tmp_path / "agent", tmp_path / "vault"]
+    sandbox_cache = Path.home() / ".cache" / "ciaobot-opencode-sandbox"
+    # The server writes its data and state, and a cache no unconfined server
+    # loads. Its config and install are code an unconfined server runs later,
+    # so they are readable only (#1174).
+    assert (xdg / "data" / "opencode").resolve() in roots
+    assert (xdg / "state" / "opencode").resolve() in roots
+    assert (sandbox_cache / "opencode").resolve() in roots
+    assert read_only == [(xdg / "config" / "opencode").resolve(), (tmp_path / "install").resolve()]
+    assert not set(read_only) & set(roots)
+    assert envs[0]["XDG_CACHE_HOME"] == str(sandbox_cache)
+    argv = spawned[0]
+    assert argv[:3] == ("sandbox-exec", "-p", "PROFILE")
+    assert argv[3:6] == (str(binary), "serve", "--port")
+    assert argv[7:] == ("--hostname", "127.0.0.1")
+
+
+async def test_opencode_machine_scope_spawns_the_binary_directly(tmp_path, monkeypatch):
+    provider, request = _opencode_scope_fixture(tmp_path, "machine")
+    spawned = _capture_spawn(monkeypatch)
+
+    def no_prefix(*, roots, read_only=()):
+        raise AssertionError("machine scope must not build a sandbox prefix")
+
+    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", no_prefix)
+
+    with pytest.raises(_SpawnCaptured):
+        await provider._start_server_once(request, "/bin/opencode")
+
+    argv = spawned[0]
+    assert argv[0] == "/bin/opencode"
+    assert argv[1:2] == ("serve",)
+    assert argv[-2:] == ("--hostname", "127.0.0.1")
+
+
+async def test_opencode_workspace_scope_does_not_spawn_when_the_sandbox_is_missing(
+    tmp_path, monkeypatch
+):
+    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    spawned = _capture_spawn(monkeypatch)
+
+    def missing_sandbox(*, roots, read_only=()):
+        raise FsSandboxUnavailable("no sandbox tool")
+
+    monkeypatch.setattr("ciao.providers.opencode.opencode_sandbox_prefix", missing_sandbox)
+
+    with pytest.raises(FsSandboxUnavailable, match="no sandbox tool"):
+        await provider._start_server_once(request, "/bin/opencode")
+
+    assert spawned == []
+
+
+async def test_opencode_scope_change_restarts_the_live_server(tmp_path, monkeypatch):
+    from ciao.models import provider_reuse_key
+
+    provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    live = object()
+    provider._client = live
+    provider._process = SimpleNamespace(returncode=None)
+    provider._mcp_token = provider_reuse_key(request)
+    provider._fs_scope_key = ("machine", ())
+    events: list[str] = []
+
+    async def fake_disconnect():
+        events.append("disconnect")
+        provider._client = None
+        provider._process = None
+
+    async def fake_start(req, binary):
+        events.append("start")
+        return "fresh"
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    monkeypatch.setattr(provider, "_start_server_once", fake_start)
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda env: "/bin/opencode")
+
+    assert await provider._ensure_server(request) == "fresh"
+    assert events == ["disconnect", "start"]
+
+    # Same scope and roots: the live server is reused.
+    provider._client = live
+    provider._process = SimpleNamespace(returncode=None)
+    provider._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
+    assert await provider._ensure_server(request) is live

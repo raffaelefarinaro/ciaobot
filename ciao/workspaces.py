@@ -18,6 +18,7 @@ from ciao import provider_registry
 from ciao.config import (
     DEFAULT_WORKSPACE_COLOR,
     WorkspaceConfig,
+    coerce_agent_fs_scope,
     coerce_workspace_color,
 )
 
@@ -87,6 +88,10 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         color = coerce_workspace_color(getattr(workspace, "color", DEFAULT_WORKSPACE_COLOR))
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
+    try:
+        agent_fs_scope = coerce_agent_fs_scope(getattr(workspace, "agent_fs_scope", None))
+    except ValueError:
+        agent_fs_scope = None
     # A stored value naming a removed backend (e.g. pre-refactor "ollama") is
     # reported as the provider that actually runs the workspace. The PWA
     # renders this into a <select> limited to the provider options, so an
@@ -110,6 +115,7 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         ),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
+        "agent_fs_scope": agent_fs_scope,
     }
 
 
@@ -212,6 +218,12 @@ def workspace_from_request(
             color = DEFAULT_WORKSPACE_COLOR
     else:
         color = DEFAULT_WORKSPACE_COLOR
+    if "agent_fs_scope" in data:
+        agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
+    elif existing is not None:
+        agent_fs_scope = existing.agent_fs_scope
+    else:
+        agent_fs_scope = None
     return WorkspaceConfig(
         name=name,
         # Vault locations are not an editable Settings field. Updating a
@@ -230,6 +242,7 @@ def workspace_from_request(
         allowed_mcp_servers=allowed_mcp_servers,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
         color=color,
+        agent_fs_scope=agent_fs_scope,
     )
 
 

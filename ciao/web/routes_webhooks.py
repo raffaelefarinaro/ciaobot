@@ -32,6 +32,7 @@ from starlette.responses import JSONResponse, Response
 from ciao.webhooks import (
     INVALID_RECEIPT,
     INVALID_TRIGGER,
+    MODE_REMOVED_ERROR,
     NOT_FOUND,
     RECEIPTS_HISTORY_LIMIT,
     RECEIPT_UNAVAILABLE,
@@ -146,6 +147,8 @@ async def webhook_create(request: Request) -> JSONResponse:
     body = await _read_dict_body(request)
     if isinstance(body, JSONResponse):
         return body
+    if "mode" in body:
+        return JSONResponse({"error": MODE_REMOVED_ERROR}, status_code=400)
     error = _require_registered_workspace(config, body.get("workspace"))
     if error is not None:
         return JSONResponse({"error": error}, status_code=400)
@@ -156,8 +159,6 @@ async def webhook_create(request: Request) -> JSONResponse:
     }
     if body.get("project_id") is not None:
         arguments["project_id"] = body.get("project_id")
-    if body.get("mode") is not None:
-        arguments["mode"] = body.get("mode")
     try:
         trigger, secret = await asyncio.to_thread(_store(request).create, **arguments)
     except WebhookStoreError as exc:

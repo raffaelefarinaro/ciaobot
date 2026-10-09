@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.models import AgentRequest
 from ciao.sessions import StateStore
 from ciao.tool_path import engine_bin_dir, prepend_engine_path
@@ -44,6 +44,16 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        # These tests check the turn env, not the sandbox: whole-machine scope
+        # keeps the spawn unwrapped on every platform (Linux CI has no bwrap,
+        # Windows has no sandbox).
+        workspaces={
+            "personal": WorkspaceConfig(
+                name="personal",
+                vault_root="memory-vault/personal",
+                agent_fs_scope="machine",
+            )
+        },
     )
     return attach_stub_mcp(ProjectChatManager(
         config,
@@ -121,6 +131,21 @@ def test_prepend_engine_path_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert entries[0] == engine_bin_dir()
     assert entries[1:] == ["/user/bin"]
+
+
+def test_prepend_engine_path_does_not_multiply_inherited_repeats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PATH that already repeats a directory comes back with each one once, the
+    engine dir first, however many times it is composed."""
+    node_bin = "/Users/u/.nvm/versions/node/v22.23.2/bin"
+    monkeypatch.setenv("PATH", os.pathsep.join([node_bin, node_bin, "/user/bin", node_bin]))
+
+    once = prepend_engine_path()
+    twice = prepend_engine_path(once)
+
+    assert twice == once
+    assert once.split(os.pathsep) == [engine_bin_dir(), node_bin, "/user/bin"]
 
 
 def test_prepend_engine_path_accepts_an_explicit_path() -> None:

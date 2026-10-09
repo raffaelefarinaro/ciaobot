@@ -17,12 +17,12 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ChatPinConflictError, ProjectChatManager
-from ciao.web.routes_api import chat_detail
+from ciao.web.routes_api import chat_detail, chat_file_path
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
@@ -59,7 +59,10 @@ def _restart(manager: ProjectChatManager) -> ProjectChatManager:
 
 def _make_client(manager: ProjectChatManager) -> TestClient:
     app = Starlette(
-        routes=[Route("/api/chats/{chat_id}", chat_detail, methods=["PATCH"])]
+        routes=[
+            Route("/api/chats/{chat_id}", chat_detail, methods=["PATCH"]),
+            Route("/api/chats/{chat_id}/file-path", chat_file_path, methods=["GET"]),
+        ]
     )
     app.state.project_chat_manager = manager
     app.state.config = manager._config
@@ -69,6 +72,158 @@ def _make_client(manager: ProjectChatManager) -> TestClient:
 def _one_chat(manager: ProjectChatManager):
     project = manager.create_project("Pins", workspace="work")
     return manager.create_chat(project.project_id, title="Pinned")
+
+
+@pytest.mark.parametrize("suffix", [".md", ".html", ".htm", ".pdf", ".png"])
+def test_chat_file_identity_uses_agent_root(tmp_path, monkeypatch, suffix):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    root = tmp_path / "work"
+    root.mkdir()
+    relative = f"draft{suffix}"
+    (root / relative).write_text("correct workspace")
+    (tmp_path / relative).write_text("wrong workspace")
+    monkeypatch.setattr(CiaoConfig, "agent_root", lambda self, workspace: root)
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": relative}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"path": (root / relative).as_posix()}
+
+
+def test_pin_relative_path_uses_chat_agent_root(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    root = tmp_path / "work"
+    root.mkdir()
+    (root / "draft.md").write_text("correct workspace")
+    (tmp_path / "draft.md").write_text("wrong workspace")
+    monkeypatch.setattr(CiaoConfig, "agent_root", lambda self, workspace: root)
+    response = _make_client(manager).patch(
+        f"/api/chats/{chat.chat_id}",
+        json={"pin": {"path": "draft.md", "expected_revision": 0}},
+    )
+    assert response.status_code == 200
+    assert response.json()["pinned_file_path"] == (root / "draft.md").as_posix()
+
+
+def test_chat_file_identity_missing_target_never_searches_another_workspace(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    (tmp_path / "draft.md").write_text("wrong workspace")
+    monkeypatch.setattr(CiaoConfig, "agent_root", lambda self, workspace: tmp_path / "work")
+    client = _make_client(manager)
+    assert client.get(f"/api/chats/{chat.chat_id}/file-path", params={"path": "draft.md"}).status_code == 404
+    assert client.get("/api/chats/missing/file-path", params={"path": "draft.md"}).status_code == 404
+
+
+def _route_workspaces(manager: ProjectChatManager, monkeypatch, tmp_path: Path) -> dict[str, Path]:
+    """Register two workspaces, each with its own agent root and vault root under tmp_path."""
+    roots = {}
+    for name in ("work", "other"):
+        roots[name] = tmp_path / name
+        (tmp_path / name / "vault").mkdir(parents=True)
+        manager._config.workspaces[name] = WorkspaceConfig(name=name, vault_root=f"{name}/vault")
+    monkeypatch.setattr(
+        CiaoConfig, "agent_root", lambda self, workspace: roots[workspace]
+    )
+    monkeypatch.setattr(
+        CiaoConfig,
+        "workspace_vault_root",
+        lambda self, workspace: roots[workspace] / "vault",
+    )
+    return roots
+
+
+def test_chat_file_bare_filename_resolves_inside_agent_root(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    roots = _route_workspaces(manager, monkeypatch, tmp_path)
+    (roots["work"] / "notes").mkdir()
+    (roots["work"] / "notes" / "plan.md").write_text("in the chat workspace")
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": "plan.md"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"path": (roots["work"] / "notes" / "plan.md").as_posix()}
+
+
+def test_chat_file_vault_relative_path_resolves_inside_workspace_vault(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    roots = _route_workspaces(manager, monkeypatch, tmp_path)
+    (roots["work"] / "vault" / "people").mkdir()
+    (roots["work"] / "vault" / "people" / "ana.md").write_text("vault note")
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": "people/ana.md"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "path": (roots["work"] / "vault" / "people" / "ana.md").as_posix()
+    }
+
+
+def test_chat_file_same_name_in_other_workspace_is_404(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    roots = _route_workspaces(manager, monkeypatch, tmp_path)
+    (roots["other"] / "draft.md").write_text("other workspace")
+    (roots["other"] / "vault" / "people").mkdir()
+    (roots["other"] / "vault" / "people" / "ana.md").write_text("other vault")
+    client = _make_client(manager)
+    url = f"/api/chats/{chat.chat_id}/file-path"
+    assert client.get(url, params={"path": "draft.md"}).status_code == 404
+    assert client.get(url, params={"path": "people/ana.md"}).status_code == 404
+
+
+def test_chat_file_fuzzy_stem_only_match_is_404(tmp_path, monkeypatch):
+    """A missing report.md must not open scripts/report.py."""
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    roots = _route_workspaces(manager, monkeypatch, tmp_path)
+    (roots["work"] / "scripts").mkdir()
+    (roots["work"] / "scripts" / "report.py").write_text("print('not the note')")
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": "report.md"}
+    )
+    assert response.status_code == 404
+
+
+def test_chat_file_fuzzy_same_suffix_in_other_folder_resolves(tmp_path, monkeypatch):
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    roots = _route_workspaces(manager, monkeypatch, tmp_path)
+    (roots["work"] / "notes").mkdir()
+    (roots["work"] / "notes" / "report.md").write_text("the note")
+    (roots["work"] / "scripts").mkdir()
+    (roots["work"] / "scripts" / "report.py").write_text("print('not the note')")
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": "report.md"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"path": (roots["work"] / "notes" / "report.md").as_posix()}
+
+
+def test_chat_file_fuzzy_walks_nested_vault_once(tmp_path, monkeypatch):
+    """The vault sits under the agent root, so only the agent root is searched."""
+    import ciao.web.routes_helpers as helpers
+
+    manager = _make_manager(tmp_path)
+    chat = _one_chat(manager)
+    roots = _route_workspaces(manager, monkeypatch, tmp_path)
+    searched: list[list[Path]] = []
+    real_find = helpers._find_fuzzy_match
+
+    def recording_find(search_roots, candidate):
+        searched.append(list(search_roots))
+        return real_find(search_roots, candidate)
+
+    monkeypatch.setattr(helpers, "_find_fuzzy_match", recording_find)
+    response = _make_client(manager).get(
+        f"/api/chats/{chat.chat_id}/file-path", params={"path": "missing.md"}
+    )
+    assert response.status_code == 404
+    assert searched == [[roots["work"]]]
 
 
 def _registry(tmp_path: Path) -> dict:

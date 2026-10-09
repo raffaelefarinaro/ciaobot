@@ -23,7 +23,7 @@ from starlette.testclient import TestClient
 
 from ciao.app_settings import AppSettingsStore
 from ciao.backup_service import SETUP_CHAT_TITLE, BackupService
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, default_agent_fs_scope
 from ciao.legacy_node_state import LegacyNodeState
 from ciao.local_session import LocalSessionManager
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
@@ -197,6 +197,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "disallowed_tools": None,
                 "allowed_mcp_servers": None,
                 "color": "pink",
+                "agent_fs_scope": None,
             },
             {
                 "name": "work",
@@ -206,6 +207,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "disallowed_tools": [],
                 "allowed_mcp_servers": None,
                 "color": "pink",
+                "agent_fs_scope": None,
             },
         ],
         "active": "personal",
@@ -214,6 +216,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
             {"value": "claude", "label": "Anthropic (via Claude Code)"},
             {"value": "opencode", "label": "opencode"},
         ],
+        "default_agent_fs_scope": default_agent_fs_scope(),
     }
 
 

@@ -32,6 +32,7 @@
         <a href="guide.html">Get started</a>
         <a href="features.html" aria-current="page">Features</a>
         <a href="memory.html">Memory</a>
+        <a href="https://github.com/raffaelefarinaro/ciaobot/releases">What's new</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
     </div>
@@ -62,6 +63,7 @@
         <h2>Tasks you can track and delegate</h2>
         <p>Keep the next steps in each workspace on a board: <strong>To do</strong>, <strong>In progress</strong>, <strong>In review</strong> and <strong>Done</strong>. Add a description, a project and a due date, and choose whether you or the agent will do the work.</p>
         <p><strong>Delegate to agent</strong> shows you what will be sent before starting a chat. Follow the work there and answer when it needs you. When the agent reports the task finished, the result waits for your review; <strong>Approve Done</strong> closes the task.</p>
+        <p>Approving a task asks for a resolution note, or an explicit complete without one. While a task is in progress, you or the working agent can add progress notes, which later resumes read. Completing a project asks whether it was completed or stopped, with an optional note.</p>
         <p>Task records stay in your vault as plain Markdown, alongside the context and notes they belong to.</p>
         <p class="how"><strong>How:</strong> <em>Tasks</em> in the sidebar, then <em>New task</em>. Open a task and choose <em>Delegate to agent</em> to have Ciaobot work on it.</p>
       </div>
@@ -112,7 +114,26 @@
       </figure>
     </div>
 
-    <div class="feature" id="google">
+    <div class="feature" id="webhooks">
+      <div class="feature-text">
+        <p class="eyebrow">Let other tools start the work</p>
+        <h2>Webhook triggers</h2>
+        <p>An automation runs at a time you pick. A <strong>webhook trigger</strong> runs when another tool tells it something happened: a build failed on GitHub, a form came in through Zapier, an n8n or Make workflow finished, Home Assistant saw the front door open. Each event opens a new chat that gets to work straight away.</p>
+        <p>You write the trigger's <strong>instructions</strong> once ("When a build fails, read the log, find the commit that broke it and draft a fix"). The sending tool adds the <strong>details</strong> for each event, such as the error, an order number or a link. The chat starts with your instructions and those details shown as quoted data. A sender can pass in data, but it can't add instructions or pick the workspace, project or model.</p>
+        <p>Any tool that can send an HTTP request works: a step in a GitHub Actions workflow, an HTTP node in n8n, Zapier's or Make's webhook action, a Home Assistant automation, a shell script. GitHub's built-in repository webhooks send their own format, so call Ciaobot from an Actions step instead. The sender has to be able to reach the computer Ciaobot runs on. For a cloud service, that means a route onto your <a href="remote.html">Tailscale network</a>, for example Tailscale's GitHub Action, or a self-hosted n8n on the same network.</p>
+        <p class="how"><strong>How:</strong> <em>Automations</em> in the sidebar, then <em>Webhook triggers</em>. Create one, copy its secret (it is shown only once), switch it on, and paste the URL and secret into the other tool. Or ask: "Set up a webhook so a failed nightly build opens a chat that finds the cause".</p>
+      </div>
+      <figure>
+        <pre><code>curl -X POST "http://100.101.102.103:8443/hooks/v1/$TRIGGER" \
+  -H "Authorization: Bearer $SECRET" \
+  -H "Idempotency-Key: build-4821" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Nightly build failed on main: test_auth timed out"}'</code></pre>
+        <figcaption>What a sender posts: the trigger's secret, a key so a retry isn't counted twice, and the event details as <code>text</code>.</figcaption>
+      </figure>
+    </div>
+
+    <div class="feature flip" id="google">
       <div class="feature-text">
         <p class="eyebrow">Mail, calendar, documents</p>
         <h2>Google Workspace, built in</h2>
@@ -125,7 +146,15 @@
       </figure>
     </div>
 
-    <div class="feature phone flip" id="devices">
+    <section class="narrow" id="file-access">
+      <p class="eyebrow">Stay in control</p>
+      <h2>File access</h2>
+      <p>Each workspace decides how much of your computer its agent can read. <strong>Workspace only</strong> keeps the agent's shell and file tools inside that workspace's folder. <strong>Whole machine</strong> lets it read any file you can read. A workspace with no File access choice uses Workspace only on macOS and Linux, and Whole machine on Windows, which has no sandbox.</p>
+      <p>Workspace only does not limit the network: the agent can still reach the internet and Ciaobot's own command-line tool. On Linux, the sandbox needs a one-time AppArmor setup on Ubuntu 23.10 and later (see the Linux guide in the GitHub repository).</p>
+      <p class="how"><strong>How:</strong> Settings → Workspaces → Edit, then <em>File access</em>. Each workspace row shows the value in effect.</p>
+    </section>
+
+    <div class="feature phone" id="devices">
       <div class="feature-text">
         <p class="eyebrow">Wherever you are</p>
         <h2>From any device</h2>
@@ -148,7 +177,7 @@
   <footer class="site-footer">
     <div class="inner">
       <span>Ciaobot is open source.</span>
-      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
+      <span><a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/releases">Release notes</a> · <a href="https://github.com/raffaelefarinaro/ciaobot/issues">Report an issue</a></span>
     </div>
   </footer>
   <script src="assets/site.js" defer></script>

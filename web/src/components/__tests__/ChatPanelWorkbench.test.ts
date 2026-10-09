@@ -190,7 +190,7 @@ describe('ChatPanel aligned layout', () => {
     // showing it never reflows the transcript.
     const actions = replies[0].get('.message-row > .message-actions')
     expect(actions.text()).toContain('Copy')
-    expect(actions.text()).toContain('Fork from here')
+    expect(actions.text()).toContain('Fork')
 
     const request = wrapper.findAll('.message-wrap.user')[0]
     expect(request.get('.message-row > .message-actions').text()).toContain('Copy')

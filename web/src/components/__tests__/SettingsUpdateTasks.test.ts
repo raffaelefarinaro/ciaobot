@@ -264,10 +264,76 @@ describe('which tasks belong in a history', () => {
     ]))
     const wrapper = mount(SettingsUpdateTasks)
     await flushPromises()
+    await button(wrapper, 'Show 1 done').trigger('click')
     expect(wrapper.findAll('.set-row')).toHaveLength(3)
     expect(wrapper.text()).toContain('Done')
     expect(wrapper.text()).toContain('Hidden')
     expect(wrapper.text()).toContain('Attempt failed')
+    wrapper.unmount()
+  })
+})
+
+describe('the version a row dates from', () => {
+  it('says which release a task is since', async () => {
+    apiGet.mockResolvedValue(listing([task({ id: 'v', since_version: '2.1.0' })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Since Ciaobot 2.1.0')
+    wrapper.unmount()
+  })
+
+  it('omits the Since text when the release is unknown, never 0.0.0', async () => {
+    apiGet.mockResolvedValue(listing([task({ id: 'u', since_version: '' })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    const row = wrapper.findAll('.set-row')[0]
+    expect(row.text()).not.toContain('Since Ciaobot')
+    expect(wrapper.text()).not.toContain('0.0.0')
+    expect(row.text()).toContain('Hidden')
+    wrapper.unmount()
+  })
+})
+
+describe('finished rows', () => {
+  it('folds verified-done rows away until asked, keeping the rest in view', async () => {
+    // A done row asks nothing of anyone; leading with it buries the hidden,
+    // failed and uncertain rows that might.
+    apiGet.mockResolvedValue(listing([
+      task({ id: 'c', title: 'Finished one', status: 'completed', applicability: 'not_applicable' }),
+      task({ id: 'd', title: 'Hidden one', status: 'dismissed' }),
+    ]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('Finished one')
+    expect(wrapper.text()).toContain('Hidden one')
+    const toggle = button(wrapper, 'Show 1 done')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+
+    await toggle.trigger('click')
+    expect(wrapper.text()).toContain('Finished one')
+    await button(wrapper, 'Hide done').trigger('click')
+    expect(wrapper.text()).not.toContain('Finished one')
+    wrapper.unmount()
+  })
+
+  it('keeps a completed row whose applicability is unknown in view', async () => {
+    apiGet.mockResolvedValue(listing([
+      task({ title: 'Uncertain one', status: 'completed', applicability: 'unknown' }),
+    ]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Uncertain one')
+    expect(buttonLabels(wrapper).some((l) => /done/i.test(l))).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('does not call an all-done history empty', async () => {
+    apiGet.mockResolvedValue(listing([task({ status: 'completed' })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('Nothing to show here yet')
+    expect(buttonLabels(wrapper)).toContain('Show 1 done')
     wrapper.unmount()
   })
 })
@@ -311,6 +377,7 @@ describe('the two clocks', () => {
     })]))
     const wrapper = mount(SettingsUpdateTasks)
     await flushPromises()
+    await button(wrapper, 'Show 1 done').trigger('click')
 
     // A completion check is what verified it, and the record's own time is when
     // that verdict was written — so "Verified" never borrows the check's stamp.
@@ -521,6 +588,7 @@ describe('reopening', () => {
     apiGet.mockResolvedValue(listing([task({ status: 'completed', suppressed: true })]))
     const wrapper = mount(SettingsUpdateTasks)
     await flushPromises()
+    await button(wrapper, 'Show 1 done').trigger('click')
     const labels = buttonLabels(wrapper)
     expect(labels.some((l) => /delete|remove|reset|clear/i.test(l))).toBe(false)
     wrapper.unmount()

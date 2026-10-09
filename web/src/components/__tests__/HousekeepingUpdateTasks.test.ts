@@ -227,6 +227,15 @@ describe('the group itself', () => {
   })
 })
 
+describe('the version a card dates from', () => {
+  it('omits the Since text when the release is unknown, never 0.0.0', async () => {
+    const { wrapper } = await mountGroup([task({ since_version: '' })])
+    expect(cards(wrapper)[0].text()).not.toContain('Since Ciaobot')
+    expect(cards(wrapper)[0].text()).not.toContain('0.0.0')
+    wrapper.unmount()
+  })
+})
+
 describe('one card per lifecycle', () => {
   it('offers Start and Hide for a task that applies', async () => {
     const { wrapper } = await mountGroup([task()])

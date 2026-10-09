@@ -35,142 +35,14 @@
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">What can Ciaobot do?</p>
-            <p class="hint">
-              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
-            </p>
-            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
-          </div>
-        </div>
-
-        <!-- Appearance -->
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">Appearance</p>
-            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
-          </div>
-          <div class="setting-row setting-row--inline setting-row--flush">
-            <div class="routine-info">
-              <span class="routine-name">Theme</span>
-              <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
-            </div>
-            <div class="settings-control">
-              <div class="instance-toggle">
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'dark' }"
-                  @click="setTheme('dark')"
-                >
-                  Dark
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'light' }"
-                  @click="setTheme('light')"
-                >
-                  Light
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'system' }"
-                  @click="setTheme('system')"
-                >
-                  System
-                </button>
-              </div>
-            </div>
-          </div>
-          <div class="setting-row setting-row--inline">
-            <div class="routine-info">
-              <span class="routine-name">Font size</span>
-              <span class="routine-detail">Adjust messages, code blocks, sidebars, and menus together.</span>
-            </div>
-            <div class="settings-control">
-              <div class="font-scale-row">
-                <button class="btn-small" @click="adjustFontScale(-FONT_SCALE_STEP)" :disabled="fontScale <= MIN_FONT_SCALE">Decrease</button>
-                <span class="font-scale-display">{{ fontScalePercent }}%</span>
-                <button class="btn-small" @click="adjustFontScale(FONT_SCALE_STEP)" :disabled="fontScale >= MAX_FONT_SCALE">Increase</button>
-                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Actions. This card is about the Ciaobot *program*: the checkout it
-             runs from, and whether it is up to date. It shares a repository and
-             a serialization with the memory backup below, but never the
-             meaning, so the two never share a label: this one is an explicit,
-             bidirectional hand-off of the program, the other is an unattended
-             one-way copy of the memory. -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">This host</p>
-              <p class="hint">
-                The Ciaobot program on this computer: send pending changes to its repository, or
-                restart to update it. Your memory and notes are backed up separately, below.
-              </p>
-            </div>
-            <div class="settings-card-header-actions">
-              <button
-                class="btn-secondary btn-small"
-                @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()"
-                :disabled="!!actionPending"
-                :title="localStatus?.git_repo
-                  ? 'Send pending changes in the Ciaobot program checkout to its repository, and pull what is there'
-                  : 'Save a local snapshot of the Ciaobot program checkout, with no remote configured'"
-              >
-                {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
-              </button>
-              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
-                {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
-              </button>
-            </div>
-          </div>
-          <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
-          <div v-if="hasDeployError" class="deploy-steps">
-            <div v-for="step in deploySteps.filter(s => !s.ok)" :key="step.step" class="deploy-step fail">
-              <span class="step-icon">&#10007;</span>
-              <div style="flex: 1; min-width: 0;">
-                <strong>{{ step.step }} failed</strong>
-                <pre v-if="step.output" class="deploy-step-error-output">{{ step.output }}</pre>
-              </div>
-            </div>
-            <div class="action-row action-row--spaced action-row--compact">
-              <button class="btn-primary" @click="fixDeployErrorInChat">
-                Fix in Chat
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Start at sign-in. The last host fact beside the program's own, and
-             a different thing from both: it changes whether the engine service
-             starts at the *next* sign-in, never the engine running now, and
-             never the optional app window SettingsAppInstall owns. -->
-        <SettingsEngineLogin />
-
-        <!-- Memory backup. The unattended, one-way copy of the user's memory,
-             right below the program's own repository controls so the two are
-             read together and never confused. The panel owns its data and its
-             actions; the only thing it cannot do alone is navigate to a chat,
-             so it emits the setup chat's id for this view to open. -->
-        <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
-
-        <SettingsInsights
-          :routines="routines"
-          :routines-saving="routinesSaving"
-          :save-routines="saveRoutines"
-        />
-
-        <!-- Package update -->
+        <!-- Package update. The first section of General. Up to date with nothing
+             in progress it is only its title and a status in the corner; every
+             other state is the full card, with its copy and its controls. -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">Updates</p>
-              <p class="hint">
+              <p v-if="!updatesCompact" class="hint">
                 <template v-if="packageStatus?.mode === 'bundled_app'">
                   This app updates by re-running the one-line installer.
                   <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
@@ -188,24 +60,18 @@
                 </template>
               </p>
             </div>
-            <div v-if="packageStatus && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '')" class="settings-card-header-actions">
+            <div v-if="packageStatus && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '') && packageStatus.update_available" class="settings-card-header-actions">
               <button
-                v-if="packageStatus.update_available"
                 class="btn-primary btn-small"
                 @click="openUpdatePanel"
                 :disabled="packageUpdating || showUpdatePanel"
               >
                 {{ `Update to ${packageStatus.latest_version}` }}
               </button>
-              <!-- Nothing to do: a status, not a disabled button. -->
-              <span v-else class="settings-status">Up to date<template v-if="packageStatus.current_version"> · {{ packageStatus.current_version }}</template></span>
             </div>
-            <!-- The same status for an engine this card can update: an installer
-                 with no job and nothing newer is up to date, and says so rather
-                 than leaving the card blank. -->
-            <div v-else-if="engineUpdateIdleAndCurrent" class="settings-card-header-actions">
-              <span class="settings-status">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
-            </div>
+            <!-- Nothing to do: the status sits in the corner as a badge, the
+                 same markup the Google Workspace section uses for its state. -->
+            <span v-else-if="updatesCompact" class="badge badge--success">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
           </div>
           <SkeletonLoader v-if="packageLoading && !packageStatus" label="Checking package status" :count="2" />
           <div v-else-if="packageStatus">
@@ -370,12 +236,151 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
-        <!-- Update task history. Sits directly under Updates on purpose: the
-             Home "After this update" group is where the work an update left
-             behind is offered, and this is the record of what became of it, so
-             the two are read together and never confused. It owns its own
-             fetch — Home may never have been opened in this session. -->
+        <!-- Installing is optional and the guidance is permanent: the Home setup
+             reminder can be closed for good, so Settings keeps the steps. -->
+        <SettingsAppInstall />
+
+        <!-- Notifications. -->
+        <SettingsNotifications />
+
+        <SettingsKeyboardShortcuts />
+
+        <!-- Update task history. Below the device sections on purpose: it is
+             usually empty, and its long explanation would push them down. It is
+             still the record of what the Home "After this update" group offered,
+             so it stays on General, and it owns its own fetch because Home may
+             never have been opened in this session. -->
         <SettingsUpdateTasks />
+
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">What can Ciaobot do?</p>
+            <p class="hint">
+              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
+            </p>
+            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
+          </div>
+        </div>
+
+        <!-- Appearance -->
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Appearance</p>
+            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
+          </div>
+          <div class="setting-row setting-row--inline setting-row--flush">
+            <div class="routine-info">
+              <span class="routine-name">Theme</span>
+              <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
+            </div>
+            <div class="settings-control">
+              <div class="instance-toggle">
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'dark' }"
+                  @click="setTheme('dark')"
+                >
+                  Dark
+                </button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'light' }"
+                  @click="setTheme('light')"
+                >
+                  Light
+                </button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'system' }"
+                  @click="setTheme('system')"
+                >
+                  System
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row setting-row--inline">
+            <div class="routine-info">
+              <span class="routine-name">Font size</span>
+              <span class="routine-detail">Adjust messages, code blocks, sidebars, and menus together.</span>
+            </div>
+            <div class="settings-control">
+              <div class="font-scale-row">
+                <button class="btn-small" @click="adjustFontScale(-FONT_SCALE_STEP)" :disabled="fontScale <= MIN_FONT_SCALE">Decrease</button>
+                <span class="font-scale-display">{{ fontScalePercent }}%</span>
+                <button class="btn-small" @click="adjustFontScale(FONT_SCALE_STEP)" :disabled="fontScale >= MAX_FONT_SCALE">Increase</button>
+                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Actions. This card is about the Ciaobot *program*: the checkout it
+             runs from, and whether it is up to date. It shares a repository and
+             a serialization with the memory backup below, but never the
+             meaning, so the two never share a label: this one is an explicit,
+             bidirectional hand-off of the program, the other is an unattended
+             one-way copy of the memory. -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">This host</p>
+              <p class="hint">
+                The Ciaobot program on this computer: send pending changes to its repository, or
+                restart to update it. Your memory and notes are backed up separately, below.
+              </p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button
+                class="btn-secondary btn-small"
+                @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()"
+                :disabled="!!actionPending"
+                :title="localStatus?.git_repo
+                  ? 'Send pending changes in the Ciaobot program checkout to its repository, and pull what is there'
+                  : 'Save a local snapshot of the Ciaobot program checkout, with no remote configured'"
+              >
+                {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
+              </button>
+              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
+                {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
+              </button>
+            </div>
+          </div>
+          <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
+          <div v-if="hasDeployError" class="deploy-steps">
+            <div v-for="step in deploySteps.filter(s => !s.ok)" :key="step.step" class="deploy-step fail">
+              <span class="step-icon">&#10007;</span>
+              <div style="flex: 1; min-width: 0;">
+                <strong>{{ step.step }} failed</strong>
+                <pre v-if="step.output" class="deploy-step-error-output">{{ step.output }}</pre>
+              </div>
+            </div>
+            <div class="action-row action-row--spaced action-row--compact">
+              <button class="btn-primary" @click="fixDeployErrorInChat">
+                Fix in Chat
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Start at sign-in. The last host fact beside the program's own, and
+             a different thing from both: it changes whether the engine service
+             starts at the *next* sign-in, never the engine running now, and
+             never the optional app window SettingsAppInstall owns. -->
+        <SettingsEngineLogin />
+
+        <!-- Memory backup. The unattended, one-way copy of the user's memory,
+             right below the program's own repository controls so the two are
+             read together and never confused. The panel owns its data and its
+             actions; the only thing it cannot do alone is navigate to a chat,
+             so it emits the setup chat's id for this view to open. -->
+        <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
+
+        <SettingsInsights
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
 
         <!-- Main workspace -->
         <div v-if="routines && routines.workspace_context" class="card">
@@ -522,15 +527,6 @@
           :save-routines="saveRoutines"
         />
 
-        <!-- Installing is optional and the guidance is permanent: the Home setup
-             reminder can be closed for good, so Settings keeps the steps. -->
-        <SettingsAppInstall />
-
-        <!-- Notifications. -->
-        <SettingsNotifications />
-
-        <SettingsKeyboardShortcuts />
-
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
           <div class="settings-card-header settings-card-header--split">
@@ -616,6 +612,7 @@
               </div>
             </div>
 
+            <p v-if="workspaceModelsError" class="hint hint--warn" role="alert">{{ workspaceModelsError }}</p>
             <div v-if="providerKeys.connections" class="provider-connections set-list">
               <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row set-row">
                 <div class="set-row-head provider-row-head">
@@ -720,7 +717,7 @@
                         :disabled="routinesSaving || !getProviderSection(String(connKey))?.available"
                         @update:model-value="saveProviderInsightsModel(String(connKey) as AliasProviderKey, $event)"
                       />
-                      <span v-else class="hint hint--compact">Automatic — same as the default model.</span>
+                      <span v-else class="hint hint--compact">Automatic — same as the chat model.</span>
                     </div>
                   </div>
                   <label class="set-subrow">
@@ -742,7 +739,11 @@
                       <!-- A short closed set reads best as a segmented control; a
                            long provider list falls back to a select. -->
                       <div
-                        v-if="providerThinkingOptions(String(connKey) as AliasProviderKey).length <= 5"
+                        v-if="!workspaceModels"
+                        class="hint hint--compact"
+                      >{{ workspaceModelsError ? 'Effort options unavailable.' : 'Loading effort options…' }}</div>
+                      <div
+                        v-else-if="providerThinkingOptions(String(connKey) as AliasProviderKey).length <= 5"
                         class="set-seg"
                         role="radiogroup"
                         :aria-labelledby="`thinking-label-${connKey}`"
@@ -853,6 +854,7 @@
                 The critique panel uses its own model setting, separate from the chat defaults above.
                 "Automatic" keeps the built-in default. Session insights, the model that reads archived
                 chats into memory, names new chats and checks schedule results, is set on each provider above.
+                Automatic uses the chat's own model; choose a model to override it.
               </p>
             </div>
 
@@ -969,6 +971,14 @@
                     </option>
                   </select>
                 </label>
+                <label class="settings-field"><span class="ws-label">File access</span>
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.agent_fs_scope" :disabled="workspacesSaving === 'new'">
+                    <option value="">{{ fsScopeDefaultOptionLabel }}</option>
+                    <option value="workspace">Workspace only</option>
+                    <option value="machine">Whole machine</option>
+                  </select>
+                  <span class="hint hint--compact">{{ WORKSPACE_FS_SCOPE_COPY[newWorkspaceForm.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</span>
+                </label>
                 <label class="settings-field">
                   <div class="settings-label-row">
                     <span class="ws-label">Google profile</span>
@@ -1011,6 +1021,7 @@
                   <span class="set-dot" aria-hidden="true" :style="{ '--swatch': workspaceSwatch(form.color) }"></span>
                   <div class="set-row-main">
                     <p class="workspace-title set-row-title">{{ form.name }}</p>
+                    <span v-if="workspaceFsScopeBadge(form.agent_fs_scope)" class="set-tag workspace-fs-tag">{{ workspaceFsScopeBadge(form.agent_fs_scope) }}</span>
                     <p class="set-row-sub">{{ workspaceSummary(form) }}</p>
                   </div>
                   <div class="workspace-actions set-row-actions">
@@ -1020,7 +1031,7 @@
                       class="set-link"
                       :aria-label="`Edit workspace ${form.name}`"
                       :aria-expanded="false"
-                      @click="openWorkspace = form.name"
+                      @click="openWorkspaceEditor(form.name)"
                     >Edit</button>
                     <DropdownMenuRoot
                       v-if="workspaceArchivable(form.name)"
@@ -1052,6 +1063,16 @@
                 </div>
 
                 <div v-if="openWorkspace === form.name" class="set-row-body">
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label">Name</span>
+                    <input
+                      class="routine-input set-subrow-control"
+                      v-model="workspaceNameDraft"
+                      :disabled="workspacesSaving === form.name"
+                      :aria-describedby="`workspace-name-hint-${form.name}`"
+                    />
+                  </label>
+                  <p :id="`workspace-name-hint-${form.name}`" class="hint hint--compact set-subrow-hint">Letters, numbers, dashes, underscores.</p>
                   <div class="set-subrow">
                     <span class="set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
                     <div
@@ -1083,6 +1104,15 @@
                       </option>
                     </select>
                   </label>
+                  <label class="settings-field set-subrow">
+                    <span class="ws-label set-subrow-label">File access</span>
+                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.agent_fs_scope" :disabled="workspacesSaving === form.name">
+                      <option value="">{{ fsScopeDefaultOptionLabel }}</option>
+                      <option value="workspace">Workspace only</option>
+                      <option value="machine">Whole machine</option>
+                    </select>
+                  </label>
+                  <p class="hint hint--compact set-subrow-hint">{{ WORKSPACE_FS_SCOPE_COPY[form.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</p>
                   <label class="settings-field set-subrow">
                     <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
                     <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
@@ -1174,15 +1204,6 @@
                         personal chat never inherits work Drive or calendar access. Each
                         workspace picks which account it uses.
                       </p>
-                      <p><strong>One-time setup per account</strong></p>
-                      <ol class="field-info-steps">
-                        <li>Install <code>gws</code> (button below or <code>npm install -g @googleworkspace/cli</code>).</li>
-                        <li>Add the account below and give it a short name.</li>
-                        <li>
-                          Click <strong>Sign in with Google</strong> on the account card and approve access in the browser
-                          tab that opens. It connects automatically (no copy-paste).
-                        </li>
-                      </ol>
                       <p><strong>Alternative setups</strong></p>
                       <ul class="field-info-steps">
                         <li>
@@ -1233,6 +1254,7 @@
                 </div>
                 <p class="hint hint--compact">Opens a chat that walks through <code>npm install -g @googleworkspace/cli</code> with you — Ciaobot does not run package installs on its own.</p>
               </div>
+              <GwsSetupChecklist :integration="gwsIntegration" />
               <div class="gws-account-add">
                 <span class="ws-label">Add a Google account</span>
                 <div class="gws-account-add-row">
@@ -1320,30 +1342,20 @@
                   </div>
 
                   <!--
-                    Recovery commands. They are only useful while the account is
-                    not connected, so once it is authenticated they collapse
-                    behind a "Manual setup" disclosure instead of adding noise.
+                    Terminal and headless commands are not the main path, so they
+                    sit in a closed disclosure on every card, whatever its state.
                   -->
-                  <div
+                  <details
                     v-if="profile.setup_command || profile.headless_auth_command"
-                    class="gws-manual-block"
+                    class="gws-advanced"
                   >
-                    <button
-                      v-if="profile.configured"
-                      type="button"
-                      class="gws-manual-toggle"
-                      :aria-expanded="gwsManualOpen[profile.name] ? 'true' : 'false'"
-                      :aria-controls="`gws-manual-${profile.name}`"
-                      @click="toggleGwsManual(profile.name)"
-                    >
-                      <span class="gws-manual-toggle-icon" aria-hidden="true">i</span>
-                      Manual setup
-                    </button>
-                    <div
-                      v-if="!profile.configured || gwsManualOpen[profile.name]"
-                      :id="`gws-manual-${profile.name}`"
-                      class="gws-profile-meta gws-manual-panel"
-                    >
+                    <summary class="gws-advanced-summary">Advanced / headless setup</summary>
+                    <div :id="`gws-manual-${profile.name}`" class="gws-profile-meta gws-advanced-panel">
+                      <div v-if="!profile.client_secret_present">
+                        <span class="dev-label">Create client</span>
+                        <code class="gws-command">ciao gws {{ profile.name }} auth setup</code>
+                        <span class="hint hint--compact">Needs the <a :href="gwsReloginHelpUrl()" target="_blank" rel="noopener noreferrer">gcloud CLI</a>.</span>
+                      </div>
                       <div v-if="profile.setup_command">
                         <span class="dev-label">Login</span>
                         <code class="gws-command">{{ profile.setup_command }}</code>
@@ -1353,18 +1365,14 @@
                         <code class="gws-command">{{ profile.headless_auth_command }}</code>
                       </div>
                     </div>
-                  </div>
+                  </details>
 
                   <!-- Interactive account connection controls -->
                   <div class="gws-profile-actions">
                     <!-- State 1: Needs client_secret.json -->
                     <template v-if="!profile.client_secret_present">
                       <p class="gws-action-hint">
-                        First, create an OAuth client. Easiest: run
-                        <code>ciao gws {{ profile.name }} auth setup</code>
-                        in a terminal with the
-                        <a :href="gwsReloginHelpUrl()" target="_blank" rel="noopener noreferrer">gcloud CLI</a>
-                        installed — it creates the client for you. Or upload one you made in
+                        Upload the OAuth client (<code>client_secret.json</code>) you created in
                         <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console</a>.
                       </p>
                       <label class="btn-small file-upload-btn">
@@ -1377,6 +1385,13 @@
                           :disabled="gwsSavingProfile === profile.name"
                         />
                       </label>
+                      <button
+                        type="button"
+                        class="btn-primary btn-small"
+                        disabled
+                        :aria-describedby="`gws-signin-reason-${profile.name}`"
+                      >Sign in with Google</button>
+                      <span :id="`gws-signin-reason-${profile.name}`" class="gws-action-hint">Upload an OAuth client first.</span>
                     </template>
 
                     <!-- State 2: Ready to authenticate -->
@@ -2059,6 +2074,7 @@ import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
 import SettingsNotifications from './settings/SettingsNotifications.vue'
+import GwsSetupChecklist from './settings/GwsSetupChecklist.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
@@ -2118,7 +2134,6 @@ const mainEl = ref<HTMLElement | null>(null)
 const tocItems = ref<TocItem[]>([])
 const activeTocId = ref('')
 let tocObserver: MutationObserver | null = null
-let tocFrame = 0
 
 function slugify(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'section'
@@ -2153,14 +2168,6 @@ function rebuildToc(): void {
     && items.every((item, i) => item.id === tocItems.value[i].id && item.label === tocItems.value[i].label)
   if (!same) tocItems.value = items
   updateActiveToc()
-}
-
-function scheduleTocRebuild(): void {
-  if (tocFrame) return
-  tocFrame = requestAnimationFrame(() => {
-    tocFrame = 0
-    rebuildToc()
-  })
 }
 
 // The active entry is the last section whose top has scrolled past a line a
@@ -2200,7 +2207,7 @@ watch(currentTab, () => {
 onMounted(() => {
   void nextTick(rebuildToc)
   if (mainEl.value && typeof MutationObserver !== 'undefined') {
-    tocObserver = new MutationObserver(scheduleTocRebuild)
+    tocObserver = new MutationObserver(rebuildToc)
     tocObserver.observe(mainEl.value, { childList: true, subtree: true, characterData: true })
   }
 })
@@ -2208,7 +2215,6 @@ onMounted(() => {
 onUnmounted(() => {
   tocObserver?.disconnect()
   tocObserver = null
-  if (tocFrame) cancelAnimationFrame(tocFrame)
 })
 
 // ── GitHub star nudge, mirrored onto the open-source card ─────────────────
@@ -2610,6 +2616,8 @@ function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSecti
 }
 
 function providerDefaultModelEffective(provider: AliasProviderKey): string {
+  const selected = providerDefaultModelOverride(provider)
+  if (selected) return selected
   const explicit = workspaceModels.value?.provider_defaults?.[provider]
   if (explicit) return explicit
   // Fall back to the provider's first discovered model so a routine pick can
@@ -2696,7 +2704,7 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
 }
 
 // ── Per-provider Session insights model (Models tab) ────────────────
-// Automatic reads the session with the provider's own default chat model
+// Automatic reads the session with that chat's own model
 // (ciao/insights.py::resolve_insights_model).
 const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
 
@@ -2705,8 +2713,8 @@ function providerInsightsModelSelectorValue(provider: AliasProviderKey): string 
 }
 
 function providerInsightsModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
-  return providerSectionsWithDefault(provider, DEFAULT_INSIGHTS_SELECTION, (effective) =>
-    effective ? `Same as default (${effective})` : 'Same as default model',
+  return providerSectionsWithDefault(provider, DEFAULT_INSIGHTS_SELECTION, () =>
+    'Automatic — same as chat model',
   )
 }
 
@@ -2736,15 +2744,6 @@ function gwsProfileStatus(profile: GwsProfile): string {
   if (profile.configured) return 'Authenticated'
   if (profile.client_secret_present) return 'Ready to auth'
   return 'Needs OAuth client'
-}
-
-// Per-profile disclosure state for the recovery commands. Authenticated
-// profiles keep them collapsed; unauthenticated ones render them inline and
-// never consult this map.
-const gwsManualOpen = ref<Record<string, boolean>>({})
-
-function toggleGwsManual(name: string): void {
-  gwsManualOpen.value = { ...gwsManualOpen.value, [name]: !gwsManualOpen.value[name] }
 }
 
 function gwsProfileBadgeClass(profile: GwsProfile): string {
@@ -3706,6 +3705,7 @@ watch(
   { immediate: true },
 )
 const workspaceModels = ref<ModelsResponse | null>(null)
+const workspaceModelsError = ref('')
 
 type WorkspaceForm = {
   name: string
@@ -3714,7 +3714,32 @@ type WorkspaceForm = {
   gws_profile: string
   disallowed_tools: string
   color: WorkspaceColorId
+  // '' is "no choice": the key is left out of a create, and an update sends
+  // null, so the engine keeps or returns the workspace to its default.
+  agent_fs_scope: FsScopeChoice
 }
+
+type FsScopeChoice = 'workspace' | 'machine' | ''
+
+// Copy for the File access select. The default's name comes from the engine's
+// payload (default_agent_fs_scope), so the PWA never restates the platform rule.
+const WORKSPACE_FS_SCOPE_LABEL: Record<'workspace' | 'machine', string> = {
+  workspace: 'Workspace only',
+  machine: 'Whole machine',
+}
+const WORKSPACE_FS_SCOPE_COPY: Record<FsScopeChoice, string> = {
+  '': 'Uses the default this engine applies to workspaces with no File access choice.',
+  workspace: 'Workspace only. The agent and its shell cannot read outside this workspace.',
+  machine: 'Whole machine. The agent can read any file this user can read.',
+}
+const WORKSPACE_FS_SANDBOX_NOTE = 'If the engine cannot sandbox, a workspace-only chat refuses to start until you choose whole machine.'
+// The engine's default for File access, from /api/workspaces. Null until the
+// list has loaded, when the default option carries no name yet.
+const fsScopeEngineDefault = ref<'workspace' | 'machine' | null>(null)
+const fsScopeDefaultOptionLabel = computed(() => {
+  const label = fsScopeEngineDefault.value ? WORKSPACE_FS_SCOPE_LABEL[fsScopeEngineDefault.value] : ''
+  return label ? `Default (${label})` : 'Default'
+})
 
 function defaultWorkspaceProvider(): WorkspaceProvider {
   return projectStore.workspaceProviderOptions[0]?.value || 'claude'
@@ -3728,6 +3753,7 @@ function blankWorkspaceForm(): WorkspaceForm {
     gws_profile: '',
     disallowed_tools: '',
     color: DEFAULT_WORKSPACE_COLOR,
+    agent_fs_scope: '',
   }
 }
 
@@ -3741,6 +3767,11 @@ function normalizeWorkspaceProvider(value: unknown): WorkspaceProvider {
     : defaultWorkspaceProvider()
 }
 
+// A workspace that never chose has no stored scope, so it reads as '' (the default).
+function fsScopeChoice(raw: unknown): FsScopeChoice {
+  return raw === 'workspace' || raw === 'machine' ? raw : ''
+}
+
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
   return {
     name: ws.name,
@@ -3749,6 +3780,7 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     gws_profile: ws.gws_profile || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     color: normalizeWorkspaceColor(ws.color),
+    agent_fs_scope: fsScopeChoice(ws.agent_fs_scope),
   }
 }
 
@@ -3774,10 +3806,21 @@ function closeSettingsMenuOnEscape(event: KeyboardEvent): void {
 // the saved form, so Save appears only once something actually changed.
 const openWorkspace = ref<string | null>(null)
 const workspaceBaseline = ref<Record<string, string>>({})
+// The Name field of the open row. It is a draft kept beside `form.name`, not
+// bound to it: `form.name` is the row's identity (baseline, key, PATCH path),
+// and changing it mid-edit would re-key the card and lose focus.
+const workspaceNameDraft = ref('')
+
+function openWorkspaceEditor(name: string): void {
+  openWorkspace.value = name
+  workspaceNameDraft.value = name
+}
 
 function workspaceDirty(form: WorkspaceForm): boolean {
   const saved = workspaceBaseline.value[form.name]
-  return saved !== undefined && saved !== JSON.stringify(form)
+  if (saved === undefined) return false
+  if (openWorkspace.value === form.name && workspaceNameDraft.value.trim() !== form.name) return true
+  return saved !== JSON.stringify(form)
 }
 
 function discardWorkspace(name: string): void {
@@ -3791,6 +3834,13 @@ function discardWorkspace(name: string): void {
 
 function workspaceSwatch(color: WorkspaceColorId): string {
   return WORKSPACE_COLOR_PRESETS.find((preset) => preset.id === color)?.swatch || 'var(--accent)'
+}
+
+// The File access a workspace actually gets: its own choice, else the engine's
+// default. Empty until the list has loaded, when the default is not yet known.
+function workspaceFsScopeBadge(choice: FsScopeChoice): string {
+  const effective = choice || fsScopeEngineDefault.value
+  return effective ? WORKSPACE_FS_SCOPE_LABEL[effective] : ''
 }
 
 function workspaceSummary(form: WorkspaceForm): string {
@@ -3849,6 +3899,7 @@ async function fetchWorkspacesList() {
   try {
     const res = await projectStore.fetchWorkspaces()
     primaryWorkspace.value = res?.primary ?? null
+    fsScopeEngineDefault.value = res?.default_agent_fs_scope ?? null
     workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
     workspaceBaseline.value = Object.fromEntries(
       workspaceForms.value.map((form) => [form.name, JSON.stringify(form)]),
@@ -3873,30 +3924,63 @@ async function fetchWorkspaceModels(force = false) {
     workspaceModels.value = await api.get<ModelsResponse>(
       force ? '/api/models?refresh=1' : '/api/models',
     )
-  } catch {
-    workspaceModels.value = null
+    workspaceModelsError.value = ''
+  } catch (e) {
+    workspaceModelsError.value = `Could not load model and effort options: ${errorMessage(e)}`
   }
+}
+
+function renameConfirmMessage(from: string, to: string): string {
+  const message = `Rename "${from}" to "${to}". Projects and automations keep their ids and follow the new name.`
+  // Without a workspace named `personal`, the first one in the list is the
+  // main workspace, and a rename keeps its place in the list (#1188).
+  const first = workspaceForms.value[0]?.name
+  if (from === 'personal' && first !== from) return `${message} "${first}" becomes the main workspace.`
+  // A workspace named `personal` is the main one whatever its place in the list.
+  if (to === 'personal' && (primaryWorkspace.value ?? first) !== from) return `${message} It becomes the main workspace.`
+  return message
 }
 
 async function saveWorkspace(name: string) {
   const form = workspaceForms.value.find((f) => f.name === name)
   if (!form) return
+  const target = workspaceNameDraft.value.trim()
+  const renaming = target !== name
+  // An empty name would otherwise be read by the server as "no rename" and
+  // dropped silently, so refuse it here.
+  if (renaming && !target) {
+    workspacesResult.value = 'Enter a workspace name.'
+    return
+  }
+  if (renaming && !await askConfirm(renameConfirmMessage(name, target), {
+    title: 'Rename workspace',
+    confirmLabel: 'Rename',
+    destructive: false,
+  })) return
   workspacesSaving.value = name
   workspacesResult.value = ''
   try {
     await projectStore.updateWorkspace(name, {
+      // Only a changed name is sent; an unchanged save is the plain patch.
+      ...(renaming ? { name: target } : {}),
       // Send what the form holds. Overwriting it with the workspace name
       // silently discarded any vault path the user had set, and reset an
       // adopted workspace's `memory-vault/<name>` root to a bare name.
-      vault_root: form.vault_root.trim() || name,
+      vault_root: form.vault_root.trim() || target,
       default_provider: form.default_provider,
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       color: form.color,
+      // Sent only when File access was changed. Picking the default again goes
+      // as null, which clears an earlier explicit choice.
+      ...(form.agent_fs_scope !== fsScopeChoice(projectStore.workspaces.find(w => w.name === name)?.agent_fs_scope)
+        ? { agent_fs_scope: form.agent_fs_scope || null }
+        : {}),
     })
-    notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
+    notifySaved(renaming ? `Workspace "${name}" renamed to "${target}".` : `Workspace "${name}" saved.`, 'Workspaces')
     openWorkspace.value = null
     await fetchWorkspacesList()
+    void fetchGwsIntegration()
   } catch (e) {
     const detail = apiErrorMessage(e, 'The workspace could not be saved.')
     workspacesResult.value = `Error: ${detail}`
@@ -3923,11 +4007,14 @@ async function createNewWorkspace() {
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       color: form.color,
+      // Sent only when the user picked a value, so the server applies its default.
+      ...(form.agent_fs_scope ? { agent_fs_scope: form.agent_fs_scope } : {}),
     })
     notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
     showNewWorkspace.value = false
     newWorkspaceForm.value = blankWorkspaceForm()
     await fetchWorkspacesList()
+    void fetchGwsIntegration()
   } catch (e) {
     const detail = apiErrorMessage(e, 'The workspace could not be created.')
     workspacesResult.value = `Error: ${detail}`
@@ -4482,22 +4569,23 @@ const engineUpdateVisible = computed(
 const engineUpdateVersion = computed(
   () => engineUpdateOperation.value?.to_version || packageStatus.value?.latest_version,
 )
-// No job and nothing newer: the header's status, not a disabled button. A
-// `done` record is history rather than a job once a newer release exists, so it
-// counts as idle here too — and the `update_available` term is what keeps the
-// header quiet, so the header and the panel below it say the same thing. A
-// version check that never answered, or that answered with a rate limit, has
-// said nothing about the installed version at all: claiming "Up to date" over
-// the "Update check failed" line two rows below would be the card asserting
-// what it does not know.
-const engineUpdateIdleAndCurrent = computed(
-  () => engineUpdateEnabled.value
-    && (engineUpdateStage.value === 'idle' || engineUpdateStaleApplied.value)
-    && !updateStatus.value?.error
-    && !!packageStatus.value
-    && !packageStatus.value.error
-    && !packageStatus.value?.update_available,
-)
+// The compact Updates state: the installed version is known to be the newest,
+// and nothing is staged, running, done or failed, so the section is only its
+// title with an "Up to date" status. A version check that never answered, or
+// that answered with a rate limit, has said nothing about the installed version,
+// so it is never compact: "Up to date" over "Update check failed" would be the
+// card asserting what it does not know. A `done` record is not compact either,
+// so the applied outcome keeps its own line in the panel. Staging before its
+// first record is written reads as idle, which is why an in-flight poll or
+// action also keeps the full card.
+const updatesCompact = computed(() => {
+  const status = packageStatus.value
+  if (!status || status.error || status.update_available) return false
+  if (packageUpdating.value || updatePolling.value || updateActionPending.value) return false
+  if (updateStatus.value?.error) return false
+  if (engineUpdateEnabled.value) return engineUpdateStage.value === 'idle'
+  return true
+})
 
 async function fetchUpdateStatus() {
   try {
@@ -5638,42 +5726,41 @@ a.btn-secondary {
   flex-direction: column;
   gap: var(--space-2);
 }
-.gws-manual-block {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-.gws-manual-toggle {
+/* Terminal and headless commands: a native disclosure drawn like the install
+   card's, so its summary is a real button with a 44px touch target. */
+.gws-advanced-summary {
   display: inline-flex;
   align-items: center;
-  align-self: flex-start;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: transparent;
+  min-height: var(--touch);
   color: var(--fg2);
+  font-size: var(--text-sm);
   cursor: pointer;
-  font-family: var(--font);
-  font-size: var(--text-xs);
-  font-weight: 600;
+  list-style: none;
 }
-.gws-manual-toggle:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  color: var(--accent);
+.gws-advanced-summary::-webkit-details-marker { display: none; }
+.gws-advanced-summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin: 0 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms var(--ease);
 }
-.gws-manual-toggle-icon {
-  display: grid;
-  place-items: center;
-  width: var(--space-4);
-  height: var(--space-4);
-  border: 1px solid currentColor;
-  border-radius: 50%;
-  font-size: var(--text-xs);
-  font-weight: 700;
-  line-height: 1;
+.gws-advanced[open] > .gws-advanced-summary::before { transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) {
+  .gws-advanced-summary::before { transition: none; }
 }
-.gws-manual-panel {
+.gws-advanced-summary:hover { color: var(--fg); }
+.gws-advanced-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.gws-advanced-panel {
   border-top: none;
   padding-top: 0;
 }
@@ -5752,7 +5839,7 @@ a.btn-secondary {
   .gws-profile-card .btn-small,
   .gws-profile-card .btn-primary,
   .gws-profile-card .file-upload-btn,
-  .gws-manual-toggle,
+  .gws-advanced-summary,
   .critique-picker-header .btn-small,
   .critique-chip,
   .routine-row :deep(.model-selector__trigger) {

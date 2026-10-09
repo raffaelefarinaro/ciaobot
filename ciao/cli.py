@@ -25,6 +25,7 @@ import urllib.request
 
 from ciao import dev, gws_wrapper, package_smoke, public_release, release, service_backend
 from ciao.server_host import (
+    BUNDLE_ID,
     EXIT_TIMEOUT_SECONDS,
     HostOwnership,
     ServerHostError,
@@ -39,6 +40,7 @@ from ciao.jsonio import write_private_text
 from ciao.os_support.console import use_utf8_stdio
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.shell_hints import path_hint, path_hint_note
+from ciao.os_support.tool_path import dedupe_path
 from ciao.sync_skills import SETUP_MEMORY_FAILED_RC
 
 if TYPE_CHECKING:  # only ever a type here; the queue model is imported locally.
@@ -244,9 +246,15 @@ def _render_launchd_plist(
         "deploy", template_name
     ).read_text(encoding="utf-8")
     # Under launchd the default PATH is minimal. Bake the user's development
-    # PATH from setup time into the plist for optional deploy tooling.
-    resolved_path = path or os.environ.get("PATH", "")
+    # PATH from setup time into the plist for optional deploy tooling. The
+    # caller's PATH is deduped here, the one place it is persisted: a setup run
+    # can inherit a PATH that an earlier plist baked, so an unnormalised value
+    # would carry any repeat forward into every later write.
+    resolved_path = dedupe_path(path or os.environ.get("PATH", ""))
     replacements = {
+        "{{ASSOCIATED_BUNDLE_ID}}": html.escape(
+            BUNDLE_ID if host is not None else "local.ciaobot.app", quote=False
+        ),
         "{{CIAO_WORKSPACE}}": html.escape(str(workspace), quote=False),
         "{{CIAO_RUNTIME_ROOT}}": html.escape(
             str((runtime_root or (workspace / ".runtime")).resolve()), quote=False

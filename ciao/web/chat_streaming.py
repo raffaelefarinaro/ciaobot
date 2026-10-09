@@ -1094,6 +1094,19 @@ class ChatStreaming:
                 )
             elif (
                 isinstance(event, ResultEvent)
+                and stream is not None
+                and stream.user_stopped
+                and not event.is_error
+                and streamed_text
+            ):
+                # A user Stop keeps what the client already rendered. A
+                # provider's terminal text can be shorter than the stream: the
+                # Claude SDK's result carries only the final text block, and
+                # opencode joins its parts with separators. Persisting that
+                # tail would drop every earlier block on reload (#1223).
+                event = replace(event, result=streamed_text, stopped=True)
+            elif (
+                isinstance(event, ResultEvent)
                 and chat.provider == "claude"
                 and event.is_error
                 and _is_sdk_internal_diagnostic(event.result)

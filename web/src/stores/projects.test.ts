@@ -4314,6 +4314,56 @@ describe('deep-link chat navigation', () => {
     expect(chatSocket.readyState).toBe(FakeWebSocket.CLOSED)
   })
 
+  test('a workspaces_changed pair keeps the renamed workspace active', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.connectEventsWs()
+    const events = fakeSockets[fakeSockets.length - 1]
+    apiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') {
+        // The refetch would pick the first (or `active`) workspace if the
+        // pair were ignored, so both point away from `santo`.
+        return {
+          workspaces: [
+            { name: 'work', vault_root: 'work', default_provider: 'claude' },
+            { name: 'santo', vault_root: 'santo', default_provider: 'claude' },
+          ],
+          active: 'work',
+        }
+      }
+      if (path === '/api/projects') return []
+      return {}
+    })
+    const revision = store.workspaceRegistryRevision
+
+    events.onmessage?.({ data: JSON.stringify({ type: 'workspaces_changed', from: 'personal', to: 'santo' }) })
+
+    await vi.waitFor(() => {
+      expect(store.workspaceRegistryRevision).toBe(revision + 1)
+    })
+    expect(store.activeWorkspace).toBe('santo')
+    expect(localStorage.getItem('ciao-active-workspace')).toBe('santo')
+  })
+
+  test('updateWorkspace adopts renamed.from into the active workspace', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    apiPatch.mockResolvedValue({
+      workspaces: [
+        { name: 'work', vault_root: 'work', default_provider: 'claude' },
+        { name: 'santo', vault_root: 'santo', default_provider: 'claude' },
+      ],
+      active: 'work',
+      renamed: { from: 'personal', to: 'santo' },
+    })
+
+    await store.updateWorkspace('personal', { name: 'santo' })
+
+    expect(apiPatch).toHaveBeenCalledWith('/api/workspaces/personal', { name: 'santo' })
+    expect(store.activeWorkspace).toBe('santo')
+    expect(localStorage.getItem('ciao-active-workspace')).toBe('santo')
+  })
+
   function twoChats(): ChatInfo[] {
     return [
       { chat_id: 'parent', project_id: 'p1', title: 'Parent', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
@@ -6281,6 +6331,37 @@ describe('running subagent poll', () => {
       await vi.advanceTimersByTimeAsync(30_000)
       window.dispatchEvent(new Event('focus'))
       await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a disposed store does not resume a settled-reply retry it already scheduled', async () => {
+    // The open path re-fetches /messages on delays while it waits for a settled
+    // reply. Those waits are timers the store owns; a disposed store must cancel
+    // them rather than resume and call the API, or an earlier test's store keeps
+    // calling it on the real clock during a later test.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-dispose-retry'
+      const unsettled: ChatMessage = { role: 'user', content: 'Question', timestamp: '2026-08-27T00:00:00Z', turn_index: 0 }
+      store.activeChatId = chatId
+      store.messages[chatId] = [unsettled]
+      apiGet.mockImplementation((path: string) => {
+        if (!path.includes('/messages')) return Promise.resolve([])
+        return Promise.resolve([unsettled])
+      })
+
+      void store.loadMessages(chatId, { waitForSettledReply: true })
+      // The first fetch lands and the first retry wait is now pending.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => String(c[0]).includes('/messages')).length).toBeGreaterThan(0)
+
+      store.$dispose()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
       expect(apiGet.mock.calls).toEqual([])
     } finally {
       vi.useRealTimers()

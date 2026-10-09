@@ -16,6 +16,9 @@ worker thread (see ``routes_tasks.task_delegate``).
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +31,7 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import CiaoControlPlane
+from ciao.task_board import TaskBoardStore
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_tasks import (
     task_attempt_action,
@@ -38,6 +42,7 @@ from ciao.web.routes_tasks import (
     task_delete,
     task_get,
     task_list,
+    task_resolution_review,
     task_send_update,
     task_update,
 )
@@ -194,6 +199,11 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             Route("/api/tasks", task_list, methods=["GET"]),
             Route("/api/tasks", task_create, methods=["POST"]),
             Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+            Route(
+                "/api/tasks/{task_id}/resolution-review",
+                task_resolution_review,
+                methods=["POST"],
+            ),
             Route("/api/tasks/{task_id}/delegate", task_delegate, methods=["POST"]),
             Route("/api/tasks/{task_id}/attempts", task_attempts, methods=["GET"]),
             Route(
@@ -366,6 +376,227 @@ def test_delete_removes_the_record(world) -> None:
         / f"{created['id']}.md"
     ).exists()
     assert client.get("/api/tasks?workspace=personal", cookies=cookies).json()["tasks"] == []
+
+
+# ── Resolutions and the completion window ──────────────────────────────
+
+
+def test_complete_with_a_resolution_persists_it_and_blank_is_valid(world) -> None:
+    client, cookies, _config, _pcm = world
+    noted = _create(client, cookies, title="Ship the board", body="Describe it.")
+    done = client.post(
+        f"/api/tasks/{noted['id']}/complete",
+        json={
+            "workspace": "personal",
+            "expected_revision": noted["revision"],
+            "resolution": "Shipped to the team.",
+        },
+        cookies=cookies,
+    )
+    assert done.status_code == 200, done.text
+    assert done.json()["task"]["status"] == "done"
+
+    read = client.get(f"/api/tasks/{noted['id']}?workspace=personal", cookies=cookies)
+    task = read.json()["task"]
+    assert task["resolution"] == "Shipped to the team."
+    assert task["has_resolution"] is True
+    assert task["completed_at"] is not None
+    assert [item["resolution"] for item in task["completions"]] == ["Shipped to the team."]
+    # The description is the user's text alone: the history is not in it.
+    assert task["body"] == "Describe it."
+
+    # Without a resolution the completion is still recorded, with no note.
+    bare = _create(client, cookies, title="Close quietly")
+    closed = client.post(
+        f"/api/tasks/{bare['id']}/complete",
+        json={"workspace": "personal", "expected_revision": bare["revision"]},
+        cookies=cookies,
+    )
+    assert closed.status_code == 200, closed.text
+    read = client.get(f"/api/tasks/{bare['id']}?workspace=personal", cookies=cookies)
+    task = read.json()["task"]
+    assert task["status"] == "done"
+    assert task["resolution"] == ""
+    assert task["has_resolution"] is False
+    assert len(task["completions"]) == 1
+
+
+@pytest.mark.parametrize("value", [None, 5, {"text": "x"}, ["x"], True])
+def test_complete_rejects_a_non_string_resolution(world, value) -> None:
+    client, cookies, config, _pcm = world
+    created = _create(client, cookies, title="Not yet")
+    path = (
+        config.workspace_vault_root("personal") / "Workspace" / "Tasks" / f"{created['id']}.md"
+    )
+    before = path.read_bytes()
+
+    response = client.post(
+        f"/api/tasks/{created['id']}/complete",
+        json={
+            "workspace": "personal",
+            "expected_revision": created["revision"],
+            "resolution": value,
+        },
+        cookies=cookies,
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["message"] == "resolution must be a string"
+    assert path.read_bytes() == before, "a refused completion writes nothing"
+
+
+def test_patch_resolution_edits_the_latest_and_keeps_completed_at(world) -> None:
+    client, cookies, _config, _pcm = world
+    created = _create(client, cookies, title="Reword me")
+    done = client.post(
+        f"/api/tasks/{created['id']}/complete",
+        json={
+            "workspace": "personal",
+            "expected_revision": created["revision"],
+            "resolution": "First draft.",
+        },
+        cookies=cookies,
+    ).json()["task"]
+    first = client.get(f"/api/tasks/{created['id']}?workspace=personal", cookies=cookies).json()["task"]
+
+    edited = client.patch(
+        f"/api/tasks/{created['id']}",
+        json={
+            "workspace": "personal",
+            "expected_revision": done["revision"],
+            "resolution": "Final wording.",
+        },
+        cookies=cookies,
+    )
+    assert edited.status_code == 200, edited.text
+
+    after = client.get(f"/api/tasks/{created['id']}?workspace=personal", cookies=cookies).json()["task"]
+    assert after["resolution"] == "Final wording."
+    assert after["completed_at"] == first["completed_at"]
+    assert after["completions"][0]["edited_at"] is not None
+    assert after["completions"][0]["id"] == first["completions"][0]["id"]
+    assert len(after["completions"]) == 1
+
+    # Not a body replacement: a PATCH resolution alone leaves the description alone.
+    assert after["body"] == first["body"]
+
+    # A null resolution is refused, not stringified.
+    refused = client.patch(
+        f"/api/tasks/{created['id']}",
+        json={
+            "workspace": "personal",
+            "expected_revision": after["revision"],
+            "resolution": None,
+        },
+        cookies=cookies,
+    )
+    assert refused.status_code == 400
+    assert refused.json()["error"]["message"] == "resolution must be a string"
+
+
+def test_patch_resolution_on_an_open_task_is_refused(world) -> None:
+    client, cookies, config, _pcm = world
+    created = _create(client, cookies, title="Still open")
+    path = (
+        config.workspace_vault_root("personal") / "Workspace" / "Tasks" / f"{created['id']}.md"
+    )
+    before = path.read_bytes()
+
+    response = client.patch(
+        f"/api/tasks/{created['id']}",
+        json={
+            "workspace": "personal",
+            "expected_revision": created["revision"],
+            "resolution": "Not done yet.",
+        },
+        cookies=cookies,
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task"
+    assert path.read_bytes() == before
+
+
+def test_completed_since_uses_completion_time(world, monkeypatch) -> None:
+    """The window is over completion records, never over ``updated_at``.
+
+    ``_now`` is pinned so the timeline is exact: ``early`` is completed yesterday
+    and edited today; ``open`` is edited today and never completed; ``legacy`` is
+    a Done file with no completion section at all; ``late`` is completed today.
+    """
+    client, cookies, config, _pcm = world
+    clock = {"now": datetime(2026, 10, 7, 12, 0, tzinfo=UTC)}
+    monkeypatch.setattr(TaskBoardStore, "_now", lambda self: clock["now"])
+
+    early = _create(client, cookies, title="Early")
+    client.post(
+        f"/api/tasks/{early['id']}/complete",
+        json={"workspace": "personal", "expected_revision": early["revision"], "resolution": "Yesterday."},
+        cookies=cookies,
+    )
+    clock["now"] = datetime(2026, 10, 8, 9, 0, tzinfo=UTC)
+    early_now = client.get(f"/api/tasks/{early['id']}?workspace=personal", cookies=cookies).json()["task"]
+    client.patch(
+        f"/api/tasks/{early['id']}",
+        json={"workspace": "personal", "expected_revision": early_now["revision"], "title": "Early, edited"},
+        cookies=cookies,
+    )
+
+    open_task = _create(client, cookies, title="Open")
+    clock["now"] = datetime(2026, 10, 8, 9, 30, tzinfo=UTC)
+    client.patch(
+        f"/api/tasks/{open_task['id']}",
+        json={"workspace": "personal", "expected_revision": open_task["revision"], "title": "Open, edited"},
+        cookies=cookies,
+    )
+
+    legacy = _create(client, cookies, title="Legacy done")
+    legacy_path = (
+        config.workspace_vault_root("personal") / "Workspace" / "Tasks" / f"{legacy['id']}.md"
+    )
+    legacy_path.write_text(
+        legacy_path.read_text(encoding="utf-8").replace("status: backlog", "status: done", 1),
+        encoding="utf-8",
+    )
+
+    clock["now"] = datetime(2026, 10, 8, 10, 30, tzinfo=UTC)
+    late = _create(client, cookies, title="Late")
+    client.post(
+        f"/api/tasks/{late['id']}/complete",
+        json={"workspace": "personal", "expected_revision": late["revision"]},
+        cookies=cookies,
+    )
+
+    def ids(query: str) -> list[str]:
+        response = client.get(f"/api/tasks?workspace=personal{query}", cookies=cookies)
+        assert response.status_code == 200, response.text
+        return [row["id"] for row in response.json()["tasks"]]
+
+    everything = ids("")
+    assert {early["id"], open_task["id"], legacy["id"], late["id"]} <= set(everything)
+
+    today = ids("&completed_since=2026-10-08T00:00:00Z")
+    assert today == [late["id"]], "yesterday's completion, edited today, is outside today"
+
+    # Inclusive start, exclusive end: the completion instant is the boundary.
+    assert ids("&completed_since=2026-10-08T10:30:00Z") == [late["id"]]
+    assert ids("&completed_before=2026-10-08T10:30:00Z") == [early["id"]]
+    assert ids("&completed_since=2026-10-08T10:30:01Z") == []
+
+    # A date-only bound reads as midnight UTC.
+    assert ids("&completed_since=2026-10-07") == [early["id"], late["id"]]
+
+    row = next(r for r in client.get(
+        "/api/tasks?workspace=personal&completed_since=2026-10-08", cookies=cookies
+    ).json()["tasks"] if r["id"] == late["id"])
+    assert row["completed_at"] == "2026-10-08T10:30:00+00:00"
+    assert row["has_resolution"] is False
+
+    malformed = client.get(
+        "/api/tasks?workspace=personal&completed_since=last-tuesday", cookies=cookies
+    )
+    assert malformed.status_code == 400, malformed.text
+    assert malformed.json()["error"]["code"] == "invalid_task"
 
 
 # ── Reading one task ─────────────────────────────────────────────────────
@@ -1331,3 +1562,82 @@ async def test_an_unavailable_control_plane_is_a_503_on_delegation(
         )
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "unavailable"
+
+
+# ── Learning from a resolution (#1154) ──────────────────────────────────
+
+
+def test_resolution_review_queues_and_complete_still_succeeds_when_enqueue_raises(
+    world,
+) -> None:
+    """A queue failure never undoes Done, and a review queues the saved text once asked.
+
+    The completion queues its pass on the engine loop, so the loop is bound here
+    to a background thread the way the running engine has one. The fake fails
+    the first time, which is the case that must not reach the completion.
+    """
+    client, cookies, _config, pcm = world
+    plane = client.app.state.mcp_service.control_plane
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    plane._loop = loop
+    attempts: list[dict] = []
+    failing = {"on": True}
+
+    def enqueue(**kwargs):
+        attempts.append(kwargs)
+        if failing["on"]:
+            raise RuntimeError("the queue is down")
+        return "memory-chat-1"
+
+    pcm.enqueue_task_completion = enqueue
+    try:
+        task = _create(client, cookies, title="Ship the board")
+        done = client.post(
+            f"/api/tasks/{task['id']}/complete",
+            json={
+                "workspace": "personal",
+                "expected_revision": task["revision"],
+                "resolution": "Use the staging gate.",
+            },
+            cookies=cookies,
+        )
+        assert done.status_code == 200, done.text
+        assert done.json()["task"]["status"] == "done"
+        for _ in range(200):
+            if attempts:
+                break
+            time.sleep(0.01)
+        assert attempts and attempts[0]["resolution"] == "Use the staging gate."
+        settled = client.get(f"/api/tasks/{task['id']}?workspace=personal", cookies=cookies)
+        assert settled.json()["task"]["status"] == "done"
+
+        # The review is the explicit ask: it queues the saved text, and a stale
+        # revision is refused before anything is queued.
+        failing["on"] = False
+        revision = settled.json()["task"]["revision"]
+        stale = client.post(
+            f"/api/tasks/{task['id']}/resolution-review",
+            json={"workspace": "personal", "expected_revision": task["revision"]},
+            cookies=cookies,
+        )
+        assert stale.status_code == 409
+        assert stale.json()["error"]["code"] == "task_revision_conflict"
+
+        review = client.post(
+            f"/api/tasks/{task['id']}/resolution-review",
+            json={"workspace": "personal", "expected_revision": revision},
+            cookies=cookies,
+        )
+        assert review.status_code == 200, review.text
+        body = review.json()
+        assert body["queued"] is True
+        assert body["memory_chat_id"] == "memory-chat-1"
+        assert body["completion_id"] == attempts[0]["completion_id"]
+        assert len(attempts) == 2
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+

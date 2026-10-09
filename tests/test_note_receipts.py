@@ -1692,3 +1692,175 @@ def test_an_entry_edit_outside_the_vault_is_refused_like_any_note_write(
                 source="curation",
                 workspace=WORKSPACE,
             )
+
+
+# ── Appending one bullet ───────────────────────────────────────────────────
+#
+# The other half of the fold write: where an entry edit splices one existing
+# item's span, an append files one new item at the end of a section. Same
+# protocol otherwise — the revision is checked, both full images are
+# journaled, and undo puts the whole file back.
+
+APPEND_NOTE = "notes/append.md"
+
+
+def _append_text() -> str:
+    return (
+        "---\ntype: note\nupdated: 2024-01-05\n---\n\n"
+        "# Topic\n\n"
+        "Some prose about the topic that no entry model reads.\n\n"
+        "## Notes\n"
+        "- existing bullet\n"
+    )
+
+
+def _append_item(
+    vault: Path,
+    path: Path,
+    *,
+    section: str,
+    item: str,
+    expected: str | None = None,
+) -> dict[str, Any]:
+    """One managed bullet append, the way a fold makes it."""
+    return nr.append_list_item(
+        vault_root=vault,
+        relative_path=APPEND_NOTE,
+        expected_revision=expected if expected is not None else _revision(path),
+        section=section,
+        item=item,
+        actor="proposal-accept",
+        source="fold",
+        workspace=WORKSPACE,
+    )
+
+
+def test_append_list_item_inserts_one_bullet_and_leaves_the_rest(
+    tmp_path: Path,
+) -> None:
+    """The new bullet lands under the existing heading; nothing else moves."""
+    vault = _vault(tmp_path)
+    text = _append_text()
+    path = _write(vault, APPEND_NOTE, text)
+
+    receipt = _append_item(vault, path, section="Notes", item="- new fact")
+
+    assert receipt["changed"] is True
+    after = path.read_text(encoding="utf-8")
+    assert after == text + "- new fact\n"
+    # Frontmatter, prose and the existing bullet are byte-identical, and no
+    # second heading is created when ## Notes already exists.
+    assert after.startswith(text)
+    assert after.count("## Notes") == 1
+    # Journaled like any note write, so undo restores the note byte for byte.
+    undone = mr.undo_receipt(receipt["id"], vault_root=vault)
+    assert undone["status"] == mr.UNDONE
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_append_list_item_refuses_prose_and_unknown_sections(
+    tmp_path: Path,
+) -> None:
+    """Prose, several bullets, a trailing newline and a foreign section: no write."""
+    vault = _vault(tmp_path)
+    path = _write(vault, APPEND_NOTE, _append_text())
+    before_bytes = path.read_bytes()
+
+    for section, item in (
+        ("Notes", "just prose, no bullet"),
+        ("Notes", ""),
+        ("Notes", "- one\n- two"),
+        ("Notes", "- trailing newline\n"),
+        ("Status", "- new fact"),
+        ("", "- new fact"),
+    ):
+        with pytest.raises(mr.MemoryReceiptError):
+            _append_item(vault, path, section=section, item=item)
+    assert path.read_bytes() == before_bytes
+    assert _rows(vault) == []
+
+
+def test_append_ignores_headings_inside_fenced_code(tmp_path: Path) -> None:
+    """A fenced `## Notes` is code, so the bullet files under a real section.
+
+    The new bullet must parse back as a supported entry in the requested
+    section: filing it inside the fence writes bytes the entry model can
+    never read.
+    """
+    vault = _vault(tmp_path)
+    body = "```markdown\n## Notes\n- example\n## Other\n```\n"
+    path = _write(vault, APPEND_NOTE, body)
+
+    receipt = _append_item(vault, path, section="Notes", item="- new fact")
+
+    assert receipt["changed"] is True
+    after = path.read_bytes().decode("utf-8")
+    assert after.startswith(body)
+    assert after.count("## Notes") == 2
+    document = ne.parse_note_entries(
+        after, note_path=APPEND_NOTE, workspace=WORKSPACE
+    )
+    matching = [
+        entry for entry in document.entries
+        if entry.section == "Notes" and entry.supported
+    ]
+    assert [entry.text for entry in matching] == ["- new fact"]
+
+
+def test_append_refuses_an_unclosed_fence_destination(tmp_path: Path) -> None:
+    """Past an unclosed opener every line is code: no write, no receipt."""
+    vault = _vault(tmp_path)
+    for body in (
+        # No section heading outside the fence, so a new one would open
+        # inside code.
+        "## Notes\n- existing\n```\ncode\n",
+        # The section is real but runs into the unclosed fence.
+        "# Topic\n\n## Notes\n- existing\n```\ncode\n",
+    ):
+        path = _write(vault, APPEND_NOTE, body)
+        with pytest.raises(mr.MemoryReceiptError):
+            _append_item(vault, path, section="Notes", item="- new fact")
+        assert path.read_bytes() == body.encode("utf-8")
+    assert _rows(vault) == []
+
+
+def test_append_files_before_a_real_boundary_past_a_closed_fence(
+    tmp_path: Path,
+) -> None:
+    """A fence that closes is content, not a trap: the bullet files above it."""
+    vault = _vault(tmp_path)
+    body = "## Notes\n- existing\n```\n## Notes\n```\n## Other\n- b\n"
+    path = _write(vault, APPEND_NOTE, body)
+
+    receipt = _append_item(vault, path, section="Notes", item="- new fact")
+
+    assert receipt["changed"] is True
+    after = path.read_bytes().decode("utf-8")
+    assert after == "## Notes\n- existing\n```\n## Notes\n```\n- new fact\n## Other\n- b\n"
+
+
+def test_append_ignores_frontmatter_and_indented_code_headings(
+    tmp_path: Path,
+) -> None:
+    """Frontmatter delimiters and indented code name no section.
+
+    The `---` delimiters and the indented `## Other` below never match or
+    bound a section: the bullet files at the end of the real `## Notes`,
+    and the frontmatter comes back byte-identical.
+    """
+    vault = _vault(tmp_path)
+    body = "---\ntags: [person]\n---\n# Topic\n\n## Notes\n- existing\n"
+    path = _write(vault, APPEND_NOTE, body)
+
+    receipt = _append_item(vault, path, section="Notes", item="- new fact")
+
+    assert receipt["changed"] is True
+    after = path.read_bytes().decode("utf-8")
+    assert after == body + "- new fact\n"
+    assert after.startswith("---\ntags: [person]\n---\n")
+
+    indented = "## Notes\n- existing\n    ## Other\n"
+    path = _write(vault, APPEND_NOTE, indented)
+    receipt = _append_item(vault, path, section="Notes", item="- new fact")
+    assert receipt["changed"] is True
+    assert path.read_bytes().decode("utf-8") == indented + "- new fact\n"

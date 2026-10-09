@@ -1311,8 +1311,8 @@ fi
 # happens once the signed archive's digest and size are known to be the manifest
 # key it already trusts. It runs after the read-only preflight, so a refusal
 # there still leaves this Mac untouched, and never on a client, which runs no
-# engine to host. Installation is inert: no launchd, no plist and no service
-# change - activation is a later child.
+# engine to host. Installation is inert: it writes no launchd job itself;
+# `ciao setup` is what registers the plist when a verified host is installed.
 host_entry=
 if [ "$migrate_path" != client ] &&
     "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \

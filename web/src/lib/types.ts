@@ -58,6 +58,9 @@ export interface WorkspaceInfo {
   gws_profile: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
   color?: string
+  // Filesystem scope for the agent and its shell. Absent or null: the workspace
+  // never chose one and runs under the engine's default_agent_fs_scope.
+  agent_fs_scope?: 'workspace' | 'machine' | null
 }
 
 export interface WorkspacesResponse {
@@ -66,6 +69,8 @@ export interface WorkspacesResponse {
   // The workspace that cannot be archived (the server refuses it).
   primary?: WorkspaceName | null
   provider_options?: WorkspaceProviderOption[]
+  // The scope a workspace with no File access choice runs under on this engine.
+  default_agent_fs_scope: 'workspace' | 'machine'
 }
 
 /** One archived workspace, from `GET /api/workspaces/archived`. */
@@ -521,9 +526,10 @@ export type EventsWsMessage =
   // A board task or one of its attempts changed in `workspace` (the same name
   // `/api/tasks?workspace=` takes). No payload: the client re-reads the board.
   | { type: 'tasks_changed'; workspace: string }
-  // A workspace was archived or restored (here or on another device). No
-  // payload: the client refetches /api/workspaces.
-  | { type: 'workspaces_changed' }
+  // A workspace was archived, restored or renamed (here or on another
+  // device). Only a rename carries `from`/`to`; the client refetches
+  // /api/workspaces either way.
+  | { type: 'workspaces_changed'; from?: string; to?: string }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'server_restart_cancelled' }
@@ -633,14 +639,6 @@ export interface Schedule {
 // ── Webhook triggers ─────────────────────────────────────────────────────
 
 /**
- * How a trigger's turn runs. Set at create and never editable afterwards.
- *
- * The three are the store's `WEBHOOK_MODES`; the receiver accepts nothing else
- * and answers 400 for a mode it does not know.
- */
-export type WebhookMode = 'normal' | 'auto' | 'plan'
-
-/**
  * The body a sender may post. `event_text` is the only policy the store has, so
  * this is a named type rather than a bare string: the body shape a recipe shows
  * is derived from the policy, and there is one policy.
@@ -657,7 +655,7 @@ export type WebhookInputPolicy = 'event_text'
  * responses instead, and never again.
  *
  * `project_id: null` is the workspace's General project, not "unset".
- * `mode` and `input_policy` are create-only: `PATCH` accepts `name`,
+ * `project_id` and `input_policy` are create-only: `PATCH` accepts `name`,
  * `instructions` and `enabled` and refuses everything else.
  */
 export interface WebhookTrigger {
@@ -667,7 +665,6 @@ export interface WebhookTrigger {
   project_id: string | null
   instructions: string
   enabled: boolean
-  mode: WebhookMode
   input_policy: WebhookInputPolicy
   created_at: string
   updated_at: string
@@ -785,8 +782,7 @@ export interface RoutineSettings {
   provider_default_modes?: Record<string, string>
   // Per-provider default thinking level for new chats; missing = provider default.
   provider_default_thinking?: Record<string, string>
-  // Per-provider Session insights models; missing = that provider's default
-  // chat model.
+  // Per-provider Session insights models; missing = the source chat's model.
   provider_insights_models?: Record<string, string>
 
   critique_models_effective: string
@@ -1265,6 +1261,14 @@ export interface Task {
   /** The engine's note on how the current attempt ended, when it says one. */
   attempt_detail: string
   /**
+   * When the latest completion was recorded (`completed_at`), or `null` for a task
+   * never completed. Done-today reads this, never `updated_at`: an edit to a done
+   * task moves `updated_at` without finishing anything.
+   */
+  completed_at: string | null
+  /** Whether the latest completion carries resolution text. */
+  has_resolution: boolean
+  /**
    * Non-empty only while an attempt actually holds the task.
    *
    * That is what tells the board whether Stop and Detach are available: a
@@ -1345,6 +1349,18 @@ export interface TaskAttemptsResponse {
   attempts: TaskAttempt[]
 }
 
+/**
+ * What `POST /api/tasks/{id}/resolution-review` answers with.
+ *
+ * `queued: true` names the completion the review will read. `queued: false`
+ * carries the server's reason (for example, a task with no resolution to review).
+ */
+export interface TaskResolutionReviewResponse {
+  queued: boolean
+  completion_id?: string
+  reason?: string
+}
+
 /** What `POST /delegate` answers with. `created: false` means nothing was started. */
 export interface TaskDelegateResponse {
   workspace: string
@@ -1415,7 +1431,38 @@ export interface TaskListResponse {
  * ever shows a description it actually holds.
  */
 export interface TaskDetail extends Task {
+  /** The description alone: the engine's completion and delegation sections are not in it. */
   body: string
+  /** The latest completion's resolution text, or `''`. */
+  resolution: string
+  /** Every completion, newest first. */
+  completions: TaskCompletion[]
+  /** The engine's delegation log as text, or `''`. */
+  delegation_log: string
+  /** Progress notes, newest first. Empty when this payload did not carry them. */
+  updates: TaskUpdate[]
+}
+
+/** One progress note (`ciao/task_updates.py`), as the get route serves it. */
+export interface TaskUpdate {
+  id: string
+  recorded_at: string
+  actor: 'user' | 'agent' | string
+  text: string
+  /** When the note was last reworded, or `null` when it never was. */
+  edited_at: string | null
+  attempt_id: string
+  chat_id: string
+}
+
+/** One recorded completion of a task (`ciao/task_resolution.py`), as the get route serves it. */
+export interface TaskCompletion {
+  id: string
+  completed_at: string
+  resolution: string
+  /** When the resolution was last reworded, or `null` when it never was. */
+  edited_at: string | null
+  attempt_id: string
 }
 
 // ── Update tasks: the "After this update" group ────────────────────────────
@@ -1670,6 +1717,8 @@ export interface ProposalActionResult {
   region?: string
   leak_warning?: boolean
   destination?: string
+  /** notes a category accept skipped because they no longer exist */
+  skipped?: string[]
   justified?: boolean
   promoted?: boolean
   duplicate?: boolean
@@ -1798,6 +1847,7 @@ export interface ProposalPreview {
     folder: string
     description: string
     notes: string[]
+    missing?: string[]
   }
 }
 

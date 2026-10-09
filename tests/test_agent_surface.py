@@ -407,6 +407,10 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["project", "restore", "q4-launch"], ("project", {"action": "restore", "stem": "q4-launch"})),
         (["project", "complete", "p1"], ("project_action", {"action": "complete", "project_id": "p1"})),
         (["task", "list"], ("task_list", {})),
+        (
+            ["task", "list", "--completed-since", "2026-10-08", "--completed-before", "2026-10-09T00:00:00Z"],
+            ("task_list", {"completed_since": "2026-10-08", "completed_before": "2026-10-09T00:00:00Z"}),
+        ),
         (["task", "get", "a1b2"], ("task_get", {"task_id": "a1b2"})),
         (["task", "create", "--title", "Ship the board"], ("task_create", {"title": "Ship the board"})),
         (
@@ -466,6 +470,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
         "task complete": ["a" * 32, "--revision", "r"],
         "task delegate": ["a" * 32, "--revision", "r"],
+        "task add-update": ["a" * 32, "--revision", "r", "--text-file", str(summary)],
         "task report": ["a" * 32, "--outcome", "done", "--summary-file", str(summary)],
         "task attempt": ["a" * 32, "stop"],
         "schedule update": ["s"], "schedule pause": ["s"],

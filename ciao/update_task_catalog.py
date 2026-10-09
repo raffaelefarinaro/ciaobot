@@ -285,6 +285,24 @@ def parse_version(value: str) -> tuple[tuple[int, object], ...] | None:
 #: ``eligible`` on a hand-built catalog. ``load_catalog`` admits no such task.
 _UNREADABLE_VERSION: tuple[tuple[int, object], ...] = ((2, ""),)
 
+#: The placeholder the shipped catalog gives a task with no known release. It
+#: gates as "every engine supports this" (see ``TaskCatalog.eligible``), which
+#: is not a claim about any release, so it is never shown as a version.
+UNKNOWN_SINCE_VERSION = "0.0.0"
+
+
+def shown_since_version(since_version: str) -> str:
+    """The release a task says it dates from, or ``""`` when that is unknown.
+
+    Empty and the ``0.0.0`` placeholder both come back as ``""``, so a surface
+    that renders ``since_version`` only when it is non-empty omits the claim
+    instead of printing a version nobody stamped.
+    """
+    text = (since_version or "").strip()
+    if not text or parse_version(text) == parse_version(UNKNOWN_SINCE_VERSION):
+        return ""
+    return text
+
 
 def packaged_root() -> Path:
     """The packaged ``ciao/stock/update-tasks`` directory.

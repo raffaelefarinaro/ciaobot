@@ -5,7 +5,6 @@ import { apiErrorMessage } from '../lib/errorMessage'
 import { webhookTriggerFrom } from '../lib/webhooks'
 import type {
   WebhookCreateResponse,
-  WebhookMode,
   WebhookReceipt,
   WebhookReceiptsResponse,
   WebhookTrigger,
@@ -15,7 +14,7 @@ import type {
 /**
  * Fields accepted by `POST /api/webhooks`.
  *
- * `mode`, `project_id` and the input policy are **create-only**: `PATCH` reads
+ * `project_id` and the input policy are **create-only**: `PATCH` reads
  * only `name`, `instructions` and `enabled`, so nothing here is editable later.
  * A `project_id` of null is the workspace's General project, which is a real
  * destination and not "unset".
@@ -25,7 +24,6 @@ export interface WebhookCreateInput {
   workspace: string
   instructions?: string
   project_id?: string | null
-  mode?: WebhookMode
 }
 
 /** The fields a `PATCH /api/webhooks/{id}` accepts, exactly as the route checks them. */
@@ -47,20 +45,12 @@ function receiptsUrl(workspace: string, triggerId: string): string {
   return `${triggerUrl(triggerId)}/receipts?workspace=${encodeURIComponent(workspace)}`
 }
 
-/**
- * A trigger's own mode is never a question this store answers by guessing, so
- * the create input is normalised once here: an absent `mode` means the route's
- * default (`auto`) and is left off the wire rather than sent as an explicit
- * `auto`, which would make a later default change indistinguishable from a
- * stored choice.
- */
 function createBody(input: WebhookCreateInput): Record<string, unknown> {
   return {
     name: input.name.trim(),
     workspace: input.workspace,
     instructions: input.instructions?.trim() ?? '',
     ...(input.project_id ? { project_id: input.project_id } : {}),
-    ...(input.mode ? { mode: input.mode } : {}),
   }
 }
 
@@ -394,7 +384,7 @@ export const useWebhookStore = defineStore('webhooks', () => {
   /**
    * Edit one trigger at the revision the caller read.
    *
-   * Only `name`, `instructions` and `enabled` go on the wire — `mode`,
+   * Only `name`, `instructions` and `enabled` go on the wire —
    * `project_id` and the input policy are create-only, and a body carrying them
    * is not a wider edit, it is a request the route ignores.
    *

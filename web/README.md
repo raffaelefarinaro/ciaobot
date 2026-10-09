@@ -4,6 +4,12 @@ Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, serv
 
 The file viewer is Vue-first. Text, Markdown, CSV, PDF/PPTX (via a binary preview), and HTML artifacts all render through native Vue components (`HtmlArtifactViewer.vue`, `CsvViewer.vue`, plus text/iframe previews). Diagrams live inside HTML artifacts as inline SVG; `.excalidraw` is no longer a viewer type. History and Diff operate on the raw file snapshots.
 
+Chat-originated file opens resolve a canonical absolute path through
+`/api/chats/{chat_id}/file-path` before rendering or pinning. Relative paths are
+anchored to that chat's agent root, never the sidebar's selected workspace.
+Pins report success explicitly; failed pins keep the modal open, and an older
+pin request cannot close a newer file preview.
+
 ## Dev workflow
 
 ```bash
@@ -244,10 +250,13 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   unpin removes the opener and, if its clean shared-pin preview is open, closes
   that preview — a separately opened viewer or a dirty edit is left untouched.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
-  way, one tab at a time, into `components/settings/`. General begins with a
-  short capability-help section linking to the public feature guide and inviting
-  users to ask Ciaobot directly in any chat; it appears in the generated
-  "On this page" navigation. The MCP tab is the first one out.
+  way, one tab at a time, into `components/settings/`. General begins with the
+  Updates section (compact to a title and an "Up to date" status when nothing is
+  in progress), then Use Ciaobot as an app, Notifications, Keyboard shortcuts and
+  the update task history; the capability-help section linking to the public
+  feature guide follows them.
+  The "On this page" navigation is built from the rendered sections in DOM order,
+  so it follows that order. The MCP tab is the first one out.
   `composables/useMcpServers.ts` owns the MCP state and every
   `/api/mcp/*` call — the status, the per-server edit drafts, the expansion
   map, the secret inputs, the tool probes and the add form. It imports no

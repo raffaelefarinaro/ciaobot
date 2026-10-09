@@ -18,6 +18,7 @@ models, no services.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -511,3 +512,132 @@ def test_a_malformed_id_is_never_removed_as_a_path(tmp_path: Path) -> None:
         plane.workspace_task_delete("personal", "../keep-me", expected_revision="x")
     assert excinfo.value.code == "task_invalid"
     assert outside.read_text(encoding="utf-8") == "not a task\n"
+
+# ── Resolutions, the read shape and the delegation log ─────────────────────
+
+
+def test_a_read_separates_the_description_history_and_log(tmp_path: Path) -> None:
+    from ciao.task_log import LOG_CLOSE, LOG_HEADING, LOG_OPEN
+
+    plane = _world(tmp_path)
+    created = _create(plane, "personal", title="Separate me", body="The work.")
+    done = _action(
+        plane, "personal", "complete", created["id"],
+        expected_revision=created["revision"], actor="user",
+        resolution="Merged after review.",
+    )
+    assert done["resolution"] == "Merged after review."
+    assert done["has_resolution"] is True
+    assert done["body"] == "The work."
+    assert done["delegation_log"] == ""
+
+    # The log is written by the attempt store's own path: a body carrying it.
+    logged = _get(plane, "personal", created["id"])["body"]
+    logged_body = (
+        f"{logged}\n\n{LOG_OPEN}\n{LOG_HEADING}\n\n"
+        f"- 2026-10-08T09:00:00+00:00 · Attempt one\n{LOG_CLOSE}\n"
+    )
+    _update(
+        plane, "personal", created["id"],
+        expected_revision=done["revision"], changes={}, body=logged_body, actor="user",
+    )
+    read = _get(plane, "personal", created["id"])
+    assert "Attempt one" in read["delegation_log"]
+    assert LOG_OPEN not in read["body"]
+    assert LOG_HEADING not in read["body"]
+    assert "Attempt one" not in read["body"]
+    assert [item["resolution"] for item in read["completions"]] == ["Merged after review."]
+
+    # A description save that leaves the log out keeps the stored log.
+    after_save = _update(
+        plane, "personal", created["id"],
+        expected_revision=read["revision"], changes={}, body="The work, reworded.", actor="user",
+    )
+    assert after_save["body"] == "The work, reworded."
+    assert "Attempt one" in _get(plane, "personal", created["id"])["delegation_log"]
+    assert [item["resolution"] for item in _get(plane, "personal", created["id"])["completions"]] == [
+        "Merged after review."
+    ]
+
+
+def test_a_resolution_is_the_users_and_only_on_a_done_task(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    task = _create(plane, "personal", title="Mine to close")
+
+    # The agent surface has no resolution parameter, and the shared update
+    # path refuses one from an agent actor.
+    assert "resolution" not in inspect.signature(plane.task_action).parameters
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _update(
+            plane, "personal", task["id"],
+            expected_revision=task["revision"], changes={}, resolution="I did it.",
+            actor="agent",
+        )
+    assert excinfo.value.code == "task_completion_requires_user"
+    assert _get(plane, "personal", task["id"])["status"] == "backlog"
+
+    # A resolution on a gesture that is not a completion is refused.
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _action(
+            plane, "personal", "move", task["id"],
+            expected_revision=task["revision"], status="in_progress",
+            actor="user", resolution="Not a completion.",
+        )
+    assert excinfo.value.code == "invalid_action"
+
+    # A non-string is refused before the write, and nothing is recorded.
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _action(
+            plane, "personal", "complete", task["id"],
+            expected_revision=task["revision"], actor="user", resolution=7,
+        )
+    assert excinfo.value.code == "invalid_task"
+    assert _get(plane, "personal", task["id"])["status"] == "backlog"
+    assert _get(plane, "personal", task["id"])["completions"] == []
+
+    # A done task with no completion record has nothing to reword.
+    legacy = _create(plane, "personal", title="Legacy")
+    path = _tasks_dir(plane, "personal") / f"{legacy['id']}.md"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("status: backlog", "status: done", 1),
+        encoding="utf-8",
+    )
+    legacy_now = _get(plane, "personal", legacy["id"])
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _update(
+            plane, "personal", legacy["id"],
+            expected_revision=legacy_now["revision"], changes={}, resolution="Late note.",
+            actor="user",
+        )
+    assert excinfo.value.code == "invalid_task"
+
+
+def test_a_completion_window_is_inclusive_and_refuses_a_bad_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    from ciao.task_board import TaskBoardStore
+
+    plane = _world(tmp_path)
+    moment = datetime(2026, 10, 7, 23, 59, 59, tzinfo=UTC)
+    monkeypatch.setattr(TaskBoardStore, "_now", lambda self: moment)
+    task = _create(plane, "personal", title="Boundary")
+    _action(
+        plane, "personal", "complete", task["id"],
+        expected_revision=task["revision"], actor="user",
+    )
+
+    def ids(**kw: str) -> list[str]:
+        return [row["id"] for row in plane.workspace_task_list("personal", **kw)]
+
+    assert ids(completed_since="2026-10-07T23:59:59+00:00") == [task["id"]]
+    assert ids(completed_since="2026-10-08T00:00:00+00:00") == []
+    assert ids(completed_before="2026-10-07T23:59:59+00:00") == []
+    assert ids(completed_before="2026-10-08T00:00:00+00:00") == [task["id"]]
+    # A naive bound is read as UTC, the store's own convention.
+    assert ids(completed_since="2026-10-07T23:59:59") == [task["id"]]
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_list("personal", completed_since="yesterday")
+    assert excinfo.value.code == "invalid_task"

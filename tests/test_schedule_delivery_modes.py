@@ -257,6 +257,31 @@ async def test_schedule_attention_classifier_uses_the_run_providers_insights_mod
     assert captured["model"] == "vendor/insights-model"
 
 
+async def test_automatic_schedule_attention_uses_actual_run_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    manager = _manager_for_classifier()
+    manager._config.provider_insights_models = {}
+    manager._chats = {
+        "run-chat": SimpleNamespace(provider="opencode", model="vendor/run-model"),
+    }
+    captured = {}
+
+    async def fake_oneshot(*args, **kwargs):
+        captured.update(kwargs)
+        return '{"needs_user": false, "reason": "routine"}'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+    assert await manager._schedule_run_needs_user(
+        _entry(), ScheduleRunOutcome(completed=True, final_text="done"),
+        chat_id="run-chat",
+    ) is False
+    assert captured["provider"] == "opencode"
+    assert captured["model"] == "vendor/run-model"
+
+
 async def test_schedule_attention_classifier_tracks_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

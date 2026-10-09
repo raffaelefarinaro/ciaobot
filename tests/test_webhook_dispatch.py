@@ -152,7 +152,6 @@ class _World:
             workspace="personal",
             project_id=project_id,
             instructions=_INSTRUCTIONS,
-            mode="normal",
         )
         self.store.update(
             created.trigger_id, expected_revision=created.revision, enabled=True
@@ -521,10 +520,9 @@ async def test_no_sender_input_reaches_model_or_permission_selection(
     # provider at all, so the payload's "choices" are inert strings.
     assert pcm.created[0]["model"] is None
     assert pcm.created[0]["provider"] is None
-    # The one permission input is the trigger's own configured mode — which the
-    # store can only hold as `normal`, `auto` or `plan`. The sender's `bypass`
-    # is not among them and did not reach anything.
-    assert pcm.created[0]["mode"] == "normal"
+    # No mode either: the chat takes the operator's new-chat default, and the
+    # sender's `bypass` did not reach anything.
+    assert pcm.created[0]["mode"] is None
     assert pcm.started[0][1] == {}
 
     # The payload is quoted as data, after the trigger's instructions, inside a

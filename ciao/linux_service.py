@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 from ciao.os_support.limits import SERVER_NOFILE_TARGET
+from ciao.os_support.tool_path import dedupe_path
 
 
 def _quoted(value: str) -> str:
@@ -36,7 +37,9 @@ def render_service(*, workspace: Path, user: str, home: Path, python: Path) -> s
         )
     # Do not resolve python: resolving a virtualenv symlink would select the
     # system interpreter and lose the installed Ciaobot dependencies.
-    tool_path = f"{python.parent}:{home}/.local/bin:/usr/local/bin:/usr/bin:/bin"
+    # The interpreter's folder is often /usr/bin already, so the composed PATH is
+    # deduplicated like every other PATH this package hands on.
+    tool_path = dedupe_path(f"{python.parent}:{home}/.local/bin:/usr/local/bin:/usr/bin:/bin")
     template = resources.files("ciao.stock").joinpath("deploy/ciaobot.service.tmpl").read_text(encoding="utf-8")
     return template.format(
         user=user,

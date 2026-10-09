@@ -27,6 +27,15 @@ vi.mock('../../lib/api', () => {
         ? Promise.reject(new Error('HTTP 500'))
         : Promise.resolve({ archived: state.archived })
     }
+    if (path === '/api/integrations/gws') {
+      return Promise.resolve({
+        installed: false,
+        binary_path: '',
+        default_profile: '',
+        cli_available: false,
+        profiles: [],
+      })
+    }
     return Promise.resolve({})
   })
   return {
@@ -59,6 +68,7 @@ function workspaces(names: string[], primary = 'personal'): WorkspacesResponse {
     })),
     active: names[0] ?? null,
     primary,
+    default_agent_fs_scope: 'workspace',
     provider_options: [{ value: 'claude', label: 'Claude' }],
   }
 }

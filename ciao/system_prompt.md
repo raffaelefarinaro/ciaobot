@@ -84,6 +84,7 @@ task update      ID --revision REV [--title T] [--body-file FILE.md] [--due D] [
 task move        ID --to backlog|in_progress|in_review|done --revision REV
 task complete    ID --revision REV
 task delegate   ID --revision REV [--project P]
+task add-update ID --revision REV --text-file FILE.md
 task report     ID --outcome done|blocked|needs_input --summary-file FILE.md
 task attempt    ID stop|resume|retry|detach
 schedule list
@@ -95,7 +96,7 @@ schedule resume   ID
 schedule run      ID
 schedule delete   ID
 webhook list
-webhook create    --name NAME [--instructions-file FILE] [--project P] [--mode normal|auto|plan]
+webhook create    --name NAME [--instructions-file FILE] [--project P]
 webhook update    ID --revision REV [--name NAME] [--instructions-file FILE] [--enable|--disable]
 webhook rotate    ID --revision REV
 webhook delete    ID --revision REV
@@ -115,5 +116,5 @@ workspace list
 
 - The memory-proposal review queue has its own two commands, outside the table: `ciao memory-proposals` lists it, and `ciao memory-proposal-dismiss --text-file F [--promoted]` removes one row (fact text in a file, never argv; `--promoted` only after filing the fact).
 - `note verify --payload-file F` settles a stale note's facts (JSON: `relative_path`, `expected_revision`, `outcome`, `coverage`, `evidence`, `before`/`after`); `status` is `applied`, `needs_review` (a `note_edit` proposal for a person), `unverified` or `conflict`. Never hand-edit a stale note's `updated:` instead.
-- The user's tasks are this board (`ciao task …`), not your provider's todo tool; link one as `[title](/tasks/<id>)`, full id. Tasks live one per file under `Workspace/Tasks/` in this workspace's vault, and `task list`/`task get` return the `revision` every edit has to pass back. A stale revision changes nothing: re-read and re-plan, never resend it. You cannot mark a task done: report what is finished and let the user close it. `task delegate` hands it to the agent as one ordinary attended chat, and `task attempt ID ACTION` then stops, resumes, retries or detaches that run; delegated work reports back once, before the turn ends, with `task report ID --outcome done|blocked|needs_input --summary-file FILE.md`, and a delegated turn that ends without one reads to the user as Unfinished rather than as a result to review; a finished turn waits for review, it does not close the task. Asked to delegate, run `task delegate` rather than doing the work in this turn. When you work a task yourself, note what you did and where in its body, then move it to `in_review`. Pass a task body with `--body-file`, never as a shell argument.
+- The user's tasks are this board (`ciao task …`), not your provider's todo tool; link one as `[title](/tasks/<id>)`, full id. Tasks live one per file under `Workspace/Tasks/` in this workspace's vault, and `task list`/`task get` return the `revision` every edit has to pass back. A stale revision changes nothing: re-read and re-plan, never resend it. You cannot mark a task done: report what is finished and let the user close it. `task delegate` hands it to the agent as one ordinary attended chat, and `task attempt ID ACTION` then stops, resumes, retries or detaches that run; delegated work reports back once, before the turn ends, with `task report ID --outcome done|blocked|needs_input --summary-file FILE.md`, and a delegated turn that ends without one reads to the user as Unfinished rather than as a result to review; a finished turn waits for review, it does not close the task. Asked to delegate, run `task delegate` rather than doing the work in this turn. When you work a task yourself, `task add-update` records a milestone (not a chat dump), then move it to `in_review`.
 - `webhook create|rotate` return a secret **shown once**: hand it to the user, never store it. A trigger is created disabled, so ask before `webhook update --enable`, then tell them the sender POSTs `{"text": "..."}` to `/hooks/v1/<trigger_id>` on this engine, with that secret as a bearer token and an `Idempotency-Key`. `webhook rotate` kills the old secret at once. Instructions go in a file: `--instructions-file`.

@@ -186,6 +186,8 @@ again
 More.
 ```
 """
+    from ciao.web.project_chats import ProjectChatManager
+
     pcm = ProjectChatManager.__new__(ProjectChatManager)
     rows = pcm._parse_transcript_messages(md)
 
@@ -202,3 +204,104 @@ More.
     assert "usage" not in assistant[1]
     # Quota lines are not leaked into usage.
     assert "rateLimitType" not in assistant[0]["usage"]
+
+
+def test_archived_reply_with_inner_fences_is_read_whole(tmp_path: Path) -> None:
+    """A reply holding its own fenced block round-trips through the archive.
+
+    The writer fences each message in a backtick run longer than any inside it,
+    so the reader gets the reply back in full, not just the text before the
+    first inner fence (#1241).
+    """
+    from ciao.models import AgentRequest, ChatContext
+    from ciao.transcripts import TranscriptStore
+    from ciao.web.project_chats import ProjectChatManager
+
+    response = "line A\n```\n(eval):1: command not found: hi\n```\nline B\n\n`hi` isn't a command."
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "memory-vault")
+    store.record_turn(
+        AgentRequest(
+            prompt="run hi",
+            model="sonnet",
+            mode="bypass",
+            resume_session=None,
+            images=[],
+        ),
+        ctx=ChatContext(chat_id=1),
+        response_text=response,
+        effective_model="sonnet",
+        session_id="ses_1",
+        usage={},
+        quota={},
+        input_kind="text",
+        tool_events=[],
+    )
+    archived = store.archive_session(
+        ctx=ChatContext(chat_id=1),
+        active_model="sonnet",
+        last_effective_model="sonnet",
+        session_id="ses_1",
+    )
+    assert archived is not None
+    pcm = ProjectChatManager.__new__(ProjectChatManager)
+    rows = pcm._parse_transcript_messages(archived.read_text(encoding="utf-8"))
+
+    assert [r["content"] for r in rows if r["role"] == "assistant"] == [response]
+    assert [r["content"] for r in rows if r["role"] == "user"] == ["run hi"]
+
+
+def test_legacy_three_backtick_archive_with_inner_fences_is_read_in_full() -> None:
+    from ciao.web.project_chats import ProjectChatManager
+
+    """A transcript written before the fence grew still parses to its end.
+
+    The body holds a three-backtick block of its own; the wrapper is the last
+    closing fence before the ``### Usage`` heading, so the reply is read whole
+    (#1241).
+    """
+    md = """## Turn 1
+
+- Time: 2026-10-09T14:12:07Z
+- Input kind: text
+- Mode: auto
+- Effective model: claude-sonnet-5-5
+- Images: 0
+
+### User
+
+```text
+run hi
+```
+
+### Assistant
+
+```text
+line A
+```
+(eval):1: command not found: hi
+```
+line B
+
+`hi` isn't a command on this machine, so Bash exited with code 127.
+```
+
+### Usage
+
+- input_tokens: 4
+- output_tokens: 157
+
+### Quota
+
+- status: allowed
+"""
+    pcm = ProjectChatManager.__new__(ProjectChatManager)
+    rows = pcm._parse_transcript_messages(md)
+
+    assistant = [r for r in rows if r["role"] == "assistant"]
+    assert assistant[0]["content"] == (
+        "line A\n```\n(eval):1: command not found: hi\n```\nline B\n\n"
+        "`hi` isn't a command on this machine, so Bash exited with code 127."
+    )
+    assert assistant[0]["timestamp"] == "2026-10-09T14:12:07Z"
+    assert assistant[0]["usage"] == {"input_tokens": "4", "output_tokens": "157"}
+    assert [r["content"] for r in rows if r["role"] == "user"] == ["run hi"]

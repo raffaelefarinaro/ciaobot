@@ -2,6 +2,16 @@
 
 Setup, dev workflow, testing, and change guidelines. For the system design, read `docs/ARCHITECTURE.md` first.
 
+Provider-settings regressions cover saved defaults and effort options even when
+catalog refresh fails. Automatic Session insights inherits the source chat model
+for archive memory, titles and schedule attention; an explicit per-provider
+insights model wins. History imports without a recorded model use the
+workspace/provider default.
+
+Chat file-link regressions cover separate agent roots, exact identities across
+text/image/binary/HTML previews, failed pins preserving the modal, and stale pin
+completions not dismissing a newer file (#1167).
+
 ## Server install
 
 Linux production and every installer-managed macOS install restart the engine
@@ -229,8 +239,9 @@ continues, because the host is optional and inert and must not abort the one-lin
 Because the record is written before the rename, a process killed in that window
 leaves a consistent, verified host rather than a recordless bundle every later run
 reports as `host_exists`; a Python failure removes both the bundle and record the
-run placed. The host is **not activated**: no launchd, no
-plist, no service change, no permission prompt — activation is a later child.
+run placed. The host install is inert: it writes no launchd job itself;
+activation is `ciao setup` registering the hosted plist when a verified host
+is installed. No step requests a permission prompt.
 A wheel-only manifest (every historical release) prints nothing from the selector
 and installs the engine exactly as before, and so does an explicit `--version`
 naming a wheel cut before the host work: the shell probes for the module first,

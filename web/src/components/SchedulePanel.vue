@@ -486,7 +486,7 @@
             <strong :class="{ 'rail-attention': scheduleNeedsAttention(schedule) }">{{ scheduleStateLabel(schedule) }}</strong>
           </div>
           <div v-if="schedule.frequency !== 'manual'" class="rail-kv">
-            <span>Next run</span><strong>{{ schedule.enabled && schedule.next_run ? relativeWhen(schedule.next_run, schedule.timezone_name) : '—' }}</strong>
+            <span>Next run</span><strong>{{ schedule.enabled && schedule.next_run ? relativeWhen(schedule.next_run) : '—' }}</strong>
           </div>
           <div class="rail-kv">
             <span>Last run</span><strong>{{ schedule.last_dispatched_at ? relativeWhen(schedule.last_dispatched_at) : (schedule.last_triggered_on || 'never') }}</strong>
@@ -552,7 +552,7 @@
                 </span>
                 <span class="ov-sub">{{ cadenceSummary(s) }} · {{ deliverySummary(s) }}</span>
               </span>
-              <span class="ov-when">{{ relativeWhen(s.next_run, s.timezone_name) }}</span>
+              <span class="ov-when">{{ relativeWhen(s.next_run) }}</span>
             </router-link>
             <p v-if="!upcomingRoutines.length" class="ov-empty">
               Nothing scheduled. The rest run only when you click Run now, or are paused.
@@ -588,7 +588,7 @@
                 <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span class="ov-sub">{{ cadenceSummary(s) }}<template v-if="!s.enabled"> · paused</template></span>
               </span>
-              <span v-if="s.enabled && s.next_run" class="ov-when">{{ relativeWhen(s.next_run, s.timezone_name) }}</span>
+              <span v-if="s.enabled && s.next_run" class="ov-when">{{ relativeWhen(s.next_run) }}</span>
             </router-link>
           </section>
 
@@ -677,6 +677,7 @@ import {
   DropdownMenuTrigger,
 } from 'reka-ui'
 import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
+import { cadenceSummary } from '../lib/scheduleClock'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
 import type { ScheduleUpdate } from '../stores/tasks'
@@ -913,41 +914,21 @@ function formatWhen(iso: string | null): string {
 }
 
 // Short relative form for rows and the rail: "Fri 10:00 · in 10h".
-// Upcoming slots are shown in the automation's own timezone, the one its
-// "At" row names, so the list, the rail and the detail rows agree.
-function relativeWhen(iso: string | null | undefined, timeZone?: string): string {
+// Times are in the browser's local zone, the same as Home's next-run line. The
+// automation's own zone is named once, in the "At" row of its detail.
+function relativeWhen(iso: string | null | undefined): string {
   if (!iso) return '—'
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
   const diffMs = d.getTime() - Date.now()
   const absMin = Math.round(Math.abs(diffMs) / 60000)
-  let clock: string
-  try {
-    clock = d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false, timeZone })
-  } catch {
-    clock = d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
-  }
+  const clock = d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false })
   if (absMin < 1) return `${clock} · now`
   let rel: string
   if (absMin < 60) rel = `${absMin}m`
   else if (absMin < 60 * 24) rel = `${Math.round(absMin / 60)}h`
   else rel = `${Math.round(absMin / 1440)}d`
   return diffMs < 0 ? `${clock} · ${rel} ago` : `${clock} · in ${rel}`
-}
-
-// Plain cadence for a row's sub-line: "Every day at 08:00", "Every 30 min".
-function cadenceSummary(s: Schedule): string {
-  const at = s.daily_time_utc ? ` at ${s.daily_time_utc}` : ''
-  if (s.frequency === 'manual') return 'Only when you run it'
-  if (s.frequency === 'interval') return `Every ${s.interval_minutes} min`
-  if (s.frequency === 'once') return s.run_at_date ? `Once on ${s.run_at_date}${at}` : `Once${at}`
-  if (s.frequency === 'monthly') return `Monthly on day ${s.day_of_month}${at}`
-  if (s.frequency === 'weekly') {
-    return s.days_of_week?.length
-      ? `Weekly on ${s.days_of_week.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', ')}${at}`
-      : `Weekly${at}`
-  }
-  return `Every day${at}`
 }
 
 // Where each run lands, in the sub-line's words.
@@ -1055,11 +1036,10 @@ function nextRunLabel(s: Schedule): string {
   try {
     const d = new Date(s.next_run)
     const when = new Intl.DateTimeFormat(undefined, {
-      timeZone: s.timezone_name,
       weekday: 'short', day: 'numeric', month: 'short',
       hour: '2-digit', minute: '2-digit', hour12: false,
     }).format(d)
-    const rel = relativeWhen(s.next_run, s.timezone_name).split(' · ')[1]
+    const rel = relativeWhen(s.next_run).split(' · ')[1]
     return rel ? `${when} · ${rel}` : when
   } catch {
     return s.next_run

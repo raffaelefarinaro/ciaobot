@@ -18,7 +18,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -67,7 +67,21 @@ from ciao.task_attempts import (
     task_delegation_helper,
 )
 from ciao.task_board import Actor, TaskBoardError, TaskBoardStore, TaskDocument
-from ciao.task_log import render_item, upsert_item
+from ciao.task_log import extract_log, log_text, render_item, strip_log, upsert_item
+from ciao.task_resolution import (
+    Completion,
+    extract_section,
+    parse_completions,
+    strip_completions,
+)
+from ciao.task_updates import (
+    extract_section as extract_updates,
+    latest_update_id,
+    parse_updates,
+    strip_updates,
+    unseen_updates,
+)
+from ciao.web.chat_service import MEMORY_PASS_RESOLUTION_MAX
 from ciao.web.routes_webhooks import webhook_store
 from ciao.webhooks import (
     WebhookStore,
@@ -239,6 +253,12 @@ _ATTEMPT_ERROR_CODES: dict[str, tuple[str, bool]] = {
 }
 
 
+def _latest_completion(body: str) -> Completion | None:
+    """The task's newest completion record, or ``None`` when it has none."""
+    completions = parse_completions(body)
+    return completions[0] if completions else None
+
+
 def _task_error(exc: TaskBoardError) -> ControlPlaneError:
     """Re-raise one store refusal as the control plane's typed error."""
     code, retryable = _TASK_ERROR_CODES.get(exc.code, ("task_read_failed", True))
@@ -287,10 +307,40 @@ def _chat_has_native_question(chat: Any) -> bool:
     return isinstance(payload, dict) and bool(payload.get("request_id"))
 
 
+def _completion_bound(value: str | None, name: str) -> datetime | None:
+    """One completion-window bound as an aware UTC instant, or None when not given.
+
+    A naive value is read as UTC, the store's own convention. A value that does
+    not parse is refused rather than ignored, so a typo cannot widen a window.
+    """
+    if value is None:
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise ControlPlaneError(
+            "invalid_task", f"{name} must be an ISO-8601 date or time."
+        ) from exc
+    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment
+
+
+def _completed_within(
+    document: TaskDocument, since: datetime | None, before: datetime | None
+) -> bool:
+    """Whether any completion of *document* falls in ``[since, before)``."""
+    return any(
+        (since is None or item.completed_at >= since)
+        and (before is None or item.completed_at < before)
+        for item in parse_completions(document.body)
+    )
+
+
 def _task_row_with_attempt(
     document: TaskDocument,
     live: TaskAttempt | None,
     current: TaskAttempt | None,
+    *,
+    include_body: bool = False,
 ) -> dict[str, Any]:
     """One task as a board row, plus the three delegation facts it draws.
 
@@ -314,7 +364,7 @@ def _task_row_with_attempt(
     result was reached against an older description" on the very card that has no
     longer delegated anything.
     """
-    payload = _task_payload(document)
+    payload = _task_payload(document, include_body=include_body)
     linked = document.record.attempt_id is not None
     payload["attempt_state"] = current.state if current is not None else ""
     # The agent's own word on the current attempt (#1064), and the engine's note
@@ -404,6 +454,31 @@ def _webhook_revision(value: Any) -> int:
         ) from exc
 
 
+def _description(body: str) -> str:
+    """The body as the description: both engine sections removed, else untouched.
+
+    A body with neither section passes through byte for byte. With a section, the
+    trailing newline the strip helpers leave is trimmed, so the description reads
+    back as the text the user wrote, and a save that sends it back round-trips.
+    """
+    if not (extract_section(body) or extract_log(body) or extract_updates(body)):
+        return body
+    return strip_updates(strip_completions(strip_log(body))).rstrip("\n")
+
+
+def _completed_summary(completions: list[Completion]) -> dict[str, Any]:
+    """The latest completion's time and whether it carries a resolution.
+
+    ``completions`` is newest first, as the store keeps it, so the first item is
+    the latest. A task with no completion record reports ``null`` and ``false``.
+    """
+    latest = completions[0] if completions else None
+    return {
+        "completed_at": latest.completed_at.isoformat() if latest is not None else None,
+        "has_resolution": latest is not None and bool(latest.resolution.strip()),
+    }
+
+
 def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict[str, Any]:
     """One task as a transport payload.
 
@@ -412,6 +487,11 @@ def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict
     lost update. The body is omitted from a list row (it is Markdown prose, and
     a board renders many cards) and present on a get, where the caller asked
     for this one task.
+
+    The completion facts a row needs (``completed_at``, ``has_resolution``) are
+    on every payload. A get also carries the resolution text, the whole parsed
+    completion history and the delegation log, each under its own key, and its
+    ``body`` is the description alone: neither engine section is in it.
     """
     record = document.record
     payload: dict[str, Any] = {
@@ -428,8 +508,35 @@ def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict
         "revision": document.revision,
         "relative_path": document.relative_path,
     }
+    completions = parse_completions(document.body)
+    payload.update(_completed_summary(completions))
     if include_body:
-        payload["body"] = document.body
+        latest = completions[0] if completions else None
+        payload["body"] = _description(document.body)
+        payload["resolution"] = latest.resolution if latest is not None else ""
+        payload["completions"] = [
+            {
+                "id": item.id,
+                "completed_at": item.completed_at.isoformat(),
+                "resolution": item.resolution,
+                "edited_at": item.edited_at.isoformat() if item.edited_at is not None else None,
+                "attempt_id": item.attempt_id,
+            }
+            for item in completions
+        ]
+        payload["delegation_log"] = log_text(document.body)
+        payload["updates"] = [
+            {
+                "id": item.id,
+                "recorded_at": item.recorded_at.isoformat(),
+                "actor": item.actor,
+                "text": item.text,
+                "edited_at": item.edited_at.isoformat() if item.edited_at is not None else None,
+                "attempt_id": item.attempt_id,
+                "chat_id": item.chat_id,
+            }
+            for item in parse_updates(document.body)
+        ]
     return payload
 
 
@@ -2585,17 +2692,32 @@ class CiaoControlPlane:
             raise ControlPlaneError("project_not_found", f"Project '{value}' was not found.")
         return resolved
 
-    def workspace_task_list(self, workspace: str) -> list[dict[str, Any]]:
+    def workspace_task_list(
+        self,
+        workspace: str,
+        *,
+        completed_since: str | None = None,
+        completed_before: str | None = None,
+    ) -> list[dict[str, Any]]:
         """One workspace's board rows, valid tasks first, then unreadable files.
 
         A file that is not a readable task is never dropped: it comes back as a
         row carrying ``code`` (and no task fields), so a malformed file cannot
         masquerade as an empty or healthy board.
 
+        ``completed_since`` (inclusive) and ``completed_before`` (exclusive) are
+        ISO-8601 bounds over the completion records, not ``updated_at``: a task
+        matches when any of its completions falls inside the window. Once either
+        bound is given the list is filtered, so a task with no completion record
+        and an unreadable file (which has no record to read) are both omitted.
+
         Every readable row carries the same attempt facts a single read does, so a
         board draws a delegation badge from one request per workspace rather than
         one per card. The attempts are one document, read once here.
         """
+        since = _completion_bound(completed_since, "completed_since")
+        before = _completion_bound(completed_before, "completed_before")
+        windowed = since is not None or before is not None
         result = self._task_call(workspace, lambda store: store.list())
         live: dict[str, TaskAttempt] = self._attempt_call(
             workspace, lambda store: store.live_by_task()
@@ -2603,14 +2725,18 @@ class CiaoControlPlane:
         current: dict[str, TaskAttempt] = self._attempt_call(
             workspace, lambda store: store.newest_by_task()
         )
-        return [
+        rows = [
             _task_row_with_attempt(
                 document,
                 live.get(document.record.id),
                 current.get(document.record.id),
             )
             for document in result.tasks
-        ] + [
+            if not windowed or _completed_within(document, since, before)
+        ]
+        if windowed:
+            return rows
+        return rows + [
             {
                 "id": entry.relative_path.rsplit("/", 1)[-1].removesuffix(".md"),
                 "path": entry.relative_path,
@@ -2662,6 +2788,7 @@ class CiaoControlPlane:
         changes: Mapping[str, object],
         body: str | None = None,
         actor: Actor = "agent",
+        resolution: str | None = None,
     ) -> dict[str, Any]:
         """Apply managed edits to one task at the revision the caller read.
 
@@ -2670,10 +2797,25 @@ class CiaoControlPlane:
         This layer adds the one thing a pure file store cannot know: that a
         ``project_id`` names a live project in this same workspace.
 
+        ``resolution`` is the user's completion text. It rides on the write that
+        makes the task done, or rewords the latest completion of a task that is
+        already done. It is user-only: no agent call carries one. A resolution on
+        a write that leaves the task open, or on a done task with no completion
+        record to reword, is refused rather than dropped.
+
         The answer carries the attempt facts, because an edit is exactly what can
         make a delegated task ``changed_since_delegated``: the user editing a task
         the agent is working on is the case that flag exists for.
         """
+        if resolution is not None:
+            if actor != "user":
+                raise ControlPlaneError(
+                    "task_completion_requires_user",
+                    "Only the user records how a task was resolved.",
+                )
+            if not isinstance(resolution, str):
+                raise ControlPlaneError("invalid_task", "resolution must be a string")
+            self._check_resolution_target(workspace, task_id, changes)
         planned: dict[str, object] = {}
         for key, value in dict(changes or {}).items():
             if key == "project_id":
@@ -2691,9 +2833,196 @@ class CiaoControlPlane:
                 changes=planned,
                 body=body,
                 actor=actor,
+                resolution=resolution,
             ),
         )
         return self._task_with_attempt(workspace, document, include_body=True)
+
+    def _check_resolution_target(
+        self, workspace: str, task_id: str, changes: Mapping[str, object]
+    ) -> None:
+        """Refuse a resolution that no completion record could hold.
+
+        A resolution is written only with a transition into Done or as a rewording
+        of a completion that already exists. Anything else would be a silent no-op
+        in the store, so it is named here instead. The read is advisory: the store
+        still checks the revision before it writes.
+        """
+        current = self._task_call(
+            workspace, lambda store: store.get(str(task_id or "").strip())
+        )
+        target = changes.get("status", current.record.status)
+        if target != "done":
+            raise ControlPlaneError(
+                "invalid_task",
+                "a resolution is recorded when a task is completed; "
+                "the task must be done after this edit.",
+            )
+        if current.record.status == "done" and not parse_completions(current.body):
+            raise ControlPlaneError(
+                "invalid_task",
+                "this task is done but has no completion record to edit a resolution on.",
+            )
+
+    def workspace_task_add_update(
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        text: str,
+        actor: Actor,
+        chat_id: str = "",
+        send: bool = False,
+    ) -> dict[str, Any]:
+        """Append one progress note, and optionally send it to the live attempt.
+
+        A note is not an edit of the description. When the live attempt was
+        bound to the revision this write read, it follows the new revision so
+        the note does not read as "changed since delegated". A description
+        edit that was already pending stays pending.
+
+        ``send`` delivers the note as one ordinary message in the attempt's
+        chat. It is refused before the write when nothing is live to receive
+        it. Saving without ``send`` leaves the note for the next resume.
+        """
+        clean = str(task_id or "").strip()
+        if not isinstance(text, str) or not text.strip():
+            raise ControlPlaneError("invalid_task", "a progress note must be text")
+        document = self._task_call(workspace, lambda store: store.get(clean))
+        if str(expected_revision or "").strip() != document.revision:
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "the task changed since this note was planned; nothing was written",
+                retryable=True,
+            )
+        live = self._attempt_live(workspace, clean)
+        attempt_id = ""
+        linked_chat = ""
+        if actor == "agent":
+            # Same gate as `task report`: an agent note is that agent's word about
+            # its own work, so only the chat holding a live attempt may write one.
+            if live is None or live.chat_id != chat_id:
+                raise ControlPlaneError(
+                    "task_report_not_holder",
+                    "only the chat working on this task can add a progress note to it; "
+                    "this chat does not hold a live attempt for it.",
+                )
+            attempt_id = live.attempt_id
+            linked_chat = live.chat_id
+        if send and (live is None or not live.is_live):
+            raise ControlPlaneError(
+                "invalid_action",
+                "there is no live attempt to send this progress note to.",
+            )
+        written = self._task_call(
+            workspace,
+            lambda store: store.add_update(
+                clean,
+                expected_revision=document.revision,
+                actor=actor,
+                text=text.strip(),
+                attempt_id=attempt_id,
+                chat_id=linked_chat,
+            ),
+        )
+        if live is not None and live.task_revision == document.revision:
+            live = self._attempt_call(
+                workspace,
+                lambda store: store.bind_revision(live.attempt_id, written.revision),
+            )
+        sent = False
+        if send and live is not None:
+            message = "Progress note on this task:\n\n" + text.strip()
+            self._deliver_task_message(live.chat_id, message)
+            sent = True
+            self._note_updates_seen(workspace, live.attempt_id, written.body)
+        elif actor == "agent" and live is not None and live.chat_id == chat_id:
+            self._note_updates_seen(workspace, live.attempt_id, written.body)
+        task = self._task_with_attempt(workspace, written, include_body=True)
+        task["update_sent"] = sent
+        return task
+
+    def workspace_task_edit_update(
+        self,
+        workspace: str,
+        task_id: str,
+        update_id: str,
+        *,
+        expected_revision: str,
+        text: str,
+    ) -> dict[str, Any]:
+        """Reword one progress note. The description is not edited."""
+        clean = str(task_id or "").strip()
+        document = self._task_call(workspace, lambda store: store.get(clean))
+        if str(expected_revision or "").strip() != document.revision:
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "the task changed since this note was planned; nothing was written",
+                retryable=True,
+            )
+        written = self._task_call(
+            workspace,
+            lambda store: store.edit_update(
+                clean,
+                str(update_id or ""),
+                expected_revision=document.revision,
+                text=text,
+            ),
+        )
+        live = self._attempt_live(workspace, clean)
+        if live is not None and live.task_revision == document.revision:
+            self._attempt_call(
+                workspace,
+                lambda store: store.bind_revision(live.attempt_id, written.revision),
+            )
+        return self._task_with_attempt(workspace, written, include_body=True)
+
+    def _note_updates_seen(self, workspace: str, attempt_id: str, body: str) -> None:
+        """Remember the newest progress note an attempt has been shown."""
+        newest = latest_update_id(body)
+        if not newest:
+            return
+        try:
+            self._attempt_call(
+                workspace,
+                lambda store: store.note_seen_update(attempt_id, newest),
+            )
+        except ControlPlaneError:
+            logger.exception("tasks: could not record the progress cursor for %s", attempt_id)
+
+    def _deliver_task_message(self, chat_id: str, message: str) -> None:
+        """Queue or start one ordinary message in a delegated chat."""
+        if self.pcm.queue_message(chat_id, message):
+            return
+        active = self.pcm.get_active_stream(chat_id)
+        stream, refusal = self._launch_turn(chat_id, message)
+        if stream is None or stream is active:
+            raise ControlPlaneError(
+                "task_launch_failed",
+                f"the progress note was saved but could not be sent ({refusal or 'the chat is busy'})",
+                retryable=True,
+            )
+        self._watch_turn_for_chat(chat_id, stream)
+
+    def _watch_turn_for_chat(self, chat_id: str, stream: Any) -> None:
+        """Attach a watcher when this delivery started the turn itself."""
+        try:
+            chat = self.pcm.get_chat(chat_id)
+        except Exception:  # noqa: BLE001
+            return
+        helper = getattr(chat, "helper", None)
+        project = self.pcm.get_project(str(getattr(chat, "project_id", "") or ""))
+        workspace = str(getattr(project, "workspace", "") or "")
+        if not isinstance(helper, dict) or not workspace:
+            return
+        self._watch_turn(
+            workspace,
+            str(helper.get("attempt_id") or ""),
+            str(helper.get("task_id") or ""),
+            chat_id,
+            stream,
+        )
 
     def workspace_task_action(
         self,
@@ -2707,6 +3036,7 @@ class CiaoControlPlane:
         project_id: str | None = None,
         due: str | None = None,
         actor: Actor = "agent",
+        resolution: str | None = None,
     ) -> dict[str, Any]:
         """One board gesture: ``move``, ``complete`` or ``reassign``.
 
@@ -2722,6 +3052,8 @@ class CiaoControlPlane:
         here and has to be stopped or detached first.
         """
         verb = str(action or "").strip()
+        if resolution is not None and verb != "complete":
+            raise ControlPlaneError("invalid_action", "resolution is only recorded by complete.")
         if verb == "move":
             target = str(status or "").strip()
             if not target:
@@ -2749,16 +3081,21 @@ class CiaoControlPlane:
                 expected_revision=expected_revision,
                 changes=changes,
                 actor=actor,
+                resolution=resolution,
             )
             if reviewed is not None:
                 return reviewed
-        return self.workspace_task_update(
+        task = self.workspace_task_update(
             workspace,
             task_id,
             expected_revision=expected_revision,
             changes=changes,
             actor=actor,
+            resolution=resolution,
         )
+        if verb == "complete" and (resolution or "").strip():
+            self._learn_from_task_completion(workspace, task_id)
+        return task
 
     def workspace_task_complete_reviewed(
         self,
@@ -2768,6 +3105,7 @@ class CiaoControlPlane:
         expected_revision: str,
         changes: dict[str, object],
         actor: Actor,
+        resolution: str | None = None,
     ) -> dict[str, Any] | None:
         """Close a task whose delegated turn has a result waiting, in one gesture.
 
@@ -2816,6 +3154,8 @@ class CiaoControlPlane:
         """
         if actor != "user":
             return None
+        if resolution is not None and not isinstance(resolution, str):
+            raise ControlPlaneError("invalid_task", "resolution must be a string")
         clean = str(task_id or "").strip()
         document: TaskDocument = self._task_call(
             workspace, lambda store: store.get(clean)
@@ -2839,6 +3179,7 @@ class CiaoControlPlane:
                 expected_revision=released.revision,
                 changes=changes,
                 actor=actor,
+                resolution=resolution,
             )
         except ControlPlaneError:
             # The unlink landed and the completion did not, so the task is free of
@@ -2849,14 +3190,27 @@ class CiaoControlPlane:
             )
             raise
         self._release_attempt(workspace, attempt.attempt_id)
-        self._learn_from_approved(workspace, attempt, document.record.title)
         # Read again rather than returning the completion's own row: the reply is
         # what a board paints, and a completed card still naming a live attempt
         # would keep drawing Stop and Detach over a task with no chat to open.
         done: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
+        self._learn_from_approved(
+            workspace,
+            attempt,
+            document.record.title,
+            _latest_completion(done.body),
+            task_path=done.relative_path,
+        )
         return self._task_with_attempt(workspace, done, include_body=True)
 
-    def _learn_from_approved(self, workspace: str, attempt: TaskAttempt, title: str) -> None:
+    def _learn_from_approved(
+        self,
+        workspace: str,
+        attempt: TaskAttempt,
+        title: str,
+        completion: Completion | None,
+        task_path: str = "",
+    ) -> None:
         """Archive an approved task's chat and run a procedure-focused memory pass.
 
         The user approving a delegated result says this conversation is how that
@@ -2874,18 +3228,33 @@ class CiaoControlPlane:
         handed to the loop this plane was built on — the same one
         ``tasks_changed`` is published on. Without one (a test calling the
         service outside any loop) it does nothing.
+
+        ``completion`` is the task's latest completion record (#1154). Its
+        resolution rides in the focus as the user's own words, separate from the
+        agent's summary, and empty when the approval saved none.
         """
-        try:
-            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
-            on_loop = True
-        except RuntimeError:
-            loop, on_loop = self._loop, False
-        if loop is None or loop.is_closed():
-            return
+        resolution = completion.resolution if completion is not None else ""
+        if len(resolution) > MEMORY_PASS_RESOLUTION_MAX:
+            # Dropped, not sliced: a cut resolution would reach the pass as the
+            # user's words. The pass still runs on the transcript.
+            logger.warning(
+                "Resolution for task %r is %d characters, over the %d limit; "
+                "the approved-task pass runs without it",
+                title,
+                len(resolution),
+                MEMORY_PASS_RESOLUTION_MAX,
+            )
+            resolution = ""
         focus = {
             "focus": "approved_task",
             "task_title": title,
             "task_summary": attempt.summary,
+            "completion_id": completion.id if completion is not None else "",
+            "completed_at": (
+                completion.completed_at.isoformat() if completion is not None else ""
+            ),
+            "user_resolution": resolution,
+            "task_path": task_path,
         }
 
         async def _run() -> None:
@@ -2916,8 +3285,27 @@ class CiaoControlPlane:
                     "tasks: could not learn from the approved task in chat %s", attempt.chat_id
                 )
 
+        self._run_on_engine_loop(f"task-learn-{attempt.attempt_id[:8]}", _run)
+
+    def _run_on_engine_loop(
+        self, name: str, run: Callable[[], Coroutine[Any, Any, None]]
+    ) -> None:
+        """Schedule *run* on the engine's loop, from a loop or from a worker thread.
+
+        The board's complete route runs in a worker thread (``asyncio.to_thread``),
+        where there is no running loop, so the work is handed to the loop this
+        plane was built on. Without one, nothing runs.
+        """
+        try:
+            loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+            on_loop = True
+        except RuntimeError:
+            loop, on_loop = self._loop, False
+        if loop is None or loop.is_closed():
+            return
+
         def _spawn() -> None:
-            task = loop.create_task(_run(), name=f"task-learn-{attempt.attempt_id[:8]}")
+            task: asyncio.Task[None] = loop.create_task(run(), name=name)
             self._watchers.add(task)
             task.add_done_callback(self._watchers.discard)
 
@@ -2927,10 +3315,90 @@ class CiaoControlPlane:
         try:
             loop.call_soon_threadsafe(_spawn)
         except RuntimeError:
-            logger.warning(
-                "tasks: the loop closed before the approved task in chat %s could be archived",
-                attempt.chat_id,
+            logger.warning("tasks: the loop closed before %s could run", name)
+
+    def _learn_from_task_completion(self, workspace: str, task_id: str) -> None:
+        """Queue a learning pass for the resolution a manual completion saved (#1154).
+
+        Runs after the completion is written, so nothing here can undo Done: a
+        read failure, a refused resolution or a queue failure is logged and the
+        completion stands. The enqueue itself runs on the engine loop, because
+        starting the pass's turn needs one.
+        """
+        try:
+            document = self._task_call(workspace, lambda store: store.get(task_id))
+            latest = _latest_completion(document.body)
+        except Exception:  # noqa: BLE001 — the completion already stands
+            logger.exception("tasks: could not read task %s to learn from it", task_id)
+            return
+        if latest is None:
+            return
+        task_path = document.relative_path
+
+        async def _queue() -> None:
+            try:
+                self._enqueue_task_resolution(workspace, task_path, latest)
+            except Exception:  # noqa: BLE001 — the completion already stands
+                logger.exception(
+                    "tasks: could not queue a learning pass for task %s", task_id
+                )
+
+        self._run_on_engine_loop(f"task-resolution-{task_id[:8]}", _queue)
+
+    def _enqueue_task_resolution(
+        self, workspace: str, task_path: str, completion: Completion
+    ) -> str | None:
+        """Hand one saved resolution to the memory pass queue (#1154)."""
+        queued: str | None = self.pcm.enqueue_task_completion(
+            workspace=workspace,
+            task_path=task_path,
+            completion_id=completion.id,
+            resolution=completion.resolution,
+            completed_at=completion.completed_at.isoformat(),
+        )
+        return queued
+
+    async def workspace_task_resolution_review(
+        self, workspace: str, task_id: str, *, expected_revision: str
+    ) -> dict[str, Any]:
+        """Queue a learning pass for a task's saved resolution, on request (#1154).
+
+        Editing a resolution never queues a pass by itself. This is the explicit
+        ask, and it answers from the queue: the same text on the same completion
+        returns the pass already queued rather than extracting it twice. Runs on
+        the engine loop, so a queue failure reaches the caller instead of being
+        logged; a refused resolution raises ``invalid_task``.
+        """
+        clean = str(task_id or "").strip()
+        task_path, latest = await asyncio.to_thread(
+            self._resolution_to_review, workspace, clean, str(expected_revision or "")
+        )
+        if not self.config.insights_enabled:
+            return {"queued": False, "reason": "session insights off"}
+        try:
+            chat_id = self._enqueue_task_resolution(workspace, task_path, latest)
+        except ValueError as exc:
+            raise ControlPlaneError("invalid_task", str(exc)) from exc
+        return {
+            "queued": chat_id is not None,
+            "completion_id": latest.id,
+            "memory_chat_id": chat_id or "",
+        }
+
+    def _resolution_to_review(
+        self, workspace: str, task_id: str, expected_revision: str
+    ) -> tuple[str, Completion]:
+        """The task's path and latest completion, once the caller's read is current."""
+        document = self._task_call(workspace, lambda store: store.get(task_id))
+        if document.revision != expected_revision:
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "The task changed since you read it: re-read it and try again.",
             )
+        latest = _latest_completion(document.body)
+        if latest is None or not latest.resolution.strip():
+            raise ControlPlaneError("invalid_task", "nothing to review: no resolution is saved.")
+        return document.relative_path, latest
 
     def _relink_after_refusal(
         self,
@@ -3109,14 +3577,12 @@ class CiaoControlPlane:
         See :func:`_task_row_with_attempt`, which is the whole of the derivation;
         this is that function with the store read done for one task.
         """
-        payload = _task_row_with_attempt(
+        return _task_row_with_attempt(
             document,
             self._attempt_live(workspace, document.record.id),
             self._attempt_current(workspace, document.record.id),
+            include_body=include_body,
         )
-        if include_body:
-            payload["body"] = document.body
-        return payload
 
     def workspace_task_delegate(
         self,
@@ -3306,6 +3772,8 @@ class CiaoControlPlane:
             lambda store: store.bind_revision(attempt.attempt_id, linked.revision),
         )
         stream, refusal = self._launch_turn(chat.chat_id, prompt)
+        if stream is not None:
+            self._note_updates_seen(workspace, attempt.attempt_id, document.body)
         if stream is None:
             self._settle_interrupted(
                 workspace,
@@ -4347,11 +4815,13 @@ class CiaoControlPlane:
                 + ("deleted" if chat is None else "archived")
                 + "; continue in a new chat instead (retry), which is handed what it did.",
             )
+        pending = tuple(unseen_updates(document.body, attempt.seen_update_id))
         prompt = build_resume_prompt(
             title=document.record.title,
             state=attempt.state,
             task_id=document.record.id,
             detail=attempt.detail,
+            updates=pending,
         )
         running = self._attempt_call(
             workspace, lambda store: store.reopen(attempt.attempt_id)
@@ -4372,6 +4842,8 @@ class CiaoControlPlane:
         self._watch_turn(
             workspace, running.attempt_id, document.record.id, attempt.chat_id, stream
         )
+        if pending:
+            self._note_updates_seen(workspace, running.attempt_id, document.body)
         return {
             **_attempt_payload(
                 running, self._task_with_attempt(workspace, document)
@@ -4557,14 +5029,24 @@ class CiaoControlPlane:
             )
         )
 
-    def task_list(self, principal: AgentPrincipal) -> list[dict[str, Any]]:
-        """Every task in the calling chat's workspace.
+    def task_list(
+        self,
+        principal: AgentPrincipal,
+        *,
+        completed_since: str | None = None,
+        completed_before: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Every task in the calling chat's workspace, optionally by completion window.
 
         A list rather than an envelope on purpose: ``_invoke`` wraps a
         non-dict result as ``{"ok": true, "data": …}``, and a board is a list
         of rows.
         """
-        return self.workspace_task_list(self._workspace(principal))
+        return self.workspace_task_list(
+            self._workspace(principal),
+            completed_since=completed_since,
+            completed_before=completed_before,
+        )
 
     def task_get(self, principal: AgentPrincipal, task_id: str) -> dict[str, Any]:
         """One task in the calling chat's workspace."""
@@ -4587,6 +5069,26 @@ class CiaoControlPlane:
                 body=body,
                 project_id=project_id,
                 due=due,
+            )
+        )
+
+    def task_add_update(
+        self,
+        principal: AgentPrincipal,
+        task_id: str,
+        *,
+        expected_revision: str,
+        text: str,
+    ) -> dict[str, Any]:
+        """Append a progress note. The agent cannot complete the task by doing so."""
+        return _ok(
+            self.workspace_task_add_update(
+                self._workspace(principal),
+                task_id,
+                expected_revision=expected_revision,
+                text=text,
+                actor="agent",
+                chat_id=principal.chat_id,
             )
         )
 
@@ -4728,7 +5230,6 @@ class CiaoControlPlane:
         name: str,
         instructions: str,
         project_id: str | None = None,
-        mode: str | None = None,
     ) -> dict[str, Any]:
         """Store a new trigger in one workspace and return it with its secret.
 
@@ -4736,11 +5237,9 @@ class CiaoControlPlane:
         callable, so an agent that creates a trigger for the user has not handed
         a stranger a working credential until ``workspace_webhook_update``
         enables it on purpose. ``project_id`` is stored as given — the store
-        checks its shape and dispatch is what resolves it against the workspace
-        — and ``mode`` is the trigger's own permission mode for the turn it
-        launches, never a sender's choice. Which modes are legal is the store's
-        rule, not this layer's: ``normal``, ``auto`` and ``plan``, anything else
-        ``webhook_invalid``.
+        checks its shape and dispatch is what resolves it against the workspace.
+        The turn an event launches runs in the new-chat default permission mode,
+        never a sender's choice.
         """
         scope = self._registered_workspace(workspace)
         arguments: dict[str, Any] = {
@@ -4750,8 +5249,6 @@ class CiaoControlPlane:
         }
         if project_id is not None:
             arguments["project_id"] = project_id
-        if mode is not None:
-            arguments["mode"] = mode
         trigger, secret = self._webhook_call(
             lambda store: store.create(**arguments)
         )
@@ -4769,10 +5266,9 @@ class CiaoControlPlane:
     ) -> dict[str, Any]:
         """Edit one trigger of one workspace at the revision the caller read.
 
-        Only the three fields the store can change are parameters: the target
-        and the mode are not, because retargeting a trigger or changing the mode
-        its events run under is a trust change rather than an edit. Omitting a
-        field leaves it alone; ``enabled`` is the operator's off switch and it
+        Only the three fields the store can change are parameters: the target is
+        not, because retargeting a trigger is a trust change rather than an
+        edit. Omitting a field leaves it alone; ``enabled`` is the operator's off switch and it
         reaches an event already in the receipt journal too.
         """
         scope = self._registered_workspace(workspace)
@@ -4838,7 +5334,6 @@ class CiaoControlPlane:
         name: str,
         instructions: str,
         project_id: str | None = None,
-        mode: str | None = None,
     ) -> dict[str, Any]:
         """Configure a trigger in the calling chat's workspace; created disabled."""
         return _ok(
@@ -4847,7 +5342,6 @@ class CiaoControlPlane:
                 name=name,
                 instructions=instructions,
                 project_id=project_id,
-                mode=mode,
             )
         )
 

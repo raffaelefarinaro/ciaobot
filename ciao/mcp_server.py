@@ -1023,7 +1023,11 @@ async def _op_schedule_action(service: CiaoMcpService, schedule_id: str, action:
     return await service._invoke("schedule_action", op, mutating=True)
 
 
-async def _op_task_list(service: CiaoMcpService) -> dict[str, Any]:
+async def _op_task_list(
+    service: CiaoMcpService,
+    completed_since: str | None = None,
+    completed_before: str | None = None,
+) -> dict[str, Any]:
     """List this workspace's tasks in board order.
 
     Every task row carries its `revision` (the SHA-256 of the file's bytes),
@@ -1031,8 +1035,21 @@ async def _op_task_list(service: CiaoMcpService) -> dict[str, Any]:
     directory that is not a readable task is returned as a row carrying
     `code` instead of task fields: it is never dropped, so a malformed file
     cannot read as an empty board.
+
+    Args:
+        completed_since: ISO-8601 start, inclusive. Keeps tasks with a
+            completion at or after it.
+        completed_before: ISO-8601 end, exclusive. Keeps tasks with a
+            completion before it. Either bound filters the list by when
+            tasks were completed, not when they were last edited; a task
+            never completed is left out of a filtered list.
     """
-    return await service._invoke("task_list", lambda cp, p: cp.task_list(p))
+    return await service._invoke(
+        "task_list",
+        lambda cp, p: cp.task_list(
+            p, completed_since=completed_since, completed_before=completed_before
+        ),
+    )
 
 
 async def _op_task_get(service: CiaoMcpService, task_id: str) -> dict[str, Any]:
@@ -1126,6 +1143,28 @@ async def _op_task_delegate(service: CiaoMcpService, task_id: str,
         "task_delegate",
         lambda cp, p: cp.task_delegate(
             p, task_id, expected_revision=expected_revision, project_id=project_id
+        ),
+        mutating=True,
+    )
+
+
+async def _op_task_add_update(service: CiaoMcpService, task_id: str,
+                             expected_revision: str, text: str) -> dict[str, Any]:
+    """Append one progress note to a task you are working on.
+
+    Read the task first and pass the revision that read returned. A progress
+    note records a milestone, a blocker, or a finished step. It does not
+    complete the task, and it is not a copy of every message or tool call.
+
+    Args:
+        task_id: The task's 32-hex id.
+        expected_revision: The `revision` you just read.
+        text: The progress note, in Markdown.
+    """
+    return await service._invoke(
+        "task_add_update",
+        lambda cp, p: cp.task_add_update(
+            p, task_id, expected_revision=expected_revision, text=text
         ),
         mutating=True,
     )
@@ -1231,8 +1270,7 @@ async def _op_webhook_list(service: CiaoMcpService) -> dict[str, Any]:
 
 
 async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: str = "",
-                             project_id: str | None = None,
-                             mode: str | None = None) -> dict[str, Any]:
+                             project_id: str | None = None) -> dict[str, Any]:
     """Configure a webhook trigger in this workspace.
 
     Args:
@@ -1246,8 +1284,9 @@ async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: s
             General project. Stored as given — a project that no longer exists
             or belongs to another workspace fails the event's launch rather than
             quietly running it somewhere else.
-        mode: `normal`, `auto` (the default) or `plan`: the permission mode the
-            launched turn runs under. A sender can never choose it.
+
+    The launched turn runs in the permission mode a new chat defaults to
+    (Settings → Models & providers). A sender can never choose it.
 
     The reply is the trigger **plus its secret, shown once**: only a hash of it
     is kept, so it cannot be read back — hand it to the sender now, or rotate and
@@ -1262,7 +1301,6 @@ async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: s
             name=name,
             instructions=instructions,
             project_id=project_id,
-            mode=mode,
         ),
         mutating=True,
     )
@@ -1285,10 +1323,9 @@ async def _op_webhook_update(service: CiaoMcpService, trigger_id: str,
             switch reaches an event that was accepted a moment earlier: it
             launches only while its trigger is still enabled.
 
-    The target (workspace, project) and the mode are deliberately not
-    editable — retargeting a trigger, or changing the permissions its events
-    run under, is a trust change rather than an edit. Delete and recreate it
-    instead, which is why `webhook_create` takes both.
+    The target (workspace, project) is deliberately not editable — retargeting
+    a trigger is a trust change rather than an edit. Delete and recreate it
+    instead, which is why `webhook_create` takes it.
     """
     return await service._invoke(
         "webhook_update",
@@ -1407,6 +1444,7 @@ OPERATIONS: tuple[Operation, ...] = (
     # destructive effect for an agent caller.
     Operation("task_action", _WRITE, _op_task_action.__doc__ or "", _op_task_action),
     Operation("task_delegate", _WRITE, _op_task_delegate.__doc__ or "", _op_task_delegate),
+    Operation("task_add_update", _WRITE, _op_task_add_update.__doc__ or "", _op_task_add_update),
     Operation("task_report", _WRITE, _op_task_report.__doc__ or "", _op_task_report),
     # `_DESTRUCTIVE`, because `stop` ends a turn irreversibly: an ask-class
     # operation, where every other task write is allow-class.

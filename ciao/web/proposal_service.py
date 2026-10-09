@@ -85,6 +85,7 @@ class AcceptOutcome:
     reason: str | None = None
     competing: Sequence[str] | None = None
     destination: str | None = None
+    skipped: Sequence[str] | None = None
     error: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
@@ -118,6 +119,8 @@ class AcceptOutcome:
             payload["competing"] = list(self.competing)
         if self.destination is not None:
             payload["destination"] = self.destination
+        if self.skipped:
+            payload["skipped"] = list(self.skipped)
         if self.error is not None:
             payload["error"] = self.error
         return payload
@@ -1693,11 +1696,23 @@ async def _accept_people_row(config, row: dict[str, Any]) -> AcceptOutcome:
     # function hardcodes.
     destination = note.relative_to(notes_root).as_posix()
     if note.exists():
+        from ciao.insights import resolve_insights_model
+
         errors: list[str] = []
+        workspace = str(row.get("workspace") or "")
+        try:
+            provider = config.default_provider_for_workspace(workspace or None)
+            model = resolve_insights_model(config, workspace or None, provider)
+            cwd = config.agent_root(workspace)
+        except (AttributeError, ValueError) as exc:
+            return AcceptOutcome(ok=False, error=f"could not resolve the vault: {exc}")
         wrote = await fold_fact_into_person_note(
             note_path=note,
             fact=row["text"],
-            model=getattr(config, "insights_model", "") or "sonnet",
+            model=model,
+            provider=provider,
+            cwd=cwd,
+            workspace=workspace,
             error_out=errors,
         )
         if errors:
@@ -1853,8 +1868,12 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
     source_type = sidecar["source_type"]
     planned: list[tuple[Path, str]] = []
     drifted: list[str] = []
+    missing: list[str] = []
     for rendered in sidecar["paths"]:
         path = _note_path_in_vault(vault, rendered)
+        if not path.is_file():
+            missing.append(path.name)
+            continue
         current = read_note_type(path)
         if current == category_id:
             continue  # Already typed: a retried accept, not a change.
@@ -1868,9 +1887,21 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
             continue
         try:
             image = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            missing.append(path.name)
+            continue
         except (OSError, UnicodeDecodeError) as exc:
             return AcceptOutcome(ok=False, error=f"could not read {path.name}: {exc}")
         planned.append((path, image))
+    if missing and len(missing) == len(sidecar["paths"]):
+        return AcceptOutcome(
+            ok=False,
+            error=(
+                f"none of the {len(missing)} notes behind {category_id} are in the "
+                "vault any more (" + ", ".join(missing) + "); restore them from "
+                "the vault-review trash, or dismiss this row to decline the category"
+            ),
+        )
     if drifted:
         return AcceptOutcome(
             ok=False,
@@ -1956,10 +1987,16 @@ def _accept_category_row(config, row: dict[str, Any]) -> AcceptOutcome:
             workspace=str(row.get("workspace") or ""),
             vault_root=vault,
         )
+    if missing:
+        logger.warning(
+            "category %s: skipped %d missing note(s): %s",
+            category_id, len(missing), ", ".join(missing),
+        )
     return AcceptOutcome(
         ok=True,
         destination=sidecar["folder"],
         receipt_id=str(receipt.get("id", "")),
+        skipped=missing or None,
     )
 
 
@@ -2391,12 +2428,13 @@ def decline_category_row(config, row: dict[str, Any]) -> str:
 async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
     """Fold an accepted `[project]` bullet into its canonical doc.
 
-    Reuses the fold's guards, NO_CHANGES sentinel and per-doc lock with just
+    Reuses the fold's single-entry writes and per-doc lock with just
     this bullet as input. ``False`` back means the model judged the
-    doc already covers the fact or a guard rejected the rewrite — ambiguous
-    enough that dropping the row silently would be wrong, so the caller keeps
-    it queued and the operator decides.
+    doc already covers the fact or its reply was not a single entry
+    edit — ambiguous enough that dropping the row silently would be
+    wrong, so the caller keeps it queued and the operator decides.
     """
+    from ciao.insights import resolve_insights_model
     from ciao.project_doc_update import update_project_doc
 
     doc_raw = str(row.get("target") or "").strip()
@@ -2410,10 +2448,15 @@ async def _accept_project_row(config, row: dict[str, Any]) -> AcceptOutcome:
         return AcceptOutcome(ok=False, error=f"project doc not found: {doc_raw}")
     insights = f"## Decisions\n- {row['text']}\n"
     try:
+        workspace = str(row.get("workspace") or "")
+        provider = config.default_provider_for_workspace(workspace or None)
         wrote = await update_project_doc(
             doc_path=doc,
             insights_md=insights,
-            model=getattr(config, "insights_model", "") or "sonnet",
+            model=resolve_insights_model(config, workspace or None, provider),
+            provider=provider,
+            cwd=config.agent_root(workspace),
+            workspace=workspace,
         )
     except Exception as exc:  # noqa: BLE001 — a failed fold keeps the row
         return AcceptOutcome(ok=False, error=f"fold failed: {exc}")
@@ -2802,20 +2845,33 @@ def _category_preview(config, row: dict[str, Any]) -> dict[str, Any]:
             "this row and re-run curation to propose it again"
         )
         return out
+    present = [p for p in sidecar["paths"] if _note_path_in_vault(vault, p).is_file()]
+    missing = [Path(p).name for p in sidecar["paths"] if p not in present]
     out["category"] = {
         "id": sidecar["id"],
         "label": sidecar["label"],
         "folder": sidecar["folder"],
         "description": sidecar["description"],
-        "notes": list(sidecar["paths"]),
+        "notes": present,
+        "missing": missing,
     }
-    out["after"] = "\n".join(sidecar["paths"])
+    out["after"] = "\n".join(present)
     out["exact"] = True
-    out["can_accept"] = True
+    out["can_accept"] = bool(present)
     out["reason"] = (
-        f"adds the {sidecar['id']} category and retypes "
-        f"{len(sidecar['paths'])} note(s) in place; nothing is moved"
+        f"adds the {sidecar['id']} category and retypes {len(present)} note(s) "
+        "in place; nothing is moved"
     )
+    if missing:
+        out["reason"] += (
+            f"; {len(missing)} listed note(s) no longer exist and will be "
+            f"skipped: {', '.join(missing)}"
+        )
+    if not present:
+        out["reason"] = (
+            f"none of the notes behind {sidecar['id']} are in the vault any more; "
+            "restore them from the vault-review trash, or dismiss this row"
+        )
     return out
 
 

@@ -91,6 +91,31 @@ const DEFAULT_CHAT_TITLE = 'New Chat'
 const FINISHED_RUN_NOTICE_MS = 6000
 
 export const useProjectStore = defineStore('projects', () => {
+  // Every one-shot timer the store schedules for itself (retries, debounces,
+  // expiries). A bare setTimeout outlives the store: dispose cannot reach it,
+  // so a retry loop would resume and keep calling the API after teardown.
+  // Routing them through here lets dispose cancel them all.
+  let disposed = false
+  const storeTimers = new Set<ReturnType<typeof setTimeout>>()
+  function scheduleTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+    const id = setTimeout(() => {
+      storeTimers.delete(id)
+      if (!disposed) fn()
+    }, ms)
+    if (!disposed) storeTimers.add(id)
+    return id
+  }
+  function cancelTimer(id: ReturnType<typeof setTimeout> | undefined): void {
+    if (id === undefined) return
+    clearTimeout(id)
+    storeTimers.delete(id)
+  }
+  // Resolves after `ms`. A disposed store's sleep never resolves, so a retry
+  // loop awaiting one stops there instead of making its next request.
+  function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => { scheduleTimer(resolve, ms) })
+  }
+
   const projects = ref<ProjectInfo[]>([])
   const chats = ref<ChatInfo[]>([])
   const workspaces = ref<WorkspaceInfo[]>([])
@@ -369,7 +394,7 @@ export const useProjectStore = defineStore('projects', () => {
     const key = responseKey(chatId, requestId, sessionId)
     const timer = timers[key]
     if (timer !== undefined) {
-      clearTimeout(timer)
+      cancelTimer(timer)
       delete timers[key]
     }
   }
@@ -383,7 +408,7 @@ export const useProjectStore = defineStore('projects', () => {
   ) {
     clearResponseTimer(timers, chatId, requestId, sessionId)
     const key = responseKey(chatId, requestId, sessionId)
-    timers[key] = setTimeout(() => {
+    timers[key] = scheduleTimer(() => {
       delete timers[key]
       onTimeout()
     }, RESPONSE_ACK_TIMEOUT_MS)
@@ -734,7 +759,7 @@ export const useProjectStore = defineStore('projects', () => {
   // when its frame arrives.
   interface UnackedSend { text: string; images?: string[]; at: number; attempts: number }
   const unackedSends: Record<string, UnackedSend> = {}
-  const unackedRecoveryTimers: Record<string, number> = {}
+  const unackedRecoveryTimers: Record<string, ReturnType<typeof setTimeout>> = {}
   // Grace before declaring a send lost: a turn that DID start replays its
   // buffered user_echo immediately after reconnect, and /messages can lag
   // the provider session write by a moment.
@@ -774,8 +799,8 @@ export const useProjectStore = defineStore('projects', () => {
   // then either recovers the send or gives up visibly — never silently.
   function scheduleUnackedSendRecovery(chatId: string) {
     if (!unackedSends[chatId]) return
-    if (unackedRecoveryTimers[chatId]) window.clearTimeout(unackedRecoveryTimers[chatId])
-    unackedRecoveryTimers[chatId] = window.setTimeout(() => {
+    cancelTimer(unackedRecoveryTimers[chatId])
+    unackedRecoveryTimers[chatId] = scheduleTimer(() => {
       delete unackedRecoveryTimers[chatId]
       recoverUnackedSend(chatId)
     }, UNACKED_RECOVERY_DELAY_MS)
@@ -830,7 +855,7 @@ export const useProjectStore = defineStore('projects', () => {
   // pending reconnect be cancelled; attempts drive the backoff and reset once
   // the socket proves live (first frame received).
   const intentionalCloses = new Set<WebSocket>()
-  const chatReconnectTimers: Record<string, number> = {}
+  const chatReconnectTimers: Record<string, ReturnType<typeof setTimeout>> = {}
   const chatReconnectAttempts: Record<string, number> = {}
   // After an unexpected drop or half-open recovery, keep the frozen Activity
   // timeline on screen and rebuild it from the broker replay on the first
@@ -988,13 +1013,14 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   onScopeDispose(() => {
+    disposed = true
+    for (const id of storeTimers) clearTimeout(id)
+    storeTimers.clear()
     if (subagentPollTimer !== null) {
       clearInterval(subagentPollTimer)
       subagentPollTimer = null
     }
     stopRunningSubagentPoll()
-    for (const timer of Object.values(questionSubmissionTimers)) clearTimeout(timer)
-    for (const timer of Object.values(permissionSubmissionTimers)) clearTimeout(timer)
     for (const undo of teardowns.splice(0)) {
       try { undo() } catch { /* a disposed store must not throw */ }
     }
@@ -1223,7 +1249,7 @@ export const useProjectStore = defineStore('projects', () => {
     toasts.value.push(t)
     // Notifications auto-dismiss; error toasts persist until dismissed or acted on.
     if (t.variant !== 'error') {
-      setTimeout(() => dismissToast(t.id), 5000)
+      scheduleTimer(() => dismissToast(t.id), 5000)
     }
     return t
   }
@@ -2147,15 +2173,29 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function updateWorkspace(name: WorkspaceName, payload: Partial<WorkspaceInfo>) {
-    const res = await api.patch<WorkspacesResponse>(`/api/workspaces/${encodeURIComponent(name)}`, payload)
+    const res = await api.patch<WorkspacesResponse & { renamed?: { from: string; to: string } }>(
+      `/api/workspaces/${encodeURIComponent(name)}`,
+      payload,
+    )
     workspaces.value = res.workspaces || []
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
+    if (res.renamed && activeWorkspace.value === res.renamed.from) {
+      followRenamedWorkspace(res.renamed.from, res.renamed.to)
+    }
     if (activeWorkspace.value && !workspaces.value.some(w => w.name === activeWorkspace.value)) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
     return res
+  }
+
+  // A rename keeps the workspace selected under its new name. Persisted so a
+  // reload restores it rather than falling back to the first workspace.
+  function followRenamedWorkspace(from: WorkspaceName, to: WorkspaceName) {
+    if (activeWorkspace.value !== from) return
+    activeWorkspace.value = to
+    persistState()
   }
 
   // Archive, never delete: the server unregisters the workspace, archives its
@@ -2270,9 +2310,15 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  async function completeProject(projectId: string) {
+  async function completeProject(
+    projectId: string,
+    closure: { outcome: 'completed' | 'stopped'; note: string } = { outcome: 'completed', note: '' },
+  ) {
     const activeChatProject = activeChat.value?.project_id
-    await api.post(`/api/projects/${projectId}/complete`, {})
+    await api.post(`/api/projects/${projectId}/complete`, {
+      outcome: closure.outcome,
+      note: closure.note,
+    })
     projects.value = projects.value.filter(p => p.project_id !== projectId)
     clearDraftsForProject(projectId)
     chats.value = chats.value.filter(c => c.project_id !== projectId)
@@ -2766,7 +2812,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (awaitingReply) {
           for (const delay of [300, 700, 1500, 3000]) {
             if (messageLoadGenerations.get(chatId) !== generation) return
-            await new Promise(r => setTimeout(r, delay))
+            await sleep(delay)
             await loadMessagesFromServer(chatId)
             if (hasSettledHistory(chatId) || streaming.value[chatId] || projectStreaming.value[chatId]) break
           }
@@ -3287,7 +3333,7 @@ export const useProjectStore = defineStore('projects', () => {
   async function reconcileAfterResult(chatId: string) {
     const delays = [0, 300, 700, 1500, 3000, 5000]
     for (const delay of delays) {
-      if (delay) await new Promise(r => setTimeout(r, delay))
+      if (delay) await sleep(delay)
       await loadMessages(chatId, { background: true })
       // The events socket owns `projectStreaming`, and it can flip back on
       // while this loop is awaiting: a new turn has started. Nothing read from
@@ -3662,8 +3708,8 @@ export const useProjectStore = defineStore('projects', () => {
           return
         }
         const delay = Math.min(2000 * 2 ** Math.min(attempt, 5), 64000)
-        if (chatReconnectTimers[chatId]) window.clearTimeout(chatReconnectTimers[chatId])
-        chatReconnectTimers[chatId] = window.setTimeout(() => {
+        cancelTimer(chatReconnectTimers[chatId])
+        chatReconnectTimers[chatId] = scheduleTimer(() => {
           delete chatReconnectTimers[chatId]
           if (activeChatId.value === chatId && !sockets.value[chatId]) {
             connectWs(chatId)
@@ -3678,8 +3724,8 @@ export const useProjectStore = defineStore('projects', () => {
       pendingStreamResync.add(chatId)
       const attempt = (chatReconnectAttempts[chatId] = (chatReconnectAttempts[chatId] || 0) + 1)
       const delay = chatWsReconnectDelayMs(attempt)
-      if (chatReconnectTimers[chatId]) window.clearTimeout(chatReconnectTimers[chatId])
-      chatReconnectTimers[chatId] = window.setTimeout(() => {
+      cancelTimer(chatReconnectTimers[chatId])
+      chatReconnectTimers[chatId] = scheduleTimer(() => {
         delete chatReconnectTimers[chatId]
         // Only if still the viewed chat and not reconnected in the meantime.
         if (activeChatId.value === chatId && !sockets.value[chatId]) {
@@ -3877,7 +3923,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Cancel any pending auto-reconnect and mark this as an intentional close
     // so onclose does not schedule a new one.
     if (chatReconnectTimers[chatId]) {
-      window.clearTimeout(chatReconnectTimers[chatId])
+      cancelTimer(chatReconnectTimers[chatId])
       delete chatReconnectTimers[chatId]
     }
     const ws = toRaw(sockets.value[chatId])
@@ -3981,7 +4027,7 @@ export const useProjectStore = defineStore('projects', () => {
         eventsWsFailureStreak = 0
         // A previously-live awareness socket should come back immediately so
         // chat_streaming_done / result_ready are not delayed after a blip.
-        setTimeout(() => {
+        scheduleTimer(() => {
           if (!eventsSocket.value) connectEventsWs()
         }, 50)
         return
@@ -3997,7 +4043,7 @@ export const useProjectStore = defineStore('projects', () => {
       // Reconnect with exponential backoff on repeated handshake failures
       // (2s → 64s cap); cross-chat awareness is best-effort.
       const delay = Math.min(2000 * 2 ** Math.min(eventsWsFailureStreak, 5), 64000)
-      setTimeout(() => {
+      scheduleTimer(() => {
         if (!eventsSocket.value) connectEventsWs()
       }, delay)
     }
@@ -4014,7 +4060,7 @@ export const useProjectStore = defineStore('projects', () => {
   let schedulesRefetchTimer: ReturnType<typeof setTimeout> | null = null
   function scheduleSchedulesRefetch(): void {
     if (schedulesRefetchTimer !== null) return
-    schedulesRefetchTimer = setTimeout(() => {
+    schedulesRefetchTimer = scheduleTimer(() => {
       schedulesRefetchTimer = null
       void import('./tasks')
         .then(({ useTaskStore }) => useTaskStore().fetchSchedules())
@@ -4028,7 +4074,7 @@ export const useProjectStore = defineStore('projects', () => {
   let workspacesRefetchTimer: ReturnType<typeof setTimeout> | null = null
   function scheduleWorkspacesRefetch(): void {
     if (workspacesRefetchTimer !== null) return
-    workspacesRefetchTimer = setTimeout(() => {
+    workspacesRefetchTimer = scheduleTimer(() => {
       workspacesRefetchTimer = null
       void refreshWorkspaceRegistry().catch(() => {})
     }, 150)
@@ -4236,8 +4282,8 @@ export const useProjectStore = defineStore('projects', () => {
         if (msg.finished) {
           const chatId = msg.chat_id
           finishedBackgroundRuns.value[chatId] = msg.finished
-          clearTimeout(finishedRunTimers.get(chatId))
-          finishedRunTimers.set(chatId, setTimeout(() => {
+          cancelTimer(finishedRunTimers.get(chatId))
+          finishedRunTimers.set(chatId, scheduleTimer(() => {
             delete finishedBackgroundRuns.value[chatId]
             finishedRunTimers.delete(chatId)
           }, FINISHED_RUN_NOTICE_MS))
@@ -4441,9 +4487,13 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'workspaces_changed': {
-        // A workspace was archived or restored in another tab or device.
-        // Refetch the registry so the sidebar and pickers stop offering it
-        // (or show it again) without a reload.
+        // A workspace was archived, restored or renamed in another tab or
+        // device. Refetch the registry so the sidebar and pickers stop
+        // offering it (or show it again) without a reload. A rename also
+        // moves the selection, so the renamed workspace stays selected here.
+        if (msg.from !== undefined && msg.to !== undefined && activeWorkspace.value === msg.from) {
+          followRenamedWorkspace(msg.from, msg.to)
+        }
         scheduleWorkspacesRefetch()
         break
       }
@@ -4668,7 +4718,7 @@ export const useProjectStore = defineStore('projects', () => {
         return false
       }
       connectWs(chatId)
-      setTimeout(
+      scheduleTimer(
         () => sendMessage(chatId, text, message, onSent, _deferredAttempt + 1),
         500,
       )

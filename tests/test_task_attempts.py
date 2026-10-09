@@ -37,6 +37,7 @@ import pytest
 from ciao.task_attempts import (
     LIVE_STATES,
     MAX_ATTEMPTS_PER_TASK,
+    MAX_PROGRESS_PROMPT_CHARS,
     PreviousAttempt,
     RESUMABLE_STATES,
     SETTLED_STATES,
@@ -47,6 +48,7 @@ from ciao.task_attempts import (
     build_resume_prompt,
     task_delegation_helper,
 )
+from ciao.task_updates import TaskUpdate
 
 TASK_ID = "a" * 32
 OTHER_TASK_ID = "b" * 32
@@ -640,6 +642,7 @@ def test_the_store_holds_no_board_and_never_completes_a_task(tmp_path: Path) -> 
         "finish",
         "release",
         "report",
+        "note_seen_update",
     }
 
 
@@ -729,6 +732,45 @@ def test_the_prompt_carries_the_record_and_its_revision(tmp_path: Path) -> None:
     assert prompt.index("Title:") < prompt.index("<task-board-task>")
     # The instruction says the one thing a finishing agent gets wrong.
     assert "do not mark the task done" in prompt.lower()
+
+
+def test_a_long_progress_history_keeps_the_newest_notes_within_budget() -> None:
+    """Every note is capped, but a task can collect many. The prompt quotes the
+    newest notes that fit the budget, in order, and says how many it left out."""
+    when = datetime(2026, 10, 9, 12, 0, 0, tzinfo=UTC)
+    count = 60
+    updates = tuple(
+        TaskUpdate(
+            id=f"{index:032x}",
+            recorded_at=when,
+            actor="agent",
+            text=f"note {index:02d} " + "x" * 7_990,
+        )
+        for index in range(count)
+    )
+    common = {
+        "title": "Long history",
+        "status": "in_progress",
+        "due": "",
+        "project_id": "project-home",
+        "task_id": TASK_ID,
+        "task_revision": REVISION,
+        "relative_path": f"Workspace/Tasks/{TASK_ID}.md",
+        "body": "The work.",
+    }
+    baseline = build_prompt(**common)
+    prompt = build_prompt(**common, updates=updates)
+
+    progress = len(prompt) - len(baseline)
+    assert progress <= MAX_PROGRESS_PROMPT_CHARS + 500
+    assert "note 59 " in prompt, "the newest note is kept"
+    assert "note 00 " not in prompt, "the oldest note is left out"
+    kept = prompt.count("<task-progress>")
+    assert 0 < kept < count
+    assert f"{count - kept} earlier progress notes left out" in prompt
+    assert "they are in the task file" in prompt
+    # Kept notes stay chronological: the newest one comes last.
+    assert prompt.index(f"note {count - kept:02d} ") < prompt.index("note 59 ")
 
 
 def test_hand_over_instructions_are_quoted_after_the_description() -> None:

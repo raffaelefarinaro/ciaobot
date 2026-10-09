@@ -89,21 +89,14 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
-# Ordinary permission modes only. ``bypass`` is a real ``BridgeMode``
-# (``ciao.models``) and is deliberately absent: an unattended turn is a trust
-# decision a remote sender must not be able to make, and a foundation that can
-# store it would hand that decision to whoever writes the store next.
-WEBHOOK_MODES = ("normal", "auto", "plan")
 # Event text is the only input a trigger accepts for now. Caller-supplied
 # prompts, payload URLs and file attachments are all later trust decisions.
 WEBHOOK_INPUT_POLICIES = ("event_text",)
 
-WebhookMode = Literal["normal", "auto", "plan"]
 WebhookInputPolicy = Literal["event_text"]
 
 #: The one input policy this child supports; a record can hold nothing else.
 DEFAULT_INPUT_POLICY: WebhookInputPolicy = "event_text"
-DEFAULT_MODE: WebhookMode = "auto"
 
 MAX_NAME_LENGTH = 120
 MAX_INSTRUCTIONS_LENGTH = 16_000
@@ -115,6 +108,13 @@ SECRET_BYTES = 32
 #: ``secrets.token_urlsafe(32)`` is 43 characters, so real secrets are far
 #: below it and no legitimate token is ever rejected by this bound.
 MAX_SECRET_LENGTH = 128
+
+#: Refusal for a request that still names a per-trigger permission mode. Events
+#: always run in the new-chat default mode, so a silently ignored ``mode`` would
+#: let a caller believe it had chosen one.
+MODE_REMOVED_ERROR = (
+    "mode is no longer supported; webhook events use the new-chat default mode"
+)
 
 # Stable error codes. They are part of the contract a later route and its tests
 # match on, so they are module constants rather than free strings.
@@ -160,7 +160,6 @@ _TRIGGER_FIELDS = (
     "project_id",
     "instructions",
     "enabled",
-    "mode",
     "input_policy",
     "created_at",
     "updated_at",
@@ -184,8 +183,8 @@ class WebhookStoreError(Exception):
     exception classes would make it import one per reason. The codes:
 
     - ``invalid_trigger``: an argument is not a trigger this store will store —
-      a wrong type, an empty or overlong name, a bad target, an unsupported mode
-      or input policy, or a stale-looking field. Nothing was written.
+      a wrong type, an empty or overlong name, a bad target, an unsupported
+      input policy, or a stale-looking field. Nothing was written.
     - ``unsupported_schema``: the file on disk is a schema this code does not
       implement. Never migrated, never rewritten; the bytes are left alone.
     - ``corrupt_store``: the file is there and this code cannot read it as a
@@ -223,7 +222,6 @@ class WebhookTrigger:
     project_id: str | None
     instructions: str
     enabled: bool
-    mode: WebhookMode
     input_policy: WebhookInputPolicy
     created_at: str
     updated_at: str
@@ -241,7 +239,6 @@ class WebhookTrigger:
             "project_id": self.project_id,
             "instructions": self.instructions,
             "enabled": self.enabled,
-            "mode": self.mode,
             "input_policy": self.input_policy,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -349,17 +346,6 @@ def _validated_instructions(value: Any, *, code: str) -> str:
     return instructions
 
 
-def _validated_mode(value: Any, *, code: str) -> WebhookMode:
-    """One of the ordinary permission modes."""
-    mode = _text(value, field_name="trigger mode", code=code)
-    if mode not in WEBHOOK_MODES:
-        raise WebhookStoreError(
-            f"trigger mode {mode!r} is not supported ({', '.join(WEBHOOK_MODES)})",
-            code=code,
-        )
-    return cast(WebhookMode, mode)
-
-
 def _validated_input_policy(value: Any, *, code: str) -> WebhookInputPolicy:
     """The one input policy this child supports."""
     policy = _text(value, field_name="trigger input_policy", code=code)
@@ -456,7 +442,6 @@ def _decode_trigger(raw: Any, *, trigger_id: str, path: Path) -> WebhookTrigger:
         project_id=_validated_project_id(raw["project_id"], code=CORRUPT_STORE),
         instructions=_validated_instructions(raw["instructions"], code=CORRUPT_STORE),
         enabled=_validated_enabled(raw["enabled"], code=CORRUPT_STORE),
-        mode=_validated_mode(raw["mode"], code=CORRUPT_STORE),
         input_policy=_validated_input_policy(raw["input_policy"], code=CORRUPT_STORE),
         created_at=_stored_instant(
             raw["created_at"], field_name="created_at", path=path, trigger_id=trigger_id
@@ -816,7 +801,6 @@ class WebhookStore:
         workspace: str,
         project_id: str | None = None,
         instructions: str,
-        mode: WebhookMode = DEFAULT_MODE,
     ) -> tuple[WebhookTrigger, str]:
         """Store a new trigger and mint its first secret.
 
@@ -835,7 +819,6 @@ class WebhookStore:
         checked_instructions = _validated_instructions(
             instructions, code=INVALID_TRIGGER
         )
-        checked_mode = _validated_mode(mode, code=INVALID_TRIGGER)
         with self._mutation():
             records = self._read()
             stamp = self._stamp()
@@ -850,7 +833,6 @@ class WebhookStore:
                 project_id=checked_project,
                 instructions=checked_instructions,
                 enabled=False,
-                mode=checked_mode,
                 input_policy=DEFAULT_INPUT_POLICY,
                 created_at=stamp,
                 updated_at=stamp,
@@ -879,10 +861,9 @@ class WebhookStore:
         re-reads and decides again.
 
         Only these three fields are mutable here. The target (``workspace``,
-        ``project_id``) and the ``mode`` are not parameters, because retargeting
-        an existing trigger or escalating its permission mode under a secret
-        somebody already holds is a trust change, and it needs its own design
-        rather than an optional argument. Enable a revoked trigger's
+        ``project_id``) is not a parameter, because retargeting an existing
+        trigger under a secret somebody already holds is a trust change, and it
+        needs its own design rather than an optional argument. Enable a revoked trigger's
         configuration freely, though: ``enabled`` is exactly how a trigger is
         configured while it stays uncallable.
 
@@ -1022,6 +1003,35 @@ class WebhookStore:
             if revoked:
                 self._write(records)
             return revoked
+
+    def rename_workspace(self, old: str, new: str) -> int:
+        """Point every trigger filed under ``old`` at ``new``.
+
+        The trigger keeps its id, verifier and enabled state; only
+        ``workspace`` changes and the revision advances, so a holder of a
+        stale copy re-reads. Nothing is revoked. Idempotent: a second call
+        sees no ``old`` rows and writes nothing.
+        """
+        with self._mutation():
+            records = self._read()
+            stamp = self._stamp()
+            renamed = 0
+            for trigger_id, record in list(records.items()):
+                if record.trigger.workspace != old:
+                    continue
+                records[trigger_id] = _StoredTrigger(
+                    trigger=replace(
+                        record.trigger,
+                        workspace=new,
+                        revision=record.trigger.revision + 1,
+                        updated_at=stamp,
+                    ),
+                    secret_sha256=record.secret_sha256,
+                )
+                renamed += 1
+            if renamed:
+                self._write(records)
+            return renamed
 
     # -- authenticating ---------------------------------------------------
 

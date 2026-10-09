@@ -22,6 +22,7 @@ verified snapshot is injected, and every path is a pytest tmpdir.
 
 from __future__ import annotations
 
+import os
 import plistlib
 import shutil
 import sys
@@ -463,3 +464,42 @@ def test_register_launchd_service_render_refusal_is_a_message(
 
     with pytest.raises(RuntimeError, match="interpreter"):
         cli._register_launchd_service(workspace)
+
+
+def test_plist_path_is_written_with_each_directory_once(tmp_path: Path) -> None:
+    """The baked EnvironmentVariables PATH never carries a repeated directory, so
+    setup run again on an inherited PATH does not grow the LaunchAgent."""
+    node_bin = "/Users/u/.nvm/versions/node/v22.23.2/bin"
+    inherited = os.pathsep.join([node_bin] * 3 + ["/usr/bin", "/bin", node_bin])
+    rendered = cli._render_launchd_plist(
+        workspace=tmp_path / "ws",
+        python_path="/opt/ciaobot/venv/bin/python3.12",
+        port=8443,
+        path=inherited,
+    )
+    expected = os.pathsep.join([node_bin, "/usr/bin", "/bin"])
+    assert f"<string>{expected}</string>" in rendered
+
+
+def test_hosted_plist_advertises_the_server_bundle_id(tmp_path: Path) -> None:
+    """A hosted render names the host bundle id inside
+    ``AssociatedBundleIdentifiers``; the direct shape keeps the app id."""
+    hosted = cli._render_launchd_plist(
+        workspace=tmp_path / "ws",
+        port=8443,
+        host=_verified_host(),
+        host_python=_ENGINE_PYTHON,
+    )
+    assert "<key>AssociatedBundleIdentifiers</key>" in hosted
+    assert f"<string>{BUNDLE_ID}</string>" in hosted
+    assert BUNDLE_ID == "local.ciaobot.server"
+    assert "local.ciaobot.app" not in hosted
+    assert "{{ASSOCIATED_BUNDLE_ID}}" not in hosted
+
+    direct = cli._render_launchd_plist(
+        workspace=tmp_path / "ws",
+        python_path="/opt/ciaobot/venv/bin/python3.12",
+        port=8443,
+    )
+    assert "<string>local.ciaobot.app</string>" in direct
+    assert "{{ASSOCIATED_BUNDLE_ID}}" not in direct

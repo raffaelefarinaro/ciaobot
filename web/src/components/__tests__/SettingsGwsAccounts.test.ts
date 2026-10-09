@@ -4,8 +4,8 @@
 // easy to regress here: the card header (title, status chip and "Remove
 // account" must stay three separate siblings on one wrapping row — an earlier
 // layout let the chip print on top of the wrapped title), and the recovery
-// commands, which are noise once the account is connected and therefore sit
-// behind a "Manual setup" disclosure in that state only.
+// commands, which sit in a closed "Advanced / headless setup" disclosure on every
+// card.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -132,53 +132,95 @@ describe('the Google Workspace account card header', () => {
   })
 })
 
-describe('the manual setup disclosure', () => {
+describe('the advanced setup disclosure', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
   })
 
-  it('hides the recovery commands behind a toggle once authenticated', async () => {
+  it('keeps the recovery commands in a closed details once authenticated', async () => {
     gwsState.value = integration([profile()])
     const wrapper = await mountWorkspacesTab()
 
-    expect(wrapper.find('#gws-manual-personal').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('ciao gws personal auth login --full')
-    expect(wrapper.text()).not.toContain('ciao gws-auth-helper personal')
-
-    const toggle = wrapper.find('button.gws-manual-toggle')
-    expect(toggle.exists()).toBe(true)
-    expect(toggle.attributes('aria-expanded')).toBe('false')
-    expect(toggle.attributes('aria-controls')).toBe('gws-manual-personal')
-
-    await toggle.trigger('click')
-    await nextTick()
-
-    expect(toggle.attributes('aria-expanded')).toBe('true')
-    const panel = wrapper.find('#gws-manual-personal')
-    expect(panel.exists()).toBe(true)
-    // Still plain, selectable command text.
-    const commands = panel.findAll('code.gws-command').map(c => c.text())
+    const details = wrapper.find('details.gws-advanced')
+    expect(details.exists()).toBe(true)
+    expect(details.attributes('open')).toBeUndefined()
+    expect(details.find('summary').text()).toBe('Advanced / headless setup')
+    const commands = wrapper.find('#gws-manual-personal').findAll('code.gws-command').map(c => c.text())
     expect(commands).toEqual([
       'ciao gws personal auth login --full',
       'ciao gws-auth-helper personal',
     ])
-
-    await toggle.trigger('click')
-    await nextTick()
-    expect(toggle.attributes('aria-expanded')).toBe('false')
-    expect(wrapper.find('#gws-manual-personal').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('shows the recovery commands outright while the account is not connected', async () => {
+  it('keeps the recovery commands closed while the account is not connected', async () => {
     gwsState.value = integration([profile({ configured: false })])
     const wrapper = await mountWorkspacesTab()
 
-    expect(wrapper.find('button.gws-manual-toggle').exists()).toBe(false)
-    const panel = wrapper.find('#gws-manual-personal')
-    expect(panel.exists()).toBe(true)
-    expect(panel.text()).toContain('ciao gws personal auth login --full')
-    expect(panel.text()).toContain('ciao gws-auth-helper personal')
+    const details = wrapper.find('details.gws-advanced')
+    expect(details.exists()).toBe(true)
+    expect(details.attributes('open')).toBeUndefined()
+    expect(wrapper.find('#gws-manual-personal').text()).toContain('ciao gws personal auth login --full')
+    expect(wrapper.find('#gws-manual-personal').text()).toContain('ciao gws-auth-helper personal')
+    wrapper.unmount()
+  })
+
+  it('offers the gcloud client command only while no client exists', async () => {
+    gwsState.value = integration([
+      profile({ client_secret_present: false, configured: false }),
+      profile({ name: 'work', label: 'Work Google account', workspaces: ['work'] }),
+    ])
+    const wrapper = await mountWorkspacesTab()
+
+    const [needsClient, ready] = wrapper.findAll('details.gws-advanced')
+    expect(needsClient.findAll('code.gws-command').map(c => c.text())).toContain('ciao gws personal auth setup')
+    expect(ready.findAll('code.gws-command').map(c => c.text())).not.toContain('ciao gws work auth setup')
+    wrapper.unmount()
+  })
+})
+
+describe('the sign-in button before a client exists', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('shows a disabled Sign in with Google with its reason', async () => {
+    gwsState.value = integration([profile({ client_secret_present: false, configured: false })])
+    const wrapper = await mountWorkspacesTab()
+
+    const button = wrapper.findAll('button').find(b => b.text() === 'Sign in with Google')
+    expect(button).toBeDefined()
+    expect(button!.attributes('disabled')).toBeDefined()
+
+    const describedBy = button!.attributes('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(wrapper.find(`#${describedBy}`).text()).toBe('Upload an OAuth client first.')
+
+    expect(wrapper.find('.gws-profile-actions').text()).not.toContain('auth setup')
+    wrapper.unmount()
+  })
+})
+
+describe('the setup checklist', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  it('marks the current step on the section', async () => {
+    gwsState.value = integration([profile({ client_secret_present: false, configured: false })])
+    const wrapper = await mountWorkspacesTab()
+
+    const current = wrapper.find('.gws-setup-step[aria-current="step"]')
+    expect(current.exists()).toBe(true)
+    expect(current.text()).toContain('Add an OAuth client')
+    wrapper.unmount()
+  })
+
+  it('hides once every account is set up', async () => {
+    gwsState.value = integration([profile()])
+    const wrapper = await mountWorkspacesTab()
+
+    expect(wrapper.find('.gws-setup').exists()).toBe(false)
     wrapper.unmount()
   })
 })

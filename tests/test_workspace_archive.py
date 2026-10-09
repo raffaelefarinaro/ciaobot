@@ -882,7 +882,8 @@ def test_registry_save_failure_on_archive_restores_the_entry_and_the_folder(
 
     assert retried.status_code == 200, retried.json()
     assert config.workspace("work") is None
-    assert "work" not in registry_path.read_text(encoding="utf-8")
+    registry_names = [row["name"] for row in json.loads(registry_path.read_text(encoding="utf-8"))]
+    assert "work" not in registry_names
 
 
 def test_unregister_failure_puts_the_entry_back_in_place(tmp_path, monkeypatch):

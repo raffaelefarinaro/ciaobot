@@ -50,6 +50,8 @@ function press(target: Element, key: string, init: KeyboardEventInit = {}) {
 describe('FileViewerModal', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    localStorage.clear()
+    vi.stubGlobal('innerWidth', 600)
     vi.stubGlobal('ResizeObserver', class {
       observe() {}
       unobserve() {}
@@ -82,6 +84,38 @@ describe('FileViewerModal', () => {
     expect(title.text()).toBe('today.md')
     expect(description.text()).toBe('notes/today.md')
     expect(document.activeElement).toBe(dialog.element)
+  })
+
+  it('keeps the viewer open after an automatic pin failure', async () => {
+    vi.stubGlobal('innerWidth', 1280)
+    const projects = useProjectStore()
+    projects.activeChatId = 'chat-1'
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(false)
+    const store = openViewer()
+    await flushPromises()
+    expect(projects.pinFile).toHaveBeenCalledWith('chat-1', 'notes/today.md')
+    expect(store.isOpen).toBe(true)
+    expect(store.content).toBe('Hello')
+    await wrapper!.get('button[aria-label="Pin to sidebar"]').trigger('click')
+    await flushPromises()
+    expect(store.isOpen).toBe(true)
+    expect(projects.pinFile).toHaveBeenCalledTimes(2)
+  })
+
+  it('a slow successful pin never closes a newer file', async () => {
+    vi.stubGlobal('innerWidth', 1280)
+    const projects = useProjectStore()
+    projects.activeChatId = 'chat-1'
+    let finish!: (success: boolean) => void
+    vi.spyOn(projects, 'pinFile').mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const store = openViewer()
+    await nextTick()
+    store.path = 'notes/newer.md'
+    store.loadToken++
+    finish(true)
+    await flushPromises()
+    expect(store.isOpen).toBe(true)
+    expect(store.path).toBe('notes/newer.md')
   })
 
   it('offers a user-triggered native share of the opened text file', async () => {

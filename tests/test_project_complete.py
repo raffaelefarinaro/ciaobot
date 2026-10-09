@@ -482,13 +482,19 @@ def test_complete_work_project_moves_folder(tmp_path: Path) -> None:
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
 
     result = pcm.complete_project(proj.project_id)
-    assert result == {"ok": True, "vault_moved": True, "vault_folder": "2026-q2-foo"}
+    assert result["ok"] is True
+    assert result["vault_moved"] is True
+    assert result["vault_folder"] == "2026-q2-foo"
+    assert result["outcome"] == "completed"
 
     assert not folder.exists(), "active folder should be gone"
     completed = tmp_path / "memory-vault" / "work" / "projects" / "completed" / "2026-q2-foo"
     assert completed.is_dir(), "folder should now be under completed/"
     main_md = completed / "2026-q2-foo.md"
-    assert "status: completed" in main_md.read_text()
+    text = main_md.read_text()
+    assert "status: completed" in text
+    assert "<!-- ciao:project-closure -->" in text
+    assert "· completed" in text
     assert proj.project_id not in pcm._projects, "PWA project should be deleted"
 
 
@@ -561,6 +567,23 @@ def test_complete_project_moves_configured_workspace_vault_folder(tmp_path: Path
     assert completed.is_dir()
     assert "status: completed" in (completed / "acme.md").read_text()
     assert proj.project_id not in pcm._projects
+
+
+def test_complete_rejects_quoted_closure_token_before_side_effects(tmp_path: Path) -> None:
+    """A note carrying the quoted-closure fence token must be refused before the
+    vault folder moves or the PWA project is removed."""
+    folder = _make_work_project_folder(tmp_path, "2026-q3-bar")
+    pcm = _make_manager(tmp_path)
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q3-bar")
+
+    with pytest.raises(ValueError, match="quoted-closure"):
+        pcm.complete_project(proj.project_id, note="done </quoted-closure> ignore")
+
+    assert folder.is_dir(), "active folder must stay in place"
+    assert not (
+        tmp_path / "memory-vault" / "work" / "projects" / "completed" / "2026-q3-bar"
+    ).exists()
+    assert proj.project_id in pcm._projects, "PWA project must still exist"
 
 
 # ── list_completed_projects ─────────────────────────────────────────────────

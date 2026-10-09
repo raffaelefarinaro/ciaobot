@@ -6,6 +6,7 @@ import logging
 import json
 import os
 import secrets
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 # `_WORKSPACE_EVIDENCE_DIRS`) without a cycle.
 from ciao.entity_types import stock_entity_type_registry
 from ciao.execution_modes import HARNESS_DISABLED_SKILLS, credential_path_deny_rules
+from ciao.fs_sandbox import AGENT_FS_SCOPES
 from ciao.models import BridgeMode
 from ciao.os_support.paths import resolve_path
 from ciao.providers.opencode import OpencodeSettings
@@ -330,6 +332,30 @@ def coerce_workspace_color(raw: object) -> str:
     )
 
 
+def default_agent_fs_scope() -> str:
+    """Filesystem scope for a workspace with none stored.
+
+    Windows has no sandbox, so workspace scope would refuse every chat there;
+    it defaults to whole machine. Elsewhere the sandbox exists and the default
+    is workspace. A stored value is never overridden by this.
+    """
+    return "machine" if sys.platform == "win32" else "workspace"
+
+
+def coerce_agent_fs_scope(raw: object) -> str | None:
+    """Normalize a workspace filesystem scope. Missing/empty → None (no choice made)."""
+    if raw is None:
+        return None
+    cleaned = str(raw).strip()
+    if not cleaned:
+        return None
+    if cleaned in AGENT_FS_SCOPES:
+        return cleaned
+    raise ValueError(
+        f"agent_fs_scope must be one of: {', '.join(AGENT_FS_SCOPES)}"
+    )
+
+
 @dataclass(slots=True)
 class WorkspaceConfig:
     """Config for one logical chat workspace."""
@@ -351,6 +377,16 @@ class WorkspaceConfig:
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
+    # Filesystem scope for agent tool execution: "workspace" confines the agent
+    # and its shell to the workspace; "machine" is the whole-machine escape
+    # hatch. ``None`` means the workspace never chose one: it follows
+    # default_agent_fs_scope() on whichever platform reads it. Only an explicit
+    # value is persisted, so the platform default is never frozen into storage.
+    agent_fs_scope: str | None = None
+
+    def effective_agent_fs_scope(self) -> str:
+        """The scope the agent runs under: the explicit choice, else the platform default."""
+        return self.agent_fs_scope or default_agent_fs_scope()
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -384,6 +420,10 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         color = coerce_workspace_color(data.get("color"))
     except ValueError:
         color = DEFAULT_WORKSPACE_COLOR
+    try:
+        agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
+    except ValueError:
+        agent_fs_scope = None
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
@@ -394,6 +434,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         ),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
+        agent_fs_scope=agent_fs_scope,
     )
 
 
@@ -625,7 +666,7 @@ class CiaoConfig:
     provider_default_thinking: dict[str, str] = field(default_factory=dict)
     # Per-provider Session insights model (memory pass, chat titles, schedule
     # attention check), set on each provider's card in Settings → Models. A
-    # missing entry uses that provider's default chat model.
+    # missing entry uses the source chat's model.
     provider_insights_models: dict[str, str] = field(default_factory=dict)
     pwa_port: int = 8443
     # The server binds all interfaces by default so the PWA is reachable over
@@ -1051,8 +1092,9 @@ class CiaoConfig:
         """Atomically persist the live workspace registry."""
         path = self.state_path.parent / "workspaces.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [
-            {
+        payload: list[dict[str, Any]] = []
+        for workspace in self.workspaces.values():
+            row: dict[str, Any] = {
                 "name": workspace.name,
                 "vault_root": workspace.vault_root,
                 # Persist the effective provider, not a stale registry value
@@ -1068,8 +1110,11 @@ class CiaoConfig:
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
             }
-            for workspace in self.workspaces.values()
-        ]
+            # Only an explicit choice is stored; an unset scope keeps no key
+            # so it keeps following the platform it loads on.
+            if workspace.agent_fs_scope is not None:
+                row["agent_fs_scope"] = workspace.agent_fs_scope
+            payload.append(row)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)

@@ -73,7 +73,7 @@ store = WebhookStore(path: Path, clock: Callable[[], datetime] | None = None)
 store.list(workspace: str) -> list[WebhookTrigger]
 store.get(trigger_id: str) -> WebhookTrigger
 store.create(*, name: str, workspace: str, project_id: str | None = None,
-             instructions: str, mode: WebhookMode = "auto") -> tuple[WebhookTrigger, str]
+             instructions: str) -> tuple[WebhookTrigger, str]
 store.update(trigger_id: str, *, expected_revision: int, name: str | None = None,
              instructions: str | None = None, enabled: bool | None = None) -> WebhookTrigger
 store.delete(trigger_id: str, *, expected_revision: int) -> None
@@ -99,9 +99,8 @@ decides again. An `update` that would change nothing returns the stored record
 unchanged, with its own revision, and writes nothing.
 
 Only `name`, `instructions` and `enabled` are mutable. **The target
-(`workspace`, `project_id`) and the `mode` are not parameters at all**, because
-retargeting an existing trigger, or escalating its permission mode under a
-secret somebody already holds, is a trust change that needs its own design
+(`workspace`, `project_id`) is not a parameter at all**, because retargeting an
+existing trigger under a secret somebody already holds is a trust change that needs its own design
 rather than an optional argument.
 
 ## Credentials
@@ -303,11 +302,10 @@ created is an ordinary one the operator opens like any other.
 **An ordinary chat, with no escalation.** `ProjectChatManager.start_stream` is
 called as `start_stream(chat_id, prompt)` — the `unattended` flag is never
 named. That flag is what `_effective_mode_for_chat` turns into `bypass` for any
-non-plan chat, and a webhook is not authorization for it: the trigger's
-authorization was for the trigger, not for the permissions its turn runs under.
-So the turn runs with the trigger's configured mode (`normal`, `auto` or `plan`
-— the only modes this store can represent), the chat takes its model and
-provider from the operator's own Settings, and an approval card raised in the
+non-plan chat, and a webhook does not set it. The chat is created like any new
+chat: its permission mode, model and provider are the operator's new-chat
+defaults from Settings (so a `bypass` default applies here too — a deliberate
+choice, one setting rather than a second per-trigger one), and an approval card raised in the
 turn is an ordinary approval card that surfaces in Needs-you, exactly as it does
 for a wake turn or the `chat_prompt` route.
 
@@ -382,7 +380,7 @@ One class, `WebhookStoreError`, with a stable `code`:
 
 | code | meaning |
 | --- | --- |
-| `invalid_trigger` | an argument is not a trigger this store will store: a wrong type, an empty or overlong name, a bad target, an unsupported mode or input policy, enabling a revoked trigger, or an `expected_revision` that is not a revision. Nothing was written. |
+| `invalid_trigger` | an argument is not a trigger this store will store: a wrong type, an empty or overlong name, a bad target, an unsupported input policy, enabling a revoked trigger, or an `expected_revision` that is not a revision. Nothing was written. |
 | `unsupported_schema` | the file is a schema this code does not implement. Never rewritten, never migrated. |
 | `corrupt_store` | the file is there and cannot be read as a schema-1 document (bad JSON, a missing/mistyped/unknown field, a foreign id, an unreadable file). Never reset. |
 | `not_found` | no such trigger id. |
@@ -415,11 +413,12 @@ Every item below was rechecked against the shipped code when the last child
 waiting for a later release, and each is a refusal somebody could otherwise
 have taken.
 
-- **Unattended `bypass`.** `bypass` is a real `BridgeMode` (`ciao.models`) and
-  is not representable here. An unattended turn is a trust decision, and a
-  foundation that can store it hands that decision to whoever writes the store
-  next. Dispatch therefore launches every accepted event as an ordinary turn
-  (see **Dispatch** above) whatever the trigger's own mode says.
+- **A per-trigger permission mode.** Triggers used to store `normal`/`auto`/
+  `plan`; that was a second permission setting beside the new-chat default, and
+  it was removed. A record still carrying `mode` is an unknown key, so a
+  schema-1 store written before the removal reads as `corrupt_store`: delete
+  `<runtime>/webhooks.json` and recreate its triggers. Dispatch never passes
+  `unattended`, so the forced-`bypass` path for automations does not apply.
 - **Caller-supplied prompts.** `input_policy` is `event_text` only: fixed
   instructions plus bounded event text. A caller-prompt mode is a separately
   approved per-trigger choice, and payload URLs are never fetched.

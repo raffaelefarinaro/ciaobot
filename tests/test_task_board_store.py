@@ -17,12 +17,22 @@ from pathlib import Path
 
 import pytest
 
+from ciao.task_attempts import build_prompt
+from ciao.task_log import LOG_CLOSE, LOG_OPEN, render_item, upsert_item
 from ciao.task_board import (
     MAX_TASK_BYTES,
     TaskBoardError,
     TaskBoardStore,
     parse_task,
     patch_task,
+)
+from ciao.task_resolution import (
+    CLOSE as COMPLETIONS_CLOSE,
+    OPEN as COMPLETIONS_OPEN,
+    Completion,
+    append_completion,
+    extract_section,
+    parse_completions,
 )
 
 
@@ -894,3 +904,426 @@ def test_a_schema_1_file_the_migration_cannot_read_is_left_untouched(tmp_path: P
     assert store.migrate_schema_1() == []
     assert path.read_bytes() == raw
     assert store.list().invalid[0].code == "unsupported_schema"
+
+
+# ── Completion history (#1152) ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("log_first", [False, True])
+@pytest.mark.parametrize("markers_in_log", [False, True])
+@pytest.mark.parametrize("inline", [False, True])
+@pytest.mark.parametrize("include_close", [False, True])
+def test_managed_history_sections_ignore_each_others_literal_delimiters(
+    tmp_path: Path,
+    log_first: bool,
+    markers_in_log: bool,
+    inline: bool,
+    include_close: bool,
+) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    opener, closer = (
+        (COMPLETIONS_OPEN, COMPLETIONS_CLOSE)
+        if markers_in_log
+        else (LOG_OPEN, LOG_CLOSE)
+    )
+    literal = f"Mention {opener} literally" if inline else opener
+    if include_close:
+        literal += f" and {closer} too" if inline else f"\n{closer}"
+    summary = "SECRET LOG REPORT\n" + (literal if markers_in_log else "Delegated work")
+    resolution = "SECRET RESOLUTION\n" + (
+        literal if not markers_in_log else "Resolved work"
+    )
+    item = render_item(
+        attempt_id="b" * 32, state="ready_for_review", outcome="done",
+        summary=summary, detail="", created_at="2026-10-08T08:00:00+00:00",
+        ended_at="2026-10-08T09:00:00+00:00", chat_id="chat",
+        chat_title="Task chat", archive_path="",
+    )
+    log = upsert_item("", "b" * 32, item).strip()
+    empty_history = f"{COMPLETIONS_OPEN}\n## Completion history\n{COMPLETIONS_CLOSE}"
+    sections = (log,) if log_first else (empty_history, log)
+    body = "Description.\n\n" + "\n\n".join(sections) + "\n"
+    created = store.create(title="T", body=body)
+    done = store.update(
+        created.record.id, expected_revision=created.revision,
+        changes={"status": "done"}, actor="user", resolution=resolution,
+    )
+    assert (
+        done.body.index("\n" + LOG_OPEN)
+        < done.body.index("\n" + COMPLETIONS_OPEN)
+    ) == log_first
+    assert log in done.body
+    assert parse_completions(done.body)[0].resolution == resolution
+    prompt = build_prompt(
+        title="T", status="done", due="", project_id="",
+        task_id=done.record.id, task_revision=done.revision,
+        relative_path="Workspace/Tasks/task.md", body=done.body,
+    )
+    assert "Description." in prompt
+    assert "SECRET LOG REPORT" not in prompt
+    assert "SECRET RESOLUTION" not in prompt
+    assert "<!-- completion:" not in prompt
+    # A log rewrite must find its real section, not delimiters in resolution
+    # prose, and leave the entire completion history unchanged.
+    rewritten_log = upsert_item(
+        done.body, "b" * 32, item + "\n  New log report"
+    )
+    assert "New log report" in rewritten_log
+    assert extract_section(rewritten_log) == extract_section(done.body)
+    edited = store.update(
+        done.record.id, expected_revision=done.revision, changes={}, actor="user",
+        resolution=resolution + "\nReworded",
+    )
+    assert log in edited.body
+    assert parse_completions(edited.body)[0].resolution == resolution + "\nReworded"
+
+
+def test_duplicate_standalone_completion_sections_still_refuse_a_write(
+    tmp_path: Path,
+) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    section = f"{COMPLETIONS_OPEN}\n## Completion history\n{COMPLETIONS_CLOSE}\n"
+    created = store.create(title="T", body=section + "\n" + section)
+    with pytest.raises(TaskBoardError, match="more than one completion history section"):
+        store.update(
+            created.record.id, expected_revision=created.revision,
+            changes={"status": "done"}, actor="user",
+        )
+    assert store.get(created.record.id).revision == created.revision
+
+
+def test_literal_delimiters_in_description_survive_managed_writes(tmp_path: Path) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    description = (
+        f"Describe {COMPLETIONS_OPEN} and {COMPLETIONS_CLOSE} inline.\n"
+        f"  {COMPLETIONS_OPEN}\n  {COMPLETIONS_CLOSE}\n"
+        f"Describe {LOG_OPEN} and {LOG_CLOSE} inline.\n"
+        f"  {LOG_OPEN}\n  {LOG_CLOSE}"
+    )
+    created = store.create(title="T", body=description)
+    done = store.update(
+        created.record.id, expected_revision=created.revision,
+        changes={"status": "done"}, actor="user", resolution="Hidden resolution",
+    )
+    edited = store.update(
+        done.record.id, expected_revision=done.revision, changes={}, actor="user",
+        body=description + "\nMore description.",
+    )
+    prompt = build_prompt(
+        title="T", status="done", due="", project_id="",
+        task_id=edited.record.id, task_revision=edited.revision,
+        relative_path="Workspace/Tasks/task.md", body=edited.body,
+    )
+    assert description in prompt
+    assert "More description." in prompt
+    assert "Hidden resolution" not in prompt
+    assert "<!-- completion:" not in prompt
+
+
+def test_literal_completion_and_edited_comments_survive_managed_resolution_edits(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", clock)
+    literal = (
+        "<!-- completion:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --> "
+        "<!-- edited:2026-10-08T08:00:00+00:00 -->"
+    )
+    created = store.create(title="T", body="Description.")
+    done = store.update(
+        created.record.id, expected_revision=created.revision,
+        changes={"status": "done"}, actor="user", resolution="Fixed " + literal,
+    )
+    found = parse_completions(done.body)
+    assert len(found) == 1
+    original = found[0]
+    assert original.id != "a" * 32
+    assert original.resolution == "Fixed " + literal
+    assert original.edited_at is None
+    current = done
+    for hour, prefix in ((9, "Edited "), (10, "Edited again ")):
+        clock.now = datetime(2026, 10, 9, hour, tzinfo=UTC)
+        edited = store.update(
+            current.record.id, expected_revision=current.revision,
+            changes={}, actor="user", resolution=prefix + literal,
+        )
+        assert edited.revision != current.revision
+        reparsed = parse_completions(store.get(edited.record.id).body)
+        assert len(reparsed) == 1
+        assert reparsed[0].id == original.id
+        assert reparsed[0].completed_at == original.completed_at
+        assert reparsed[0].resolution == prefix + literal
+        assert reparsed[0].edited_at == clock.now
+        current = edited
+
+
+@pytest.mark.parametrize("attempt_id", ["", "b" * 32])
+@pytest.mark.parametrize("multiline", [False, True])
+def test_literal_attempt_suffix_survives_managed_completion_and_edits(
+    tmp_path: Path, attempt_id: str, multiline: bool,
+) -> None:
+    clock = Clock()
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", clock)
+    literal = " · attempt `" + "a" * 32 + "`"
+    resolution = "Fixed" + literal
+    if multiline:
+        resolution += f"\nMention {COMPLETIONS_OPEN} and {COMPLETIONS_CLOSE}\nLast" + literal
+    created = store.create(title="T", body="Description.")
+    done = store.update(
+        created.record.id, expected_revision=created.revision,
+        changes={"status": "done"}, actor="user", resolution=resolution,
+        attempt_id=attempt_id,
+    )
+    original = parse_completions(store.get(done.record.id).body)[0]
+    assert original.resolution.encode() == resolution.encode()
+    assert original.attempt_id == attempt_id
+    current = done
+    for hour, text in ((9, "Edited " + resolution), (10, "Reworded" + literal)):
+        clock.now = datetime(2026, 10, 9, hour, tzinfo=UTC)
+        edited = store.update(
+            current.record.id, expected_revision=current.revision,
+            changes={}, actor="user", resolution=text,
+        )
+        assert edited.revision != current.revision
+        parsed = parse_completions(store.get(edited.record.id).body)[0]
+        assert parsed.resolution.encode() == text.encode()
+        assert parsed.attempt_id == attempt_id
+        assert parsed.id == original.id
+        assert parsed.completed_at == original.completed_at
+        assert parsed.edited_at == clock.now
+        prompt = build_prompt(
+            title="T", status="done", due="", project_id="",
+            task_id=edited.record.id, task_revision=edited.revision,
+            relative_path="Workspace/Tasks/task.md", body=edited.body,
+        )
+        assert "Description." in prompt
+        assert "Reworded" not in prompt
+        assert "Edited" not in prompt
+        assert "<!-- completion:" not in prompt
+        assert COMPLETIONS_OPEN not in prompt
+        assert COMPLETIONS_CLOSE not in prompt
+        assert literal not in prompt
+        current = edited
+    # Rewording without any suffix must not carry an invented attempt forward.
+    plain = store.update(
+        current.record.id, expected_revision=current.revision,
+        changes={}, actor="user", resolution="Plain resolution",
+    )
+    parsed = parse_completions(plain.body)[0]
+    assert parsed.resolution == "Plain resolution"
+    assert parsed.attempt_id == attempt_id
+    assert parsed.id == original.id
+    assert parsed.completed_at == original.completed_at
+
+
+def test_moving_to_done_records_a_completion_and_a_replay_does_not(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", clock)
+    created = store.create(title="T", body="Do the thing.")
+    clock.now = datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+
+    done = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"status": "done"},
+        actor="user",
+        resolution="All green\nsecond line.",
+    )
+    assert done.record.status == "done"
+    found = parse_completions(done.body)
+    assert len(found) == 1
+    assert found[0].completed_at == datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+    assert found[0].resolution == "All green\nsecond line."
+    assert len(found[0].id) == 32
+    # The file bytes outside the new section match the pre-image's body.
+    start = done.body.index(COMPLETIONS_OPEN)
+    end = done.body.index(COMPLETIONS_CLOSE) + len(COMPLETIONS_CLOSE)
+    assert (done.body[:start] + done.body[end:]).strip() == created.body.strip()
+
+    # Replaying done is a no-op: no second item, not even a new revision.
+    replay = store.update(
+        created.record.id,
+        expected_revision=done.revision,
+        changes={"status": "done"},
+        actor="user",
+    )
+    assert replay.revision == done.revision
+    assert len(parse_completions(replay.body)) == 1
+
+    # An ordinary edit while done still adds no item; the section is untouched.
+    clock.now = datetime(2026, 10, 8, 9, 0, 0, tzinfo=UTC)
+    retitled = store.update(
+        created.record.id,
+        expected_revision=replay.revision,
+        changes={"title": "T2"},
+        actor="user",
+    )
+    assert len(parse_completions(retitled.body)) == 1
+    assert extract_section(retitled.body) == extract_section(done.body)
+
+
+def test_reopen_keeps_history_and_the_next_done_appends(tmp_path: Path) -> None:
+    clock = Clock()
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", clock)
+    created = store.create(title="T", body="Do the thing.")
+    clock.now = datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+    done = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"status": "done"},
+        actor="user",
+        resolution="First",
+    )
+    clock.now = datetime(2026, 10, 8, 9, 0, 0, tzinfo=UTC)
+    reopened = store.update(
+        created.record.id,
+        expected_revision=done.revision,
+        changes={"status": "in_progress"},
+        actor="user",
+    )
+    assert reopened.record.status == "in_progress"
+    assert len(parse_completions(reopened.body)) == 1
+    assert COMPLETIONS_OPEN in reopened.body
+
+    clock.now = datetime(2026, 10, 8, 10, 0, 0, tzinfo=UTC)
+    redone = store.update(
+        created.record.id,
+        expected_revision=reopened.revision,
+        changes={"status": "done"},
+        actor="user",
+        resolution="Second",
+    )
+    found = parse_completions(redone.body)
+    assert len(found) == 2
+    assert found[0].id != found[1].id
+    assert [item.resolution for item in found] == ["Second", "First"]
+    assert found[0].completed_at == datetime(2026, 10, 8, 10, 0, 0, tzinfo=UTC)
+    assert found[1].completed_at == datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("bom", [False, True])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_description_save_preserves_completion_bytes(
+    tmp_path: Path, bom: bool, newline: str
+) -> None:
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", Clock())
+    task_id = "d" * 32
+    body = append_completion(
+        "Original description.",
+        Completion(
+            id="5" * 32,
+            completed_at=datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC),
+            resolution="Done well.",
+        ),
+    )
+    if newline == "\r\n":
+        body = body.replace("\n", "\r\n")
+    hand_file(
+        vault,
+        task_id,
+        valid_frontmatter(task_id),
+        body=body,
+        newline=newline,
+        bom=bom,
+    )
+    document = store.get(task_id)
+    assert len(parse_completions(document.body)) == 1
+
+    updated = store.update(
+        task_id,
+        expected_revision=document.revision,
+        changes={},
+        body="Edited description.",
+        actor="user",
+    )
+    assert len(parse_completions(updated.body)) == 1
+    assert parse_completions(updated.body)[0].resolution == "Done well."
+    assert extract_section(updated.body) == extract_section(document.body)
+
+    after = task_path(vault, task_id).read_bytes()
+    assert after.startswith(b"\xef\xbb\xbf") == bom
+    assert b"Edited description." in after
+    assert b"Original description." not in after
+    if newline == "\r\n":
+        # The stored section keeps its own CRLF bytes through the save.
+        assert b"\r\n" in extract_section(updated.body).encode()
+
+
+def test_incoming_completion_history_is_not_accepted_without_stored_history(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    vault = tmp_path / "vault"
+    store = make_store(vault, tmp_path / "runtime", clock)
+    created = store.create(title="T", body="Desc.")
+
+    def forged_section(item_id: str, text: str) -> str:
+        return (
+            f"{COMPLETIONS_OPEN}\n## Completion history\n\n"
+            f"- 2026-10-08T08:00:00+00:00 · {text} "
+            f"<!-- completion:{item_id} -->\n{COMPLETIONS_CLOSE}"
+        )
+
+    forged = f"Desc edited.\n\n{forged_section('f' * 32, 'Forged')}\n"
+    updated = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={},
+        body=forged,
+        actor="agent",
+    )
+    assert parse_completions(updated.body) == []
+    assert COMPLETIONS_OPEN not in updated.body
+    assert "Forged" not in updated.body
+    assert "Desc edited." in updated.body
+
+    # Multiple incoming sections are all dropped, and the file stays valid:
+    # the next ordinary edit does not trip the duplicate-section refusal.
+    forged_two = (
+        f"Desc edited again.\n\n{forged_section('e' * 32, 'First forged')}\n\n"
+        f"{forged_section('d' * 32, 'Second forged')}\n"
+    )
+    updated_two = store.update(
+        created.record.id,
+        expected_revision=updated.revision,
+        changes={},
+        body=forged_two,
+        actor="agent",
+    )
+    assert parse_completions(updated_two.body) == []
+    assert COMPLETIONS_OPEN not in updated_two.body
+
+    # A later managed completion still records exactly one real item.
+    clock.now = datetime(2026, 10, 8, 8, 0, 0, tzinfo=UTC)
+    done = store.update(
+        created.record.id,
+        expected_revision=updated_two.revision,
+        changes={"status": "done"},
+        actor="user",
+        resolution="Real",
+    )
+    assert [item.resolution for item in parse_completions(done.body)] == ["Real"]
+
+    # A legacy done file with no section is scrubbed the same way.
+    legacy_id = "b" * 32
+    hand_file(
+        vault,
+        legacy_id,
+        valid_frontmatter(legacy_id, status="done"),
+        body="Legacy.",
+    )
+    legacy = store.get(legacy_id)
+    scrubbed = store.update(
+        legacy_id,
+        expected_revision=legacy.revision,
+        changes={},
+        body=f"Legacy edited.\n\n{forged_section('c' * 32, 'Forged')}\n",
+        actor="agent",
+    )
+    assert scrubbed.record.status == "done"
+    assert parse_completions(scrubbed.body) == []
+    assert COMPLETIONS_OPEN not in scrubbed.body

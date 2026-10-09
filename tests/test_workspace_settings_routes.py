@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -1472,3 +1474,529 @@ def test_the_shared_vault_root_is_not_treated_as_an_owner(tmp_path):
     assert vault_root_owner(config, shared / "newcomer") is None
     # The shared root itself is still owned — that is equality, not nesting.
     assert vault_root_owner(config, shared) == "legacy"
+
+
+class _RenameEvents:
+    def __init__(self) -> None:
+        self.published: list[dict] = []
+
+    def publish(self, payload: dict) -> None:
+        self.published.append(payload)
+
+
+class _RenamePCM:
+    """The slice of ProjectChatManager a workspace rename touches."""
+
+    def __init__(self) -> None:
+        from ciao.web.project_chats import ProjectInfo
+
+        self._projects = {
+            "proj-1": ProjectInfo(
+                project_id="proj-1", name="Work", workspace="alpha"
+            )
+        }
+        self.events = _RenameEvents()
+        self.refresh_count = 0
+
+    def refresh_workspaces(self) -> None:
+        self.refresh_count += 1
+
+    def workspace_busy_chat_ids(self, workspace: str) -> list[str]:
+        return []
+
+    def evict_workspace_providers(self, workspace: str) -> list[str]:
+        return []
+
+    def _save(self, *, reason: str = "registry_mutation") -> None:
+        return None
+
+
+def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path):
+    """PATCH with a different name renames the workspace and reports the pair.
+
+    The response carries ``renamed`` as ``{from, to}``, every reference
+    follows the new name, and a second client event — beside the response —
+    carries both names so other tabs can follow the workspace.
+    """
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.background import BackgroundRun, BackgroundRunStore
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.import_store import ImportStore, engine_store_path
+    from ciao.schedules import ScheduleStore
+    from ciao.webhooks import WebhookStore
+
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "alpha": WorkspaceConfig(
+                name="alpha", vault_root="memory-vault/alpha"
+            ),
+            "work": WorkspaceConfig(
+                name="work", vault_root="memory-vault/work"
+            ),
+        },
+    )
+    config.persist_workspace_registry()
+    runtime = tmp_path / ".runtime"
+
+    schedules = ScheduleStore(runtime)
+    user = schedules.create(
+        daily_time_utc="10:00",
+        prompt="morning brief",
+        model="",
+        mode="auto",
+        chat_id=0,
+        workspace="alpha",
+        title="Brief",
+    )
+    webhooks = WebhookStore(runtime / "webhooks.json")
+    trigger, secret = webhooks.create(
+        name="hook", workspace="alpha", instructions="do the thing"
+    )
+    imports = ImportStore(engine_store_path(config))
+    batch = imports.create(
+        workspace="alpha",
+        sources=[{"provider": "claude_code", "source_id": "sess-1"}],
+    )
+    runs = BackgroundRunStore(runtime)
+    runs.replace(
+        BackgroundRun(
+            run_id="run-1",
+            parent_chat_id="chat-1",
+            project_id="proj-1",
+            workspace="alpha",
+            label="job",
+            cmd=["echo", "hi"],
+            cwd="",
+            status="ok",
+            started_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    pcm = _RenamePCM()
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/workspaces/{name}",
+                upsert_workspace_setting,
+                methods=["PATCH"],
+            ),
+        ]
+    )
+    app.state.config = config
+    app.state.project_chat_manager = pcm
+    client = TestClient(app, client=("127.0.0.1", 50000))
+
+    resp = client.patch(
+        "/api/workspaces/alpha", json={"name": "beta", "color": "cyan"}
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["renamed"] == {"from": "alpha", "to": "beta"}
+    assert sorted(entry["name"] for entry in body["workspaces"]) == [
+        "beta",
+        "work",
+    ]
+    beta = next(entry for entry in body["workspaces"] if entry["name"] == "beta")
+    assert beta["color"] == "cyan"
+    assert pcm.events.published == [
+        {"type": "workspaces_changed", "from": "alpha", "to": "beta"}
+    ]
+    assert pcm._projects["proj-1"].workspace == "beta"
+    assert schedules.get(user.schedule_id) is not None
+    assert schedules.get(user.schedule_id).workspace == "beta"  # type: ignore[union-attr]
+    assert webhooks.get(trigger.trigger_id).workspace == "beta"
+    assert imports.get(batch.batch_id).workspace == "beta"
+    stored_run = runs.get("run-1")
+    assert stored_run is not None
+    assert stored_run.workspace == "beta"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"default_provider": "invalid"},
+        {"color": "chartreuse"},
+        {"disallowed_tools": 123},
+    ],
+)
+def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
+    """A rename carrying an invalid setting is refused before any write.
+
+    The 400 leaves the registry, every reference, the agent directory and
+    the emitted events exactly as they were: validation runs against the
+    proposed renamed record before the rename itself runs.
+    """
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.background import BackgroundRun, BackgroundRunStore
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.import_store import ImportStore, engine_store_path
+    from ciao.schedules import ScheduleStore
+    from ciao.webhooks import WebhookStore
+
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "alpha": WorkspaceConfig(
+                name="alpha", vault_root="memory-vault/alpha"
+            ),
+            "work": WorkspaceConfig(
+                name="work", vault_root="memory-vault/work"
+            ),
+        },
+    )
+    config.persist_workspace_registry()
+    runtime = tmp_path / ".runtime"
+
+    schedules = ScheduleStore(runtime)
+    user = schedules.create(
+        daily_time_utc="10:00",
+        prompt="morning brief",
+        model="",
+        mode="auto",
+        chat_id=0,
+        workspace="alpha",
+        title="Brief",
+    )
+    webhooks = WebhookStore(runtime / "webhooks.json")
+    trigger, secret = webhooks.create(
+        name="hook", workspace="alpha", instructions="do the thing"
+    )
+    trigger = webhooks.update(
+        trigger.trigger_id, expected_revision=trigger.revision, enabled=True
+    )
+    imports = ImportStore(engine_store_path(config))
+    batch = imports.create(
+        workspace="alpha",
+        sources=[{"provider": "claude_code", "source_id": "sess-1"}],
+    )
+    runs = BackgroundRunStore(runtime)
+    runs.replace(
+        BackgroundRun(
+            run_id="run-1",
+            parent_chat_id="chat-1",
+            project_id="proj-1",
+            workspace="alpha",
+            label="job",
+            cmd=["echo", "hi"],
+            cwd="",
+            status="ok",
+            started_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    pcm = _RenamePCM()
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/workspaces/{name}",
+                upsert_workspace_setting,
+                methods=["PATCH"],
+            ),
+        ]
+    )
+    app.state.config = config
+    app.state.project_chat_manager = pcm
+    client = TestClient(app, client=("127.0.0.1", 50000))
+
+    before = {
+        path.name: path.read_bytes()
+        for path in (
+            runtime / "workspaces.json",
+            runtime / "schedules.json",
+            runtime / "webhooks.json",
+            engine_store_path(config),
+            runtime / "background" / "state.json",
+        )
+    }
+
+    resp = client.patch("/api/workspaces/alpha", json={"name": "beta", **extra})
+
+    assert resp.status_code == 400
+    assert sorted(config.workspace_names()) == ["alpha", "work"]
+    assert config.workspace("beta") is None
+    for path in (
+        runtime / "workspaces.json",
+        runtime / "schedules.json",
+        runtime / "webhooks.json",
+        engine_store_path(config),
+        runtime / "background" / "state.json",
+    ):
+        assert path.read_bytes() == before[path.name]
+    assert pcm.events.published == []
+    assert pcm._projects["proj-1"].workspace == "alpha"
+    assert schedules.get(user.schedule_id).workspace == "alpha"  # type: ignore[union-attr]
+    assert webhooks.get(trigger.trigger_id).workspace == "alpha"
+    assert webhooks.authenticate(trigger.trigger_id, secret) is not None
+    assert imports.get(batch.batch_id).workspace == "alpha"
+    stored_run = runs.get("run-1")
+    assert stored_run is not None
+    assert stored_run.workspace == "alpha"
+    assert not (tmp_path / "beta").exists()
+
+
+def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path, monkeypatch):
+    """The workspace filesystem scope persists, rejects unknowns, and defaults."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    client, config, _pcm = _client(tmp_path)
+
+    assert config.workspace("personal").agent_fs_scope is None
+    assert config.workspace("personal").effective_agent_fs_scope() == "workspace"
+    listed = client.get("/api/workspaces").json()
+    personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
+    assert personal["agent_fs_scope"] is None
+
+    patched = client.patch(
+        "/api/workspaces/personal",
+        json={"agent_fs_scope": "workspace"},
+    )
+    assert patched.status_code == 200
+    updated = next(
+        w for w in patched.json()["workspaces"] if w["name"] == "personal"
+    )
+    assert updated["agent_fs_scope"] == "workspace"
+    assert config.workspace("personal").agent_fs_scope == "workspace"
+
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert next(w for w in stored if w["name"] == "personal")["agent_fs_scope"] == "workspace"
+
+    bad = client.patch(
+        "/api/workspaces/personal",
+        json={"agent_fs_scope": "telepathy"},
+    )
+    assert bad.status_code == 400
+
+    runtime = tmp_path / ".runtime"
+    (runtime / "workspaces.json").write_text(
+        json.dumps(
+            [{"name": "personal", "vault_root": "memory-vault/personal"}]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    fresh = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert fresh.workspace("personal").agent_fs_scope is None
+    assert fresh.workspace("personal").effective_agent_fs_scope() == "workspace"
+
+
+def test_missing_agent_fs_scope_loads_as_workspace(tmp_path, monkeypatch):
+    """A registry row with no agent_fs_scope loads unset (workspace here); a stored machine stays machine."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps(
+            [
+                {"name": "personal", "vault_root": "memory-vault/personal"},
+                {
+                    "name": "work",
+                    "vault_root": "memory-vault/work",
+                    "agent_fs_scope": "machine",
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert config.workspace("personal").agent_fs_scope is None
+    assert config.workspace("personal").effective_agent_fs_scope() == "workspace"
+    assert config.workspace("work").agent_fs_scope == "machine"
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_missing_agent_fs_scope_defaults_to_workspace_off_windows(tmp_path, monkeypatch, platform):
+    """Off Windows the sandbox exists, so a workspace with no stored scope is workspace-only."""
+    monkeypatch.setattr(sys, "platform", platform)
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]) + "\n",
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert config.workspace("personal").agent_fs_scope is None
+    assert config.workspace("personal").effective_agent_fs_scope() == "workspace"
+
+
+def test_missing_agent_fs_scope_defaults_to_machine_on_windows(tmp_path, monkeypatch):
+    """Windows has no sandbox, so a missing scope loads as whole machine, not a refusing workspace scope."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal"}]) + "\n",
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert config.workspace("personal").agent_fs_scope is None
+    assert config.workspace("personal").effective_agent_fs_scope() == "machine"
+
+
+def test_stored_agent_fs_scope_is_kept_on_windows(tmp_path, monkeypatch):
+    """An explicit stored workspace scope survives the Windows default."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "personal",
+                    "vault_root": "memory-vault/personal",
+                    "agent_fs_scope": "workspace",
+                }
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(runtime),
+        }
+    )
+    assert config.workspace("personal").agent_fs_scope == "workspace"
+
+
+def _stored_workspace(tmp_path: Path, name: str) -> dict:
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    return next(w for w in stored if w["name"] == name)
+
+
+def _reload_config(tmp_path: Path) -> CiaoConfig:
+    return CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
+        }
+    )
+
+
+def test_workspace_create_without_fs_scope_stores_no_scope_on_windows(tmp_path, monkeypatch):
+    """A create with no agent_fs_scope key stores no scope; Windows then reads it as whole machine."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    client, _config, _pcm = _client(tmp_path)
+
+    response = client.post("/api/workspaces", json={"name": "Research"})
+
+    assert response.status_code == 201
+    created = next(w for w in response.json()["workspaces"] if w["name"] == "Research")
+    assert created["agent_fs_scope"] is None
+    assert "agent_fs_scope" not in _stored_workspace(tmp_path, "Research")
+
+
+@pytest.mark.parametrize(("platform", "expected"), [("win32", "machine"), ("darwin", "workspace")])
+def test_unset_agent_fs_scope_is_not_frozen_by_saves(tmp_path, monkeypatch, platform, expected):
+    """A workspace that never chose keeps no stored key through later saves and reloads as the platform default."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    client, _config, _pcm = _client(tmp_path)
+    assert client.post("/api/workspaces", json={"name": "research"}).status_code == 201
+    patch = client.patch("/api/workspaces/research", json={"disallowed_tools": "Bash"})
+    assert patch.status_code == 200
+
+    assert "agent_fs_scope" not in _stored_workspace(tmp_path, "research")
+    monkeypatch.setattr(sys, "platform", platform)
+    reloaded = _reload_config(tmp_path)
+    assert reloaded.workspace("research").agent_fs_scope is None
+    assert reloaded.workspace("research").effective_agent_fs_scope() == expected
+
+
+def test_explicit_agent_fs_scope_is_persisted(tmp_path, monkeypatch):
+    """A scope the user picked is stored and wins over the platform default on reload."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    client, _config, _pcm = _client(tmp_path)
+
+    response = client.post(
+        "/api/workspaces",
+        json={"name": "research", "agent_fs_scope": "workspace"},
+    )
+
+    assert response.status_code == 201
+    assert _stored_workspace(tmp_path, "research")["agent_fs_scope"] == "workspace"
+    assert _reload_config(tmp_path).workspace("research").effective_agent_fs_scope() == "workspace"
+
+
+def test_choosing_default_clears_an_explicit_scope(tmp_path, monkeypatch):
+    """Sending null for File access returns the workspace to the platform default and drops the stored key."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    client, config, _pcm = _client(tmp_path)
+    assert client.patch("/api/workspaces/personal", json={"agent_fs_scope": "machine"}).status_code == 200
+    assert _stored_workspace(tmp_path, "personal")["agent_fs_scope"] == "machine"
+
+    cleared = client.patch("/api/workspaces/personal", json={"agent_fs_scope": None})
+
+    assert cleared.status_code == 200
+    assert config.workspace("personal").agent_fs_scope is None
+    assert "agent_fs_scope" not in _stored_workspace(tmp_path, "personal")
+
+
+def test_stored_agent_fs_scope_survives_unrelated_saves(tmp_path, monkeypatch):
+    """A scope stored by an earlier version is an explicit choice: saving another field keeps it."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([{"name": "personal", "vault_root": "memory-vault/personal", "agent_fs_scope": "machine"}])
+        + "\n",
+        encoding="utf-8",
+    )
+    client, _config, _pcm = _client(tmp_path)
+
+    assert client.patch("/api/workspaces/personal", json={"disallowed_tools": "Bash"}).status_code == 200
+
+    assert _stored_workspace(tmp_path, "personal")["agent_fs_scope"] == "machine"
+    assert _reload_config(tmp_path).workspace("personal").agent_fs_scope == "machine"
+
+
+@pytest.mark.parametrize(("platform", "expected"), [("win32", "machine"), ("linux", "workspace")])
+def test_workspaces_payload_carries_engine_default(tmp_path, monkeypatch, platform, expected):
+    """/api/workspaces reports the default a workspace with no choice runs under, for the PWA to label."""
+    monkeypatch.setattr(sys, "platform", platform)
+    client, _config, _pcm = _client(tmp_path)
+
+    listed = client.get("/api/workspaces").json()
+
+    assert listed["default_agent_fs_scope"] == expected
+    personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
+    assert personal["agent_fs_scope"] is None

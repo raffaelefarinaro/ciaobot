@@ -58,6 +58,7 @@ from ciao.web.routes_api import (
     chat_archive,
     chat_continue,
     chat_detail,
+    chat_file_path,
     chat_fork,
     chat_handover,
     chat_images,
@@ -201,9 +202,12 @@ from ciao.web.routes_import import (
 )
 from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.routes_tasks import (
+    task_add_update,
     task_attempt_action,
     task_attempts,
     task_complete,
+    task_edit_update,
+    task_resolution_review,
     task_create,
     task_delegate,
     task_delete,
@@ -306,6 +310,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # /read-all must precede /{chat_id} so the literal isn't swallowed.
         Route("/api/chats/read-all", chats_mark_all_read, methods=["POST"]),
         Route("/api/chats/{chat_id}", chat_detail, methods=["PATCH", "DELETE"]),
+        Route("/api/chats/{chat_id}/file-path", chat_file_path, methods=["GET"]),
         Route("/api/chats/{chat_id}/new", chat_new_session, methods=["POST"]),
         Route("/api/chats/{chat_id}/handover", chat_handover, methods=["POST"]),
         Route("/api/chats/{chat_id}/fork", chat_fork, methods=["POST"]),
@@ -369,6 +374,17 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Literal `complete` precedes the `{task_id}` pattern so it is not
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
+        Route("/api/tasks/{task_id}/updates", task_add_update, methods=["POST"]),
+        Route(
+            "/api/tasks/{task_id}/updates/{update_id}",
+            task_edit_update,
+            methods=["PATCH"],
+        ),
+        Route(
+            "/api/tasks/{task_id}/resolution-review",
+            task_resolution_review,
+            methods=["POST"],
+        ),
         # Delegation (B5). `delegate` hands the task to the agent as one ordinary
         # chat with no attendance bypass and returns the attempt; the attempt
         # routes act on it (stop/resume/retry/detach), and `attempts` is the

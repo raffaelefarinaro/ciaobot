@@ -424,3 +424,50 @@ async def test_manager_private_streaming_state_is_collaborator_views() -> None:
     manager._detached_tasks.add(task)
     assert task in manager._detached_tasks
     manager._detached_tasks.clear()
+
+
+@pytest.mark.asyncio
+async def test_user_stop_persists_everything_streamed_not_the_terminal_tail() -> None:
+    """A Stop keeps the whole streamed reply, not the provider's last block.
+
+    The Claude SDK's terminal ``result`` carries only the final text block of a
+    multi-block turn, and opencode joins its parts with separators. The client
+    rendered every streamed delta, so the stopped turn must persist exactly
+    that text; otherwise a reload loses the earlier blocks (#1223).
+    """
+    streamed_blocks = ["first block of the reply\n", "second block of the reply"]
+    host = _PassHost(
+        _Provider(
+            [
+                *(AssistantTextDelta(type="text", text=t) for t in streamed_blocks),
+                ResultEvent(
+                    type="result",
+                    result="second block of the reply",
+                    session_id="s1",
+                    effective_model="sonnet",
+                    is_error=False,
+                ),
+            ]
+        )
+    )
+    stream = ChatStream()
+    host._broker.register("chat-1", stream)
+    stream.user_stopped = True
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    outcome = StreamOutcome()
+    request = AgentRequest(prompt="hello", model="opus", mode="auto")
+
+    received = [
+        event
+        async for event in streaming.drive_stream(
+            chat_id="chat-1", request=request, outcome=outcome
+        )
+    ]
+
+    full = "".join(streamed_blocks)
+    terminal = [event for event in received if isinstance(event, ResultEvent)]
+    assert len(terminal) == 1
+    assert terminal[0].result == full
+    assert terminal[0].stopped is True
+    assert outcome.response_text == full
+    assert outcome.stopped is True

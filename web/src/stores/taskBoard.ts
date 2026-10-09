@@ -16,6 +16,7 @@ import type {
   TaskDelegateResponse,
   TaskDetail,
   TaskListResponse,
+  TaskResolutionReviewResponse,
   TaskRow,
   TaskSendUpdateResponse,
   TaskStatus,
@@ -28,6 +29,8 @@ export interface TaskChanges {
   project_id?: string | null
   due?: string | null
   assignee?: 'user' | 'agent'
+  /** The completion's resolution text on a done task; rewords the latest completion. */
+  resolution?: string
 }
 
 export interface TaskCreateInput {
@@ -435,6 +438,10 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * enforces completion as the user's own act, and it refuses a task linked to a
    * live chat or attempt — refusals the board surfaces rather than swallows.
    *
+   * `resolution`, when given as a string (blank included), rides on the same POST:
+   * status and note land in one write, so a note never lands without its
+   * completion. Omitted, the POST is the one-gesture Done it has always been.
+   *
    * `null` comes back from a refusal *and* from a workspace switch made while the
    * POST was in flight; see {@link drawingWorkspace}.
    */
@@ -442,6 +449,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     workspace: string,
     taskId: string,
     expectedRevision: string,
+    resolution?: string,
   ): Promise<TaskDetail | null> {
     if (!workspace || !taskId) return null
     descriptionSeq++
@@ -451,6 +459,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       const data = await api.post<{ task?: unknown }>(`${taskUrl(taskId)}/complete`, {
         workspace,
         expected_revision: expectedRevision,
+        ...(resolution === undefined ? {} : { resolution }),
       })
       // Approving a reviewed result releases the linkage and closes the card, so
       // whatever history was held is about an attempt that no longer holds this
@@ -466,6 +475,96 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
       return null
     } finally {
       saving.value = false
+    }
+  }
+
+  /**
+   * Append one progress note, at the revision the caller read.
+   *
+   * `send` also delivers it to the live attempt's chat. A note is not a
+   * description edit and does not complete the task.
+   */
+  async function addUpdate(
+    workspace: string,
+    taskId: string,
+    expectedRevision: string,
+    text: string,
+    send = false,
+  ): Promise<TaskDetail | null> {
+    if (!workspace || !taskId || !expectedRevision || !text.trim()) return null
+    descriptionSeq++
+    saving.value = true
+    error.value = ''
+    try {
+      const data = await api.post<{ task?: unknown }>(`${taskUrl(taskId)}/updates`, {
+        workspace,
+        expected_revision: expectedRevision,
+        text,
+        send,
+      })
+      if (!drawingWorkspace(workspace)) return null
+      const task = adopt(data?.task)
+      if (task.id && described.value?.id === task.id) described.value = task
+      return task
+    } catch (e) {
+      error.value = taskApiErrorMessage(e, 'Could not save the progress note')
+      return null
+    } finally {
+      saving.value = false
+    }
+  }
+
+  /** Reword one progress note. Its author and recorded time stay. */
+  async function editUpdate(
+    workspace: string,
+    taskId: string,
+    updateId: string,
+    expectedRevision: string,
+    text: string,
+  ): Promise<TaskDetail | null> {
+    if (!workspace || !taskId || !updateId || !expectedRevision) return null
+    descriptionSeq++
+    saving.value = true
+    error.value = ''
+    try {
+      const data = await api.patch<{ task?: unknown }>(
+        `${taskUrl(taskId)}/updates/${encodeURIComponent(updateId)}`,
+        { workspace, expected_revision: expectedRevision, text },
+      )
+      if (!drawingWorkspace(workspace)) return null
+      const task = adopt(data?.task)
+      if (task.id && described.value?.id === task.id) described.value = task
+      return task
+    } catch (e) {
+      error.value = taskApiErrorMessage(e, 'Could not save the progress note')
+      return null
+    } finally {
+      saving.value = false
+    }
+  }
+
+  /**
+   * Ask the agent to read a done task's resolution for learnings, at the revision read.
+   *
+   * Answers `{queued, completion_id}` when the review was queued, or `{queued: false,
+   * reason}` when it was not. A refusal puts the server's sentence in `error` and
+   * returns `null`. Nothing on the board is written, so no row is adopted.
+   */
+  async function reviewResolution(
+    workspace: string,
+    taskId: string,
+    expectedRevision: string,
+  ): Promise<TaskResolutionReviewResponse | null> {
+    if (!workspace || !taskId || !expectedRevision) return null
+    error.value = ''
+    try {
+      return await api.post<TaskResolutionReviewResponse>(
+        `${taskUrl(taskId)}/resolution-review`,
+        { workspace, expected_revision: expectedRevision },
+      )
+    } catch (e) {
+      error.value = taskApiErrorMessage(e, 'Could not queue the resolution review')
+      return null
     }
   }
 
@@ -687,7 +786,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     rows, loadedWorkspace, loading, loadError, error, saving, described,
     attempts, attemptsTaskId, attemptsLoading, attemptsLoaded, attemptsError,
     reload, revisionOf, get,
-    create, update, complete, remove, clearError,
+    create, update, complete, addUpdate, editUpdate, reviewResolution, remove, clearError,
     delegate, attemptAction, sendUpdate,
     ensureAttempts, invalidateAttempts, resetAttempts,
   }

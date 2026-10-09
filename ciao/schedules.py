@@ -1256,6 +1256,47 @@ class ScheduleStore:
                 self._save(data)
             return added
 
+    def rename_workspace(self, old: str, new: str) -> int:
+        """Point every row filed under ``old`` at ``new``.
+
+        User rows keep their ``schedule_id``; only ``workspace`` changes.
+        System overlays keyed ``<base>@<old>`` move to ``<base>@<new>`` with
+        ``workspace`` set to ``new``. Returns how many user rows changed.
+        Idempotent: a second call sees no ``old`` rows and writes nothing.
+        """
+        renamed = 0
+        with self._lock:
+            data = self._load()
+            dirty = False
+            for item in data.get("schedules", []):
+                if (
+                    isinstance(item, dict)
+                    and item.get("scope") != "system"
+                    and item.get("workspace") == old
+                ):
+                    item["workspace"] = new
+                    dirty = True
+                    renamed += 1
+            if dirty:
+                self._save(data)
+            state = self._load_system_state()
+            rebuilt: dict[str, dict] = {}
+            relocated = 0
+            for schedule_id, overlay in state.items():
+                base, separator, row_workspace = schedule_id.partition(
+                    SYSTEM_ID_SEPARATOR
+                )
+                if separator and row_workspace == old:
+                    moved_overlay = dict(overlay)
+                    moved_overlay["workspace"] = new
+                    rebuilt[system_schedule_id(base, new)] = moved_overlay
+                    relocated += 1
+                else:
+                    rebuilt[schedule_id] = overlay
+            if relocated:
+                self._save_system_state(rebuilt)
+        return renamed
+
     def _load(self) -> dict:
         if not self._path.exists():
             return {"schedules": []}

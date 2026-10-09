@@ -39,6 +39,8 @@ function task(overrides: Partial<Task> = {}): Task {
     attempt_detail: '',
     live_attempt_id: '',
     changed_since_delegated: false,
+    completed_at: null,
+    has_resolution: false,
     ...overrides,
   }
 }

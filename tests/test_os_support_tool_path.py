@@ -204,6 +204,26 @@ def test_expand_vars_expands_only_percent_names(monkeypatch: pytest.MonkeyPatch)
     assert os_tool_path._expand_vars("C:\\plain") == "C:\\plain"
 
 
+def test_dedupe_path_keeps_first_occurrences_in_order() -> None:
+    """Each directory once, where it first appears; empty entries dropped."""
+    path = os.pathsep.join(["/a", "", "/b", "/a", "/c", "/b", ""])
+    assert os_tool_path.dedupe_path(path) == os.pathsep.join(["/a", "/b", "/c"])
+
+
+def test_dedupe_path_is_stable_when_composed_twice() -> None:
+    """Composing an already-composed PATH yields the same PATH."""
+    once = os_tool_path.dedupe_path(os.pathsep.join(["/nvm/bin", "/usr/bin", "/nvm/bin"]))
+    assert os_tool_path.dedupe_path(once) == once
+    assert once.split(os.pathsep) == ["/nvm/bin", "/usr/bin"]
+
+
+def test_dedupe_path_collapses_a_directory_repeated_many_times() -> None:
+    """The reported shape: one node bin dir repeated ahead of everything else."""
+    node_bin = "/Users/u/.nvm/versions/node/v22.23.2/bin"
+    inherited = os.pathsep.join([node_bin] * 30 + ["/usr/bin", "/bin"])
+    assert os_tool_path.dedupe_path(inherited) == os.pathsep.join([node_bin, "/usr/bin", "/bin"])
+
+
 def test_join_path_sources_keeps_machine_entries_first(monkeypatch: pytest.MonkeyPatch) -> None:
     """The order Windows combines the two halves in, with one expansion pass."""
     monkeypatch.setenv("CiaoTestVar", "C:\\Windows")
