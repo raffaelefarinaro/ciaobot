@@ -3921,7 +3921,11 @@ async function fetchWorkspaceModels(force = false) {
 
 function renameConfirmMessage(from: string, to: string): string {
   const message = `Rename "${from}" to "${to}". Projects and automations keep their ids and follow the new name.`
-  return from === 'personal' ? `${message} It will no longer be the main workspace.` : message
+  // Without a workspace named `personal`, the first one in the list is the
+  // main workspace, and a rename keeps its place in the list (#1188).
+  const first = workspaceForms.value[0]?.name
+  if (from !== 'personal' || first === from) return message
+  return `${message} "${first}" becomes the main workspace.`
 }
 
 async function saveWorkspace(name: string) {
