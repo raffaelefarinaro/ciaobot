@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- Workspace File access defaults to "Workspace only" on macOS and Linux and to "Whole machine" on Windows, which has no sandbox. A workspace that never chose keeps no saved value and follows the default of the computer that loads it; a saved choice is never changed. Choose "Whole machine" in Settings → Workspaces to keep the previous behavior on macOS and Linux.
+
 ## v1.2.1 - 2026-10-08
 
 ### Changed
@@ -2121,9 +2126,6 @@
 - feat(desktop): "Notification Settings…" tray item opens the notifications page in the macOS app window
 - feat(home): GitHub-star nudge as a housekeeping tile after setup completes, with a "Later" snooze and a "Starred — thank you!" toast
 - feat(update): link release notes from the update tile, the update-available toast, and the Settings update panel
-
-### Changed
-- Workspace File access defaults to "Workspace only" on macOS and Linux: a workspace with no saved `agent_fs_scope` confines the agent and its shell to the workspace. On Windows, which has no sandbox, the default is "Whole machine" so chats keep starting; a saved choice is never changed. Choose "Whole machine" in Settings → Workspaces to keep the previous behavior on macOS and Linux.
 
 ## v0.10.0 - 2026-08-24
 

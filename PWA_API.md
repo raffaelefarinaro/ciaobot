@@ -764,7 +764,10 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 **Workspaces**
 
 ```bash
-# List — returns {workspaces, active, primary, provider_options}.
+# List — returns {workspaces, active, primary, provider_options,
+# default_agent_fs_scope}. default_agent_fs_scope ("workspace" | "machine") is the
+# File access scope a workspace with no choice runs under on this engine; a
+# workspace's agent_fs_scope is null until it chooses one.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider,

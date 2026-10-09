@@ -59,6 +59,7 @@ from ciao.config import (
     MAX_IMAGE_SIZE_BYTES,
     RESTART_EXIT_CODE,
     WorkspaceConfig,
+    default_agent_fs_scope,
 )
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.workspaces import (
@@ -244,6 +245,9 @@ def _workspaces_payload(config) -> dict:
         # button rather than offering an action the server refuses.
         "primary": config.primary_workspace() or None,
         "provider_options": _workspace_provider_options(config),
+        # What a workspace that never chose a File access scope runs under on
+        # this engine. The PWA labels its "Default" option from this value.
+        "default_agent_fs_scope": default_agent_fs_scope(),
     }
 
 

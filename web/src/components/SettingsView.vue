@@ -977,7 +977,7 @@
                 </label>
                 <label class="settings-field"><span class="ws-label">File access</span>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.agent_fs_scope" :disabled="workspacesSaving === 'new'">
-                    <option value="">Default for this computer</option>
+                    <option value="">{{ fsScopeDefaultOptionLabel }}</option>
                     <option value="workspace">Workspace only</option>
                     <option value="machine">Whole machine</option>
                   </select>
@@ -1110,6 +1110,7 @@
                   <label class="settings-field set-subrow">
                     <span class="ws-label set-subrow-label">File access</span>
                     <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.agent_fs_scope" :disabled="workspacesSaving === form.name">
+                      <option value="">{{ fsScopeDefaultOptionLabel }}</option>
                       <option value="workspace">Workspace only</option>
                       <option value="machine">Whole machine</option>
                     </select>
@@ -3726,28 +3727,38 @@ type WorkspaceForm = {
   gws_profile: string
   disallowed_tools: string
   color: WorkspaceColorId
-  agent_fs_scope: 'workspace' | 'machine'
+  // '' is "no choice": the key is left out of a create, and an update sends
+  // null, so the engine keeps or returns the workspace to its default.
+  agent_fs_scope: FsScopeChoice
 }
 
-// A new workspace may leave File access to the server: '' means the key is
-// left out of the create payload, and the server applies its platform default.
-type FsScopeChoice = WorkspaceForm['agent_fs_scope'] | ''
-type NewWorkspaceForm = Omit<WorkspaceForm, 'agent_fs_scope'> & { agent_fs_scope: FsScopeChoice }
+type FsScopeChoice = 'workspace' | 'machine' | ''
 
-// Copy for the File access select. Workspace scope needs the sandbox on this
-// computer; the note says what a machine without one does.
+// Copy for the File access select. The default's name comes from the engine's
+// payload (default_agent_fs_scope), so the PWA never restates the platform rule.
+const WORKSPACE_FS_SCOPE_LABEL: Record<'workspace' | 'machine', string> = {
+  workspace: 'Workspace only',
+  machine: 'Whole machine',
+}
 const WORKSPACE_FS_SCOPE_COPY: Record<FsScopeChoice, string> = {
-  '': 'Default for this computer: whole machine on Windows, which has no sandbox; workspace only elsewhere.',
+  '': 'Uses the default this engine applies to workspaces with no File access choice.',
   workspace: 'Workspace only. The agent and its shell cannot read outside this workspace.',
   machine: 'Whole machine. The agent can read any file this user can read.',
 }
-const WORKSPACE_FS_SANDBOX_NOTE = 'If this computer cannot sandbox, a workspace-only chat refuses to start until you choose whole machine.'
+const WORKSPACE_FS_SANDBOX_NOTE = 'If the engine cannot sandbox, a workspace-only chat refuses to start until you choose whole machine.'
+// The engine's default for File access, from /api/workspaces. Null until the
+// list has loaded, when the default option carries no name yet.
+const fsScopeEngineDefault = ref<'workspace' | 'machine' | null>(null)
+const fsScopeDefaultOptionLabel = computed(() => {
+  const label = fsScopeEngineDefault.value ? WORKSPACE_FS_SCOPE_LABEL[fsScopeEngineDefault.value] : ''
+  return label ? `Default (${label})` : 'Default'
+})
 
 function defaultWorkspaceProvider(): WorkspaceProvider {
   return projectStore.workspaceProviderOptions[0]?.value || 'claude'
 }
 
-function blankWorkspaceForm(): NewWorkspaceForm {
+function blankWorkspaceForm(): WorkspaceForm {
   return {
     name: '',
     vault_root: '',
@@ -3769,6 +3780,11 @@ function normalizeWorkspaceProvider(value: unknown): WorkspaceProvider {
     : defaultWorkspaceProvider()
 }
 
+// A workspace that never chose has no stored scope, so it reads as '' (the default).
+function fsScopeChoice(raw: unknown): FsScopeChoice {
+  return raw === 'workspace' || raw === 'machine' ? raw : ''
+}
+
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
   return {
     name: ws.name,
@@ -3777,12 +3793,12 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     gws_profile: ws.gws_profile || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     color: normalizeWorkspaceColor(ws.color),
-    agent_fs_scope: ws.agent_fs_scope === 'machine' ? 'machine' : 'workspace',
+    agent_fs_scope: fsScopeChoice(ws.agent_fs_scope),
   }
 }
 
 const workspaceForms = ref<WorkspaceForm[]>([])
-const newWorkspaceForm = ref<NewWorkspaceForm>(blankWorkspaceForm())
+const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
 // One row "..." menu open at a time, keyed by row. Esc closes it here and
 // marks the press handled: ChatLayout's window Esc handler leaves Settings
 // unless the event was already handled, and Reka's own window listener is
@@ -3889,6 +3905,7 @@ async function fetchWorkspacesList() {
   try {
     const res = await projectStore.fetchWorkspaces()
     primaryWorkspace.value = res?.primary ?? null
+    fsScopeEngineDefault.value = res?.default_agent_fs_scope ?? null
     workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
     workspaceBaseline.value = Object.fromEntries(
       workspaceForms.value.map((form) => [form.name, JSON.stringify(form)]),
@@ -3954,7 +3971,11 @@ async function saveWorkspace(name: string) {
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       color: form.color,
-      agent_fs_scope: form.agent_fs_scope,
+      // Sent only when File access was changed. Picking the default again goes
+      // as null, which clears an earlier explicit choice.
+      ...(form.agent_fs_scope !== fsScopeChoice(projectStore.workspaces.find(w => w.name === name)?.agent_fs_scope)
+        ? { agent_fs_scope: form.agent_fs_scope || null }
+        : {}),
     })
     notifySaved(renaming ? `Workspace "${name}" renamed to "${target}".` : `Workspace "${name}" saved.`, 'Workspaces')
     openWorkspace.value = null

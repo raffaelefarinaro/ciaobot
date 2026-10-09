@@ -342,13 +342,13 @@ def default_agent_fs_scope() -> str:
     return "machine" if sys.platform == "win32" else "workspace"
 
 
-def coerce_agent_fs_scope(raw: object) -> str:
-    """Normalize a workspace filesystem scope. Missing/empty → the platform default."""
+def coerce_agent_fs_scope(raw: object) -> str | None:
+    """Normalize a workspace filesystem scope. Missing/empty → None (no choice made)."""
     if raw is None:
-        return default_agent_fs_scope()
+        return None
     cleaned = str(raw).strip()
     if not cleaned:
-        return default_agent_fs_scope()
+        return None
     if cleaned in AGENT_FS_SCOPES:
         return cleaned
     raise ValueError(
@@ -377,10 +377,16 @@ class WorkspaceConfig:
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
-    # Filesystem scope for agent tool execution. Defaults per platform (see
-    # default_agent_fs_scope): "workspace" confines the agent and its shell to
-    # the workspace; "machine" is the whole-machine escape hatch.
-    agent_fs_scope: str = field(default_factory=default_agent_fs_scope)
+    # Filesystem scope for agent tool execution: "workspace" confines the agent
+    # and its shell to the workspace; "machine" is the whole-machine escape
+    # hatch. ``None`` means the workspace never chose one: it follows
+    # default_agent_fs_scope() on whichever platform reads it. Only an explicit
+    # value is persisted, so the platform default is never frozen into storage.
+    agent_fs_scope: str | None = None
+
+    def effective_agent_fs_scope(self) -> str:
+        """The scope the agent runs under: the explicit choice, else the platform default."""
+        return self.agent_fs_scope or default_agent_fs_scope()
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -417,7 +423,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     try:
         agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
     except ValueError:
-        agent_fs_scope = default_agent_fs_scope()
+        agent_fs_scope = None
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
@@ -1086,8 +1092,9 @@ class CiaoConfig:
         """Atomically persist the live workspace registry."""
         path = self.state_path.parent / "workspaces.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = [
-            {
+        payload: list[dict[str, Any]] = []
+        for workspace in self.workspaces.values():
+            row: dict[str, Any] = {
                 "name": workspace.name,
                 "vault_root": workspace.vault_root,
                 # Persist the effective provider, not a stale registry value
@@ -1102,10 +1109,12 @@ class CiaoConfig:
                 "allowed_mcp_servers": workspace.allowed_mcp_servers,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
-                "agent_fs_scope": workspace.agent_fs_scope,
             }
-            for workspace in self.workspaces.values()
-        ]
+            # Only an explicit choice is stored; an unset scope keeps no key
+            # so it keeps following the platform it loads on.
+            if workspace.agent_fs_scope is not None:
+                row["agent_fs_scope"] = workspace.agent_fs_scope
+            payload.append(row)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")
         tmp.replace(path)
