@@ -11,7 +11,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-async function mountSettings() {
+async function mountSettings(routines?: unknown) {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
   const router = createRouter({
@@ -23,7 +23,10 @@ async function mountSettings() {
   })
   await router.push('/settings')
   await router.isReady()
-  vi.spyOn(api, 'get').mockRejectedValue(new Error('Unrelated settings data unavailable in this test'))
+  vi.spyOn(api, 'get').mockImplementation(async (url: string) => {
+    if (url === '/api/settings/routines' && routines) return routines as never
+    throw new Error('Unrelated settings data unavailable in this test')
+  })
   const wrapper = mount(SettingsView, {
     attachTo: document.body,
     global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } },
@@ -56,6 +59,24 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
     for (const item of wrapper.findAll('.settings-toc-item')) {
       expect(item.attributes('type')).toBe('button')
     }
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('lists Main workspace on the rail, in page order, once its routines load', async () => {
+  // The card only renders when the routines payload carries a workspace
+  // context, which arrives after mount, so the rail has to pick it up then.
+  const { wrapper } = await mountSettings({
+    workspace_context: { workspace_root: '/srv/ciao' },
+  })
+  try {
+    const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
+    const at = labels.indexOf('Main workspace')
+    expect(at).toBeGreaterThan(-1)
+    expect(labels[at - 1]).toBe('Session insights')
+    expect(labels[at + 1]).toBe('Workspace health')
+    expect(wrapper.find('#settings-main-workspace').exists()).toBe(true)
   } finally {
     wrapper.unmount()
   }

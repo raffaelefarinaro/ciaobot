@@ -9468,6 +9468,7 @@ def _update_task_row(status: "update_tasks.TaskStatus", pcm: Any) -> dict[str, A
     attempt, not a check. A surface that rendered one of them under the other's
     name would claim a task was re-checked when an operator merely declined it.
     """
+    from ciao.update_task_catalog import shown_since_version
     from ciao.web.update_task_launch import _live_chat
 
     task = status.task
@@ -9479,7 +9480,7 @@ def _update_task_row(status: "update_tasks.TaskStatus", pcm: Any) -> dict[str, A
         "scope": task.scope,
         "title": task.title,
         "why": task.why,
-        "since_version": task.since_version,
+        "since_version": shown_since_version(task.since_version),
         "status": state.lifecycle if state is not None else "offered",
         "applicability": status.applicability.status,
         "applicability_checked_at": status.applicability.checked_at,
