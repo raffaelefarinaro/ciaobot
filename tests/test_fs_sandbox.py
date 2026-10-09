@@ -42,6 +42,8 @@ def test_claude_workspace_settings_allow_only_the_roots(tmp_path, monkeypatch):
         "autoAllowBashIfSandboxed": True,
         "allowUnsandboxedCommands": False,
         "excludedCommands": [],
+        # Network is open: the sandbox confines files only (#1234).
+        "network": {"allowedDomains": ["*"], "allowLocalBinding": True},
         "filesystem": {
             "denyRead": [str(Path.home())],
             # The engine's own install is readable so the agent can run
