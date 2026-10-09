@@ -269,6 +269,27 @@ def render_changelog_section(
     return "\n".join(lines)
 
 
+def render_curated_section(version: str, release_date: date, notes: str) -> str:
+    """The changelog section for hand-written release notes (``--notes-file``).
+
+    The notes are the body only: this adds the ``## vX.Y.Z - date`` heading the
+    release workflow extracts the GitHub release body by. That extraction runs
+    to the next ``## `` heading, so a second-level heading inside the notes
+    would cut them short; it is refused, and sections use ``###``.
+    """
+    _require_version(version, label="release version")
+    body = notes.strip()
+    if not body:
+        raise ReleaseError("release notes file is empty")
+    for line in body.splitlines():
+        if line.startswith("## ") or line.strip() == "##":
+            raise ReleaseError(
+                "release notes may not contain a '## ' heading (use '### '): "
+                f"{line.strip()!r}"
+            )
+    return f"## v{version} - {release_date.isoformat()}\n\n{body}"
+
+
 def _lock_blocks(lock_text: str, *, path: Path) -> list[tuple[str, dict | None]]:
     """Split ``uv.lock`` at top-level ``[[package]]`` boundaries.
 
@@ -845,6 +866,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Version bump to apply when --version is omitted.",
     )
     parser.add_argument("--from-ref", help="Git ref/tag to start changelog from.")
+    parser.add_argument(
+        "--notes-file",
+        help=(
+            "Hand-written release notes (Markdown body, '###' sections) used as "
+            "the CHANGELOG section and GitHub release body instead of the "
+            "commit-subject list. See the ciao-release-notes skill."
+        ),
+    )
     parser.add_argument("--to-ref", default="HEAD", help="Git ref to end changelog at.")
     parser.add_argument("--base", default="main", help="Pull request base branch.")
     parser.add_argument(
@@ -945,7 +974,15 @@ def main(argv: list[str] | None = None) -> int:
             changelog_to_ref = "HEAD"
     from_ref = args.from_ref or _latest_release_tag(root)
     commits = _commit_summaries(root, from_ref=from_ref, to_ref=changelog_to_ref)
-    changelog_section = render_changelog_section(version, release_date, commits)
+    if args.notes_file:
+        notes_path = Path(args.notes_file)
+        try:
+            notes_text = notes_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ReleaseError(f"cannot read release notes file {notes_path}: {exc}") from exc
+        changelog_section = render_curated_section(version, release_date, notes_text)
+    else:
+        changelog_section = render_changelog_section(version, release_date, commits)
 
     if args.create_pr:
         args.push = True

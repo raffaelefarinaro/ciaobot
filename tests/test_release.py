@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from datetime import date
 from pathlib import Path
@@ -15,6 +16,7 @@ from ciao.release import (
     bump_version,
     read_versions,
     render_changelog_section,
+    render_curated_section,
 )
 
 
@@ -144,6 +146,41 @@ def test_render_changelog_section_groups_commit_subjects() -> None:
     assert "### Added\n- feat: add release automation (`abc1234`)" in section
     assert "### Fixed\n- fix: repair package smoke (`def5678`)" in section
     assert "### Maintenance\n- docs: explain release flow (`987abcd`)" in section
+
+
+_CURATED = """**Heads up:** the default changed.
+
+### New features
+- **Rename a workspace** from Settings.
+
+### Bug fixes
+- Links failed to pin ([#1167](https://github.com/raffaelefarinaro/ciaobot/issues/1167))
+"""
+
+
+def test_render_curated_section_heads_the_notes_with_the_version() -> None:
+    section = render_curated_section("1.3.0", date(2026, 10, 9), _CURATED)
+
+    assert section.startswith("## v1.3.0 - 2026-10-09\n\n**Heads up:**")
+    assert "### New features\n- **Rename a workspace**" in section
+
+
+def test_curated_section_survives_the_release_workflow_extraction() -> None:
+    # release-on-main.yml cuts the GitHub release body from CHANGELOG.md with
+    # this pattern: from the version heading to the next "## v" heading.
+    section = render_curated_section("1.3.0", date(2026, 10, 9), _CURATED)
+    changelog = f"# Changelog\n\n{section}\n\n## v1.2.1 - 2026-10-08\n\n- older\n"
+    pattern = r"^## v1\.3\.0 -.*?(?=^## v|\Z)"
+    match = re.search(pattern, changelog, flags=re.MULTILINE | re.DOTALL)
+
+    assert match is not None
+    assert match.group(0).strip() == section
+
+
+@pytest.mark.parametrize("notes", ["", "   \n", "## Ciaobot 1.3.0\n- x", "intro\n##\n"])
+def test_render_curated_section_refuses_empty_or_second_level_headings(notes: str) -> None:
+    with pytest.raises(ReleaseError):
+        render_curated_section("1.3.0", date(2026, 10, 9), notes)
 
 
 def test_apply_release_files_updates_versions_and_changelog(tmp_path: Path) -> None:
