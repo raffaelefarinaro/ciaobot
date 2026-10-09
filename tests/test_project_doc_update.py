@@ -660,6 +660,10 @@ _FOLD_ADD = json.dumps({
     f"```json\n{_FOLD_ADD}\n```",
     f"```\n{_FOLD_ADD}\n```",
     f"  ```json\n{_FOLD_ADD}\n```\n",
+    f"```json \n{_FOLD_ADD}\n```",
+    f"```json\t\n{_FOLD_ADD}\n```",
+    f"```\t\n{_FOLD_ADD}\n```",
+    f"```json\r\n{_FOLD_ADD}\r\n```",
 ])
 def test_fold_reply_parses_bare_or_fenced(
     writer: str, reply: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

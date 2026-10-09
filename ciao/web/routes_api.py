@@ -3268,6 +3268,23 @@ _WORKSPACE_IMAGE_MAX_BYTES = 15 * 1024 * 1024  # 15 MB
 
 
 
+def _is_same_chat_target(requested: str, found: Path) -> bool:
+    """Whether a fuzzy match is the file a chat link named.
+
+    Fuzzy search may drop leading directories or the extension, which can pick
+    `scripts/report.py` for a missing `report.md`. A match is accepted only
+    when it has the requested basename, or when its trailing path parts equal
+    the requested ones. Case is ignored in both comparisons.
+    """
+    wanted = Path(requested)
+    if found.name.lower() == wanted.name.lower():
+        return True
+    count = len(wanted.parts)
+    if count > len(found.parts):
+        return False
+    return [p.lower() for p in found.parts[-count:]] == [p.lower() for p in wanted.parts]
+
+
 def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
     """Resolve a chat link against the chat's own roots only.
 
@@ -3275,14 +3292,27 @@ def _resolve_chat_file(roots: list[Path], raw: str) -> Path | Response:
     fuzzy match can only land inside a root the chat owns. Passing the roots
     together would let relative-path fuzzy search reach just the first one,
     and a single-root call per attempt keeps every search inside its root.
+    A fuzzy match is kept only if it is the requested file (see
+    ``_is_same_chat_target``). A root nested inside an earlier root is skipped
+    for the fuzzy pass, since that earlier root's search already covers it.
     """
-    attempts = [(root, False) for root in roots] + [(root, True) for root in roots]
-    result: Path | Response = JSONResponse({"error": "not found"}, status_code=404)
-    for root, fuzzy in attempts:
-        result = _resolve_workspace_path([root], raw, allow_fuzzy=fuzzy)
+    for root in roots:
+        result = _resolve_workspace_path([root], raw, allow_fuzzy=False)
         if not isinstance(result, Response) or result.status_code != 404:
             return result
-    return result
+    requested = _LINE_SUFFIX_RE.sub("", raw)
+    fuzzy_roots = [
+        root for index, root in enumerate(roots)
+        if not any(root.is_relative_to(earlier) for earlier in roots[:index])
+    ]
+    for root in fuzzy_roots:
+        found = _resolve_workspace_path([root], raw, allow_fuzzy=True)
+        if isinstance(found, Path):
+            if _is_same_chat_target(requested, found):
+                return found
+        elif found.status_code != 404:
+            return found
+    return JSONResponse({"error": "not found"}, status_code=404)
 
 
 async def chat_file_path(request: Request) -> Response:
@@ -3303,7 +3333,10 @@ async def chat_file_path(request: Request) -> Response:
         config.agent_root(workspace).resolve(),
         config.workspace_vault_root(workspace).resolve(),
     ]))
-    result = _resolve_chat_file(roots, request.query_params.get("path", "").strip())
+    # The fuzzy pass walks the directory tree, so it runs off the event loop.
+    result = await asyncio.to_thread(
+        _resolve_chat_file, roots, request.query_params.get("path", "").strip()
+    )
     if isinstance(result, Response):
         return result
     extensions = _WORKSPACE_FILE_EXTS | _WORKSPACE_IMAGE_EXTS | _WORKSPACE_BINARY_EXTS
