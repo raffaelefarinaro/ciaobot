@@ -485,3 +485,30 @@ def test_reading_a_missing_archive_yields_no_evidence(tmp_path: Path) -> None:
     assert read_archive_skills(tmp_path / "gone.md") == {}
 
 
+
+
+def test_a_reply_with_its_own_fenced_blocks_round_trips_whole(tmp_path: Path) -> None:
+    """The writer's fence outgrows every backtick run in the message.
+
+    A reply holding ```` ``` ````, ``~~~`` and ```` ```` ```` blocks is written
+    inside a longer fence, so no line of it closes the wrapper, and the parser
+    reads back exactly what was written.
+    """
+    from ciao.transcripts import parse_archive_turns
+
+    prompt = "show me\n````\nfour\n````\nand ``` inline"
+    response = (
+        "line A\n```python\nprint('x')\n```\n~~~\ntilde\n~~~\n"
+        "````md\n```\nnested\n```\n````\nline B"
+    )
+    archived = _archive(
+        tmp_path,
+        [{"prompt": prompt, "response": response}],
+    )
+
+    body = archived.read_text(encoding="utf-8")
+    assert "````text\n" + prompt + "\n````" in body
+    turns = parse_archive_turns(body)
+    assert len(turns) == 1
+    assert turns[0]["user"] == prompt
+    assert turns[0]["assistant"] == response

@@ -136,6 +136,7 @@ from ciao.transcripts import (
     TurnJournal,
     _claude_projects_dir,
     _global_session_matches,
+    parse_archive_turns,
 )
 from ciao.web import chat_service
 from ciao.web.chat_broker import (
@@ -3252,19 +3253,13 @@ class ProjectChatManager:
     def _parse_transcript_messages(self, text: str) -> list[dict]:
         """Extract user and assistant messages from transcript markdown."""
         turns_data = []
-        parts = re.split(r'^## Turn \d+', text, flags=re.MULTILINE)
 
-        for part in parts[1:]:
-            user_match = re.search(r'### User\s*\n\s*```text\n(.*?)\n```', part, re.DOTALL)
-            assistant_match = re.search(r'### Assistant\s*\n\s*```text\n(.*?)\n```', part, re.DOTALL)
+        for turn in parse_archive_turns(text):
+            timestamp = turn["timestamp"]
+            usage = self._parse_transcript_usage(turn["trailer"])
 
-            time_match = re.search(r'-\s*Time:\s*([^\n]+)', part)
-            timestamp = time_match.group(1).strip() if time_match else ""
-
-            usage = self._parse_transcript_usage(part)
-
-            if user_match:
-                user_content = user_match.group(1)
+            if turn["user"] is not None:
+                user_content = turn["user"]
                 user_content = re.sub(r'(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*', '', user_content)
                 if user_content.strip():
                     turns_data.append({
@@ -3273,8 +3268,8 @@ class ProjectChatManager:
                         "timestamp": timestamp,
                     })
 
-            if assistant_match:
-                assistant_content = assistant_match.group(1)
+            if turn["assistant"] is not None:
+                assistant_content = turn["assistant"]
                 if assistant_content.strip():
                     row = {
                         "role": "assistant",
