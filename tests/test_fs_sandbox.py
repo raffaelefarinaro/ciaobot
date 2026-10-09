@@ -430,3 +430,18 @@ def test_bwrap_binds_where_resolv_conf_points(tmp_path, monkeypatch):
     target = str(run.resolve())
     at = argv.index(target)
     assert argv[at - 1] == "--ro-bind"
+
+
+def test_seatbelt_lets_opencode_resolve_config_names_in_ancestors(tmp_path):
+    root = tmp_path / "workspace" / "agent"
+    profile = _seatbelt_profile([root])
+
+    # OpenCode realpaths `.claude` (and its siblings) in every ancestor of its
+    # cwd; a refused realpath fails the whole prompt with a 500 (#1197).
+    ancestor = tmp_path / "workspace"
+    for name in (".claude", "AGENTS.md"):
+        literal = f'(literal "{_quote_seatbelt_subpath(f"{ancestor}/{name}")}")'
+        assert literal in profile
+    # A literal, never a subpath: the folder opens, nothing inside it is read.
+    assert f'(subpath "{_quote_seatbelt_subpath(f"{ancestor}/.claude")}")' not in profile
+    assert _writable_rules(profile) == 1

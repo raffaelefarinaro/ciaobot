@@ -37,6 +37,17 @@ _SYSTEM_READ_SUBPATHS = (
 
 _BWRAP_RO_DIRS = ("/usr", "/bin", "/lib", "/lib64", "/etc")
 
+# Config names OpenCode resolves in every ancestor of its cwd (#1197).
+_ANCESTOR_CONFIG_NAMES = (
+    ".claude",
+    ".agents",
+    ".opencode",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "opencode.json",
+    "opencode.jsonc",
+)
+
 # /etc entries that commonly point outside /etc and that name resolution needs.
 _BWRAP_ETC_LINKS = ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf")
 
@@ -276,6 +287,20 @@ def _seatbelt_profile(roots: list[Path], read_only: Sequence[Path] = ()) -> str:
     if ancestors:
         listed = " ".join(f'(literal "{_quote_seatbelt_subpath(a)}")' for a in ancestors)
         lines.append(f"(allow file-read* {listed})")
+        # OpenCode realpaths config names (`.claude`, `AGENTS.md`, ...) in every
+        # ancestor of its cwd, and a refused realpath fails the whole prompt
+        # with a 500 (#1197). Metadata (stat, readlink) of an ancestor's direct
+        # children is enough for that and reads no file contents.
+        # OpenCode realpaths config names in every ancestor of its cwd, and a
+        # refused realpath fails the whole prompt with a 500 (#1197). Bun opens
+        # the path to resolve it, so these names are readable as literals: a
+        # folder (`.claude`) can be opened and listed, nothing inside it is read.
+        config = " ".join(
+            f'(literal "{_quote_seatbelt_subpath(a + "/" + name)}")'
+            for a in ancestors
+            for name in _ANCESTOR_CONFIG_NAMES
+        )
+        lines.append(f"(allow file-read* {config})")
     for root in roots:
         quoted = _quote_seatbelt_subpath(str(root))
         lines.append(f'(allow file-read* file-write* (subpath "{quoted}"))')
