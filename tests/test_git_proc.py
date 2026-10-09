@@ -62,6 +62,33 @@ def _alive(pid: int) -> bool:
     return True
 
 
+#: Wall-clock budget for the fake git shell to start its grandchild. Timeouts
+#: run from spawn, so this must leave room for a loaded machine to schedule
+#: `sh` and `sleep` before the timeout fires; the pid-file poll below is what
+#: then proves the grandchild existed when the kill landed.
+_STARTUP_BUDGET = 5.0
+
+
+async def _read_pid_file(pid_file: Path, budget: float = 10.0) -> int:
+    """Wait (bounded) for the fake git to publish its grandchild's pid."""
+    for _ in range(int(budget / 0.05)):
+        if pid_file.exists():
+            text = pid_file.read_text().strip()
+            if text:
+                return int(text)
+        await asyncio.sleep(0.05)
+    pytest.fail(f"fake git never wrote {pid_file} within {budget}s")
+
+
+async def _wait_until_gone(pid: int, budget: float = 10.0) -> bool:
+    """True once ``pid`` no longer exists, polled for up to ``budget`` seconds."""
+    for _ in range(int(budget / 0.1)):
+        if not _alive(pid):
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
 @posix_fake_git
 @pytest.mark.asyncio
 async def test_timeout_does_not_leak_file_descriptors(
@@ -146,17 +173,15 @@ async def test_timeout_kills_the_grandchild(
     )
     monkeypatch.setenv("PATH", env["PATH"])
 
-    rc, _, err = await run_git(tmp_path, "push", timeout=0.5)
+    rc, _, err = await run_git(tmp_path, "push", timeout=_STARTUP_BUDGET)
     assert rc == -1
     assert err == GIT_TIMEOUT_DETAIL
 
-    grandchild = int(pid_file.read_text().strip())
+    # The timeout only proves the kill if the grandchild existed when it
+    # fired; the pid file is written by that grandchild's parent shell.
+    grandchild = await _read_pid_file(pid_file)
     # SIGKILL delivery is not instantaneous; give it a moment to be reaped.
-    for _ in range(50):
-        if not _alive(grandchild):
-            break
-        await asyncio.sleep(0.1)
-    else:
+    if not await _wait_until_gone(grandchild):
         os.kill(grandchild, signal.SIGKILL)  # don't leave it behind
         pytest.fail(f"grandchild {grandchild} survived the timeout")
 
