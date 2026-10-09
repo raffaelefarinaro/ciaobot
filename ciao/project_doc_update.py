@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -207,17 +208,33 @@ def _sanitize_fold_stamp(text: str, entry: Any | None) -> str:
     return _strip_opening_claim(text)
 
 
+_WHOLE_FENCE = re.compile(r"```[A-Za-z0-9_+-]*\n(.*)\n```", re.S)
+
+
+def _unwrap_fold_fence(output: str) -> str:
+    """``output`` with one surrounding code fence removed, or as it was.
+
+    The reply is asked to be bare JSON, but a model may still wrap it in a
+    single ```json (or bare ```) fence. Only a fence that spans the whole
+    reply is removed; text outside it stays, and the JSON parse refuses it.
+    """
+    stripped = output.strip()
+    match = _WHOLE_FENCE.fullmatch(stripped)
+    return match.group(1) if match else stripped
+
+
 def _parse_fold_reply(
     output: str, entries: list[Any], *, note_path: str, workspace: str
 ) -> _FoldDecision:
     """The model's JSON reply as a decision, or a refusal.
 
-    A code fence, a non-object, an unknown action, an index that is not one of
-    the numbered entries, a section outside :data:`_FOLD_SECTIONS`, or a
-    ``text`` that is not one list item are all the same outcome: do not write.
+    A fence that is not the whole reply, a non-object, an unknown action, an
+    index that is not one of the numbered entries, a section outside
+    :data:`_FOLD_SECTIONS`, or a ``text`` that is not one list item are all the
+    same outcome: do not write.
     """
     try:
-        reply = json.loads(output.strip())
+        reply = json.loads(_unwrap_fold_fence(output))
     except (json.JSONDecodeError, ValueError):
         raise _FoldRefused("the fold reply was not a single entry edit") from None
     if not isinstance(reply, dict):
