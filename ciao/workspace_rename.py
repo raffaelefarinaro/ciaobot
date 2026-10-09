@@ -168,6 +168,13 @@ def rename_workspace(
     snapshot = _take_snapshot(
         config, projects, schedules, webhooks, imports, runs
     )
+    if projects is not None:
+        # Cached providers were built with the old agent root and workspace
+        # name. Evicted before the agent root and the project rows move: the
+        # eviction is keyed by the chats that are still in ``old``, and the busy
+        # check has already passed. The chats keep their session ids and the
+        # next turn rebuilds the provider.
+        projects.evict_workspace_providers(old)
     if move is not None:
         source, dest = move
         try:
@@ -176,12 +183,6 @@ def rename_workspace(
             raise ValueError(
                 f"could not rename '{old}' to '{new}': {exc}"
             ) from exc
-    if projects is not None:
-        # Cached providers were built with the old agent root and workspace
-        # name. Evicted before the project rows move, because the eviction is
-        # keyed by the chats that are still in ``old``; the chats keep their
-        # session ids and the next turn rebuilds the provider.
-        projects.evict_workspace_providers(old)
     try:
         # Replace the key in place so the renamed workspace keeps its position
         # in the registry: sidebar order, the 1-9 shortcuts and the

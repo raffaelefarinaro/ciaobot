@@ -787,6 +787,39 @@ def test_old_name_recreated_after_rename_does_not_take_over_projects(
     assert new_memory.workspace == "work"
 
 
+def test_rename_evicts_providers_before_the_agent_root_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #1208: the eviction runs before the directory move, so a provider is never
+    # rebuilt from a root that is about to change under it.
+    config = _rerooted_config(tmp_path, {"personal": "personal", "work": "work"})
+    (tmp_path / "personal" / "memory-vault").mkdir(parents=True)
+    config.persist_workspace_registry()
+    projects = _Projects()
+    root_present_at_eviction: list[bool] = []
+
+    def evict(workspace: str) -> list[str]:
+        root_present_at_eviction.append((tmp_path / "personal").is_dir())
+        return []
+
+    monkeypatch.setattr(projects, "evict_workspace_providers", evict)
+    schedules, webhooks, imports, runs = _stores(config, tmp_path)
+
+    rename_workspace(
+        config,
+        old="personal",
+        new="santo",
+        projects=projects,
+        schedules=schedules,
+        webhooks=webhooks,
+        imports=imports,
+        runs=runs,
+    )
+
+    assert root_present_at_eviction == [True]
+    assert (tmp_path / "santo").is_dir()
+
+
 @pytest.mark.asyncio
 async def test_rename_evicts_cached_providers_of_the_renamed_workspace(
     tmp_path: Path,

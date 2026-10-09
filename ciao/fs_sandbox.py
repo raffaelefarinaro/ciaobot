@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import os
 import shutil
+import site
 import subprocess
 import sys
 import sysconfig
@@ -40,16 +41,14 @@ _SYSTEM_READ_SUBPATHS = (
 
 _BWRAP_RO_DIRS = ("/usr", "/bin", "/lib", "/lib64", "/etc")
 
-# Config names OpenCode resolves in every ancestor of its cwd (#1197).
-_ANCESTOR_CONFIG_NAMES = (
-    ".claude",
-    ".agents",
-    ".opencode",
-    "AGENTS.md",
-    "CLAUDE.md",
-    "opencode.json",
-    "opencode.jsonc",
-)
+# Config names OpenCode resolves in every ancestor of its cwd (#1197). A folder
+# is a literal with read (it opens and lists, nothing inside it is read). A
+# file that OpenCode loads as config or instructions needs its contents, so it
+# is a literal with read too. CLAUDE.md is only realpathed here, so it gets
+# metadata alone (#1208).
+_ANCESTOR_CONFIG_FOLDERS = (".claude", ".agents", ".opencode")
+_ANCESTOR_CONFIG_READ = ("AGENTS.md", "opencode.json", "opencode.jsonc")
+_ANCESTOR_CONFIG_METADATA = ("CLAUDE.md",)
 
 # /etc entries that commonly point outside /etc and that name resolution needs.
 _BWRAP_ETC_LINKS = ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf")
@@ -136,6 +135,30 @@ def _symlink_hops(start: Path) -> list[Path]:
     return hops
 
 
+def _user_scheme_install_paths() -> list[Path]:
+    """The per-user install's packages and scripts, for a ``pip install --user`` engine.
+
+    The default sysconfig scheme is the prefix's, so a user install's packages and
+    console scripts sit outside it. They are added only when the running ``ciao``
+    package lives in the user site, which is the case this covers.
+    """
+    if not site.ENABLE_USER_SITE:
+        return []
+    package = Path(__file__).resolve().parent
+    if not package.is_relative_to(Path(site.getusersitepackages()).resolve()):
+        return []
+    scheme = sysconfig.get_preferred_scheme("user")
+    return [
+        Path(sysconfig.get_path("purelib", scheme=scheme)),
+        Path(sysconfig.get_path("scripts", scheme=scheme)),
+    ]
+
+
+def _shadowed_engine_roots(roots: Sequence[Path], engine: Sequence[Path]) -> list[Path]:
+    """Engine folders inside a writable root: readable there, but never writable."""
+    return [path for path in engine if any(path.is_relative_to(root) for root in roots)]
+
+
 @functools.cache
 def engine_read_roots() -> list[Path]:
     """The running engine's install, readable (never writable) in workspace scope.
@@ -167,6 +190,7 @@ def engine_read_roots() -> list[Path]:
         Path(sysconfig.get_path("purelib")),
         Path(sysconfig.get_path("platlib")),
     ]
+    candidates += _user_scheme_install_paths()
     candidates += _symlink_hops(Path(sys.executable))
     for path in candidates:
         # A folder already granted with its contents covers anything inside it
@@ -190,6 +214,10 @@ def claude_sandbox_settings(
     if sys.platform != "darwin":
         # Claude's Linux sandbox is bubblewrap, which cannot bind a symlink, so
         # only the real folders are granted; the links resolve to them inside.
+        # Known gap (#1208): unlike OpenCode's bwrap path, no ``--symlink`` is
+        # recreated for a link outside the bound folders, so a uv alias under
+        # the denied home may not resolve in Claude's shell. Unverified: it needs
+        # a signed-in Linux Claude, so the behaviour is left as is.
         engine = [path for path in engine if not path.is_symlink()]
     return {
         "enabled": True,
@@ -203,6 +231,9 @@ def claude_sandbox_settings(
             "denyRead": [str(Path.home())],
             "allowRead": [str(p) for p in [*roots, *engine]],
             "allowWrite": [str(p) for p in roots],
+            # The roots grant write access, so an engine folder inside one is denied
+            # it by name, as OpenCode's profile shadows it (#1208).
+            "denyWrite": [str(p) for p in _shadowed_engine_roots(roots, engine)],
         },
     }
 
@@ -320,20 +351,26 @@ def _seatbelt_profile(
     if ancestors:
         listed = " ".join(f'(literal "{_quote_seatbelt_subpath(a)}")' for a in ancestors)
         lines.append(f"(allow file-read* {listed})")
-        # OpenCode realpaths config names (`.claude`, `AGENTS.md`, ...) in every
-        # ancestor of its cwd, and a refused realpath fails the whole prompt
-        # with a 500 (#1197). Metadata (stat, readlink) of an ancestor's direct
-        # children is enough for that and reads no file contents.
         # OpenCode realpaths config names in every ancestor of its cwd, and a
-        # refused realpath fails the whole prompt with a 500 (#1197). Bun opens
-        # the path to resolve it, so these names are readable as literals: a
-        # folder (`.claude`) can be opened and listed, nothing inside it is read.
-        config = " ".join(
+        # refused realpath fails the whole prompt with a 500 (#1197). Only the
+        # names in ``_ANCESTOR_CONFIG_METADATA`` get metadata alone (#1208).
+        folders = " ".join(
             f'(literal "{_quote_seatbelt_subpath(a + "/" + name)}")'
             for a in ancestors
-            for name in _ANCESTOR_CONFIG_NAMES
+            for name in _ANCESTOR_CONFIG_FOLDERS
         )
-        lines.append(f"(allow file-read* {config})")
+        read = " ".join(
+            f'(literal "{_quote_seatbelt_subpath(a + "/" + name)}")'
+            for a in ancestors
+            for name in _ANCESTOR_CONFIG_READ
+        )
+        metadata = " ".join(
+            f'(literal "{_quote_seatbelt_subpath(a + "/" + name)}")'
+            for a in ancestors
+            for name in _ANCESTOR_CONFIG_METADATA
+        )
+        lines.append(f"(allow file-read* {folders} {read})")
+        lines.append(f"(allow file-read-metadata {metadata})")
     for root in roots:
         quoted = _quote_seatbelt_subpath(str(root))
         lines.append(f'(allow file-read* file-write* (subpath "{quoted}"))')
@@ -388,7 +425,7 @@ def opencode_sandbox_prefix(
     # An engine folder inside a writable root is already readable there; it
     # stays read-only by a rule that follows the root's grant, not by a grant.
     engine = engine_read_roots()
-    shadowed = [path for path in engine if any(path.is_relative_to(root) for root in roots)]
+    shadowed = _shadowed_engine_roots(roots, engine)
     read_only = [*read_only, *(path for path in engine if path not in shadowed)]
     platform = sys.platform
     if platform == "darwin":
