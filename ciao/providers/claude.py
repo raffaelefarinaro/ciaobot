@@ -933,6 +933,9 @@ class ClaudeProvider(BaseSDKProvider):
                             merged.put_nowait(event)
 
                 if pending_result is not None:
+                    pending_result.effective_model = self._turn_effective_model(
+                        last_result_msg, last_main_msg
+                    )
                     await self._augment_with_context_pct(
                         client,
                         pending_result,
@@ -1477,6 +1480,22 @@ class ClaudeProvider(BaseSDKProvider):
                 if isinstance(value, int):
                     summary[key] = str(value)
         return summary
+
+    @staticmethod
+    def _turn_effective_model(
+        result_msg: ResultMessage | None, last_main_msg: AssistantMessage | None
+    ) -> str:
+        """The model the footer names for a turn.
+
+        The main agent's last model call is the chat model. ``model_usage`` can
+        rank a helper call (a haiku title) above a very short reply, so it is
+        only used when the turn made no main model call.
+        """
+        if last_main_msg is not None and last_main_msg.model:
+            return last_main_msg.model
+        if result_msg is None:
+            return ""
+        return ClaudeProvider._extract_effective_model(result_msg)
 
     @staticmethod
     def _extract_effective_model(msg: ResultMessage) -> str:
