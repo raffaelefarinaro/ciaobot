@@ -58,8 +58,9 @@ export interface WorkspaceInfo {
   gws_profile: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
   color?: string
-  // Filesystem scope for the agent and its shell. Missing → workspace.
-  agent_fs_scope?: 'workspace' | 'machine'
+  // Filesystem scope for the agent and its shell. Absent or null: the workspace
+  // never chose one and runs under the engine's default_agent_fs_scope.
+  agent_fs_scope?: 'workspace' | 'machine' | null
 }
 
 export interface WorkspacesResponse {
@@ -68,6 +69,8 @@ export interface WorkspacesResponse {
   // The workspace that cannot be archived (the server refuses it).
   primary?: WorkspaceName | null
   provider_options?: WorkspaceProviderOption[]
+  // The scope a workspace with no File access choice runs under on this engine.
+  default_agent_fs_scope: 'workspace' | 'machine'
 }
 
 /** One archived workspace, from `GET /api/workspaces/archived`. */

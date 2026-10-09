@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
 // Settings > Workspaces: the "File access" select sets the workspace's
-// agent_fs_scope. Edit saves the chosen value. A new workspace starts on
-// "Default for this computer" and omits agent_fs_scope on create unless the
-// user picks one, so the server applies its platform default.
+// agent_fs_scope. Its default option is labelled from the engine's
+// default_agent_fs_scope, never from a platform rule in the PWA. A new workspace
+// starts on that default and omits agent_fs_scope on create; an edit that leaves
+// File access alone omits it too, so a workspace that never chose stays unset.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -50,7 +51,10 @@ vi.mock('../../lib/push', () => ({
 
 const Stub = defineComponent({ render: () => h('div') })
 
-function workspaces(): WorkspacesResponse {
+function workspaces(
+  scope: 'workspace' | 'machine' | null = 'workspace',
+  defaultScope: 'workspace' | 'machine' = 'workspace',
+): WorkspacesResponse {
   return {
     workspaces: [
       {
@@ -59,12 +63,13 @@ function workspaces(): WorkspacesResponse {
         default_provider: 'claude',
         gws_profile: '',
         color: 'pink',
-        agent_fs_scope: 'workspace',
+        agent_fs_scope: scope,
       },
     ],
     active: 'personal',
     primary: 'personal',
     provider_options: [{ value: 'claude', label: 'Claude' }],
+    default_agent_fs_scope: defaultScope,
   }
 }
 
@@ -109,8 +114,12 @@ describe('Settings > Workspaces file access', () => {
 
       const select = fileAccessSelect(wrapper)
       expect(select.element.value).toBe('workspace')
-      expect(select.findAll('option').map(o => o.text())).toEqual(['Workspace only', 'Whole machine'])
-      expect(wrapper.text()).toContain('If this computer cannot sandbox')
+      expect(select.findAll('option').map(o => o.text())).toEqual([
+        'Default (Workspace only)',
+        'Workspace only',
+        'Whole machine',
+      ])
+      expect(wrapper.text()).toContain('If the engine cannot sandbox')
 
       await select.setValue('machine')
       await flushPromises()
@@ -139,11 +148,11 @@ describe('Settings > Workspaces file access', () => {
       const select = fileAccessSelect(newPanel)
       expect(select.element.value).toBe('')
       expect(select.findAll('option').map(o => o.text())).toEqual([
-        'Default for this computer',
+        'Default (Workspace only)',
         'Workspace only',
         'Whole machine',
       ])
-      expect(newPanel.text()).toContain('whole machine on Windows')
+      expect(newPanel.text()).not.toContain('this computer')
 
       await newPanel.get('input[placeholder="letters, numbers, dashes, underscores"]').setValue('client-a')
       const create = wrapper.findAll('button').find(b => b.text() === 'Create workspace')
@@ -176,6 +185,76 @@ describe('Settings > Workspaces file access', () => {
       expect(api.post).toHaveBeenCalledWith(
         '/api/workspaces',
         expect.objectContaining({ name: 'client-b', agent_fs_scope: 'workspace' }),
+      )
+    } finally {
+      wrapper.unmount()
+    }
+  })
+})
+
+describe('Settings > Workspaces file access default', () => {
+  beforeEach(async () => {
+    setActivePinia(createPinia())
+    const { api } = await import('../../lib/api')
+    vi.mocked(api.post).mockClear()
+    vi.mocked(api.patch).mockClear()
+  })
+
+  it('labels the default option from the engine payload', async () => {
+    state.workspaces = workspaces(null, 'machine')
+    const wrapper = await mountWorkspacesTab()
+    try {
+      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
+      await flushPromises()
+
+      expect(fileAccessSelect(wrapper).findAll('option')[0].text()).toBe('Default (Whole machine)')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('shows a workspace that never chose as the default and saves it unchanged without the key', async () => {
+    const { api } = await import('../../lib/api')
+    state.workspaces = workspaces(null, 'workspace')
+    const wrapper = await mountWorkspacesTab()
+    try {
+      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
+      await flushPromises()
+
+      const select = fileAccessSelect(wrapper)
+      expect(select.element.value).toBe('')
+
+      // Save appears only once the row is dirty: change the colour, not File access.
+      const otherColour = wrapper.findAll('[role="radio"][aria-checked="false"]')[0]
+      await otherColour.trigger('click')
+      await flushPromises()
+      await wrapper.get('.workspace-save').trigger('click')
+      await flushPromises()
+
+      const payload = vi.mocked(api.patch).mock.calls.find(c => c[0] === '/api/workspaces/personal')?.[1] as Record<string, unknown>
+      expect(payload).toBeTruthy()
+      expect(payload).not.toHaveProperty('agent_fs_scope')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('clears an explicit choice when the default is picked again', async () => {
+    const { api } = await import('../../lib/api')
+    state.workspaces = workspaces('machine', 'workspace')
+    const wrapper = await mountWorkspacesTab()
+    try {
+      await wrapper.get('[aria-label="Edit workspace personal"]').trigger('click')
+      await flushPromises()
+
+      await fileAccessSelect(wrapper).setValue('')
+      await flushPromises()
+      await wrapper.get('.workspace-save').trigger('click')
+      await flushPromises()
+
+      expect(api.patch).toHaveBeenCalledWith(
+        '/api/workspaces/personal',
+        expect.objectContaining({ agent_fs_scope: null }),
       )
     } finally {
       wrapper.unmount()

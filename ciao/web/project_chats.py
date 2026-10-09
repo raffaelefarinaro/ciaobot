@@ -4169,7 +4169,7 @@ class ProjectChatManager:
         """
         workspace = self._workspace_for_chat(chat.chat_id)
         config = self._config.workspace(workspace)
-        if config is None or config.agent_fs_scope != "workspace":
+        if config is None or config.effective_agent_fs_scope() != "workspace":
             return "machine", ()
         agent_root = self._config.agent_root(workspace).resolve()
         vault_root = self._config.workspace_vault_root(workspace).resolve()

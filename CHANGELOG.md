@@ -2122,9 +2122,6 @@
 - feat(home): GitHub-star nudge as a housekeeping tile after setup completes, with a "Later" snooze and a "Starred — thank you!" toast
 - feat(update): link release notes from the update tile, the update-available toast, and the Settings update panel
 
-### Changed
-- Workspace File access defaults to "Workspace only" on macOS and Linux: a workspace with no saved `agent_fs_scope` confines the agent and its shell to the workspace. On Windows, which has no sandbox, the default is "Whole machine" so chats keep starting; a saved choice is never changed. Choose "Whole machine" in Settings → Workspaces to keep the previous behavior on macOS and Linux.
-
 ## v0.10.0 - 2026-08-24
 
 ### Added

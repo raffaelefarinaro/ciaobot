@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
+import sys
 from pathlib import Path
+
+import pytest
 
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
@@ -61,3 +64,22 @@ def test_build_agent_request_machine_scope_has_no_roots(tmp_path: Path) -> None:
 
     assert request.agent_fs_scope == "machine"
     assert request.agent_roots == ()
+
+
+@pytest.mark.parametrize(("platform", "expected"), [("darwin", "workspace"), ("win32", "machine")])
+def test_build_agent_request_unset_scope_uses_platform_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, expected: str
+) -> None:
+    """A workspace that never chose a File access scope runs under the platform default."""
+    monkeypatch.setattr(sys, "platform", platform)
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope=None)
+    project = manager.create_project("defaulted", workspace="personal")
+    chat = manager.create_chat(project.project_id, provider="claude")
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_fs_scope == expected
