@@ -12,9 +12,12 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+from ciao.os_support.tool_path import engine_bin_dir
 
 AGENT_FS_SCOPES = ("workspace", "machine")
 
@@ -57,6 +60,11 @@ _BWRAP_BLOCKED = (
     "(Ubuntu 23.10 and later block it with AppArmor until bwrap has a profile; "
     "see docs/LINUX.md); set the workspace to whole machine"
 )
+
+
+def _under(text: str, folders: Sequence[str]) -> bool:
+    """Whether *text* is one of *folders* or lies beneath one of them."""
+    return any(text == d or text.startswith(d.rstrip("/") + "/") for d in folders)
 
 
 def _bwrap_link_targets() -> list[str]:
@@ -111,7 +119,9 @@ def _symlink_hops(start: Path) -> list[Path]:
     hops: list[Path] = []
     pending = [start.absolute()]
     while pending and len(hops) < 40:
-        path = pending.pop()
+        # A relative readlink target joins onto its link's folder, so it can
+        # carry ``..``; seatbelt never matches such a path, so normalize first.
+        path = Path(os.path.normpath(pending.pop()))
         current = Path(path.anchor)
         for index, part in enumerate(path.parts[1:], start=1):
             current = current / part
@@ -126,6 +136,7 @@ def _symlink_hops(start: Path) -> list[Path]:
     return hops
 
 
+@functools.cache
 def engine_read_roots() -> list[Path]:
     """The running engine's install, readable (never writable) in workspace scope.
 
@@ -138,15 +149,29 @@ def engine_read_roots() -> list[Path]:
     ``python`` through a version alias (``cpython-3.13-…`` → ``cpython-3.13.13-…``),
     so every link on the way to the interpreter is granted as well, and so is
     the ``ciao`` package folder, which an editable install keeps outside the venv.
+    A ``pip install --user`` keeps its scripts and packages in the user site,
+    outside ``sys.prefix``, so the sysconfig scheme paths are granted too.
+
+    Cached for the process: every input is fixed once the engine starts. The
+    list is shared, so callers copy it rather than change it.
     """
     seen: list[Path] = []
     # The ``ciao`` package itself: inside the venv for a wheel install, but in
     # the source checkout for an editable one (docs/LINUX.md installs ``-e``).
     package = Path(__file__).resolve().parent
-    candidates = [Path(sys.prefix), Path(sys.base_prefix).resolve(), package]
+    candidates = [
+        Path(sys.prefix),
+        Path(sys.base_prefix).resolve(),
+        package,
+        Path(engine_bin_dir()),
+        Path(sysconfig.get_path("purelib")),
+        Path(sysconfig.get_path("platlib")),
+    ]
     candidates += _symlink_hops(Path(sys.executable))
     for path in candidates:
-        if path not in seen:
+        # A folder already granted with its contents covers anything inside it
+        # (a venv's site-packages sits under the venv), so it is not listed twice.
+        if not any(path.is_relative_to(granted) for granted in seen):
             seen.append(path)
     return seen
 
@@ -161,6 +186,11 @@ def claude_sandbox_settings(
         raise ValueError("scope must be one of: workspace, machine")
     if not roots:
         raise ValueError("roots must not be empty")
+    engine = engine_read_roots()
+    if sys.platform != "darwin":
+        # Claude's Linux sandbox is bubblewrap, which cannot bind a symlink, so
+        # only the real folders are granted; the links resolve to them inside.
+        engine = [path for path in engine if not path.is_symlink()]
     return {
         "enabled": True,
         "autoAllowBashIfSandboxed": mode == "auto",
@@ -171,7 +201,7 @@ def claude_sandbox_settings(
             # ``allowRead`` alone confines nothing: deny the home directory
             # and re-allow the roots inside it (#1174).
             "denyRead": [str(Path.home())],
-            "allowRead": [str(p) for p in [*roots, *engine_read_roots()]],
+            "allowRead": [str(p) for p in [*roots, *engine]],
             "allowWrite": [str(p) for p in roots],
         },
     }
@@ -265,7 +295,10 @@ def _quote_seatbelt_subpath(root: str) -> str:
     return root.replace("\\", "\\\\")
 
 
-def _seatbelt_profile(roots: list[Path], read_only: Sequence[Path] = ()) -> str:
+def _seatbelt_profile(
+    roots: list[Path], read_only: Sequence[Path] = (), shadowed: Sequence[Path] = ()
+) -> str:
+    """The seatbelt profile; ``shadowed`` paths sit inside a root and stay read-only."""
     # NOTE (issue #1148, live-tested on macOS): two details differ from the
     # first draft. `process-exec`/`process-fork` take no `*` suffix
     # (`process-fork*` is an "unbound variable" profile parse error, exit 65),
@@ -304,6 +337,11 @@ def _seatbelt_profile(roots: list[Path], read_only: Sequence[Path] = ()) -> str:
     for root in roots:
         quoted = _quote_seatbelt_subpath(str(root))
         lines.append(f'(allow file-read* file-write* (subpath "{quoted}"))')
+    # Seatbelt applies the last matching rule, so these denies follow every root
+    # allow and win over it for the folder they name.
+    for path in shadowed:
+        quoted = _quote_seatbelt_subpath(str(path))
+        lines.append(f'(deny file-write* (subpath "{quoted}"))')
     for root in read_only:
         quoted = _quote_seatbelt_subpath(str(root))
         lines.append(f'(allow file-read* (subpath "{quoted}"))')
@@ -347,11 +385,15 @@ def opencode_sandbox_prefix(
     """
     if not roots:
         raise ValueError("roots must not be empty")
-    read_only = [*read_only, *engine_read_roots()]
+    # An engine folder inside a writable root is already readable there; it
+    # stays read-only by a rule that follows the root's grant, not by a grant.
+    engine = engine_read_roots()
+    shadowed = [path for path in engine if any(path.is_relative_to(root) for root in roots)]
+    read_only = [*read_only, *(path for path in engine if path not in shadowed)]
     platform = sys.platform
     if platform == "darwin":
         if Path(SANDBOX_EXEC_PATH).is_file():
-            return [SANDBOX_EXEC_PATH, "-p", _seatbelt_profile(roots, read_only)]
+            return [SANDBOX_EXEC_PATH, "-p", _seatbelt_profile(roots, read_only, shadowed)]
         raise FsSandboxUnavailable(_FS_SANDBOX_UNAVAILABLE)
     if platform.startswith("linux"):
         bwrap = shutil.which("bwrap")
@@ -366,21 +408,33 @@ def opencode_sandbox_prefix(
                     argv.extend(["--ro-bind", candidate, candidate])
             for candidate in _bwrap_link_targets():
                 argv.extend(["--ro-bind", candidate, candidate])
+            # A symlink is never bound (bwrap cannot bind onto one), and a
+            # folder under an earlier bind is already there. Shadowed folders
+            # are bound after the roots, so they are left out of this pass.
+            directories = [
+                str(path) for path in read_only if not path.is_symlink() and path not in shadowed
+            ]
             bound: list[str] = list(_BWRAP_RO_DIRS)
-            for root in read_only:
-                text = str(root)
-                # bwrap cannot bind onto a symlink, and needs no grant for one:
-                # a link inside a bound folder resolves on its own. Seatbelt
-                # does need the hops, which is why they are in ``read_only``.
-                if Path(text).is_symlink() or any(
-                    text == d or text.startswith(d.rstrip("/") + "/") for d in bound
-                ):
-                    continue
-                bound.append(text)
-                argv.extend(["--ro-bind", text, text])
+            for text in directories:
+                if not _under(text, bound):
+                    bound.append(text)
+                    argv.extend(["--ro-bind", text, text])
             for root in roots:
                 text = str(root)
                 argv.extend(["--bind", text, text])
+            # Mounted after the writable binds so the read-only mount sits on top.
+            for path in shadowed:
+                if not path.is_symlink():
+                    text = str(path)
+                    argv.extend(["--ro-bind", text, text])
+            # A link outside every bind gets recreated inside the sandbox, so it
+            # resolves to its target. A link under a bind resolves on its own.
+            # No bind contains a link made here, so the order does not matter.
+            covered = [*bound, *(str(root) for root in roots), *(str(p) for p in shadowed)]
+            for path in read_only:
+                text = str(path)
+                if path.is_symlink() and not _under(text, covered):
+                    argv.extend(["--symlink", os.readlink(text), text])
             argv.append("--")
             return argv
         raise FsSandboxUnavailable(_FS_SANDBOX_UNAVAILABLE)

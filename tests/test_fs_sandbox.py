@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -29,8 +30,11 @@ def _writable_rules(profile: str) -> int:
     )
 
 
-def test_claude_workspace_settings_allow_only_the_roots(tmp_path):
+def test_claude_workspace_settings_allow_only_the_roots(tmp_path, monkeypatch):
     roots = [tmp_path / "root-a", tmp_path / "root-b"]
+    # A fixed engine folder: the real install's symlink hops depend on the host.
+    engine = tmp_path / "engine"
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [engine])
 
     auto = claude_sandbox_settings(scope="workspace", mode="auto", roots=roots)
     assert auto == {
@@ -42,7 +46,7 @@ def test_claude_workspace_settings_allow_only_the_roots(tmp_path):
             "denyRead": [str(Path.home())],
             # The engine's own install is readable so the agent can run
             # `ciao` (#1185); it is never writable.
-            "allowRead": [str(roots[0]), str(roots[1]), *map(str, engine_read_roots())],
+            "allowRead": [str(roots[0]), str(roots[1]), str(engine)],
             "allowWrite": [str(roots[0]), str(roots[1])],
         },
     }
@@ -383,8 +387,16 @@ def test_engine_read_roots_cover_the_venv_and_every_interpreter_link(tmp_path, m
     monkeypatch.setattr(fs_sandbox.sys, "prefix", str(venv))
     monkeypatch.setattr(fs_sandbox.sys, "base_prefix", str(real))
     monkeypatch.setattr(fs_sandbox.sys, "executable", str(venv / "bin" / "python"))
-
-    granted = engine_read_roots()
+    # sysconfig caches its scheme under the real prefix; a patched prefix must
+    # not reach it, so its paths are stubbed to the venv instead.
+    venv_paths = {"scripts": str(venv / "bin"), "purelib": str(venv / "lib"), "platlib": str(venv / "lib")}
+    monkeypatch.setattr("sysconfig.get_path", lambda name, *a, **k: venv_paths[name])
+    # The result is cached per process; these inputs are patched, so start cold.
+    engine_read_roots.cache_clear()
+    try:
+        granted = engine_read_roots()
+    finally:
+        engine_read_roots.cache_clear()
 
     # The venv, the interpreter, and the version alias uv links through: seatbelt
     # refuses the exec unless each link on the way is readable (#1185).
@@ -445,3 +457,175 @@ def test_seatbelt_lets_opencode_resolve_config_names_in_ancestors(tmp_path):
     # A literal, never a subpath: the folder opens, nothing inside it is read.
     assert f'(subpath "{_quote_seatbelt_subpath(f"{ancestor}/.claude")}")' not in profile
     assert _writable_rules(profile) == 1
+
+
+def _bwrap_triples(argv: list[str]) -> list[list[str]]:
+    return [argv[i : i + 3] for i in range(len(argv) - 2)]
+
+
+def test_bwrap_recreates_an_alias_outside_the_bound_folders(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        # Platform branch, not a skip marker: creating a symlink needs a privilege
+        # Windows does not grant by default, and bwrap does not run there.
+        return
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [])
+
+    real = tmp_path / "python" / "cpython-3.13.13"
+    real.mkdir(parents=True)
+    # uv's version alias, outside every bound folder: the sandbox must get it.
+    alias = tmp_path / "python" / "cpython-3.13"
+    alias.symlink_to(real)
+    root = tmp_path / "root"
+    root.mkdir()
+    # A link under the writable root is already bound, so it is left alone.
+    inside = root / "alias"
+    inside.symlink_to(real)
+
+    argv = opencode_sandbox_prefix(roots=[root], read_only=[real, alias, inside])
+
+    triples = _bwrap_triples(argv)
+    assert ["--symlink", os.readlink(alias), str(alias)] in triples
+    assert not [t for t in triples if t[0] == "--symlink" and t[2] == str(inside)]
+    assert ["--ro-bind", str(real), str(real)] in triples
+    assert not [t for t in triples if t[2] == str(inside)]
+
+
+def test_claude_allow_read_has_symlink_hops_only_on_darwin(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        # Platform branch, not a skip marker: symlinks need a privilege on Windows.
+        return
+    real = tmp_path / "python" / "cpython"
+    real.mkdir(parents=True)
+    alias = tmp_path / "python" / "alias"
+    alias.symlink_to(real)
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [real, alias])
+    root = tmp_path / "root"
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    linux = claude_sandbox_settings(scope="workspace", mode="auto", roots=[root])
+    # bubblewrap cannot bind a symlink: the folder is granted, the hop is not.
+    assert linux["filesystem"]["allowRead"] == [str(root), str(real)]
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    darwin = claude_sandbox_settings(scope="workspace", mode="auto", roots=[root])
+    assert darwin["filesystem"]["allowRead"] == [str(root), str(real), str(alias)]
+
+
+def test_symlink_hops_normalize_relative_chains_with_dotdot(tmp_path):
+    if sys.platform == "win32":
+        # Platform branch, not a skip marker: symlinks need a privilege on Windows.
+        return
+    from ciao.fs_sandbox import _symlink_hops
+
+    (tmp_path / "c").mkdir()
+    (tmp_path / "c" / "real").write_text("")
+    (tmp_path / "b").mkdir()
+    link2 = tmp_path / "b" / "link2"
+    link2.symlink_to("../c/real")
+    (tmp_path / "a").mkdir()
+    link1 = tmp_path / "a" / "link1"
+    link1.symlink_to("../b/link2")
+
+    # Each relative target joins onto its link's folder as ``a/../b/link2``;
+    # the hops must come out as the normalized paths seatbelt would match.
+    hops = _symlink_hops(link1)
+    assert hops == [link1, link2]
+    assert all(".." not in hop.parts for hop in hops)
+
+
+def test_engine_read_roots_include_the_sysconfig_install_paths(tmp_path, monkeypatch):
+    import sysconfig
+
+    from ciao import fs_sandbox
+
+    real_get_path = sysconfig.get_path
+    scripts = tmp_path / "home" / ".local" / "bin"
+    purelib = tmp_path / "home" / ".local" / "lib" / "python3.13" / "site-packages"
+    platlib = tmp_path / "home" / ".local" / "lib64" / "python3.13" / "site-packages"
+    paths = {"scripts": str(scripts), "purelib": str(purelib), "platlib": str(platlib)}
+    # A pip --user install: the packages and console scripts sit outside sys.prefix.
+    monkeypatch.setattr(
+        sysconfig,
+        "get_path",
+        lambda name, *a, **k: paths[name] if name in paths else real_get_path(name, *a, **k),
+    )
+    monkeypatch.setattr(fs_sandbox.sys, "prefix", str(tmp_path / "system"))
+    monkeypatch.setattr(fs_sandbox.sys, "base_prefix", str(tmp_path / "system"))
+    monkeypatch.setattr(fs_sandbox.sys, "executable", str(tmp_path / "system" / "bin" / "python"))
+    fs_sandbox.engine_read_roots.cache_clear()
+    try:
+        granted = fs_sandbox.engine_read_roots()
+    finally:
+        fs_sandbox.engine_read_roots.cache_clear()
+
+    assert scripts in granted
+    assert purelib in granted
+    assert platlib in granted
+    # De-duplicated: no folder is listed twice.
+    assert len(granted) == len(set(granted))
+
+
+def test_engine_read_roots_are_computed_once_per_process(tmp_path, monkeypatch):
+    from ciao import fs_sandbox
+
+    calls: list[Path] = []
+    real_hops = fs_sandbox._symlink_hops
+
+    def counting_hops(start: Path) -> list[Path]:
+        calls.append(start)
+        return real_hops(start)
+
+    monkeypatch.setattr(fs_sandbox, "_symlink_hops", counting_hops)
+    fs_sandbox.engine_read_roots.cache_clear()
+    try:
+        first = fs_sandbox.engine_read_roots()
+        second = fs_sandbox.engine_read_roots()
+    finally:
+        fs_sandbox.engine_read_roots.cache_clear()
+
+    assert first == second
+    assert len(calls) == 1
+
+
+def test_engine_inside_a_writable_root_is_denied_writes_on_darwin(tmp_path, monkeypatch):
+    fake_binary = tmp_path / "sandbox-exec"
+    fake_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr("ciao.fs_sandbox.SANDBOX_EXEC_PATH", str(fake_binary))
+    root = tmp_path / "root"
+    engine = root / "engine"
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [engine])
+
+    argv = opencode_sandbox_prefix(roots=[root])
+
+    lines = argv[2].splitlines()
+    allow = f'(allow file-read* file-write* (subpath "{_quote_seatbelt_subpath(str(root))}"))'
+    deny = f'(deny file-write* (subpath "{_quote_seatbelt_subpath(str(engine))}"))'
+    # Last matching rule wins: the deny must follow the writable root's allow.
+    assert allow in lines and deny in lines
+    assert lines.index(deny) > lines.index(allow)
+    # The engine is already readable under the root, so it gets no separate grant.
+    assert f'(subpath "{_quote_seatbelt_subpath(str(engine))}")' not in argv[2].replace(deny, "")
+
+
+def test_engine_inside_a_writable_root_is_read_only_after_the_bind_on_bwrap(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name, *args, **kwargs: "/usr/bin/bwrap")
+    monkeypatch.setattr("ciao.fs_sandbox._bwrap_usable", lambda bwrap: True)
+    root = tmp_path / "root"
+    engine = root / "engine"
+    engine.mkdir(parents=True)
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [engine])
+
+    argv = opencode_sandbox_prefix(roots=[root])
+
+    triples = _bwrap_triples(argv)
+    bind_at = [i for i, t in enumerate(triples) if t == ["--bind", str(root), str(root)]]
+    ro_at = [i for i, t in enumerate(triples) if t == ["--ro-bind", str(engine), str(engine)]]
+    # Exactly one read-only mount of the engine, and it comes after the writable bind
+    # so it sits on top of it.
+    assert len(bind_at) == 1 and len(ro_at) == 1
+    assert ro_at[0] > bind_at[0]
