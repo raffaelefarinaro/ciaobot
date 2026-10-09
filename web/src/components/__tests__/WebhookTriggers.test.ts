@@ -67,7 +67,6 @@ function trigger(overrides: Partial<WebhookTrigger> = {}): WebhookTrigger {
     project_id: null,
     instructions: 'Triage the issue and open a note.',
     enabled: true,
-    mode: 'auto',
     input_policy: 'event_text',
     created_at: '2026-03-01T09:00:00+00:00',
     updated_at: '2026-03-01T09:00:00+00:00',
@@ -268,7 +267,7 @@ describe('the list', () => {
     wrapper.unmount()
   })
 
-  it('names the project or General, the mode, and when the row last changed', async () => {
+  it('names the project or General, and when the row last changed', async () => {
     const projectStore = useProjectStore()
     projectStore.projects = [{
       project_id: 'proj_board',
@@ -281,7 +280,7 @@ describe('the list', () => {
     }]
     apiGet.mockResolvedValue(listing([
       trigger(),
-      trigger({ trigger_id: 'trg_other', name: 'Plan mode one', project_id: 'proj_board', mode: 'plan' }),
+      trigger({ trigger_id: 'trg_other', name: 'Board one', project_id: 'proj_board' }),
     ]))
     const wrapper = mountSection()
     await flushPromises()
@@ -289,10 +288,9 @@ describe('the list', () => {
     // `project_id: null` is the workspace's General, a real destination and not
     // "unset" — a row reading "unset" would tell the user the trigger has none.
     expect(row(wrapper, 'New issue from GitHub').text()).toContain('General')
-    expect(row(wrapper, 'New issue from GitHub').text()).toContain('Auto mode')
     expect(row(wrapper, 'New issue from GitHub').text()).toContain('updated')
-    expect(row(wrapper, 'Plan mode one').text()).toContain('Board')
-    expect(row(wrapper, 'Plan mode one').text()).toContain('Plan mode')
+    expect(row(wrapper, 'Board one').text()).toContain('Board')
+    expect(row(wrapper, 'Board one').text()).not.toContain('mode')
     wrapper.unmount()
   })
 
@@ -404,7 +402,7 @@ describe('creating a trigger', () => {
     await nextTick()
   }
 
-  it('sends the workspace, project, instructions and mode the form holds', async () => {
+  it('sends the workspace, project and instructions the form holds, and no mode', async () => {
     apiGet.mockResolvedValue(listing([]))
     apiPost.mockResolvedValue({ trigger: trigger(), secret: SECRET })
     const wrapper = mountSection()
@@ -413,8 +411,8 @@ describe('creating a trigger', () => {
 
     await wrapper.find('input[type="text"]').setValue('New issue from GitHub')
     await wrapper.find('textarea').setValue('Triage the issue and open a note.')
-    const mode = wrapper.findAll('select').at(-1)!
-    await mode.setValue('plan')
+    // Each event runs in the new-chat default mode, so the form offers no choice.
+    expect(wrapper.text()).not.toContain('Mode')
     await button(wrapper, 'Create trigger').trigger('click')
     await flushPromises()
 
@@ -422,7 +420,6 @@ describe('creating a trigger', () => {
       name: 'New issue from GitHub',
       workspace: 'personal',
       instructions: 'Triage the issue and open a note.',
-      mode: 'plan',
     })
     wrapper.unmount()
   })
@@ -529,15 +526,16 @@ describe('creating a trigger', () => {
     wrapper.unmount()
   })
 
-  it('says mode and project cannot be changed later, while they can still be chosen', async () => {
+  it('says the project cannot be changed later, and that events get new-chat permissions', async () => {
     apiGet.mockResolvedValue(listing([]))
     const wrapper = mountSection()
     await flushPromises()
     await openForm(wrapper)
 
-    // The row has no Edit and the route reads neither field on a PATCH, so the
-    // form is the only place this is ever said.
+    // The row has no Edit and the route does not read the project on a PATCH,
+    // so the form is the only place this is ever said.
     expect(wrapper.text()).toContain('cannot be changed after the trigger is created')
+    expect(wrapper.text()).toContain('same permissions as any new chat')
     wrapper.unmount()
   })
 
@@ -826,8 +824,8 @@ describe('enabling and disabling', () => {
     wrapper.unmount()
   })
 
-  it('sends no create-only field, so mode and project cannot be smuggled in', async () => {
-    apiGet.mockResolvedValue(listing([trigger({ mode: 'plan', project_id: 'proj_board' })]))
+  it('sends no create-only field, so the project cannot be smuggled in', async () => {
+    apiGet.mockResolvedValue(listing([trigger({ project_id: 'proj_board' })]))
     apiPatch.mockResolvedValue({ trigger: trigger({ enabled: false, revision: 4 }) })
     const wrapper = mountSection()
     await flushPromises()

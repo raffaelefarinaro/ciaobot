@@ -68,12 +68,6 @@ _CHAT_UPDATE_FLAGS: tuple[tuple[str, str], ...] = (
     ("--project", "project_id"),
 )
 
-#: The permission modes a trigger's own events run under. ``bypass`` is not
-#: among them and cannot be added here: it is what an *unattended* turn gets,
-#: and a webhook event is never dispatched unattended. The store refuses
-#: anything else anyway, so this is the first refusal rather than the last.
-_WEBHOOK_MODES: tuple[str, ...] = ("normal", "auto", "plan")
-
 
 class UsageError(Exception):
     """A caller mistake caught before any request is sent (exit 2)."""
@@ -292,7 +286,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Markdown/text file holding the trigger's instructions: @file.md or a plain path.",
     )
     wcreate.add_argument("--project", default=None, metavar="P")
-    wcreate.add_argument("--mode", default=None, choices=_WEBHOOK_MODES)
     wupdate = webhook.add_parser("update")
     wupdate.add_argument("trigger_id")
     wupdate.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
@@ -602,8 +595,6 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 arguments["instructions"] = instructions
             if args.project is not None:
                 arguments["project_id"] = args.project
-            if args.mode is not None:
-                arguments["mode"] = args.mode
             return "webhook_create", arguments
         if verb == "update":
             arguments = {

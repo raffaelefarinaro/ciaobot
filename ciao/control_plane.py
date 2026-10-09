@@ -5019,7 +5019,6 @@ class CiaoControlPlane:
         name: str,
         instructions: str,
         project_id: str | None = None,
-        mode: str | None = None,
     ) -> dict[str, Any]:
         """Store a new trigger in one workspace and return it with its secret.
 
@@ -5027,11 +5026,9 @@ class CiaoControlPlane:
         callable, so an agent that creates a trigger for the user has not handed
         a stranger a working credential until ``workspace_webhook_update``
         enables it on purpose. ``project_id`` is stored as given — the store
-        checks its shape and dispatch is what resolves it against the workspace
-        — and ``mode`` is the trigger's own permission mode for the turn it
-        launches, never a sender's choice. Which modes are legal is the store's
-        rule, not this layer's: ``normal``, ``auto`` and ``plan``, anything else
-        ``webhook_invalid``.
+        checks its shape and dispatch is what resolves it against the workspace.
+        The turn an event launches runs in the new-chat default permission mode,
+        never a sender's choice.
         """
         scope = self._registered_workspace(workspace)
         arguments: dict[str, Any] = {
@@ -5041,8 +5038,6 @@ class CiaoControlPlane:
         }
         if project_id is not None:
             arguments["project_id"] = project_id
-        if mode is not None:
-            arguments["mode"] = mode
         trigger, secret = self._webhook_call(
             lambda store: store.create(**arguments)
         )
@@ -5060,10 +5055,9 @@ class CiaoControlPlane:
     ) -> dict[str, Any]:
         """Edit one trigger of one workspace at the revision the caller read.
 
-        Only the three fields the store can change are parameters: the target
-        and the mode are not, because retargeting a trigger or changing the mode
-        its events run under is a trust change rather than an edit. Omitting a
-        field leaves it alone; ``enabled`` is the operator's off switch and it
+        Only the three fields the store can change are parameters: the target is
+        not, because retargeting a trigger is a trust change rather than an
+        edit. Omitting a field leaves it alone; ``enabled`` is the operator's off switch and it
         reaches an event already in the receipt journal too.
         """
         scope = self._registered_workspace(workspace)
@@ -5129,7 +5123,6 @@ class CiaoControlPlane:
         name: str,
         instructions: str,
         project_id: str | None = None,
-        mode: str | None = None,
     ) -> dict[str, Any]:
         """Configure a trigger in the calling chat's workspace; created disabled."""
         return _ok(
@@ -5138,7 +5131,6 @@ class CiaoControlPlane:
                 name=name,
                 instructions=instructions,
                 project_id=project_id,
-                mode=mode,
             )
         )
 

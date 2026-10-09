@@ -408,7 +408,7 @@ th { color: var(--muted); font-weight: 600; }
 .feature.phone { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
 .feature.phone figure { max-width: 300px; justify-self: center; }
 @media (max-width: 820px) {
-  .feature, .feature.flip, .feature.phone { grid-template-columns: 1fr; gap: 16px; }
+  .feature, .feature.flip, .feature.phone { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .feature.flip .feature-text { order: 0; }
 }
 

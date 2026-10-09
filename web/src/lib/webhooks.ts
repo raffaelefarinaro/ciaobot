@@ -1,4 +1,4 @@
-import type { WebhookMode, WebhookTrigger } from './types'
+import type { WebhookTrigger } from './types'
 
 /**
  * Pure helpers for the webhook triggers section.
@@ -54,24 +54,4 @@ export function webhookRecipe(triggerId: string): string {
     `  "status": "accepted"`,
     `}`,
   ].join('\n')
-}
-
-/**
- * What a trigger's mode does, in words.
- *
- * The mode is create-only, so this label is the only explanation of it a user
- * ever gets — a row that said `auto` would leave the choice that decides whether
- * a turn asks for approval unexplained.
- */
-export function webhookModeLabel(mode: WebhookMode): string {
-  if (mode === 'plan') return 'Plan'
-  if (mode === 'normal') return 'Normal'
-  return 'Auto'
-}
-
-/** One sentence on what the mode means, for the create form. */
-export function webhookModeHint(mode: WebhookMode): string {
-  if (mode === 'plan') return 'Reads the event and writes a plan. It does not act on it.'
-  if (mode === 'normal') return 'Answers the event as an ordinary turn.'
-  return 'Works the event itself, asking for approval when it needs it.'
 }

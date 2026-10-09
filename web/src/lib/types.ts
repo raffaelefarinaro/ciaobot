@@ -639,14 +639,6 @@ export interface Schedule {
 // ── Webhook triggers ─────────────────────────────────────────────────────
 
 /**
- * How a trigger's turn runs. Set at create and never editable afterwards.
- *
- * The three are the store's `WEBHOOK_MODES`; the receiver accepts nothing else
- * and answers 400 for a mode it does not know.
- */
-export type WebhookMode = 'normal' | 'auto' | 'plan'
-
-/**
  * The body a sender may post. `event_text` is the only policy the store has, so
  * this is a named type rather than a bare string: the body shape a recipe shows
  * is derived from the policy, and there is one policy.
@@ -663,7 +655,7 @@ export type WebhookInputPolicy = 'event_text'
  * responses instead, and never again.
  *
  * `project_id: null` is the workspace's General project, not "unset".
- * `mode` and `input_policy` are create-only: `PATCH` accepts `name`,
+ * `project_id` and `input_policy` are create-only: `PATCH` accepts `name`,
  * `instructions` and `enabled` and refuses everything else.
  */
 export interface WebhookTrigger {
@@ -673,7 +665,6 @@ export interface WebhookTrigger {
   project_id: string | null
   instructions: string
   enabled: boolean
-  mode: WebhookMode
   input_policy: WebhookInputPolicy
   created_at: string
   updated_at: string

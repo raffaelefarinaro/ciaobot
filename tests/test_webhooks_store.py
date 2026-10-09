@@ -355,9 +355,7 @@ def test_validation_rejects_invalid_schema_fields(path: Path, clock: _Clock) -> 
     """Nothing is coerced or repaired: bad input and bad stored fields both fail loud."""
     store = _store(path, clock)
 
-    # 1. Caller input. `mode="bypass"` is a real BridgeMode (`ciao.models`) and
-    #    deliberately not a webhook mode: an unattended turn is not a decision a
-    #    remote sender may make.
+    # 1. Caller input.
     for field, value in (
         ("name", ""),
         ("name", "   "),
@@ -378,9 +376,6 @@ def test_validation_rejects_invalid_schema_fields(path: Path, clock: _Clock) -> 
         ("project_id", 12),
         ("instructions", "x" * (webhooks.MAX_INSTRUCTIONS_LENGTH + 1)),
         ("instructions", ["do", "it"]),
-        ("mode", "bypass"),
-        ("mode", "AUTO"),
-        ("mode", True),
     ):
         fields: dict[str, Any] = {
             "name": "CI push",
@@ -428,7 +423,8 @@ def test_validation_rejects_invalid_schema_fields(path: Path, clock: _Clock) -> 
     for field, value in (
         ("enabled", "true"),
         ("enabled", 1),
-        ("mode", "bypass"),
+        # A record written before triggers lost their own permission mode.
+        ("mode", "auto"),
         ("input_policy", "caller_prompt"),
         ("workspace", ""),
         ("name", ""),
@@ -463,7 +459,6 @@ def test_corrupt_or_unreadable_existing_store_is_not_reset(
         "project_id": None,
         "instructions": "go",
         "enabled": False,
-        "mode": "auto",
         "input_policy": "event_text",
         "created_at": "2026-10-03T12:00:00+00:00",
         "updated_at": "2026-10-03T12:00:00+00:00",
