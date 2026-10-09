@@ -273,6 +273,27 @@ describe('which tasks belong in a history', () => {
   })
 })
 
+describe('the version a row dates from', () => {
+  it('says which release a task is since', async () => {
+    apiGet.mockResolvedValue(listing([task({ id: 'v', since_version: '2.1.0' })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Since Ciaobot 2.1.0')
+    wrapper.unmount()
+  })
+
+  it('omits the Since text when the release is unknown, never 0.0.0', async () => {
+    apiGet.mockResolvedValue(listing([task({ id: 'u', since_version: '' })]))
+    const wrapper = mount(SettingsUpdateTasks)
+    await flushPromises()
+    const row = wrapper.findAll('.set-row')[0]
+    expect(row.text()).not.toContain('Since Ciaobot')
+    expect(wrapper.text()).not.toContain('0.0.0')
+    expect(row.text()).toContain('Hidden')
+    wrapper.unmount()
+  })
+})
+
 describe('finished rows', () => {
   it('folds verified-done rows away until asked, keeping the rest in view', async () => {
     // A done row asks nothing of anyone; leading with it buries the hidden,

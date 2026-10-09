@@ -577,3 +577,39 @@ def test_malformed_json_and_bad_types_are_diagnosed(tmp_path: Path) -> None:
     ):
         assert field in named, f"no diagnostic named the bad {field!r}"
     assert "positive integer, got 0" in named
+
+
+@pytest.mark.parametrize("unknown", ["", "0.0.0", "v0.0.0", "  "])
+def test_unknown_since_version_is_not_shown(unknown: str) -> None:
+    # Empty and the 0.0.0 gating placeholder mean "no known release", so the
+    # surface gets an empty string and omits the "Since Ciaobot …" text.
+    assert update_task_catalog.shown_since_version(unknown) == ""
+
+
+def test_known_since_version_is_shown_as_stamped() -> None:
+    assert update_task_catalog.shown_since_version("1.3.0") == "1.3.0"
+    assert update_task_catalog.shown_since_version("v1.3.0-rc.2") == "v1.3.0-rc.2"
+
+
+def test_shipped_placeholder_rows_serialize_without_a_version() -> None:
+    # The stock catalog's 0.0.0 rows keep gating every engine (eligible still
+    # sees 0.0.0), but the row the API hands the PWA carries no version.
+    from types import SimpleNamespace
+
+    from ciao.web.routes_api import _update_task_row
+
+    catalog = load_catalog()
+    placeholder = [t for t in catalog.tasks if t.since_version == "0.0.0"]
+    assert placeholder, "the shipped catalog is expected to carry 0.0.0 rows"
+    for task in placeholder:
+        status = SimpleNamespace(
+            task=task,
+            state=None,
+            applicability=SimpleNamespace(status="applies", checked_at=""),
+            offered=True,
+            suppressed=False,
+        )
+        row = _update_task_row(status, None)
+        assert row["since_version"] == ""
+        assert row["id"] == task.id
+    assert {t.id for t in catalog.eligible("1.0.0")} >= {t.id for t in placeholder}

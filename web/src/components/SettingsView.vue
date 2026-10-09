@@ -1021,6 +1021,7 @@
                   <span class="set-dot" aria-hidden="true" :style="{ '--swatch': workspaceSwatch(form.color) }"></span>
                   <div class="set-row-main">
                     <p class="workspace-title set-row-title">{{ form.name }}</p>
+                    <span v-if="workspaceFsScopeBadge(form.agent_fs_scope)" class="set-tag workspace-fs-tag">{{ workspaceFsScopeBadge(form.agent_fs_scope) }}</span>
                     <p class="set-row-sub">{{ workspaceSummary(form) }}</p>
                   </div>
                   <div class="workspace-actions set-row-actions">
@@ -2133,7 +2134,6 @@ const mainEl = ref<HTMLElement | null>(null)
 const tocItems = ref<TocItem[]>([])
 const activeTocId = ref('')
 let tocObserver: MutationObserver | null = null
-let tocFrame = 0
 
 function slugify(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'section'
@@ -2168,14 +2168,6 @@ function rebuildToc(): void {
     && items.every((item, i) => item.id === tocItems.value[i].id && item.label === tocItems.value[i].label)
   if (!same) tocItems.value = items
   updateActiveToc()
-}
-
-function scheduleTocRebuild(): void {
-  if (tocFrame) return
-  tocFrame = requestAnimationFrame(() => {
-    tocFrame = 0
-    rebuildToc()
-  })
 }
 
 // The active entry is the last section whose top has scrolled past a line a
@@ -2215,7 +2207,7 @@ watch(currentTab, () => {
 onMounted(() => {
   void nextTick(rebuildToc)
   if (mainEl.value && typeof MutationObserver !== 'undefined') {
-    tocObserver = new MutationObserver(scheduleTocRebuild)
+    tocObserver = new MutationObserver(rebuildToc)
     tocObserver.observe(mainEl.value, { childList: true, subtree: true, characterData: true })
   }
 })
@@ -2223,7 +2215,6 @@ onMounted(() => {
 onUnmounted(() => {
   tocObserver?.disconnect()
   tocObserver = null
-  if (tocFrame) cancelAnimationFrame(tocFrame)
 })
 
 // ── GitHub star nudge, mirrored onto the open-source card ─────────────────
@@ -3843,6 +3834,13 @@ function discardWorkspace(name: string): void {
 
 function workspaceSwatch(color: WorkspaceColorId): string {
   return WORKSPACE_COLOR_PRESETS.find((preset) => preset.id === color)?.swatch || 'var(--accent)'
+}
+
+// The File access a workspace actually gets: its own choice, else the engine's
+// default. Empty until the list has loaded, when the default is not yet known.
+function workspaceFsScopeBadge(choice: FsScopeChoice): string {
+  const effective = choice || fsScopeEngineDefault.value
+  return effective ? WORKSPACE_FS_SCOPE_LABEL[effective] : ''
 }
 
 function workspaceSummary(form: WorkspaceForm): string {
