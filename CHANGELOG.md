@@ -1,10 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Changed
-- Workspace File access defaults to "Workspace only" on macOS and Linux and to "Whole machine" on Windows, which has no sandbox. A workspace that never chose keeps no saved value and follows the default of the computer that loads it; a saved choice is never changed. Choose "Whole machine" in Settings → Workspaces to keep the previous behavior on macOS and Linux.
-
 ## v1.2.1 - 2026-10-08
 
 ### Changed
