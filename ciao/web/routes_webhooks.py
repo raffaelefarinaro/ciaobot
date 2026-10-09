@@ -156,8 +156,6 @@ async def webhook_create(request: Request) -> JSONResponse:
     }
     if body.get("project_id") is not None:
         arguments["project_id"] = body.get("project_id")
-    if body.get("mode") is not None:
-        arguments["mode"] = body.get("mode")
     try:
         trigger, secret = await asyncio.to_thread(_store(request).create, **arguments)
     except WebhookStoreError as exc:

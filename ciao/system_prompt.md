@@ -95,7 +95,7 @@ schedule resume   ID
 schedule run      ID
 schedule delete   ID
 webhook list
-webhook create    --name NAME [--instructions-file FILE] [--project P] [--mode normal|auto|plan]
+webhook create    --name NAME [--instructions-file FILE] [--project P]
 webhook update    ID --revision REV [--name NAME] [--instructions-file FILE] [--enable|--disable]
 webhook rotate    ID --revision REV
 webhook delete    ID --revision REV

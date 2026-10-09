@@ -1248,8 +1248,7 @@ async def _op_webhook_list(service: CiaoMcpService) -> dict[str, Any]:
 
 
 async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: str = "",
-                             project_id: str | None = None,
-                             mode: str | None = None) -> dict[str, Any]:
+                             project_id: str | None = None) -> dict[str, Any]:
     """Configure a webhook trigger in this workspace.
 
     Args:
@@ -1263,8 +1262,9 @@ async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: s
             General project. Stored as given — a project that no longer exists
             or belongs to another workspace fails the event's launch rather than
             quietly running it somewhere else.
-        mode: `normal`, `auto` (the default) or `plan`: the permission mode the
-            launched turn runs under. A sender can never choose it.
+
+    The launched turn runs in the permission mode a new chat defaults to
+    (Settings → Models & providers). A sender can never choose it.
 
     The reply is the trigger **plus its secret, shown once**: only a hash of it
     is kept, so it cannot be read back — hand it to the sender now, or rotate and
@@ -1279,7 +1279,6 @@ async def _op_webhook_create(service: CiaoMcpService, name: str, instructions: s
             name=name,
             instructions=instructions,
             project_id=project_id,
-            mode=mode,
         ),
         mutating=True,
     )
@@ -1302,10 +1301,9 @@ async def _op_webhook_update(service: CiaoMcpService, trigger_id: str,
             switch reaches an event that was accepted a moment earlier: it
             launches only while its trigger is still enabled.
 
-    The target (workspace, project) and the mode are deliberately not
-    editable — retargeting a trigger, or changing the permissions its events
-    run under, is a trust change rather than an edit. Delete and recreate it
-    instead, which is why `webhook_create` takes both.
+    The target (workspace, project) is deliberately not editable — retargeting
+    a trigger is a trust change rather than an edit. Delete and recreate it
+    instead, which is why `webhook_create` takes it.
     """
     return await service._invoke(
         "webhook_update",

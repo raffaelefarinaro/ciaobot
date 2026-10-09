@@ -1577,21 +1577,21 @@ managed chat has the same five verbs as `ciao webhook list|create|update|rotate|
 use those rather than curl when you are in one.
 
 ```bash
-# Configure a trigger. `mode` is normal|auto|plan (default auto) and is the
-# permission mode the launched turn runs under; a sender can never change it.
+# Configure a trigger. The launched turn runs in the new-chat default permission
+# mode (Settings → Models & providers); a sender can never change it.
 # The reply carries the secret, ONCE — only its SHA-256 is stored, so copy it
 # into the sender's configuration now. There is no way to read it back.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/webhooks" \
   -H 'content-type: application/json' \
-  -d '{"workspace":"default","name":"Nightly build","instructions":"File the failure as an intake note and tell nobody","project_id":null,"mode":"normal"}'
+  -d '{"workspace":"default","name":"Nightly build","instructions":"File the failure as an intake note and tell nobody","project_id":null}'
 
 # Public records only: no secret is in a list, and `project_id: null` means this
 # workspace's General project. `revision` is what the next call has to send back.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/webhooks?workspace=default"
 
 # A new trigger is stored DISABLED and cannot authenticate until you say so.
-# Only `name`, `instructions` and `enabled` are editable: the target and the
-# mode are not, because retargeting a trigger somebody holds a secret for is a
+# Only `name`, `instructions` and `enabled` are editable: the target is not,
+# because retargeting a trigger somebody holds a secret for is a
 # trust change rather than an edit. A stale `expected_revision` is a 409 and
 # writes nothing.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/webhooks/$TRIGGER" \
@@ -1634,7 +1634,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/webhooks/recei
 
 What an accepted event does with it is invisible here. The receiver records a
 durable receipt, and dispatch launches the event as an ordinary chat in the
-trigger's own project with the trigger's mode and the operator's own model — so
+trigger's own project with the operator's new-chat default mode and model — so
 an approval card raised in that turn is an ordinary card in Needs-you. The
 trigger's `instructions` come first and the sender's text follows as data; a
 sender cannot choose the chat, the project, the workspace, the model or the

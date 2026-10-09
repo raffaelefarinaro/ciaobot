@@ -202,7 +202,7 @@ unattended, so an approval it raises is an ordinary approval card.
 | Command | Purpose | Guard |
 |---|---|---|
 | `webhook list` | List this workspace's triggers as public records. | Read-only. Never a secret: only a hash of it is stored. |
-| `webhook create --name NAME [--instructions-file FILE] [--project P] [--mode normal\|auto\|plan]` | Configure a trigger and mint its secret. | Returns the trigger **and its secret, shown once**: hand it to the sender now, because only its hash is kept and it cannot be read back. Created **disabled** — nothing authorizes until `webhook update --enable`. |
+| `webhook create --name NAME [--instructions-file FILE] [--project P]` | Configure a trigger and mint its secret. | Returns the trigger **and its secret, shown once**: hand it to the sender now, because only its hash is kept and it cannot be read back. Created **disabled** — nothing authorizes until `webhook update --enable`. |
 | `webhook update ID --revision REV [--name N] [--instructions-file FILE] [--enable\|--disable]` | Edit one trigger; only the fields you pass change. `--enable`/`--disable` is the off switch, and it reaches an event accepted a moment earlier. | `webhook_revision_conflict` (retryable) means the trigger moved: re-read and re-plan. The target and the mode are not editable — delete and recreate instead. |
 | `webhook rotate ID --revision REV` | Replace the trigger's secret and return the new one, shown once. | **Revokes on rotate**: the old secret stops authorizing immediately. Keeps `enabled` as it was; rotating is not a way to enable a disabled trigger. |
 | `webhook delete ID --revision REV` | Delete the trigger and destroy its verifier. | Destructive and irreversible: the sender needs a new trigger. Recorded receipts for past events are kept. |
@@ -318,7 +318,7 @@ ciao context get
 - **`task_not_found`** — a task id that is well formed but absent *from this workspace*. Another workspace's task is answered exactly this way, so this is also the answer when you reached for an id from the wrong vault.
 - **`webhook_revision_conflict`** — the trigger changed since you read it (`webhook list`). Nothing was written: re-read and re-plan instead of resending the same `--revision`.
 - **`webhook_not_found`** — no trigger with that id **in this workspace**. A trigger belonging to another workspace answers exactly this way, so do not look for it in another workspace; report the id back and let the operator reconcile it.
-- **`webhook_invalid`** — the store refused one field: a blank name, an unknown `--mode` (only `normal`, `auto`, `plan`), or a `--revision` that is not a number. Enabling a revoked trigger is also refused this way: rotate its secret first.
+- **`webhook_invalid`** — the store refused one field: a blank name or a `--revision` that is not a number. Enabling a revoked trigger is also refused this way: rotate its secret first.
 - **`unauthorized` on the sender's POST** — the trigger's secret does not authorize right now. Missing, disabled, revoked and wrong are one answer; if the secret was rotated, the old one is dead by design and the sender needs the new one, which `webhook create`/`webhook rotate` showed once.
 
 ## Operation names for telemetry

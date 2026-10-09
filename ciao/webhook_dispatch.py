@@ -7,14 +7,14 @@ project chat out, and a durable answer of ``launched``, ``failed`` or
 trigger-management API, no history UI, no CLI and no recipe. The one thing this
 module decides is whether a remote sender's event becomes an ordinary turn.
 
-Six rules, and each of them is a refusal somebody could otherwise have taken:
+Six rules; every one but the first is a refusal somebody could otherwise have taken:
 
-* **A webhook is not authorization for `bypass`.**
+* **A webhook turn is an ordinary chat turn.**
   ``ProjectChatManager._effective_mode_for_chat`` returns ``"bypass"`` for any
   non-plan chat when ``unattended=True``, so this module calls
   ``start_stream(chat_id, prompt)`` and never names that argument at all. The
-  turn therefore runs with the trigger's configured mode — ``normal``, ``auto``
-  or ``plan``, the only modes the store can hold — and an approval card is an
+  chat is created like any new chat, in the operator's new-chat default
+  permission mode (Settings → Models & providers), and an approval card is an
   ordinary approval card that surfaces in Needs-you, exactly as it does for a
   wake turn (``_deliver_wake``) or the ``chat_prompt`` route. The sender never
   reaches model, provider or permission selection: the *trigger* pins the
@@ -146,15 +146,13 @@ class WebhookDispatchHost(Protocol):
     def list_projects(self, workspace: str | None = None) -> list[ProjectInfo]:
         """Every live project, optionally one workspace's."""
 
-    def create_chat(
-        self,
-        project_id: str,
-        title: str = ...,
-        model: str | None = ...,
-        mode: str | None = ...,
-        provider: str | None = ...,
-    ) -> ChatInfo:
-        """Create a chat in ``project_id``. Dispatch names only project and title."""
+    def create_chat(self, project_id: str, title: str = ...) -> ChatInfo:
+        """Create a chat in ``project_id``.
+
+        Only project and title: no ``model``, ``mode`` or ``provider``, so the
+        chat takes the operator's new-chat defaults and the type checker refuses
+        a dispatch that tries to pick them.
+        """
 
     def start_stream(self, chat_id: str, prompt: str) -> ChatStream:
         """Start the turn. No ``unattended``: see the module docstring."""
@@ -406,10 +404,8 @@ async def _dispatch_claimed(
         chat = pcm.create_chat(
             project.project_id,
             title=trigger.name,
-            # The trigger's own mode, which the store restricts to `normal`,
-            # `auto` or `plan`. No `model` and no `provider`: those are the
-            # operator's Settings, and a sender has no reach into them.
-            mode=trigger.mode,
+            # No `model`, `provider` or `mode`: those are the operator's
+            # new-chat defaults, and a sender has no reach into them.
         )
     except _TargetRefusal as exc:
         return await _settle_failed(receiver, receipt.id, str(exc))

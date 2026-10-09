@@ -13,8 +13,8 @@ nothing mocked but the model:
    ``Idempotency-Key`` — the machine surface, no cookie — and get ``202`` plus a
    receipt that is already durable in the journal;
 4. dispatch the accepted receipt against a chat manager that records what it
-   was asked to do, and see **exactly one** ordinary chat, in the trigger's own
-   mode, with ``unattended`` never named;
+   was asked to do, and see **exactly one** ordinary chat, in the new-chat
+   default mode, with ``unattended`` never named;
 5. resend the same key with the same body and get the same receipt and no second
    chat, and resend it with a different body and be refused ``409``.
 
@@ -224,7 +224,6 @@ async def test_one_configured_event_becomes_one_ordinary_chat(
         name="Nightly build",
         instructions=_INSTRUCTIONS,
         project_id="proj-alpha",
-        mode="normal",
     )["data"]
     trigger, secret = created["trigger"], created["secret"]
     assert created.keys() == {"trigger", "secret"}
@@ -276,9 +275,9 @@ async def test_one_configured_event_becomes_one_ordinary_chat(
         assert len(pcm.created) == 1
         assert pcm.created[0]["project_id"] == "proj-alpha"
         assert pcm.created[0]["title"] == "Nightly build"
-        # The trigger's configured mode is the turn's mode, and no model or
-        # provider was chosen by anything a sender wrote.
-        assert pcm.created[0]["mode"] == "normal"
+        # Mode, model and provider are the operator's new-chat defaults: dispatch
+        # names none of them, and nothing a sender wrote chose them.
+        assert pcm.created[0]["mode"] is None
         assert pcm.created[0]["model"] is None
         assert pcm.created[0]["provider"] is None
 

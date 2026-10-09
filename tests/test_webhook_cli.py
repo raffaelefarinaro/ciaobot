@@ -138,14 +138,14 @@ def test_create_returns_a_disabled_trigger_and_the_secret_once(tmp_path: Path) -
     service = _service_over(tmp_path)
     token = _token(service)
     with _client(service) as client:
-        trigger, secret = _create(client, token, project_id="proj-alpha", mode="normal")
+        trigger, secret = _create(client, token, project_id="proj-alpha")
 
-        # Disabled by construction, at revision 1, with the mode the operator
-        # chose — and the store's own public record, with nothing extra on it.
+        # Disabled by construction, at revision 1 — and the store's own public
+        # record, with nothing extra on it and no permission mode of its own.
         assert trigger["enabled"] is False
         assert trigger["revision"] == 1
         assert trigger["project_id"] == "proj-alpha"
-        assert trigger["mode"] == "normal"
+        assert "mode" not in trigger
         assert trigger["workspace"] == "personal"
         assert secret
 
@@ -456,7 +456,7 @@ def test_the_operations_are_declared_with_the_shape_the_cli_sends() -> None:
     }
     assert signatures == {
         "webhook_list": set(),
-        "webhook_create": {"name", "instructions", "project_id", "mode"},
+        "webhook_create": {"name", "instructions", "project_id"},
         "webhook_update": {
             "trigger_id",
             "expected_revision",

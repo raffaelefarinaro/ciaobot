@@ -97,13 +97,22 @@ the sender's own call is a short `curl` recipe in `PWA_API.md`.
 - **A new trigger does nothing until it is enabled**, on purpose: you can
   configure it fully while it cannot be called.
 - **The sender's only input is event text.** It cannot choose the workspace,
-  project, chat, model or permission mode — those were decided when the trigger
-  was configured.
-- **A webhook event grants no extra permission.** The turn it launches is an
-  ordinary chat in the trigger's own project, running in the trigger's configured
-  mode with your own model settings; if it needs an approval, that is an ordinary
-  approval card waiting for you in **Needs-you**, and nobody is watching to
-  answer it. It is not an unattended automation, so it never runs in bypass.
+  project, chat, model or permission mode.
+- **A webhook event is an ordinary new chat.** The turn it launches runs in the
+  trigger's own project with the same permission mode and model a new chat gets
+  (Settings → Models & providers); there is no separate per-trigger mode. If it
+  needs an approval, that is an ordinary approval card waiting for you in
+  **Needs-you**. If your new-chat default is bypass, webhook turns run in bypass
+  too.
+- **Instructions plus content.** The trigger's instructions say what to do; the
+  sender's text carries the content to work on (an error, an order number, a
+  link) and arrives quoted as data, so it cannot add instructions of its own.
+- **What can send events:** anything that can make an HTTP POST with a custom
+  header and JSON body — a GitHub Actions step, an n8n HTTP Request node,
+  Zapier/Make webhook actions, Home Assistant, a script. GitHub's built-in repo
+  webhooks cannot (they send their own payload and an HMAC signature, not a
+  bearer secret). The sender must be able to reach the engine, so a cloud
+  service needs a route onto the user's Tailscale network.
 - **`202 accepted` means the event was recorded**, not that the work happened:
   the chat it becomes is an ordinary one you open yourself. If the launch could
   not happen (a deleted project, a disabled trigger), the receipt says so and
