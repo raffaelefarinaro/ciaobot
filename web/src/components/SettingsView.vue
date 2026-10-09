@@ -236,13 +236,6 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
-        <!-- Update task history. Sits directly under Updates on purpose: the
-             Home "After this update" group is where the work an update left
-             behind is offered, and this is the record of what became of it, so
-             the two are read together and never confused. It owns its own
-             fetch — Home may never have been opened in this session. -->
-        <SettingsUpdateTasks />
-
         <!-- Installing is optional and the guidance is permanent: the Home setup
              reminder can be closed for good, so Settings keeps the steps. -->
         <SettingsAppInstall />
@@ -251,6 +244,13 @@
         <SettingsNotifications />
 
         <SettingsKeyboardShortcuts />
+
+        <!-- Update task history. Below the device sections on purpose: it is
+             usually empty, and its long explanation would push them down. It is
+             still the record of what the Home "After this update" group offered,
+             so it stays on General, and it owns its own fetch because Home may
+             never have been opened in this session. -->
+        <SettingsUpdateTasks />
 
         <div class="card">
           <div class="settings-card-header">

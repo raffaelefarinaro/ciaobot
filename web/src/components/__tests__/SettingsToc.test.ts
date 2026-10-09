@@ -39,14 +39,14 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
   try {
     const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
     // Built from the page itself, in page order, headings in sentence case.
-    // Updates leads, then the everyday device sections, then everything else
-    // in its existing order.
+    // Updates leads, then the everyday device sections, then the update task
+    // history, then everything else in its existing order.
     expect(labels.slice(0, 5)).toEqual([
       'Updates',
-      'Update task history',
       'Use Ciaobot as an app',
       'Notifications',
       'Keyboard shortcuts',
+      'Update task history',
     ])
     expect(labels.slice(5, 8)).toEqual(['What can Ciaobot do?', 'Appearance', 'This host'])
     expect(labels.indexOf('Open source')).toBeGreaterThan(labels.indexOf('Keyboard shortcuts'))

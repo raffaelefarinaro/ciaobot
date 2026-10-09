@@ -252,8 +252,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General begins with the
   Updates section (compact to a title and an "Up to date" status when nothing is
-  in progress), then Use Ciaobot as an app, Notifications and Keyboard shortcuts;
-  the capability-help section linking to the public feature guide follows them.
+  in progress), then Use Ciaobot as an app, Notifications, Keyboard shortcuts and
+  the update task history; the capability-help section linking to the public
+  feature guide follows them.
   The "On this page" navigation is built from the rendered sections in DOM order,
   so it follows that order. The MCP tab is the first one out.
   `composables/useMcpServers.ts` owns the MCP state and every
