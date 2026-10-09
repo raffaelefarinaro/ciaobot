@@ -60,6 +60,7 @@
              glyph. Work details moved out: it opens from the info tab at the
              top right of the chat body and hides from its own heading. -->
         <button
+          v-if="!chat.archived"
           type="button"
           class="btn-icon chat-archive-btn"
           :title="ARCHIVE_ACTION_LABEL"
