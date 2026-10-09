@@ -187,9 +187,10 @@ def test_code_fenced_output_is_unwrapped(
         doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
     ))
 
-    # A fenced JSON reply is a parse failure and does not write.
-    assert wrote is False
-    assert doc.read_text(encoding="utf-8") == _DOC
+    # A reply wrapped in one whole ```json fence is unwrapped and written.
+    assert wrote is True
+    after = doc.read_text(encoding="utf-8")
+    assert "- Chose Redis Streams over Kafka." in after
 
 
 def test_model_failure_never_raises(
@@ -643,4 +644,72 @@ def test_noop_update_returns_no_change(
         ))
         assert wrote is False
         assert errors == ["the fold reported no changes; dismiss instead"]
+        assert note.read_bytes() == before
+
+
+_FOLD_ADD = json.dumps({
+    "action": "add",
+    "section": "Notes",
+    "text": "- Based in Lisbon",
+})
+
+
+@pytest.mark.parametrize("writer", ["project", "people"])
+@pytest.mark.parametrize("reply", [
+    _FOLD_ADD,
+    f"```json\n{_FOLD_ADD}\n```",
+    f"```\n{_FOLD_ADD}\n```",
+    f"  ```json\n{_FOLD_ADD}\n```\n",
+])
+def test_fold_reply_parses_bare_or_fenced(
+    writer: str, reply: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply is accepted bare or wrapped in one whole code fence."""
+    _patch_oneshot(monkeypatch, reply)
+    if writer == "project":
+        doc = _write_doc(tmp_path)
+        wrote = asyncio.run(pdu.update_project_doc(
+            doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+        ))
+        after = doc.read_bytes().replace(b"\r\n", b"\n")
+    else:
+        note = _write_note(tmp_path)
+        wrote = asyncio.run(pdu.fold_fact_into_person_note(
+            note_path=note, fact="Based in Lisbon.", model="m",
+        ))
+        after = note.read_bytes().replace(b"\r\n", b"\n")
+    assert wrote is True
+    assert b"- Based in Lisbon\n" in after
+
+
+@pytest.mark.parametrize("writer", ["project", "people"])
+@pytest.mark.parametrize("reply", [
+    f"Here you go:\n```json\n{_FOLD_ADD}\n```",
+    f"```json\n{_FOLD_ADD}\n```\nLet me know if that works.",
+    f"{_FOLD_ADD}\n{_FOLD_ADD}",
+    f"```json\n{_FOLD_ADD}\n{_FOLD_ADD}\n```",
+])
+def test_fold_reply_with_junk_or_two_objects_is_refused(
+    writer: str, reply: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text around a fence, or more than one object, writes nothing."""
+    _patch_oneshot(monkeypatch, reply)
+    if writer == "project":
+        doc = _write_doc(tmp_path)
+        before = doc.read_bytes()
+        wrote = asyncio.run(pdu.update_project_doc(
+            doc_path=doc, insights_md=_INSIGHTS_WITH_DECISION, model="m",
+        ))
+        assert wrote is False
+        assert doc.read_bytes() == before
+    else:
+        note = _write_note(tmp_path)
+        before = note.read_bytes()
+        errors: list[str] = []
+        wrote = asyncio.run(pdu.fold_fact_into_person_note(
+            note_path=note, fact="Based in Lisbon.", model="m",
+            error_out=errors,
+        ))
+        assert wrote is False
+        assert errors == ["the fold reply was not a single entry edit"]
         assert note.read_bytes() == before
