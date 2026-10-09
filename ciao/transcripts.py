@@ -21,7 +21,13 @@ from claude_agent_sdk import (
 
 from ciao.agent_paths import claude_projects_dir
 from ciao.jsonio import read_json_dict
-from ciao.models import AgentRequest, ChatContext
+from ciao.models import (
+    AgentRequest,
+    AssistantTextDelta,
+    ChatContext,
+    ThinkingEvent,
+    ToolUseEvent,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +43,69 @@ _SKILL_MARKER_RE = re.compile(r"<command-name>([^<\s]+)</command-name>")
 # entry cap, whichever comes first. A crash loses at most this much tail.
 _JOURNAL_FLUSH_SECONDS = 0.25
 _JOURNAL_FLUSH_ENTRIES = 32
+
+
+class TextStepJoiner:
+    """Join one reply's top-level text steps into the text a stop persists.
+
+    The live view draws each text step as its own block, and a tool call or a
+    thinking block separates one step from the next. Concatenating the deltas
+    with no separator reloads as "I'll check the file.The file says". A step
+    boundary is recorded with :meth:`boundary`; the next text delta is then
+    preceded by a paragraph break, made from just enough newlines that the
+    reply never gets a leading break, a doubled one or a trailing one.
+    """
+
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+        self._pending_break = False
+
+    def feed(self, event: Any) -> None:
+        """Advance the join for one stream event; subagent events are ignored."""
+        if getattr(event, "parent_tool_use_id", None) is not None:
+            return
+        if isinstance(event, AssistantTextDelta):
+            self.add(event.text)
+        elif isinstance(event, (ToolUseEvent, ThinkingEvent)):
+            self.boundary()
+
+    def boundary(self) -> None:
+        if self._parts:
+            self._pending_break = True
+
+    def add(self, text: str) -> None:
+        if not text:
+            return
+        if self._pending_break:
+            self._pending_break = False
+            self._trim_trailing_blanks()
+            leading = len(text) - len(text.lstrip("\n"))
+            separator = "\n" * max(0, 2 - self._trailing_newlines() - leading)
+            if separator:
+                self._parts.append(separator)
+        self._parts.append(text)
+
+    def _trim_trailing_blanks(self) -> None:
+        # "Working on " + break reads as trailing spaces in the stored reply.
+        while self._parts:
+            last = self._parts[-1].rstrip(" \t")
+            if last:
+                self._parts[-1] = last
+                return
+            self._parts.pop()
+
+    def _trailing_newlines(self) -> int:
+        count = 0
+        for part in reversed(self._parts):
+            stripped = part.rstrip("\n")
+            count += len(part) - len(stripped)
+            if stripped:
+                break
+        return count
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts)
 
 
 class TurnJournal:
@@ -184,17 +253,25 @@ class TurnJournal:
 
 
 def _journal_event_record(event: Any) -> dict[str, Any] | None:
-    """Map a stream event to its compact journal record (None = skip)."""
+    """Map a stream event to its compact journal record (None = skip).
+
+    Only top-level events are journalled: subagent text belongs to the
+    subagent, so recovery joins the same text a live stop persists.
+    """
     type_name = type(event).__name__
+    if getattr(event, "parent_tool_use_id", None) is not None:
+        return None
     if type_name == "AssistantTextDelta":
         text = getattr(event, "text", "")
         return {"type": "text", "text": text} if text else None
     if type_name == "ToolUseEvent":
-        name = getattr(event, "tool_name", "")
-        return {"type": "tool", "name": name} if name else None
+        return {"type": "tool", "name": getattr(event, "tool_name", "") or "tool"}
+    if type_name == "ThinkingEvent":
+        # Not recoverable content, but a step boundary for the joined text.
+        return {"type": "break"}
     if type_name == "ResultEvent":
         return {"type": "result", "is_error": bool(getattr(event, "is_error", False))}
-    # Thinking/system/permission events carry no recoverable reply content.
+    # System/permission events carry no recoverable reply content.
     return None
 
 
@@ -386,7 +463,7 @@ class TranscriptStore:
                 prompt = ""
                 started_at = ""
                 committed = False
-                texts: list[str] = []
+                steps = TextStepJoiner()
                 tool_events: list[dict[str, Any]] = []
                 with journal_file.open("r", encoding="utf-8") as handle:
                     for line in handle:
@@ -403,13 +480,16 @@ class TranscriptStore:
                             prompt = str(record.get("prompt") or "")
                             started_at = str(record.get("started_at") or "")
                         elif kind == "text":
-                            texts.append(str(record.get("text") or ""))
+                            steps.add(str(record.get("text") or ""))
                         elif kind == "tool":
+                            steps.boundary()
                             tool_events.append({
                                 "id": "",
                                 "name": str(record.get("name") or "tool"),
                                 "input": {"summary": ""},
                             })
+                        elif kind == "break":
+                            steps.boundary()
                         elif kind == "committed":
                             committed = True
                 if committed:
@@ -423,7 +503,7 @@ class TranscriptStore:
                     ctx,
                     provider=provider,
                     prompt=prompt,
-                    response_text="".join(texts).strip(),
+                    response_text=steps.text.strip(),
                     tool_events=tool_events,
                     started_at=started_at,
                     journal_path=journal_file,
