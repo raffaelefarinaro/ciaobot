@@ -1281,6 +1281,23 @@ class ProjectChatManager:
         except ValueError:
             return str(root)
 
+    def _unused_vault_project_id(self, workspace: str, folder: str) -> str:
+        """The stable id for a vault-bound project, never one already in use.
+
+        ``_stable_vault_project_id`` keys on the workspace name, so after a
+        workspace is renamed away and a new one takes its old name, the id
+        computed for the new one is the id the renamed workspace's projects
+        still hold. The stable id is only the starting point: when it is taken,
+        a salted id is derived instead. Existing projects are never re-id'd,
+        because their ids are referenced by chats, schedules and runs.
+        """
+        pid = chat_service._stable_vault_project_id(workspace, folder)
+        salt = 1
+        while pid in self._projects:
+            salt += 1
+            pid = chat_service._stable_vault_project_id(workspace, f"{folder}#{salt}")
+        return pid
+
     def _ensure_defaults(self) -> None:
         """Ensure each workspace has its auto-managed `General` project.
 
@@ -1304,7 +1321,7 @@ class ProjectChatManager:
                 None,
             )
             if general is None:
-                pid = chat_service._stable_vault_project_id(ws, "general")
+                pid = self._unused_vault_project_id(ws, "general")
                 general = ProjectInfo(
                     project_id=pid,
                     name="General",
@@ -2424,7 +2441,7 @@ class ProjectChatManager:
                     })
                     continue
 
-                pid = chat_service._stable_vault_project_id(ws, stem)
+                pid = self._unused_vault_project_id(ws, stem)
                 project = ProjectInfo(
                     project_id=pid,
                     name=name,
@@ -3942,6 +3959,24 @@ class ProjectChatManager:
         self._provider_last_used.pop(chat_id, None)
         self._provider_disconnect_failures.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
+
+    def evict_workspace_providers(self, workspace: str) -> list[str]:
+        """Disconnect and forget the cached providers of *workspace*'s chats.
+
+        A provider is built with its chat's agent root and workspace name, so
+        a rename leaves it pointing at both old values. The chat row and its
+        ``session_id`` are untouched, so the next turn builds a fresh provider
+        and resumes the same session. The disconnect is scheduled, not awaited,
+        the same way ``_schedule_provider_cleanup`` runs it; the caller must
+        have checked that no chat in the workspace is busy. Returns the evicted
+        chat ids.
+        """
+        _project_ids, chat_ids = self.workspace_scope(workspace)
+        evicted = sorted(cid for cid in chat_ids if cid in self._providers)
+        for chat_id in evicted:
+            provider = self._pop_provider(chat_id)
+            asyncio.ensure_future(self._disconnect_provider(chat_id, provider))
+        return evicted
 
     # ── Idle provider reaping ────────────────────────────────────────────
 

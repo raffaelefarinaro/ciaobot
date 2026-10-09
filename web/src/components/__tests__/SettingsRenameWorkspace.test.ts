@@ -201,7 +201,7 @@ describe('Settings > Workspaces rename from Edit', () => {
     }
   })
 
-  it('renaming personal says it stops being the main workspace', async () => {
+  it('renaming a first-listed personal keeps it the main workspace, so says nothing about it', async () => {
     const { pendingConfirm } = await import('../../lib/confirm')
     const wrapper = await mountWorkspacesTab()
     try {
@@ -211,7 +211,25 @@ describe('Settings > Workspaces rename from Edit', () => {
       await nextTick()
 
       expect(pendingConfirm.value!.message).toContain('Rename "personal" to "home".')
-      expect(pendingConfirm.value!.message).toContain('It will no longer be the main workspace.')
+      expect(pendingConfirm.value!.message).not.toContain('main workspace')
+      pendingConfirm.value!.resolve(false)
+      await flushPromises()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('renaming a personal that is not first names the workspace that becomes main', async () => {
+    const { pendingConfirm } = await import('../../lib/confirm')
+    state.workspaces = workspaces(['work', 'personal'])
+    const wrapper = await mountWorkspacesTab()
+    try {
+      const nameInput = await openEditor(wrapper, 'personal')
+      await nameInput.setValue('home')
+      await cardFor(wrapper, 'personal').find('.workspace-save').trigger('click')
+      await nextTick()
+
+      expect(pendingConfirm.value!.message).toContain('"work" becomes the main workspace.')
       pendingConfirm.value!.resolve(false)
       await flushPromises()
     } finally {

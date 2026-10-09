@@ -176,9 +176,22 @@ def rename_workspace(
             raise ValueError(
                 f"could not rename '{old}' to '{new}': {exc}"
             ) from exc
+    if projects is not None:
+        # Cached providers were built with the old agent root and workspace
+        # name. Evicted before the project rows move, because the eviction is
+        # keyed by the chats that are still in ``old``; the chats keep their
+        # session ids and the next turn rebuilds the provider.
+        projects.evict_workspace_providers(old)
     try:
-        config.workspaces.pop(old)
-        config.workspaces[new] = updated
+        # Replace the key in place so the renamed workspace keeps its position
+        # in the registry: sidebar order, the 1-9 shortcuts and the
+        # first-registered primary fallback all follow it.
+        renamed = [
+            (new, updated) if name == old else (name, record)
+            for name, record in config.workspaces.items()
+        ]
+        config.workspaces.clear()
+        config.workspaces.update(renamed)
         config.persist_workspace_registry()
         if projects is not None:
             entries = getattr(projects, "_projects", None)
