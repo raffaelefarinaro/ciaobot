@@ -31,6 +31,7 @@ import os
 from ciao.os_support.tool_path import (
     clear_terminal_path_cache,
     common_tool_dirs,
+    dedupe_path,
     engine_bin_dir,
     prepend_engine_path,
     resolve_command as _resolve_command,
@@ -69,25 +70,8 @@ def login_shell_path() -> str:
     """
     current = os.environ.get("PATH", "")
     shell_path = terminal_path()
-
-    ordered: list[str] = []
-    seen: set[str] = set()
-    for chunk in (shell_path, current):
-        for d in chunk.split(os.pathsep):
-            if not d:
-                continue
-            key = os.path.normcase(d)
-            if key not in seen:
-                seen.add(key)
-                ordered.append(d)
-    for d in common_tool_dirs():
-        if not d or not os.path.isdir(d):
-            continue
-        key = os.path.normcase(d)
-        if key not in seen:
-            seen.add(key)
-            ordered.append(d)
-    return os.pathsep.join(ordered)
+    extra = [d for d in common_tool_dirs() if d and os.path.isdir(d)]
+    return dedupe_path(os.pathsep.join([shell_path, current, *extra]))
 
 
 def resolve_tool(cmd: str) -> str | None:

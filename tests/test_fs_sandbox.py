@@ -48,6 +48,7 @@ def test_claude_workspace_settings_allow_only_the_roots(tmp_path, monkeypatch):
             # `ciao` (#1185); it is never writable.
             "allowRead": [str(roots[0]), str(roots[1]), str(engine)],
             "allowWrite": [str(roots[0]), str(roots[1])],
+            "denyWrite": [],
         },
     }
 
@@ -407,6 +408,22 @@ def test_engine_read_roots_cover_the_venv_and_every_interpreter_link(tmp_path, m
     assert Path(fs_sandbox.__file__).resolve().parent in granted
 
 
+def test_claude_denies_writes_to_an_engine_inside_a_root(tmp_path, monkeypatch):
+    # #1208: the roots grant Claude write access, so an engine folder inside one
+    # is denied writes by name, as OpenCode's profile shadows it.
+    root = tmp_path / "root"
+    engine = root / "engine"
+    outside = tmp_path / "elsewhere"
+    monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [engine, outside])
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    settings = claude_sandbox_settings(scope="workspace", mode="auto", roots=[root])
+
+    assert settings["filesystem"]["denyWrite"] == [str(engine)]
+    assert str(engine) in settings["filesystem"]["allowRead"]
+    assert str(engine) not in settings["filesystem"]["allowWrite"]
+
+
 def test_engine_install_is_read_only_in_every_profile(tmp_path, monkeypatch):
     engine = tmp_path / "engine"
     monkeypatch.setattr("ciao.fs_sandbox.engine_read_roots", lambda: [engine])
@@ -456,6 +473,21 @@ def test_seatbelt_lets_opencode_resolve_config_names_in_ancestors(tmp_path):
         assert literal in profile
     # A literal, never a subpath: the folder opens, nothing inside it is read.
     assert f'(subpath "{_quote_seatbelt_subpath(f"{ancestor}/.claude")}")' not in profile
+    assert _writable_rules(profile) == 1
+
+
+def test_seatbelt_gives_claude_md_metadata_only_in_ancestors(tmp_path):
+    # #1208: CLAUDE.md is realpathed in every ancestor but its contents stay
+    # unreadable, so it is a metadata grant and never a read grant.
+    root = tmp_path / "workspace" / "agent"
+    profile = _seatbelt_profile([root])
+    claude_md = _quote_seatbelt_subpath(f"{tmp_path / 'workspace'}/CLAUDE.md")
+    literal = f'(literal "{claude_md}")'
+    metadata = [line for line in profile.splitlines() if "file-read-metadata" in line]
+    assert any(literal in line for line in metadata)
+    assert literal not in "\n".join(
+        line for line in profile.splitlines() if "file-read*" in line
+    )
     assert _writable_rules(profile) == 1
 
 
@@ -566,6 +598,44 @@ def test_engine_read_roots_include_the_sysconfig_install_paths(tmp_path, monkeyp
     assert platlib in granted
     # De-duplicated: no folder is listed twice.
     assert len(granted) == len(set(granted))
+
+
+def test_engine_read_roots_add_the_user_scheme_for_a_user_install(tmp_path, monkeypatch):
+    import site
+    import sysconfig
+
+    from ciao import fs_sandbox
+
+    home = (tmp_path / "home").resolve()
+    user_site = home / ".local" / "lib" / "python3.13" / "site-packages"
+    user_paths = {"purelib": str(user_site), "scripts": str(home / ".local" / "bin")}
+    system = tmp_path / "system"
+    # Only the user scheme is stubbed, and the default scheme points at the prefix:
+    # the sysconfig cache is never touched, so the real install keeps its paths.
+    monkeypatch.setattr(
+        sysconfig,
+        "get_path",
+        lambda name, *a, scheme=None, **k: user_paths[name] if scheme else str(system / name),
+    )
+    monkeypatch.setattr(sysconfig, "get_preferred_scheme", lambda key: "posix_user")
+    monkeypatch.setattr(site, "ENABLE_USER_SITE", True)
+    monkeypatch.setattr(site, "getusersitepackages", lambda: str(user_site))
+    monkeypatch.setattr(fs_sandbox, "__file__", str(user_site / "ciao" / "fs_sandbox.py"))
+    fs_sandbox.engine_read_roots.cache_clear()
+    try:
+        granted = fs_sandbox.engine_read_roots()
+    finally:
+        fs_sandbox.engine_read_roots.cache_clear()
+    assert user_site in granted
+    assert home / ".local" / "bin" in granted
+
+    # The same stubs with the package outside the user site: nothing is added.
+    monkeypatch.setattr(fs_sandbox, "__file__", str(tmp_path / "checkout" / "ciao" / "fs_sandbox.py"))
+    fs_sandbox.engine_read_roots.cache_clear()
+    try:
+        assert user_site not in fs_sandbox.engine_read_roots()
+    finally:
+        fs_sandbox.engine_read_roots.cache_clear()
 
 
 def test_engine_read_roots_are_computed_once_per_process(tmp_path, monkeypatch):
