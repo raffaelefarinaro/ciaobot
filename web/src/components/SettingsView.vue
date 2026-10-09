@@ -35,142 +35,14 @@
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">What can Ciaobot do?</p>
-            <p class="hint">
-              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
-            </p>
-            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
-          </div>
-        </div>
-
-        <!-- Appearance -->
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">Appearance</p>
-            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
-          </div>
-          <div class="setting-row setting-row--inline setting-row--flush">
-            <div class="routine-info">
-              <span class="routine-name">Theme</span>
-              <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
-            </div>
-            <div class="settings-control">
-              <div class="instance-toggle">
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'dark' }"
-                  @click="setTheme('dark')"
-                >
-                  Dark
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'light' }"
-                  @click="setTheme('light')"
-                >
-                  Light
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'system' }"
-                  @click="setTheme('system')"
-                >
-                  System
-                </button>
-              </div>
-            </div>
-          </div>
-          <div class="setting-row setting-row--inline">
-            <div class="routine-info">
-              <span class="routine-name">Font size</span>
-              <span class="routine-detail">Adjust messages, code blocks, sidebars, and menus together.</span>
-            </div>
-            <div class="settings-control">
-              <div class="font-scale-row">
-                <button class="btn-small" @click="adjustFontScale(-FONT_SCALE_STEP)" :disabled="fontScale <= MIN_FONT_SCALE">Decrease</button>
-                <span class="font-scale-display">{{ fontScalePercent }}%</span>
-                <button class="btn-small" @click="adjustFontScale(FONT_SCALE_STEP)" :disabled="fontScale >= MAX_FONT_SCALE">Increase</button>
-                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Actions. This card is about the Ciaobot *program*: the checkout it
-             runs from, and whether it is up to date. It shares a repository and
-             a serialization with the memory backup below, but never the
-             meaning, so the two never share a label: this one is an explicit,
-             bidirectional hand-off of the program, the other is an unattended
-             one-way copy of the memory. -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">This host</p>
-              <p class="hint">
-                The Ciaobot program on this computer: send pending changes to its repository, or
-                restart to update it. Your memory and notes are backed up separately, below.
-              </p>
-            </div>
-            <div class="settings-card-header-actions">
-              <button
-                class="btn-secondary btn-small"
-                @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()"
-                :disabled="!!actionPending"
-                :title="localStatus?.git_repo
-                  ? 'Send pending changes in the Ciaobot program checkout to its repository, and pull what is there'
-                  : 'Save a local snapshot of the Ciaobot program checkout, with no remote configured'"
-              >
-                {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
-              </button>
-              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
-                {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
-              </button>
-            </div>
-          </div>
-          <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
-          <div v-if="hasDeployError" class="deploy-steps">
-            <div v-for="step in deploySteps.filter(s => !s.ok)" :key="step.step" class="deploy-step fail">
-              <span class="step-icon">&#10007;</span>
-              <div style="flex: 1; min-width: 0;">
-                <strong>{{ step.step }} failed</strong>
-                <pre v-if="step.output" class="deploy-step-error-output">{{ step.output }}</pre>
-              </div>
-            </div>
-            <div class="action-row action-row--spaced action-row--compact">
-              <button class="btn-primary" @click="fixDeployErrorInChat">
-                Fix in Chat
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Start at sign-in. The last host fact beside the program's own, and
-             a different thing from both: it changes whether the engine service
-             starts at the *next* sign-in, never the engine running now, and
-             never the optional app window SettingsAppInstall owns. -->
-        <SettingsEngineLogin />
-
-        <!-- Memory backup. The unattended, one-way copy of the user's memory,
-             right below the program's own repository controls so the two are
-             read together and never confused. The panel owns its data and its
-             actions; the only thing it cannot do alone is navigate to a chat,
-             so it emits the setup chat's id for this view to open. -->
-        <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
-
-        <SettingsInsights
-          :routines="routines"
-          :routines-saving="routinesSaving"
-          :save-routines="saveRoutines"
-        />
-
-        <!-- Package update -->
+        <!-- Package update. The first section of General. Up to date with nothing
+             in progress it is only its title and a status in the corner; every
+             other state is the full card, with its copy and its controls. -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">Updates</p>
-              <p class="hint">
+              <p v-if="!updatesCompact" class="hint">
                 <template v-if="packageStatus?.mode === 'bundled_app'">
                   This app updates by re-running the one-line installer.
                   <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
@@ -188,24 +60,18 @@
                 </template>
               </p>
             </div>
-            <div v-if="packageStatus && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '')" class="settings-card-header-actions">
+            <div v-if="packageStatus && !['bundled_app', 'installer'].includes(packageStatus.mode ?? '') && packageStatus.update_available" class="settings-card-header-actions">
               <button
-                v-if="packageStatus.update_available"
                 class="btn-primary btn-small"
                 @click="openUpdatePanel"
                 :disabled="packageUpdating || showUpdatePanel"
               >
                 {{ `Update to ${packageStatus.latest_version}` }}
               </button>
-              <!-- Nothing to do: a status, not a disabled button. -->
-              <span v-else class="settings-status">Up to date<template v-if="packageStatus.current_version"> · {{ packageStatus.current_version }}</template></span>
             </div>
-            <!-- The same status for an engine this card can update: an installer
-                 with no job and nothing newer is up to date, and says so rather
-                 than leaving the card blank. -->
-            <div v-else-if="engineUpdateIdleAndCurrent" class="settings-card-header-actions">
-              <span class="settings-status">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
-            </div>
+            <!-- Nothing to do: the status sits in the corner as a badge, the
+                 same markup the Google Workspace section uses for its state. -->
+            <span v-else-if="updatesCompact" class="badge badge--success">Up to date<template v-if="packageStatus?.current_version"> · {{ packageStatus.current_version }}</template></span>
           </div>
           <SkeletonLoader v-if="packageLoading && !packageStatus" label="Checking package status" :count="2" />
           <div v-else-if="packageStatus">
@@ -377,6 +243,145 @@
              fetch — Home may never have been opened in this session. -->
         <SettingsUpdateTasks />
 
+        <!-- Installing is optional and the guidance is permanent: the Home setup
+             reminder can be closed for good, so Settings keeps the steps. -->
+        <SettingsAppInstall />
+
+        <!-- Notifications. -->
+        <SettingsNotifications />
+
+        <SettingsKeyboardShortcuts />
+
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">What can Ciaobot do?</p>
+            <p class="hint">
+              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
+            </p>
+            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
+          </div>
+        </div>
+
+        <!-- Appearance -->
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Appearance</p>
+            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
+          </div>
+          <div class="setting-row setting-row--inline setting-row--flush">
+            <div class="routine-info">
+              <span class="routine-name">Theme</span>
+              <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
+            </div>
+            <div class="settings-control">
+              <div class="instance-toggle">
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'dark' }"
+                  @click="setTheme('dark')"
+                >
+                  Dark
+                </button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'light' }"
+                  @click="setTheme('light')"
+                >
+                  Light
+                </button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'system' }"
+                  @click="setTheme('system')"
+                >
+                  System
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row setting-row--inline">
+            <div class="routine-info">
+              <span class="routine-name">Font size</span>
+              <span class="routine-detail">Adjust messages, code blocks, sidebars, and menus together.</span>
+            </div>
+            <div class="settings-control">
+              <div class="font-scale-row">
+                <button class="btn-small" @click="adjustFontScale(-FONT_SCALE_STEP)" :disabled="fontScale <= MIN_FONT_SCALE">Decrease</button>
+                <span class="font-scale-display">{{ fontScalePercent }}%</span>
+                <button class="btn-small" @click="adjustFontScale(FONT_SCALE_STEP)" :disabled="fontScale >= MAX_FONT_SCALE">Increase</button>
+                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Actions. This card is about the Ciaobot *program*: the checkout it
+             runs from, and whether it is up to date. It shares a repository and
+             a serialization with the memory backup below, but never the
+             meaning, so the two never share a label: this one is an explicit,
+             bidirectional hand-off of the program, the other is an unattended
+             one-way copy of the memory. -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">This host</p>
+              <p class="hint">
+                The Ciaobot program on this computer: send pending changes to its repository, or
+                restart to update it. Your memory and notes are backed up separately, below.
+              </p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button
+                class="btn-secondary btn-small"
+                @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()"
+                :disabled="!!actionPending"
+                :title="localStatus?.git_repo
+                  ? 'Send pending changes in the Ciaobot program checkout to its repository, and pull what is there'
+                  : 'Save a local snapshot of the Ciaobot program checkout, with no remote configured'"
+              >
+                {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
+              </button>
+              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" :title="localStatus?.restart_only ? 'Wait for active chats, then restart the installed server' : 'Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code'">
+                {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
+              </button>
+            </div>
+          </div>
+          <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
+          <div v-if="hasDeployError" class="deploy-steps">
+            <div v-for="step in deploySteps.filter(s => !s.ok)" :key="step.step" class="deploy-step fail">
+              <span class="step-icon">&#10007;</span>
+              <div style="flex: 1; min-width: 0;">
+                <strong>{{ step.step }} failed</strong>
+                <pre v-if="step.output" class="deploy-step-error-output">{{ step.output }}</pre>
+              </div>
+            </div>
+            <div class="action-row action-row--spaced action-row--compact">
+              <button class="btn-primary" @click="fixDeployErrorInChat">
+                Fix in Chat
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Start at sign-in. The last host fact beside the program's own, and
+             a different thing from both: it changes whether the engine service
+             starts at the *next* sign-in, never the engine running now, and
+             never the optional app window SettingsAppInstall owns. -->
+        <SettingsEngineLogin />
+
+        <!-- Memory backup. The unattended, one-way copy of the user's memory,
+             right below the program's own repository controls so the two are
+             read together and never confused. The panel owns its data and its
+             actions; the only thing it cannot do alone is navigate to a chat,
+             so it emits the setup chat's id for this view to open. -->
+        <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
+
+        <SettingsInsights
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
+
         <!-- Main workspace -->
         <div v-if="routines && routines.workspace_context" class="card">
           <div class="settings-card-header">
@@ -521,15 +526,6 @@
           :routines-saving="routinesSaving"
           :save-routines="saveRoutines"
         />
-
-        <!-- Installing is optional and the guidance is permanent: the Home setup
-             reminder can be closed for good, so Settings keeps the steps. -->
-        <SettingsAppInstall />
-
-        <!-- Notifications. -->
-        <SettingsNotifications />
-
-        <SettingsKeyboardShortcuts />
 
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
@@ -4575,22 +4571,23 @@ const engineUpdateVisible = computed(
 const engineUpdateVersion = computed(
   () => engineUpdateOperation.value?.to_version || packageStatus.value?.latest_version,
 )
-// No job and nothing newer: the header's status, not a disabled button. A
-// `done` record is history rather than a job once a newer release exists, so it
-// counts as idle here too — and the `update_available` term is what keeps the
-// header quiet, so the header and the panel below it say the same thing. A
-// version check that never answered, or that answered with a rate limit, has
-// said nothing about the installed version at all: claiming "Up to date" over
-// the "Update check failed" line two rows below would be the card asserting
-// what it does not know.
-const engineUpdateIdleAndCurrent = computed(
-  () => engineUpdateEnabled.value
-    && (engineUpdateStage.value === 'idle' || engineUpdateStaleApplied.value)
-    && !updateStatus.value?.error
-    && !!packageStatus.value
-    && !packageStatus.value.error
-    && !packageStatus.value?.update_available,
-)
+// The compact Updates state: the installed version is known to be the newest,
+// and nothing is staged, running, done or failed, so the section is only its
+// title with an "Up to date" status. A version check that never answered, or
+// that answered with a rate limit, has said nothing about the installed version,
+// so it is never compact: "Up to date" over "Update check failed" would be the
+// card asserting what it does not know. A `done` record is not compact either,
+// so the applied outcome keeps its own line in the panel. Staging before its
+// first record is written reads as idle, which is why an in-flight poll or
+// action also keeps the full card.
+const updatesCompact = computed(() => {
+  const status = packageStatus.value
+  if (!status || status.error || status.update_available) return false
+  if (packageUpdating.value || updatePolling.value || updateActionPending.value) return false
+  if (updateStatus.value?.error) return false
+  if (engineUpdateEnabled.value) return engineUpdateStage.value === 'idle'
+  return true
+})
 
 async function fetchUpdateStatus() {
   try {

@@ -608,6 +608,72 @@ it('says up to date for an installer engine with no job and nothing newer', asyn
   }
 })
 
+it('collapses Updates to its title and an up-to-date badge when nothing is in progress', async () => {
+  const { wrapper } = await mountCard(
+    { install_mode: 'installer', can_update: true, operation: null },
+    { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
+  )
+  try {
+    // The first card on General is Updates. Its title stays; the status sits in
+    // the corner as the same badge the Google Workspace section uses, and the
+    // copy and the engine panel are not rendered at all.
+    const card = wrapper.get('.card')
+    expect(card.get('.section-title').text()).toBe('Updates')
+    expect(card.get('.settings-card-header .badge--success').text()).toBe('Up to date · 0.20.0')
+    expect(card.findAll('p.hint')).toHaveLength(0)
+    expect(card.text()).not.toContain('Installed with the Ciaobot engine installer')
+    expect(card.find('.engine-update-panel').exists()).toBe(false)
+    expect(card.find('.settings-form-panel').exists()).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('collapses a bundled app that is up to date, without the reinstall copy', async () => {
+  const { wrapper } = await mountCard(
+    { install_mode: 'bundled_app', can_update: false, operation: null },
+    { mode: 'bundled_app', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
+  )
+  try {
+    const card = wrapper.get('.card')
+    expect(card.get('.settings-card-header .badge--success').text()).toBe('Up to date · 0.20.0')
+    expect(card.findAll('p.hint')).toHaveLength(0)
+    expect(card.find('code').exists()).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('keeps the full Updates card when an update is available', async () => {
+  const { wrapper } = await mountCard({ install_mode: 'installer', can_update: true, operation: null })
+  try {
+    const card = wrapper.get('.card')
+    expect(card.find('.settings-card-header .badge').exists()).toBe(false)
+    expect(card.text()).toContain('Stage a release below')
+    expect(card.get('.engine-update-panel').text()).toContain('v0.20.0 is available')
+    expect(buttonLabels(wrapper)).toContain('Stage update')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('keeps the full Updates card for an applied record with nothing newer', async () => {
+  const { wrapper } = await mountCard(
+    { install_mode: 'installer', can_update: true, operation: operation('applied') },
+    { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
+  )
+  try {
+    // A `done` record is the last run's outcome, not an idle engine: the panel
+    // keeps its line and the corner carries no status of its own.
+    const card = wrapper.get('.card')
+    expect(card.find('.settings-card-header .badge').exists()).toBe(false)
+    expect(card.text()).toContain('ciaobot is up to date')
+    expect(card.findAll('p.hint').length).toBeGreaterThan(0)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
 it('keeps the non-installer guidance', async () => {
   const { wrapper, post } = await mountCard(
     { install_mode: 'editable', can_update: false, operation: null },
