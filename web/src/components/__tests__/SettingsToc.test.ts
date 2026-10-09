@@ -39,9 +39,17 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
   try {
     const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
     // Built from the page itself, in page order, headings in sentence case.
-    expect(labels.slice(0, 3)).toEqual(['What can Ciaobot do?', 'Appearance', 'This host'])
-    expect(labels).toContain('Keyboard shortcuts')
-    expect(labels).toContain('Open source')
+    // Updates leads, then the everyday device sections, then the update task
+    // history, then everything else in its existing order.
+    expect(labels.slice(0, 5)).toEqual([
+      'Updates',
+      'Use Ciaobot as an app',
+      'Notifications',
+      'Keyboard shortcuts',
+      'Update task history',
+    ])
+    expect(labels.slice(5, 8)).toEqual(['What can Ciaobot do?', 'Appearance', 'This host'])
+    expect(labels.indexOf('Open source')).toBeGreaterThan(labels.indexOf('Keyboard shortcuts'))
     // The client/role callout is a notice, not a section to jump to.
     expect(labels).not.toContain('Connection role unavailable')
     // Every entry points at a real element.
@@ -80,6 +88,20 @@ it('scrolls to and focuses the section a rail entry names', async () => {
     expect(scroll).toHaveBeenCalled()
     expect(document.activeElement).toBe(section)
     expect(entry!.attributes('aria-current')).toBe('location')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('gives Keyboard shortcuts the same labelled section heading as its neighbours', async () => {
+  const { wrapper } = await mountSettings()
+  try {
+    const heading = wrapper.get('#keyboard-shortcuts-title')
+    expect(heading.element.tagName).toBe('H2')
+    expect(heading.classes()).toContain('section-title')
+    const section = wrapper.get('section[aria-labelledby="keyboard-shortcuts-title"]')
+    expect(section.classes()).toContain('card')
+    expect(section.element.querySelector('h2#keyboard-shortcuts-title')).not.toBeNull()
   } finally {
     wrapper.unmount()
   }

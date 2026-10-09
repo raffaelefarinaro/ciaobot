@@ -1,7 +1,7 @@
 <template>
   <section class="card" aria-labelledby="keyboard-shortcuts-title">
     <div class="settings-card-header">
-      <p id="keyboard-shortcuts-title" class="section-title">Keyboard shortcuts</p>
+      <h2 id="keyboard-shortcuts-title" class="section-title">Keyboard shortcuts</h2>
       <p class="hint">Shortcuts are shared by every device connected to this Ciaobot engine.</p>
     </div>
     <div class="shortcut-setting-list">
@@ -101,6 +101,8 @@ function restoreDefaults(): Promise<void> {
   return update({ keyboard_shortcuts: {}, keyboard_send_mode: 'modifier' })
 }
 </script>
+
+<style scoped src="./settingsPanels.css"></style>
 
 <style scoped>
 .shortcut-setting-list { display: grid; gap: 8px; }
