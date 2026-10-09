@@ -470,6 +470,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
         "task complete": ["a" * 32, "--revision", "r"],
         "task delegate": ["a" * 32, "--revision", "r"],
+        "task add-update": ["a" * 32, "--revision", "r", "--text-file", str(summary)],
         "task report": ["a" * 32, "--outcome", "done", "--summary-file", str(summary)],
         "task attempt": ["a" * 32, "stop"],
         "schedule update": ["s"], "schedule pause": ["s"],

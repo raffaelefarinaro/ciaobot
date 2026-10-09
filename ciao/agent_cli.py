@@ -249,6 +249,10 @@ def build_parser() -> argparse.ArgumentParser:
     tdelegate.add_argument("task_id")
     tdelegate.add_argument("--revision", required=True, help="The revision you read; a stale one starts nothing.")
     tdelegate.add_argument("--project", default=None, help="Override the chat's project; omit to use the task's own, else General.")
+    tnote = task.add_parser("add-update", help="Append a progress note. This does not complete the task.")
+    tnote.add_argument("task_id")
+    tnote.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
+    tnote.add_argument("--text-file", required=True, metavar="FILE", help="Markdown file holding the progress note.")
     treport = task.add_parser("report", help="Report how far you got on the task this chat was handed.")
     treport.add_argument("task_id")
     treport.add_argument("--outcome", required=True, choices=["done", "blocked", "needs_input"])
@@ -560,6 +564,12 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             if args.project is not None:
                 arguments["project_id"] = args.project
             return "task_delegate", arguments
+        if verb == "add-update":
+            return "task_add_update", {
+                "task_id": args.task_id,
+                "expected_revision": args.revision,
+                "text": _task_body(args.text_file, flag="--text-file") or "",
+            }
         if verb == "report":
             return "task_report", {
                 "task_id": args.task_id,

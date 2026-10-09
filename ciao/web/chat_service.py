@@ -106,6 +106,7 @@ _HEX_DIGEST_RE = re.compile(r"^[0-9a-f]{16}$")
 # of the resolution text. ``MEMORY_PASS_RESOLUTION_MAX`` bounds that text, so a
 # resolution too long to fit a helper is refused at enqueue, not truncated.
 TASK_COMPLETION_SOURCE = "task_completion"
+PROJECT_CLOSURE_SOURCE = "project_closure"
 MEMORY_PASS_RESOLUTION_MAX = 8000
 _COMPLETION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -548,6 +549,8 @@ def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
         return {}
     if str(value.get("source_kind") or "") == TASK_COMPLETION_SOURCE:
         return _normalize_task_completion_pass(value, state)
+    if str(value.get("source_kind") or "") == PROJECT_CLOSURE_SOURCE:
+        return _normalize_project_closure_pass(value, state)
     source_chat_id = str(value.get("source_chat_id") or "")
     if not source_chat_id or len(source_chat_id) > 128:
         return {}
@@ -575,6 +578,7 @@ def _normalize_memory_pass_helper(value: dict[str, Any]) -> dict[str, Any]:
         normalized["user_resolution"] = (
             resolution if len(resolution) <= MEMORY_PASS_RESOLUTION_MAX else ""
         )
+        normalized["task_path"] = str(value.get("task_path") or "")[:512]
     return normalized
 
 
@@ -616,6 +620,41 @@ def _normalize_task_completion_pass(value: dict[str, Any], state: str) -> dict[s
         "doc_path": "",
         "source_title": "",
         "source_project": "",
+        "state": state,
+        "archive_policy": "when_clean",
+    }
+
+
+def _normalize_project_closure_pass(value: dict[str, Any], state: str) -> dict[str, Any]:
+    """A project-closure pass: the note and outcome, not a chat transcript."""
+    folder = str(value.get("vault_folder") or "")
+    outcome = str(value.get("outcome") or "")
+    note = value.get("note")
+    digest = str(value.get("note_sha256") or "")
+    if not folder or len(folder) > 200 or "/" in folder or "\\" in folder:
+        return {}
+    if outcome not in {"completed", "stopped"}:
+        return {}
+    if not isinstance(note, str) or len(note) > MEMORY_PASS_RESOLUTION_MAX:
+        return {}
+    if not _SHA256_RE.fullmatch(digest):
+        return {}
+    if hashlib.sha256(note.encode("utf-8")).hexdigest() != digest:
+        return {}
+    return {
+        "kind": "memory_pass",
+        "source_kind": PROJECT_CLOSURE_SOURCE,
+        "source_chat_id": "",
+        "vault_folder": folder,
+        "project_name": str(value.get("project_name") or "")[:200],
+        "outcome": outcome,
+        "note": note,
+        "note_sha256": digest,
+        "recorded_at": str(value.get("recorded_at") or "")[:64],
+        "archive_path": "",
+        "doc_path": "",
+        "source_title": str(value.get("project_name") or "")[:200],
+        "source_project": str(value.get("project_name") or "")[:200],
         "state": state,
         "archive_policy": "when_clean",
     }

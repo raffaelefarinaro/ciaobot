@@ -482,13 +482,19 @@ def test_complete_work_project_moves_folder(tmp_path: Path) -> None:
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
 
     result = pcm.complete_project(proj.project_id)
-    assert result == {"ok": True, "vault_moved": True, "vault_folder": "2026-q2-foo"}
+    assert result["ok"] is True
+    assert result["vault_moved"] is True
+    assert result["vault_folder"] == "2026-q2-foo"
+    assert result["outcome"] == "completed"
 
     assert not folder.exists(), "active folder should be gone"
     completed = tmp_path / "memory-vault" / "work" / "projects" / "completed" / "2026-q2-foo"
     assert completed.is_dir(), "folder should now be under completed/"
     main_md = completed / "2026-q2-foo.md"
-    assert "status: completed" in main_md.read_text()
+    text = main_md.read_text()
+    assert "status: completed" in text
+    assert "<!-- ciao:project-closure -->" in text
+    assert "· completed" in text
     assert proj.project_id not in pcm._projects, "PWA project should be deleted"
 
 

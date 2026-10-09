@@ -640,6 +640,7 @@ def test_the_store_holds_no_board_and_never_completes_a_task(tmp_path: Path) -> 
         "finish",
         "release",
         "report",
+        "note_seen_update",
     }
 
 

@@ -610,3 +610,70 @@ async def task_delete(request: Request) -> JSONResponse:
     except ControlPlaneError as exc:
         return _error(exc)
     return JSONResponse({"workspace": workspace, **result})
+
+
+async def task_add_update(request: Request) -> JSONResponse:
+    """Append one progress note: ``{"workspace", "expected_revision", "text", "send"}``.
+
+    ``send: true`` also delivers the note to the live attempt's chat. The note
+    is not a description edit and cannot complete the task. Awaited on the loop
+    because sending may start a turn.
+    """
+    plane = _control_plane(request)
+    if plane is None:
+        return _unavailable()
+    body = await _body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    revision = _revision(body)
+    if isinstance(revision, JSONResponse):
+        return revision
+    text = body.get("text")
+    if not isinstance(text, str):
+        return _refusal("invalid_task", "text must be a string", 400)
+    workspace = _workspace(request.app.state.config, body.get("workspace"))
+    if workspace is None:
+        return _workspace_required()
+    try:
+        task = plane.workspace_task_add_update(
+            workspace,
+            str(request.path_params.get("task_id") or ""),
+            expected_revision=revision,
+            text=text,
+            actor="user",
+            send=body.get("send") is True,
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+    return JSONResponse({"workspace": workspace, "task": task})
+
+
+async def task_edit_update(request: Request) -> JSONResponse:
+    """Reword one progress note at ``expected_revision``."""
+    plane = _control_plane(request)
+    if plane is None:
+        return _unavailable()
+    body = await _body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    revision = _revision(body)
+    if isinstance(revision, JSONResponse):
+        return revision
+    text = body.get("text")
+    if not isinstance(text, str):
+        return _refusal("invalid_task", "text must be a string", 400)
+    workspace = _workspace(request.app.state.config, body.get("workspace"))
+    if workspace is None:
+        return _workspace_required()
+    try:
+        task = await asyncio.to_thread(
+            plane.workspace_task_edit_update,
+            workspace,
+            str(request.path_params.get("task_id") or ""),
+            str(request.path_params.get("update_id") or ""),
+            expected_revision=revision,
+            text=text,
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+    return JSONResponse({"workspace": workspace, "task": task})

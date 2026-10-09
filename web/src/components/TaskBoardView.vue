@@ -79,7 +79,7 @@ import {
   type TaskDueFilter,
   type TaskReconcileNote,
 } from '../lib/taskBoard'
-import type { Task, TaskAttempt, TaskDetail, TaskStatus } from '../lib/types'
+import type { Task, TaskAttempt, TaskDetail, TaskStatus, TaskUpdate } from '../lib/types'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -329,9 +329,12 @@ async function moveTo(task: Task, next: TaskStatus) {
   const revision = board.revisionOf(task.id)
   board.clearError()
   if (!revision) return
+  if (next === 'done') {
+    openResolution(task, 'complete')
+    return
+  }
   busyTaskId.value = task.id
-  if (next === 'done') await board.complete(workspace.value, task.id, revision)
-  else await board.update(workspace.value, task.id, revision, { status: next })
+  await board.update(workspace.value, task.id, revision, { status: next })
   busyTaskId.value = ''
   // A refused write means the record moved on, so re-read rather than leave the
   // user holding a conflict they can only clear by switching workspace.
@@ -434,30 +437,8 @@ async function releaseForDone(task: Task): Promise<boolean> {
   return Boolean(detached)
 }
 
-async function markDone(task: Task) {
-  busyTaskId.value = task.id
-  if (!(await releaseForDone(task))) {
-    busyTaskId.value = ''
-    if (board.error) {
-      projectStore.pushErrorToast('Could not mark the task done', board.error)
-      load()
-    }
-    return
-  }
-  const revision = board.revisionOf(task.id)
-  if (!revision) {
-    busyTaskId.value = ''
-    return
-  }
-  board.clearError()
-  await board.complete(workspace.value, task.id, revision)
-  busyTaskId.value = ''
-  if (board.error) {
-    // The board's own message sits below the columns, out of sight from the
-    // card that was ticked; say it where the user is looking.
-    projectStore.pushErrorToast('Could not mark the task done', board.error)
-    load()
-  }
+function markDone(task: Task) {
+  openResolution(task, 'complete')
 }
 
 /**
@@ -1029,11 +1010,10 @@ async function submitCreate() {
 
 // ── Resolution ────────────────────────────────────────────────────────────
 //
-// A completion's note. Done stays one gesture (the card's check and the status
-// control). "Complete with resolution…" opens this sheet, and its submit sends the
-// status and the note in one POST, so a note never lands without the completion it
-// belongs to. Cancel posts nothing. A failed write keeps the draft: this sheet is
-// the only place that text lives until it lands.
+// A completion's note. Every Done gesture opens this sheet first. The note is
+// optional only through "Complete without note". Submit sends the status and the
+// note in one POST, so a note never lands without the completion it belongs to.
+// Cancel posts nothing. A failed write keeps the draft.
 
 type ResolutionMode = 'complete' | 'edit'
 
@@ -1147,6 +1127,12 @@ async function submitResolution() {
   board.clearError()
 }
 
+/** Complete with an empty resolution. The blank is the user's explicit choice. */
+async function completeWithoutNote() {
+  resolutionDraft.value = ''
+  await submitResolution()
+}
+
 /**
  * Refresh task: the record moved on under a conflict. Re-read the board and the
  * task, so the next write presents the current revision. The draft is not touched.
@@ -1162,6 +1148,69 @@ async function refreshResolutionTask() {
     board.clearError()
     return
   }
+  board.clearError()
+}
+
+const progressDraft = ref('')
+const progressError = ref('')
+const progressBusy = ref(false)
+const editingUpdateId = ref('')
+const editingUpdateDraft = ref('')
+const canAddProgress = computed(() => {
+  const status = detailTask.value?.status
+  return status === 'in_progress' || status === 'in_review'
+})
+
+function beginEditProgress(item: TaskUpdate) {
+  editingUpdateId.value = item.id
+  editingUpdateDraft.value = item.text
+  progressError.value = ''
+}
+
+async function saveProgress(send: boolean) {
+  const task = detailTask.value
+  const text = progressDraft.value.trim()
+  if (!task || !text || progressBusy.value) return
+  const revision = board.revisionOf(task.id)
+  if (!revision) {
+    progressError.value = 'Refresh the task before saving this.'
+    return
+  }
+  progressBusy.value = true
+  progressError.value = ''
+  board.clearError()
+  const saved = await board.addUpdate(workspace.value, task.id, revision, text, send)
+  progressBusy.value = false
+  if (!saved) {
+    progressError.value = board.error || 'Could not save the progress note.'
+    board.clearError()
+    return
+  }
+  progressDraft.value = ''
+  board.clearError()
+}
+
+async function saveEditedProgress() {
+  const task = detailTask.value
+  const updateId = editingUpdateId.value
+  const text = editingUpdateDraft.value.trim()
+  if (!task || !updateId || !text || progressBusy.value) return
+  const revision = board.revisionOf(task.id)
+  if (!revision) {
+    progressError.value = 'Refresh the task before saving this.'
+    return
+  }
+  progressBusy.value = true
+  progressError.value = ''
+  board.clearError()
+  const saved = await board.editUpdate(workspace.value, task.id, updateId, revision, text)
+  progressBusy.value = false
+  if (!saved) {
+    progressError.value = board.error || 'Could not save the progress note.'
+    board.clearError()
+    return
+  }
+  editingUpdateId.value = ''
   board.clearError()
 }
 
@@ -1473,24 +1522,14 @@ async function setDetailStatus(next: TaskStatus) {
   if (!task) return
   statusError.value = ''
   if (next === 'done') {
-    detailSaving.value = true
-    const freed = await releaseForDone(task)
-    detailSaving.value = false
-    if (!freed) {
-      if (board.error) {
-        statusError.value = board.error
-        load()
-      }
-      return
-    }
+    openResolution(task, 'complete')
+    return
   }
   const revision = board.revisionOf(task.id)
   if (!revision) return
   board.clearError()
   detailSaving.value = true
-  const saved = next === 'done'
-    ? await board.complete(workspace.value, task.id, revision)
-    : await board.update(workspace.value, task.id, revision, { status: next })
+  const saved = await board.update(workspace.value, task.id, revision, { status: next })
   detailSaving.value = false
   if (!saved) {
     statusError.value = board.error
@@ -2381,6 +2420,53 @@ const today = localDateKey()
             </p>
           </div>
 
+          <section class="task-progress" aria-labelledby="task-progress-title">
+            <h4 id="task-progress-title" class="task-delegate-title">Activity</h4>
+            <p class="hint">Milestones and blockers. These notes are what the next resume and the completion memory pass read. They are not a copy of the chat.</p>
+            <ol v-if="detailHeld?.updates.length" class="task-completions" aria-label="Progress notes, newest first">
+              <li v-for="item in detailHeld.updates" :key="item.id" class="task-completion">
+                <span class="hint">{{ item.actor === 'agent' ? 'Agent' : 'You' }} · {{ formatCompletedAt(item.recorded_at) || 'No time recorded' }}<template v-if="item.edited_at"> · edited</template></span>
+                <template v-if="editingUpdateId === item.id">
+                  <textarea v-model="editingUpdateDraft" rows="4" :disabled="progressBusy" :aria-label="`Edit progress note from ${item.actor}`"></textarea>
+                  <div class="task-resolution-actions">
+                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy || !editingUpdateDraft.trim()" @click="saveEditedProgress">Save</button>
+                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy" @click="editingUpdateId = ''">Cancel</button>
+                  </div>
+                </template>
+                <template v-else>
+                  <p class="task-resolution-text">{{ item.text }}</p>
+                  <div class="task-resolution-actions">
+                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy || detailSaving" @click="beginEditProgress(item)">Edit</button>
+                  </div>
+                </template>
+              </li>
+            </ol>
+            <p v-else-if="detailHeld" class="hint">No progress notes yet.</p>
+            <template v-if="canAddProgress">
+              <div class="form-group">
+                <label for="task-progress-text">Add a progress note</label>
+                <textarea
+                  id="task-progress-text"
+                  v-model="progressDraft"
+                  rows="4"
+                  :disabled="progressBusy"
+                  placeholder="What moved, what's blocked, what you checked."
+                ></textarea>
+              </div>
+              <div class="task-resolution-actions">
+                <button type="button" class="btn-chip task-chip" :disabled="progressBusy || !progressDraft.trim()" @click="saveProgress(false)">Save note</button>
+                <button
+                  v-if="detailTask?.live_attempt_id"
+                  type="button"
+                  class="btn-chip task-chip"
+                  :disabled="progressBusy || !progressDraft.trim()"
+                  @click="saveProgress(true)"
+                >Save and send to agent</button>
+              </div>
+            </template>
+            <p v-if="progressError" class="task-action-error" role="alert">{{ progressError }}</p>
+          </section>
+
           <!-- The completion record. Complete with resolution is the way to finish a
                task and write its note in one step; a done task shows what it
                recorded, kept apart from the description and the delegation log. -->
@@ -2393,7 +2479,7 @@ const today = localDateKey()
                   class="btn-chip task-chip"
                   :disabled="detailSaving || board.saving"
                   @click="openResolution(detailTask!, 'complete')"
-                >{{ isReviewReady(detailTask) ? 'Approve with resolution…' : 'Complete with resolution…' }}</button>
+                >{{ isReviewReady(detailTask) ? 'Approve…' : 'Complete…' }}</button>
               </div>
             </template>
             <template v-else-if="detailTask">
@@ -2631,7 +2717,18 @@ const today = localDateKey()
             <button type="button" class="btn-chip task-chip" :disabled="resolutionBusy" @click="refreshResolutionTask">Refresh task</button>
           </div>
           <div class="form-actions">
-            <button type="submit" class="btn-primary" :disabled="resolutionBusy">{{ resolutionBusy ? 'Saving…' : resolutionSubmitLabel }}</button>
+            <button
+              type="submit"
+              class="btn-primary"
+              :disabled="resolutionBusy || (resolutionMode === 'complete' && !resolutionDraft.trim())"
+            >{{ resolutionBusy ? 'Saving…' : resolutionSubmitLabel }}</button>
+            <button
+              v-if="resolutionMode === 'complete'"
+              type="button"
+              class="btn-small"
+              :disabled="resolutionBusy"
+              @click="completeWithoutNote"
+            >Complete without note</button>
             <button type="button" class="btn-small" :disabled="resolutionBusy" @click="closeResolution">Cancel</button>
           </div>
         </form>

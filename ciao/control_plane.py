@@ -74,6 +74,13 @@ from ciao.task_resolution import (
     parse_completions,
     strip_completions,
 )
+from ciao.task_updates import (
+    extract_section as extract_updates,
+    latest_update_id,
+    parse_updates,
+    strip_updates,
+    unseen_updates,
+)
 from ciao.web.chat_service import MEMORY_PASS_RESOLUTION_MAX
 from ciao.web.routes_webhooks import webhook_store
 from ciao.webhooks import (
@@ -454,9 +461,9 @@ def _description(body: str) -> str:
     trailing newline the strip helpers leave is trimmed, so the description reads
     back as the text the user wrote, and a save that sends it back round-trips.
     """
-    if not (extract_section(body) or extract_log(body)):
+    if not (extract_section(body) or extract_log(body) or extract_updates(body)):
         return body
-    return strip_completions(strip_log(body)).rstrip("\n")
+    return strip_updates(strip_completions(strip_log(body))).rstrip("\n")
 
 
 def _completed_summary(completions: list[Completion]) -> dict[str, Any]:
@@ -518,6 +525,18 @@ def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict
             for item in completions
         ]
         payload["delegation_log"] = log_text(document.body)
+        payload["updates"] = [
+            {
+                "id": item.id,
+                "recorded_at": item.recorded_at.isoformat(),
+                "actor": item.actor,
+                "text": item.text,
+                "edited_at": item.edited_at.isoformat() if item.edited_at is not None else None,
+                "attempt_id": item.attempt_id,
+                "chat_id": item.chat_id,
+            }
+            for item in parse_updates(document.body)
+        ]
     return payload
 
 
@@ -2845,6 +2864,164 @@ class CiaoControlPlane:
                 "this task is done but has no completion record to edit a resolution on.",
             )
 
+    def workspace_task_add_update(
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        text: str,
+        actor: Actor,
+        chat_id: str = "",
+        send: bool = False,
+    ) -> dict[str, Any]:
+        """Append one progress note, and optionally send it to the live attempt.
+
+        A note is not an edit of the description. When the live attempt was
+        bound to the revision this write read, it follows the new revision so
+        the note does not read as "changed since delegated". A description
+        edit that was already pending stays pending.
+
+        ``send`` delivers the note as one ordinary message in the attempt's
+        chat. It is refused before the write when nothing is live to receive
+        it. Saving without ``send`` leaves the note for the next resume.
+        """
+        clean = str(task_id or "").strip()
+        if not isinstance(text, str) or not text.strip():
+            raise ControlPlaneError("invalid_task", "a progress note must be text")
+        document = self._task_call(workspace, lambda store: store.get(clean))
+        if str(expected_revision or "").strip() != document.revision:
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "the task changed since this note was planned; nothing was written",
+                retryable=True,
+            )
+        live = self._attempt_live(workspace, clean)
+        attempt_id = ""
+        linked_chat = ""
+        if actor == "agent":
+            if live is not None and live.chat_id != chat_id:
+                raise ControlPlaneError(
+                    "task_report_not_holder",
+                    "only the chat working on this task can add a progress note to it.",
+                )
+            if live is not None and live.chat_id == chat_id:
+                attempt_id = live.attempt_id
+                linked_chat = live.chat_id
+        if send and (live is None or not live.is_live):
+            raise ControlPlaneError(
+                "invalid_action",
+                "there is no live attempt to send this progress note to.",
+            )
+        written = self._task_call(
+            workspace,
+            lambda store: store.add_update(
+                clean,
+                expected_revision=document.revision,
+                actor=actor,
+                text=text.strip(),
+                attempt_id=attempt_id,
+                chat_id=linked_chat,
+            ),
+        )
+        if live is not None and live.task_revision == document.revision:
+            live = self._attempt_call(
+                workspace,
+                lambda store: store.bind_revision(live.attempt_id, written.revision),
+            )
+        sent = False
+        if send and live is not None:
+            message = "Progress note on this task:\n\n" + text.strip()
+            self._deliver_task_message(live.chat_id, message)
+            sent = True
+            self._note_updates_seen(workspace, live.attempt_id, written.body)
+        elif actor == "agent" and live is not None and live.chat_id == chat_id:
+            self._note_updates_seen(workspace, live.attempt_id, written.body)
+        task = self._task_with_attempt(workspace, written, include_body=True)
+        task["update_sent"] = sent
+        return task
+
+    def workspace_task_edit_update(
+        self,
+        workspace: str,
+        task_id: str,
+        update_id: str,
+        *,
+        expected_revision: str,
+        text: str,
+    ) -> dict[str, Any]:
+        """Reword one progress note. The description is not edited."""
+        clean = str(task_id or "").strip()
+        document = self._task_call(workspace, lambda store: store.get(clean))
+        if str(expected_revision or "").strip() != document.revision:
+            raise ControlPlaneError(
+                "task_revision_conflict",
+                "the task changed since this note was planned; nothing was written",
+                retryable=True,
+            )
+        written = self._task_call(
+            workspace,
+            lambda store: store.edit_update(
+                clean,
+                str(update_id or ""),
+                expected_revision=document.revision,
+                text=text,
+            ),
+        )
+        live = self._attempt_live(workspace, clean)
+        if live is not None and live.task_revision == document.revision:
+            self._attempt_call(
+                workspace,
+                lambda store: store.bind_revision(live.attempt_id, written.revision),
+            )
+        return self._task_with_attempt(workspace, written, include_body=True)
+
+    def _note_updates_seen(self, workspace: str, attempt_id: str, body: str) -> None:
+        """Remember the newest progress note an attempt has been shown."""
+        newest = latest_update_id(body)
+        if not newest:
+            return
+        try:
+            self._attempt_call(
+                workspace,
+                lambda store: store.note_seen_update(attempt_id, newest),
+            )
+        except ControlPlaneError:
+            logger.exception("tasks: could not record the progress cursor for %s", attempt_id)
+
+    def _deliver_task_message(self, chat_id: str, message: str) -> None:
+        """Queue or start one ordinary message in a delegated chat."""
+        if self.pcm.queue_message(chat_id, message):
+            return
+        active = self.pcm.get_active_stream(chat_id)
+        stream, refusal = self._launch_turn(chat_id, message)
+        if stream is None or stream is active:
+            raise ControlPlaneError(
+                "task_launch_failed",
+                f"the progress note was saved but could not be sent ({refusal or 'the chat is busy'})",
+                retryable=True,
+            )
+        self._watch_turn_for_chat(chat_id, stream)
+
+    def _watch_turn_for_chat(self, chat_id: str, stream: Any) -> None:
+        """Attach a watcher when this delivery started the turn itself."""
+        try:
+            chat = self.pcm.get_chat(chat_id)
+        except Exception:  # noqa: BLE001
+            return
+        helper = getattr(chat, "helper", None)
+        project = self.pcm.get_project(str(getattr(chat, "project_id", "") or ""))
+        workspace = str(getattr(project, "workspace", "") or "")
+        if not isinstance(helper, dict) or not workspace:
+            return
+        self._watch_turn(
+            workspace,
+            str(helper.get("attempt_id") or ""),
+            str(helper.get("task_id") or ""),
+            chat_id,
+            stream,
+        )
+
     def workspace_task_action(
         self,
         workspace: str,
@@ -3016,7 +3193,11 @@ class CiaoControlPlane:
         # would keep drawing Stop and Detach over a task with no chat to open.
         done: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
         self._learn_from_approved(
-            workspace, attempt, document.record.title, _latest_completion(done.body)
+            workspace,
+            attempt,
+            document.record.title,
+            _latest_completion(done.body),
+            task_path=done.relative_path,
         )
         return self._task_with_attempt(workspace, done, include_body=True)
 
@@ -3026,6 +3207,7 @@ class CiaoControlPlane:
         attempt: TaskAttempt,
         title: str,
         completion: Completion | None,
+        task_path: str = "",
     ) -> None:
         """Archive an approved task's chat and run a procedure-focused memory pass.
 
@@ -3070,6 +3252,7 @@ class CiaoControlPlane:
                 completion.completed_at.isoformat() if completion is not None else ""
             ),
             "user_resolution": resolution,
+            "task_path": task_path,
         }
 
         async def _run() -> None:
@@ -3587,6 +3770,8 @@ class CiaoControlPlane:
             lambda store: store.bind_revision(attempt.attempt_id, linked.revision),
         )
         stream, refusal = self._launch_turn(chat.chat_id, prompt)
+        if stream is not None:
+            self._note_updates_seen(workspace, attempt.attempt_id, document.body)
         if stream is None:
             self._settle_interrupted(
                 workspace,
@@ -4628,11 +4813,13 @@ class CiaoControlPlane:
                 + ("deleted" if chat is None else "archived")
                 + "; continue in a new chat instead (retry), which is handed what it did.",
             )
+        pending = tuple(unseen_updates(document.body, attempt.seen_update_id))
         prompt = build_resume_prompt(
             title=document.record.title,
             state=attempt.state,
             task_id=document.record.id,
             detail=attempt.detail,
+            updates=pending,
         )
         running = self._attempt_call(
             workspace, lambda store: store.reopen(attempt.attempt_id)
@@ -4653,6 +4840,8 @@ class CiaoControlPlane:
         self._watch_turn(
             workspace, running.attempt_id, document.record.id, attempt.chat_id, stream
         )
+        if pending:
+            self._note_updates_seen(workspace, running.attempt_id, document.body)
         return {
             **_attempt_payload(
                 running, self._task_with_attempt(workspace, document)
@@ -4878,6 +5067,26 @@ class CiaoControlPlane:
                 body=body,
                 project_id=project_id,
                 due=due,
+            )
+        )
+
+    def task_add_update(
+        self,
+        principal: AgentPrincipal,
+        task_id: str,
+        *,
+        expected_revision: str,
+        text: str,
+    ) -> dict[str, Any]:
+        """Append a progress note. The agent cannot complete the task by doing so."""
+        return _ok(
+            self.workspace_task_add_update(
+                self._workspace(principal),
+                task_id,
+                expected_revision=expected_revision,
+                text=text,
+                actor="agent",
+                chat_id=principal.chat_id,
             )
         )
 

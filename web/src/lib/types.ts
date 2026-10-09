@@ -1439,6 +1439,20 @@ export interface TaskDetail extends Task {
   completions: TaskCompletion[]
   /** The engine's delegation log as text, or `''`. */
   delegation_log: string
+  /** Progress notes, newest first. Empty when this payload did not carry them. */
+  updates: TaskUpdate[]
+}
+
+/** One progress note (`ciao/task_updates.py`), as the get route serves it. */
+export interface TaskUpdate {
+  id: string
+  recorded_at: string
+  actor: 'user' | 'agent' | string
+  text: string
+  /** When the note was last reworded, or `null` when it never was. */
+  edited_at: string | null
+  attempt_id: string
+  chat_id: string
 }
 
 /** One recorded completion of a task (`ciao/task_resolution.py`), as the get route serves it. */

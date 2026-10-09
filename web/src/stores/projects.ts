@@ -2310,9 +2310,15 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
-  async function completeProject(projectId: string) {
+  async function completeProject(
+    projectId: string,
+    closure: { outcome: 'completed' | 'stopped'; note: string } = { outcome: 'completed', note: '' },
+  ) {
     const activeChatProject = activeChat.value?.project_id
-    await api.post(`/api/projects/${projectId}/complete`, {})
+    await api.post(`/api/projects/${projectId}/complete`, {
+      outcome: closure.outcome,
+      note: closure.note,
+    })
     projects.value = projects.value.filter(p => p.project_id !== projectId)
     clearDraftsForProject(projectId)
     chats.value = chats.value.filter(c => c.project_id !== projectId)
