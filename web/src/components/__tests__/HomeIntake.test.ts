@@ -229,6 +229,26 @@ describe('HomeIntake', () => {
     wrapper.unmount()
   })
 
+  it('names the submit button for what it does, matching its title', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'general', name: 'General', workspace: 'personal', order: 0 },
+    ] as unknown as typeof store.projects
+    store.activeWorkspace = 'personal'
+    vi.spyOn(store, 'newChatInProject').mockResolvedValue({ chat_id: 'x' } as ChatInfo)
+    vi.spyOn(store, 'sendMessage').mockReturnValue(true)
+
+    const wrapper = mount(HomeIntake)
+    const submit = wrapper.get('button[type="submit"]')
+    expect(submit.attributes('aria-label')).toBe('New chat')
+    expect(submit.attributes('title')).toBe('New chat')
+
+    await wrapper.get<HTMLTextAreaElement>('#home-intake-prompt').setValue('Draft the plan')
+    expect(submit.attributes('aria-label')).toBe('Send')
+    expect(submit.attributes('title')).toMatch(/^Send \(.+\)$/)
+    wrapper.unmount()
+  })
+
   it('sends with Cmd/Ctrl+Enter and keeps bare Enter as a newline', async () => {
     const store = useProjectStore()
     store.projects = [
@@ -298,7 +318,7 @@ describe('HomeIntake', () => {
     const wrapper = mount(HomeIntake, { attachTo: document.body })
     const trigger = wrapper.get('.home-intake-model-trigger')
     expect(trigger.text()).toContain('opencode default')
-    expect(wrapper.get('button[type="submit"]').attributes('aria-label')).toBe('New')
+    expect(wrapper.get('button[type="submit"]').attributes('aria-label')).toBe('New chat')
 
     await trigger.trigger('click')
     await flushPromises()

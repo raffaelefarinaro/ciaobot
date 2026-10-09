@@ -98,13 +98,14 @@
         </button>
         <span class="home-intake-spacer" />
         <span v-if="prompt.trim()" class="home-intake-kbd" aria-hidden="true"><kbd>{{ sendChord }}</kbd> send</span>
-        <!-- Keeps "New" as its accessible name: with or without a prompt it
-             opens a chat in the project the chip names. -->
+        <!-- The accessible name is the title's wording: "Send" with a prompt,
+             "New chat" without one (it opens an empty chat in the project the
+             chip names). -->
         <button
           type="submit"
           class="home-intake-new"
           :disabled="starting || !hasProjects"
-          :aria-label="starting ? 'Opening…' : 'New'"
+          :aria-label="starting ? 'Opening…' : prompt.trim() ? 'Send' : 'New chat'"
           :aria-keyshortcuts="prompt.trim() ? sendKeyshortcuts : undefined"
           :title="prompt.trim() ? `Send (${sendChord})` : 'New chat'"
         >
