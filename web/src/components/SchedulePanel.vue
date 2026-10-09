@@ -677,6 +677,7 @@ import {
   DropdownMenuTrigger,
 } from 'reka-ui'
 import { bindsFixedChat, contextBindsFixedChat, scheduleSupportsAutoArchive } from '../lib/scheduleBinding'
+import { cadenceSummary } from '../lib/scheduleClock'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
 import type { ScheduleUpdate } from '../stores/tasks'
@@ -928,21 +929,6 @@ function relativeWhen(iso: string | null | undefined): string {
   else if (absMin < 60 * 24) rel = `${Math.round(absMin / 60)}h`
   else rel = `${Math.round(absMin / 1440)}d`
   return diffMs < 0 ? `${clock} · ${rel} ago` : `${clock} · in ${rel}`
-}
-
-// Plain cadence for a row's sub-line: "Every day at 08:00", "Every 30 min".
-function cadenceSummary(s: Schedule): string {
-  const at = s.daily_time_utc ? ` at ${s.daily_time_utc}` : ''
-  if (s.frequency === 'manual') return 'Only when you run it'
-  if (s.frequency === 'interval') return `Every ${s.interval_minutes} min`
-  if (s.frequency === 'once') return s.run_at_date ? `Once on ${s.run_at_date}${at}` : `Once${at}`
-  if (s.frequency === 'monthly') return `Monthly on day ${s.day_of_month}${at}`
-  if (s.frequency === 'weekly') {
-    return s.days_of_week?.length
-      ? `Weekly on ${s.days_of_week.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', ')}${at}`
-      : `Weekly${at}`
-  }
-  return `Every day${at}`
 }
 
 // Where each run lands, in the sub-line's words.

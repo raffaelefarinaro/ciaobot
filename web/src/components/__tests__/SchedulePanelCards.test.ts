@@ -498,6 +498,31 @@ describe('SchedulePanel overview', () => {
     }
   })
 
+  it('states the cadence in browser time, matching the next-run time', async () => {
+    const previousTz = process.env.TZ
+    process.env.TZ = 'Europe/Rome'
+    try {
+      const wrapper = await mountOverview([
+        makeSchedule({
+          schedule_id: 'utc',
+          title: 'Early sweep',
+          timezone_name: 'UTC',
+          daily_time_utc: '00:01',
+          frequency: 'daily',
+          days_of_week: null,
+          next_run: '2026-12-05T00:01:00Z',
+        }),
+      ])
+      const row = wrapper.get('.ov-item')
+      expect(row.get('.ov-sub').text()).toContain('Every day at 01:01')
+      expect(row.get('.ov-sub').text()).not.toContain('00:01')
+      expect(row.get('.ov-when').text()).toContain('Sat 01:01')
+    } finally {
+      if (previousTz === undefined) delete process.env.TZ
+      else process.env.TZ = previousTz
+    }
+  })
+
   it('sends a "check the chat" row to the run chat, and other rows to the automation', async () => {
     const wrapper = await mountOverview([
       makeSchedule({ schedule_id: 'q', title: 'Asks first', last_status: 'skipped', last_run_chat_id: 'chat-q' }),

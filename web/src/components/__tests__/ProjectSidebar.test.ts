@@ -413,6 +413,44 @@ describe('ProjectSidebar global new chat', () => {
     wrapper.unmount()
   })
 
+  it('shows routine times in the browser zone, not the schedule zone', async () => {
+    const previousTz = process.env.TZ
+    process.env.TZ = 'Europe/Rome'
+    try {
+      useTaskStore().schedules = [{
+        schedule_id: 'utc-routine',
+        title: 'Early sweep',
+        prompt: 'sweep',
+        daily_time_utc: '00:01',
+        timezone_name: 'UTC',
+        frequency: 'daily',
+        enabled: true,
+        scope: 'user',
+        workspace: 'personal',
+        web_project_id: 'proj-1',
+        next_run: '2026-12-05T00:01:00Z',
+        last_triggered_on: '',
+        days_of_week: null,
+        interval_minutes: 0,
+        day_of_month: null,
+        run_at_date: null,
+        web_chat_id: null,
+        missed: false,
+        model: '',
+        archive_policy: 'manual',
+      } as never]
+      const wrapper = await mountSidebar('schedules')
+      useTaskStore().loading = false
+      await nextTick()
+      const row = wrapper.get('.schedule-item .schedule-time')
+      expect(row.text()).toBe('01:01')
+      wrapper.unmount()
+    } finally {
+      if (previousTz === undefined) delete process.env.TZ
+      else process.env.TZ = previousTz
+    }
+  })
+
   it('leaves the vault lists to the map rail', async () => {
     const wrapper = await mountSidebar('memory')
     expect(wrapper.text()).not.toContain('Most connected')
