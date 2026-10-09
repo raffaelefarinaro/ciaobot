@@ -70,6 +70,34 @@ def test_progress_round_trips_and_stays_out_of_the_description(tmp_path: Path) -
     assert "Schema is in." not in saved.body.split(OPEN)[0]
 
 
+def test_an_edit_cannot_blank_a_progress_note(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    created = store.create(title="In flight", body="Do the thing.")
+    moved = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"status": "in_progress"},
+        actor="user",
+    )
+    written = store.add_update(
+        moved.record.id,
+        expected_revision=moved.revision,
+        actor="user",
+        text="Kept wording.",
+    )
+    original = parse_updates(written.body)[0]
+    for blank in ("", "   \n\t "):
+        with pytest.raises(TaskBoardError) as refused:
+            store.edit_update(
+                written.record.id,
+                original.id,
+                expected_revision=written.revision,
+                text=blank,
+            )
+        assert refused.value.code == "invalid_task"
+    assert parse_updates(store.get(written.record.id).body)[0].text == "Kept wording."
+
+
 def test_progress_is_refused_off_the_active_columns(tmp_path: Path) -> None:
     store = _store(tmp_path)
     created = store.create(title="Still to do", body="Not started.")

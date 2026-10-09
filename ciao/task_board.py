@@ -1759,7 +1759,7 @@ class TaskBoardStore:
         text: str,
     ) -> TaskDocument:
         """Reword one progress note. Its author and recorded time stay."""
-        if not isinstance(text, str):
+        if not isinstance(text, str) or not text.strip():
             raise TaskBoardError("invalid_task", "a progress note must be text")
         path = self._task_path(task_id)
         expected = str(expected_revision or "").strip()
