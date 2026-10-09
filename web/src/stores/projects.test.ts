@@ -6337,6 +6337,37 @@ describe('running subagent poll', () => {
     }
   })
 
+  test('a disposed store does not resume a settled-reply retry it already scheduled', async () => {
+    // The open path re-fetches /messages on delays while it waits for a settled
+    // reply. Those waits are timers the store owns; a disposed store must cancel
+    // them rather than resume and call the API, or an earlier test's store keeps
+    // calling it on the real clock during a later test.
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'c-dispose-retry'
+      const unsettled: ChatMessage = { role: 'user', content: 'Question', timestamp: '2026-08-27T00:00:00Z', turn_index: 0 }
+      store.activeChatId = chatId
+      store.messages[chatId] = [unsettled]
+      apiGet.mockImplementation((path: string) => {
+        if (!path.includes('/messages')) return Promise.resolve([])
+        return Promise.resolve([unsettled])
+      })
+
+      void store.loadMessages(chatId, { waitForSettledReply: true })
+      // The first fetch lands and the first retry wait is now pending.
+      await vi.advanceTimersByTimeAsync(0)
+      expect(apiGet.mock.calls.filter(c => String(c[0]).includes('/messages')).length).toBeGreaterThan(0)
+
+      store.$dispose()
+      apiGet.mockClear()
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(apiGet.mock.calls).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   test('the drain is bounded, so a row the server never retires cannot poll forever', async () => {
     const store = useProjectStore()
     const row = [{ agent_id: 'a1', description: 'stuck', subagent_type: '', status: 'running', is_async: true, turn_index: 0 }]
