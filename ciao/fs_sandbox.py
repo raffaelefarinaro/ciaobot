@@ -224,6 +224,13 @@ def claude_sandbox_settings(
         "autoAllowBashIfSandboxed": mode == "auto",
         "allowUnsandboxedCommands": False,
         "excludedCommands": [],
+        # Only the filesystem is confined (parity with OpenCode's profile, which
+        # allows network both ways). Without this section the SDK sandbox
+        # blocks the engine's loopback port and every outbound host.
+        "network": {
+            "allowedDomains": ["*"],
+            "allowLocalBinding": True,
+        },
         "filesystem": {
             # Claude Code reads everywhere unless a path is denied, so
             # ``allowRead`` alone confines nothing: deny the home directory
