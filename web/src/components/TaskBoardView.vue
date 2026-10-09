@@ -2404,7 +2404,10 @@ const today = localDateKey()
               <p v-else-if="detailHeld" class="hint">No resolution recorded.</p>
               <p v-else-if="descriptionState === 'loading'" class="hint" role="status">Loading resolution…</p>
               <p v-else class="hint">Open the task again to read its resolution.</p>
-              <div class="task-resolution-actions">
+              <!-- A legacy done task has no completion record for an edit to reword
+                   (#1189): `completed_at` is null exactly when there is none, so the
+                   action row is left out rather than offering a refused write. -->
+              <div v-if="detailTask.completed_at" class="task-resolution-actions">
                 <button
                   type="button"
                   class="btn-chip task-chip"
