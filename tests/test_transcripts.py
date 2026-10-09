@@ -512,3 +512,72 @@ def test_a_reply_with_its_own_fenced_blocks_round_trips_whole(tmp_path: Path) ->
     assert len(turns) == 1
     assert turns[0]["user"] == prompt
     assert turns[0]["assistant"] == response
+
+
+def _legacy_turn(user_body: str, assistant_body: str) -> str:
+    """One turn in the three-backtick shape written before the fence grew."""
+    return (
+        "## Turn 1\n"
+        "\n"
+        "- Time: 2026-01-01 10:00\n"
+        "- Input kind: text\n"
+        "\n"
+        "### User\n"
+        "\n"
+        "```text\n"
+        f"{user_body}\n"
+        "```\n"
+        "\n"
+        "### Assistant\n"
+        "\n"
+        "```text\n"
+        f"{assistant_body}\n"
+        "```\n"
+        "\n"
+        "### Usage\n"
+        "\n"
+        "- input: 3\n"
+    )
+
+
+def test_a_legacy_user_body_with_a_pasted_assistant_heading_is_read_whole() -> None:
+    """A pasted ``### Assistant`` in a legacy user body is not the reply heading.
+
+    The heading only ends the body when a text fence opens after it, so the
+    scan passes over the pasted one, keeps the body through the fence it
+    closes, and reads the real reply.
+    """
+    from ciao.transcripts import parse_archive_turns
+
+    user_body = (
+        "Here is my code:\n```python\nx = 1\n```\n"
+        "### Assistant\npasted heading\n"
+        "and that is all"
+    )
+    turns = parse_archive_turns(_legacy_turn(user_body, "the real reply"))
+
+    assert len(turns) == 1
+    assert turns[0]["user"] == user_body
+    assert turns[0]["assistant"] == "the real reply"
+    assert "- input: 3" in turns[0]["trailer"]
+
+
+def test_a_legacy_assistant_body_with_a_pasted_usage_heading_is_read_whole() -> None:
+    """A pasted ``### Usage`` in a legacy reply is not the trailer.
+
+    The trailer holds no fence, so a ``### Usage`` heading followed by the
+    reply's own closing fence is part of the body, not the trailer.
+    """
+    from ciao.transcripts import parse_archive_turns
+
+    assistant_body = (
+        "here is the log:\n```\nok\n```\n"
+        "### Usage\n- note: quoted\n"
+        "end of reply"
+    )
+    turns = parse_archive_turns(_legacy_turn("question", assistant_body))
+
+    assert len(turns) == 1
+    assert turns[0]["user"] == "question"
+    assert turns[0]["assistant"] == assistant_body
+    assert "- input: 3" in turns[0]["trailer"]

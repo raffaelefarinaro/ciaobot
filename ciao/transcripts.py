@@ -941,6 +941,7 @@ _ARCHIVE_FENCE_RUN_RE = re.compile(r"^ {0,3}(`{3,})\s*$")
 #: Lines that end a legacy (three-backtick) message body: the next turn, or a
 #: sub-heading the renderer writes after a message.
 _ARCHIVE_BOUNDARY_RE = re.compile(r"^(?:## Turn \d+|### (?:User|Assistant|Usage|Quota))\s*$")
+_ARCHIVE_MESSAGE_HEADING_RE = re.compile(r"^### (?:User|Assistant)\s*$")
 _ARCHIVE_TURN_LINE_RE = re.compile(r"^## Turn \d+\s*$")
 _ARCHIVE_TIME_RE = re.compile(r"^- Time:\s*(.+)$")
 
@@ -956,6 +957,38 @@ def _text_block(body: str) -> list[str]:
     longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
     fence = "`" * max(3, longest + 1)
     return [f"{fence}text", body, fence]
+
+
+def _opens_text_block(lines: list[str], start: int) -> bool:
+    """Whether the first non-blank line from ``start`` opens a ``text`` fence."""
+    index = start
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    return index < len(lines) and _ARCHIVE_TEXT_OPEN_RE.match(lines[index]) is not None
+
+
+def _is_legacy_boundary(lines: list[str], index: int) -> bool:
+    """Whether the boundary line at ``index`` really ends a legacy message body.
+
+    A message body may quote the renderer's own headings. A ``### User`` or
+    ``### Assistant`` heading ends a body only when a ``text`` fence opens
+    after it, which is what the renderer writes. A ``### Usage`` or
+    ``### Quota`` heading ends a body only when the rest of the turn is trailer
+    (no fence line, no message heading) up to the next turn, since the trailer
+    never holds a fence. A ``## Turn`` heading always counts; the caller still
+    needs a fence before it.
+    """
+    line = lines[index]
+    if _ARCHIVE_TURN_LINE_RE.match(line) is not None:
+        return True
+    if _ARCHIVE_MESSAGE_HEADING_RE.match(line) is not None:
+        return _opens_text_block(lines, index + 1)
+    for row in lines[index + 1 :]:
+        if _ARCHIVE_TURN_LINE_RE.match(row) is not None:
+            break
+        if _ARCHIVE_FENCE_RUN_RE.match(row) is not None or _ARCHIVE_MESSAGE_HEADING_RE.match(row):
+            return False
+    return True
 
 
 def _read_text_block(lines: list[str], start: int) -> tuple[str, int] | None:
@@ -992,7 +1025,10 @@ def _read_text_block(lines: list[str], start: int) -> tuple[str, int] | None:
                 break
     else:
         for boundary in range(index + 1, len(lines) + 1):
-            if boundary < len(lines) and _ARCHIVE_BOUNDARY_RE.match(lines[boundary]) is None:
+            if boundary < len(lines) and (
+                _ARCHIVE_BOUNDARY_RE.match(lines[boundary]) is None
+                or not _is_legacy_boundary(lines, boundary)
+            ):
                 continue
             for candidate in range(boundary - 1, index, -1):
                 if _ARCHIVE_FENCE_RUN_RE.match(lines[candidate]) is not None:
