@@ -474,6 +474,30 @@ describe('SchedulePanel overview', () => {
     expect(rail.text()).toContain('Flaky one')
   })
 
+  it('shows next runs in the browser zone, not the automation\'s UTC clock', async () => {
+    // Pinned so the expected clock is the same on every machine: 00:01 UTC on a
+    // Saturday is 09:01 in Tokyo, which has no DST.
+    const previousTz = process.env.TZ
+    process.env.TZ = 'Asia/Tokyo'
+    try {
+      const wrapper = await mountOverview([
+        makeSchedule({
+          schedule_id: 'utc',
+          title: 'Early sweep',
+          timezone_name: 'UTC',
+          daily_time_utc: '00:01',
+          next_run: '2026-12-05T00:01:00Z',
+        }),
+      ])
+      const row = wrapper.get('.ov-item .ov-when').text()
+      expect(row).toContain('Sat 09:01')
+      expect(row).not.toContain('00:01')
+    } finally {
+      if (previousTz === undefined) delete process.env.TZ
+      else process.env.TZ = previousTz
+    }
+  })
+
   it('sends a "check the chat" row to the run chat, and other rows to the automation', async () => {
     const wrapper = await mountOverview([
       makeSchedule({ schedule_id: 'q', title: 'Asks first', last_status: 'skipped', last_run_chat_id: 'chat-q' }),
