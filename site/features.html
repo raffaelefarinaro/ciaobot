@@ -63,6 +63,7 @@
         <h2>Tasks you can track and delegate</h2>
         <p>Keep the next steps in each workspace on a board: <strong>To do</strong>, <strong>In progress</strong>, <strong>In review</strong> and <strong>Done</strong>. Add a description, a project and a due date, and choose whether you or the agent will do the work.</p>
         <p><strong>Delegate to agent</strong> shows you what will be sent before starting a chat. Follow the work there and answer when it needs you. When the agent reports the task finished, the result waits for your review; <strong>Approve Done</strong> closes the task.</p>
+        <p>Approving a task asks for a resolution note, or an explicit complete without one. While a task is in progress, you or the working agent can add progress notes, which later resumes read. Completing a project asks whether it was completed or stopped, with an optional note.</p>
         <p>Task records stay in your vault as plain Markdown, alongside the context and notes they belong to.</p>
         <p class="how"><strong>How:</strong> <em>Tasks</em> in the sidebar, then <em>New task</em>. Open a task and choose <em>Delegate to agent</em> to have Ciaobot work on it.</p>
       </div>
@@ -144,6 +145,14 @@
         <a href="assets/img/google.webp"><img src="assets/img/google.webp" alt="Settings, Workspaces tab: each workspace with its colour, AI tool and Google profile, and the Google Workspace card for adding accounts" loading="lazy" width="1600" height="1000"></a>
       </figure>
     </div>
+
+    <section class="narrow" id="file-access">
+      <p class="eyebrow">Stay in control</p>
+      <h2>File access</h2>
+      <p>Each workspace decides how much of your computer its agent can read. <strong>Workspace only</strong> keeps the agent's shell and file tools inside that workspace's folder. <strong>Whole machine</strong> lets it read any file you can read. A workspace with no File access choice uses Workspace only on macOS and Linux, and Whole machine on Windows, which has no sandbox.</p>
+      <p>Workspace only does not limit the network: the agent can still reach the internet and Ciaobot's own command-line tool. On Linux, the sandbox needs a one-time AppArmor setup on Ubuntu 23.10 and later (see the Linux guide in the GitHub repository).</p>
+      <p class="how"><strong>How:</strong> Settings → Workspaces → Edit, then <em>File access</em>. Each workspace row shows the value in effect.</p>
+    </section>
 
     <div class="feature phone" id="devices">
       <div class="feature-text">
