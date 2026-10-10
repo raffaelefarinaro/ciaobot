@@ -4072,6 +4072,10 @@ def _resolve_workspace_and_vaults(
     return workspace, resolved, resolved, name
 
 
+#: Proposals `ciao memory-proposals` prints per page unless `--limit` says otherwise.
+MEMORY_PROPOSALS_DEFAULT_LIMIT = 20
+
+
 def _memory_proposals_command(args: argparse.Namespace) -> int:
     """List pending memory proposals in a workspace's review queue.
 
@@ -4080,20 +4084,33 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     item (promote via a region Edit, or dismiss via ``memory-proposal-dismiss``),
     and thereby keeps memory improving across sessions.
     """
+    from ciao.control_plane import PAGE_MAX_LIMIT, page_of, validate_page
     from ciao.memory_proposals import list_proposals
 
+    try:
+        validate_page(args.limit, args.offset, maximum=PAGE_MAX_LIMIT)
+    except ValueError as exc:
+        print(f"ciao memory-proposals: {exc}", file=sys.stderr)
+        return 2
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
     rows = list_proposals(path)
+    window = rows[args.offset : args.offset + args.limit]
+    page = page_of("proposals", window, total=len(rows), offset=args.offset, limit=args.limit)
     if args.json:
-        json.dump(rows, sys.stdout, ensure_ascii=False, indent=2)
+        json.dump(page, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
     else:
         if not rows:
             print("No memory proposals are pending.")
-        for row in rows:
+        for row in window:
             tag = f" [{row['source']}]" if row["source"] else ""
             print(f"- [{row['kind']}] {row['text']}{tag}")
+        if "next_offset" in page:
+            print(
+                f"Showing {args.offset + 1}-{page['next_offset']} of {len(rows)}; "
+                f"more with --offset {page['next_offset']}."
+            )
     return 0
 
 
@@ -7296,9 +7313,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
     )
     memory_proposals_parser.add_argument(
+        "--limit",
+        type=int,
+        default=MEMORY_PROPOSALS_DEFAULT_LIMIT,
+        help="Proposals per page, 1-200. Default 20.",
+    )
+    memory_proposals_parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Proposals to skip; use the printed next offset to page on.",
+    )
+    memory_proposals_parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit the structured rows as JSON instead of text.",
+        help="Emit one page as JSON: proposals, total, offset, limit, and truncated/next_offset when more remain.",
     )
     memory_proposals_parser.set_defaults(func=_memory_proposals_command)
 

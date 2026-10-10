@@ -59,8 +59,8 @@ vault review restore-completed --candidate ID
 vault review delete  --candidate ID --confirm ID
 note verify       --payload-file FILE.json
 file surface      PATH
-chat list         [--project P]
-chat get          [--chat C]
+chat list         [--project P] [--limit N] [--offset N] [--full]
+chat get          [--chat C] [--full]
 chat create       [--project P] [--title T] [--provider P] [--model M] [--mode M] [--prompt TEXT]
 chat update       [--chat C] [--title T] [--provider P] [--model M] [--mode M] [--thinking-level L] [--project P]
 chat send         --chat C --prompt TEXT
