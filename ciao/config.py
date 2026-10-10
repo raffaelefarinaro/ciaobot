@@ -1850,6 +1850,23 @@ class CiaoConfig:
 logger = logging.getLogger(__name__)
 
 
+def active_workspace_vault_root(env: Mapping[str, str]) -> Path | None:
+    """The vault the ``CIAO_ACTIVE_WORKSPACE`` workspace owns, or ``None``.
+
+    ``None`` when that variable is unset or names no registered workspace. Read
+    only: the same resolution as the memory-proposal commands, with the
+    ``PWA_AUTH_TOKEN`` stand-in so a CLI call never mints a session secret.
+    """
+    active = str(env.get("CIAO_ACTIVE_WORKSPACE", "") or "").strip()
+    if not active:
+        return None
+    source = installed_workspace_env(env)
+    if not source.get("PWA_AUTH_TOKEN", "").strip():
+        source["PWA_AUTH_TOKEN"] = "vault-root"
+    config = CiaoConfig.from_env(source)
+    if config.workspace(active) is None:
+        return None
+    return Path(config.agent_vault_root(active)).resolve()
 
 
 # Backward-compatible alias used by project_chats.py and other modules

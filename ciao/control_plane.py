@@ -93,6 +93,13 @@ from ciao.workspace_guide import guide_path
 
 logger = logging.getLogger(__name__)
 
+MIN_DELEGATION_CHARS = 30
+"""The shortest title plus description a task may have to be delegated.
+
+A title like "Do the thing." makes the agent ask the user what the task is, which
+costs a full run for nothing, so a delegation must say what the work is.
+"""
+
 # A GWS health reading older than this is treated as stale: the monitor
 # preserves prior state when probes are unavailable or checks are disabled, so
 # a cached "valid" reading can outlive the token it described. Mirrors the
@@ -3762,6 +3769,16 @@ class CiaoControlPlane:
             raise ControlPlaneError(
                 "invalid_task",
                 "a task in Done cannot be delegated: move it out of Done first.",
+            )
+        brief = " ".join(
+            part
+            for part in (document.record.title.strip(), _description(document.body).strip())
+            if part
+        )
+        if len(brief) < MIN_DELEGATION_CHARS:
+            raise ControlPlaneError(
+                "invalid_task",
+                "Describe the task in at least a sentence before delegating",
             )
         existing = self._attempt_live(workspace, clean)
         if existing is not None:

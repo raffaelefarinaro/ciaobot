@@ -239,3 +239,95 @@ def test_an_absolute_vault_root_is_still_honoured(tmp_path: Path, monkeypatch) -
     target.mkdir(parents=True)
 
     assert _resolve_vault_root(target) == target.resolve()
+
+
+def _install_with_client_workspace(tmp_path: Path) -> Path:
+    """An install whose registry names a `client` workspace, as the PWA writes it."""
+    import json
+
+    root = tmp_path / "install"
+    runtime = root / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "client", "vault_root": "memory-vault/client"},
+        ]),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_default_vault_root_follows_the_active_workspace(tmp_path: Path, monkeypatch) -> None:
+    """With no CIAO_VAULT_ROOT, the default vault is the active workspace's.
+
+    Chats export CIAO_ACTIVE_WORKSPACE, and a routine run that wrote its index to
+    `<workspace>/memory-vault` while the chat named another vault was the bug.
+    """
+    import os
+
+    from ciao.cli import _resolve_vault_root
+    from ciao.config import CiaoConfig, installed_workspace_env
+    from ciao.vault_index import default_vault_root
+
+    root = _install_with_client_workspace(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.chdir(elsewhere)
+
+    source = {**installed_workspace_env(dict(os.environ)), "PWA_AUTH_TOKEN": "test"}
+    expected = CiaoConfig.from_env(source).agent_vault_root("client").resolve()
+    assert default_vault_root() == expected
+    assert _resolve_vault_root() == expected
+
+
+def test_explicit_vault_root_env_still_wins_over_the_active_workspace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.vault_index import default_vault_root
+
+    root = _install_with_client_workspace(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    explicit = tmp_path / "explicit-vault"
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(explicit))
+
+    assert default_vault_root() == explicit.resolve()
+
+
+def test_vault_index_write_refuses_when_env_and_active_workspace_differ(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao.vault_index import main as vault_index_main
+
+    root = _install_with_client_workspace(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    shared = tmp_path / "shared-vault"
+    shared.mkdir()
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(shared))
+
+    assert vault_index_main(["--write"]) == 2
+    assert not (shared / "INDEX.md").exists()
+    err = capsys.readouterr().err
+    assert str(shared.resolve()) in err
+    assert "name different vaults" in err
+
+
+def test_vault_index_write_with_an_explicit_vault_root_is_not_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.vault_index import main as vault_index_main
+
+    root = _install_with_client_workspace(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(tmp_path / "shared-vault"))
+    target = tmp_path / "named-vault"
+    target.mkdir()
+
+    assert vault_index_main(["--write", "--vault-root", str(target)]) == 0
+    assert (target / "INDEX.md").is_file()

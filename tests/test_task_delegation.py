@@ -365,6 +365,10 @@ def _principal(workspace: str = "personal") -> AgentPrincipal:
 def _create(
     plane: CiaoControlPlane, workspace: str = "personal", **fields: Any
 ) -> dict[str, Any]:
+    # A delegation must describe its work (MIN_DELEGATION_CHARS), so a fixture
+    # that does not name a body gets one that does. Tests of the rule itself
+    # pass their own body.
+    fields.setdefault("body", "Write the runbook steps, links and acceptance criteria.")
     return plane.workspace_task_create(workspace, **fields)
 
 
@@ -413,6 +417,41 @@ def _creates(pcm: _RecordingPcm) -> list[tuple[Any, ...]]:
     return [call[1] for call in pcm.calls if call[0] == "create_chat"]
 
 
+async def test_a_vague_task_is_refused_before_any_chat_is_made(tmp_path: Path) -> None:
+    """A title plus description under MIN_DELEGATION_CHARS asks the user back.
+
+    The agent would have to ask what "Do the thing." means, so the delegation is
+    refused up front, with nothing started and no chat created.
+    """
+    from ciao.control_plane import ControlPlaneError
+
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Do the thing.", body="")
+
+    with pytest.raises(ControlPlaneError) as refused:
+        _delegate(plane, task)
+
+    assert refused.value.code == "invalid_task"
+    assert str(refused.value) == "Describe the task in at least a sentence before delegating"
+    assert _creates(pcm) == []
+
+
+async def test_title_and_description_together_meet_the_delegation_minimum(
+    tmp_path: Path,
+) -> None:
+    from ciao.control_plane import MIN_DELEGATION_CHARS, ControlPlaneError
+
+    plane, _pcm = _world(tmp_path)
+    # "Ship it" + " " + body is one character under the minimum, then exactly at it.
+    body = "x" * (MIN_DELEGATION_CHARS - len("Ship it") - 2)
+    short = _create(plane, title="Ship it", body=body)
+    with pytest.raises(ControlPlaneError, match="at least a sentence"):
+        _delegate(plane, short)
+
+    enough = _create(plane, title="Ship it", body=body + "x")
+    assert _delegate(plane, enough)["created"] is True
+
+
 # ── One ordinary chat, no bypass ────────────────────────────────────────
 
 
@@ -446,7 +485,7 @@ async def test_start_stream_is_called_with_no_unattended_and_nothing_else(
     kwargs, so adding the flag later fails here rather than in production.
     """
     plane, pcm = _world(tmp_path)
-    task = _create(plane, title="Wire the board", body="Do the thing.")
+    task = _create(plane, title="Wire the board", body="Connect the board to the chat engine.")
 
     _delegate(plane, task)
 
@@ -1889,7 +1928,9 @@ async def test_a_delegated_task_is_uncompletable_and_unreassignable_by_the_agent
     linkage refuses both outright, before the agent/user distinction comes into it."""
     plane, _pcm = _world(tmp_path)
     principal = _principal()
-    created = plane.task_create(principal, title="Review the diff")["data"]
+    created = plane.task_create(
+        principal, title="Review the diff", body="Read the diff and report any defects."
+    )["data"]
     outcome = plane.task_delegate(
         principal, created["id"], expected_revision=created["revision"]
     )
@@ -2598,7 +2639,9 @@ async def test_an_agents_delegation_is_scoped_to_its_own_workspace(
 async def test_the_agent_envelopes_are_the_shape_the_cli_prints(tmp_path: Path) -> None:
     plane, _pcm = _world(tmp_path)
     principal = _principal()
-    created = plane.task_create(principal, title="Envelope check")["data"]
+    created = plane.task_create(
+        principal, title="Envelope check", body="Check the envelope shape."
+    )["data"]
     delegated = plane.task_delegate(
         principal, created["id"], expected_revision=created["revision"]
     )
@@ -2716,7 +2759,7 @@ async def test_the_task_body_logs_each_attempt_without_tripping_changed_since_de
     tmp_path: Path,
 ) -> None:
     plane, pcm = _world(tmp_path)
-    task = _create(plane, title="Logged", body="The description.")
+    task = _create(plane, title="Logged", body="The description of the work.")
     outcome = _delegate(plane, task)
     # The reply already carries the revision the log write left behind.
     assert outcome["task"]["revision"] == _get_task(plane, task["id"])["revision"]
@@ -2728,7 +2771,7 @@ async def test_the_task_body_logs_each_attempt_without_tripping_changed_since_de
     await _end_turns(pcm)
     files = list(_tasks_dir(plane).glob("*.md"))
     text = files[0].read_text(encoding="utf-8")
-    assert "The description." in text
+    assert "The description of the work." in text
     assert "## Delegation log" in text
     assert "**Agent says done**" in text
     assert "Wrote the runbook in docs/run.md." in text

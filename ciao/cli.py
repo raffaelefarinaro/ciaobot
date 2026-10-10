@@ -1763,19 +1763,17 @@ def _auth_command(args: argparse.Namespace) -> int:
 def _resolve_vault_root(raw: Path | str | None = None) -> Path:
     """Locate the vault.
 
+    With no explicit value the default is `vault_index.default_vault_root`:
+    `CIAO_VAULT_ROOT`, else the active workspace's vault, else `memory-vault`.
     A relative value resolves against `CIAO_WORKSPACE`, not the current
-    directory, for the same reason `_resolve_runtime_root` does: the bundled
-    engine's launcher `cd`s into `Ciaobot.app/.../ciao-runtime` before exec'ing
-    Python, so a relative `CIAO_VAULT_ROOT=memory-vault` resolved against the cwd
-    pointed inside the app bundle. Every vault command run from a routine — whose
-    prompts deliberately pass no `--vault-root` — failed with a
-    FileNotFoundError under the runtime directory.
+    directory, because the bundled engine's launcher `cd`s into the app bundle
+    before exec'ing Python.
     """
-    if raw is not None:
-        root = Path(raw).expanduser()
-    else:
-        env_root = os.environ.get("CIAO_VAULT_ROOT", "").strip()
-        root = Path(env_root).expanduser() if env_root else Path("memory-vault")
+    if raw is None:
+        from ciao.vault_index import default_vault_root
+
+        return default_vault_root()
+    root = Path(raw).expanduser()
     if not root.is_absolute():
         workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
         base = Path(workspace).expanduser() if workspace else Path.cwd()
@@ -3961,6 +3959,19 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     return 1 if findings else 0
 
 
+def _refuse_ambiguous_memory_write(args: argparse.Namespace) -> int | None:
+    """Refuse a memory-proposal write when CIAO_VAULT_ROOT and the active workspace disagree.
+
+    An explicit ``--workspace`` or ``--vault-root`` names the vault, so only the
+    implicit resolution is checked.
+    """
+    if getattr(args, "vault_root", None) or getattr(args, "workspace", None):
+        return None
+    from ciao.vault_index import refuse_conflicting_vault_write
+
+    return refuse_conflicting_vault_write()
+
+
 def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
     """Shared workspace/vault resolution for the memory-proposal commands."""
     workspace, vault, _registry_root, _name = _resolve_workspace_and_vaults(args)
@@ -4142,6 +4153,9 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     and the learning model deduplicates on it, so a retry of the same
     ``/remember`` cannot inflate the recurrence count.
     """
+    refused = _refuse_ambiguous_memory_write(args)
+    if refused is not None:
+        return refused
     from ciao.memory_proposals import (
         DESTINATIONS,
         MemoryProposal,
@@ -4290,6 +4304,9 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     so the queue stops re-asking. TEXT matches one proposal by a unique
     substring.
     """
+    refused = _refuse_ambiguous_memory_write(args)
+    if refused is not None:
+        return refused
     from ciao import proposal_actions
     from ciao.memory_proposals import (
         find_proposal_matches,
@@ -5444,11 +5461,14 @@ def _proposal_config(args: argparse.Namespace, purpose: str) -> CiaoConfig:
 
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
-    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
-    vault = Path(vault_raw).expanduser()
-    if not vault.is_absolute():
-        vault = workspace / vault
-    vault = vault.resolve()
+    if args.vault_root or args.workspace:
+        vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+        vault = Path(vault_raw).expanduser()
+        if not vault.is_absolute():
+            vault = workspace / vault
+        vault = vault.resolve()
+    else:
+        vault = _resolve_vault_root(None)
 
     config_source = dict(os.environ)
     config_source.update({
