@@ -320,11 +320,14 @@ prefix and the deferral language here.
 def is_unattended_turn(prompt: str) -> bool:
     """True when a stored user turn was fired automatically.
 
-    The marker sits inside the ``<ciao-context>`` capsule that prefixes the
-    turn's stored prompt, so it is matched anywhere in the text, not at the
-    start. A turn an automation did not fire never carries it.
+    The marker sits inside the ``[CIAO_CONTEXT_BEGIN]`` envelope that prefixes
+    the turn's stored prompt. It is matched only there, so a person who pastes
+    the marker text into their own message is still a human turn.
     """
-    return UNATTENDED_MARKER in prompt
+    if not prompt.startswith("[CIAO_CONTEXT_BEGIN]"):
+        return False
+    envelope = prompt.partition("[CIAO_CONTEXT_END]")[0]
+    return UNATTENDED_MARKER in envelope
 
 
 def context_policy(key: str) -> MemoryWritePolicy:
