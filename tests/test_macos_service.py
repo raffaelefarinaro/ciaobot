@@ -918,16 +918,47 @@ def test_status_leaves_the_match_unknown_when_not_loaded(tmp_path: Path, monkeyp
     assert "Warning" not in result.message
 
 
+GONE_PRINT = 'Could not find service "com.ciao.server" in domain for port'
+
+
+def _teardown_runner(
+    calls: list[list[str]], *, running_polls: int = 0, print_forever_running: bool = False
+):
+    """Answers `print` as running until a bootout, then as gone after `running_polls` polls.
+
+    Every verb other than `print` succeeds. Records each post-bootout print in `calls`.
+    """
+    state = {"booted_out": False, "polls_left": running_polls}
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        if command[1] == "bootout":
+            state["booted_out"] = True
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+        if command[1] == "print":
+            if not state["booted_out"]:
+                return subprocess.CompletedProcess(command, 0, stdout=HOSTED_PRINT, stderr="")
+            if not print_forever_running and state["polls_left"] == 0:
+                return subprocess.CompletedProcess(command, 113, stdout="", stderr=GONE_PRINT)
+            state["polls_left"] -= 1
+            return subprocess.CompletedProcess(command, 0, stdout=HOSTED_PRINT, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    return run
+
+
 def test_restart_reloads_the_definition_when_the_plist_was_edited(
     tmp_path: Path, monkeypatch
 ) -> None:
     runtime = _runtime(tmp_path)
     _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
     monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.delenv("CIAO_CHAT_ID", raising=False)
+    monkeypatch.setattr(macos_service, "_sleep", lambda _s: None)
     calls: list[list[str]] = []
 
     result = macos_service.restart_service(
-        runtime=runtime, uid=501, runner=_launchd_runner(calls, HOSTED_PRINT)
+        runtime=runtime, uid=501, runner=_teardown_runner(calls)
     )
 
     assert result.ok is True
@@ -936,8 +967,89 @@ def test_restart_reloads_the_definition_when_the_plist_was_edited(
     assert calls == [
         ["launchctl", "print", "gui/501/com.ciao.server"],
         ["launchctl", "bootout", "gui/501/com.ciao.server"],
+        ["launchctl", "print", "gui/501/com.ciao.server"],
         ["launchctl", "bootstrap", "gui/501", runtime.server_plist],
     ]
+
+
+def test_reload_waits_for_launchd_to_forget_the_job_before_bootstrap(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.delenv("CIAO_CHAT_ID", raising=False)
+    sleeps: list[float] = []
+    monkeypatch.setattr(macos_service, "_sleep", sleeps.append)
+    calls: list[list[str]] = []
+
+    result = macos_service.restart_service(
+        runtime=runtime, uid=501, runner=_teardown_runner(calls, running_polls=3)
+    )
+
+    assert result.ok is True
+    # Three polls still see the stopping job (sleeping 0.5 s between polls), the fourth does not.
+    assert sleeps == [0.5] * 3
+    verbs = [call[1] for call in calls]
+    assert verbs == ["print", "bootout", "print", "print", "print", "print", "bootstrap"]
+
+
+def test_reload_times_out_without_bootstrapping_a_half_dead_job(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.delenv("CIAO_CHAT_ID", raising=False)
+    sleeps: list[float] = []
+    monkeypatch.setattr(macos_service, "_sleep", sleeps.append)
+    calls: list[list[str]] = []
+
+    result = macos_service.restart_service(
+        runtime=runtime,
+        uid=501,
+        runner=_teardown_runner(calls, print_forever_running=True),
+    )
+
+    assert result.ok is False
+    assert "did not stop within 45 s" in result.message
+    assert result.details["teardown_timed_out"] is True
+    assert not any("bootstrap" in call for call in calls)
+    assert len(sleeps) == int(macos_service.RELOAD_TEARDOWN_TIMEOUT_S / macos_service.RELOAD_POLL_INTERVAL_S)
+
+
+def test_reload_is_refused_from_inside_a_chat_shell(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.setenv("CIAO_CHAT_ID", "chat-1")
+    calls: list[list[str]] = []
+
+    result = macos_service.restart_service(
+        runtime=runtime, uid=501, runner=_launchd_runner(calls, HOSTED_PRINT)
+    )
+
+    assert result.ok is False
+    assert result.details["refused"] is True
+    assert "ciao service restart" in result.message
+    assert "Settings → Restart" in result.message
+    assert calls == [["launchctl", "print", "gui/501/com.ciao.server"]]
+
+
+def test_kickstart_still_restarts_from_inside_a_chat_shell(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.setenv("CIAO_CHAT_ID", "chat-1")
+    calls: list[list[str]] = []
+
+    result = macos_service.restart_service(
+        runtime=runtime, uid=501, runner=_launchd_runner(calls, HOSTED_PRINT)
+    )
+
+    assert result.ok is True
+    assert result.details["restart"] == "kickstart"
+    assert calls[-1] == ["launchctl", "kickstart", "-k", "gui/501/com.ciao.server"]
 
 
 def test_restart_kickstarts_when_the_loaded_definition_matches(

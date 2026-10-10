@@ -240,10 +240,11 @@ _RESUME_CONTINUE_PROMPT = "continue"
 # persistently flaky connection cannot loop forever burning quota. Once hit,
 # the turn is left for the user to continue manually.
 _MAX_CONNECTION_DROP_RETRIES = 6
-# Cap on hourly quota retries. A quota limit that survives three hourly
-# attempts is not transient in any useful window; stop and leave the turn for
-# the user rather than keep spending attempts.
-_MAX_QUOTA_RETRIES = 3
+# Cap on hourly quota retries. Claude's session limit resets on a 5-hour
+# window, so six hourly attempts (the five hours of the window plus one) cover
+# a session limit that clears on schedule. Weekly and monthly limits are
+# terminal and never reach this cap (see _stop_terminal_quota_retry).
+_MAX_QUOTA_RETRIES = 6
 
 # Injected into the parent turn when its background subagents all finish. The
 # CLI does not auto-continue a parent turn after a background `Agent` dispatch
@@ -470,6 +471,10 @@ class ChatInfo:
     retry_next_at: str = ""
     retry_last_error: str = ""
     retry_attempts: int = 0
+    # Kind of the failure that armed the pending retry ("quota", "connection",
+    # "startup", "auth"). The attempt counter belongs to one kind: arming a
+    # retry of a different kind starts that kind's budget at zero.
+    retry_kind: str = ""
     retry_interval_seconds: int = _RETRY_INTERVAL_SECONDS
     # Visible messages preserved when the chat is handed to a fresh provider
     # session. They are prepended by /messages so the same chat does not lose
@@ -955,6 +960,7 @@ class ProjectChatManager:
                 retry_next_at=cd.get("retry_next_at", ""),
                 retry_last_error=cd.get("retry_last_error", ""),
                 retry_attempts=int(cd.get("retry_attempts", 0) or 0),
+                retry_kind=str(cd.get("retry_kind", "") or ""),
                 retry_interval_seconds=int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS),
                 handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
@@ -1061,6 +1067,7 @@ class ProjectChatManager:
                     "retry_next_at": c.retry_next_at,
                     "retry_last_error": c.retry_last_error,
                     "retry_attempts": c.retry_attempts,
+                    "retry_kind": c.retry_kind,
                     "retry_interval_seconds": c.retry_interval_seconds,
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
@@ -5648,6 +5655,11 @@ class ProjectChatManager:
         # a transient-looking local failure looping forever, and the quota cap
         # stops hourly retries against a limit that is not clearing.
         cap = _MAX_QUOTA_RETRIES if kind == "quota" else _MAX_CONNECTION_DROP_RETRIES
+        if chat is not None and chat.retry_kind != kind:
+            # Each kind gets its own budget: a run of connection retries must
+            # not spend the quota window's attempts, and vice versa.
+            chat.retry_kind = kind
+            chat.retry_attempts = 0
         attempts = chat.retry_attempts if chat is not None else 0
         if attempts >= cap:
             logger.warning(
@@ -5786,6 +5798,7 @@ class ProjectChatManager:
         chat.retry_next_at = ""
         chat.retry_last_error = ""
         chat.retry_attempts = 0
+        chat.retry_kind = ""
         chat.retry_interval_seconds = _RETRY_INTERVAL_SECONDS
         self._save()
         self._publish_retry(chat)

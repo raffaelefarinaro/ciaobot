@@ -27,6 +27,9 @@ COMPACT_KEYS = {
     "archived",
     "last_activity_at",
     "last_response",
+    "active_turn",
+    "needs_attention",
+    "last_response_status",
 }
 
 
