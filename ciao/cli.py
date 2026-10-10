@@ -1932,6 +1932,10 @@ def _vault_migrate_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_migration import migrate_vault_vocabulary, retain_retired_stock_types
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -2046,6 +2050,10 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_migrate_links import migrate_links
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -2929,6 +2937,10 @@ def _vault_unmigrate_links_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_migrate_links import unmigrate_links
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -2994,6 +3006,10 @@ def _vault_rehome_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_rehome import rehome_people
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -3095,6 +3111,10 @@ def _vault_unrehome_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_rehome import unrehome_people
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -3680,6 +3700,9 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         return 1 if result["reported"] else 0
 
     if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
         result = workspace_reroot.apply(
             workspace, vault, names, runtime, primary=config.primary_workspace()
         )
@@ -3959,11 +3982,12 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     return 1 if findings else 0
 
 
-def _refuse_ambiguous_memory_write(args: argparse.Namespace) -> int | None:
-    """Refuse a memory-proposal write when CIAO_VAULT_ROOT and the active workspace disagree.
+def _refuse_ambiguous_vault_write(args: argparse.Namespace) -> int | None:
+    """Refuse a vault write when CIAO_VAULT_ROOT and the active workspace disagree.
 
-    An explicit ``--workspace`` or ``--vault-root`` names the vault, so only the
-    implicit resolution is checked.
+    Called on the write/apply path only, by every command that resolves its vault
+    implicitly. An explicit ``--workspace`` or ``--vault-root`` names the vault,
+    so only the implicit resolution is checked.
     """
     if getattr(args, "vault_root", None) or getattr(args, "workspace", None):
         return None
@@ -4153,7 +4177,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     and the learning model deduplicates on it, so a retry of the same
     ``/remember`` cannot inflate the recurrence count.
     """
-    refused = _refuse_ambiguous_memory_write(args)
+    refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
         return refused
     from ciao.memory_proposals import (
@@ -4304,7 +4328,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     so the queue stops re-asking. TEXT matches one proposal by a unique
     substring.
     """
-    refused = _refuse_ambiguous_memory_write(args)
+    refused = _refuse_ambiguous_vault_write(args)
     if refused is not None:
         return refused
     from ciao import proposal_actions
@@ -4951,6 +4975,9 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     queued, which is the point: a record is one row per skill, so a person who
     dealt with one of its findings has not dealt with the rest.
     """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     # Deleting a proposal file is a review decision, not a session write;
     # loading config outside the server env must not mint a session secret.
     config = _proposal_config(args, "skill-proposal-remove")
@@ -5331,6 +5358,9 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
     Settling stays out of here: this proposes, and ``skill-proposal-remove``
     decides.
     """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     from ciao.skill_proposals import (
         PENDING,
         SkillEvidence,
@@ -5508,6 +5538,9 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
     refused if it carries a transcript excerpt, a path, a name or a credential,
     because a public issue is public.
     """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     from ciao.upstream_drafts import DraftError, file_draft
 
     payload, problem = _read_skill_draft_input(args.input_file)
@@ -5720,6 +5753,9 @@ def _skill_draft_approve_command(args: argparse.Namespace) -> int:
         find_draft,
     )
 
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     config = _proposal_config(args, "skill-draft-approve")
     name = _active_workspace_name(config)
     refused = _refuse_unattended_draft(config, name, "approving a skill draft")
@@ -5817,6 +5853,9 @@ def _skill_draft_reject_command(args: argparse.Namespace) -> int:
     """
     from ciao.upstream_drafts import reject_draft
 
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     config = _proposal_config(args, "skill-draft-reject")
     name = _active_workspace_name(config)
     refused = _refuse_unattended_draft(config, name, "rejecting a skill draft")
