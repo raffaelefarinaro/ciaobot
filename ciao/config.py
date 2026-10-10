@@ -374,6 +374,11 @@ class WorkspaceConfig:
     # for anything new. ``mcp__<server>`` deny entries are derived from this at
     # request time; this field is the source, not the deny list.
     allowed_mcp_servers: list[str] | None = None
+    # Whether this workspace's Claude chats load the Claude account's claude.ai
+    # connectors (remote MCP servers). Off sets ENABLE_CLAUDEAI_MCP_SERVERS=false
+    # on the spawned Claude Code process. True keeps the behavior from before
+    # this switch existed, so a workspace that never set it is unchanged.
+    claude_ai_connectors: bool = True
     gws_profile: str = ""
     # PWA accent preset id. Defaults to Ciao pink.
     color: str = DEFAULT_WORKSPACE_COLOR
@@ -411,6 +416,14 @@ def _coerce_allowed_mcp_servers(raw: object) -> list[str] | None:
     return None
 
 
+def _coerce_claude_ai_connectors(raw: object) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() not in {"false", "0", "no", "off"}
+    return True
+
+
 def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     name = str(data.get("name", "")).strip()
     if not name:
@@ -431,6 +444,9 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
         allowed_mcp_servers=_coerce_allowed_mcp_servers(
             data.get("allowed_mcp_servers")
+        ),
+        claude_ai_connectors=_coerce_claude_ai_connectors(
+            data.get("claude_ai_connectors")
         ),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
@@ -1107,6 +1123,7 @@ class CiaoConfig:
                 ),
                 "disallowed_tools": workspace.disallowed_tools,
                 "allowed_mcp_servers": workspace.allowed_mcp_servers,
+                "claude_ai_connectors": workspace.claude_ai_connectors,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
             }
@@ -1833,6 +1850,23 @@ class CiaoConfig:
 logger = logging.getLogger(__name__)
 
 
+def active_workspace_vault_root(env: Mapping[str, str]) -> Path | None:
+    """The vault the ``CIAO_ACTIVE_WORKSPACE`` workspace owns, or ``None``.
+
+    ``None`` when that variable is unset or names no registered workspace. Read
+    only: the same resolution as the memory-proposal commands, with the
+    ``PWA_AUTH_TOKEN`` stand-in so a CLI call never mints a session secret.
+    """
+    active = str(env.get("CIAO_ACTIVE_WORKSPACE", "") or "").strip()
+    if not active:
+        return None
+    source = installed_workspace_env(env)
+    if not source.get("PWA_AUTH_TOKEN", "").strip():
+        source["PWA_AUTH_TOKEN"] = "vault-root"
+    config = CiaoConfig.from_env(source)
+    if config.workspace(active) is None:
+        return None
+    return Path(config.agent_vault_root(active)).resolve()
 
 
 # Backward-compatible alias used by project_chats.py and other modules

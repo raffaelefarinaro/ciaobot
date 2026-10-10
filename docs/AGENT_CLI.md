@@ -76,7 +76,11 @@ flowchart LR
   package update — are queued until that chat is idle.
 - Operation telemetry is appended to `.runtime/mcp_tool_calls.jsonl` with
   `surface: "cli"`; provider tool selection is appended to
-  `.runtime/agent_tool_calls.jsonl`. Neither file records arguments.
+  `.runtime/agent_tool_calls.jsonl`. Neither file records arguments. A provider
+  row carries `control_surface: "cli"` when a shell call's command starts with
+  `ciao ` (after whitespace, `cd <dir> &&` hops or `NAME=value` assignments), and
+  `"mcp"` for `mcp__ciaobot__*`; other rows omit the key. The archive's per-turn
+  `### Tools` section lists each call's input size and error flag, not its input.
 - `mcp_tool_calls.jsonl` is size-capped like the job-run log: past ~2 MB it is
   trimmed to the newest 2000 records. Detailed records therefore cover only that
   retained window, but the per-tool counters of everything dropped are rolled

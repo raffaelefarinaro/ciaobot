@@ -26,17 +26,17 @@ engine version:
 | `arch` | `universal` |
 | `filename` | `ciaobot-server-host-macos-universal-v1.tar.gz` |
 | `bundle_id` | `local.ciaobot.server` |
-| `host_revision` | `1` |
+| `host_revision` | `2` |
 | `host_protocol` | `1` |
 
 `host_revision` and `host_protocol` are the host's own revision, never the
 engine release version. `publish.yml` currently rebuilds the archive on every
 release, so its `sha256` and `size` (computed from the bytes that release
 serves) and the host's CDHash can differ between releases that share revision
-`1`; whether to reuse one archive across releases is still open. The selector
+`2`; whether to reuse one archive across releases is still open. The selector
 accepts a host entry only when the platform, arch, filename, bundle id,
 revision, protocol and positive size all match exactly; `host_revision`/`host_protocol` reject a boolean, so `True`
-cannot stand in for revision `1`.
+cannot stand in for revision `2`.
 
 ## Wheel-only releases remain supported
 
@@ -112,6 +112,12 @@ the prebuilt archive is the artifact a user receives. Its Accessibility and
 Automation grants are tied to the exact signed bytes, so any rebuild changes the
 CDHash and can require the user to reapprove the prompt.
 
+Revision 2 renames the executable from `CiaobotServerHost` to `Ciaobot Server`
+(#1249) so the Login Items row reads "Ciaobot Server". That changes the bytes
+and the path, so every installed revision-1 host needs its Accessibility and
+Automation grants approved again once. The installer replaces a revision-1
+host only when its own record proves it ours, and prints a warning when it does.
+
 ## What this does not do
 
 - It does not activate, load or launch the host, and it does not touch launchd,
@@ -121,8 +127,11 @@ CDHash and can require the user to reapprove the prompt.
 - It does not make the engine updater overwrite an installed host: an installed
   compatible host is never auto-replaced by an engine update, because the host
   is authenticated but opt-in and its revision is independent of the engine.
-- A host upgrade is a separate, explicit, warned action reviewed on its own; it
-  is not implied by an engine update and is not implemented here.
+- A host upgrade is an explicit, warned action. The one-liner installer and an
+  in-app update that finds a revision-1 host perform the revision-1 to
+  revision-2 replacement (see `SERVER_HOST.md`). An in-app update replaces the
+  host only when it is revision 1 and its own record proves it; an engine-only
+  update never does.
 - It documents no release/admin procedure to run: cutting a release, signing it
   and publishing it remain the maintainer's, and are not performed by this
   change.

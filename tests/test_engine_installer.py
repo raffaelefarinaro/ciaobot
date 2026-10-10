@@ -725,6 +725,46 @@ def test_a_wheel_only_release_never_touches_the_host(tmp_path: Path) -> None:
 
 @runs_the_sh_installer
 @needs_local_tools
+def test_replacing_a_revision_one_host_warns_about_macos_permissions(tmp_path: Path) -> None:
+    # MIGRATION (#1249): a host installed before the rename has the old executable
+    # on disk. Its replacement changes the bytes macOS granted permissions to, so
+    # the one-liner says so, once, on stderr.
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    legacy = (
+        harness["home"] / "Applications" / "Ciaobot Server.app" / "Contents" / "MacOS"
+        / "CiaobotServerHost"
+    )
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("revision-one host")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "Ciaobot Server host installed and recorded." in result.stdout
+    assert "Accessibility and Automation" in result.stderr
+    assert result.stderr.count("Accessibility") == 1
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_first_host_install_does_not_warn_about_permissions(tmp_path: Path) -> None:
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "Ciaobot Server host installed and recorded." in result.stdout
+    assert "Accessibility" not in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
 def test_a_host_release_verifies_and_installs_the_host(tmp_path: Path) -> None:
     # A signed server-host entry: the archive is downloaded from the release
     # under the manifest's name, and the verified wheel's module is asked to
@@ -1069,7 +1109,7 @@ def test_engine_installer_accepts_its_own_server_host(tmp_path: Path) -> None:
         / "Ciaobot Server.app"
         / "Contents"
         / "MacOS"
-        / "CiaobotServerHost"
+        / "Ciaobot Server"
     )
     host.parent.mkdir(parents=True)
     _write_exec(host, "#!/bin/sh\nexit 0\n")

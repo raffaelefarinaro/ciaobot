@@ -630,14 +630,41 @@ async def _op_workspaces_list(service: CiaoMcpService) -> dict[str, Any]:
     return await service._invoke("workspaces_list", lambda cp, p: cp.workspaces_list(p))
 
 
-async def _op_chats_list(service: CiaoMcpService, project_id: str = "") -> dict[str, Any]:
-    """List active and archived chats in the active workspace or one project."""
-    return await service._invoke("chats_list", lambda cp, p: cp.chats_list(p, project_id))
+async def _op_chats_list(
+    service: CiaoMcpService,
+    project_id: str = "",
+    limit: int | None = None,
+    offset: int = 0,
+    compact: bool = False,
+) -> dict[str, Any]:
+    """List active and archived chats in the active workspace or one project.
+
+    Without ``limit`` the reply is the full, unpaged list. With ``limit`` it is
+    one newest-first page (``total``, ``truncated`` and ``next_offset`` say
+    what remains); ``compact`` trims each row to the listing fields.
+    """
+    return await service._invoke(
+        "chats_list",
+        lambda cp, p: cp.chats_list(p, project_id, limit=limit, offset=offset, compact=compact),
+    )
 
 
-async def _op_chat_get(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
-    """Get one chat by ID within the active workspace. Omit to get the calling chat."""
-    return await service._invoke("chat_get", lambda cp, p: cp.chat_get(p, chat_id))
+async def _op_chat_get(
+    service: CiaoMcpService,
+    chat_id: str = "",
+    messages: int | None = None,
+    message_chars: int | None = None,
+) -> dict[str, Any]:
+    """Get one chat by ID within the active workspace. Omit to get the calling chat.
+
+    ``messages`` adds that many of the most recent messages (0 for all) and
+    ``message_chars`` caps each message's content. Without ``messages`` only
+    the chat's metadata is returned.
+    """
+    return await service._invoke(
+        "chat_get",
+        lambda cp, p: cp.chat_get(p, chat_id, messages=messages, message_chars=message_chars),
+    )
 
 
 async def _op_chat_create(service: CiaoMcpService, project_id: str | None = None, title: str = "New Chat",
@@ -844,7 +871,8 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
                        chat_id: str | None = None, title: str | None = None,
                        description: str | None = None, provider: str | None = None,
                        model: str | None = None, archive_policy: str | None = None,
-                       workspace: str | None = None, schedule_id: str = "") -> dict[str, Any]:
+                       workspace: str | None = None, command: str | None = None,
+                       schedule_id: str = "") -> dict[str, Any]:
     """Preview, create, or update a Ciaobot schedule (recurring, one-off, or manual-only).
 
     action:
@@ -917,6 +945,11 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
         provider: Empty inherits the target workspace's default
             provider at dispatch time; override only when necessary.
         archive_policy: "manual" (default) | "auto".
+        command: Optional shell command run in the workspace before the
+            prompt, with no model turn. Exit 0 with empty stdout records
+            the run as done and opens no chat; otherwise the chat opens
+            with the exit code and output (capped) ahead of the prompt.
+            Refused from an unattended (scheduled) turn; "" clears it.
         workspace: Omit in almost every case — the schedule is created
             in this chat's workspace. Any other name is refused unless
             it restates this chat's workspace: schedules are

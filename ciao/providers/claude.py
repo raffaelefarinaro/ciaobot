@@ -72,6 +72,7 @@ from ciao.models import (
     TokenUsageEvent,
     ToolUseEvent,
     provider_reuse_key,
+    tool_call_facts,
 )
 from ciao.execution_modes import (
     harness_skill_overrides,
@@ -460,8 +461,23 @@ class ClaudeProvider(BaseSDKProvider):
         """Session id as currently known to the provider (may be set mid-stream)."""
         return self._session_id
 
+    def _log_client_turn(self, request: AgentRequest, *, reused: bool, reason: str) -> None:
+        """One line per turn: whether the live SDK client was reused or replaced, and why."""
+        chat = (request.extra_env or {}).get("CIAO_CHAT_ID") or request.resume_session or "-"
+        logger.info(
+            "claude turn: client=%s reason=%s chat=%s",
+            "reused" if reused else "new",
+            reason,
+            chat,
+        )
+
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
         requested_model = request.model
+        # Whether a client object existed before this turn. Used to tell a
+        # client that died (``_connected`` reset) from one never built.
+        had_client = self._client is not None
+        # Why the live client is being replaced; empty while it is reused.
+        reconnect_reason = ""
         if (
             self._client is not None
             and self._connected
@@ -475,6 +491,7 @@ class ClaudeProvider(BaseSDKProvider):
             # when a chat switches surfaces, receives a refreshed ephemeral
             # token (on either surface), or its workspace scope changes;
             # model/mode alone can still change in place.
+            reconnect_reason = "other"
             await self.disconnect()
         if (
             self._client is not None
@@ -482,6 +499,7 @@ class ClaudeProvider(BaseSDKProvider):
             and request.resume_session
             and request.resume_session != self._session_id
         ):
+            reconnect_reason = "resume"
             await self.disconnect()
 
         if self._client is not None and self._connected:
@@ -491,6 +509,7 @@ class ClaudeProvider(BaseSDKProvider):
                     self._current_model = requested_model
                 except _CLAUDE_OP_ERRORS:
                     logger.warning("Claude set_model failed; reconnecting")
+                    reconnect_reason = "model_change"
                     await self.disconnect()
             if self._client is not None and self._connected and request.mode != self._current_mode:
                 try:
@@ -498,9 +517,20 @@ class ClaudeProvider(BaseSDKProvider):
                     self._current_mode = request.mode
                 except _CLAUDE_OP_ERRORS:
                     logger.warning("Claude set_permission_mode failed; reconnecting")
+                    reconnect_reason = "mode_change"
                     await self.disconnect()
         if self._client is not None and self._connected:
+            self._log_client_turn(request, reused=True, reason="none")
             return self._client
+
+        if not reconnect_reason:
+            if had_client:
+                reconnect_reason = "dead_process"
+            elif request.resume_session:
+                reconnect_reason = "resume"
+            else:
+                reconnect_reason = "first_turn"
+        self._log_client_turn(request, reused=False, reason=reconnect_reason)
 
         resume_session = self._validated_resume_session(request.resume_session)
         from ciao.tool_path import resolve_tool
@@ -1236,6 +1266,7 @@ class ClaudeProvider(BaseSDKProvider):
                     from ciao.web.chat_broker import extract_file_touches
                     touches = extract_file_touches(block.name, raw_input)
                     summary = _summarize_tool_input(block.name, raw_input)
+                    input_chars, surface = tool_call_facts(block.name, raw_input)
                     events.append(ToolUseEvent(
                         type="assistant",
                         tool_name=block.name,
@@ -1243,6 +1274,8 @@ class ClaudeProvider(BaseSDKProvider):
                         tool_use_id=getattr(block, "id", None),
                         parent_tool_use_id=parent_id,
                         file_touches=touches or None,
+                        input_chars=input_chars,
+                        control_surface=surface,
                     ))
             if msg.session_id:
                 self._session_id = msg.session_id

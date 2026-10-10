@@ -138,6 +138,23 @@ workspace=$(/usr/libexec/PlistBuddy -c 'Print :WorkingDirectory' \
 `ciao setup` preserves the existing `.env` (its variables win over setup
 arguments), so the password and vault root survive the re-render.
 
+**Hosted service (`Ciaobot Server.app`).** When the plist's `ProgramArguments`
+start with `…/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost serve --python
+<interpreter>`, `ciao setup` deliberately keeps that live hosted definition
+byte-for-byte (`_existing_hosted_definition_serves` in `ciao/cli.py`), so the
+command above exits 0 and changes nothing: the service keeps running the old
+interpreter. Point the hosted definition at this checkout instead; the restart in step 4
+reloads it:
+
+```bash
+plist="$HOME/Library/LaunchAgents/com.ciao.server.plist"
+if [ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$plist")" = "serve" ]; then
+  cp "$plist" "$plist.bak.devinstall"
+  /usr/libexec/PlistBuddy -c "Set :ProgramArguments:3 $(pwd)/.venv/bin/python" "$plist"
+  plutil -lint "$plist"
+fi
+```
+
 ### 4. Restart the service
 
 Gate on active chats first, then restart:
@@ -155,6 +172,13 @@ print("no active chats - clear to restart")
 EOF
 [ $? -eq 0 ] && .venv/bin/ciao service restart
 ```
+
+`ciao service restart` reloads an edited plist (bootout and bootstrap) when the
+loaded definition differs from the one on disk, and kickstarts otherwise. Confirm
+the switch took with `ciao service status --json`: `loaded_python_path` is the
+interpreter launchd is actually running and `plist_matches_loaded` must be
+`true`. (`python_path` is read from the plist file, so on its own it reports the
+new interpreter even while the old process is still serving.)
 
 Two things bite here. `status=$(…)` is a **zsh read-only variable** and aborts the
 whole snippet, so use a neutral name; and backslash-escaping quotes inside a

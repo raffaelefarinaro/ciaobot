@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,8 @@ from ciao.providers.base import (
     build_claude_message_content,
     build_prompt,
 )
+from claude_agent_sdk import ClaudeSDKError
+
 from ciao.providers.claude import ClaudeProvider, _sdk_permission_mode
 from ciao.providers.opencode import OpencodeProvider
 
@@ -1429,3 +1432,72 @@ async def test_opencode_scope_change_restarts_the_live_server(tmp_path, monkeypa
     provider._process = SimpleNamespace(returncode=None)
     provider._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
     assert await provider._ensure_server(request) is live
+
+
+# -- Claude turn client decision log -----------------------------------------
+
+
+def _claude_turn_log(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("claude turn:")]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_logs_new_first_turn_then_reused(tmp_path: Path, monkeypatch, caplog) -> None:
+    constructed: list[object] = []
+
+    class FakeClient:
+        def __init__(self, options):
+            constructed.append(options)
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        extra_env={"CIAO_CHAT_ID": "chat-1"},
+    )
+
+    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
+        await provider._ensure_connected(request)
+        # The SDK client only becomes connected once the first stream starts.
+        provider._connected = True
+        await provider._ensure_connected(request)
+
+    assert len(constructed) == 1
+    assert _claude_turn_log(caplog) == [
+        "claude turn: client=new reason=first_turn chat=chat-1",
+        "claude turn: client=reused reason=none chat=chat-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_logs_reconnect_reason_on_model_change(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    constructed: list[object] = []
+
+    class FakeClient:
+        def __init__(self, options):
+            constructed.append(options)
+
+        async def set_model(self, model):
+            raise ClaudeSDKError("set_model refused")
+
+        async def disconnect(self):
+            return None
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    first = AgentRequest(prompt="a", model="sonnet", mode="auto", extra_env={"CIAO_CHAT_ID": "c2"})
+    await provider._ensure_connected(first)
+    provider._connected = True
+
+    second = AgentRequest(prompt="b", model="opus", mode="auto", extra_env={"CIAO_CHAT_ID": "c2"})
+    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
+        await provider._ensure_connected(second)
+
+    assert len(constructed) == 2
+    assert _claude_turn_log(caplog) == ["claude turn: client=new reason=model_change chat=c2"]

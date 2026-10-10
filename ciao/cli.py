@@ -229,7 +229,7 @@ def _render_launchd_plist(
     ``engine_path`` name the program and the arguments follow the launcher
     name. When ``host`` is given — a snapshot from
     ``ciao.server_host.verify_owned_host``, the only proof the bytes are ours —
-    the program becomes the native ``CiaobotServerHost`` running
+    the program becomes the native ``Ciaobot Server`` running
     ``serve --python <host_python>`` and the job gains ``ExitTimeOut``
     ``EXIT_TIMEOUT_SECONDS`` (45 s), so launchd never sweeps the job group out
     from under the host's own 35 s stop grace. The caller supplying ``host`` in
@@ -1763,19 +1763,17 @@ def _auth_command(args: argparse.Namespace) -> int:
 def _resolve_vault_root(raw: Path | str | None = None) -> Path:
     """Locate the vault.
 
+    With no explicit value the default is `vault_index.default_vault_root`:
+    `CIAO_VAULT_ROOT`, else the active workspace's vault, else `memory-vault`.
     A relative value resolves against `CIAO_WORKSPACE`, not the current
-    directory, for the same reason `_resolve_runtime_root` does: the bundled
-    engine's launcher `cd`s into `Ciaobot.app/.../ciao-runtime` before exec'ing
-    Python, so a relative `CIAO_VAULT_ROOT=memory-vault` resolved against the cwd
-    pointed inside the app bundle. Every vault command run from a routine — whose
-    prompts deliberately pass no `--vault-root` — failed with a
-    FileNotFoundError under the runtime directory.
+    directory, because the bundled engine's launcher `cd`s into the app bundle
+    before exec'ing Python.
     """
-    if raw is not None:
-        root = Path(raw).expanduser()
-    else:
-        env_root = os.environ.get("CIAO_VAULT_ROOT", "").strip()
-        root = Path(env_root).expanduser() if env_root else Path("memory-vault")
+    if raw is None:
+        from ciao.vault_index import default_vault_root
+
+        return default_vault_root()
+    root = Path(raw).expanduser()
     if not root.is_absolute():
         workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
         base = Path(workspace).expanduser() if workspace else Path.cwd()
@@ -1934,6 +1932,10 @@ def _vault_migrate_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_migration import migrate_vault_vocabulary, retain_retired_stock_types
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -2048,6 +2050,10 @@ def _vault_migrate_links_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_migrate_links import migrate_links
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -2931,6 +2937,10 @@ def _vault_unmigrate_links_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_migrate_links import unmigrate_links
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -2996,6 +3006,10 @@ def _vault_rehome_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_rehome import rehome_people
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -3097,6 +3111,10 @@ def _vault_unrehome_command(args: argparse.Namespace) -> int:
     """
     from ciao.vault_rehome import unrehome_people
 
+    if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
         print(
@@ -3682,6 +3700,9 @@ def _workspace_reroot_command(args: argparse.Namespace) -> int:
         return 1 if result["reported"] else 0
 
     if args.apply:
+        refused = _refuse_ambiguous_vault_write(args)
+        if refused is not None:
+            return refused
         result = workspace_reroot.apply(
             workspace, vault, names, runtime, primary=config.primary_workspace()
         )
@@ -3961,6 +3982,20 @@ def _memory_audit_command(args: argparse.Namespace) -> int:
     return 1 if findings else 0
 
 
+def _refuse_ambiguous_vault_write(args: argparse.Namespace) -> int | None:
+    """Refuse a vault write when CIAO_VAULT_ROOT and the active workspace disagree.
+
+    Called on the write/apply path only, by every command that resolves its vault
+    implicitly. An explicit ``--workspace`` or ``--vault-root`` names the vault,
+    so only the implicit resolution is checked.
+    """
+    if getattr(args, "vault_root", None) or getattr(args, "workspace", None):
+        return None
+    from ciao.vault_index import refuse_conflicting_vault_write
+
+    return refuse_conflicting_vault_write()
+
+
 def _resolve_workspace_and_vault(args: argparse.Namespace) -> tuple[Path, Path]:
     """Shared workspace/vault resolution for the memory-proposal commands."""
     workspace, vault, _registry_root, _name = _resolve_workspace_and_vaults(args)
@@ -4072,6 +4107,10 @@ def _resolve_workspace_and_vaults(
     return workspace, resolved, resolved, name
 
 
+#: Proposals `ciao memory-proposals` prints per page unless `--limit` says otherwise.
+MEMORY_PROPOSALS_DEFAULT_LIMIT = 20
+
+
 def _memory_proposals_command(args: argparse.Namespace) -> int:
     """List pending memory proposals in a workspace's review queue.
 
@@ -4080,20 +4119,33 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     item (promote via a region Edit, or dismiss via ``memory-proposal-dismiss``),
     and thereby keeps memory improving across sessions.
     """
+    from ciao.control_plane import PAGE_MAX_LIMIT, page_of, validate_page
     from ciao.memory_proposals import list_proposals
 
+    try:
+        validate_page(args.limit, args.offset, maximum=PAGE_MAX_LIMIT)
+    except ValueError as exc:
+        print(f"ciao memory-proposals: {exc}", file=sys.stderr)
+        return 2
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
     rows = list_proposals(path)
+    window = rows[args.offset : args.offset + args.limit]
+    page = page_of("proposals", window, total=len(rows), offset=args.offset, limit=args.limit)
     if args.json:
-        json.dump(rows, sys.stdout, ensure_ascii=False, indent=2)
+        json.dump(page, sys.stdout, ensure_ascii=False, indent=2)
         sys.stdout.write("\n")
     else:
         if not rows:
             print("No memory proposals are pending.")
-        for row in rows:
+        for row in window:
             tag = f" [{row['source']}]" if row["source"] else ""
             print(f"- [{row['kind']}] {row['text']}{tag}")
+        if "next_offset" in page:
+            print(
+                f"Showing {args.offset + 1}-{page['next_offset']} of {len(rows)}; "
+                f"more with --offset {page['next_offset']}."
+            )
     return 0
 
 
@@ -4125,6 +4177,9 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     and the learning model deduplicates on it, so a retry of the same
     ``/remember`` cannot inflate the recurrence count.
     """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     from ciao.memory_proposals import (
         DESTINATIONS,
         MemoryProposal,
@@ -4273,6 +4328,9 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     so the queue stops re-asking. TEXT matches one proposal by a unique
     substring.
     """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     from ciao import proposal_actions
     from ciao.memory_proposals import (
         find_proposal_matches,
@@ -4917,6 +4975,9 @@ def _skill_proposal_remove_command(args: argparse.Namespace) -> int:
     queued, which is the point: a record is one row per skill, so a person who
     dealt with one of its findings has not dealt with the rest.
     """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     # Deleting a proposal file is a review decision, not a session write;
     # loading config outside the server env must not mint a session secret.
     config = _proposal_config(args, "skill-proposal-remove")
@@ -5297,6 +5358,9 @@ def _skill_proposal_add_command(args: argparse.Namespace) -> int:
     Settling stays out of here: this proposes, and ``skill-proposal-remove``
     decides.
     """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     from ciao.skill_proposals import (
         PENDING,
         SkillEvidence,
@@ -5427,11 +5491,14 @@ def _proposal_config(args: argparse.Namespace, purpose: str) -> CiaoConfig:
 
     workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
     workspace = Path(workspace_raw).expanduser().resolve()
-    vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
-    vault = Path(vault_raw).expanduser()
-    if not vault.is_absolute():
-        vault = workspace / vault
-    vault = vault.resolve()
+    if args.vault_root or args.workspace:
+        vault_raw = args.vault_root or os.environ.get("CIAO_VAULT_ROOT") or "memory-vault"
+        vault = Path(vault_raw).expanduser()
+        if not vault.is_absolute():
+            vault = workspace / vault
+        vault = vault.resolve()
+    else:
+        vault = _resolve_vault_root(None)
 
     config_source = dict(os.environ)
     config_source.update({
@@ -5471,6 +5538,9 @@ def _skill_draft_add_command(args: argparse.Namespace) -> int:
     refused if it carries a transcript excerpt, a path, a name or a credential,
     because a public issue is public.
     """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     from ciao.upstream_drafts import DraftError, file_draft
 
     payload, problem = _read_skill_draft_input(args.input_file)
@@ -5683,6 +5753,9 @@ def _skill_draft_approve_command(args: argparse.Namespace) -> int:
         find_draft,
     )
 
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     config = _proposal_config(args, "skill-draft-approve")
     name = _active_workspace_name(config)
     refused = _refuse_unattended_draft(config, name, "approving a skill draft")
@@ -5780,6 +5853,9 @@ def _skill_draft_reject_command(args: argparse.Namespace) -> int:
     """
     from ciao.upstream_drafts import reject_draft
 
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
     config = _proposal_config(args, "skill-draft-reject")
     name = _active_workspace_name(config)
     refused = _refuse_unattended_draft(config, name, "rejecting a skill draft")
@@ -7296,9 +7372,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
     )
     memory_proposals_parser.add_argument(
+        "--limit",
+        type=int,
+        default=MEMORY_PROPOSALS_DEFAULT_LIMIT,
+        help="Proposals per page, 1-200. Default 20.",
+    )
+    memory_proposals_parser.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="Proposals to skip; use the printed next offset to page on.",
+    )
+    memory_proposals_parser.add_argument(
         "--json",
         action="store_true",
-        help="Emit the structured rows as JSON instead of text.",
+        help="Emit one page as JSON: proposals, total, offset, limit, and truncated/next_offset when more remain.",
     )
     memory_proposals_parser.set_defaults(func=_memory_proposals_command)
 

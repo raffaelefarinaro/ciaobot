@@ -59,7 +59,7 @@ def test_recover_journals_folds_crashed_turn_into_transcript(
     assert [r["role"] for r in rows] == ["user", "assistant"]
     assert rows[0]["content"] == "fix the bug"
     reply = rows[1]
-    assert reply["content"] == "Working on it now"
+    assert reply["content"] == "Working on\n\nit now"
     assert reply.get("partial") is True
     assert not journal_path.exists()
 
@@ -280,3 +280,74 @@ def test_a_different_journal_for_the_same_chat_is_still_recovered(
         if m["role"] == "user"
     ]
     assert prompts == ["first", "second"]
+
+
+def test_recovered_turn_keeps_a_paragraph_break_between_text_steps(
+    tmp_path: Path,
+) -> None:
+    """A crash mid-reply reloads its text steps as paragraphs, as a stop does (#1246)."""
+    runtime = tmp_path / ".runtime"
+    _write_journal(runtime, "chat-12", [
+        {"type": "begin", "provider": "claude", "prompt": "check it", "started_at": "2026-10-09T10:00:00Z"},
+        {"type": "text", "text": "I'll check the file."},
+        {"type": "tool", "name": "Read"},
+        {"type": "text", "text": "The file says it works."},
+    ])
+
+    store = _store(tmp_path)
+    assert store.recover_journals() == 1
+
+    rows = store.current_messages(_ctx("chat-12"), "claude")
+    assert rows[1]["content"] == "I'll check the file.\n\nThe file says it works."
+
+
+def test_thinking_break_records_separate_recovered_text_steps(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    _write_journal(runtime, "chat-13", [
+        {"type": "begin", "provider": "claude", "prompt": "think", "started_at": "2026-10-09T10:00:00Z"},
+        {"type": "text", "text": "First step."},
+        {"type": "break"},
+        {"type": "text", "text": "Second step."},
+    ])
+
+    store = _store(tmp_path)
+    assert store.recover_journals() == 1
+
+    rows = store.current_messages(_ctx("chat-13"), "claude")
+    assert rows[1]["content"] == "First step.\n\nSecond step."
+
+
+def test_journal_skips_subagent_events_so_recovery_matches_a_live_stop(
+    tmp_path: Path,
+) -> None:
+    from ciao.models import AssistantTextDelta, ThinkingEvent, ToolUseEvent
+    from ciao.transcripts import _journal_event_record
+
+    assert _journal_event_record(
+        AssistantTextDelta(type="text", text="subagent prose", parent_tool_use_id="task-1")
+    ) is None
+    assert _journal_event_record(
+        ToolUseEvent(type="tool_use", tool_name="Read", parent_tool_use_id="task-1")
+    ) is None
+    assert _journal_event_record(
+        ThinkingEvent(type="thinking", text="hmm", parent_tool_use_id="task-1")
+    ) is None
+    assert _journal_event_record(ThinkingEvent(type="thinking", text="hmm")) == {
+        "type": "break"
+    }
+
+
+def test_text_step_joiner_breaks_only_between_steps() -> None:
+    from ciao.transcripts import TextStepJoiner
+
+    joiner = TextStepJoiner()
+    joiner.boundary()  # no text yet: no leading break
+    joiner.add("A")
+    joiner.boundary()
+    joiner.add("\n")  # text already ends a line: one more newline, not two
+    joiner.add("B")
+    joiner.boundary()
+    joiner.boundary()  # repeated boundaries collapse into one
+    joiner.add("\n\nC")  # text already leads with a break: no extra one
+    joiner.boundary()  # trailing boundary adds nothing until text follows
+    assert joiner.text == "A\n\nB\n\nC"

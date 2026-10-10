@@ -15,6 +15,9 @@ from typing import cast
 import pytest
 
 from ciao.config import CiaoConfig
+from ciao.context.capsule import build_context_capsule
+from ciao.models import AgentRequest, ChatContext
+from ciao.transcripts import TranscriptStore
 from ciao.web.archive_pipeline import ArchivePipeline, ArchivePipelineHost
 from ciao.web.chat_broker import EventsHub
 from ciao.web.project_chats import ArchiveOutcome, ChatInfo, ProjectInfo
@@ -132,6 +135,108 @@ async def test_insights_off_skips_the_pass_but_still_indexes(tmp_path: Path) -> 
 
     assert host.enqueued == []
     assert host.index_calls == ["index"]
+
+
+def _real_archive(tmp_path: Path, prompts: list[str]) -> Path:
+    """Archive one turn per prompt through the transcript store, for real."""
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "chat-archive")
+    for prompt in prompts:
+        store.record_turn(
+            AgentRequest(
+                prompt=prompt,
+                model="sonnet",
+                mode="bypass",
+                resume_session=None,
+                images=[],
+            ),
+            ctx=ChatContext(chat_id=1),
+            response_text="ok",
+            effective_model="sonnet",
+            session_id="ses_1",
+            usage={},
+            quota={},
+            input_kind="text",
+        )
+    archived = store.archive_session(
+        ctx=ChatContext(chat_id=1),
+        active_model="sonnet",
+        last_effective_model="sonnet",
+        session_id="ses_1",
+    )
+    assert archived is not None
+    return archived
+
+
+def _automated(text: str) -> str:
+    capsule = build_context_capsule(unattended=True)
+    return f"[CIAO_CONTEXT_BEGIN]\n{capsule}\n[CIAO_CONTEXT_END]\n\n{text}"
+
+
+@pytest.mark.asyncio
+async def test_an_all_unattended_archive_queues_no_pass(tmp_path: Path) -> None:
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    archive = _real_archive(tmp_path, [_automated("Curate"), _automated("Care")])
+    outcome = ArchiveOutcome(path=archive, turn_count=2)
+
+    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await asyncio.sleep(0)
+
+    assert host.enqueued == []
+    assert host.index_calls == ["index"]
+
+
+@pytest.mark.asyncio
+async def test_a_focused_pass_on_an_all_unattended_archive_still_runs(
+    tmp_path: Path,
+) -> None:
+    """A pass the owner asked for is never skipped by the unattended gate."""
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    archive = _real_archive(tmp_path, [_automated("Curate")])
+    outcome = ArchiveOutcome(path=archive, turn_count=1)
+
+    pipeline.run_archive_postprocess(
+        chat.chat_id, outcome, chat, project, focus={"kind": "approved_task"}
+    )
+    await asyncio.sleep(0)
+
+    assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)]
+
+
+@pytest.mark.asyncio
+async def test_an_archive_with_one_human_turn_queues_the_pass(tmp_path: Path) -> None:
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    archive = _real_archive(
+        tmp_path, [_automated("Curate"), "Remember that Acme kickoff moved"]
+    )
+    outcome = ArchiveOutcome(path=archive, turn_count=2)
+
+    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await asyncio.sleep(0)
+
+    assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)]
+
+
+@pytest.mark.asyncio
+async def test_a_normal_archive_queues_the_pass(tmp_path: Path) -> None:
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    archive = _real_archive(tmp_path, ["Plan the Q3 review"])
+    outcome = ArchiveOutcome(path=archive, turn_count=1)
+
+    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await asyncio.sleep(0)
+
+    assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)]
+
+
+@pytest.mark.asyncio
+async def test_an_unparseable_archive_still_queues_the_pass(tmp_path: Path) -> None:
+    host, pipeline, chat, project, outcome = _setup(tmp_path)
+    outcome.path.write_text("not a transcript at all\n", encoding="utf-8")
+
+    pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
+    await asyncio.sleep(0)
+
+    assert host.enqueued == [(chat.chat_id, outcome.path, project.vault_doc_path)]
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.4.0 - 2026-10-10
+
+**Heads up:** on macOS, the background service now shows as "Ciaobot Server" in System Settings → General → Login Items. The update replaces the server host, so if you had granted it Accessibility or Automation access, macOS asks once more.
+
+### New features
+- **Command schedules:** a schedule can run a shell command first and only opens a chat when the command prints something or fails, so routine checks with nothing to report cost no model time. Set it in the schedule's Command field.
+- **claude.ai connectors per workspace:** turn your Claude account's connectors (Slack, Jira and the rest) off for a workspace in Settings → Workspaces. Claude chats there then start lighter and faster.
+
+### Improvements
+- Lower token use across the board:
+  - OpenCode chats no longer resend Ciaobot's instructions on every turn.
+  - The end-of-chat memory pass is skipped for fully automated runs, and never loads claude.ai connectors.
+  - The schedule attention check runs on a small model.
+  - Agents page through long chat and proposal lists instead of loading them whole.
+- Archived chats now list the tools each turn used.
+- Automations defer editing application code or Ciaobot's runtime files to you, and never print secret values into a chat.
+- Agents wait for CI or other agents in the background instead of polling in the chat.
+- Delegating a task now needs at least a sentence of description, so the agent does not have to come back and ask what to do.
+- `ciao service status` shows the interpreter the service is actually running, and `ciao service restart` picks up an edited service definition (macOS).
+
+### Bug fixes
+- Chats that hit a provider's weekly usage limit no longer retry every hour for the rest of the week ([#1259](https://github.com/raffaelefarinaro/ciaobot/issues/1259))
+- Vault commands run by automations could write to a different workspace's vault than the chat's own; they now follow the active workspace and refuse a conflicting target ([#1265](https://github.com/raffaelefarinaro/ciaobot/issues/1265))
+- A stopped reply with several steps reloaded with its paragraphs run together ([#1246](https://github.com/raffaelefarinaro/ciaobot/issues/1246))
+- Some older archived chats hid the reply when the message contained a code block and a pasted heading ([#1247](https://github.com/raffaelefarinaro/ciaobot/issues/1247))
+- `ciao service restart` kept running the old service definition after it was edited (macOS) ([#1270](https://github.com/raffaelefarinaro/ciaobot/issues/1270))
+
+[Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.3.0...v1.4.0)
+
 ## v1.3.0 - 2026-10-09
 
 **Heads up:**

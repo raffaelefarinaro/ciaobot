@@ -305,8 +305,10 @@ UNATTENDED_CAPSULE_GUIDANCE = (
     "approval: promoting a NEW fact into the always-loaded memory regions, "
     "editing a skill or the AGENTS.md guide body, settling a skill proposal or "
     "draft, trashing or permanently deleting a vault note, writing another "
-    "workspace, creating or moving an automation into another workspace, and "
-    "public or destructive git actions."
+    "workspace, creating or moving an automation into another workspace, "
+    "editing application source code, hand-editing `.runtime/` state files, and "
+    "public or destructive git actions. Never print secret values (env files, "
+    "tokens, provider configs) into the conversation."
 )
 """The unattended marker the context capsule injects, in one place.
 
@@ -315,6 +317,19 @@ automatically`` prefix to flag automation turns during extraction, so that
 prefix is part of the archive format and must not change. Tests pin both the
 prefix and the deferral language here.
 """
+
+
+def is_unattended_turn(prompt: str) -> bool:
+    """True when a stored user turn was fired automatically.
+
+    The marker sits inside the ``[CIAO_CONTEXT_BEGIN]`` envelope that prefixes
+    the turn's stored prompt. It is matched only there, so a person who pastes
+    the marker text into their own message is still a human turn.
+    """
+    if not prompt.startswith("[CIAO_CONTEXT_BEGIN]"):
+        return False
+    envelope = prompt.partition("[CIAO_CONTEXT_END]")[0]
+    return UNATTENDED_MARKER in envelope
 
 
 def context_policy(key: str) -> MemoryWritePolicy:

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ciao.config import CiaoConfig
+from ciao.transcripts import transcript_has_human_turn
 from ciao.web.chat_broker import EventsHub
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -169,18 +170,29 @@ class ArchivePipeline:
                 and outcome.turn_count > 0
                 and vault_root is not None
             ):
-                try:
-                    self._host.enqueue_memory_pass(
-                        chat,
-                        project_meta,
-                        outcome.path,
-                        self._project_doc_path(chat, project_meta),
-                        focus,
+                # A transcript whose every turn was fired by an automation holds
+                # nothing the pass may record (memory_pass tells it so), so the
+                # pass is not paid for. Unknown (unparseable) does not skip, and
+                # neither does a focused pass the owner asked for.
+                if not focus and not transcript_has_human_turn(outcome.path):
+                    logger.info(
+                        "Skipping the memory pass for %s: every user turn in the "
+                        "archive is unattended",
+                        chat_id,
                     )
-                except Exception:  # noqa: BLE001 — the archive already succeeded
-                    logger.exception(
-                        "Failed to enqueue a memory pass for %s", chat_id
-                    )
+                else:
+                    try:
+                        self._host.enqueue_memory_pass(
+                            chat,
+                            project_meta,
+                            outcome.path,
+                            self._project_doc_path(chat, project_meta),
+                            focus,
+                        )
+                    except Exception:  # noqa: BLE001 — the archive already succeeded
+                        logger.exception(
+                            "Failed to enqueue a memory pass for %s", chat_id
+                        )
 
         # Index the newly archived file in the FTS5 database. The control
         # plane now runs its own index passes in bounded workers, so this

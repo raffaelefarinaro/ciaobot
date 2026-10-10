@@ -52,7 +52,7 @@ def _host_bundle(tmp_path: Path, *, name: str = "Host") -> Path:
     scratch directory is enough, so no live ``~/Applications`` is touched.
     """
     bundle = tmp_path / name / "Ciaobot Server.app"
-    executable = bundle / "Contents" / "MacOS" / "CiaobotServerHost"
+    executable = bundle / "Contents" / "MacOS" / "Ciaobot Server"
     executable.parent.mkdir(parents=True)
     executable.write_bytes(b"#!/bin/sh\nexit 0\n")
     return bundle
@@ -142,7 +142,7 @@ def test_setup_with_verified_host_renders_host_argv_and_engine(
 
     data = _load_plist(agents / "com.ciao.server.plist")
     assert data["ProgramArguments"] == _hosted_expected(host, _ENGINE_PYTHON)
-    assert data["ProgramArguments"][0].endswith("CiaobotServerHost")
+    assert data["ProgramArguments"][0].endswith("Ciaobot Server")
     assert data["ProgramArguments"][3] == _ENGINE_PYTHON
     assert data["ProgramArguments"][3] != "/opt/ciaobot/bin/ciao"
     assert data["ExitTimeOut"] == EXIT_TIMEOUT_SECONDS == 45
@@ -289,7 +289,7 @@ def test_setup_with_a_foreign_or_unverified_host_stays_direct(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A host the record does not prove is not claimed: the direct shape is
-    written, with no ExitTimeOut and no ``CiaobotServerHost`` in the argv."""
+    written, with no ExitTimeOut and no ``Ciaobot Server`` in the argv."""
     def _refuse(*_a: object, **_k: object) -> HostOwnership:
         raise ServerHostError("not ours", code="not_owned")
 
@@ -310,7 +310,7 @@ def test_setup_with_a_foreign_or_unverified_host_stays_direct(
         "run",
     ]
     assert "ExitTimeOut" not in data
-    assert "CiaobotServerHost" not in " ".join(data["ProgramArguments"])
+    assert "Ciaobot Server" not in " ".join(data["ProgramArguments"])
 
 
 def test_setup_render_refusal_is_a_message_not_a_traceback(
@@ -419,11 +419,11 @@ def test_existing_hosted_definition_is_preserved_only_while_its_host_exists(
     assert cli._existing_hosted_definition_serves(agents, workspace) is True
 
     # The executable is gone (bundle deleted or half-installed): stop keeping it.
-    (bundle / "Contents" / "MacOS" / "CiaobotServerHost").unlink()
+    (bundle / "Contents" / "MacOS" / "Ciaobot Server").unlink()
     assert cli._existing_hosted_definition_serves(agents, workspace) is False
 
     # A directory where a regular executable file is expected is not one either.
-    executable = bundle / "Contents" / "MacOS" / "CiaobotServerHost"
+    executable = bundle / "Contents" / "MacOS" / "Ciaobot Server"
     executable.mkdir()
     assert cli._existing_hosted_definition_serves(agents, workspace) is False
 

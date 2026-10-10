@@ -4,13 +4,13 @@
 // the final job-group member (#1009, child A of #1008). It does exactly two
 // things, and nothing else:
 //
-//   CiaobotServerHost serve --python /absolute/interpreter
+//   Ciaobot Server serve --python /absolute/interpreter
 //       Launch exactly `[python, -I, -m, ciao.cli, supervise]` as a child and
 //       stay alive until that child exits, then mirror its status. The Python
 //       supervisor still owns restart/backoff and the engine descendants; the
 //       host does not restart or relaunch anything.
 //
-//   CiaobotServerHost request-accessibility
+//   Ciaobot Server request-accessibility
 //       Ask macOS once, through the public AX trust prompt, whether this host
 //       may control the desktop. The prompt is asynchronous, so the process
 //       stays alive for five seconds and then exits. It never grants anything
@@ -74,8 +74,8 @@ func errnoMessage(_ code: Int32) -> String {
 
 func usage() -> Never {
     writeStderr(
-        "Usage: CiaobotServerHost serve --python /absolute/interpreter\n"
-            + "       CiaobotServerHost request-accessibility\n"
+        "Usage: Ciaobot Server serve --python /absolute/interpreter\n"
+            + "       Ciaobot Server request-accessibility\n"
     )
     exit(EXIT_USAGE)
 }
@@ -105,7 +105,7 @@ func parseInvocation(_ arguments: [String]) -> Operation {
     }
     let python = args[2]
     guard isRunnableExecutable(python) else {
-        writeStderr("CiaobotServerHost: --python must be an absolute existing executable\n")
+        writeStderr("Ciaobot Server: --python must be an absolute existing executable\n")
         exit(EXIT_USAGE)
     }
     return .serve(python: python)
@@ -238,7 +238,7 @@ final class ServeController {
         switch spawnSupervisor(python: python) {
         case .failed(let message):
             writeStderr(
-                "CiaobotServerHost: could not launch supervisor \(python): \(message)\n"
+                "Ciaobot Server: could not launch supervisor \(python): \(message)\n"
             )
             exit(EXIT_LAUNCH_FAILURE)
         case .spawned(let pid):

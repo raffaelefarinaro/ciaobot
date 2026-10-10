@@ -240,6 +240,11 @@ _RESUME_CONTINUE_PROMPT = "continue"
 # persistently flaky connection cannot loop forever burning quota. Once hit,
 # the turn is left for the user to continue manually.
 _MAX_CONNECTION_DROP_RETRIES = 6
+# Cap on hourly quota retries. Claude's session limit resets on a 5-hour
+# window, so six hourly attempts (the five hours of the window plus one) cover
+# a session limit that clears on schedule. Weekly and monthly limits are
+# terminal and never reach this cap (see _stop_terminal_quota_retry).
+_MAX_QUOTA_RETRIES = 6
 
 # Injected into the parent turn when its background subagents all finish. The
 # CLI does not auto-continue a parent turn after a background `Agent` dispatch
@@ -466,6 +471,10 @@ class ChatInfo:
     retry_next_at: str = ""
     retry_last_error: str = ""
     retry_attempts: int = 0
+    # Kind of the failure that armed the pending retry ("quota", "connection",
+    # "startup", "auth"). The attempt counter belongs to one kind: arming a
+    # retry of a different kind starts that kind's budget at zero.
+    retry_kind: str = ""
     retry_interval_seconds: int = _RETRY_INTERVAL_SECONDS
     # Visible messages preserved when the chat is handed to a fresh provider
     # session. They are prepended by /messages so the same chat does not lose
@@ -951,6 +960,7 @@ class ProjectChatManager:
                 retry_next_at=cd.get("retry_next_at", ""),
                 retry_last_error=cd.get("retry_last_error", ""),
                 retry_attempts=int(cd.get("retry_attempts", 0) or 0),
+                retry_kind=str(cd.get("retry_kind", "") or ""),
                 retry_interval_seconds=int(cd.get("retry_interval_seconds", _RETRY_INTERVAL_SECONDS) or _RETRY_INTERVAL_SECONDS),
                 handover_messages=chat_service._normalize_handover_messages(
                     list(cd.get("handover_messages", []))
@@ -1057,6 +1067,7 @@ class ProjectChatManager:
                     "retry_next_at": c.retry_next_at,
                     "retry_last_error": c.retry_last_error,
                     "retry_attempts": c.retry_attempts,
+                    "retry_kind": c.retry_kind,
                     "retry_interval_seconds": c.retry_interval_seconds,
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
@@ -4303,6 +4314,34 @@ class ProjectChatManager:
             workspace = self._config.primary_workspace()
         return self._config.agent_root(workspace)
 
+    def _schedule_target_project(self, entry: object) -> ProjectInfo | None:
+        """The project a schedule runs in: its target chat's, else its named project."""
+        web_chat_id = getattr(entry, "web_chat_id", None)
+        if web_chat_id:
+            chat = self._chats.get(web_chat_id)
+            project = self._projects.get(chat.project_id) if chat else None
+            if project is not None:
+                return project
+        web_project_id = getattr(entry, "web_project_id", None)
+        if web_project_id:
+            return self._projects.get(web_project_id)
+        return None
+
+    def schedule_command_env(self, entry: object) -> tuple[Path, dict[str, str]]:
+        """The working directory and extra environment for a schedule's command.
+
+        The same workspace a chat in this schedule would run in: the agent root
+        and the workspace-scoped env that a chat turn gets, with CIAO_WORKSPACE
+        left at the install root.
+        """
+        project = self._schedule_target_project(entry)
+        workspace = self.schedule_workspace(entry)
+        if not self._is_known_workspace(workspace):
+            workspace = self._config.primary_workspace()
+        env = {"CIAO_WORKSPACE": str(self._config.workspace_root)}
+        env.update(self.workspace_shell_env(workspace, project))
+        return self._config.agent_root(workspace), env
+
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
@@ -4675,19 +4714,9 @@ class ProjectChatManager:
 
     def schedule_workspace(self, entry: object) -> str:
         """Resolve the workspace that owns a schedule's execution context."""
-        web_chat_id = getattr(entry, "web_chat_id", None)
-        if web_chat_id:
-            chat = self._chats.get(web_chat_id)
-            project = self._projects.get(chat.project_id) if chat else None
-            if project is not None:
-                return project.workspace
-
-        web_project_id = getattr(entry, "web_project_id", None)
-        if web_project_id:
-            project = self._projects.get(web_project_id)
-            if project is not None:
-                return project.workspace
-
+        project = self._schedule_target_project(entry)
+        if project is not None:
+            return project.workspace
         return self._schedule_workspace_hint(entry)
 
     def schedule_effective_routing(self, entry: object) -> tuple[str, str, str]:
@@ -4851,21 +4880,22 @@ class ProjectChatManager:
             return chat.thinking_level
         return ""
 
-    def _build_extra_env(self, chat: ChatInfo) -> dict[str, str]:
-        """Build extra environment variables for the provider.
+    def workspace_shell_env(self, workspace: str, project: ProjectInfo | None) -> dict[str, str]:
+        """The workspace-scoped environment a process run for ``workspace`` gets.
 
-        Workspace, project, chat, and provider markers for the spawned CLI.
-        No upstream overrides: each provider authenticates itself.
+        Shared by a chat turn (``_build_extra_env``) and a schedule's shell
+        command, so a ``ciao`` or ``gws`` call behaves the same in both: the
+        engine's CLI leads PATH, the vault is the workspace's own agent vault,
+        and the Google profile is the workspace's. Chat-only keys (the chat id,
+        model, provider, agent tokens) are not part of it, and CIAO_WORKSPACE
+        (the install root) is set by the caller.
         """
         env: dict[str, str] = {}
-        project = self._projects.get(chat.project_id)
-        env["CIAO_WORKSPACE"] = str(self._config.workspace_root)
         # The running engine's own executable directory goes at the front of the
         # agent's PATH so a ``ciao <command>`` the agent runs is THIS engine's
         # CLI, not a stale install earlier on the user's PATH. The user's PATH
         # stays behind it, so their own tools still resolve (#989).
         env["PATH"] = prepend_engine_path()
-        workspace = project.workspace if project else ""
         # The vault this chat's CLI commands should read and write. Exported
         # explicitly rather than inherited, because there is one process-level
         # CIAO_VAULT_ROOT and after the re-rooting there are N vaults, so a
@@ -4897,6 +4927,18 @@ class ProjectChatManager:
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
+        return env
+
+    def _build_extra_env(self, chat: ChatInfo) -> dict[str, str]:
+        """Build extra environment variables for the provider.
+
+        Workspace, project, chat, and provider markers for the spawned CLI.
+        No upstream overrides: each provider authenticates itself.
+        """
+        project = self._projects.get(chat.project_id)
+        env: dict[str, str] = {"CIAO_WORKSPACE": str(self._config.workspace_root)}
+        workspace = project.workspace if project else ""
+        env.update(self.workspace_shell_env(workspace, project))
         env["CIAO_MODEL"] = chat.model
         env["CIAO_PROVIDER"] = chat.provider
         env["CIAO_CHAT_ID"] = chat.chat_id
@@ -4904,7 +4946,26 @@ class ProjectChatManager:
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         # Artifacts publish to claude.ai; ciaobot has no use for that surface
         env["CLAUDE_CODE_DISABLE_ARTIFACT"] = "1"
+        # The claude.ai connectors (the Claude account's remote MCP servers)
+        # load into every Claude chat unless Claude Code is told not to. A
+        # workspace can switch them off; a memory pass always runs without them,
+        # since a pass reads and edits the vault and must not reach an external
+        # surface. Other providers never see this variable.
+        if chat.provider == "claude" and (
+            is_memory_pass_chat(chat, project) or not self._claude_ai_connectors_on(workspace)
+        ):
+            env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         return env
+
+    def _claude_ai_connectors_on(self, workspace: str) -> bool:
+        """Whether a Claude chat in ``workspace`` loads the claude.ai connectors.
+
+        An unregistered or empty workspace name keeps the default (on).
+        """
+        config_workspace = self._config.workspace(workspace) if workspace else None
+        if config_workspace is None:
+            return True
+        return bool(config_workspace.claude_ai_connectors)
 
     def _effective_mode_for_chat(
         self, chat: ChatInfo, *, unattended: bool = False
@@ -5006,6 +5067,9 @@ class ProjectChatManager:
             "tool_use_id": event.tool_use_id or "",
             "parent_tool_use_id": event.parent_tool_use_id or "",
         }
+        # Only the CLI and MCP surfaces are labelled; other calls omit the key.
+        if event.control_surface:
+            record["control_surface"] = event.control_surface
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8", newline="") as handle:
@@ -5618,22 +5682,27 @@ class ProjectChatManager:
             and chat is not None
             and bool(chat.session_id)
         )
-        # The connection/startup/auth cap guards against a transient-looking
-        # local failure looping forever; quota retries are time-gated by the
-        # hourly retry interval instead.
-        if kind in {"connection", "startup", "auth"}:
-            attempts = chat.retry_attempts if chat is not None else 0
-            if attempts >= _MAX_CONNECTION_DROP_RETRIES:
-                logger.warning(
-                    "chat %s hit the %s retry cap "
-                    "(%d); leaving the turn for a manual continue",
-                    chat_id,
-                    kind,
-                    _MAX_CONNECTION_DROP_RETRIES,
-                )
-                if chat is not None and chat.retry_status == "pending":
-                    self._clear_chat_retry(chat, status="stopped")
-                return False
+        # Every kind is capped: the connection/startup/auth cap guards against
+        # a transient-looking local failure looping forever, and the quota cap
+        # stops hourly retries against a limit that is not clearing.
+        cap = _MAX_QUOTA_RETRIES if kind == "quota" else _MAX_CONNECTION_DROP_RETRIES
+        if chat is not None and chat.retry_kind != kind:
+            # Each kind gets its own budget: a run of connection retries must
+            # not spend the quota window's attempts, and vice versa.
+            chat.retry_kind = kind
+            chat.retry_attempts = 0
+        attempts = chat.retry_attempts if chat is not None else 0
+        if attempts >= cap:
+            logger.warning(
+                "chat %s hit the %s retry cap "
+                "(%d); leaving the turn for a manual continue",
+                chat_id,
+                kind,
+                cap,
+            )
+            if chat is not None and chat.retry_status == "pending":
+                self._clear_chat_retry(chat, status="stopped")
+            return False
         if resume_continue:
             prompt = _RESUME_CONTINUE_PROMPT
             image_refs: list[str] | None = None
@@ -5657,6 +5726,16 @@ class ProjectChatManager:
         stream.publish({"type": "chat_retry", "status": "pending"})
         self._park_pending_for_retry(chat_id, stream)
         return True
+
+    def _stop_terminal_quota_retry(self, chat_id: str) -> None:
+        """End the retry ladder when the provider reports a weekly/monthly limit.
+
+        A retry that was already pending, or a retry attempt that just failed
+        with a terminal limit, must not fire again on the hourly timer.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.retry_status == "pending":
+            self._clear_chat_retry(chat, status="stopped")
 
     def set_chat_retry(
         self,
@@ -5750,6 +5829,7 @@ class ProjectChatManager:
         chat.retry_next_at = ""
         chat.retry_last_error = ""
         chat.retry_attempts = 0
+        chat.retry_kind = ""
         chat.retry_interval_seconds = _RETRY_INTERVAL_SECONDS
         self._save()
         self._publish_retry(chat)

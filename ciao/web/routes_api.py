@@ -77,6 +77,7 @@ from ciao.tool_path import resolve_command
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
 from ciao.subprocess_step import run_step
+from ciao.schedule_command import normalize_schedule_command
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
     FREQUENCIES,
@@ -5209,6 +5210,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"unknown provider '{provider}'"}, status_code=400)
     try:
         archive_policy = normalize_archive_policy(body.get("archive_policy"))
+        command = normalize_schedule_command(body.get("command"))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     # Stamp the workspace from the target project so the schedule still routes
@@ -5254,6 +5256,7 @@ async def create_schedule(request: Request) -> JSONResponse:
         workspace=workspace if workspace in known_workspaces else "",
         title=str(body.get("title", "")).strip(),
         description=str(body.get("description", "")).strip(),
+        command=command,
     )
     # Records where a chat-bound entry re-homes once its chat is deleted; must
     # be captured while that chat still exists. See stamp_fallback_project.
@@ -5369,6 +5372,8 @@ async def schedule_detail(request: Request) -> JSONResponse:
     try:
         if "archive_policy" in body:
             entry.archive_policy = normalize_archive_policy(body.get("archive_policy"))
+        if "command" in body:
+            entry.command = normalize_schedule_command(body.get("command"))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if "enabled" in body:

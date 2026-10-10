@@ -33,6 +33,7 @@ from typing import Any, Callable, Coroutine, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from ciao.jsonio import read_json_dict
+from ciao.schedule_command import normalize_schedule_command
 from ciao.models import BridgeMode
 
 _BRIDGE_MODES = frozenset({"normal", "plan", "auto", "bypass"})
@@ -1055,6 +1056,10 @@ class ScheduleEntry:
     # routines; the packaged system routines ship one so their (often
     # command-style) prompts aren't the only thing the user sees.
     description: str = ""
+    # Optional shell command run before the prompt, with no model turn. Empty
+    # means a plain prompt schedule. See ciao/schedule_command.py for the
+    # dispatch outcomes (quiet exit 0 opens no chat).
+    command: str = ""
     scope: str = "user"
     editable: bool = True
     removable: bool = True
@@ -1136,6 +1141,7 @@ class ScheduleStore:
         workspace: str = "",
         title: str = "",
         description: str = "",
+        command: str = "",
     ) -> ScheduleEntry:
         entry = ScheduleEntry(
             schedule_id=f"sched-{uuid.uuid4().hex[:8]}",
@@ -1164,6 +1170,7 @@ class ScheduleStore:
             workspace=workspace or "",
             title=title or "",
             description=description or "",
+            command=normalize_schedule_command(command),
         )
         with self._lock:
             data = self._load()
@@ -1176,6 +1183,7 @@ class ScheduleStore:
         # Both write doors normalise, so no caller can persist an auto-archive
         # policy the dispatcher will refuse to honour.
         normalize_auto_archive(entry)
+        entry.command = normalize_schedule_command(entry.command)
         with self._lock:
             if entry.scope == "system":
                 self._replace_system_state(entry)
@@ -1327,6 +1335,11 @@ class ScheduleStore:
             entry.interval_minutes = int(entry.interval_minutes or 0)
         except (TypeError, ValueError):
             entry.interval_minutes = 0
+        try:
+            entry.command = normalize_schedule_command(entry.command)
+        except ValueError:
+            logger.warning("Schedule %s has a non-string command; ignoring it", entry.schedule_id)
+            entry.command = ""
         try:
             entry.archive_policy = normalize_archive_policy(entry.archive_policy)
         except ValueError:
@@ -1701,6 +1714,7 @@ class ScheduleManager:
         workspace: str = "",
         title: str = "",
         description: str = "",
+        command: str = "",
     ) -> ScheduleEntry:
         return self._store.create(
             daily_time_utc=daily_time_utc,
@@ -1723,6 +1737,7 @@ class ScheduleManager:
             workspace=workspace,
             title=title,
             description=description,
+            command=command,
         )
 
     def backfill_project_names(self, resolve_name) -> int:
@@ -1795,6 +1810,19 @@ class ScheduleManager:
     def replace(self, entry: ScheduleEntry) -> None:
         """Persist a validated schedule update through the public manager API."""
         self._store.replace(entry)
+
+    def _prepare_run_chat(
+        self, entry: ScheduleEntry, model: str, mode: BridgeMode, provider: str
+    ) -> str | None:
+        """Prepare the target chat before dispatch, unless a command decides first.
+
+        A command entry opens its chat only when the command has output to show,
+        so the dispatch prepares it then. Preparing one here would leave an
+        empty chat behind every quiet run.
+        """
+        if self._prepare_chat is None or entry.command:
+            return None
+        return self._prepare_chat(entry, entry.prompt, model, mode, provider)
 
     def _begin_dispatch(
         self,
@@ -1924,16 +1952,15 @@ class ScheduleManager:
         # Sampling it in there instead read the already-re-pointed value, so
         # the carry-over below could never fire.
         bound_before = entry.web_chat_id
-        chat_id: str | None = None
-        if self._prepare_chat is not None:
-            chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
-        if chat_id is None:
+        chat_id = self._prepare_run_chat(entry, model, mode, provider)
+        if chat_id is None and not entry.command:
             self._disable_interval(entry, "no chat left to dispatch into")
             return None
         # Stamp before dispatching: the interval is measured from this value, so
         # a crash mid-run must not leave the entry due again immediately.
         entry.last_dispatched_at = now.isoformat(timespec="seconds")
-        entry.last_run_chat_id = chat_id
+        if chat_id:
+            entry.last_run_chat_id = chat_id
         entry.last_status = "running"
         # Interval entries have no expected slot (compute_last_expected_run
         # returns None for them), so the id carries no occurrence — it is here
@@ -1942,7 +1969,8 @@ class ScheduleManager:
         self._store.replace(entry)
         self._dispatched_ids.add(entry.schedule_id)
         self._inflight.add(entry.schedule_id)
-        self._claimed_chats.add(chat_id)
+        if chat_id:
+            self._claimed_chats.add(chat_id)
         task = asyncio.create_task(
             self._run_interval(
                 entry,
@@ -1967,7 +1995,7 @@ class ScheduleManager:
         model: str,
         mode: BridgeMode,
         provider: str,
-        chat_id: str,
+        chat_id: str | None,
         *,
         bound_before: str | None = None,
         dispatch_id: str = "",
@@ -2005,6 +2033,11 @@ class ScheduleManager:
             if stamp_run_outcome(latest, dispatch_id, status):
                 self._store.replace(latest)
             return
+        if status == "missing-chat" and entry.command:
+            # A command printed output but the dispatcher found no chat to
+            # report it into. A prompt entry with no chat is disabled in
+            # _fire_interval; a command entry only learns this here.
+            self._disable_interval(latest, "no chat left to dispatch into")
         latest.last_status = status
         rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before
         if rehomed and latest.web_chat_id == bound_before:
@@ -2015,7 +2048,8 @@ class ScheduleManager:
             # holds `bound_before` the user retargeted it mid-run, and their
             # edit wins.
             latest.web_chat_id = entry.web_chat_id
-        latest.last_run_chat_id = chat_id
+        if chat_id:
+            latest.last_run_chat_id = chat_id
         self._store.replace(latest)
 
     async def _tick_interval(self, entry: ScheduleEntry, now: datetime) -> None:
@@ -2052,9 +2086,9 @@ class ScheduleManager:
                 "chat_id": entry.web_chat_id or "",
             }
         chat_id = await self._fire_interval(entry, now or _now_utc())
-        if chat_id is None:
+        if chat_id is None and not entry.command:
             return {**result, "status": "missing-chat"}
-        return {**result, "status": "started", "chat_id": chat_id}
+        return {**result, "status": "started", "chat_id": chat_id or ""}
 
     async def dispatch_now(
         self, schedule_id: str, *, now: datetime | None = None
@@ -2084,9 +2118,7 @@ class ScheduleManager:
         )
         # Prepare the chat synchronously so we can return its ID immediately.
         # Pass it through to dispatch so it doesn't create a second chat.
-        chat_id: str | None = None
-        if self._prepare_chat is not None:
-            chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
+        chat_id = self._prepare_run_chat(entry, model, mode, provider)
         # Identify the dispatch before handing the entry to the pipeline: the
         # run reads its id off this object, and a manual run started while a
         # scheduled one is still streaming must not inherit its identity. The
@@ -2174,9 +2206,7 @@ class ScheduleManager:
             # last_run_chat_id is durable in the same write as
             # last_dispatched_at, instead of depending on the fire-and-forget
             # dispatch task surviving long enough to write it back later.
-            chat_id: str | None = None
-            if self._prepare_chat is not None:
-                chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
+            chat_id = self._prepare_run_chat(entry, model, mode, provider)
             # The slot being served is the one this tick matched, whatever the
             # clock says by the time the run ends: a 23:55 daily dispatched at
             # 23:55:07 is credited to that day even if the turn streams past
@@ -2353,9 +2383,7 @@ class ScheduleManager:
                 localized.isoformat(),
                 "; recovering a run that did not finish" if recovering else "",
             )
-            chat_id = None
-            if self._prepare_chat is not None:
-                chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
+            chat_id = self._prepare_run_chat(entry, model, mode, provider)
             # The occurrence being recovered, not the one current at boot: a
             # catch-up that runs after midnight is still serving the slot it
             # found unserved, which is the same day `last_triggered_on` below

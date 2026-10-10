@@ -42,6 +42,7 @@ from ciao.providers.opencode import QuestionResponseResult
 from ciao.sessions import StateStore
 from ciao.transcripts import (
     TranscriptStore,
+    TextStepJoiner,
     TurnJournal,
     _journal_event_record,
 )
@@ -185,6 +186,8 @@ class ChatStreamingHost(Protocol):
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
+
+    def _stop_terminal_quota_retry(self, chat_id: str) -> None: ...
 
     @staticmethod
     def _result_snippet(text: str, limit: int = 280) -> str: ...
@@ -407,7 +410,7 @@ class ChatStreaming:
         try:
             while True:
                 turn_assistant_text = ""
-                turn_streamed_text = ""
+                turn_steps = TextStepJoiner()
                 turn_result_published = False
                 question_paused = False
 
@@ -417,7 +420,7 @@ class ChatStreaming:
                     run_unattended: bool = turn_unattended,
                     run_turn_index: int | None = current_turn_index,
                 ) -> None:
-                    nonlocal turn_assistant_text, turn_streamed_text
+                    nonlocal turn_assistant_text
                     nonlocal question_paused, had_error
                     nonlocal had_provider_progress, turn_result_published
                     nonlocal last_assistant_text
@@ -481,11 +484,7 @@ class ChatStreaming:
                             stream.publish(payload)
                             if isinstance(event, ResultEvent):
                                 turn_result_published = True
-                        if (
-                            isinstance(event, AssistantTextDelta)
-                            and event.parent_tool_use_id is None
-                        ):
-                            turn_streamed_text += event.text
+                        turn_steps.feed(event)
                         if isinstance(
                             event,
                             (
@@ -630,6 +629,8 @@ class ChatStreaming:
                                         had_progress=had_provider_progress,
                                         reason=result_text or "quota limit",
                                     )
+                                elif chat_service._is_terminal_quota_error(result_text):
+                                    self._host._stop_terminal_quota_retry(chat_id)
                                 elif chat_service._is_retryable_connection_error(
                                     result_text
                                 ):
@@ -670,7 +671,7 @@ class ChatStreaming:
                         self._host._stop_result_payload(
                             chat_id,
                             turn_index=current_turn_index,
-                            text=turn_streamed_text,
+                            text=turn_steps.text,
                         )
                     )
                 else:
@@ -687,12 +688,12 @@ class ChatStreaming:
                     stream.force_closing = False
                     logger.info("Turn force-closed by user stop for chat %s", chat_id)
                     if not turn_result_published:
-                        turn_assistant_text = turn_streamed_text
+                        turn_assistant_text = turn_steps.text
                         stream.publish(
                             self._host._stop_result_payload(
                                 chat_id,
                                 turn_index=current_turn_index,
-                                text=turn_streamed_text,
+                                text=turn_steps.text,
                             )
                         )
                 except Exception as exc:
@@ -707,7 +708,7 @@ class ChatStreaming:
                                 self._host._stop_result_payload(
                                     chat_id,
                                     turn_index=current_turn_index,
-                                    text=turn_streamed_text,
+                                    text=turn_steps.text,
                                 )
                             )
                     elif isinstance(exc, ValueError) and "archived chat" in str(exc):
@@ -802,6 +803,8 @@ class ChatStreaming:
                                 had_progress=had_provider_progress,
                                 reason=error_msg,
                             )
+                        elif chat_service._is_terminal_quota_error(error_msg):
+                            self._host._stop_terminal_quota_retry(chat_id)
                         elif chat_service._is_retryable_connection_error(error_msg):
                             self._host._arm_retry(
                                 chat_id,
@@ -1062,14 +1065,12 @@ class ChatStreaming:
         stream = self._host._broker.get(chat_id)
         # Top-level (non-subagent) text seen so far, so an explicit stop that
         # ends on an empty provider terminal still persists what the user saw.
-        streamed_text = ""
+        # Steps are joined with a paragraph break where a tool call or thinking
+        # block separated them, as the live view renders them.
+        streamed_steps = TextStepJoiner()
 
         async for event in provider.execute_streaming(request):
-            if (
-                isinstance(event, AssistantTextDelta)
-                and event.parent_tool_use_id is None
-            ):
-                streamed_text += event.text
+            streamed_steps.feed(event)
             if (
                 isinstance(event, ResultEvent)
                 and chat.provider == "claude"
@@ -1088,7 +1089,7 @@ class ChatStreaming:
                 # stays an error.
                 event = replace(
                     event,
-                    result=streamed_text,
+                    result=streamed_steps.text,
                     is_error=False,
                     stopped=True,
                 )
@@ -1097,14 +1098,14 @@ class ChatStreaming:
                 and stream is not None
                 and stream.user_stopped
                 and not event.is_error
-                and streamed_text
+                and streamed_steps.text
             ):
                 # A user Stop keeps what the client already rendered. A
                 # provider's terminal text can be shorter than the stream: the
                 # Claude SDK's result carries only the final text block, and
                 # opencode joins its parts with separators. Persisting that
                 # tail would drop every earlier block on reload (#1223).
-                event = replace(event, result=streamed_text, stopped=True)
+                event = replace(event, result=streamed_steps.text, stopped=True)
             elif (
                 isinstance(event, ResultEvent)
                 and chat.provider == "claude"
@@ -1134,13 +1135,38 @@ class ChatStreaming:
                 outcome.quota = event.quota
                 outcome.cost_usd = event.cost_usd or 0.0
             elif isinstance(event, ToolUseEvent):
-                outcome.tool_events.append(
-                    {
+                # The archive keeps one row per call, not one per event: Claude
+                # streams a call twice (an input-less partial, then the full
+                # message) and a result settles the call it answers.
+                settled = None
+                if event.tool_use_id:
+                    settled = next(
+                        (
+                            entry
+                            for entry in outcome.tool_events
+                            if entry.get("id") == event.tool_use_id
+                        ),
+                        None,
+                    )
+                if settled is not None:
+                    if event.type == "tool_result":
+                        settled["error"] = bool(event.is_error)
+                    else:
+                        if event.input_chars is not None:
+                            settled["input_chars"] = event.input_chars
+                        if event.tool_input:
+                            settled["input"] = {"summary": event.tool_input}
+                else:
+                    entry: dict[str, Any] = {
                         "id": event.tool_use_id or "",
                         "name": event.tool_name,
                         "input": {"summary": event.tool_input},
                     }
-                )
+                    if event.input_chars is not None:
+                        entry["input_chars"] = event.input_chars
+                    if event.type == "tool_result":
+                        entry["error"] = bool(event.is_error)
+                    outcome.tool_events.append(entry)
                 self._host._record_agent_tool_use(chat, request, event)
             outcome.events.append(event)
             # Session bookkeeping is aggregated before delivery too, so the
@@ -1185,12 +1211,10 @@ class ChatStreaming:
             # Only the top-level turn's deltas are the user-visible answer.
             # Subagent text carries a parent_tool_use_id and belongs to the
             # subagent transcript, not this reply.
-            streamed = "".join(
-                event.text
-                for event in outcome.events
-                if isinstance(event, AssistantTextDelta)
-                and event.parent_tool_use_id is None
-            )
+            steps = TextStepJoiner()
+            for event in outcome.events:
+                steps.feed(event)
+            streamed = steps.text
             self._host._transcripts.record_turn(
                 request,
                 ctx=ChatContext.for_web(chat_id),

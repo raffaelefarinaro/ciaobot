@@ -432,7 +432,6 @@ def test_add_command_targets_the_active_workspace_vault(tmp_path: Path) -> None:
     monkeypatch_env = {
         "CIAO_WORKSPACE": str(root),
         "CIAO_ACTIVE_WORKSPACE": "client",
-        "CIAO_VAULT_ROOT": str(shared),
     }
 
     args = argparse.Namespace(
@@ -444,6 +443,13 @@ def test_add_command_targets_the_active_workspace_vault(tmp_path: Path) -> None:
         source="chat-abc",
         json=False,
     )
+    # A CIAO_VAULT_ROOT that names a different vault than the active workspace
+    # is refused, not silently overridden in either direction.
+    conflicting_env = {**monkeypatch_env, "CIAO_VAULT_ROOT": str(shared)}
+    with unittest.mock.patch.dict(os.environ, conflicting_env):
+        assert _memory_proposal_add_command(args) == 2
+    assert not (root / "memory-vault" / "client" / "Workspace" / "Memory-Proposals.md").exists()
+
     with unittest.mock.patch.dict(os.environ, monkeypatch_env):
         exit_code = _memory_proposal_add_command(args)
 
@@ -456,7 +462,7 @@ def test_add_command_targets_the_active_workspace_vault(tmp_path: Path) -> None:
     # the ambient active-workspace name. With no explicit vault root and no
     # exported one either, the queue lands under that folder's own default.
     explicit_dir = tmp_path / "manual"
-    manual_env = {k: v for k, v in monkeypatch_env.items() if k != "CIAO_VAULT_ROOT"}
+    manual_env = dict(monkeypatch_env)
     explicit_args = argparse.Namespace(
         workspace=explicit_dir,
         vault_root=None,

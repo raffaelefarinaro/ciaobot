@@ -1113,6 +1113,22 @@
                     </select>
                   </label>
                   <p class="hint hint--compact set-subrow-hint">{{ WORKSPACE_FS_SCOPE_COPY[form.agent_fs_scope] }} {{ WORKSPACE_FS_SANDBOX_NOTE }}</p>
+                  <div class="settings-switch-row set-subrow">
+                    <span class="ws-label set-subrow-label">claude.ai connectors</span>
+                    <button
+                      class="settings-switch"
+                      type="button"
+                      role="switch"
+                      :aria-checked="form.claude_ai_connectors"
+                      aria-label="claude.ai connectors"
+                      :disabled="workspacesSaving === form.name"
+                      @click="form.claude_ai_connectors = !form.claude_ai_connectors"
+                    >
+                      <span class="switch-word">{{ form.claude_ai_connectors ? 'On' : 'Off' }}</span>
+                      <span class="switch-track" aria-hidden="true"></span>
+                    </button>
+                  </div>
+                  <p class="hint hint--compact set-subrow-hint">Load your Claude account's connectors (Slack, Jira, …) in this workspace's Claude chats.</p>
                   <label class="settings-field set-subrow">
                     <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
                     <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
@@ -3713,6 +3729,8 @@ type WorkspaceForm = {
   default_provider: WorkspaceProvider
   gws_profile: string
   disallowed_tools: string
+  // Whether the workspace's Claude chats load the claude.ai connectors.
+  claude_ai_connectors: boolean
   color: WorkspaceColorId
   // '' is "no choice": the key is left out of a create, and an update sends
   // null, so the engine keeps or returns the workspace to its default.
@@ -3752,6 +3770,7 @@ function blankWorkspaceForm(): WorkspaceForm {
     default_provider: defaultWorkspaceProvider(),
     gws_profile: '',
     disallowed_tools: '',
+    claude_ai_connectors: true,
     color: DEFAULT_WORKSPACE_COLOR,
     agent_fs_scope: '',
   }
@@ -3779,6 +3798,7 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     default_provider: normalizeWorkspaceProvider(ws.default_provider),
     gws_profile: ws.gws_profile || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
+    claude_ai_connectors: ws.claude_ai_connectors !== false,
     color: normalizeWorkspaceColor(ws.color),
     agent_fs_scope: fsScopeChoice(ws.agent_fs_scope),
   }
@@ -3970,6 +3990,7 @@ async function saveWorkspace(name: string) {
       default_provider: form.default_provider,
       gws_profile: form.gws_profile,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
+      claude_ai_connectors: form.claude_ai_connectors,
       color: form.color,
       // Sent only when File access was changed. Picking the default again goes
       // as null, which clears an earlier explicit choice.

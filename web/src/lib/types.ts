@@ -55,6 +55,8 @@ export interface WorkspaceInfo {
   vault_root: string
   default_provider: WorkspaceProvider
   disallowed_tools?: string[] | null
+  // Whether the workspace's Claude chats load the claude.ai connectors. Missing → on.
+  claude_ai_connectors?: boolean
   gws_profile: string
   // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
   color?: string
@@ -631,6 +633,8 @@ export interface Schedule {
   archive_policy: ScheduleArchivePolicy
   title?: string
   description?: string
+  // Optional shell command run before the prompt; empty when there is none.
+  command?: string
   scope?: string
   editable?: boolean
   removable?: boolean

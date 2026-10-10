@@ -585,6 +585,13 @@ class WindowsUpdateHost:
         sigbreak: signal.Signals = getattr(signal, "SIGBREAK")
         return (signal.SIGTERM, sigbreak)
 
+    def server_host_migration_needed(self) -> bool:
+        """The Ciaobot Server host is macOS only, so Windows never migrates one."""
+        return False
+
+    def migrate_server_host(self, archive: Path, entry: dict[str, Any]) -> None:
+        raise RuntimeError("the Ciaobot Server host is macOS only")
+
     def redirect_detached_stdio(self, root: Path) -> None:
         """Under pythonw.exe, append stdout and stderr to ``<root>/updater.log``.
 

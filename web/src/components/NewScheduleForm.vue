@@ -15,6 +15,21 @@
         rows="4"
         required
       ></textarea>
+      <div class="nsf-command-field">
+        <label class="nsf-command-label" for="nsf-command">Command (optional)</label>
+        <input
+          id="nsf-command"
+          v-model="command"
+          class="nsf-command"
+          type="text"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+          placeholder="e.g. git -C docs pull && ./scripts/sync.sh"
+          aria-describedby="nsf-command-hint"
+        />
+        <p id="nsf-command-hint" class="nsf-hint">Runs first. If it prints nothing and exits 0, no chat is opened.</p>
+      </div>
     </section>
 
     <section class="nsf-sec" aria-labelledby="nsf-when-h">
@@ -202,6 +217,7 @@ const projectStore = useProjectStore()
 
 const time = ref('')
 const prompt = ref('')
+const command = ref('')
 const timezone = ref('Europe/Zurich')
 const contextKey = ref('')
 const frequency = ref('weekly')
@@ -427,6 +443,7 @@ async function submit() {
 
   await store.createSchedule({
     prompt: prompt.value,
+    command: command.value,
     frequency: frequency.value,
     time: needsTimeOfDay.value ? time.value : '',
     timezone: timezone.value,
@@ -448,6 +465,7 @@ async function submit() {
   })
   time.value = ''
   prompt.value = ''
+  command.value = ''
   frequency.value = 'weekly'
   intervalMinutes.value = 10
   selectedDays.value = []
@@ -474,6 +492,9 @@ async function submit() {
 }
 .nsf-hint { margin: 0 0 var(--space-2); color: var(--fg3); font-size: var(--text-sm); }
 .nsf-prompt { width: 100%; box-sizing: border-box; min-height: 96px; resize: vertical; line-height: 1.5; }
+.nsf-command-field { margin-top: var(--space-3); }
+.nsf-command-label { display: block; margin-bottom: var(--space-1); font-size: var(--text-sm); }
+.nsf-command { width: 100%; box-sizing: border-box; min-height: 44px; font-family: var(--font-mono); font-size: var(--text-sm); }
 .nsf-rows { border-top: 1px solid var(--border); }
 .nsf-row {
   display: flex;

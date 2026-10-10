@@ -126,7 +126,7 @@ def test_classify_engine_for_a_hosted_definition(tmp_path: Path) -> None:
                 "Label": "com.ciao.server",
                 "ProgramArguments": [
                     "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/"
-                    "CiaobotServerHost",
+                    "Ciaobot Server",
                     "serve",
                     "--python",
                     "/opt/ciao/venv/bin/python",
@@ -140,7 +140,7 @@ def test_classify_engine_for_a_hosted_definition(tmp_path: Path) -> None:
     result = classify(agents)
 
     assert result.kind == "engine"
-    assert result.plist_program.endswith("CiaobotServerHost")
+    assert result.plist_program.endswith("Ciaobot Server")
 
 
 def test_classify_never_names_the_server_host_bundle_as_an_app_to_retire(
@@ -159,7 +159,7 @@ def test_classify_never_names_the_server_host_bundle_as_an_app_to_retire(
                 "Label": "com.ciao.server",
                 "ProgramArguments": [
                     "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/"
-                    "CiaobotServerHost",
+                    "Ciaobot Server",
                     "serve",
                     "--python",
                     "/opt/ciao/venv/bin/python3-intel64",

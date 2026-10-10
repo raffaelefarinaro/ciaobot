@@ -199,6 +199,7 @@ def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
         "default_provider": config.default_provider_for_workspace(workspace.name),
         "disallowed_tools": workspace.disallowed_tools,
         "allowed_mcp_servers": workspace.allowed_mcp_servers,
+        "claude_ai_connectors": workspace.claude_ai_connectors,
         "gws_profile": workspace.gws_profile,
         "color": workspace.color,
     }
@@ -509,6 +510,11 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
         allowed = _string_list(raw_allowed, _MCP_SERVER_NAME_RE)
         if allowed is None:
             allowed = []
+    # An archive written before the switch existed has no key and restores to
+    # the default (on); a stored value that is not a boolean restores off.
+    connectors = entry.get("claude_ai_connectors", True)
+    if not isinstance(connectors, bool):
+        connectors = False
     profile = entry.get("gws_profile")
     if not isinstance(profile, str) or not (
         profile == "" or _GWS_PROFILE_RE.fullmatch(profile)
@@ -522,6 +528,7 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
         "default_provider": provider,
         "disallowed_tools": disallowed,
         "allowed_mcp_servers": allowed,
+        "claude_ai_connectors": connectors,
         "gws_profile": profile,
         "color": color,
     }
@@ -811,6 +818,7 @@ def register_restored(
         default_provider=settings["default_provider"],
         disallowed_tools=settings["disallowed_tools"],
         allowed_mcp_servers=settings["allowed_mcp_servers"],
+        claude_ai_connectors=settings["claude_ai_connectors"],
         gws_profile=settings["gws_profile"],
         color=settings["color"],
     )

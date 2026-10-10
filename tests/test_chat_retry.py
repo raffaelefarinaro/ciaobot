@@ -539,10 +539,7 @@ async def test_non_billing_rate_limit_with_progress_resumes_continue(tmp_path: P
         yield AssistantTextDelta(type="assistant", text="editing files… ")
         yield ResultEvent(
             type="result",
-            result=(
-                "API Error: Request rejected (429) · you have reached your "
-                "weekly usage limit, upgrade for higher limits"
-            ),
+            result="API Error: Request rejected (429) · rate limit exceeded, try again later",
             session_id="sess-live",
             is_error=True,
             effective_model=chat.model,
@@ -610,6 +607,7 @@ async def test_midresponse_drop_stops_after_retry_cap(tmp_path: Path) -> None:
     # Simulate a live session plus an already-exhausted retry budget.
     chat.session_id = "sess-drop"
     chat.retry_attempts = _MAX_CONNECTION_DROP_RETRIES
+    chat.retry_kind = "connection"
     pcm._save()
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
@@ -743,3 +741,229 @@ def test_a_limit_noun_alone_still_needs_the_429_marker() -> None:
     assert _is_retryable_quota_error("I checked the quota settings for you") is False
     assert _is_retryable_quota_error("the session was restored") is False
     assert _is_retryable_quota_error("explain how rate limit headers work") is False
+
+
+OLLAMA_WEEKLY_LIMIT = (
+    "API Error: Request rejected (429) · you (x) have reached your weekly usage "
+    "limit, upgrade for higher limits: https://ollama.com/upgrade"
+)
+
+
+def test_weekly_usage_limit_is_terminal_not_retryable() -> None:
+    """A weekly limit resets days out; the hourly retry must not be armed."""
+    from ciao.web.chat_service import (
+        _is_retryable_quota_error,
+        _is_terminal_quota_error,
+    )
+
+    assert _is_terminal_quota_error(OLLAMA_WEEKLY_LIMIT) is True
+    assert _is_retryable_quota_error(OLLAMA_WEEKLY_LIMIT) is False
+    assert _is_terminal_quota_error("You've hit your monthly limit") is True
+    assert _is_retryable_quota_error("You've hit your monthly limit") is False
+
+
+def test_session_limit_and_capacity_stay_retryable() -> None:
+    from ciao.web.chat_service import (
+        _is_terminal_quota_error,
+        _is_retryable_quota_error,
+    )
+
+    session = "API Error: Request rejected (429) · you have reached your session usage limit"
+    capacity = "Model is at capacity, try again shortly"
+    for text in (session, capacity, "You've hit your session limit - resets 2:20pm"):
+        assert _is_terminal_quota_error(text) is False
+        assert _is_retryable_quota_error(text) is True
+
+
+async def test_weekly_limit_error_arms_no_retry(tmp_path: Path) -> None:
+    """A terminal weekly limit surfaces as an error and leaves no retry pending."""
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield AssistantTextDelta(type="assistant", text="partial… ")
+        yield ResultEvent(
+            type="result",
+            result=OLLAMA_WEEKLY_LIMIT,
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+    assert not any(
+        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
+    )
+    assert any(
+        e.get("type") == "result" and e.get("is_error") for e in events
+    )
+
+
+async def test_pending_retry_is_stopped_by_terminal_weekly_limit(tmp_path: Path) -> None:
+    """A retry attempt that hits a weekly limit must not refire on the hourly timer."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    pcm.set_chat_retry(chat.chat_id, "do the thing", reason="rate limit")
+
+    pcm._stop_terminal_quota_retry(chat.chat_id)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "stopped"
+
+
+async def test_quota_retries_stop_after_cap(tmp_path: Path) -> None:
+    """After _MAX_QUOTA_RETRIES hourly retries, a further quota error arms nothing."""
+    from ciao.web.project_chats import _MAX_QUOTA_RETRIES
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.retry_attempts = _MAX_QUOTA_RETRIES
+    chat.retry_kind = "quota"
+    pcm._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): rate limit exceeded",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+    assert not any(
+        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
+    )
+
+
+async def test_quota_retry_armed_below_cap(tmp_path: Path) -> None:
+    """One short of the quota cap, a rate-limit error still arms the hourly retry."""
+    from ciao.web.project_chats import _MAX_QUOTA_RETRIES
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.retry_attempts = _MAX_QUOTA_RETRIES - 1
+    chat.retry_kind = "quota"
+    pcm._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): rate limit exceeded",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_five_hour_session_limit_gets_six_hourly_attempts(tmp_path: Path) -> None:
+    """A session limit that clears inside the 5-hour window is retried six times."""
+    from ciao.web.project_chats import _MAX_QUOTA_RETRIES
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): reached your session usage limit",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    # Each hourly fire fails again; the first failure arms the ladder.
+    for _ in range(_MAX_QUOTA_RETRIES):
+        updated = pcm.get_chat(chat.chat_id)
+        assert updated is not None
+        assert updated.retry_status == "pending"
+        retry_stream = pcm.try_chat_retry_now(chat.chat_id)
+        assert retry_stream is not None
+        await asyncio.wait_for(_consume(retry_stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+
+
+async def test_connection_retries_do_not_consume_quota_budget(tmp_path: Path) -> None:
+    """Earlier connection retries leave the full quota budget for a later limit."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.retry_attempts = 3
+    chat.retry_kind = "connection"
+    pcm._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): rate limit exceeded",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_kind == "quota"
+    assert updated.retry_attempts == 0
+    pcm.stop_chat_retry(chat.chat_id)

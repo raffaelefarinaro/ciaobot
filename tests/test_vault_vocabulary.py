@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ciao.vault_index import (
     CANONICAL_TYPES,
     DIR_TYPE_MAP,
@@ -239,3 +241,278 @@ def test_an_absolute_vault_root_is_still_honoured(tmp_path: Path, monkeypatch) -
     target.mkdir(parents=True)
 
     assert _resolve_vault_root(target) == target.resolve()
+
+
+def _install_with_client_workspace(tmp_path: Path) -> Path:
+    """An install whose registry names a `client` workspace, as the PWA writes it."""
+    import json
+
+    root = tmp_path / "install"
+    runtime = root / ".runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workspaces.json").write_text(
+        json.dumps([
+            {"name": "personal", "vault_root": "memory-vault/personal"},
+            {"name": "client", "vault_root": "memory-vault/client"},
+        ]),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_default_vault_root_follows_the_active_workspace(tmp_path: Path, monkeypatch) -> None:
+    """With no CIAO_VAULT_ROOT, the default vault is the active workspace's.
+
+    Chats export CIAO_ACTIVE_WORKSPACE, and a routine run that wrote its index to
+    `<workspace>/memory-vault` while the chat named another vault was the bug.
+    """
+    import os
+
+    from ciao.cli import _resolve_vault_root
+    from ciao.config import CiaoConfig, installed_workspace_env
+    from ciao.vault_index import default_vault_root
+
+    root = _install_with_client_workspace(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    monkeypatch.delenv("CIAO_VAULT_ROOT", raising=False)
+    monkeypatch.chdir(elsewhere)
+
+    source = {**installed_workspace_env(dict(os.environ)), "PWA_AUTH_TOKEN": "test"}
+    expected = CiaoConfig.from_env(source).agent_vault_root("client").resolve()
+    assert default_vault_root() == expected
+    assert _resolve_vault_root() == expected
+
+
+def test_explicit_vault_root_env_still_wins_over_the_active_workspace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.vault_index import default_vault_root
+
+    root = _install_with_client_workspace(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    explicit = tmp_path / "explicit-vault"
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(explicit))
+
+    assert default_vault_root() == explicit.resolve()
+
+
+def test_vault_index_write_refuses_when_env_and_active_workspace_differ(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao.vault_index import main as vault_index_main
+
+    root = _install_with_client_workspace(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    shared = tmp_path / "shared-vault"
+    shared.mkdir()
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(shared))
+
+    assert vault_index_main(["--write"]) == 2
+    assert not (shared / "INDEX.md").exists()
+    err = capsys.readouterr().err
+    assert str(shared.resolve()) in err
+    assert "name different vaults" in err
+
+
+def test_vault_index_write_with_an_explicit_vault_root_is_not_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.vault_index import main as vault_index_main
+
+    root = _install_with_client_workspace(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(tmp_path / "shared-vault"))
+    target = tmp_path / "named-vault"
+    target.mkdir()
+
+    assert vault_index_main(["--write", "--vault-root", str(target)]) == 0
+    assert (target / "INDEX.md").is_file()
+
+
+class _Reached(Exception):
+    """Raised by a stub standing in for the write, to prove the guard let the call through."""
+
+
+def _conflicting_install(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """An install whose active workspace vault differs from CIAO_VAULT_ROOT."""
+    root = _install_with_client_workspace(tmp_path)
+    shared = tmp_path / "shared-vault"
+    shared.mkdir()
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    monkeypatch.setenv("CIAO_VAULT_ROOT", str(shared))
+    return root, shared
+
+
+def _stub_write(monkeypatch, module: str, attr: str) -> list[tuple]:
+    """Replace one library write with a stub that records the call and then stops."""
+    import importlib
+
+    calls: list[tuple] = []
+
+    def stub(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise _Reached
+
+    monkeypatch.setattr(importlib.import_module(module), attr, stub)
+    return calls
+
+
+# (command argv, library module, library callable the handler reaches once it proceeds)
+_VAULT_WRITERS = [
+    (["vault-migrate"], "ciao.vault_migration", "retain_retired_stock_types"),
+    (["vault-migrate-links"], "ciao.vault_migrate_links", "migrate_links"),
+    (["vault-unmigrate-links"], "ciao.vault_migrate_links", "unmigrate_links"),
+    (["vault-rehome"], "ciao.vault_rehome", "rehome_people"),
+    (["vault-unrehome"], "ciao.vault_rehome", "unrehome_people"),
+]
+
+
+def _vault_writer_cases():
+    return [pytest.param(argv, mod, attr, id=argv[0]) for argv, mod, attr in _VAULT_WRITERS]
+
+
+@pytest.mark.parametrize("argv,module,attr", _vault_writer_cases())
+def test_implicit_vault_apply_is_refused_on_conflict(
+    argv, module, attr, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao.cli import main as cli_main
+
+    _conflicting_install(tmp_path, monkeypatch)
+    calls = _stub_write(monkeypatch, module, attr)
+
+    assert cli_main([*argv, "--apply"]) == 2
+    assert calls == []
+    err = capsys.readouterr().err
+    assert "name different vaults" in err
+    assert str((tmp_path / "shared-vault").resolve()) in err
+
+
+@pytest.mark.parametrize("argv,module,attr", _vault_writer_cases())
+def test_implicit_vault_apply_with_explicit_vault_root_proceeds(
+    argv, module, attr, tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.cli import main as cli_main
+
+    _conflicting_install(tmp_path, monkeypatch)
+    named = tmp_path / "named-vault"
+    named.mkdir()
+    _stub_write(monkeypatch, module, attr)
+
+    with pytest.raises(_Reached):
+        cli_main([*argv, "--apply", "--vault-root", str(named)])
+
+
+@pytest.mark.parametrize("argv,module,attr", _vault_writer_cases())
+def test_implicit_vault_dry_run_is_not_refused(
+    argv, module, attr, tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.cli import main as cli_main
+
+    _conflicting_install(tmp_path, monkeypatch)
+    _stub_write(monkeypatch, module, attr)
+
+    # Without --apply the handler still reaches its library call (the preview),
+    # so the conflict must not short-circuit it with exit 2.
+    with pytest.raises(_Reached):
+        cli_main(argv)
+
+
+def test_workspace_reroot_apply_is_refused_on_conflict(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao.cli import main as cli_main
+
+    _conflicting_install(tmp_path, monkeypatch)
+    calls = _stub_write(monkeypatch, "ciao.workspace_reroot", "apply")
+
+    assert cli_main(["workspace-reroot", "--apply"]) == 2
+    assert calls == []
+    assert "name different vaults" in capsys.readouterr().err
+
+
+def test_workspace_reroot_apply_with_explicit_workspace_proceeds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from ciao.cli import main as cli_main
+
+    root, _ = _conflicting_install(tmp_path, monkeypatch)
+    _stub_write(monkeypatch, "ciao.workspace_reroot", "apply")
+
+    with pytest.raises(_Reached):
+        cli_main(["workspace-reroot", "--apply", "--workspace", str(root)])
+
+
+def test_workspace_reroot_plan_is_not_refused(tmp_path: Path, monkeypatch) -> None:
+    from ciao.cli import main as cli_main
+
+    _conflicting_install(tmp_path, monkeypatch)
+    _stub_write(monkeypatch, "ciao.workspace_reroot", "plan")
+
+    with pytest.raises(_Reached):
+        cli_main(["workspace-reroot"])
+
+
+# The review-queue writers resolve their vault through _proposal_config. The
+# refusal sits before any input is read, so the stub is the first thing that can
+# observe a call.
+def _skill_writer_argv(tmp_path: Path, command: str) -> list[str]:
+    payload = tmp_path / "input.json"
+    payload.write_text("{}", encoding="utf-8")
+    return {
+        "skill-proposal-add": ["skill-proposal-add", "some-skill", "--input-file", str(payload)],
+        "skill-proposal-remove": ["skill-proposal-remove", "some-skill"],
+        "skill-draft-add": ["skill-draft-add", "--input-file", str(payload)],
+        "skill-draft-approve": ["skill-draft-approve", "draft-1"],
+        "skill-draft-reject": ["skill-draft-reject", "draft-1"],
+    }[command]
+
+
+_SKILL_WRITERS = [
+    "skill-proposal-add",
+    "skill-proposal-remove",
+    "skill-draft-add",
+    "skill-draft-approve",
+    "skill-draft-reject",
+]
+
+
+@pytest.mark.parametrize("command", _SKILL_WRITERS)
+def test_skill_queue_write_is_refused_on_conflict(
+    command, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from ciao import cli
+
+    _conflicting_install(tmp_path, monkeypatch)
+    calls = _stub_write(monkeypatch, "ciao.cli", "_proposal_config")
+
+    assert cli.main(_skill_writer_argv(tmp_path, command)) == 2
+    assert calls == []
+    assert "name different vaults" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", _SKILL_WRITERS)
+def test_skill_queue_write_with_explicit_vault_root_proceeds(
+    command, tmp_path: Path, monkeypatch
+) -> None:
+    from ciao import cli
+
+    _conflicting_install(tmp_path, monkeypatch)
+    named = tmp_path / "named-vault"
+    named.mkdir()
+    # The add commands read their input before resolving the vault. An empty
+    # payload is not a finding, so the readers are stubbed to reach the stop
+    # point; the test is about the vault choice, not the payload's shape.
+    monkeypatch.setattr(cli, "_read_skill_proposal_input", lambda path: ({}, ""))
+    monkeypatch.setattr(cli, "_read_skill_draft_input", lambda path: ({}, ""))
+    _stub_write(monkeypatch, "ciao.cli", "_proposal_config")
+
+    argv = _skill_writer_argv(tmp_path, command) + ["--vault-root", str(named)]
+    with pytest.raises(_Reached):
+        cli.main(argv)

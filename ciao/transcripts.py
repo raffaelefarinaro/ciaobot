@@ -21,7 +21,14 @@ from claude_agent_sdk import (
 
 from ciao.agent_paths import claude_projects_dir
 from ciao.jsonio import read_json_dict
-from ciao.models import AgentRequest, ChatContext
+from ciao.memory_policy import is_unattended_turn
+from ciao.models import (
+    AgentRequest,
+    AssistantTextDelta,
+    ChatContext,
+    ThinkingEvent,
+    ToolUseEvent,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +44,69 @@ _SKILL_MARKER_RE = re.compile(r"<command-name>([^<\s]+)</command-name>")
 # entry cap, whichever comes first. A crash loses at most this much tail.
 _JOURNAL_FLUSH_SECONDS = 0.25
 _JOURNAL_FLUSH_ENTRIES = 32
+
+
+class TextStepJoiner:
+    """Join one reply's top-level text steps into the text a stop persists.
+
+    The live view draws each text step as its own block, and a tool call or a
+    thinking block separates one step from the next. Concatenating the deltas
+    with no separator reloads as "I'll check the file.The file says". A step
+    boundary is recorded with :meth:`boundary`; the next text delta is then
+    preceded by a paragraph break, made from just enough newlines that the
+    reply never gets a leading break, a doubled one or a trailing one.
+    """
+
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+        self._pending_break = False
+
+    def feed(self, event: Any) -> None:
+        """Advance the join for one stream event; subagent events are ignored."""
+        if getattr(event, "parent_tool_use_id", None) is not None:
+            return
+        if isinstance(event, AssistantTextDelta):
+            self.add(event.text)
+        elif isinstance(event, (ToolUseEvent, ThinkingEvent)):
+            self.boundary()
+
+    def boundary(self) -> None:
+        if self._parts:
+            self._pending_break = True
+
+    def add(self, text: str) -> None:
+        if not text:
+            return
+        if self._pending_break:
+            self._pending_break = False
+            self._trim_trailing_blanks()
+            leading = len(text) - len(text.lstrip("\n"))
+            separator = "\n" * max(0, 2 - self._trailing_newlines() - leading)
+            if separator:
+                self._parts.append(separator)
+        self._parts.append(text)
+
+    def _trim_trailing_blanks(self) -> None:
+        # "Working on " + break reads as trailing spaces in the stored reply.
+        while self._parts:
+            last = self._parts[-1].rstrip(" \t")
+            if last:
+                self._parts[-1] = last
+                return
+            self._parts.pop()
+
+    def _trailing_newlines(self) -> int:
+        count = 0
+        for part in reversed(self._parts):
+            stripped = part.rstrip("\n")
+            count += len(part) - len(stripped)
+            if stripped:
+                break
+        return count
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts)
 
 
 class TurnJournal:
@@ -184,18 +254,59 @@ class TurnJournal:
 
 
 def _journal_event_record(event: Any) -> dict[str, Any] | None:
-    """Map a stream event to its compact journal record (None = skip)."""
+    """Map a stream event to its compact journal record (None = skip).
+
+    Only top-level events are journalled: subagent text belongs to the
+    subagent, so recovery joins the same text a live stop persists.
+    """
     type_name = type(event).__name__
+    if getattr(event, "parent_tool_use_id", None) is not None:
+        return None
     if type_name == "AssistantTextDelta":
         text = getattr(event, "text", "")
         return {"type": "text", "text": text} if text else None
     if type_name == "ToolUseEvent":
-        name = getattr(event, "tool_name", "")
-        return {"type": "tool", "name": name} if name else None
+        return {"type": "tool", "name": getattr(event, "tool_name", "") or "tool"}
+    if type_name == "ThinkingEvent":
+        # Not recoverable content, but a step boundary for the joined text.
+        return {"type": "break"}
     if type_name == "ResultEvent":
         return {"type": "result", "is_error": bool(getattr(event, "is_error", False))}
-    # Thinking/system/permission events carry no recoverable reply content.
+    # System/permission events carry no recoverable reply content.
     return None
+
+
+def compact_tool_calls(tool_events: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """The per-call facts a turn keeps for the archive's ``### Tools`` section.
+
+    Only the tool name, the input size and the error flag survive. The input and the
+    result themselves are never stored here: they can hold secrets and are
+    large.
+    """
+    calls: list[dict[str, Any]] = []
+    for event in tool_events or []:
+        if not isinstance(event, dict):
+            continue
+        call: dict[str, Any] = {"name": str(event.get("name") or "tool")}
+        input_chars = event.get("input_chars")
+        if isinstance(input_chars, int) and not isinstance(input_chars, bool):
+            call["input_chars"] = input_chars
+        if event.get("error") is True:
+            call["error"] = True
+        calls.append(call)
+    return calls
+
+
+def _tool_call_line(call: dict[str, Any]) -> str:
+    """One ``### Tools`` row: ``- Bash · in 120 · error``."""
+    name = " ".join(str(call.get("name") or "tool").split())
+    parts = [f"- {name}"]
+    input_chars = call.get("input_chars")
+    if isinstance(input_chars, int):
+        parts.append(f"in {input_chars:,}")
+    if call.get("error") is True:
+        parts.append("error")
+    return " · ".join(parts)
 
 
 def _now_iso() -> str:
@@ -278,6 +389,7 @@ class TranscriptStore:
                 "usage": usage,
                 "quota": quota,
                 "tool_events": list(tool_events or []),
+                "tool_calls": compact_tool_calls(tool_events),
                 # A force-stopped turn is durable but incomplete; renderers
                 # already treat this flag as "the reply was cut short".
                 **({"is_partial": True} if is_partial else {}),
@@ -353,6 +465,7 @@ class TranscriptStore:
                 "usage": {},
                 "quota": {},
                 "tool_events": list(tool_events or []),
+                "tool_calls": compact_tool_calls(tool_events),
                 # The journal this turn came from, so a replay can recognise it.
                 "recovered_from": source,
             }
@@ -386,7 +499,7 @@ class TranscriptStore:
                 prompt = ""
                 started_at = ""
                 committed = False
-                texts: list[str] = []
+                steps = TextStepJoiner()
                 tool_events: list[dict[str, Any]] = []
                 with journal_file.open("r", encoding="utf-8") as handle:
                     for line in handle:
@@ -403,13 +516,16 @@ class TranscriptStore:
                             prompt = str(record.get("prompt") or "")
                             started_at = str(record.get("started_at") or "")
                         elif kind == "text":
-                            texts.append(str(record.get("text") or ""))
+                            steps.add(str(record.get("text") or ""))
                         elif kind == "tool":
+                            steps.boundary()
                             tool_events.append({
                                 "id": "",
                                 "name": str(record.get("name") or "tool"),
                                 "input": {"summary": ""},
                             })
+                        elif kind == "break":
+                            steps.boundary()
                         elif kind == "committed":
                             committed = True
                 if committed:
@@ -423,7 +539,7 @@ class TranscriptStore:
                     ctx,
                     provider=provider,
                     prompt=prompt,
-                    response_text="".join(texts).strip(),
+                    response_text=steps.text.strip(),
                     tool_events=tool_events,
                     started_at=started_at,
                     journal_path=journal_file,
@@ -700,6 +816,13 @@ class TranscriptStore:
                     "",
                 ]
             )
+            calls = turn.get("tool_calls") or []
+            if calls:
+                lines.append("### Tools")
+                lines.append("")
+                for call in calls:
+                    lines.append(_tool_call_line(call))
+                lines.append("")
             usage = turn.get("usage") or {}
             if usage:
                 lines.append("### Usage")
@@ -940,7 +1063,10 @@ _ARCHIVE_TEXT_OPEN_RE = re.compile(r"^(`{3,})text\s*$")
 _ARCHIVE_FENCE_RUN_RE = re.compile(r"^ {0,3}(`{3,})\s*$")
 #: Lines that end a legacy (three-backtick) message body: the next turn, or a
 #: sub-heading the renderer writes after a message.
-_ARCHIVE_BOUNDARY_RE = re.compile(r"^(?:## Turn \d+|### (?:User|Assistant|Usage|Quota))\s*$")
+_ARCHIVE_BOUNDARY_RE = re.compile(
+    r"^(?:## Turn \d+|### (?:User|Assistant|Tools|Usage|Quota))\s*$"
+)
+_ARCHIVE_MESSAGE_HEADING_RE = re.compile(r"^### (?:User|Assistant)\s*$")
 _ARCHIVE_TURN_LINE_RE = re.compile(r"^## Turn \d+\s*$")
 _ARCHIVE_TIME_RE = re.compile(r"^- Time:\s*(.+)$")
 
@@ -956,6 +1082,38 @@ def _text_block(body: str) -> list[str]:
     longest = max((len(run) for run in re.findall(r"`+", body)), default=0)
     fence = "`" * max(3, longest + 1)
     return [f"{fence}text", body, fence]
+
+
+def _opens_text_block(lines: list[str], start: int) -> bool:
+    """Whether the first non-blank line from ``start`` opens a ``text`` fence."""
+    index = start
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    return index < len(lines) and _ARCHIVE_TEXT_OPEN_RE.match(lines[index]) is not None
+
+
+def _is_legacy_boundary(lines: list[str], index: int) -> bool:
+    """Whether the boundary line at ``index`` really ends a legacy message body.
+
+    A message body may quote the renderer's own headings. A ``### User`` or
+    ``### Assistant`` heading ends a body only when a ``text`` fence opens
+    after it, which is what the renderer writes. A ``### Usage`` or
+    ``### Quota`` heading ends a body only when the rest of the turn is trailer
+    (no fence line, no message heading) up to the next turn, since the trailer
+    never holds a fence. A ``## Turn`` heading always counts; the caller still
+    needs a fence before it.
+    """
+    line = lines[index]
+    if _ARCHIVE_TURN_LINE_RE.match(line) is not None:
+        return True
+    if _ARCHIVE_MESSAGE_HEADING_RE.match(line) is not None:
+        return _opens_text_block(lines, index + 1)
+    for row in lines[index + 1 :]:
+        if _ARCHIVE_TURN_LINE_RE.match(row) is not None:
+            break
+        if _ARCHIVE_FENCE_RUN_RE.match(row) is not None or _ARCHIVE_MESSAGE_HEADING_RE.match(row):
+            return False
+    return True
 
 
 def _read_text_block(lines: list[str], start: int) -> tuple[str, int] | None:
@@ -992,7 +1150,10 @@ def _read_text_block(lines: list[str], start: int) -> tuple[str, int] | None:
                 break
     else:
         for boundary in range(index + 1, len(lines) + 1):
-            if boundary < len(lines) and _ARCHIVE_BOUNDARY_RE.match(lines[boundary]) is None:
+            if boundary < len(lines) and (
+                _ARCHIVE_BOUNDARY_RE.match(lines[boundary]) is None
+                or not _is_legacy_boundary(lines, boundary)
+            ):
                 continue
             for candidate in range(boundary - 1, index, -1):
                 if _ARCHIVE_FENCE_RUN_RE.match(lines[candidate]) is not None:
@@ -1060,6 +1221,29 @@ def parse_archive_turns(text: str) -> list[dict[str, Any]]:
             "trailer": "\n".join(lines[trailer_start:index]),
         })
     return turns
+
+
+def transcript_has_human_turn(path: Path | str) -> bool:
+    """Whether an archived transcript holds a turn a person typed.
+
+    False only when the archive parses and every user turn carries the
+    unattended marker (:func:`ciao.memory_policy.is_unattended_turn`): an
+    all-automation transcript has nothing the memory pass may record. An
+    archive that cannot be read, has no parseable turns, or has a turn whose
+    user body cannot be read answers True. Unknown means do not skip.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return True
+    turns = parse_archive_turns(text)
+    if not turns:
+        return True
+    for turn in turns:
+        user = turn["user"]
+        if user is None or not is_unattended_turn(user):
+            return True
+    return False
 
 
 def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:

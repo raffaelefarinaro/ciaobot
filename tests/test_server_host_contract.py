@@ -876,7 +876,10 @@ def test_inspect_rejects_a_special_file(
             lambda b: _rewrite_plist(b, bundle_id="local.other"),
             server_host.INSPECTION_FAILED,
         ),
-        (lambda b: _rewrite_plist(b, revision=2), server_host.INSPECTION_FAILED),
+        (
+            lambda b: _rewrite_plist(b, revision=HOST_REVISION + 1),
+            server_host.INSPECTION_FAILED,
+        ),
         (lambda b: _rewrite_plist(b, protocol=2), server_host.INSPECTION_FAILED),
         # A plist <true/> is not protocol 1, although True == 1 in Python.
         (lambda b: _rewrite_plist(b, protocol=True), server_host.INSPECTION_FAILED),
@@ -1191,3 +1194,85 @@ def test_real_build_snapshot_record_and_reverify(tmp_path: Path) -> None:
     with pytest.raises(ServerHostError) as caught:
         verify_owned_host(app, ownership_path=record)
     assert caught.value.code == server_host.NOT_OWNED
+
+
+# ── MIGRATION (#1249): the spaced executable name and the revision-1 layout ──
+
+_EXE_REL_CURRENT = f"Contents/MacOS/{EXECUTABLE_NAME}"
+_LEGACY_EXE_REL = f"Contents/MacOS/{server_host.LEGACY_EXECUTABLE_NAME}"
+
+
+def test_parse_hosted_shape_accepts_the_spaced_executable_name() -> None:
+    # The host executable is named "Ciaobot Server". The argv is a list, so the
+    # space is part of one element and never a word split.
+    host = f"{POSIX_BUNDLE}/{_EXE_REL_CURRENT}"
+    parsed = parse_service_command([host, "serve", "--python", "/usr/bin/python3"])
+    assert parsed.mode == "hosted"
+    assert parsed.program == host
+    assert parsed.python == "/usr/bin/python3"
+    rendered = host_service_argv(
+        PurePosixPath(POSIX_BUNDLE), PurePosixPath("/usr/bin/python3")
+    )
+    assert rendered == (host, "serve", "--python", "/usr/bin/python3")
+    assert parse_service_command(list(rendered)).program == host
+
+
+def test_parse_refuses_the_retired_executable_name() -> None:
+    legacy = f"{POSIX_BUNDLE}/{_LEGACY_EXE_REL}"
+    with pytest.raises(ServerHostError) as caught:
+        parse_service_command([legacy, "serve", "--python", "/usr/bin/python3"])
+    assert caught.value.code == server_host.INVALID_COMMAND
+
+
+def _make_legacy_bundle(root: Path) -> Path:
+    bundle = root / APP_NAME
+    (bundle / "Contents" / "MacOS").mkdir(parents=True)
+    (bundle / "Contents" / "Resources").mkdir(parents=True)
+    (bundle / "Contents" / "_CodeSignature").mkdir(parents=True)
+    (bundle / _LEGACY_EXE_REL).write_bytes(b"revision-one-host-binary")
+    (bundle / _ICON_REL).write_bytes(b"indigo-icns-bytes")
+    (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
+    info = BUILD.bundle_info()
+    info["CFBundleExecutable"] = server_host.LEGACY_EXECUTABLE_NAME
+    info["CFBundleVersion"] = "1"
+    info["CFBundleShortVersionString"] = "1"
+    with (bundle / _PLIST_REL).open("wb") as handle:
+        plistlib.dump(info, handle)
+    return bundle
+
+
+@requires_posix_uid
+def test_superseded_verifier_accepts_only_the_revision_one_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    legacy = _make_legacy_bundle(tmp_path / "old")
+    runner = _FakeRunner()
+    snapshot = server_host._inspect_bundle(legacy, runner, server_host._LEGACY_LAYOUT)
+    record = _install_record(tmp_path / "server-host.json", snapshot)
+
+    assert (
+        server_host.verify_superseded_host(legacy, ownership_path=record, runner=runner)
+        == snapshot
+    )
+    # The current inspector and verifier never accept the old name, even with
+    # the revision-1 record that vouches for it.
+    with pytest.raises(ServerHostError) as inspected:
+        inspect_host_bundle(legacy, runner=runner)
+    assert inspected.value.code == server_host.INSPECTION_FAILED
+    with pytest.raises(ServerHostError):
+        verify_owned_host(legacy, ownership_path=record, runner=runner)
+
+
+@requires_posix_uid
+def test_superseded_verifier_refuses_the_current_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_bundle(tmp_path)
+    runner = _FakeRunner()
+    snapshot = inspect_host_bundle(bundle, runner=runner)
+    record = _install_record(tmp_path / "server-host.json", snapshot)
+
+    with pytest.raises(ServerHostError):
+        server_host.verify_superseded_host(bundle, ownership_path=record, runner=runner)

@@ -235,7 +235,13 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _create(client: TestClient, cookies: dict[str, str], **body) -> dict:
-    payload = {"workspace": "personal", **body}
+    # Delegation needs a described task (MIN_DELEGATION_CHARS), so a fixture
+    # without a body gets one that describes the work.
+    payload = {
+        "workspace": "personal",
+        "body": "Write the runbook steps, links and acceptance criteria.",
+        **body,
+    }
     response = client.post("/api/tasks", json=payload, cookies=cookies)
     assert response.status_code == 201, response.text
     return response.json()["task"]
@@ -1013,6 +1019,20 @@ async def test_a_delegation_body_cannot_carry_prompt_or_task_fields(world) -> No
     assert pcm.start_stream_calls == []
 
 
+def test_a_vague_delegation_is_refused_with_the_sentence_to_describe_it(world) -> None:
+    """The PWA's delegate call shows the engine's refusal rather than handing a vague task over."""
+    client, cookies, _config, pcm = world
+    task = _create(client, cookies, title="Do the thing.", body="")
+
+    response = _delegate(client, cookies, task, pcm)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "invalid_task"
+    assert error["message"] == "Describe the task in at least a sentence before delegating"
+    assert pcm.create_chat_calls == []
+
+
 async def test_a_delegation_needs_the_session_cookie_and_the_revision(world) -> None:
     client, cookies, _config, pcm = world
     task = _create(client, cookies, title="Guarded")
@@ -1458,7 +1478,7 @@ async def test_an_edit_after_delegation_is_reported_on_the_row(world) -> None:
     task, edit it, and the answer says the description the agent was handed is no
     longer the one on disk."""
     client, cookies, _config, pcm = world
-    task = _create(client, cookies, title="Edited after", body="Original scope.")
+    task = _create(client, cookies, title="Edited after", body="Original scope of the work.")
     delegated = _delegate(client, cookies, task, pcm).json()
 
     edited = client.patch(

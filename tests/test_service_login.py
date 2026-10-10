@@ -1397,7 +1397,7 @@ def test_the_runtime_the_enable_call_carries_resolves_a_hosted_interpreter(
     body = plistlib.loads(plist_path.read_bytes())
     body["ProgramArguments"] = [
         "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/"
-        "CiaobotServerHost",
+        "Ciaobot Server",
         "serve",
         "--python",
         "/opt/ciao/venv/bin/python",

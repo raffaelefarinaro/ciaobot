@@ -359,8 +359,19 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["file", "surface", "out/report.md"], ("file_surface", {"path": "out/report.md"})),
         # The payload crosses as a path; the verdict's prose never does.
         (["note", "verify", "--payload-file", "out/verify.json"], ("verify_note", {"payload_file": "out/verify.json"})),
-        (["chat", "list", "--project", "p1"], ("chats_list", {"project_id": "p1"})),
-        (["chat", "get", "--chat", "c2"], ("chat_get", {"chat_id": "c2"})),
+        (
+            ["chat", "list", "--project", "p1"],
+            ("chats_list", {"project_id": "p1", "limit": 20, "offset": 0, "compact": True}),
+        ),
+        (
+            ["chat", "list", "--limit", "5", "--offset", "10", "--full"],
+            ("chats_list", {"project_id": "", "limit": 5, "offset": 10, "compact": False}),
+        ),
+        (
+            ["chat", "get", "--chat", "c2"],
+            ("chat_get", {"chat_id": "c2", "messages": 10, "message_chars": 2000}),
+        ),
+        (["chat", "get", "--chat", "c2", "--full"], ("chat_get", {"chat_id": "c2", "messages": 0})),
         (["chat", "create", "--title", "New", "--prompt", "hi"], ("chat_create", {"title": "New", "prompt": "hi"})),
         (["chat", "send", "--chat", "c5", "--prompt", "run"], ("chat_send", {"chat_id": "c5", "prompt": "run"})),
         (["chat", "stop", "--chat", "c7"], ("chat_stop", {"chat_id": "c7"})),

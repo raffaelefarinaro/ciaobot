@@ -29,11 +29,20 @@ import signal
 import subprocess
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
 
 from ciao import macos_service
 from ciao.os_support.private import make_private, mkstemp_private
+from ciao.server_host import (
+    HostOwnership,
+    ServerHostError,
+    default_bundle_path,
+    host_service_argv,
+    verify_owned_host,
+    verify_superseded_host,
+)
+from ciao.server_host_install import install_server_host
 
 if TYPE_CHECKING:
     from ciao.engine_update import Operation, UpdateError
@@ -118,7 +127,7 @@ class UpdateHost(Protocol):
         """The full argv the loaded service actually runs, or ``None``.
 
         The loaded job is the authority, and the whole argument vector and not
-        just ``argv[0]``: a native hosted service runs ``CiaobotServerHost serve
+        just ``argv[0]``: a native hosted service runs ``Ciaobot Server serve
         --python <interpreter>``, so the engine install the job is actually
         using is named by the interpreter it serves, not by the host
         executable. ``None`` is "not loaded, or nothing usable was reported",
@@ -201,6 +210,21 @@ class UpdateHost(Protocol):
 
     def redirect_detached_stdio(self, root: Path) -> None:
         """Give a detached helper somewhere to write, if it has none of its own."""
+        ...
+
+    def server_host_migration_needed(self) -> bool:
+        """Whether an installed revision-1 server host must be replaced (#1249).
+
+        Only macOS can answer yes; every other platform has no server host.
+        """
+        ...
+
+    def migrate_server_host(self, archive: Path, entry: dict[str, Any]) -> None:
+        """Replace the revision-1 server host with ``archive`` and repoint its agent (#1249).
+
+        Raises on any failure, leaving the old host in place when the host
+        itself could not be installed.
+        """
         ...
 
 
@@ -427,103 +451,23 @@ def _retire_job(launch: Launchctl, domain_uid: int, label: str, *plists: Path) -
         launch(["bootout", f"gui/{domain_uid}/{label}"])
 
 
-def _loaded_field(printed: str, key: str) -> str:
-    """The text ``launchctl print`` rendered for ``key``, or ``""``.
-
-    launchd has printed a job's values in three shapes across versions: a bare
-    scalar on the key's own line, a list opened on that same line, and a list
-    whose opening bracket is on the line *after* the key. A list of any shape is
-    flattened to its own lines here, so the callers only decide what a token in
-    it means, and a key launchd did not render at all answers ``""`` — which is
-    evidence of nothing, and so never refuses an update and never stands a
-    recovery down.
-    """
-    lines = printed.splitlines()
-    for index, line in enumerate(lines):
-        head, separator, rest = line.partition("=")
-        if not separator or head.strip() != key:
-            continue
-        value = rest.strip()
-        if value[:1] not in {"(", "{"}:
-            return value
-        parts = [value]
-        # The list's own delimiters, so a block that opens here is collected up
-        # to the line that closes it — one argument per line, in every shape.
-        depth = value.count("(") + value.count("{") - value.count(")") - value.count("}")
-        if depth <= 0:
-            # Opened and closed on the key's own line: the value is that line,
-            # not that line plus whatever key launchd printed after it.
-            return value
-        for nxt in lines[index + 1 :]:
-            parts.append(nxt)
-            depth += nxt.count("(") + nxt.count("{") - nxt.count(")") - nxt.count("}")
-            if depth <= 0:
-                break
-        return "\n".join(parts)
-    return ""
-
-
-def _loaded_tokens(printed: str, key: str) -> list[str]:
-    """The tokens in a value ``launchctl print`` rendered for ``key``."""
-    return [
-        token
-        for line in _loaded_field(printed, key).splitlines()
-        for token in re.findall(r"[^\s,(){}]+", line)
-    ]
-
-
 def _loaded_program_argument(printed: str) -> str | None:
     """The program ``launchctl print`` says a loaded job runs, or ``None``.
 
     The ``program`` value in every shape launchd prints it (see
-    :func:`_loaded_field`): a bare scalar keeps its spaces, because the host the
+    :func:`macos_service.launchctl_print_field`): a bare scalar keeps its spaces, because the host the
     service runs under is ``Ciaobot Server.app`` and a token split would truncate
     it at the bundle name; a list answers its first element (see
-    :func:`_loaded_list`). Nothing recognisable answers ``None``, which is
+    :func:`macos_service.launchctl_print_list`). Nothing recognisable answers ``None``, which is
     evidence of nothing and so never refuses an update.
     """
-    raw = _loaded_field(printed, "program").strip()
+    raw = macos_service.launchctl_print_field(printed, "program").strip()
     if not raw:
         return None
     if raw[:1] not in {"(", "{"}:
         return raw.strip("\"'")
-    items = _loaded_list(printed, "program")
+    items = macos_service.launchctl_print_list(printed, "program")
     return items[0] if items else None
-
-
-def _loaded_list(printed: str, key: str) -> list[str]:
-    """The elements of a list ``launchctl print`` rendered for ``key``.
-
-    launchd renders a job's list one element per line inside a delimited block,
-    and that layout is what preserves an element that contains a space — the
-    native host's own path does (``Ciaobot Server.app``), and so may the
-    interpreter it serves. Splitting those lines on whitespace would truncate the
-    host path at the first space, so a multi-line block is read line by line,
-    including any element on the line that opens it. The older single-line
-    shapes (``( -I -m ... )`` or ``{ -I -m ... }``) carry no spaces in their
-    tokens and are read as whitespace-separated tokens, as :func:`_loaded_tokens`
-    does. Quotes are stripped from every element, exactly as from a scalar
-    program, so the two agree when :func:`_loaded_server_command` folds them.
-    """
-    lines = [line.strip() for line in _loaded_field(printed, key).splitlines()]
-    if not lines:
-        return []
-    if len(lines) == 1:
-        elements = re.findall(r"[^\s,(){}]+", lines[0])
-    else:
-        # Only the block's own delimiters come off: the opening one on the first
-        # line and the closing one on the last. An element may itself end in a
-        # bracket (`/tools/env (copy)`), so no line is stripped of them wholesale.
-        lines[0] = lines[0][1:]
-        if lines[-1][-1:] in {")", "}"}:
-            lines[-1] = lines[-1][:-1]
-        elements = [line.strip().rstrip(",").strip() for line in lines]
-    return [stripped for element in elements if (stripped := element.strip("\"'"))]
-
-
-def _loaded_arguments(printed: str) -> list[str]:
-    """The arguments ``launchctl print`` rendered for a loaded job (see :func:`_loaded_list`)."""
-    return _loaded_list(printed, "arguments")
 
 
 def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...] | None:
@@ -536,7 +480,7 @@ def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...
     while the running service still executes the old one. ``launchctl print``
     reports the loaded job, which is the one that has to agree with the
     receipt. The whole argument vector and not just the program, because a
-    native hosted service runs ``CiaobotServerHost serve --python
+    native hosted service runs ``Ciaobot Server serve --python
     <interpreter>``: the engine install it is actually using is named by the
     interpreter it serves, not by the host executable.
 
@@ -556,7 +500,7 @@ def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...
     program = _loaded_program_argument(output)
     if program is None:
         return None
-    arguments = _loaded_arguments(output)
+    arguments = macos_service.launchctl_print_list(output, "arguments")
     if arguments and arguments[0] == program:
         return tuple(arguments)
     return (program, *arguments)
@@ -892,7 +836,7 @@ class MacUpdateHost:
         printed = _loaded_updater(self._launchctl, self._uid)
         if _LOADED_PID.search(printed) is None:
             return False
-        return "run-apply" in _loaded_tokens(printed, "arguments")
+        return "run-apply" in macos_service.launchctl_print_tokens(printed, "arguments")
 
     # ── the environment being swapped ───────────────────────────────
 
@@ -1045,6 +989,78 @@ class MacUpdateHost:
         them running beside each other cannot interleave their output into
         something nobody can read.
         """
+
+    def server_host_migration_needed(self) -> bool:
+        """MIGRATION (#1249): a revision-1 host its record proves ours, under a hosted agent.
+
+        A current host, no host, or a direct LaunchAgent (which runs no host and
+        has nothing to repoint) answers False.
+        """
+        bundle = default_bundle_path()
+        try:
+            verify_owned_host(bundle)
+            return False
+        except ServerHostError:
+            pass
+        try:
+            verify_superseded_host(bundle)
+        except ServerHostError:
+            return False
+        return self._hosted_agent_python() is not None
+
+    def _server_agent_plist(self) -> dict[str, Any] | None:
+        path = macos_service.default_launch_agents_dir() / f"{SERVER_LABEL}.plist"
+        try:
+            with path.open("rb") as handle:
+                loaded: Any = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    def _hosted_agent_python(self) -> str | None:
+        """The interpreter the server LaunchAgent's hosted command serves, or None."""
+        data = self._server_agent_plist()
+        if data is None:
+            return None
+        return macos_service.hosted_service_python(data.get("ProgramArguments"))
+
+    def _install_host(self, archive: Path, entry: dict[str, Any]) -> HostOwnership:
+        """The installer's replacement of the host bundle; a seam for tests."""
+        return install_server_host(archive, entry)
+
+    def migrate_server_host(self, archive: Path, entry: dict[str, Any]) -> None:
+        """MIGRATION (#1249): install the revision-2 host, then name it in the agent.
+
+        The installer replaces the revision-1 bundle only when its own record
+        proves it ours, and restores it when the replacement fails. The agent is
+        rewritten only after the new host is verified. ``ProgramArguments`` is the
+        only key changed, so the workspace, port and environment the agent was
+        set up with are kept as they are.
+        """
+        python = self._hosted_agent_python()
+        if python is None:
+            raise RuntimeError(
+                "the server LaunchAgent is not a hosted service, so there is no "
+                "host to move"
+            )
+        host = self._install_host(archive, entry)
+        data = self._server_agent_plist()
+        if data is None:
+            raise RuntimeError("the server LaunchAgent could not be read after the host install")
+        data["ProgramArguments"] = list(
+            host_service_argv(PurePosixPath(host.bundle_path), PurePosixPath(python))
+        )
+        try:
+            _write_plist(
+                data, macos_service.default_launch_agents_dir() / f"{SERVER_LABEL}.plist"
+            )
+        except OSError as exc:
+            # The new host is already in place at this point, so the old
+            # ProgramArguments no longer point at an existing file. Say so.
+            raise RuntimeError(
+                f"the Ciaobot Server host was replaced, but the LaunchAgent could "
+                f"not be rewritten to name it ({exc}); run: ciao setup"
+            ) from exc
 
 
 def current_update_host() -> UpdateHost:

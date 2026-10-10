@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -218,6 +221,43 @@ class ToolUseEvent(StreamEvent):
     request_id: str = ""
     session_id: str = ""
     file_touches: list | None = None
+    # Size of the call's raw JSON input and the control surface it went
+    # through ("cli" or "mcp", see ``tool_call_facts``). Both come from the
+    # raw input, which ``tool_input`` (a summary) does not carry.
+    input_chars: int | None = None
+    control_surface: str = ""
+    # On a ``tool_result`` event: whether the call failed. ``None`` = unknown.
+    is_error: bool | None = None
+
+
+_SHELL_TOOL_NAMES = frozenset({"Bash", "bash", "shell"})
+# A shell command that runs the ``ciao`` CLI: optional ``cd <dir> &&`` hops and
+# ``NAME=value`` assignments before it. Paths containing spaces are not matched.
+_CLI_COMMAND_RE = re.compile(
+    r"^\s*(?:cd\s+\S+\s*&&\s*)*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*ciao "
+)
+
+
+def tool_call_facts(tool_name: str, raw_input: object) -> tuple[int, str]:
+    """``(input_chars, control_surface)`` for one tool call's raw input.
+
+    ``input_chars`` is the length of the input's JSON. ``control_surface`` is
+    ``"mcp"`` for a ``mcp__ciaobot__*`` tool, ``"cli"`` for a shell tool whose
+    command starts with ``ciao `` (after whitespace, ``cd <dir> &&`` hops or
+    env assignments), and ``""`` otherwise. Only these two derived values are
+    returned: the arguments themselves are never kept.
+    """
+    try:
+        input_chars = len(json.dumps(raw_input, ensure_ascii=False)) if raw_input else 0
+    except (TypeError, ValueError):
+        input_chars = 0
+    if tool_name.startswith("mcp__ciaobot__"):
+        return input_chars, "mcp"
+    if tool_name in _SHELL_TOOL_NAMES and isinstance(raw_input, Mapping):
+        command = raw_input.get("command")
+        if isinstance(command, str) and _CLI_COMMAND_RE.match(command):
+            return input_chars, "cli"
+    return input_chars, ""
 
 
 @dataclass(slots=True)

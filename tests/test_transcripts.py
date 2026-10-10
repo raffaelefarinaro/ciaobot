@@ -512,3 +512,120 @@ def test_a_reply_with_its_own_fenced_blocks_round_trips_whole(tmp_path: Path) ->
     assert len(turns) == 1
     assert turns[0]["user"] == prompt
     assert turns[0]["assistant"] == response
+
+
+def _legacy_turn(user_body: str, assistant_body: str) -> str:
+    """One turn in the three-backtick shape written before the fence grew."""
+    return (
+        "## Turn 1\n"
+        "\n"
+        "- Time: 2026-01-01 10:00\n"
+        "- Input kind: text\n"
+        "\n"
+        "### User\n"
+        "\n"
+        "```text\n"
+        f"{user_body}\n"
+        "```\n"
+        "\n"
+        "### Assistant\n"
+        "\n"
+        "```text\n"
+        f"{assistant_body}\n"
+        "```\n"
+        "\n"
+        "### Usage\n"
+        "\n"
+        "- input: 3\n"
+    )
+
+
+def test_a_legacy_user_body_with_a_pasted_assistant_heading_is_read_whole() -> None:
+    """A pasted ``### Assistant`` in a legacy user body is not the reply heading.
+
+    The heading only ends the body when a text fence opens after it, so the
+    scan passes over the pasted one, keeps the body through the fence it
+    closes, and reads the real reply.
+    """
+    from ciao.transcripts import parse_archive_turns
+
+    user_body = (
+        "Here is my code:\n```python\nx = 1\n```\n"
+        "### Assistant\npasted heading\n"
+        "and that is all"
+    )
+    turns = parse_archive_turns(_legacy_turn(user_body, "the real reply"))
+
+    assert len(turns) == 1
+    assert turns[0]["user"] == user_body
+    assert turns[0]["assistant"] == "the real reply"
+    assert "- input: 3" in turns[0]["trailer"]
+
+
+def test_a_legacy_assistant_body_with_a_pasted_usage_heading_is_read_whole() -> None:
+    """A pasted ``### Usage`` in a legacy reply is not the trailer.
+
+    The trailer holds no fence, so a ``### Usage`` heading followed by the
+    reply's own closing fence is part of the body, not the trailer.
+    """
+    from ciao.transcripts import parse_archive_turns
+
+    assistant_body = (
+        "here is the log:\n```\nok\n```\n"
+        "### Usage\n- note: quoted\n"
+        "end of reply"
+    )
+    turns = parse_archive_turns(_legacy_turn("question", assistant_body))
+
+    assert len(turns) == 1
+    assert turns[0]["user"] == "question"
+    assert turns[0]["assistant"] == assistant_body
+    assert "- input: 3" in turns[0]["trailer"]
+
+
+# ── Human turns in the archive (memory pass gate) ─────────────────────────
+
+
+def _unattended_prompt(text: str) -> str:
+    """A stored prompt as an automation turn writes it: the capsule envelope."""
+    from ciao.context.capsule import build_context_capsule
+
+    capsule = build_context_capsule(unattended=True)
+    return f"[CIAO_CONTEXT_BEGIN]\n{capsule}\n[CIAO_CONTEXT_END]\n\n{text}"
+
+
+def test_transcript_has_human_turn_on_a_real_archive(tmp_path: Path) -> None:
+    from ciao.transcripts import transcript_has_human_turn
+
+    all_automated = _archive(
+        tmp_path / "automated",
+        [
+            {"prompt": _unattended_prompt("Curate the People notes")},
+            {"prompt": _unattended_prompt("Workspace care")},
+        ],
+    )
+    mixed = _archive(
+        tmp_path / "mixed",
+        [
+            {"prompt": _unattended_prompt("Curate the People notes")},
+            {"prompt": "Remember that Acme kickoff is next week"},
+        ],
+    )
+    normal = _archive(
+        tmp_path / "normal",
+        [{"prompt": "Remember that Acme kickoff is next week"}],
+    )
+
+    assert transcript_has_human_turn(all_automated) is False
+    assert transcript_has_human_turn(mixed) is True
+    assert transcript_has_human_turn(normal) is True
+
+
+def test_transcript_has_human_turn_does_not_skip_an_unknown_file(tmp_path: Path) -> None:
+    from ciao.transcripts import transcript_has_human_turn
+
+    garbage = tmp_path / "garbage.md"
+    garbage.write_text("# archived\n", encoding="utf-8")
+
+    assert transcript_has_human_turn(garbage) is True
+    assert transcript_has_human_turn(tmp_path / "missing.md") is True

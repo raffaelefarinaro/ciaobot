@@ -16,6 +16,7 @@ from ciao.models import (
     ImageAttachment,
     ResultEvent,
     StreamEvent,
+    ThinkingEvent,
     ToolUseEvent,
 )
 from ciao.web.chat_broker import ChatStream, ChatStreamBroker
@@ -471,3 +472,153 @@ async def test_user_stop_persists_everything_streamed_not_the_terminal_tail() ->
     assert terminal[0].stopped is True
     assert outcome.response_text == full
     assert outcome.stopped is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("between", "expected"),
+    [
+        (
+            [ToolUseEvent(type="tool_use", tool_name="Read", tool_use_id="t1")],
+            "I'll check the file.\n\nThe file says it works.",
+        ),
+        (
+            [ThinkingEvent(type="thinking", text="hmm")],
+            "I'll check the file.\n\nThe file says it works.",
+        ),
+        (
+            [
+                ToolUseEvent(type="tool_use", tool_name="Read", tool_use_id="t1"),
+                ThinkingEvent(type="thinking", text="hmm"),
+            ],
+            "I'll check the file.\n\nThe file says it works.",
+        ),
+    ],
+)
+async def test_user_stop_keeps_a_paragraph_break_between_text_steps(
+    between: list[StreamEvent], expected: str
+) -> None:
+    """Text steps split by a tool call or thinking reload as separate paragraphs.
+
+    The live view draws each step as its own block; a stop must persist the
+    same reply, not the steps run together (#1246).
+    """
+    host = _PassHost(
+        _Provider(
+            [
+                AssistantTextDelta(type="text", text="I'll check the file."),
+                *between,
+                AssistantTextDelta(type="text", text="The file says it works."),
+                ResultEvent(
+                    type="result",
+                    result="The file says it works.",
+                    session_id="s1",
+                    effective_model="sonnet",
+                    is_error=False,
+                ),
+            ]
+        )
+    )
+    stream = ChatStream()
+    host._broker.register("chat-1", stream)
+    stream.user_stopped = True
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    outcome = StreamOutcome()
+    request = AgentRequest(prompt="hello", model="opus", mode="auto")
+
+    received = [
+        event
+        async for event in streaming.drive_stream(
+            chat_id="chat-1", request=request, outcome=outcome
+        )
+    ]
+
+    terminal = [event for event in received if isinstance(event, ResultEvent)]
+    assert len(terminal) == 1
+    assert terminal[0].result == expected
+    assert outcome.response_text == expected
+
+
+@pytest.mark.asyncio
+async def test_normal_completion_keeps_the_provider_terminal_text() -> None:
+    """Without a Stop the provider's terminal text is the reply, untouched."""
+    host = _PassHost(
+        _Provider(
+            [
+                AssistantTextDelta(type="text", text="I'll check the file."),
+                ToolUseEvent(type="tool_use", tool_name="Read", tool_use_id="t1"),
+                AssistantTextDelta(type="text", text="The file says it works."),
+                ResultEvent(
+                    type="result",
+                    result="The file says it works.",
+                    session_id="s1",
+                    effective_model="sonnet",
+                    is_error=False,
+                ),
+            ]
+        )
+    )
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    outcome = StreamOutcome()
+    request = AgentRequest(prompt="hello", model="opus", mode="auto")
+
+    received = [
+        event
+        async for event in streaming.drive_stream(
+            chat_id="chat-1", request=request, outcome=outcome
+        )
+    ]
+
+    terminal = [event for event in received if isinstance(event, ResultEvent)]
+    assert terminal[0].result == "The file says it works."
+    assert terminal[0].stopped is False
+
+
+@pytest.mark.asyncio
+async def test_a_call_streamed_twice_and_its_result_are_one_tool_row() -> None:
+    """Claude streams a call as an input-less partial, then the full message;
+    with its result that is three events and one archived row (#1264)."""
+    host = _PassHost(
+        _Provider(
+            [
+                ToolUseEvent(type="tool_use", tool_name="Bash", tool_use_id="t1"),
+                ToolUseEvent(
+                    type="tool_use",
+                    tool_name="Bash",
+                    tool_use_id="t1",
+                    tool_input="ciao chat list",
+                    input_chars=30,
+                ),
+                ToolUseEvent(
+                    type="tool_result", tool_name="Bash", tool_use_id="t1", is_error=True
+                ),
+                ResultEvent(
+                    type="result",
+                    result="done",
+                    session_id="s1",
+                    effective_model="sonnet",
+                    is_error=False,
+                ),
+            ]
+        )
+    )
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    outcome = StreamOutcome()
+    request = AgentRequest(prompt="hello", model="opus", mode="auto")
+
+    _ = [
+        event
+        async for event in streaming.drive_stream(
+            chat_id="chat-1", request=request, outcome=outcome
+        )
+    ]
+
+    assert outcome.tool_events == [
+        {
+            "id": "t1",
+            "name": "Bash",
+            "input": {"summary": "ciao chat list"},
+            "input_chars": 30,
+            "error": True,
+        }
+    ]
