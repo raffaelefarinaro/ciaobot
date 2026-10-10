@@ -572,3 +572,53 @@ async def test_normal_completion_keeps_the_provider_terminal_text() -> None:
     terminal = [event for event in received if isinstance(event, ResultEvent)]
     assert terminal[0].result == "The file says it works."
     assert terminal[0].stopped is False
+
+
+@pytest.mark.asyncio
+async def test_a_call_streamed_twice_and_its_result_are_one_tool_row() -> None:
+    """Claude streams a call as an input-less partial, then the full message;
+    with its result that is three events and one archived row (#1264)."""
+    host = _PassHost(
+        _Provider(
+            [
+                ToolUseEvent(type="tool_use", tool_name="Bash", tool_use_id="t1"),
+                ToolUseEvent(
+                    type="tool_use",
+                    tool_name="Bash",
+                    tool_use_id="t1",
+                    tool_input="ciao chat list",
+                    input_chars=30,
+                ),
+                ToolUseEvent(
+                    type="tool_result", tool_name="Bash", tool_use_id="t1", is_error=True
+                ),
+                ResultEvent(
+                    type="result",
+                    result="done",
+                    session_id="s1",
+                    effective_model="sonnet",
+                    is_error=False,
+                ),
+            ]
+        )
+    )
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    outcome = StreamOutcome()
+    request = AgentRequest(prompt="hello", model="opus", mode="auto")
+
+    _ = [
+        event
+        async for event in streaming.drive_stream(
+            chat_id="chat-1", request=request, outcome=outcome
+        )
+    ]
+
+    assert outcome.tool_events == [
+        {
+            "id": "t1",
+            "name": "Bash",
+            "input": {"summary": "ciao chat list"},
+            "input_chars": 30,
+            "error": True,
+        }
+    ]

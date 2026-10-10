@@ -1129,10 +1129,11 @@ class ChatStreaming:
                 outcome.quota = event.quota
                 outcome.cost_usd = event.cost_usd or 0.0
             elif isinstance(event, ToolUseEvent):
-                # A result settles the call it answers: the archive keeps one
-                # row per call, with its error flag, not one row per event.
+                # The archive keeps one row per call, not one per event: Claude
+                # streams a call twice (an input-less partial, then the full
+                # message) and a result settles the call it answers.
                 settled = None
-                if event.type == "tool_result" and event.tool_use_id:
+                if event.tool_use_id:
                     settled = next(
                         (
                             entry
@@ -1142,7 +1143,13 @@ class ChatStreaming:
                         None,
                     )
                 if settled is not None:
-                    settled["error"] = bool(event.is_error)
+                    if event.type == "tool_result":
+                        settled["error"] = bool(event.is_error)
+                    else:
+                        if event.input_chars is not None:
+                            settled["input_chars"] = event.input_chars
+                        if event.tool_input:
+                            settled["input"] = {"summary": event.tool_input}
                 else:
                     entry: dict[str, Any] = {
                         "id": event.tool_use_id or "",
