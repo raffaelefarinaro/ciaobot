@@ -55,22 +55,77 @@ from ciao.vault_links import (
 )
 
 
-def default_vault_root() -> Path:
-    """Locate the vault when no root was passed.
+def _against_workspace(root: Path) -> Path:
+    """Resolve a relative root against ``CIAO_WORKSPACE`` rather than the cwd.
 
-    A relative value resolves against ``CIAO_WORKSPACE`` rather than the cwd. The
-    bundled engine's launcher ``cd``s into the app's ``ciao-runtime`` directory
+    The bundled engine's launcher ``cd``s into the app's ``ciao-runtime`` directory
     before exec'ing Python, so resolving against the cwd sent a relative
     ``CIAO_VAULT_ROOT=memory-vault`` inside the app bundle — which is why
     ``vault-index --write`` failed from a routine while working from a shell.
     """
-    env_root = os.environ.get("CIAO_VAULT_ROOT", "").strip()
-    root = Path(env_root).expanduser() if env_root else Path("memory-vault")
     if not root.is_absolute():
         workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
         base = Path(workspace).expanduser() if workspace else Path.cwd()
         root = base / root
     return root.resolve()
+
+
+def _env_vault_root() -> Path | None:
+    """``CIAO_VAULT_ROOT`` as a resolved path, or ``None`` when it is unset."""
+    env_root = os.environ.get("CIAO_VAULT_ROOT", "").strip()
+    if not env_root:
+        return None
+    return _against_workspace(Path(env_root).expanduser())
+
+
+def default_vault_root() -> Path:
+    """Locate the vault when no root was passed.
+
+    Precedence: ``CIAO_VAULT_ROOT``, then the vault of the workspace named by
+    ``CIAO_ACTIVE_WORKSPACE`` (when it resolves through the config), then
+    ``memory-vault`` under the workspace.
+    """
+    env_root = _env_vault_root()
+    if env_root is not None:
+        return env_root
+    from ciao.config import active_workspace_vault_root
+
+    active = active_workspace_vault_root(os.environ)
+    if active is not None:
+        return active
+    return _against_workspace(Path("memory-vault"))
+
+
+def vault_root_conflict() -> tuple[Path, Path] | None:
+    """``(CIAO_VAULT_ROOT, active workspace vault)`` when the two name different vaults.
+
+    ``None`` unless both resolve. A write command refuses on a conflict rather
+    than silently picking one of the two.
+    """
+    env_root = _env_vault_root()
+    if env_root is None:
+        return None
+    from ciao.config import active_workspace_vault_root
+
+    active = active_workspace_vault_root(os.environ)
+    if active is None or active == env_root:
+        return None
+    return env_root, active
+
+
+def refuse_conflicting_vault_write() -> int | None:
+    """Print the refusal and return exit code 2 when the write's vault is ambiguous."""
+    conflict = vault_root_conflict()
+    if conflict is None:
+        return None
+    env_root, active = conflict
+    print(
+        f"CIAO_VAULT_ROOT ({env_root}) and the active workspace's vault ({active}) "
+        "name different vaults. Refusing to write to one of them silently: pass "
+        "--vault-root to name the vault, or unset CIAO_VAULT_ROOT.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 VAULT_RENDER_PREFIX = Path("memory-vault")
@@ -1529,6 +1584,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    if args.write and args.vault_root is None:
+        refused = refuse_conflicting_vault_write()
+        if refused is not None:
+            return refused
     vault_root = (args.vault_root or default_vault_root()).resolve()
     # The scan and the two renderings below must share one closed set, or a
     # folder-inferred custom type shows in INDEX.md while VOCABULARY.md calls

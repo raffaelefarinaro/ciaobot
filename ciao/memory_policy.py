@@ -305,8 +305,10 @@ UNATTENDED_CAPSULE_GUIDANCE = (
     "approval: promoting a NEW fact into the always-loaded memory regions, "
     "editing a skill or the AGENTS.md guide body, settling a skill proposal or "
     "draft, trashing or permanently deleting a vault note, writing another "
-    "workspace, creating or moving an automation into another workspace, and "
-    "public or destructive git actions."
+    "workspace, creating or moving an automation into another workspace, "
+    "editing application source code, hand-editing `.runtime/` state files, and "
+    "public or destructive git actions. Never print secret values (env files, "
+    "tokens, provider configs) into the conversation."
 )
 """The unattended marker the context capsule injects, in one place.
 

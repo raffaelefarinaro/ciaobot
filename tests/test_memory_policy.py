@@ -114,6 +114,13 @@ def test_capsule_unattended_guidance_defers_approval_requiring_work() -> None:
     assert "Defer and report" in text
 
 
+def test_capsule_unattended_guidance_defers_source_and_runtime_edits() -> None:
+    text = mp.UNATTENDED_CAPSULE_GUIDANCE
+    assert "editing application source code" in text
+    assert "hand-editing `.runtime/` state files" in text
+    assert "Never print secret values (env files, tokens, provider configs) into the conversation." in text
+
+
 def test_capsule_renders_the_shared_guidance_verbatim() -> None:
     capsule = build_context_capsule(workspace="work", unattended=True)
     assert mp.UNATTENDED_CAPSULE_GUIDANCE in capsule
