@@ -112,16 +112,9 @@ class _Heartbeat:
                 await self._task
 
 
-async def _run_while_heartbeating(coro, heartbeat: _Heartbeat):
-    heartbeat.start()
-    # Wait until the heartbeat coroutine actually starts ticking.
-    while not heartbeat.started:
-        await asyncio.sleep(0)
-    before = heartbeat.beats
-    result = await coro
-    during = heartbeat.beats - before
-    await heartbeat.stop()
-    return result, during
+async def _wait_for_beats(heartbeat: _Heartbeat, target: int) -> None:
+    while heartbeat.beats < target:
+        await asyncio.sleep(0.001)
 
 
 # -- acceptance: slow scan cannot stop a heartbeat --------------------------
@@ -131,24 +124,47 @@ def test_a_slow_vault_search_does_not_stop_a_heartbeat(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     control_plane, principal = _plane(tmp_path, monkeypatch)
+    # The slow read parks on these events, not on the clock. It stays parked
+    # until the test has seen the heartbeat tick REQUIRED_TICKS times while it
+    # was in flight, so the assertion does not depend on how much CPU or GIL
+    # time the worker and the loop get under load.
+    parked = threading.Event()
+    release = threading.Event()
 
     def _slow_index(conn, root, *, path_base=None):
-        time.sleep(SLOW_READ_SECONDS)
+        parked.set()
+        release.wait(10)
         return (0, 0)
 
     monkeypatch.setattr(cp_module, "index_vault", _slow_index)
 
     async def _scenario() -> tuple[dict, int]:
         heartbeat = _Heartbeat()
-        return await _run_while_heartbeating(
-            control_plane.vault_search(principal, "Alba"), heartbeat
-        )
+        heartbeat.start()
+        while not heartbeat.started:
+            await asyncio.sleep(0)
+        search = asyncio.ensure_future(control_plane.vault_search(principal, "Alba"))
+        try:
+            while not parked.is_set():
+                await asyncio.sleep(0.005)
+            before = heartbeat.beats
+            # A timeout here means the loop was blocked by the read: a real
+            # failure, not a slow machine.
+            await asyncio.wait_for(
+                _wait_for_beats(heartbeat, before + REQUIRED_TICKS), timeout=5.0
+            )
+            during = heartbeat.beats - before
+            assert not search.done(), "search finished before the heartbeat ticked"
+        finally:
+            release.set()
+        result = await search
+        await heartbeat.stop()
+        return result, during
 
     result, beats_during = asyncio.run(_scenario())
 
     assert result["ok"] is True
-    # The loop was free for the whole slow read: ~40 ticks at 10ms.
-    assert beats_during >= SLOW_READ_SECONDS / HEARTBEAT_INTERVAL / 2, beats_during
+    assert beats_during >= REQUIRED_TICKS, beats_during
 
 
 def test_a_slow_backlink_scan_does_not_stop_a_health_response(
