@@ -36,6 +36,8 @@ export interface ScheduleUpdate {
   archive_policy?: ScheduleArchivePolicy
   title?: string
   description?: string
+  // Optional shell command run before the prompt; "" clears it.
+  command?: string
 }
 
 export const useTaskStore = defineStore('tasks', () => {
@@ -139,6 +141,7 @@ export const useTaskStore = defineStore('tasks', () => {
     model?: string
     provider?: RuntimeProvider
     archivePolicy?: ScheduleArchivePolicy
+    command?: string
   }) {
     const body: Record<string, unknown> = {
       time: input.time || '',
@@ -150,6 +153,7 @@ export const useTaskStore = defineStore('tasks', () => {
     }
     if (input.frequency === 'interval') body.interval_minutes = input.intervalMinutes
     if (input.archivePolicy) body.archive_policy = input.archivePolicy
+    if (input.command) body.command = input.command
     if (input.runAtDate) body.run_at_date = input.runAtDate
     if (input.model) body.model = input.model
     if (input.provider) body.provider = input.provider

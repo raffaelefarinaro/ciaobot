@@ -42,6 +42,7 @@ from ciao.memory_tool import (
     resolve_region,
     update_region,
 )
+from ciao.schedule_command import normalize_schedule_command
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
     FREQUENCIES,
@@ -5521,6 +5522,25 @@ class CiaoControlPlane:
         ]
         return _ok(rows)
 
+    def _schedule_command(self, principal: AgentPrincipal, value: object) -> str:
+        """Validate a schedule's shell command as a managed chat may set it.
+
+        A command runs with no model turn and no permission prompt, so a
+        scheduled (unattended) turn may not create or change one: a
+        compromised unattended run could otherwise schedule itself a shell
+        command. Clearing a command is always allowed.
+        """
+        try:
+            command = normalize_schedule_command(value)
+        except ValueError as exc:
+            raise ControlPlaneError("invalid_command", str(exc)) from exc
+        if command and self._unattended_turn(principal):
+            raise ControlPlaneError(
+                "unattended_forbidden",
+                "A schedule's command can be set only from an attended turn.",
+            )
+        return command
+
     def schedule_preview(self, principal: AgentPrincipal, **values: Any) -> dict[str, Any]:
         """Validate schedule fields and resolve workspace/project targets.
 
@@ -5619,6 +5639,7 @@ class CiaoControlPlane:
             workspace=workspace,
             archive_policy=str(values.get("archive_policy") or "manual"),
             title=str(values.get("title") or ""),
+            command=self._schedule_command(principal, values.get("command")),
         )
         # Same gate `schedule_update` applies, on the create door. A model
         # emitting `daily_time: "9:30"` (no leading zero) or "25:00" otherwise
@@ -5651,6 +5672,7 @@ class CiaoControlPlane:
             archive_policy=preview["archive_policy"],
             title=preview["title"],
             description=str(values.get("description") or ""),
+            command=preview["command"],
         )
         # Where a chat-bound entry re-homes once its chat is deleted; only
         # capturable while that chat still exists. See stamp_fallback_project.
@@ -5793,6 +5815,8 @@ class CiaoControlPlane:
         unknown = sorted(set(normalized) - known)
         if unknown:
             raise ControlPlaneError("invalid_fields", f"Unknown schedule fields: {', '.join(unknown)}")
+        if "command" in normalized:
+            normalized["command"] = self._schedule_command(principal, normalized["command"])
         if "frequency" in normalized and normalized["frequency"] not in FREQUENCIES:
             raise ControlPlaneError(
                 "invalid_frequency",

@@ -34,6 +34,7 @@ from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import BridgeMode, ImageAttachment
 from ciao.provider_service import ProviderService, supported_providers
 from ciao.providers.opencode import OpencodeProvider, opencode_collab_tree_counts
+from ciao.schedule_command import CommandRun, run_schedule_command
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.web import chat_service
 from ciao.web.chat_broker import ChatStream, EventsHub
@@ -528,6 +529,35 @@ class ScheduleDispatcher:
         web_project_id: str | None = getattr(entry, "web_project_id", None)
         web_chat_id: str | None = getattr(entry, "web_chat_id", None)
 
+        # Job-run recording: this method swallows its own errors (the broad
+        # except below sets outcome.stream_error and continues) and has a
+        # single exit, so we time it here and record once before returning.
+        _sched_perf = time.perf_counter()
+        _sched_started = datetime.now(UTC)
+        _sched_schedule_id = getattr(entry, "schedule_id", "") or ""
+        # Which dispatch this run *is*, sampled from the entry as it stood when
+        # the run started. The stored row can have moved on to a newer dispatch
+        # by the time the outcome lands (an overlapping manual "Run now"), and
+        # that is exactly what the write-back below has to be able to tell.
+        _sched_dispatch_id = getattr(entry, "last_dispatch_id", "") or ""
+
+        # A command runs before any chat exists. Exit 0 with nothing printed
+        # ends the run here with no chat; anything else opens the chat below
+        # with the command's outcome in front of the prompt.
+        command_extra: dict[str, object] = {}
+        if getattr(entry, "command", ""):
+            command_run = await run_schedule_command(
+                entry.command, self._host._config.workspace_root
+            )
+            command_extra = command_run.extra()
+            if command_run.quiet:
+                return self._finish_quiet_run(
+                    entry, model, provider, command_run,
+                    perf=_sched_perf, started=_sched_started,
+                    dispatch_id=_sched_dispatch_id,
+                )
+            prompt = command_run.compose_prompt(prompt)
+
         # Go through the manager seam rather than calling this collaborator's
         # preparation method directly. Existing callers patch the manager's
         # method to inject a target or observe preparation, and that patch must
@@ -540,18 +570,6 @@ class ScheduleDispatcher:
 
         result: dict[str, str] = {"chat_id": target_id}
         outcome = chat_service.ScheduleRunOutcome()
-
-        # Job-run recording: this method swallows its own errors (the broad
-        # except below sets outcome.stream_error and continues) and has a
-        # single exit, so we time it here and record once before returning.
-        _sched_perf = time.perf_counter()
-        _sched_started = datetime.now(UTC)
-        _sched_schedule_id = getattr(entry, "schedule_id", "") or ""
-        # Which dispatch this run *is*, sampled from the entry as it stood when
-        # the run started. The stored row can have moved on to a newer dispatch
-        # by the time the outcome lands (an overlapping manual "Run now"), and
-        # that is exactly what the write-back below has to be able to tell.
-        _sched_dispatch_id = getattr(entry, "last_dispatch_id", "") or ""
 
         # Save original model/mode for fixed-chat dispatches. Interval entries
         # are exempt: prepare_schedule_chat leaves the chat's settings alone for
@@ -787,25 +805,7 @@ class ScheduleDispatcher:
         # overlap: the health field belongs to the dispatch the row still names,
         # while a completed run credits the occurrence it was dispatched for
         # either way (issue #490).
-        if _sched_schedule_id and _row_status in {
-            "error", "ok", "skipped", schedule_support.RUN_STATUS_UNFINISHED
-        }:
-            store = cast(
-                ScheduleStore | None,
-                getattr(self._host, "schedule_store", None),
-            )
-            if store is not None:
-                latest = store.get(_sched_schedule_id)
-                if latest is not None and schedule_support.stamp_run_outcome(
-                    latest, _sched_dispatch_id, _row_status
-                ):
-                    store.replace(latest)
-                    # An open sidebar or Automations page only refetches on the
-                    # schedules_changed event; without publishing it the newly
-                    # stamped health (a failure that needs attention, or a
-                    # skipped run waiting on the user) stays invisible until an
-                    # unrelated refetch or reload.
-                    schedule_support.publish_automations_changed(self._host)
+        self._stamp_row_outcome(_sched_schedule_id, _sched_dispatch_id, _row_status)
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",
@@ -829,9 +829,66 @@ class ScheduleDispatcher:
                 "permission_requested": outcome.permission_requested,
                 "question_requested": outcome.question_requested,
                 "retry_pending": outcome.retry_pending,
+                **command_extra,
             },
         ))
         return result
+
+    def _stamp_row_outcome(self, schedule_id: str, dispatch_id: str, status: str) -> None:
+        """Write a run's outcome onto the stored row, if the row still names it."""
+        if not schedule_id or status not in {
+            "error", "ok", "skipped", schedule_support.RUN_STATUS_UNFINISHED
+        }:
+            return
+        store = cast(ScheduleStore | None, getattr(self._host, "schedule_store", None))
+        if store is None:
+            return
+        latest = store.get(schedule_id)
+        if latest is not None and schedule_support.stamp_run_outcome(
+            latest, dispatch_id, status
+        ):
+            store.replace(latest)
+            # An open sidebar or Automations page only refetches on the
+            # schedules_changed event; without publishing it the newly stamped
+            # health (a failure that needs attention, or a skipped run waiting
+            # on the user) stays invisible until an unrelated refetch or reload.
+            schedule_support.publish_automations_changed(self._host)
+
+    def _finish_quiet_run(
+        self,
+        entry: ScheduleEntry,
+        model: str,
+        provider: str,
+        command_run: CommandRun,
+        *,
+        perf: float,
+        started: datetime,
+        dispatch_id: str,
+    ) -> dict[str, str]:
+        """Record a command-only run: exit 0, no output, no chat opened."""
+        schedule_id = getattr(entry, "schedule_id", "") or ""
+        self._stamp_row_outcome(schedule_id, dispatch_id, "ok")
+        job_runs.record_run(job_runs.JobRun(
+            job="schedule_dispatch",
+            label="Scheduled dispatch",
+            category="content",
+            started_at=started.isoformat(),
+            ended_at=datetime.now(UTC).isoformat(),
+            duration_ms=int((time.perf_counter() - perf) * 1000),
+            status="ok",
+            model=model,
+            provider=provider or "claude",
+            error=None,
+            extra={
+                "schedule_id": schedule_id,
+                "dispatch_id": dispatch_id,
+                "chat_id": "",
+                "archived_to": None,
+                "output": "no output",
+                **command_run.extra(),
+            },
+        ))
+        return {"status": "ok"}
 
 
 # Keep the shorter name available to callers that describe the lifecycle by

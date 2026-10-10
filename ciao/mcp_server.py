@@ -844,7 +844,8 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
                        chat_id: str | None = None, title: str | None = None,
                        description: str | None = None, provider: str | None = None,
                        model: str | None = None, archive_policy: str | None = None,
-                       workspace: str | None = None, schedule_id: str = "") -> dict[str, Any]:
+                       workspace: str | None = None, command: str | None = None,
+                       schedule_id: str = "") -> dict[str, Any]:
     """Preview, create, or update a Ciaobot schedule (recurring, one-off, or manual-only).
 
     action:
@@ -917,6 +918,11 @@ async def _op_schedule(service: CiaoMcpService, action: str, prompt: str | None 
         provider: Empty inherits the target workspace's default
             provider at dispatch time; override only when necessary.
         archive_policy: "manual" (default) | "auto".
+        command: Optional shell command run in the workspace before the
+            prompt, with no model turn. Exit 0 with empty stdout records
+            the run as done and opens no chat; otherwise the chat opens
+            with the exit code and output (capped) ahead of the prompt.
+            Refused from an unattended (scheduled) turn; "" clears it.
         workspace: Omit in almost every case — the schedule is created
             in this chat's workspace. Any other name is refused unless
             it restates this chat's workspace: schedules are

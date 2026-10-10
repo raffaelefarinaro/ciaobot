@@ -631,6 +631,8 @@ export interface Schedule {
   archive_policy: ScheduleArchivePolicy
   title?: string
   description?: string
+  // Optional shell command run before the prompt; empty when there is none.
+  command?: string
   scope?: string
   editable?: boolean
   removable?: boolean
