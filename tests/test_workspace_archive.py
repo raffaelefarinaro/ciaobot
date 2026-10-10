@@ -542,6 +542,17 @@ def test_restore_round_trip(tmp_path, rerooted):
     assert client.get("/api/workspaces/archived").json()["archived"] == []
 
 
+def test_restore_carries_the_claude_ai_connectors_switch(tmp_path):
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    config.workspaces["work"].claude_ai_connectors = False
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert config.workspaces["work"].claude_ai_connectors is False
+
+
 def test_restore_refuses_a_taken_name(tmp_path):
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
     archived = client.post("/api/workspaces/work/archive").json()["archived"]
