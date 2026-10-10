@@ -317,6 +317,16 @@ prefix and the deferral language here.
 """
 
 
+def is_unattended_turn(prompt: str) -> bool:
+    """True when a stored user turn was fired automatically.
+
+    The marker sits inside the ``<ciao-context>`` capsule that prefixes the
+    turn's stored prompt, so it is matched anywhere in the text, not at the
+    start. A turn an automation did not fire never carries it.
+    """
+    return UNATTENDED_MARKER in prompt
+
+
 def context_policy(key: str) -> MemoryWritePolicy:
     """Return the matrix row for ``key``; raise ``KeyError`` for an unknown one."""
     for policy in CONTEXT_POLICIES:

@@ -21,6 +21,7 @@ from claude_agent_sdk import (
 
 from ciao.agent_paths import claude_projects_dir
 from ciao.jsonio import read_json_dict
+from ciao.memory_policy import is_unattended_turn
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -1176,6 +1177,29 @@ def parse_archive_turns(text: str) -> list[dict[str, Any]]:
             "trailer": "\n".join(lines[trailer_start:index]),
         })
     return turns
+
+
+def transcript_has_human_turn(path: Path | str) -> bool:
+    """Whether an archived transcript holds a turn a person typed.
+
+    False only when the archive parses and every user turn carries the
+    unattended marker (:func:`ciao.memory_policy.is_unattended_turn`): an
+    all-automation transcript has nothing the memory pass may record. An
+    archive that cannot be read, has no parseable turns, or has a turn whose
+    user body cannot be read answers True. Unknown means do not skip.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return True
+    turns = parse_archive_turns(text)
+    if not turns:
+        return True
+    for turn in turns:
+        user = turn["user"]
+        if user is None or not is_unattended_turn(user):
+            return True
+    return False
 
 
 def read_archive_skills(path: Path | str) -> dict[str, tuple[int, ...]]:
