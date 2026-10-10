@@ -39,8 +39,7 @@ def resolve_helper_model(
 ) -> str:
     """Pick the model for a classification-sized helper one-shot.
 
-    Used by the schedule attention classifier and the people-note fold on
-    accept. The Settings override (``provider_insights_models``) wins. Under
+    Used by the schedule attention classifier. The Settings override (``provider_insights_models``) wins. Under
     the claude provider the answer is :data:`HELPER_MODEL_CLAUDE`, whatever
     the source chat runs on. Other providers have no small-model notion in
     the registry, so they keep :func:`resolve_insights_model`.

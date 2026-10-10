@@ -95,7 +95,7 @@ def _helper_config(overrides: dict[str, str] | None = None) -> SimpleNamespace:
 def test_claude_helpers_resolve_to_haiku_whatever_the_source_chat_runs() -> None:
     config = _helper_config()
     assert insights.HELPER_MODEL_CLAUDE == "haiku"
-    # Classifier path: source chat on Opus. Reconcile path: workspace default Opus.
+    # Source chat on Opus, and no source model with a workspace default of Opus.
     assert insights.resolve_helper_model(config, "work", "claude", source_model="opus") == "haiku"
     assert insights.resolve_helper_model(config, "work", "claude") == "haiku"
 
