@@ -63,10 +63,12 @@ def _alive(pid: int) -> bool:
 
 
 #: Wall-clock budget for the fake git shell to start its grandchild. Timeouts
-#: run from spawn, so this must leave room for a loaded machine to schedule
-#: `sh` and `sleep` before the timeout fires; the pid-file poll below is what
-#: then proves the grandchild existed when the kill landed.
-_STARTUP_BUDGET = 5.0
+#: run from spawn and cannot be started later by the test, so this is the only
+#: handshake available: it must leave room for a loaded machine to schedule
+#: `sh` and `sleep` before the timeout fires. Typical startup is milliseconds.
+#: The pid-file poll after the timeout is what proves the grandchild existed
+#: when the kill landed.
+_STARTUP_BUDGET = 2.0
 
 
 async def _read_pid_file(pid_file: Path, budget: float = 10.0) -> int:
@@ -141,7 +143,8 @@ async def test_cancel_reaps_the_child(
     baseline = _open_fd_count()
 
     task = asyncio.ensure_future(run_git(tmp_path, "push", timeout=30.0))
-    await asyncio.sleep(0.5)  # let git and its grandchild spawn
+    # Cancel only once the grandchild is up, so the cancel is what reaps it.
+    grandchild = await _read_pid_file(pid_file)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -150,12 +153,7 @@ async def test_cancel_reaps_the_child(
     leaked = _open_fd_count() - baseline
     assert leaked <= 0, f"leaked {leaked} descriptors on cancel"
 
-    grandchild = int(pid_file.read_text().strip())
-    for _ in range(50):
-        if not _alive(grandchild):
-            break
-        await asyncio.sleep(0.1)
-    else:
+    if not await _wait_until_gone(grandchild):
         os.kill(grandchild, signal.SIGKILL)  # don't leave it behind
         pytest.fail(f"grandchild {grandchild} survived the cancel")
 
