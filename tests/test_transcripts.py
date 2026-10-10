@@ -581,3 +581,51 @@ def test_a_legacy_assistant_body_with_a_pasted_usage_heading_is_read_whole() -> 
     assert turns[0]["user"] == "question"
     assert turns[0]["assistant"] == assistant_body
     assert "- input: 3" in turns[0]["trailer"]
+
+
+# ── Human turns in the archive (memory pass gate) ─────────────────────────
+
+
+def _unattended_prompt(text: str) -> str:
+    """A stored prompt as an automation turn writes it: the capsule envelope."""
+    from ciao.context.capsule import build_context_capsule
+
+    capsule = build_context_capsule(unattended=True)
+    return f"[CIAO_CONTEXT_BEGIN]\n{capsule}\n[CIAO_CONTEXT_END]\n\n{text}"
+
+
+def test_transcript_has_human_turn_on_a_real_archive(tmp_path: Path) -> None:
+    from ciao.transcripts import transcript_has_human_turn
+
+    all_automated = _archive(
+        tmp_path / "automated",
+        [
+            {"prompt": _unattended_prompt("Curate the People notes")},
+            {"prompt": _unattended_prompt("Workspace care")},
+        ],
+    )
+    mixed = _archive(
+        tmp_path / "mixed",
+        [
+            {"prompt": _unattended_prompt("Curate the People notes")},
+            {"prompt": "Remember that Acme kickoff is next week"},
+        ],
+    )
+    normal = _archive(
+        tmp_path / "normal",
+        [{"prompt": "Remember that Acme kickoff is next week"}],
+    )
+
+    assert transcript_has_human_turn(all_automated) is False
+    assert transcript_has_human_turn(mixed) is True
+    assert transcript_has_human_turn(normal) is True
+
+
+def test_transcript_has_human_turn_does_not_skip_an_unknown_file(tmp_path: Path) -> None:
+    from ciao.transcripts import transcript_has_human_turn
+
+    garbage = tmp_path / "garbage.md"
+    garbage.write_text("# archived\n", encoding="utf-8")
+
+    assert transcript_has_human_turn(garbage) is True
+    assert transcript_has_human_turn(tmp_path / "missing.md") is True
