@@ -1129,13 +1129,31 @@ class ChatStreaming:
                 outcome.quota = event.quota
                 outcome.cost_usd = event.cost_usd or 0.0
             elif isinstance(event, ToolUseEvent):
-                outcome.tool_events.append(
-                    {
+                # A result settles the call it answers: the archive keeps one
+                # row per call, with its error flag, not one row per event.
+                settled = None
+                if event.type == "tool_result" and event.tool_use_id:
+                    settled = next(
+                        (
+                            entry
+                            for entry in outcome.tool_events
+                            if entry.get("id") == event.tool_use_id
+                        ),
+                        None,
+                    )
+                if settled is not None:
+                    settled["error"] = bool(event.is_error)
+                else:
+                    entry: dict[str, Any] = {
                         "id": event.tool_use_id or "",
                         "name": event.tool_name,
                         "input": {"summary": event.tool_input},
                     }
-                )
+                    if event.input_chars is not None:
+                        entry["input_chars"] = event.input_chars
+                    if event.type == "tool_result":
+                        entry["error"] = bool(event.is_error)
+                    outcome.tool_events.append(entry)
                 self._host._record_agent_tool_use(chat, request, event)
             outcome.events.append(event)
             # Session bookkeeping is aggregated before delivery too, so the

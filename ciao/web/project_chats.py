@@ -5006,6 +5006,9 @@ class ProjectChatManager:
             "tool_use_id": event.tool_use_id or "",
             "parent_tool_use_id": event.parent_tool_use_id or "",
         }
+        # Only the CLI and MCP surfaces are labelled; other calls omit the key.
+        if event.control_surface:
+            record["control_surface"] = event.control_surface
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8", newline="") as handle:

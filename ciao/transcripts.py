@@ -275,6 +275,45 @@ def _journal_event_record(event: Any) -> dict[str, Any] | None:
     return None
 
 
+def compact_tool_calls(tool_events: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """The per-call facts a turn keeps for the archive's ``### Tools`` section.
+
+    Only the tool name, the sizes and the error flag survive. The input and the
+    result themselves are never stored here: they can hold secrets and are
+    large.
+    """
+    calls: list[dict[str, Any]] = []
+    for event in tool_events or []:
+        if not isinstance(event, dict):
+            continue
+        call: dict[str, Any] = {"name": str(event.get("name") or "tool")}
+        input_chars = event.get("input_chars")
+        if isinstance(input_chars, int) and not isinstance(input_chars, bool):
+            call["input_chars"] = input_chars
+        result_chars = event.get("result_chars")
+        if isinstance(result_chars, int) and not isinstance(result_chars, bool):
+            call["result_chars"] = result_chars
+        if event.get("error") is True:
+            call["error"] = True
+        calls.append(call)
+    return calls
+
+
+def _tool_call_line(call: dict[str, Any]) -> str:
+    """One ``### Tools`` row: ``- Bash · in 120 · out 5,431 · error``."""
+    name = " ".join(str(call.get("name") or "tool").split())
+    parts = [f"- {name}"]
+    input_chars = call.get("input_chars")
+    if isinstance(input_chars, int):
+        parts.append(f"in {input_chars:,}")
+    result_chars = call.get("result_chars")
+    if isinstance(result_chars, int):
+        parts.append(f"out {result_chars:,}")
+    if call.get("error") is True:
+        parts.append("error")
+    return " · ".join(parts)
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -355,6 +394,7 @@ class TranscriptStore:
                 "usage": usage,
                 "quota": quota,
                 "tool_events": list(tool_events or []),
+                "tool_calls": compact_tool_calls(tool_events),
                 # A force-stopped turn is durable but incomplete; renderers
                 # already treat this flag as "the reply was cut short".
                 **({"is_partial": True} if is_partial else {}),
@@ -430,6 +470,7 @@ class TranscriptStore:
                 "usage": {},
                 "quota": {},
                 "tool_events": list(tool_events or []),
+                "tool_calls": compact_tool_calls(tool_events),
                 # The journal this turn came from, so a replay can recognise it.
                 "recovered_from": source,
             }
@@ -780,6 +821,13 @@ class TranscriptStore:
                     "",
                 ]
             )
+            calls = turn.get("tool_calls") or []
+            if calls:
+                lines.append("### Tools")
+                lines.append("")
+                for call in calls:
+                    lines.append(_tool_call_line(call))
+                lines.append("")
             usage = turn.get("usage") or {}
             if usage:
                 lines.append("### Usage")
@@ -1020,7 +1068,9 @@ _ARCHIVE_TEXT_OPEN_RE = re.compile(r"^(`{3,})text\s*$")
 _ARCHIVE_FENCE_RUN_RE = re.compile(r"^ {0,3}(`{3,})\s*$")
 #: Lines that end a legacy (three-backtick) message body: the next turn, or a
 #: sub-heading the renderer writes after a message.
-_ARCHIVE_BOUNDARY_RE = re.compile(r"^(?:## Turn \d+|### (?:User|Assistant|Usage|Quota))\s*$")
+_ARCHIVE_BOUNDARY_RE = re.compile(
+    r"^(?:## Turn \d+|### (?:User|Assistant|Tools|Usage|Quota))\s*$"
+)
 _ARCHIVE_MESSAGE_HEADING_RE = re.compile(r"^### (?:User|Assistant)\s*$")
 _ARCHIVE_TURN_LINE_RE = re.compile(r"^## Turn \d+\s*$")
 _ARCHIVE_TIME_RE = re.compile(r"^- Time:\s*(.+)$")

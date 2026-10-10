@@ -72,6 +72,7 @@ from ciao.models import (
     TokenUsageEvent,
     ToolUseEvent,
     provider_reuse_key,
+    tool_call_facts,
 )
 from ciao.execution_modes import (
     harness_skill_overrides,
@@ -1236,6 +1237,7 @@ class ClaudeProvider(BaseSDKProvider):
                     from ciao.web.chat_broker import extract_file_touches
                     touches = extract_file_touches(block.name, raw_input)
                     summary = _summarize_tool_input(block.name, raw_input)
+                    input_chars, surface = tool_call_facts(block.name, raw_input)
                     events.append(ToolUseEvent(
                         type="assistant",
                         tool_name=block.name,
@@ -1243,6 +1245,8 @@ class ClaudeProvider(BaseSDKProvider):
                         tool_use_id=getattr(block, "id", None),
                         parent_tool_use_id=parent_id,
                         file_touches=touches or None,
+                        input_chars=input_chars,
+                        control_surface=surface,
                     ))
             if msg.session_id:
                 self._session_id = msg.session_id

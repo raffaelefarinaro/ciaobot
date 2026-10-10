@@ -59,6 +59,7 @@ from ciao.models import (
     TokenUsageEvent,
     ToolUseEvent,
     provider_reuse_key,
+    tool_call_facts,
 )
 from ciao.providers.base import (
     ActiveHandle,
@@ -2578,12 +2579,15 @@ class OpencodeProvider(BaseSDKProvider):
             tool = str(props.get("name") or self._tool_calls.get(call_id) or "tool")
             self._tool_calls[call_id] = tool
             raw_input = props.get("input")
+            input_chars, surface = tool_call_facts(tool, raw_input)
             return [ToolUseEvent(
                 type="tool_use",
                 tool_name=tool,
                 tool_input=_summarize_tool_input(tool, raw_input),
                 tool_use_id=call_id or None,
                 file_touches=_file_touches(tool, raw_input),
+                input_chars=input_chars,
+                control_surface=surface,
             )]
         if kind in {"session.tool.success", "session.tool.failed"}:
             call_id = str(props.get("id") or "")
@@ -2599,6 +2603,7 @@ class OpencodeProvider(BaseSDKProvider):
                 tool_name=tool,
                 tool_input=detail,
                 tool_use_id=call_id or None,
+                is_error=kind.endswith("failed"),
             )]
 
         if kind == "session.step.started":
@@ -2714,12 +2719,15 @@ class OpencodeProvider(BaseSDKProvider):
             if status == "pending" and not raw_input:
                 return []
             self._tool_calls[call_id] = tool
+            input_chars, surface = tool_call_facts(tool, raw_input)
             return [ToolUseEvent(
                 type="tool_use",
                 tool_name=tool,
                 tool_input=_summarize_tool_input(tool, raw_input),
                 tool_use_id=call_id or None,
                 file_touches=_file_touches(tool, raw_input),
+                input_chars=input_chars,
+                control_surface=surface,
             )]
 
         if status in {"completed", "error"}:
@@ -2729,12 +2737,15 @@ class OpencodeProvider(BaseSDKProvider):
             if call_id not in self._tool_calls:
                 # A fast tool can settle before any running update arrives, so
                 # the call would otherwise never be shown at all.
+                input_chars, surface = tool_call_facts(tool, raw_input)
                 events.append(ToolUseEvent(
                     type="tool_use",
                     tool_name=tool,
                     tool_input=_summarize_tool_input(tool, raw_input),
                     tool_use_id=call_id or None,
                     file_touches=_file_touches(tool, raw_input),
+                    input_chars=input_chars,
+                    control_surface=surface,
                 ))
             self._tool_calls.pop(call_id, None)
             raw_error = state.get("error")
@@ -2748,6 +2759,7 @@ class OpencodeProvider(BaseSDKProvider):
                 tool_name=tool,
                 tool_input=detail,
                 tool_use_id=call_id or None,
+                is_error=status == "error",
             ))
             return events
 
