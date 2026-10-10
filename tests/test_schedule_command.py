@@ -7,7 +7,9 @@ command's outcome in front of the prompt.
 
 from __future__ import annotations
 
+import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,8 +35,13 @@ from tests.test_schedule_dispatch_boundary import _entry, _ScheduleHost
 
 
 def _py(code: str) -> str:
-    """A shell command that runs ``code`` under this interpreter."""
-    return shlex.join([sys.executable, "-c", code])
+    """A shell command that runs ``code`` under this interpreter.
+
+    The command goes through the platform shell, so it is quoted the way that
+    shell reads it: POSIX quoting for ``/bin/sh``, ``list2cmdline`` for cmd.exe.
+    """
+    argv = [sys.executable, "-c", code]
+    return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
 
 # ── Store round-trip and validation ──────────────────────────────────────
