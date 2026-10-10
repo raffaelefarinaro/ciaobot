@@ -278,7 +278,7 @@ def _journal_event_record(event: Any) -> dict[str, Any] | None:
 def compact_tool_calls(tool_events: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """The per-call facts a turn keeps for the archive's ``### Tools`` section.
 
-    Only the tool name, the sizes and the error flag survive. The input and the
+    Only the tool name, the input size and the error flag survive. The input and the
     result themselves are never stored here: they can hold secrets and are
     large.
     """
@@ -290,9 +290,6 @@ def compact_tool_calls(tool_events: list[dict[str, Any]] | None) -> list[dict[st
         input_chars = event.get("input_chars")
         if isinstance(input_chars, int) and not isinstance(input_chars, bool):
             call["input_chars"] = input_chars
-        result_chars = event.get("result_chars")
-        if isinstance(result_chars, int) and not isinstance(result_chars, bool):
-            call["result_chars"] = result_chars
         if event.get("error") is True:
             call["error"] = True
         calls.append(call)
@@ -300,15 +297,12 @@ def compact_tool_calls(tool_events: list[dict[str, Any]] | None) -> list[dict[st
 
 
 def _tool_call_line(call: dict[str, Any]) -> str:
-    """One ``### Tools`` row: ``- Bash · in 120 · out 5,431 · error``."""
+    """One ``### Tools`` row: ``- Bash · in 120 · error``."""
     name = " ".join(str(call.get("name") or "tool").split())
     parts = [f"- {name}"]
     input_chars = call.get("input_chars")
     if isinstance(input_chars, int):
         parts.append(f"in {input_chars:,}")
-    result_chars = call.get("result_chars")
-    if isinstance(result_chars, int):
-        parts.append(f"out {result_chars:,}")
     if call.get("error") is True:
         parts.append("error")
     return " · ".join(parts)
