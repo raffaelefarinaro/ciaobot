@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -27,6 +28,15 @@ DESKTOP_EXECUTABLE = "ciaobot-desktop"
 LEGACY_EXECUTABLE = "CiaobotServer"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+# A reload boots the job out, waits for launchd to forget it, then bootstraps
+# the edited plist. The hosted job takes up to ~35 s to stop (its shutdown
+# grace), so the wait outlasts that; bootstrapping while the old job still
+# exists fails or leaves a half-dead service.
+RELOAD_TEARDOWN_TIMEOUT_S = 45
+RELOAD_POLL_INTERVAL_S = 0.5
+# Test seam: the teardown poll sleeps through this, so tests run without waiting.
+_sleep: Callable[[float], None] = time.sleep
 
 
 def _getuid() -> int:
@@ -559,6 +569,18 @@ def stop_service(
     return ServiceResult(True, "stop", "Ciaobot engine stopped.", asdict(runtime))
 
 
+def _wait_for_teardown(uid: int, runner: Runner) -> bool:
+    """Poll until launchd reports the server job gone; False if it never does."""
+    polls = int(RELOAD_TEARDOWN_TIMEOUT_S / RELOAD_POLL_INTERVAL_S)
+    for _ in range(polls):
+        completed = _launchctl(["print", f"gui/{uid}/{SERVER_LABEL}"], runner=runner)
+        text = f"{completed.stdout or ''}\n{completed.stderr or ''}".lower()
+        if completed.returncode != 0 and "could not find service" in text:
+            return True
+        _sleep(RELOAD_POLL_INTERVAL_S)
+    return False
+
+
 def restart_service(
     *,
     runtime: DesktopRuntime | None = None,
@@ -584,6 +606,17 @@ def restart_service(
             _plist_program_arguments(Path(runtime.server_plist)),
         )
         if loaded and plist_matches is False:
+            if os.environ.get("CIAO_CHAT_ID"):
+                # A chat shell runs inside the engine's process tree: booting the
+                # job out stops this command along with the engine it reloads.
+                return ServiceResult(
+                    False,
+                    "restart",
+                    "Refusing to reload the service definition from inside a Ciaobot chat: "
+                    "the reload stops the engine running this command. Run `ciao service restart` "
+                    "from a terminal, or use Settings → Restart.",
+                    {**asdict(runtime), "restart": "reload", "refused": True},
+                )
             # launchd reads the plist only when a job is bootstrapped, so kickstart
             # would keep running the definition it already holds.
             booted_out = _launchctl(["bootout", f"{domain}/{SERVER_LABEL}"], runner=runner)
@@ -596,6 +629,17 @@ def restart_service(
                     "restart",
                     _command_error(booted_out) or "launchctl bootout failed",
                     {**asdict(runtime), "restart": "reload"},
+                )
+            if not _wait_for_teardown(resolved_uid, runner):
+                # Bootstrapping now would race the old job's shutdown. Leave it to the
+                # operator rather than start a second copy against a half-dead one.
+                return ServiceResult(
+                    False,
+                    "restart",
+                    f"The engine did not stop within {RELOAD_TEARDOWN_TIMEOUT_S} s, so the edited "
+                    "service definition was not loaded. Run `ciao service status`, then retry "
+                    "`ciao service restart`.",
+                    {**asdict(runtime), "restart": "reload", "teardown_timed_out": True},
                 )
             completed = _launchctl(["bootstrap", domain, runtime.server_plist], runner=runner)
             restart_path = "reload"

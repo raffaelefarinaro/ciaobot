@@ -2392,6 +2392,7 @@ class CiaoControlPlane:
             "archived": chat.archived,
             "last_activity_at": chat.last_activity_at,
             "last_response": response[:CHAT_LIST_RESPONSE_CHARS],
+            **self._chat_state_fields(chat),
         }
         if len(response) > CHAT_LIST_RESPONSE_CHARS:
             row["last_response_truncated"] = True
@@ -2432,18 +2433,24 @@ class CiaoControlPlane:
             dict[str, Any], chat.to_dict(local=self.pcm.is_session_local(chat))
         )
         result["last_response"] = getattr(chat, "last_response", "")
-        result["last_response_status"] = getattr(chat, "last_response_status", "")
-        get_active_stream = getattr(self.pcm, "get_active_stream", None)
-        result["active_turn"] = (
-            get_active_stream(chat.chat_id) is not None
-            if get_active_stream is not None
-            else False
-        )
-        result["needs_attention"] = bool(
-            getattr(chat, "pending_question", "")
-            or getattr(chat, "pending_permission", "")
-        )
+        result.update(self._chat_state_fields(chat))
         return result
+
+    def _chat_state_fields(self, chat: Any) -> dict[str, Any]:
+        """The state cleanup routines read: turn in flight, waiting on the user, last outcome."""
+        get_active_stream = getattr(self.pcm, "get_active_stream", None)
+        return {
+            "active_turn": (
+                get_active_stream(chat.chat_id) is not None
+                if get_active_stream is not None
+                else False
+            ),
+            "needs_attention": bool(
+                getattr(chat, "pending_question", "")
+                or getattr(chat, "pending_permission", "")
+            ),
+            "last_response_status": getattr(chat, "last_response_status", ""),
+        }
 
     def chat_create(
         self,

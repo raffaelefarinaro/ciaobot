@@ -607,6 +607,7 @@ async def test_midresponse_drop_stops_after_retry_cap(tmp_path: Path) -> None:
     # Simulate a live session plus an already-exhausted retry budget.
     chat.session_id = "sess-drop"
     chat.retry_attempts = _MAX_CONNECTION_DROP_RETRIES
+    chat.retry_kind = "connection"
     pcm._save()
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
@@ -833,6 +834,7 @@ async def test_quota_retries_stop_after_cap(tmp_path: Path) -> None:
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
     chat.retry_attempts = _MAX_QUOTA_RETRIES
+    chat.retry_kind = "quota"
     pcm._save()
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
@@ -868,6 +870,7 @@ async def test_quota_retry_armed_below_cap(tmp_path: Path) -> None:
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
     chat.retry_attempts = _MAX_QUOTA_RETRIES - 1
+    chat.retry_kind = "quota"
     pcm._save()
 
     async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
@@ -890,4 +893,77 @@ async def test_quota_retry_armed_below_cap(tmp_path: Path) -> None:
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
     assert updated.retry_status == "pending"
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_five_hour_session_limit_gets_six_hourly_attempts(tmp_path: Path) -> None:
+    """A session limit that clears inside the 5-hour window is retried six times."""
+    from ciao.web.project_chats import _MAX_QUOTA_RETRIES
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): reached your session usage limit",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    # Each hourly fire fails again; the first failure arms the ladder.
+    for _ in range(_MAX_QUOTA_RETRIES):
+        updated = pcm.get_chat(chat.chat_id)
+        assert updated is not None
+        assert updated.retry_status == "pending"
+        retry_stream = pcm.try_chat_retry_now(chat.chat_id)
+        assert retry_stream is not None
+        await asyncio.wait_for(_consume(retry_stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+
+
+async def test_connection_retries_do_not_consume_quota_budget(tmp_path: Path) -> None:
+    """Earlier connection retries leave the full quota budget for a later limit."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.retry_attempts = 3
+    chat.retry_kind = "connection"
+    pcm._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): rate limit exceeded",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_kind == "quota"
+    assert updated.retry_attempts == 0
     pcm.stop_chat_retry(chat.chat_id)
