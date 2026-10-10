@@ -489,3 +489,25 @@ async def test_schedule_attention_classifier_empty_output_keeps_chat_visible(
     row = _job_rows(tmp_path)[0]
     assert row["status"] == "error"
     assert row["error"] == "classifier returned no parseable JSON"
+
+
+async def test_schedule_attention_classifier_runs_claude_on_haiku_without_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _manager_for_classifier()
+    manager._config.provider_insights_models = {}
+    captured: dict[str, object] = {}
+
+    async def fake_oneshot(*args, **kwargs):
+        captured.update(kwargs)
+        return '{"needs_user": false, "reason": "routine"}'
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    entry = _entry()
+    entry.provider = "claude"
+    entry.model = "opus"
+    assert await manager._schedule_run_needs_user(
+        entry, ScheduleRunOutcome(completed=True, final_text="done")
+    ) is False
+    assert captured["model"] == "haiku"

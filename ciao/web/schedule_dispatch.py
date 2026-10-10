@@ -271,10 +271,11 @@ class ScheduleDispatcher:
         )
         user_prompt = json.dumps(payload, ensure_ascii=False)
         try:
-            from ciao.insights import resolve_insights_model
+            from ciao.insights import resolve_helper_model
 
-            # The classifier runs on the run provider's Session insights model.
-            # A raise here keeps the run visible instead of auto-archiving it.
+            # The classifier runs on the small helper model for the run
+            # provider (or its Session insights override). A raise here keeps
+            # the run visible instead of auto-archiving it.
             project_id: str | None = getattr(entry, "web_project_id", None)
             project = self._host._projects.get(project_id) if project_id else None
             workspace = project.workspace if project else None
@@ -287,7 +288,7 @@ class ScheduleDispatcher:
             )
             if classifier_provider not in supported_providers():
                 return True
-            model = resolve_insights_model(
+            model = resolve_helper_model(
                 self._host._config, workspace, classifier_provider,
                 source_model=fixed_chat.model if fixed_chat is not None else entry.model,
             )
