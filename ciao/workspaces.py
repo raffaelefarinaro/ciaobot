@@ -113,6 +113,7 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
             if getattr(workspace, "allowed_mcp_servers", None) is not None
             else None
         ),
+        "claude_ai_connectors": bool(getattr(workspace, "claude_ai_connectors", True)),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
         "agent_fs_scope": agent_fs_scope,
@@ -209,6 +210,15 @@ def workspace_from_request(
         allowed_mcp_servers = existing.allowed_mcp_servers
     else:
         allowed_mcp_servers = None
+    if "claude_ai_connectors" in data:
+        connectors = data.get("claude_ai_connectors")
+        if not isinstance(connectors, bool):
+            raise ValueError("claude_ai_connectors must be true or false")
+        claude_ai_connectors = connectors
+    elif existing is not None:
+        claude_ai_connectors = existing.claude_ai_connectors
+    else:
+        claude_ai_connectors = True
     if "color" in data:
         color = coerce_workspace_color(data.get("color"))
     elif existing is not None:
@@ -240,6 +250,7 @@ def workspace_from_request(
         default_provider=provider,
         disallowed_tools=disallowed_tools,
         allowed_mcp_servers=allowed_mcp_servers,
+        claude_ai_connectors=claude_ai_connectors,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
         color=color,
         agent_fs_scope=agent_fs_scope,

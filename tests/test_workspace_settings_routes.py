@@ -181,6 +181,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "default_provider": "claude",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         "allowed_mcp_servers": None,
+        "claude_ai_connectors": True,
         "gws_profile": "work",
         "color": "pink",
     }
@@ -216,6 +217,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "default_provider": "claude",
             "disallowed_tools": None,
             "allowed_mcp_servers": None,
+            "claude_ai_connectors": True,
             "gws_profile": "personal",
             "color": "pink",
         },
@@ -441,6 +443,34 @@ def test_connectors_always_allowed_and_extras_honored(tmp_path):
     personal_stored = next(w for w in stored if w["name"] == "personal")
     assert "claude_ai_mcps" not in personal_stored
     assert personal_stored["disallowed_tools"] == ["mcp__n8n_mcp"]
+
+
+def test_claude_ai_connectors_switch_saves_persists_and_validates(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-a", "vault_root": "client-a"})
+    assert config.workspace("client-a").claude_ai_connectors is True
+
+    off = client.patch("/api/workspaces/client-a", json={"claude_ai_connectors": False})
+    assert off.status_code == 200
+    assert any(
+        w["name"] == "client-a" and w["claude_ai_connectors"] is False
+        for w in off.json()["workspaces"]
+    )
+    assert config.workspace("client-a").claude_ai_connectors is False
+
+    # A save that leaves the switch out keeps it.
+    kept = client.patch("/api/workspaces/client-a", json={"color": "cyan"})
+    assert kept.status_code == 200
+    assert config.workspace("client-a").claude_ai_connectors is False
+
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert next(w for w in stored if w["name"] == "client-a")["claude_ai_connectors"] is False
+
+    # Only a real boolean is accepted; a string would otherwise be read as truthy.
+    bad = client.patch("/api/workspaces/client-a", json={"claude_ai_connectors": "false"})
+    assert bad.status_code == 400
+    assert "claude_ai_connectors" in bad.json()["error"]
+    assert config.workspace("client-a").claude_ai_connectors is False
 
 
 def test_workspace_color_defaults_persists_and_validates(tmp_path):

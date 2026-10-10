@@ -4904,7 +4904,26 @@ class ProjectChatManager:
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         # Artifacts publish to claude.ai; ciaobot has no use for that surface
         env["CLAUDE_CODE_DISABLE_ARTIFACT"] = "1"
+        # The claude.ai connectors (the Claude account's remote MCP servers)
+        # load into every Claude chat unless Claude Code is told not to. A
+        # workspace can switch them off; a memory pass always runs without them,
+        # since a pass reads and edits the vault and must not reach an external
+        # surface. Other providers never see this variable.
+        if chat.provider == "claude" and (
+            is_memory_pass_chat(chat, project) or not self._claude_ai_connectors_on(workspace)
+        ):
+            env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"
         return env
+
+    def _claude_ai_connectors_on(self, workspace: str) -> bool:
+        """Whether a Claude chat in ``workspace`` loads the claude.ai connectors.
+
+        An unregistered or empty workspace name keeps the default (on).
+        """
+        config_workspace = self._config.workspace(workspace) if workspace else None
+        if config_workspace is None:
+            return True
+        return bool(config_workspace.claude_ai_connectors)
 
     def _effective_mode_for_chat(
         self, chat: ChatInfo, *, unattended: bool = False
