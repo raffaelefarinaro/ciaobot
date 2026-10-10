@@ -66,6 +66,8 @@ class ScheduleDispatchHost(Protocol):
 
     def _agent_root_for_chat(self, chat_id: str) -> Path: ...
 
+    def schedule_command_env(self, entry: ScheduleEntry) -> tuple[Path, dict[str, str]]: ...
+
     def _resolve_schedule_project(
         self, stale_id: str, entry: ScheduleEntry
     ) -> ProjectInfo | None: ...
@@ -546,10 +548,10 @@ class ScheduleDispatcher:
         # ends the run here with no chat; anything else opens the chat below
         # with the command's outcome in front of the prompt.
         command_extra: dict[str, object] = {}
+        command_printed = False
         if getattr(entry, "command", ""):
-            command_run = await run_schedule_command(
-                entry.command, self._host._config.workspace_root
-            )
+            command_cwd, command_env = self._host.schedule_command_env(entry)
+            command_run = await run_schedule_command(entry.command, command_cwd, command_env)
             command_extra = command_run.extra()
             if command_run.quiet:
                 return self._finish_quiet_run(
@@ -557,6 +559,7 @@ class ScheduleDispatcher:
                     perf=_sched_perf, started=_sched_started,
                     dispatch_id=_sched_dispatch_id,
                 )
+            command_printed = True
             prompt = command_run.compose_prompt(prompt)
 
         # Go through the manager seam rather than calling this collaborator's
@@ -567,6 +570,10 @@ class ScheduleDispatcher:
             entry, prompt, model, mode, provider,
         )
         if target_id is None:
+            # A command that printed output has nowhere to report it: the run
+            # is not ok, and an interval entry is disabled by its caller.
+            if command_printed:
+                return {"status": "missing-chat"}
             return {}
 
         result: dict[str, str] = {"chat_id": target_id}
