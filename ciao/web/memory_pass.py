@@ -87,8 +87,14 @@ MEMORY_PASS_PROMPT = (
     "question for the owner instead of inventing a type. Facts from turns "
     "marked as automated (unattended) are not the user's and must not be "
     "recorded. Do not do anything outside memory and the vault: no "
-    "messages, emails, commits, pushes or external calls. Finish with a short "
-    "list of what you changed."
+    "messages, emails, commits, pushes or external calls.\n\n"
+    "Scope: the archived transcript at {archive} is the only source. Read it "
+    "once. Do not verify facts against code, docs, versions or the web. Do not "
+    "call the engine API or `ciao chat` commands to re-read the conversation. "
+    "Use `ciao vault search` to find the notes the transcript touches, "
+    "including the people in it. Stop once the updates are written; when "
+    "there is nothing durable, say so in one line and stop.\n\n"
+    "Finish with a short list of what you changed."
 )
 
 #: How a lesson that is not an owned-skill edit gets filed, spelled the way

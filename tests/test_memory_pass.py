@@ -281,6 +281,27 @@ def test_prompt_routes_categories_to_the_vocabulary_block() -> None:
     assert "instead of inventing a type" in prompt
 
 
+def test_prompt_scopes_the_pass_to_its_transcript() -> None:
+    """A pass re-derives nothing: the transcript is the only source.
+
+    October's longest pass spent its steps verifying versions against the docs
+    and re-reading the conversation through the engine. The scope block names
+    each of those, so a pass that starts exploring has a line it already read.
+    """
+    prompt = memory_pass.MEMORY_PASS_PROMPT
+    for phrase in (
+        "Scope: the archived transcript at {archive} is the only source.",
+        "Read it once.",
+        "Do not verify facts against code, docs, versions or the web.",
+        "Do not call the engine API or `ciao chat` commands to re-read the conversation.",
+        "Use `ciao vault search` to find the notes the transcript touches",
+        "including the people in it.",
+        "Stop once the updates are written",
+        "when there is nothing durable, say so in one line and stop.",
+    ):
+        assert phrase in prompt, phrase
+
+
 def test_superseded_guidance_is_rewritten_not_annotated() -> None:
     """A later reader must not be left with two current instructions (#1132).
 
