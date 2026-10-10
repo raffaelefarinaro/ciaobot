@@ -28,6 +28,29 @@ def resolve_insights_model(
     return config.default_model_for_workspace(workspace, provider)
 
 
+# Model alias the classification-sized helpers run on under the claude
+# provider. Helper one-shots are single-use, so their prompt-cache writes are
+# rarely read back; a frontier model there only costs more.
+HELPER_MODEL_CLAUDE = "haiku"
+
+
+def resolve_helper_model(
+    config: CiaoConfig, workspace: str | None, provider: str, *, source_model: str = ""
+) -> str:
+    """Pick the model for a classification-sized helper one-shot.
+
+    Used by the schedule attention classifier and the people-note fold on
+    accept. The Settings override (``provider_insights_models``) wins. Under
+    the claude provider the answer is :data:`HELPER_MODEL_CLAUDE`, whatever
+    the source chat runs on. Other providers have no small-model notion in
+    the registry, so they keep :func:`resolve_insights_model`.
+    """
+    override = (config.provider_insights_models or {}).get(provider, "")
+    if provider == "claude" and not override:
+        return HELPER_MODEL_CLAUDE
+    return resolve_insights_model(config, workspace, provider, source_model=source_model)
+
+
 # The insights model is operator-chosen and may be a slow local/cloud GGUF:
 # measured end-to-end calls on such a backend run 214-253s, so the old flat
 # 120s budget turned tail latency into a guaranteed TimeoutError and the job

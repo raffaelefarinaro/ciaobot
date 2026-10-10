@@ -82,3 +82,41 @@ def test_automatic_insights_inherits_the_source_model() -> None:
         assert insights.resolve_insights_model(
             config, "work", provider, source_model=model
         ) == "chosen-insights"
+
+
+def _helper_config(overrides: dict[str, str] | None = None) -> SimpleNamespace:
+    defaults = {"claude": "opus", "opencode": "vendor/default"}
+    return SimpleNamespace(
+        provider_insights_models=dict(overrides or {}),
+        default_model_for_workspace=lambda workspace, provider: defaults[provider],
+    )
+
+
+def test_claude_helpers_resolve_to_haiku_whatever_the_source_chat_runs() -> None:
+    config = _helper_config()
+    assert insights.HELPER_MODEL_CLAUDE == "haiku"
+    # Classifier path: source chat on Opus. Reconcile path: workspace default Opus.
+    assert insights.resolve_helper_model(config, "work", "claude", source_model="opus") == "haiku"
+    assert insights.resolve_helper_model(config, "work", "claude") == "haiku"
+
+
+def test_a_settings_insights_override_wins_over_the_helper_tier() -> None:
+    config = _helper_config({"claude": "sonnet", "opencode": "vendor/insights"})
+    assert insights.resolve_helper_model(config, "work", "claude", source_model="opus") == "sonnet"
+    assert insights.resolve_helper_model(config, "work", "opencode") == "vendor/insights"
+
+
+def test_opencode_helpers_keep_the_current_resolution() -> None:
+    config = _helper_config()
+    assert insights.resolve_helper_model(
+        config, "work", "opencode", source_model="vendor/chat"
+    ) == "vendor/chat"
+    assert insights.resolve_helper_model(config, "work", "opencode") == "vendor/default"
+
+
+def test_the_memory_pass_and_doc_folds_keep_the_source_or_default_model() -> None:
+    # resolve_insights_model is unchanged: the memory pass and doc folds still
+    # inherit the source chat's model (or the workspace default) on Claude.
+    config = _helper_config()
+    assert insights.resolve_insights_model(config, "work", "claude", source_model="opus") == "opus"
+    assert insights.resolve_insights_model(config, "work", "claude") == "opus"
