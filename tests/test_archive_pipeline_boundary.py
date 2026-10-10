@@ -186,6 +186,23 @@ async def test_an_all_unattended_archive_queues_no_pass(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_focused_pass_on_an_all_unattended_archive_still_runs(
+    tmp_path: Path,
+) -> None:
+    """A pass the owner asked for is never skipped by the unattended gate."""
+    host, pipeline, chat, project, _outcome = _setup(tmp_path)
+    archive = _real_archive(tmp_path, [_automated("Curate")])
+    outcome = ArchiveOutcome(path=archive, turn_count=1)
+
+    pipeline.run_archive_postprocess(
+        chat.chat_id, outcome, chat, project, focus={"kind": "approved_task"}
+    )
+    await asyncio.sleep(0)
+
+    assert host.enqueued == [(chat.chat_id, archive, project.vault_doc_path)]
+
+
+@pytest.mark.asyncio
 async def test_an_archive_with_one_human_turn_queues_the_pass(tmp_path: Path) -> None:
     host, pipeline, chat, project, _outcome = _setup(tmp_path)
     archive = _real_archive(
