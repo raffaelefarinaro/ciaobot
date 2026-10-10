@@ -164,7 +164,7 @@ def test_render_launchd_plist_with_verified_host_renders_host_argv_and_timeout()
     # The exact host_service_argv for the canonical verified bundle path, plus
     # the launchd bound above the host's 35 s stop grace.
     assert data["ProgramArguments"] == [
-        "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+        "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server",
         "serve",
         "--python",
         "/opt/ciao/venv/bin/python",

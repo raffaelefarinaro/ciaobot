@@ -29,11 +29,20 @@ import signal
 import subprocess
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable, Protocol, Sequence
 
 from ciao import macos_service
 from ciao.os_support.private import make_private, mkstemp_private
+from ciao.server_host import (
+    HostOwnership,
+    ServerHostError,
+    default_bundle_path,
+    host_service_argv,
+    verify_owned_host,
+    verify_superseded_host,
+)
+from ciao.server_host_install import install_server_host
 
 if TYPE_CHECKING:
     from ciao.engine_update import Operation, UpdateError
@@ -118,7 +127,7 @@ class UpdateHost(Protocol):
         """The full argv the loaded service actually runs, or ``None``.
 
         The loaded job is the authority, and the whole argument vector and not
-        just ``argv[0]``: a native hosted service runs ``CiaobotServerHost serve
+        just ``argv[0]``: a native hosted service runs ``Ciaobot Server serve
         --python <interpreter>``, so the engine install the job is actually
         using is named by the interpreter it serves, not by the host
         executable. ``None`` is "not loaded, or nothing usable was reported",
@@ -201,6 +210,21 @@ class UpdateHost(Protocol):
 
     def redirect_detached_stdio(self, root: Path) -> None:
         """Give a detached helper somewhere to write, if it has none of its own."""
+        ...
+
+    def server_host_migration_needed(self) -> bool:
+        """Whether an installed revision-1 server host must be replaced (#1249).
+
+        Only macOS can answer yes; every other platform has no server host.
+        """
+        ...
+
+    def migrate_server_host(self, archive: Path, entry: dict[str, Any]) -> None:
+        """Replace the revision-1 server host with ``archive`` and repoint its agent (#1249).
+
+        Raises on any failure, leaving the old host in place when the host
+        itself could not be installed.
+        """
         ...
 
 
@@ -536,7 +560,7 @@ def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...
     while the running service still executes the old one. ``launchctl print``
     reports the loaded job, which is the one that has to agree with the
     receipt. The whole argument vector and not just the program, because a
-    native hosted service runs ``CiaobotServerHost serve --python
+    native hosted service runs ``Ciaobot Server serve --python
     <interpreter>``: the engine install it is actually using is named by the
     interpreter it serves, not by the host executable.
 
@@ -1045,6 +1069,78 @@ class MacUpdateHost:
         them running beside each other cannot interleave their output into
         something nobody can read.
         """
+
+    def server_host_migration_needed(self) -> bool:
+        """MIGRATION (#1249): a revision-1 host its record proves ours, under a hosted agent.
+
+        A current host, no host, or a direct LaunchAgent (which runs no host and
+        has nothing to repoint) answers False.
+        """
+        bundle = default_bundle_path()
+        try:
+            verify_owned_host(bundle)
+            return False
+        except ServerHostError:
+            pass
+        try:
+            verify_superseded_host(bundle)
+        except ServerHostError:
+            return False
+        return self._hosted_agent_python() is not None
+
+    def _server_agent_plist(self) -> dict[str, Any] | None:
+        path = macos_service.default_launch_agents_dir() / f"{SERVER_LABEL}.plist"
+        try:
+            with path.open("rb") as handle:
+                loaded: Any = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException, ValueError):
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    def _hosted_agent_python(self) -> str | None:
+        """The interpreter the server LaunchAgent's hosted command serves, or None."""
+        data = self._server_agent_plist()
+        if data is None:
+            return None
+        return macos_service.hosted_service_python(data.get("ProgramArguments"))
+
+    def _install_host(self, archive: Path, entry: dict[str, Any]) -> HostOwnership:
+        """The installer's replacement of the host bundle; a seam for tests."""
+        return install_server_host(archive, entry)
+
+    def migrate_server_host(self, archive: Path, entry: dict[str, Any]) -> None:
+        """MIGRATION (#1249): install the revision-2 host, then name it in the agent.
+
+        The installer replaces the revision-1 bundle only when its own record
+        proves it ours, and restores it when the replacement fails. The agent is
+        rewritten only after the new host is verified. ``ProgramArguments`` is the
+        only key changed, so the workspace, port and environment the agent was
+        set up with are kept as they are.
+        """
+        python = self._hosted_agent_python()
+        if python is None:
+            raise RuntimeError(
+                "the server LaunchAgent is not a hosted service, so there is no "
+                "host to move"
+            )
+        host = self._install_host(archive, entry)
+        data = self._server_agent_plist()
+        if data is None:
+            raise RuntimeError("the server LaunchAgent could not be read after the host install")
+        data["ProgramArguments"] = list(
+            host_service_argv(PurePosixPath(host.bundle_path), PurePosixPath(python))
+        )
+        try:
+            _write_plist(
+                data, macos_service.default_launch_agents_dir() / f"{SERVER_LABEL}.plist"
+            )
+        except OSError as exc:
+            # The new host is already in place at this point, so the old
+            # ProgramArguments no longer point at an existing file. Say so.
+            raise RuntimeError(
+                f"the Ciaobot Server host was replaced, but the LaunchAgent could "
+                f"not be rewritten to name it ({exc}); run: ciao setup"
+            ) from exc
 
 
 def current_update_host() -> UpdateHost:

@@ -166,12 +166,15 @@ def hosted_service_python(arguments: object) -> str | None:
     """The interpreter a hosted ``ProgramArguments`` serves, or ``None``.
 
     ``None`` for anything that is not the strict hosted shape
-    (``CiaobotServerHost serve --python <interpreter>``) as
+    (``Ciaobot Server serve --python <interpreter>``) as
     :func:`ciao.server_host.parse_service_command` reads it, including every
     malformed value the parser refuses. Syntax only: it never proves ownership.
     """
     try:
-        parsed = parse_service_command(arguments)
+        # MIGRATION (#1249): a revision-1 LaunchAgent still names the old
+        # executable until the in-app or one-liner host migration rewrites it.
+        # Delete the accept_legacy_host flag with the revision-1 layout.
+        parsed = parse_service_command(arguments, accept_legacy_host=True)
     except ServerHostError:
         return None
     return parsed.python if parsed.mode == "hosted" else None
@@ -180,7 +183,7 @@ def hosted_service_python(arguments: object) -> str | None:
 def service_python_path(arguments: object) -> str:
     """The interpreter the service definition actually runs.
 
-    A **hosted** definition (``CiaobotServerHost serve --python <interpreter>``)
+    A **hosted** definition (``Ciaobot Server serve --python <interpreter>``)
     runs the native host, which is not a Python interpreter: reporting its
     executable as ``python_path`` would make ``update_engine``'s bundled-engine
     check and every consumer that hands this value to a process start the wrong

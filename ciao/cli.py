@@ -229,7 +229,7 @@ def _render_launchd_plist(
     ``engine_path`` name the program and the arguments follow the launcher
     name. When ``host`` is given — a snapshot from
     ``ciao.server_host.verify_owned_host``, the only proof the bytes are ours —
-    the program becomes the native ``CiaobotServerHost`` running
+    the program becomes the native ``Ciaobot Server`` running
     ``serve --python <host_python>`` and the job gains ``ExitTimeOut``
     ``EXIT_TIMEOUT_SECONDS`` (45 s), so launchd never sweeps the job group out
     from under the host's own 35 s stop grace. The caller supplying ``host`` in
