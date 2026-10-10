@@ -1415,6 +1415,9 @@ class OpencodeProvider(BaseSDKProvider):
         self._password: str = ""
         self._session_id: str = ""
         self._session_handover_context: str = ""
+        # Session whose transcript already holds the chat core. V2 keeps prompt
+        # text in history, so the core is sent once per session, not every turn.
+        self._core_sent_session_id: str = ""
         self._permission_requests: dict[str, _PendingRequest] = {}
         self._question_requests: dict[str, _PendingRequest] = {}
         self._tool_calls: dict[str, str] = {}
@@ -2541,6 +2544,11 @@ class OpencodeProvider(BaseSDKProvider):
         kind = str(event.get("type") or "")
         props = event.get("data")
         props = props if isinstance(props, Mapping) else {}
+        if kind in {"session.compaction.ended", "session.compacted"}:
+            # Compaction replaces the history with a summary, which drops the
+            # chat core sent on an earlier turn: send it again next turn.
+            self._core_sent_session_id = ""
+            return []
 
         if kind in {"session.reasoning.started", "session.text.started"}:
             part_kind = "reasoning" if kind.startswith("session.reasoning.") else "text"
@@ -2960,11 +2968,20 @@ class OpencodeProvider(BaseSDKProvider):
         self._reset_turn_state()
         register_handle(OpencodeActiveHandle(self, session_id))
 
-        if self._developer_instructions is None:
-            instructions = self._chat_system_instructions()
+        # The chat core is re-sent only when this session's transcript lacks it:
+        # a new or replacement session, a handover, or after a compaction
+        # (`_event_to_stream` clears the tracked id). The tracked id is set only
+        # once the prompt is accepted.
+        developer_instructions = self._developer_instructions
+        send_core = developer_instructions is None and (
+            session_id != self._core_sent_session_id
+            or bool(self._session_handover_context)
+        )
+        if developer_instructions is None:
+            instructions = self._chat_system_instructions() if send_core else ""
             runtime = ""
         else:
-            instructions = self._developer_instructions
+            instructions = developer_instructions
             runtime = build_runtime_context(request)
         system = compose_system(instructions, runtime)
         if self._session_handover_context:
@@ -3034,6 +3051,8 @@ class OpencodeProvider(BaseSDKProvider):
                         return
                     # Once accepted, the replacement session owns the handover.
                     self._session_handover_context = ""
+                    if send_core:
+                        self._core_sent_session_id = session_id
                     prompt_accepted = True
                 if prompt_accepted:
                     for converted in await self._reload_pending_requests(

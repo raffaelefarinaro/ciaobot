@@ -1949,6 +1949,162 @@ async def test_failure_result_still_carries_the_error(tmp_path, monkeypatch):
     assert "\n" not in result.result
 
 
+# ── core instructions sent once per session ─────────────────────────────
+
+
+class _PromptRecordingClient(_FakeServerClient):
+    """Records every prompt body; optionally rejects the first prompt."""
+
+    def __init__(self, *, reject_first: bool = False) -> None:
+        super().__init__([])
+        self.bodies: list[dict] = []
+        self._reject_first = reject_first
+
+    async def post(self, path: str, json=None):
+        self.bodies.append(json or {})
+        if self._reject_first:
+            self._reject_first = False
+
+            class _Rejected:
+                status_code = 500
+                text = "boom"
+
+                def json(self):
+                    return {}
+
+            return _Rejected()
+        return await super().post(path, json=json)
+
+
+_CORE_MARKER = "Ciaobot core instructions"
+
+
+_FIXTURE_SESSION = "ses_003133027ffeJooFKUT3slZ0al"
+
+
+def _turn_lines(session_id: str) -> list[str]:
+    """The recorded turn, re-addressed to ``session_id`` so its events are kept."""
+    raw = (FIXTURES / "turn_with_tool.jsonl").read_text(encoding="utf-8")
+    return [
+        f"data: {line.replace(_FIXTURE_SESSION, session_id)}\n\n"
+        for line in raw.splitlines()
+        if line.strip()
+    ]
+
+
+async def _run_recorded_turn(provider, monkeypatch, client, session_id: str):
+    from ciao.models import AgentRequest
+
+    client._lines = _turn_lines(session_id)
+
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return session_id
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    request = AgentRequest(prompt="hi", model="", mode="bypass", provider="opencode")
+    return [
+        event
+        async for event in provider.run_streaming(request, lambda _handle: None)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_core_is_sent_once_per_session(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_core_once")
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_core_once")
+
+    first, second = (body["text"] for body in client.bodies)
+    assert _CORE_MARKER in first
+    assert "[CIAO_CONTEXT_BEGIN]" in first
+    assert _CORE_MARKER not in second
+    assert "[CIAO_CONTEXT_BEGIN]" not in second
+    assert second.endswith("hi")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["session.compaction.ended", "session.compacted"])
+async def test_core_is_sent_again_after_compaction(tmp_path, monkeypatch, kind):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_core_compact")
+    assert provider._event_to_stream({"type": kind, "data": {}}) == []
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_core_compact")
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_core_compact")
+
+    first, second, third = (body["text"] for body in client.bodies)
+    assert _CORE_MARKER in first
+    assert _CORE_MARKER in second
+    assert _CORE_MARKER not in third
+
+
+@pytest.mark.asyncio
+async def test_core_is_sent_again_for_a_new_session(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_core_a")
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_core_b")
+
+    assert _CORE_MARKER in client.bodies[0]["text"]
+    assert _CORE_MARKER in client.bodies[1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_core_is_sent_with_session_handover_context(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_handover")
+    provider._session_handover_context = "User: Earlier request"
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_handover")
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_handover")
+
+    handover_text = client.bodies[1]["text"]
+    assert _CORE_MARKER in handover_text
+    assert "User: Earlier request" in handover_text
+    # The handover is consumed by the accepted prompt, so the next turn is lean.
+    assert _CORE_MARKER not in client.bodies[2]["text"]
+
+
+@pytest.mark.asyncio
+async def test_failed_send_resends_core_next_turn(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient(reject_first=True)
+
+    rejected = await _run_recorded_turn(provider, monkeypatch, client, "ses_failed")
+    assert rejected[-1].is_error
+    assert _CORE_MARKER in client.bodies[0]["text"]
+    assert provider._core_sent_session_id == ""
+
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_failed")
+    assert _CORE_MARKER in client.bodies[-1]["text"]
+    assert provider._core_sent_session_id == "ses_failed"
+
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_failed")
+    assert _CORE_MARKER not in client.bodies[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_developer_instructions_path_is_unchanged(tmp_path, monkeypatch):
+    provider = OpencodeProvider(tmp_path, developer_instructions="ONE_SHOT_TITLE_RULES")
+    client = _PromptRecordingClient()
+
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_one_shot")
+    await _run_recorded_turn(provider, monkeypatch, client, "ses_one_shot")
+
+    for body in client.bodies:
+        assert "ONE_SHOT_TITLE_RULES" in body["text"]
+        assert _CORE_MARKER not in body["text"]
+
+
 # ── server lifecycle ────────────────────────────────────────────────────
 
 
