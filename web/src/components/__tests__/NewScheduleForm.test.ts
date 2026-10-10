@@ -90,6 +90,26 @@ describe('NewScheduleForm', () => {
     expect(railText(wrapper)).toContain('When you click Run')
   })
 
+  it('offers an optional monospace command that is sent with the automation and then cleared', async () => {
+    const wrapper = await mountForm()
+    const tasks = useTaskStore()
+    const field = wrapper.find('#nsf-command')
+    expect(wrapper.find('label[for="nsf-command"]').text()).toBe('Command (optional)')
+    expect(field.attributes('spellcheck')).toBe('false')
+    expect(wrapper.find('#nsf-command-hint').text()).toBe(
+      'Runs first. If it prints nothing and exits 0, no chat is opened.',
+    )
+    await field.setValue('git -C docs pull')
+    await wrapper.find('#nsf-time').setValue('08:00')
+    await wrapper.find('#nsf-prompt').setValue('Summarise the changes')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    expect(tasks.createSchedule).toHaveBeenCalledWith(
+      expect.objectContaining({ command: 'git -C docs pull', prompt: 'Summarise the changes' }),
+    )
+    expect((wrapper.find('#nsf-command').element as HTMLInputElement).value).toBe('')
+  })
+
   it('emits cancel from the Cancel button', async () => {
     const wrapper = await mountForm()
     await wrapper.find('.nsf-cancel').trigger('click')

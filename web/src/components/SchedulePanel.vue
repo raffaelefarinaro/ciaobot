@@ -453,6 +453,20 @@
           <label>Prompt</label>
           <textarea v-model="editData.prompt" rows="10"></textarea>
         </div>
+        <div class="form-group">
+          <label for="sp-command">Command (optional)</label>
+          <input
+            id="sp-command"
+            v-model="editData.command"
+            class="schedule-command"
+            type="text"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            aria-describedby="sp-command-hint"
+          />
+          <p id="sp-command-hint" class="label-hint">Runs first. If it prints nothing and exits 0, no chat is opened.</p>
+        </div>
         <div class="card-actions">
           <span v-if="cardDirty" class="dirty-flag"><span class="dirty-dot" />Unsaved</span>
           <button class="btn-chip" @click="cancelCardEdit">Cancel</button>
@@ -719,6 +733,7 @@ const editData = ref({
   description: '',
   time: '',
   prompt: '',
+  command: '',
   timezone: 'Europe/Zurich',
   frequency: 'daily',
   interval_minutes: 10,
@@ -1266,6 +1281,7 @@ function startCardEdit(card: Exclude<EditCard, ''>) {
     description: schedule.value.description || '',
     time: schedule.value.daily_time_utc,
     prompt: schedule.value.prompt,
+    command: schedule.value.command || '',
     timezone: schedule.value.timezone_name,
     frequency: schedule.value.frequency || (schedule.value.days_of_week?.length ? 'weekly' : 'daily'),
     interval_minutes: schedule.value.interval_minutes || 10,
@@ -1313,6 +1329,7 @@ async function saveCardEdit() {
     description: d.description,
     time: d.frequency === 'manual' || d.frequency === 'interval' ? '' : d.time,
     prompt: d.prompt,
+    command: d.command,
     timezone: d.timezone,
     frequency: d.frequency,
     interval_minutes: d.frequency === 'interval' ? d.interval_minutes : undefined,
@@ -1712,6 +1729,7 @@ function closeSchedule() {
   font-size: var(--text-base);
 }
 .form-group textarea { resize: vertical; min-height: 160px; font-family: ui-monospace, monospace; }
+.form-group input.schedule-command { min-height: 44px; font-family: var(--font-mono); }
 
 .days-row { display: flex; flex-wrap: wrap; gap: 4px; }
 

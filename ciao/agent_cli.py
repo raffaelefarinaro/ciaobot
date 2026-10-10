@@ -57,6 +57,7 @@ _SCHEDULE_FLAGS: tuple[tuple[str, str, Any], ...] = (
     ("--provider", "provider", str),
     ("--model", "model", str),
     ("--archive-policy", "archive_policy", str),
+    ("--command", "command", str),
 )
 
 #: Rows `chat list` returns per page unless `--limit` says otherwise. The
