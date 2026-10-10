@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import plistlib
@@ -801,3 +802,177 @@ def test_migration_classify_names_a_mac_with_nothing_to_migrate(
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert payload["details"]["kind"] == "none"
+
+
+HOSTED_HOST = "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+
+# What `launchctl print gui/<uid>/com.ciao.server` renders for a loaded hosted job.
+HOSTED_PRINT = f"""gui/501/com.ciao.server = {{
+\tactive count = 1
+\tpath = /Users/me/Library/LaunchAgents/com.ciao.server.plist
+\ttype = LaunchAgent
+\tstate = running
+
+\tprogram = {HOSTED_HOST}
+\targuments = {{
+\t\t{HOSTED_HOST}
+\t\tserve
+\t\t--python
+\t\t/x/bin/python
+\t}}
+
+\tworking directory = /Users/me/ws
+\tpid = 4242
+}}
+"""
+
+# What launchctl prints (to stderr, so stdout is empty) for a job that is not loaded.
+NOT_LOADED_PRINT = ""
+
+
+def _write_program_arguments(runtime: macos_service.DesktopRuntime, arguments: list[str]) -> None:
+    Path(runtime.server_plist).write_bytes(
+        plistlib.dumps({"Label": "com.ciao.server", "ProgramArguments": arguments})
+    )
+
+
+def _launchd_runner(calls: list[list[str]], printed: str, *, print_returncode: int = 0):
+    # Answers `launchctl print` with the given text and every other verb with success.
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        if command[1] == "print":
+            return subprocess.CompletedProcess(command, print_returncode, stdout=printed, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    return run
+
+
+def test_parse_launchctl_print_arguments_reads_the_hosted_argv() -> None:
+    parsed = macos_service.parse_launchctl_print_arguments(HOSTED_PRINT)
+
+    assert parsed == [HOSTED_HOST, "serve", "--python", "/x/bin/python"]
+    assert macos_service.service_python_path(parsed) == "/x/bin/python"
+
+
+def test_parse_launchctl_print_arguments_is_none_when_not_loaded() -> None:
+    assert macos_service.parse_launchctl_print_arguments(NOT_LOADED_PRINT) is None
+    # A job launchd lists without an arguments block is not read as one.
+    assert (
+        macos_service.parse_launchctl_print_arguments(
+            "gui/501/com.ciao.server = {\n\tstate = waiting\n}\n"
+        )
+        is None
+    )
+
+
+def test_status_reports_a_loaded_definition_that_matches_the_plist(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+
+    result = macos_service.service_status(
+        runtime=runtime, uid=501, runner=_launchd_runner([], HOSTED_PRINT)
+    )
+
+    assert result.details["loaded"] is True
+    assert result.details["loaded_python_path"] == "/x/bin/python"
+    assert result.details["plist_matches_loaded"] is True
+    assert "Warning" not in result.message
+
+
+def test_status_warns_when_the_plist_differs_from_the_loaded_definition(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = dataclasses.replace(_runtime(tmp_path), python_path="/new/bin/python")
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+
+    result = macos_service.service_status(
+        runtime=runtime, uid=501, runner=_launchd_runner([], HOSTED_PRINT)
+    )
+
+    assert result.details["loaded_python_path"] == "/x/bin/python"
+    assert result.details["plist_matches_loaded"] is False
+    # python_path keeps reading the plist on disk; only the new fields follow launchd.
+    assert result.details["python_path"] == "/new/bin/python"
+    assert "Warning" in result.message
+    assert "ciao service restart" in result.message
+
+
+def test_status_leaves_the_match_unknown_when_not_loaded(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+
+    result = macos_service.service_status(
+        runtime=runtime,
+        uid=501,
+        runner=_launchd_runner([], NOT_LOADED_PRINT, print_returncode=113),
+    )
+
+    assert result.details["loaded"] is False
+    assert result.details["loaded_python_path"] is None
+    assert result.details["plist_matches_loaded"] is None
+    assert "Warning" not in result.message
+
+
+def test_restart_reloads_the_definition_when_the_plist_was_edited(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    calls: list[list[str]] = []
+
+    result = macos_service.restart_service(
+        runtime=runtime, uid=501, runner=_launchd_runner(calls, HOSTED_PRINT)
+    )
+
+    assert result.ok is True
+    assert result.details["restart"] == "reload"
+    assert "reloaded the edited service definition" in result.message
+    assert calls == [
+        ["launchctl", "print", "gui/501/com.ciao.server"],
+        ["launchctl", "bootout", "gui/501/com.ciao.server"],
+        ["launchctl", "bootstrap", "gui/501", runtime.server_plist],
+    ]
+
+
+def test_restart_kickstarts_when_the_loaded_definition_matches(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    calls: list[list[str]] = []
+
+    result = macos_service.restart_service(
+        runtime=runtime, uid=501, runner=_launchd_runner(calls, HOSTED_PRINT)
+    )
+
+    assert result.ok is True
+    assert result.details["restart"] == "kickstart"
+    assert result.message == "Ciaobot engine restarted."
+    assert calls == [
+        ["launchctl", "print", "gui/501/com.ciao.server"],
+        ["launchctl", "kickstart", "-k", "gui/501/com.ciao.server"],
+    ]
+
+
+def test_restart_kickstarts_when_the_job_is_not_loaded(tmp_path: Path, monkeypatch) -> None:
+    # Nothing is loaded to compare against, so restart keeps today's kickstart.
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    calls: list[list[str]] = []
+
+    macos_service.restart_service(
+        runtime=runtime,
+        uid=501,
+        runner=_launchd_runner(calls, NOT_LOADED_PRINT, print_returncode=113),
+    )
+
+    assert calls[-1] == ["launchctl", "kickstart", "-k", "gui/501/com.ciao.server"]
+    assert not any("bootstrap" in call for call in calls)

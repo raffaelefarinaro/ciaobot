@@ -451,103 +451,23 @@ def _retire_job(launch: Launchctl, domain_uid: int, label: str, *plists: Path) -
         launch(["bootout", f"gui/{domain_uid}/{label}"])
 
 
-def _loaded_field(printed: str, key: str) -> str:
-    """The text ``launchctl print`` rendered for ``key``, or ``""``.
-
-    launchd has printed a job's values in three shapes across versions: a bare
-    scalar on the key's own line, a list opened on that same line, and a list
-    whose opening bracket is on the line *after* the key. A list of any shape is
-    flattened to its own lines here, so the callers only decide what a token in
-    it means, and a key launchd did not render at all answers ``""`` — which is
-    evidence of nothing, and so never refuses an update and never stands a
-    recovery down.
-    """
-    lines = printed.splitlines()
-    for index, line in enumerate(lines):
-        head, separator, rest = line.partition("=")
-        if not separator or head.strip() != key:
-            continue
-        value = rest.strip()
-        if value[:1] not in {"(", "{"}:
-            return value
-        parts = [value]
-        # The list's own delimiters, so a block that opens here is collected up
-        # to the line that closes it — one argument per line, in every shape.
-        depth = value.count("(") + value.count("{") - value.count(")") - value.count("}")
-        if depth <= 0:
-            # Opened and closed on the key's own line: the value is that line,
-            # not that line plus whatever key launchd printed after it.
-            return value
-        for nxt in lines[index + 1 :]:
-            parts.append(nxt)
-            depth += nxt.count("(") + nxt.count("{") - nxt.count(")") - nxt.count("}")
-            if depth <= 0:
-                break
-        return "\n".join(parts)
-    return ""
-
-
-def _loaded_tokens(printed: str, key: str) -> list[str]:
-    """The tokens in a value ``launchctl print`` rendered for ``key``."""
-    return [
-        token
-        for line in _loaded_field(printed, key).splitlines()
-        for token in re.findall(r"[^\s,(){}]+", line)
-    ]
-
-
 def _loaded_program_argument(printed: str) -> str | None:
     """The program ``launchctl print`` says a loaded job runs, or ``None``.
 
     The ``program`` value in every shape launchd prints it (see
-    :func:`_loaded_field`): a bare scalar keeps its spaces, because the host the
+    :func:`macos_service.launchctl_print_field`): a bare scalar keeps its spaces, because the host the
     service runs under is ``Ciaobot Server.app`` and a token split would truncate
     it at the bundle name; a list answers its first element (see
-    :func:`_loaded_list`). Nothing recognisable answers ``None``, which is
+    :func:`macos_service.launchctl_print_list`). Nothing recognisable answers ``None``, which is
     evidence of nothing and so never refuses an update.
     """
-    raw = _loaded_field(printed, "program").strip()
+    raw = macos_service.launchctl_print_field(printed, "program").strip()
     if not raw:
         return None
     if raw[:1] not in {"(", "{"}:
         return raw.strip("\"'")
-    items = _loaded_list(printed, "program")
+    items = macos_service.launchctl_print_list(printed, "program")
     return items[0] if items else None
-
-
-def _loaded_list(printed: str, key: str) -> list[str]:
-    """The elements of a list ``launchctl print`` rendered for ``key``.
-
-    launchd renders a job's list one element per line inside a delimited block,
-    and that layout is what preserves an element that contains a space — the
-    native host's own path does (``Ciaobot Server.app``), and so may the
-    interpreter it serves. Splitting those lines on whitespace would truncate the
-    host path at the first space, so a multi-line block is read line by line,
-    including any element on the line that opens it. The older single-line
-    shapes (``( -I -m ... )`` or ``{ -I -m ... }``) carry no spaces in their
-    tokens and are read as whitespace-separated tokens, as :func:`_loaded_tokens`
-    does. Quotes are stripped from every element, exactly as from a scalar
-    program, so the two agree when :func:`_loaded_server_command` folds them.
-    """
-    lines = [line.strip() for line in _loaded_field(printed, key).splitlines()]
-    if not lines:
-        return []
-    if len(lines) == 1:
-        elements = re.findall(r"[^\s,(){}]+", lines[0])
-    else:
-        # Only the block's own delimiters come off: the opening one on the first
-        # line and the closing one on the last. An element may itself end in a
-        # bracket (`/tools/env (copy)`), so no line is stripped of them wholesale.
-        lines[0] = lines[0][1:]
-        if lines[-1][-1:] in {")", "}"}:
-            lines[-1] = lines[-1][:-1]
-        elements = [line.strip().rstrip(",").strip() for line in lines]
-    return [stripped for element in elements if (stripped := element.strip("\"'"))]
-
-
-def _loaded_arguments(printed: str) -> list[str]:
-    """The arguments ``launchctl print`` rendered for a loaded job (see :func:`_loaded_list`)."""
-    return _loaded_list(printed, "arguments")
 
 
 def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...] | None:
@@ -580,7 +500,7 @@ def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...
     program = _loaded_program_argument(output)
     if program is None:
         return None
-    arguments = _loaded_arguments(output)
+    arguments = macos_service.launchctl_print_list(output, "arguments")
     if arguments and arguments[0] == program:
         return tuple(arguments)
     return (program, *arguments)
@@ -916,7 +836,7 @@ class MacUpdateHost:
         printed = _loaded_updater(self._launchctl, self._uid)
         if _LOADED_PID.search(printed) is None:
             return False
-        return "run-apply" in _loaded_tokens(printed, "arguments")
+        return "run-apply" in macos_service.launchctl_print_tokens(printed, "arguments")
 
     # ── the environment being swapped ───────────────────────────────
 
