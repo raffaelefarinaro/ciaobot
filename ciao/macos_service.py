@@ -166,7 +166,7 @@ def hosted_service_python(arguments: object) -> str | None:
     """The interpreter a hosted ``ProgramArguments`` serves, or ``None``.
 
     ``None`` for anything that is not the strict hosted shape
-    (``CiaobotServerHost serve --python <interpreter>``) as
+    (``Ciaobot Server serve --python <interpreter>``) as
     :func:`ciao.server_host.parse_service_command` reads it, including every
     malformed value the parser refuses. Syntax only: it never proves ownership.
     """
@@ -180,7 +180,7 @@ def hosted_service_python(arguments: object) -> str | None:
 def service_python_path(arguments: object) -> str:
     """The interpreter the service definition actually runs.
 
-    A **hosted** definition (``CiaobotServerHost serve --python <interpreter>``)
+    A **hosted** definition (``Ciaobot Server serve --python <interpreter>``)
     runs the native host, which is not a Python interpreter: reporting its
     executable as ``python_path`` would make ``update_engine``'s bundled-engine
     check and every consumer that hands this value to a process start the wrong

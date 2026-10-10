@@ -1349,6 +1349,14 @@ if [ -n "$host_entry" ]; then
     # deletes it by hand. Exit 1 is reserved for a release that did not verify
     # (a manifest/selection error or an archive that does not match its signed
     # digest), and stops the run.
+    # MIGRATION (#1249): a revision-1 host (executable `CiaobotServerHost`) is
+    # replaced by this one. Its presence before the install is what makes a
+    # successful install a migration, and a migration changes the bytes macOS
+    # granted Accessibility/Automation to, so the user is told once. Delete with
+    # the revision-1 path in ciao/server_host.py.
+    host_legacy_executable="$HOME/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+    host_migrating=0
+    [ -f "$host_legacy_executable" ] && host_migrating=1
     host_rc=0
     "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
         python -I -m ciao.server_host_install install \
@@ -1357,7 +1365,12 @@ if [ -n "$host_entry" ]; then
         --archive "$host" \
         --public-key "$RELEASE_PUBLIC_KEY" >/dev/null || host_rc=$?
     case "$host_rc" in
-        0) echo "Ciaobot Server host installed and recorded." ;;
+        0)
+            echo "Ciaobot Server host installed and recorded."
+            if [ "$host_migrating" -eq 1 ]; then
+                echo "warning: Ciaobot Server was replaced by a new build, so macOS will ask again for its Accessibility and Automation permissions; approve them in System Settings > Privacy & Security" >&2
+            fi
+            ;;
         3) echo "warning: the Ciaobot Server host was not installed (see above); the engine install continues" >&2 ;;
         *) fail "the signed server host could not be installed" ;;
     esac

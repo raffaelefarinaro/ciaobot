@@ -12,11 +12,11 @@ the direct shape is kept. Host upgrade and rollback are later children.
 
 ## What it does
 
-The host exposes exactly two fixed operations, revision 1:
+The host exposes exactly two fixed operations, revision 2:
 
 ```sh
-Ciaobot Server.app/Contents/MacOS/CiaobotServerHost serve --python /absolute/interpreter
-Ciaobot Server.app/Contents/MacOS/CiaobotServerHost request-accessibility
+Ciaobot Server.app/Contents/MacOS/Ciaobot Server serve --python /absolute/interpreter
+Ciaobot Server.app/Contents/MacOS/Ciaobot Server request-accessibility
 ```
 
 - **`serve`** launches exactly `[python, -I, -m, ciao.cli, supervise]` as a child
@@ -122,9 +122,9 @@ built by the later service child (#1008 child B), not here.
 |---|---|
 | Bundle ID | `local.ciaobot.server` |
 | Display name | `Ciaobot Server` |
-| Executable | `CiaobotServerHost` |
+| Executable | `Ciaobot Server` |
 | Host protocol | `CiaobotServerHostProtocol` = `1` |
-| Bundle version | host revision (`1`), never the engine release |
+| Bundle version | host revision (`2`), never the engine release |
 | Minimum system | `13.0` |
 | `LSUIElement` | `true` (accessory app: no window, no Dock) |
 
@@ -176,8 +176,31 @@ The host is ad-hoc signed, not signed with a paid Developer ID. Its permission
 grants are therefore tied to the exact signed bytes: any rebuild changes the
 CDHash and can require the user to reapprove the Accessibility/Automation prompt
 in System Settings. That is why ordinary engine updates must keep these bytes
-unchanged, and why a host upgrade is a separate, explicit, warned action (the
-installer work tracked in #1008). The builder and tests never edit TCC and never remove a grant.
+unchanged, and why a host upgrade is a separate, explicit, warned action. The
+builder and tests never edit TCC and never remove a grant.
+
+### Upgrade from revision 1 (#1249)
+
+Revision 1 shipped the executable as `CiaobotServerHost`, so the Login Items row
+read that name. Revision 2 names it `Ciaobot Server`. The one-liner installer
+(`scripts/install-engine.sh`) handles the change:
+
+1. `ciao.server_host_install` replaces an existing `~/Applications/Ciaobot Server.app`
+   only when `ciao.server_host.verify_superseded_host` proves it is the revision-1
+   host its own record describes. Anything else at that path is still refused.
+2. The revision-1 bundle is moved aside inside the staging directory, the revision-2
+   record is written, the new bundle is renamed in, and the aside copy is removed.
+   A failure restores the revision-1 bundle and its record byte for byte.
+3. `ciao setup` then re-renders the LaunchAgent for the new host, and its
+   `--load-launchd` unloads the job that still names the old executable before
+   `ciao service start`.
+4. The installer prints one warning on stderr that macOS will ask again for
+   Accessibility and Automation. Those grants are tied to the signed bytes, so the
+   user approves them once.
+
+The in-app engine updater never replaces the host, so it neither migrates nor
+warns. The revision-1 recognition exists only in `verify_superseded_host` and the
+installer's migration branch, marked for deletion in `ciao/server_host.py`.
 
 ## Tests
 

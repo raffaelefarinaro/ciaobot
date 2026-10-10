@@ -1150,7 +1150,7 @@ def _service_disagreement(
     * a **direct** command — ``python -m ciao.cli run|supervise`` or ``ciao
       run|supervise`` — runs the engine out of its own program, so the program
       is the install to compare;
-    * a **hosted** command — ``CiaobotServerHost serve --python <interpreter>``
+    * a **hosted** command — ``Ciaobot Server serve --python <interpreter>``
       — runs the native host, which is *not* part of the receipt's install and
       must never be mistaken for it. The engine install it runs is the
       interpreter it serves, so `parse_service_command` resolves that and the

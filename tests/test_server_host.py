@@ -242,7 +242,7 @@ def test_identity_is_distinct_from_pwa_retired_and_experiment() -> None:
     assert info["CFBundleIdentifier"] == "local.ciaobot.server"
     assert info["CFBundleDisplayName"] == "Ciaobot Server"
     assert info["CFBundleName"] == "Ciaobot Server"
-    assert info["CFBundleExecutable"] == "CiaobotServerHost"
+    assert info["CFBundleExecutable"] == "Ciaobot Server"
     assert info["LSUIElement"] is True
 
     from ciao import cli, macos_service
@@ -256,9 +256,9 @@ def test_identity_is_distinct_from_pwa_retired_and_experiment() -> None:
 def test_revision_is_independent_of_engine_version() -> None:
     info = BUILD.bundle_info()
     # The bundle version expresses the host revision, never the engine release.
-    assert BUILD.HOST_REVISION == 1
-    assert info["CFBundleVersion"] == "1"
-    assert info["CFBundleShortVersionString"] == "1"
+    assert BUILD.HOST_REVISION == 2
+    assert info["CFBundleVersion"] == "2"
+    assert info["CFBundleShortVersionString"] == "2"
     assert info[BUILD.HOST_PROTOCOL_KEY] == 1
     assert info["LSMinimumSystemVersion"] == "13.0"
 
@@ -294,7 +294,7 @@ def test_icon_is_bundled_from_tracked_file(tmp_path: Path) -> None:
     )
     assert shipped == [
         "Contents/Info.plist",
-        "Contents/MacOS/CiaobotServerHost",
+        "Contents/MacOS/Ciaobot Server",
         "Contents/Resources/CiaobotServer.icns",
     ]
     assert not any(name.endswith(".py") for name in shipped)
@@ -305,8 +305,8 @@ def test_icon_is_bundled_from_tracked_file(tmp_path: Path) -> None:
 
 def test_compile_commands_are_exact_and_both_arch() -> None:
     source = Path("/src/ServerHost.swift")
-    arm = Path("/stage/CiaobotServerHost.arm64")
-    intel = Path("/stage/CiaobotServerHost.x86_64")
+    arm = Path("/stage/Ciaobot Server.arm64")
+    intel = Path("/stage/Ciaobot Server.x86_64")
     commands = BUILD.compile_commands(source, arm, intel)
     assert commands == [
         ["xcrun", "swiftc", str(source), "-target", "arm64-apple-macosx13.0", "-O", "-o", str(arm)],
@@ -388,7 +388,7 @@ def test_injected_build_order_and_metadata(tmp_path: Path) -> None:
 
     metadata = result["metadata"]
     assert metadata["bundle_id"] == "local.ciaobot.server"
-    assert metadata["host_revision"] == 1
+    assert metadata["host_revision"] == 2
     assert metadata["host_protocol"] == 1
     assert metadata["minimum_system_version"] == "13.0"
     assert metadata["architectures"] == ["arm64", "x86_64"]
@@ -430,7 +430,7 @@ def test_archive_members_are_ordinary_and_path_safe(tmp_path: Path) -> None:
         assert member.uid == 0 and member.gid == 0
         assert member.uname == "" and member.gname == ""
     names = {m.name for m in members}
-    assert "Ciaobot Server.app/Contents/MacOS/CiaobotServerHost" in names
+    assert "Ciaobot Server.app/Contents/MacOS/Ciaobot Server" in names
     # No thin staging files and no absolute paths leak into the archive.
     assert not any(n.endswith((".arm64", ".x86_64")) for n in names)
     # Only the app ships: the staging and verify scratch dirs are gone.
@@ -451,7 +451,7 @@ def test_build_archive_preserves_strict_signature(tmp_path: Path) -> None:
     assert codesign.returncode == 0, codesign.stderr
 
     archs = subprocess.run(
-        ["lipo", "-archs", str(app / "Contents" / "MacOS" / "CiaobotServerHost")],
+        ["lipo", "-archs", str(app / "Contents" / "MacOS" / "Ciaobot Server")],
         capture_output=True,
         text=True,
     )
@@ -503,7 +503,7 @@ def host_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if not HAS_TOOLS:
         pytest.skip("the native host build requires macOS Command Line Tools")
     workdir = tmp_path_factory.mktemp("server-host-bin")
-    binary = workdir / "CiaobotServerHost"
+    binary = workdir / "Ciaobot Server"
     completed = subprocess.run(
         [
             "xcrun",

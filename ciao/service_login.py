@@ -577,7 +577,7 @@ def _macos_runtime(
     workspace and program this is.
 
     ``python_path`` is the interpreter the definition runs. A hosted
-    definition runs ``CiaobotServerHost serve --python <interpreter>``, so the
+    definition runs ``Ciaobot Server serve --python <interpreter>``, so the
     host executable must not be reported as the interpreter; the served python
     is resolved by the shared recognition in
     ``macos_service.service_python_path`` (through ``parse_service_command``),

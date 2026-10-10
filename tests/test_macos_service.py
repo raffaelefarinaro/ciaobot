@@ -95,7 +95,7 @@ def test_discover_runtime_prefers_workspace_dotenv(tmp_path: Path) -> None:
 def test_discover_runtime_reports_the_served_interpreter_for_a_hosted_definition(
     tmp_path: Path,
 ) -> None:
-    # A hosted definition runs CiaobotServerHost, which is not a Python
+    # A hosted definition runs Ciaobot Server, which is not a Python
     # interpreter: reporting argv[0] as python_path would hand every consumer
     # (and update_engine's bundled-engine check) the host binary. The served
     # interpreter is the answer.
@@ -109,7 +109,7 @@ def test_discover_runtime_reports_the_served_interpreter_for_a_hosted_definition
                 "WorkingDirectory": str(workspace),
                 "ProgramArguments": [
                     "/Users/me/Applications/Ciaobot Server.app/Contents/MacOS/"
-                    "CiaobotServerHost",
+                    "Ciaobot Server",
                     "serve",
                     "--python",
                     "/opt/ciao/venv/bin/python",

@@ -90,6 +90,7 @@ from ciao.server_host import (
     default_ownership_path,
     inspect_host_bundle,
     verify_owned_host,
+    verify_superseded_host,
 )
 
 __all__ = [
@@ -423,13 +424,17 @@ def _write_ownership_record(snapshot: HostOwnership, path: Path) -> None:
 def _existing_host(
     bundle: Path, record_path: Path, runner: Runner
 ) -> HostOwnership | None:
-    """The verified existing host, or None when there is nothing at the target.
+    """The verified existing host, or None when there is nothing to keep at the target.
 
     A target that is a symlink is never followed. Anything else already there is
     only this installer's to leave alone when an existing private record proves
     it is ours; a foreign, tampered or recordless bundle is a refusal rather than
     something to replace, because replacing it would overwrite a host the user
     may be running.
+
+    MIGRATION (#1249): a revision-1 ``CiaobotServerHost`` bundle that its own
+    record proves ours answers None, so the caller replaces it. Delete this
+    branch with :func:`ciao.server_host.verify_superseded_host`.
     """
     if os.path.islink(bundle):
         raise ServerHostInstallError(
@@ -439,12 +444,16 @@ def _existing_host(
         return None
     try:
         return verify_owned_host(bundle, ownership_path=record_path, runner=runner)
-    except ServerHostError as exc:
-        raise ServerHostInstallError(
-            f"there is already a host at {bundle} that this installer cannot "
-            f"prove it owns ({exc}); it is left untouched",
-            code=HOST_EXISTS,
-        ) from exc
+    except ServerHostError as current_error:
+        try:
+            verify_superseded_host(bundle, ownership_path=record_path, runner=runner)
+        except ServerHostError as exc:
+            raise ServerHostInstallError(
+                f"there is already a host at {bundle} that this installer cannot "
+                f"prove it owns ({current_error}); it is left untouched",
+                code=HOST_EXISTS,
+            ) from exc
+        return None
 
 
 def install_server_host(
@@ -464,7 +473,10 @@ def install_server_host(
     :func:`ciao.server_host.default_ownership_path`.
 
     An existing, verified host is returned untouched (a no-op); an existing
-    bundle this installer cannot prove it owns is refused. On a fresh install the
+    bundle this installer cannot prove it owns is refused. The one exception is
+    a revision-1 ``CiaobotServerHost`` bundle its own record proves ours (#1249):
+    it is replaced by the current revision, and restored with its record if the
+    replacement fails. On a fresh install the
     staged bundle is inspected before the record is written and before the
     rename, so a foreign or tampered archive never reaches ``~/Applications``.
     The record is written *before* the rename, from the staged snapshot with the
@@ -493,6 +505,9 @@ def install_server_host(
     existing = _existing_host(bundle, record_path, runner)
     if existing is not None:
         return existing
+    # Only a proven revision-1 host can leave the target occupied here; it is
+    # re-proven below, immediately before it is moved aside.
+    superseding = os.path.lexists(bundle)
 
     parent = bundle.parent
     try:
@@ -507,6 +522,9 @@ def install_server_host(
     renamed = False
     recorded = False
     keep_record = False
+    superseded_record: HostOwnership | None = None
+    moved_aside = False
+    aside = stage / "superseded"
     try:
         staged_app = extract_host_archive(path, stage)
         # Prove the bytes before they reach ~/Applications. This runs the plist
@@ -514,12 +532,26 @@ def install_server_host(
         # bundle is refused here, with the target still untouched.
         staged = inspect_host_bundle(staged_app, runner=runner)
         if os.path.lexists(bundle):
-            # Lost the race with another installer between the check above and
-            # the rename. Refuse rather than replace what appeared.
-            raise ServerHostInstallError(
-                f"a host bundle appeared at {bundle} while this install was staging",
-                code=HOST_EXISTS,
-            )
+            if not superseding:
+                # Lost the race with another installer between the check above and
+                # the rename. Refuse rather than replace what appeared.
+                raise ServerHostInstallError(
+                    f"a host bundle appeared at {bundle} while this install was staging",
+                    code=HOST_EXISTS,
+                )
+            # MIGRATION (#1249): the revision-1 host is replaced, so its record
+            # and bytes are proven again right before it is moved aside. Its
+            # record is kept in memory so a failed migration can put it back.
+            try:
+                superseded_record = verify_superseded_host(
+                    bundle, ownership_path=record_path, runner=runner
+                )
+            except ServerHostError as exc:
+                raise ServerHostInstallError(
+                    f"the host at {bundle} changed while this install was staging "
+                    f"and is no longer proven ours ({exc}); it is left untouched",
+                    code=HOST_EXISTS,
+                ) from exc
         # The record names the canonical target, not the staging directory, and
         # is written before the rename. A crash before the rename leaves a record
         # with no bundle (the next fresh install overwrites it); a crash after
@@ -533,6 +565,18 @@ def install_server_host(
         canonical = os.path.join(os.path.realpath(parent), APP_NAME)
         record_snapshot = dataclasses.replace(staged, bundle_path=canonical)
         _fsync_tree(staged_app)
+        if superseded_record is not None:
+            # Move the revision-1 bundle out of the way first: a crash after this
+            # leaves no bundle, and the next run installs fresh. It lives inside
+            # the staging directory, so the cleanup below removes it on success.
+            try:
+                os.rename(bundle, aside)
+            except OSError as exc:
+                raise ServerHostInstallError(
+                    f"the revision-1 host at {bundle} could not be moved aside: {exc}",
+                    code=INSTALL_FAILED,
+                ) from exc
+            moved_aside = True
         _write_ownership_record(record_snapshot, record_path)
         recorded = True
         try:
@@ -573,6 +617,15 @@ def install_server_host(
         # the winner's identical host) from an install failure this run caused.
         if renamed:
             shutil.rmtree(bundle, ignore_errors=True)
+        if moved_aside and not os.path.lexists(bundle):
+            # MIGRATION (#1249): put the revision-1 host back, with its record.
+            try:
+                os.rename(aside, bundle)
+                if superseded_record is not None and recorded and not keep_record:
+                    _write_ownership_record(superseded_record, record_path)
+                    recorded = False
+            except OSError:
+                pass
         if recorded and not keep_record:
             try:
                 record_path.unlink(missing_ok=True)

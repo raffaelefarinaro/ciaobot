@@ -118,7 +118,7 @@ class UpdateHost(Protocol):
         """The full argv the loaded service actually runs, or ``None``.
 
         The loaded job is the authority, and the whole argument vector and not
-        just ``argv[0]``: a native hosted service runs ``CiaobotServerHost serve
+        just ``argv[0]``: a native hosted service runs ``Ciaobot Server serve
         --python <interpreter>``, so the engine install the job is actually
         using is named by the interpreter it serves, not by the host
         executable. ``None`` is "not loaded, or nothing usable was reported",
@@ -536,7 +536,7 @@ def _loaded_server_command(launch: Launchctl, domain_uid: int) -> tuple[str, ...
     while the running service still executes the old one. ``launchctl print``
     reports the loaded job, which is the one that has to agree with the
     receipt. The whole argument vector and not just the program, because a
-    native hosted service runs ``CiaobotServerHost serve --python
+    native hosted service runs ``Ciaobot Server serve --python
     <interpreter>``: the engine install it is actually using is named by the
     interpreter it serves, not by the host executable.
 

@@ -34,8 +34,8 @@ from typing import Any, Callable
 APP_NAME = "Ciaobot Server.app"
 BUNDLE_ID = "local.ciaobot.server"
 DISPLAY_NAME = "Ciaobot Server"
-EXECUTABLE_NAME = "CiaobotServerHost"
-HOST_REVISION = 1
+EXECUTABLE_NAME = "Ciaobot Server"
+HOST_REVISION = 2
 MACOS_DEPLOYMENT_TARGET = "13.0"
 ARM_TARGET = f"arm64-apple-macosx{MACOS_DEPLOYMENT_TARGET}"
 INTEL_TARGET = f"x86_64-apple-macosx{MACOS_DEPLOYMENT_TARGET}"

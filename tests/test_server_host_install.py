@@ -471,6 +471,150 @@ def test_install_refuses_a_foreign_bundle_without_touching_it(
     assert runner.commands == []
 
 
+# ── MIGRATION (#1249): replacing a revision-1 host ──────────────────────────
+
+_LEGACY_EXE_REL = f"Contents/MacOS/{server_host.LEGACY_EXECUTABLE_NAME}"
+
+
+def _make_legacy_bundle(root: Path) -> Path:
+    """A revision-1 host: the ``CiaobotServerHost`` executable and revision 1."""
+    bundle = root / APP_NAME
+    (bundle / "Contents" / "MacOS").mkdir(parents=True)
+    (bundle / "Contents" / "Resources").mkdir(parents=True)
+    (bundle / "Contents" / "_CodeSignature").mkdir(parents=True)
+    (bundle / _LEGACY_EXE_REL).write_bytes(b"revision-one-host-binary")
+    (bundle / _ICON_REL).write_bytes(b"indigo-icns-bytes")
+    (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
+    info = BUILD.bundle_info()
+    info["CFBundleExecutable"] = server_host.LEGACY_EXECUTABLE_NAME
+    info["CFBundleVersion"] = "1"
+    info["CFBundleShortVersionString"] = "1"
+    with (bundle / _PLIST_REL).open("wb") as handle:
+        plistlib.dump(info, handle)
+    return bundle
+
+
+def _record_legacy_host(bundle: Path, record: Path) -> bytes:
+    """Write the record a revision-1 installer wrote for ``bundle``; return its bytes."""
+    snapshot = server_host._inspect_bundle(
+        bundle, _FakeRunner(), server_host._LEGACY_LAYOUT
+    )
+    server_host_install._write_ownership_record(snapshot, record)
+    return record.read_bytes()
+
+
+@requires_posix_uid
+def test_install_replaces_a_host_its_own_record_proves_is_revision_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    legacy = _make_legacy_bundle(target.parent)
+    record = tmp_path / "records" / "server-host.json"
+    _record_legacy_host(legacy, record)
+
+    snapshot = server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=_FakeRunner()
+    )
+
+    assert snapshot.host_revision == 2
+    assert (target / _EXE_REL).read_bytes() == b"universal-host-binary"
+    assert not (target / _LEGACY_EXE_REL).exists()
+    assert read_host_ownership(record) == snapshot
+    # Nothing of the replaced bundle is left beside the target.
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_a_failed_replacement_restores_the_revision_one_host_and_its_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    legacy = _make_legacy_bundle(target.parent)
+    record = tmp_path / "records" / "server-host.json"
+    record_before = _record_legacy_host(legacy, record)
+
+    def refuse_final_proof(*args: Any, **kwargs: Any) -> None:
+        # Every current-revision proof fails, so the install fails at its last
+        # step, after the old bundle has been moved aside and the record replaced.
+        raise server_host.ServerHostError("simulated failure", code="not_owned")
+
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse_final_proof)
+
+    with pytest.raises(server_host.ServerHostError):
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+
+    assert (target / _LEGACY_EXE_REL).read_bytes() == b"revision-one-host-binary"
+    assert not (target / _EXE_REL).exists()
+    assert record.read_bytes() == record_before
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_a_revision_one_host_that_cannot_be_moved_aside_is_left_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    legacy = _make_legacy_bundle(target.parent)
+    record = tmp_path / "records" / "server-host.json"
+    record_before = _record_legacy_host(legacy, record)
+    real_rename = os.rename
+
+    def refuse_the_move_aside(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(str(dst)).name == "superseded":
+            raise OSError(errno.EPERM, "operation not permitted")
+        real_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(server_host_install.os, "rename", refuse_the_move_aside)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    # INSTALL_FAILED is a warn-and-continue refusal, never a crash of the one-liner.
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert (legacy / _LEGACY_EXE_REL).read_bytes() == b"revision-one-host-binary"
+    assert record.read_bytes() == record_before
+
+
+@requires_posix_uid
+def test_a_revision_one_host_without_its_record_is_refused_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    legacy = _make_legacy_bundle(target.parent)
+    record = tmp_path / "records" / "server-host.json"
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert (legacy / _LEGACY_EXE_REL).read_bytes() == b"revision-one-host-binary"
+    assert not record.exists()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
 @requires_posix_uid
 def test_install_refuses_a_symlinked_target(

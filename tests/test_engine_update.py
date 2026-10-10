@@ -1016,14 +1016,14 @@ def _loaded_hosted_job(engine: _FakeEngine, served_python: str | Path) -> Any:
     """A launchctl reporting `com.ciao.server` loaded as the native host.
 
     The hosted command launchd would run once the installer selects the host:
-    `CiaobotServerHost serve --python <interpreter>`. The interpreter is the
+    `Ciaobot Server serve --python <interpreter>`. The interpreter is the
     engine install the job actually runs, and the host executable is not part
     of the receipt's install at all, so the loaded-job agreement has to resolve
     the interpreter rather than compare the host's own path.
     """
     host = (
         "/Users/operator/Applications/Ciaobot Server.app/Contents/MacOS/"
-        "CiaobotServerHost"
+        "Ciaobot Server"
     )
     arguments = [host, "serve", "--python", str(served_python)]
     rendered = "\n".join(f"\t\t{argument}" for argument in arguments)
@@ -2902,7 +2902,7 @@ def test_run_apply_still_refuses_an_entry_point_the_receipt_does_not_name(
 # ── the hosted loaded job: the native host serving the receipt's install ──
 #
 # Once the installer selects the native host, `com.ciao.server` runs
-# `CiaobotServerHost serve --python <interpreter>`. The host executable is not
+# `Ciaobot Server serve --python <interpreter>`. The host executable is not
 # part of the receipt's install, so the agreement has to resolve the interpreter
 # the host serves; the interpreter is what names the engine install the job runs.
 
@@ -2956,7 +2956,7 @@ def test_run_apply_refuses_a_hosted_job_serving_a_foreign_env(
     # Both the served interpreter and the host it runs under are named, so the
     # operator can tell which installed host is pointing where.
     assert str(elsewhere) in result.error
-    assert "CiaobotServerHost" in result.error
+    assert "Ciaobot Server" in result.error
     assert engine.changed_jobs() == []
     assert not engine.booted_out(SERVER_LABEL)
     assert engine.starts == 0
@@ -2974,7 +2974,7 @@ def test_a_hosted_command_with_a_non_python_interpreter_refuses(
     # the loaded host not running the receipt's install — never a silent pass.
     def launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
         if args[0] == "print" and args[-1].endswith(SERVER_LABEL):
-            host_path = "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+            host_path = "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"
             return subprocess.CompletedProcess(
                 args,
                 0,
@@ -3009,7 +3009,7 @@ def test_an_ordinary_engine_update_leaves_the_host_definition_and_bytes_untouche
     # the service definition (the hosted command) or the host bundle.
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     host_bundle = tmp_path / "Applications" / "Ciaobot Server.app"
-    executable = host_bundle / "Contents" / "MacOS" / "CiaobotServerHost"
+    executable = host_bundle / "Contents" / "MacOS" / "Ciaobot Server"
     executable.parent.mkdir(parents=True, exist_ok=True)
     executable.write_bytes(b"the installed host bytes")
     definition_plist = _write_server_plist(executable)
@@ -3037,7 +3037,7 @@ def test_a_failed_hosted_update_rolls_back_to_the_same_hosted_state(
     # engine env is put back; the hosted definition and host bytes are untouched.
     op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
     host_bundle = tmp_path / "Applications" / "Ciaobot Server.app"
-    executable = host_bundle / "Contents" / "MacOS" / "CiaobotServerHost"
+    executable = host_bundle / "Contents" / "MacOS" / "Ciaobot Server"
     executable.parent.mkdir(parents=True, exist_ok=True)
     executable.write_bytes(b"the installed host bytes")
     definition_plist = _write_server_plist(executable)
@@ -3164,8 +3164,8 @@ def test_service_disagreement_reads_a_direct_program_unchanged() -> None:
         # `Ciaobot Server.app`, and a token split would truncate it at the bundle
         # name before any agreement could see the interpreter it serves.
         (
-            'com.ciao.server = {\n\tprogram = "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"\n}',
-            "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+            'com.ciao.server = {\n\tprogram = "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"\n}',
+            "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server",
         ),
         ("com.ciao.server = {\n\tstate = running\n\tpid = 7\n}", None),
         ("", None),
@@ -3186,10 +3186,10 @@ def test_loaded_program_argument_reads_launchctl_output(
         # spaced host path and a spaced served-interpreter path.
         (
             "com.ciao.server = {\n\targuments = {\n"
-            "\t\t/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost\n"
+            "\t\t/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server\n"
             "\t\tserve\n\t\t--python\n\t\t/tools/my env/bin/python\n\t}\n}",
             [
-                "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+                "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server",
                 "serve",
                 "--python",
                 "/tools/my env/bin/python",

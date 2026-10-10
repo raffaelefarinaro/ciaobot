@@ -437,7 +437,7 @@ def test_mac_update_host_server_command_reads_the_loaded_hosted_job(
     # the `arguments` block names the interpreter it serves. `server_command`
     # folds the program in front of the block so a caller can parse the hosted
     # command.
-    host_path = "/Users/operator/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+    host_path = "/Users/operator/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"
     printed = (
         f"{SERVER} = {{\n"
         "\tstate = running\n"
@@ -485,7 +485,7 @@ def test_mac_update_host_server_command_uses_the_disk_plist_when_not_loaded(
             {
                 "Label": SERVER,
                 "ProgramArguments": [
-                    "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+                    "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server",
                     "serve",
                     "--python",
                     "/Applications/engine/bin/python",
@@ -497,7 +497,7 @@ def test_mac_update_host_server_command_uses_the_disk_plist_when_not_loaded(
     host = MacUpdateHost(launchctl=launchctl, uid=501)
 
     assert host.server_command() == (
-        "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+        "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server",
         "serve",
         "--python",
         "/Applications/engine/bin/python",
@@ -545,7 +545,7 @@ def test_mac_update_host_server_command_folds_the_program_only_once() -> None:
 def test_mac_update_host_server_command_folds_a_quoted_program_only_once() -> None:
     # A spaced path launchd quotes is quoted in both places; the fold compares
     # them unquoted, so the hosted argv parses instead of carrying the host twice.
-    host_path = "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+    host_path = "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"
     printed = (
         f"{SERVER} = {{\n"
         f'\tprogram = "{host_path}"\n'

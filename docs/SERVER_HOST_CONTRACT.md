@@ -21,7 +21,7 @@ sound?", and no consumer should be able to answer it for itself, differently.
 | Ownership | `verify_owned_host` | whether an existing private record matches the inspected bundle | this machine installed these bytes |
 
 **Syntax is not identity.** `parse_service_command` accepts a hosted command
-whose executable is named `CiaobotServerHost` even when no such file exists. The
+whose executable is named `Ciaobot Server` even when no such file exists. The
 host parser is pure and cross-platform, so it runs in the Windows job; its
 argument paths are parsed with `PurePosixPath` so macOS argv fixtures parse
 identically off macOS, and it deliberately refuses a backslash because the same
@@ -51,7 +51,7 @@ from ciao.server_host import (
 
 # Syntax only:
 parse_service_command(
-    ["/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+    ["/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server",
      "serve", "--python", "/usr/bin/python3"]
 )
 
@@ -63,7 +63,7 @@ host_service_argv(PurePosixPath(verified.bundle_path), Path("/usr/bin/python3"))
 
 The accepted shapes are exactly:
 
-- **hosted** — `[<abs>/CiaobotServerHost, serve, --python, <abs python|python3|python3.N>]`
+- **hosted** — `[<abs>/Ciaobot Server, serve, --python, <abs python|python3|python3.N>]`
   (host executable and interpreter basenames checked, both paths absolute);
 - **direct** — `[<abs python|python3|python3.N>, [-I], -m, ciao.cli, run|supervise]`
   or `[<abs ciao>, run|supervise]`.
@@ -98,7 +98,7 @@ executable_sha256, per_arch_cdhashes{arm64,x86_64}, bundle_files{relpath: sha256
 It holds **no** engine version, workspace, node role or credential. `bundle_files`
 maps each sealed file's bundle-relative POSIX name to its SHA-256, and names
 exactly the four files the builder seals: `Contents/Info.plist`,
-`Contents/MacOS/CiaobotServerHost`, `Contents/Resources/CiaobotServer.icns` and
+`Contents/MacOS/Ciaobot Server`, `Contents/Resources/CiaobotServer.icns` and
 `Contents/_CodeSignature/CodeResources` (`REQUIRED_BUNDLE_FILES`). A new
 resource is a new host revision, not a wider mapping.
 
@@ -164,8 +164,10 @@ The service's disk-sidecar facts a consumer needs are constants here, so B2 does
 not re-spell them:
 
 - bundle `Ciaobot Server.app`, id `local.ciaobot.server`, executable
-  `CiaobotServerHost`, icon `CiaobotServer.icns`;
-- `HOST_REVISION` / `HOST_PROTOCOL` (`CiaobotServerHostProtocol`) = `1`, tied to
+  `Ciaobot Server`, icon `CiaobotServer.icns`;
+- `HOST_REVISION` = `2` (revision 1 shipped the executable as `CiaobotServerHost`;
+  `LEGACY_EXECUTABLE_NAME` / `LEGACY_HOST_REVISION` name that layout for the one
+  migration, see below) and `HOST_PROTOCOL` (`CiaobotServerHostProtocol`) = `1`, tied to
   the host, never the engine release;
 - `MINIMUM_SYSTEM_VERSION` `13.0`;
 - `STOP_GRACE_SECONDS` 35 and `EXIT_TIMEOUT_SECONDS` 45. The launchd job's
@@ -192,6 +194,17 @@ running launchd job is executing: a plist edited on disk is not the loaded job,
 and a validated bundle is not a live engine. The loaded launchd command remains a
 requirement of the updater (later child C), which must read the live job rather
 than trust the file.
+
+## Migration: revision 1 to revision 2 (#1249)
+
+`verify_superseded_host` is the only reader of the revision-1 layout
+(`LEGACY_EXECUTABLE_NAME`, `LEGACY_HOST_REVISION`). It applies the same exact
+record-and-bundle match as `verify_owned_host`, and only the installer calls it,
+to replace a revision-1 bundle before it installs revision 2. `parse_service_command`,
+`verify_owned_host`, `inspect_host_bundle` and `read_host_ownership` accept
+revision 2 only, so a revision-1 command or bundle is refused everywhere else.
+The branch and the constants are deleted once no supported install can still hold
+a revision-1 bundle.
 
 ## Not in B1
 
