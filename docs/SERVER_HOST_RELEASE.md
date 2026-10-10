@@ -127,10 +127,11 @@ host only when its own record proves it ours, and prints a warning when it does.
 - It does not make the engine updater overwrite an installed host: an installed
   compatible host is never auto-replaced by an engine update, because the host
   is authenticated but opt-in and its revision is independent of the engine.
-- A host upgrade is a separate, explicit, warned action reviewed on its own; it
-  is not implied by an engine update. The one-liner installer performs the
-  revision-1 to revision-2 replacement (see `SERVER_HOST.md`); an engine update
-  never does.
+- A host upgrade is an explicit, warned action. The one-liner installer and an
+  in-app update that finds a revision-1 host perform the revision-1 to
+  revision-2 replacement (see `SERVER_HOST.md`). An in-app update replaces the
+  host only when it is revision 1 and its own record proves it; an engine-only
+  update never does.
 - It documents no release/admin procedure to run: cutting a release, signing it
   and publishing it remain the maintainer's, and are not performed by this
   change.

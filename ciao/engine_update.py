@@ -179,6 +179,22 @@ class Operation:
     env_python: str = ""
     env_freeze: str = ""
     previous_receipt: str = ""
+    # MIGRATION (#1249): a revision-1 Ciaobot Server host is replaced by the
+    # release's revision-2 host during the apply. ``host_archive`` is the staged
+    # archive (empty when no host is pending), ``host_status`` is ``migrated`` or
+    # ``failed`` once the apply has tried, and ``host_error`` says why it failed.
+    host_archive: str = ""
+    host_status: str = ""
+    host_error: str = ""
+
+
+#: What a user is told when a revision-1 host is replaced. macOS keys the
+#: Accessibility and Automation grants to the signed bytes, which change here.
+HOST_MIGRATION_NOTICE = (
+    "Ciaobot Server was replaced by a new build, so macOS will ask again for its "
+    "Accessibility and Automation permissions; approve them in System Settings > "
+    "Privacy & Security"
+)
 
 
 def _now() -> str:
@@ -535,6 +551,14 @@ def _stage_locked(
 
         advance("staging")
         platform = host or default_update_host()
+        _stage_server_host(
+            op,
+            manifest,
+            stage_dir=stage_dir,
+            release_url=release_url,
+            fetch=fetch,
+            host=platform,
+        )
         uv_bin = uv or find_uv(_receipt_uv(), host=platform)
         py = python_version or f"{sys.version_info.major}.{sys.version_info.minor}"
         # A real tool env, in a tool dir of this update's own, because the apply
@@ -611,6 +635,87 @@ def _stage_locked(
 
     advance("staged")
     return op
+
+
+def _stage_server_host(
+    op: Operation,
+    manifest: dict[str, Any],
+    *,
+    stage_dir: Path,
+    release_url: str,
+    fetch: Fetch,
+    host: UpdateHost,
+) -> None:
+    """MIGRATION (#1249): stage the release's host when this Mac has a revision-1 host.
+
+    Best effort, and a failure never fails the engine staging: the host is
+    optional, and the revision-1 host keeps running until a later update
+    succeeds in replacing it. The archive is checked against the signed manifest
+    the same way the wheel is, and the apply checks it again.
+    """
+    if not host.server_host_migration_needed():
+        return
+    try:
+        if not any(
+            artifact.get("kind") == release_manifest.SERVER_HOST_KIND
+            for artifact in manifest["artifacts"]
+        ):
+            # A wheel-only release has no host to move to.
+            return
+        entry = release_manifest.select_server_host_artifact(manifest)
+        filename = str(entry["filename"])
+        archive = stage_dir / filename
+        fetch(
+            f"{release_url}/{filename}",
+            archive,
+            max_bytes=int(entry["size"]) + 1_048_576,
+        )
+        digest, size = _sha256(archive)
+        if digest != entry["sha256"] or size != entry["size"]:
+            raise UpdateError("downloaded server host does not match the signed manifest")
+        op.host_archive = str(archive)
+    except Exception as exc:
+        op.host_status = "failed"
+        op.host_error = f"the Ciaobot Server host was not staged: {_reason(exc)}"
+        logger.warning("%s", op.host_error)
+
+
+def _migrate_server_host(op: Operation, host: UpdateHost) -> None:
+    """MIGRATION (#1249): move a revision-1 host to revision 2 during the apply.
+
+    Runs after the engine env is swapped and before the service starts, so the
+    start loads the agent already naming the new host. It never raises and never
+    rolls the engine back: a failure leaves the old host and its agent untouched
+    (the installer restores the old bundle and record) and is recorded on the
+    operation. The manifest is verified again, and so is the archive digest.
+    """
+    if not op.host_archive or not host.server_host_migration_needed():
+        return
+    try:
+        stage = Path(op.stage_dir)
+        manifest = release_manifest.verify_manifest(
+            (stage / MANIFEST_NAME).read_bytes(),
+            (stage / SIGNATURE_NAME).read_text(encoding="utf-8"),
+            release_manifest.RELEASE_PUBLIC_KEY,
+        )
+        entry = release_manifest.select_server_host_artifact(manifest)
+        archive = Path(op.host_archive)
+        if archive.name != entry["filename"]:
+            raise UpdateError("the staged server host is not the one the manifest selects")
+        if _sha256(archive)[0] != entry["sha256"]:
+            raise UpdateError(
+                "the staged server host no longer matches the signed manifest; "
+                "run: ciao update stage"
+            )
+        host.migrate_server_host(archive, entry)
+    except Exception as exc:
+        op.host_status = "failed"
+        op.host_error = (
+            f"the Ciaobot Server host was not moved to the new build: {_reason(exc)}"
+        )
+        logger.warning("%s", op.host_error)
+        return
+    op.host_status = "migrated"
 
 
 def _reason(exc: BaseException) -> str:
@@ -1164,7 +1269,10 @@ def _service_disagreement(
     if command is None:
         return ""
     try:
-        parsed = parse_service_command(command)
+        # accept_legacy_host (MIGRATION, #1249): a revision-1 install updating
+        # in-app still runs `CiaobotServerHost serve`, and that is the install
+        # this check must read, not refuse. The host migration rewrites it.
+        parsed = parse_service_command(command, accept_legacy_host=True)
     except ServerHostError:
         # Not a shape the parser knows. That is the direct case below with the
         # program at argv[0]; a malformed *hosted* command still falls through
@@ -1423,6 +1531,9 @@ def run_apply(
                     f"installed env reports version {reported!r}, not {op.to_version}"
                 )
 
+            # MIGRATION (#1249): the host moves before the start, so the start
+            # loads an agent that names the new host. Never fails the update.
+            _migrate_server_host(op, platform)
             advance("starting")
             install_receipt.write_receipt(
                 replace(
@@ -2028,6 +2139,10 @@ def _format(op: Operation, as_json: bool) -> str:
     line = f"{op.phase} {op.to_version} in {op.stage_dir}"
     if op.error:
         line = f"{line}: {op.error}"
+    if op.host_status == "migrated":
+        line = f"{line}\nwarning: {HOST_MIGRATION_NOTICE}"
+    elif op.host_status == "failed":
+        line = f"{line}\nnote: {op.host_error}"
     return line
 
 

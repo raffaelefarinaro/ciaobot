@@ -199,10 +199,13 @@ than trust the file.
 
 `verify_superseded_host` is the only reader of the revision-1 layout
 (`LEGACY_EXECUTABLE_NAME`, `LEGACY_HOST_REVISION`). It applies the same exact
-record-and-bundle match as `verify_owned_host`, and only the installer calls it,
-to replace a revision-1 bundle before it installs revision 2. `parse_service_command`,
+record-and-bundle match as `verify_owned_host`. Two callers use it, the installer
+and the in-app updater's `MacUpdateHost`, and each replaces a revision-1 bundle
+with revision 2. `parse_service_command` accepts the revision-1 command only
+with `accept_legacy_host=True`, which the two runtime readers of a LaunchAgent
+(`macos_service.hosted_service_python` and the update's pre-swap check) pass.
 `verify_owned_host`, `inspect_host_bundle` and `read_host_ownership` accept
-revision 2 only, so a revision-1 command or bundle is refused everywhere else.
+revision 2 only, so a revision-1 bundle is refused everywhere else.
 The branch and the constants are deleted once no supported install can still hold
 a revision-1 bundle.
 

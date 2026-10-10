@@ -171,7 +171,10 @@ def hosted_service_python(arguments: object) -> str | None:
     malformed value the parser refuses. Syntax only: it never proves ownership.
     """
     try:
-        parsed = parse_service_command(arguments)
+        # MIGRATION (#1249): a revision-1 LaunchAgent still names the old
+        # executable until the in-app or one-liner host migration rewrites it.
+        # Delete the accept_legacy_host flag with the revision-1 layout.
+        parsed = parse_service_command(arguments, accept_legacy_host=True)
     except ServerHostError:
         return None
     return parsed.python if parsed.mode == "hosted" else None

@@ -198,9 +198,17 @@ read that name. Revision 2 names it `Ciaobot Server`. The one-liner installer
    Accessibility and Automation. Those grants are tied to the signed bytes, so the
    user approves them once.
 
-The in-app engine updater never replaces the host, so it neither migrates nor
-warns. The revision-1 recognition exists only in `verify_superseded_host` and the
-installer's migration branch, marked for deletion in `ciao/server_host.py`.
+An in-app update (`ciao update`) does the same move. Staging downloads the
+release's host archive only when a revision-1 host is installed, and the apply
+moves the host after the engine swap and before the service starts. The
+LaunchAgent's `ProgramArguments` is rewritten to name the new host, and every
+other key is kept. If the host move fails, the engine update still succeeds on
+the old host, and `ciao update status` says why in a `note:` line. A moved host
+prints the same `warning:` line as the installer. The revision-1 recognition
+exists only in `verify_superseded_host`, the installer's migration branch, the
+two migration callers (`MacUpdateHost.server_host_migration_needed` and
+`migrate_server_host`) and the `accept_legacy_host` flag of
+`parse_service_command`, all marked for deletion in the code.
 
 ## Tests
 

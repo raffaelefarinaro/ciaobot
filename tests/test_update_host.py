@@ -1177,3 +1177,59 @@ def test_fake_host_run_apply_refuses_a_wheel_that_no_longer_matches_its_digest(
     assert "no longer matches the digest" in result.error
     assert "stop_engine" not in [call[0] for call in host.calls]
     assert engine.up is True
+
+
+# ── MIGRATION (#1249): when an in-app update replaces the server host ───────
+
+
+def _hosted_agent(host: str) -> None:
+    from ciao import macos_service
+
+    path = macos_service.default_launch_agents_dir() / "com.ciao.server.plist"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "Label": "com.ciao.server",
+                "ProgramArguments": [host, "serve", "--python", "/env/bin/python"],
+            },
+            handle,
+        )
+
+
+def _no_host(*_args: Any, **_kwargs: Any) -> Any:
+    raise update_host.ServerHostError("no host", code="missing_record")
+
+
+def test_migration_is_needed_only_for_a_revision_one_host_under_a_hosted_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = update_host.MacUpdateHost(launchctl=lambda args: subprocess.CompletedProcess(args, 1, "", ""), uid=501)
+    legacy = "/Users/x/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+
+    # A current host that verifies: nothing to migrate.
+    monkeypatch.setattr(update_host, "verify_owned_host", lambda *a, **k: object())
+    _hosted_agent("/Users/x/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server")
+    assert host.server_host_migration_needed() is False
+
+    # No host at all: the update does not invent one.
+    monkeypatch.setattr(update_host, "verify_owned_host", _no_host)
+    monkeypatch.setattr(update_host, "verify_superseded_host", _no_host)
+    assert host.server_host_migration_needed() is False
+
+    # A revision-1 host proven by its record, under a hosted agent: migrate.
+    monkeypatch.setattr(update_host, "verify_superseded_host", lambda *a, **k: object())
+    _hosted_agent(legacy)
+    assert host.server_host_migration_needed() is True
+
+    # The same host under a direct agent runs no host: nothing to repoint.
+    from ciao import macos_service
+
+    with (macos_service.default_launch_agents_dir() / "com.ciao.server.plist").open("wb") as handle:
+        plistlib.dump({"Label": "com.ciao.server", "ProgramArguments": ["/env/bin/python", "-m", "ciao.cli", "run"]}, handle)
+    assert host.server_host_migration_needed() is False
+
+    # A record that does not prove the host is refused as a migration too.
+    _hosted_agent(legacy)
+    monkeypatch.setattr(update_host, "verify_superseded_host", _no_host)
+    assert host.server_host_migration_needed() is False

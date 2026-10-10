@@ -99,10 +99,11 @@ MINIMUM_SYSTEM_VERSION = "13.0"
 # MIGRATION (#1249), delete when no install can still hold it. Host revision 1
 # shipped the executable as ``CiaobotServerHost``; revision 2 renames it so the
 # macOS Login Items row reads "Ciaobot Server". The only reader of these values
-# is :func:`verify_superseded_host`, which the installer calls to prove an
-# existing revision-1 bundle is ours before replacing it. Nothing else accepts
-# the old name: a revision-1 bundle is refused everywhere else. Delete these two
-# constants, :func:`verify_superseded_host` and its installer caller once no
+# is :func:`verify_superseded_host`, which the installer and the in-app update
+# call to prove an existing revision-1 bundle is ours before replacing it.
+# Nothing else accepts the old name (``accept_legacy_host`` is the one opt-in,
+# and only the two LaunchAgent readers pass it). Delete these two constants,
+# :func:`verify_superseded_host` and its callers, and the flag, once no
 # supported install can still hold a revision-1 bundle, i.e. after a release
 # that ships revision 2 has been out for a full release cycle.
 LEGACY_EXECUTABLE_NAME = "CiaobotServerHost"
@@ -328,7 +329,9 @@ def _parse_direct(program: str, argv: tuple[str, ...]) -> ServiceCommand:
     )
 
 
-def parse_service_command(arguments: object) -> ServiceCommand:
+def parse_service_command(
+    arguments: object, *, accept_legacy_host: bool = False
+) -> ServiceCommand:
     """Parse a service invocation strictly into a :class:`ServiceCommand`.
 
     Accepts exactly the two shapes the service actually uses:
@@ -361,7 +364,15 @@ def parse_service_command(arguments: object) -> ServiceCommand:
         host = _absolute_posix(
             argv[0], what="the host executable", code=INVALID_COMMAND
         )
-        if PurePosixPath(host).name != EXECUTABLE_NAME:
+        # MIGRATION (#1249): only the two runtime consumers that must read a
+        # revision-1 LaunchAgent pass accept_legacy_host; every other caller gets
+        # the strict current name.
+        allowed = (
+            (EXECUTABLE_NAME, LEGACY_EXECUTABLE_NAME)
+            if accept_legacy_host
+            else (EXECUTABLE_NAME,)
+        )
+        if PurePosixPath(host).name not in allowed:
             raise ServerHostError(
                 f"the hosted executable must be {EXECUTABLE_NAME!r}, not "
                 f"{PurePosixPath(host).name!r}",
