@@ -82,6 +82,7 @@ from ciao.task_updates import (
     unseen_updates,
 )
 from ciao.web.chat_service import MEMORY_PASS_RESOLUTION_MAX
+from ciao.web.transcript_service import _assemble_chat_messages
 from ciao.web.routes_webhooks import webhook_store
 from ciao.webhooks import (
     WebhookStore,
@@ -213,6 +214,46 @@ def _ok(data: Any = None, **extra: Any) -> dict[str, Any]:
         payload["data"] = data
     payload.update(extra)
     return payload
+
+
+#: Ceiling for any paged listing (`chats_list`, `memory-proposals`). The CLI
+#: default is a separate, smaller constant in `ciao/agent_cli.py`.
+PAGE_MAX_LIMIT = 200
+#: Characters of a chat's last reply kept in a compact `chats_list` row.
+CHAT_LIST_RESPONSE_CHARS = 200
+
+
+def validate_page(limit: int, offset: int, *, maximum: int) -> None:
+    """Refuse a page window the listing cannot serve, before any work is done."""
+    if not 1 <= limit <= maximum:
+        raise ValueError(f"limit must be between 1 and {maximum}.")
+    if offset < 0:
+        raise ValueError("offset must be zero or more.")
+
+
+def page_of(key: str, rows: list[Any], *, total: int, offset: int, limit: int) -> dict[str, Any]:
+    """The paged envelope: ``rows`` under ``key`` plus the totals an agent needs.
+
+    ``truncated`` and ``next_offset`` appear only when rows remain past this
+    page, so a complete listing carries nothing extra.
+    """
+    page: dict[str, Any] = {key: rows, "total": total, "offset": offset, "limit": limit}
+    end = offset + len(rows)
+    if end < total:
+        page["truncated"] = True
+        page["next_offset"] = end
+    return page
+
+
+def _bounded_message(row: dict[str, Any], max_chars: int | None) -> dict[str, Any]:
+    """A transcript row with its ``content`` capped, marked when it was cut."""
+    item = dict(row)
+    content = item.get("content")
+    if max_chars is not None and isinstance(content, str) and len(content) > max_chars:
+        item["content"] = content[:max_chars]
+        item["truncated"] = True
+        item["content_chars"] = len(content)
+    return item
 
 
 # ---- Task operations (#1021, child B3 of #973) ------------------------
@@ -2296,7 +2337,21 @@ class CiaoControlPlane:
             )
         return _ok({"deleted": self.pcm.delete_project(pid), "project_id": pid})
 
-    def chats_list(self, principal: AgentPrincipal, project_id: str = "") -> dict[str, Any]:
+    def chats_list(
+        self,
+        principal: AgentPrincipal,
+        project_id: str = "",
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+        compact: bool = False,
+    ) -> dict[str, Any]:
+        """Every chat, or one page of them, newest activity first.
+
+        ``limit=None`` is the unbounded legacy shape (a bare list of full rows)
+        that the PWA and the MCP surface rely on. With a limit the data is a
+        page envelope; ``compact`` trims each row to the listing fields.
+        """
         if project_id:
             # Accept a project name as well as an id (same resolver
             # `chat_create` uses), scoped to the principal's own workspace.
@@ -2304,11 +2359,64 @@ class CiaoControlPlane:
             chats = self.pcm.list_chats(project.project_id)
         else:
             chats = self._workspace_chats(principal)
-        return _ok([self._chat_review_dict(chat) for chat in chats])
+        if limit is None:
+            return _ok([self._chat_review_dict(chat) for chat in chats])
+        validate_page(limit, offset, maximum=PAGE_MAX_LIMIT)
+        ordered = sorted(
+            chats, key=lambda chat: chat.last_activity_at or chat.created_at or "", reverse=True
+        )
+        page = ordered[offset : offset + limit]
+        rows = [
+            self._chat_list_row(chat) if compact else self._chat_review_dict(chat)
+            for chat in page
+        ]
+        return _ok(page_of("chats", rows, total=len(ordered), offset=offset, limit=limit))
 
-    def chat_get(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
+    def _chat_list_row(self, chat: Any) -> dict[str, Any]:
+        """The compact listing row: identity, state and the head of the last reply."""
+        project = self.pcm.get_project(chat.project_id)
+        response = chat.last_response or ""
+        row: dict[str, Any] = {
+            "chat_id": chat.chat_id,
+            "title": chat.title,
+            "project": project.name if project is not None else chat.project_id,
+            "provider": chat.provider,
+            "archived": chat.archived,
+            "last_activity_at": chat.last_activity_at,
+            "last_response": response[:CHAT_LIST_RESPONSE_CHARS],
+        }
+        if len(response) > CHAT_LIST_RESPONSE_CHARS:
+            row["last_response_truncated"] = True
+        return row
+
+    async def chat_get(
+        self,
+        principal: AgentPrincipal,
+        chat_id: str,
+        *,
+        messages: int | None = None,
+        message_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """One chat's metadata, optionally with its most recent messages.
+
+        ``messages=None`` is the legacy metadata-only shape. ``messages=N``
+        adds the last N messages (``0`` means all of them), and
+        ``message_chars`` caps each message's ``content``; ``None`` leaves
+        content whole.
+        """
         chat = self._chat(principal, chat_id)
-        return _ok(self._chat_review_dict(chat))
+        result = self._chat_review_dict(chat)
+        if messages is None:
+            return _ok(result)
+        if messages < 0:
+            raise ValueError("messages must be zero or more (zero means all).")
+        rows = await _assemble_chat_messages(self.pcm, self.config, chat)
+        tail = rows[-messages:] if messages else rows
+        result["messages"] = [_bounded_message(row, message_chars) for row in tail]
+        result["messages_total"] = len(rows)
+        if len(tail) < len(rows):
+            result["messages_truncated"] = True
+        return _ok(result)
 
     def _chat_review_dict(self, chat: Any) -> dict[str, Any]:
         """Add reliable state needed by unattended chat cleanup routines."""

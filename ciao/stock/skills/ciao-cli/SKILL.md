@@ -84,7 +84,7 @@ Two older top-level commands, outside the `<noun> <verb>` table and its JSON env
 
 | Command | Purpose | Guard |
 |---|---|---|
-| `memory-proposals [--json]` | List the pending proposals in this workspace's review queue. | Read-only. |
+| `memory-proposals [--limit N] [--offset N] [--json]` | List the pending proposals in this workspace's review queue, one page at a time (default 20, max 200). | Read-only. When the page has `next_offset` (or the text output says `more with --offset N`), pass `--offset` with it for the next page. `--json` gives `proposals`, `total`, `offset`, `limit`, and `truncated`/`next_offset` only when more remain. |
 | `memory-proposal-dismiss --text-file FILE [--promoted]` | Remove one queued proposal, matched by a unique substring of its text. | Write the text to a file; never pass it as an argument, since proposal text is arbitrary prose. File the fact first, then dismiss with `--promoted`; a plain dismissal records a decision against the fact. Never delete the bullet from the queue file by hand. |
 
 ### Skill-proposal review queue
@@ -106,8 +106,8 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 
 | Command | Purpose | Guard |
 |---|---|---|
-| `chat list [--project ID]` | List active and archived chats in the workspace or one project. | — |
-| `chat get [--chat ID]` | Get one chat. | Omit `--chat` for the calling chat. |
+| `chat list [--project ID] [--limit N] [--offset N] [--full]` | List active and archived chats in the workspace or one project, newest activity first. Default is 20 compact rows (`chat_id`, `title`, `project`, `provider`, `archived`, `last_activity_at`, and `last_response` cut to 200 characters); `--limit` is 1-200. | The reply carries `total`; when more rows remain it also carries `truncated: true` and `next_offset`, so pass `--offset` with that value for the next page. `--full` returns full rows (still paginated). |
+| `chat get [--chat ID] [--full]` | Get one chat's metadata plus its last 10 messages, each capped at 2,000 characters (`truncated: true` and `content_chars` mark a cut message; `messages_total` counts all of them). | Omit `--chat` for the calling chat. `--full` returns every message untruncated. |
 | `chat create [--project ID\|NAME] [--title T] [--provider P] [--model M] [--mode MODE] [--prompt TEXT]` | Create a chat, optionally sending its first prompt in the same call. | Omit `--project` to reuse the calling chat's own project — no need to list projects first for a sub-topic. |
 | `chat update [--chat ID] [--title] [--provider] [--model] [--mode] [--thinking-level] [--project]` | Update chat metadata and same-backend model settings. | Omit `--chat` for the calling chat. |
 | `chat send --chat ID --prompt TEXT` | Start or queue a user turn in another chat. | `--chat` is required here — there is no "send to self" case. |

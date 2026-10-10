@@ -59,6 +59,14 @@ _SCHEDULE_FLAGS: tuple[tuple[str, str, Any], ...] = (
     ("--archive-policy", "archive_policy", str),
 )
 
+#: Rows `chat list` returns per page unless `--limit` says otherwise. The
+#: control plane's ceiling is `PAGE_MAX_LIMIT`.
+CHATS_LIST_DEFAULT_LIMIT = 20
+#: Messages `chat get` returns by default (the most recent ones).
+CHAT_GET_RECENT_MESSAGES = 10
+#: Characters of one message's content `chat get` returns by default.
+CHAT_MESSAGE_MAX_CHARS = 2000
+
 _CHAT_UPDATE_FLAGS: tuple[tuple[str, str], ...] = (
     ("--title", "title"),
     ("--provider", "provider"),
@@ -167,9 +175,18 @@ def build_parser() -> argparse.ArgumentParser:
     chat = _verbs(nouns.add_parser("chat", help="Chats in the active workspace."))
     lst = chat.add_parser("list")
     lst.add_argument("--project", default="")
+    lst.add_argument("--limit", type=int, default=CHATS_LIST_DEFAULT_LIMIT, help="Rows per page, 1-200.")
+    lst.add_argument("--offset", type=int, default=0, help="Rows to skip (newest first); use next_offset to page on.")
+    lst.add_argument("--full", action="store_true", help="Full rows instead of the compact listing fields.")
     for verb in ("get", "archive", "delete", "retry", "update", "handover"):
         sub = chat.add_parser(verb)
         sub.add_argument("--chat", default="", help="Defaults to the calling chat.")
+        if verb == "get":
+            sub.add_argument(
+                "--full",
+                action="store_true",
+                help="Every message, untruncated, instead of the last few capped messages.",
+            )
         if verb == "retry":
             sub.add_argument("--action", default="try_now", choices=["set", "stop", "try_now"])
             sub.add_argument("--prompt", default="")
@@ -478,8 +495,21 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         return "file_surface", {"path": args.path}
     if noun == "chat":
         if verb == "list":
-            return "chats_list", {"project_id": args.project}
-        if verb in ("get", "archive", "delete", "stop", "continue"):
+            return "chats_list", {
+                "project_id": args.project,
+                "limit": args.limit,
+                "offset": args.offset,
+                "compact": not args.full,
+            }
+        if verb == "get":
+            if args.full:
+                return "chat_get", {"chat_id": args.chat, "messages": 0}
+            return "chat_get", {
+                "chat_id": args.chat,
+                "messages": CHAT_GET_RECENT_MESSAGES,
+                "message_chars": CHAT_MESSAGE_MAX_CHARS,
+            }
+        if verb in ("archive", "delete", "stop", "continue"):
             return f"chat_{verb}", {"chat_id": args.chat}
         if verb == "create":
             payload = {k: getattr(args, k) for k in ("project", "title", "provider", "model", "mode", "prompt")}

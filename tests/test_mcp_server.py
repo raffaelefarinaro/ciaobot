@@ -1439,11 +1439,11 @@ def test_project_and_chat_resolution_defaults() -> None:
     assert p_res2["data"]["project_id"] == "proj-active-123"
 
     # chat_get defaults to active chat when empty or 'this chat'
-    c_res1 = control_plane.chat_get(principal, "")
+    c_res1 = asyncio.run(control_plane.chat_get(principal, ""))
     assert c_res1["ok"] is True
     assert c_res1["data"]["chat_id"] == "chat-active-123"
 
-    c_res2 = control_plane.chat_get(principal, "self")
+    c_res2 = asyncio.run(control_plane.chat_get(principal, "self"))
     assert c_res2["ok"] is True
     assert c_res2["data"]["chat_id"] == "chat-active-123"
 
