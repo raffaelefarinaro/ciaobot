@@ -240,6 +240,10 @@ _RESUME_CONTINUE_PROMPT = "continue"
 # persistently flaky connection cannot loop forever burning quota. Once hit,
 # the turn is left for the user to continue manually.
 _MAX_CONNECTION_DROP_RETRIES = 6
+# Cap on hourly quota retries. A quota limit that survives three hourly
+# attempts is not transient in any useful window; stop and leave the turn for
+# the user rather than keep spending attempts.
+_MAX_QUOTA_RETRIES = 3
 
 # Injected into the parent turn when its background subagents all finish. The
 # CLI does not auto-continue a parent turn after a background `Agent` dispatch
@@ -5618,22 +5622,22 @@ class ProjectChatManager:
             and chat is not None
             and bool(chat.session_id)
         )
-        # The connection/startup/auth cap guards against a transient-looking
-        # local failure looping forever; quota retries are time-gated by the
-        # hourly retry interval instead.
-        if kind in {"connection", "startup", "auth"}:
-            attempts = chat.retry_attempts if chat is not None else 0
-            if attempts >= _MAX_CONNECTION_DROP_RETRIES:
-                logger.warning(
-                    "chat %s hit the %s retry cap "
-                    "(%d); leaving the turn for a manual continue",
-                    chat_id,
-                    kind,
-                    _MAX_CONNECTION_DROP_RETRIES,
-                )
-                if chat is not None and chat.retry_status == "pending":
-                    self._clear_chat_retry(chat, status="stopped")
-                return False
+        # Every kind is capped: the connection/startup/auth cap guards against
+        # a transient-looking local failure looping forever, and the quota cap
+        # stops hourly retries against a limit that is not clearing.
+        cap = _MAX_QUOTA_RETRIES if kind == "quota" else _MAX_CONNECTION_DROP_RETRIES
+        attempts = chat.retry_attempts if chat is not None else 0
+        if attempts >= cap:
+            logger.warning(
+                "chat %s hit the %s retry cap "
+                "(%d); leaving the turn for a manual continue",
+                chat_id,
+                kind,
+                cap,
+            )
+            if chat is not None and chat.retry_status == "pending":
+                self._clear_chat_retry(chat, status="stopped")
+            return False
         if resume_continue:
             prompt = _RESUME_CONTINUE_PROMPT
             image_refs: list[str] | None = None
@@ -5657,6 +5661,16 @@ class ProjectChatManager:
         stream.publish({"type": "chat_retry", "status": "pending"})
         self._park_pending_for_retry(chat_id, stream)
         return True
+
+    def _stop_terminal_quota_retry(self, chat_id: str) -> None:
+        """End the retry ladder when the provider reports a weekly/monthly limit.
+
+        A retry that was already pending, or a retry attempt that just failed
+        with a terminal limit, must not fire again on the hourly timer.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.retry_status == "pending":
+            self._clear_chat_retry(chat, status="stopped")
 
     def set_chat_retry(
         self,

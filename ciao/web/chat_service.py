@@ -254,8 +254,28 @@ def _handover_marker(
     }
 
 
+def _is_terminal_quota_error(text: str) -> bool:
+    """Recognize a weekly or monthly usage limit that no hourly retry can clear.
+
+    A weekly limit resets days away, so arming the hourly retry only burns
+    attempts (and schedule runs) against a provider that will keep refusing.
+    """
+    low = (text or "").lower()
+    return any(
+        needle in low
+        for needle in (
+            "weekly usage limit",
+            "weekly limit",
+            "monthly limit",
+            "upgrade for higher limits",
+        )
+    )
+
+
 def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
+    if _is_terminal_quota_error(text):
+        return False
     # Claude Code uses "You've hit your session limit" in its user-facing
     # exhaustion banner, while the API-shaped error says "reached your
     # session usage limit". Both should arm the deferred hourly retry.
