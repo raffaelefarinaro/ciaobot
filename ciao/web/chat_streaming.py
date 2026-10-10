@@ -187,6 +187,8 @@ class ChatStreamingHost(Protocol):
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
 
+    def _stop_terminal_quota_retry(self, chat_id: str) -> None: ...
+
     @staticmethod
     def _result_snippet(text: str, limit: int = 280) -> str: ...
 
@@ -627,6 +629,8 @@ class ChatStreaming:
                                         had_progress=had_provider_progress,
                                         reason=result_text or "quota limit",
                                     )
+                                elif chat_service._is_terminal_quota_error(result_text):
+                                    self._host._stop_terminal_quota_retry(chat_id)
                                 elif chat_service._is_retryable_connection_error(
                                     result_text
                                 ):
@@ -799,6 +803,8 @@ class ChatStreaming:
                                 had_progress=had_provider_progress,
                                 reason=error_msg,
                             )
+                        elif chat_service._is_terminal_quota_error(error_msg):
+                            self._host._stop_terminal_quota_retry(chat_id)
                         elif chat_service._is_retryable_connection_error(error_msg):
                             self._host._arm_retry(
                                 chat_id,
