@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -210,6 +211,136 @@ def service_python_path(arguments: object) -> str:
     return sys.executable
 
 
+def parse_launchctl_print_arguments(text: str) -> list[str] | None:
+    """The argv a loaded job runs, from ``launchctl print gui/<uid>/<label>``.
+
+    Reads the ``arguments = {`` block (one element per line, closed by ``}``) as
+    launchd renders it. ``None`` when there is no such block: the job is not
+    loaded (launchctl prints nothing usable for it), or the output is not what
+    launchd prints. Pure: it never runs launchctl.
+    """
+    if not launchctl_print_field(text, "arguments"):
+        return None
+    return launchctl_print_list(text, "arguments")
+
+
+def _plist_program_arguments(plist_path: Path) -> list[str] | None:
+    """The ``ProgramArguments`` of a LaunchAgent plist on disk, or ``None``."""
+    try:
+        with plist_path.open("rb") as handle:
+            plist = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException):
+        return None
+    arguments = plist.get("ProgramArguments") if isinstance(plist, dict) else None
+    if (
+        not isinstance(arguments, list)
+        or not arguments
+        or not all(isinstance(item, str) for item in arguments)
+    ):
+        return None
+    return list(arguments)
+
+
+def _loaded_definition(uid: int, runner: Runner) -> tuple[bool, list[str] | None]:
+    """Whether launchd holds the server job, and the argv it runs.
+
+    ``(False, None)`` when the job is not loaded or launchctl cannot be run.
+    ``(True, None)`` when it is loaded but its arguments are not readable.
+    """
+    try:
+        completed = _launchctl(["print", f"gui/{uid}/{SERVER_LABEL}"], runner=runner)
+    except OSError:
+        return False, None
+    if completed.returncode != 0:
+        return False, None
+    return True, parse_launchctl_print_arguments(completed.stdout or "")
+
+
+def _plist_matches_loaded(
+    loaded_arguments: list[str] | None,
+    plist_arguments: list[str] | None,
+) -> bool | None:
+    """Whether the plist on disk matches the loaded job; ``None`` if either is unknown."""
+    if not loaded_arguments or not plist_arguments:
+        return None
+    return loaded_arguments == plist_arguments
+
+
+def launchctl_print_field(printed: str, key: str) -> str:
+    """The text ``launchctl print`` rendered for ``key``, or ``""``.
+
+    launchd has printed a job's values in three shapes across versions: a bare
+    scalar on the key's own line, a list opened on that same line, and a list
+    whose opening bracket is on the line *after* the key. A list of any shape is
+    flattened to its own lines here, so the callers only decide what a token in
+    it means, and a key launchd did not render at all answers ``""`` — which is
+    evidence of nothing, and so never refuses an update and never stands a
+    recovery down.
+    """
+    lines = printed.splitlines()
+    for index, line in enumerate(lines):
+        head, separator, rest = line.partition("=")
+        if not separator or head.strip() != key:
+            continue
+        value = rest.strip()
+        if value[:1] not in {"(", "{"}:
+            return value
+        parts = [value]
+        # The list's own delimiters, so a block that opens here is collected up
+        # to the line that closes it — one argument per line, in every shape.
+        depth = value.count("(") + value.count("{") - value.count(")") - value.count("}")
+        if depth <= 0:
+            # Opened and closed on the key's own line: the value is that line,
+            # not that line plus whatever key launchd printed after it.
+            return value
+        for nxt in lines[index + 1 :]:
+            parts.append(nxt)
+            depth += nxt.count("(") + nxt.count("{") - nxt.count(")") - nxt.count("}")
+            if depth <= 0:
+                break
+        return "\n".join(parts)
+    return ""
+
+
+def launchctl_print_tokens(printed: str, key: str) -> list[str]:
+    """The tokens in a value ``launchctl print`` rendered for ``key``."""
+    return [
+        token
+        for line in launchctl_print_field(printed, key).splitlines()
+        for token in re.findall(r"[^\s,(){}]+", line)
+    ]
+
+
+def launchctl_print_list(printed: str, key: str) -> list[str]:
+    """The elements of a list ``launchctl print`` rendered for ``key``.
+
+    launchd renders a job's list one element per line inside a delimited block,
+    and that layout is what preserves an element that contains a space — the
+    native host's own path does (``Ciaobot Server.app``), and so may the
+    interpreter it serves. Splitting those lines on whitespace would truncate the
+    host path at the first space, so a multi-line block is read line by line,
+    including any element on the line that opens it. The older single-line
+    shapes (``( -I -m ... )`` or ``{ -I -m ... }``) carry no spaces in their
+    tokens and are read as whitespace-separated tokens, as :func:`launchctl_print_tokens`
+    does. Quotes are stripped from every element, exactly as from a scalar
+    program, so the two agree when :func:`_loaded_server_command` folds them.
+    """
+    lines = [line.strip() for line in launchctl_print_field(printed, key).splitlines()]
+    if not lines:
+        return []
+    if len(lines) == 1:
+        elements = re.findall(r"[^\s,(){}]+", lines[0])
+    else:
+        # Only the block's own delimiters come off: the opening one on the first
+        # line and the closing one on the last. An element may itself end in a
+        # bracket (`/tools/env (copy)`), so no line is stripped of them wholesale.
+        lines[0] = lines[0][1:]
+        if lines[-1][-1:] in {")", "}"}:
+            lines[-1] = lines[-1][:-1]
+        elements = [line.strip().rstrip(",").strip() for line in lines]
+    return [stripped for element in elements if (stripped := element.strip("\"'"))]
+
+
 def discover_runtime(
     *,
     launch_agents_dir: Path | None = None,
@@ -331,24 +462,31 @@ def service_status(
     runtime = runtime or discover_runtime()
     resolved_uid = _getuid() if uid is None else uid
     installed = Path(runtime.server_plist).is_file()
-    try:
-        loaded_result = _launchctl(
-            ["print", f"gui/{resolved_uid}/{SERVER_LABEL}"],
-            runner=runner,
-        )
-        loaded = loaded_result.returncode == 0
-    except OSError:
-        loaded = False
+    loaded, loaded_arguments = _loaded_definition(resolved_uid, runner)
+    loaded_python_path = service_python_path(loaded_arguments) if loaded_arguments else None
+    plist_matches_loaded = _plist_matches_loaded(
+        loaded_arguments,
+        _plist_program_arguments(Path(runtime.server_plist)),
+    )
     reachable = server_reachable(runtime.port)
     active = active_chat_ids(runtime.port) if reachable else []
+    message = "Ciaobot engine is running." if reachable else "Ciaobot engine is stopped."
+    if plist_matches_loaded is False:
+        message += (
+            "\nWarning: the loaded service definition differs from the plist on disk "
+            f"(loaded runs {loaded_python_path}, plist runs {runtime.python_path}). "
+            "Run `ciao service restart` to reload the edited definition."
+        )
     return ServiceResult(
         ok=True,
         action="status",
-        message="Ciaobot engine is running." if reachable else "Ciaobot engine is stopped.",
+        message=message,
         details={
             **asdict(runtime),
             "installed": installed,
             "loaded": loaded,
+            "loaded_python_path": loaded_python_path,
+            "plist_matches_loaded": plist_matches_loaded,
             "reachable": reachable,
             "active_chat_ids": active,
         },
@@ -438,21 +576,51 @@ def restart_service(
             {**asdict(runtime), "active_chat_ids": active, "requires_confirmation": True},
         )
     resolved_uid = _getuid() if uid is None else uid
+    domain = f"gui/{resolved_uid}"
     try:
-        completed = _launchctl(
-            ["kickstart", "-k", f"gui/{resolved_uid}/{SERVER_LABEL}"],
-            runner=runner,
+        loaded, loaded_arguments = _loaded_definition(resolved_uid, runner)
+        plist_matches = _plist_matches_loaded(
+            loaded_arguments,
+            _plist_program_arguments(Path(runtime.server_plist)),
         )
+        if loaded and plist_matches is False:
+            # launchd reads the plist only when a job is bootstrapped, so kickstart
+            # would keep running the definition it already holds.
+            booted_out = _launchctl(["bootout", f"{domain}/{SERVER_LABEL}"], runner=runner)
+            if (
+                booted_out.returncode != 0
+                and "could not find service" not in _command_error(booted_out).lower()
+            ):
+                return ServiceResult(
+                    False,
+                    "restart",
+                    _command_error(booted_out) or "launchctl bootout failed",
+                    {**asdict(runtime), "restart": "reload"},
+                )
+            completed = _launchctl(["bootstrap", domain, runtime.server_plist], runner=runner)
+            restart_path = "reload"
+        else:
+            completed = _launchctl(
+                ["kickstart", "-k", f"{domain}/{SERVER_LABEL}"],
+                runner=runner,
+            )
+            restart_path = "kickstart"
     except OSError as exc:
         return ServiceResult(False, "restart", str(exc), asdict(runtime))
+    details = {**asdict(runtime), "restart": restart_path}
     if completed.returncode != 0:
         return ServiceResult(
             False,
             "restart",
             _command_error(completed) or "launchctl restart failed",
-            asdict(runtime),
+            details,
         )
-    return ServiceResult(True, "restart", "Ciaobot engine restarted.", asdict(runtime))
+    message = (
+        "Ciaobot engine restarted; reloaded the edited service definition."
+        if restart_path == "reload"
+        else "Ciaobot engine restarted."
+    )
+    return ServiceResult(True, "restart", message, details)
 
 
 def set_login_enabled(

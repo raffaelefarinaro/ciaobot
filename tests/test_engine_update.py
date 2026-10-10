@@ -3380,7 +3380,7 @@ def test_loaded_program_argument_reads_launchctl_output(
 def test_loaded_arguments_reads_a_jobs_arguments(
     printed: str, expected: list[str]
 ) -> None:
-    assert update_host._loaded_arguments(printed) == expected
+    assert macos_service.launchctl_print_list(printed, "arguments") == expected
 
 
 @pytest.mark.parametrize(
@@ -3409,7 +3409,7 @@ def test_loaded_arguments_reads_a_jobs_arguments(
 def test_loaded_tokens_reads_a_jobs_arguments(
     printed: str, expected: list[str]
 ) -> None:
-    assert update_host._loaded_tokens(printed, "arguments") == expected
+    assert macos_service.launchctl_print_tokens(printed, "arguments") == expected
 
 
 def test_the_receipt_entry_point_is_compared_resolved(tmp_path: Path) -> None:

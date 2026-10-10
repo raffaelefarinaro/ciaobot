@@ -156,6 +156,8 @@ EOF
 [ $? -eq 0 ] && .venv/bin/ciao service restart
 ```
 
+`ciao service restart` reloads an edited plist (bootout and bootstrap) when the loaded definition differs from the one on disk, and kickstarts otherwise.
+
 Two things bite here. `status=$(…)` is a **zsh read-only variable** and aborts the
 whole snippet, so use a neutral name; and backslash-escaping quotes inside a
 `python3 -c '…'` f-string does not survive the shell, so feed the script on
