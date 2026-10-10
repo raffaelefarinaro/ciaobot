@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +46,10 @@ def _py(code: str) -> str:
     shell reads it: POSIX quoting for ``/bin/sh``, ``list2cmdline`` for cmd.exe.
     """
     argv = [sys.executable, "-c", code]
+    return _shell_command(argv)
+
+
+def _shell_command(argv: list[str]) -> str:
     return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
 
@@ -143,6 +148,63 @@ async def test_timeout_kills_the_command(tmp_path: Path, monkeypatch: pytest.Mon
     assert run.exit_code is None
     assert run.quiet is False
     assert "timed out" in run.compose_prompt("Go.")
+
+
+async def test_timeout_kills_grandchildren_and_keeps_partial_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(schedule_command_module, "SCHEDULE_COMMAND_TIMEOUT_S", 2.0)
+    beat = tmp_path / "grandchild.beat"
+    pid_file = tmp_path / "grandchild.pid"
+    child_script = tmp_path / "grandchild.py"
+    child_script.write_text(
+        "import sys, time\n"
+        "path = sys.argv[1]\n"
+        "while True:\n"
+        "    with open(path, 'w') as beat:\n"
+        "        beat.write(str(time.monotonic()))\n"
+        "    time.sleep(0.05)\n",
+        encoding="utf-8",
+    )
+    parent_script = tmp_path / "parent.py"
+    parent_script.write_text(
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        "child_script, beat, pid_file = map(Path, sys.argv[1:])\n"
+        "child = subprocess.Popen([sys.executable, str(child_script), str(beat)])\n"
+        "pid_file.write_text(str(child.pid))\n"
+        "while not beat.exists():\n"
+        "    time.sleep(0.01)\n"
+        "print('partial stdout', flush=True)\n"
+        "print('partial stderr', file=sys.stderr, flush=True)\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+
+    command = _shell_command([
+        sys.executable, str(parent_script), str(child_script), str(beat), str(pid_file)
+    ])
+    run = await run_schedule_command(command, tmp_path, {})
+    pid = int(pid_file.read_text())
+    try:
+        assert run.timed_out is True
+        assert "partial stdout" in run.stdout
+        assert "partial stderr" in run.stderr
+        prompt = run.compose_prompt("Go.")
+        assert "partial stdout" in prompt
+        assert "partial stderr" in prompt
+        first = beat.read_text()
+        await asyncio.sleep(1.0)
+        assert beat.read_text() == first, "the grandchild survived the schedule timeout"
+    finally:
+        # Keep a failed regression run from leaving its fixture process behind.
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 async def test_long_output_keeps_head_and_tail_within_the_cap(tmp_path: Path) -> None:

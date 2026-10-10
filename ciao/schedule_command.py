@@ -15,6 +15,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from ciao.os_support.processes import ProcessTree, tree_spawn_options
+
 #: Wall-clock budget for one command run. A command past it is killed and the
 #: run is handed to the model with a timeout note.
 SCHEDULE_COMMAND_TIMEOUT_S = 600
@@ -93,25 +95,42 @@ async def run_schedule_command(
         stdin=subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **tree_spawn_options(),
     )
     try:
-        stdout_b, stderr_b = await asyncio.wait_for(
-            process.communicate(), timeout=SCHEDULE_COMMAND_TIMEOUT_S
-        )
-    except TimeoutError:
-        # The shell is the only process we can reach portably; a grandchild it
-        # spawned may outlive it, so the pipes are not drained after the kill.
+        tree = ProcessTree(process.pid)
+    except OSError:
+        # Do not run an untracked command: cancellation and timeout could leave
+        # its descendants behind.
         process.kill()
         await process.wait()
-        return CommandRun(
-            command=command, exit_code=None, stdout="", stderr="", timed_out=True
+        raise
+
+    communication = asyncio.create_task(process.communicate())
+    timed_out = False
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(
+            asyncio.shield(communication), timeout=SCHEDULE_COMMAND_TIMEOUT_S
         )
+    except TimeoutError:
+        # The shell and its descendants own the pipes. Keep communicate() alive
+        # while the whole process tree is stopped so it can return partial output.
+        tree.kill()
+        stdout_b, stderr_b = await communication
+        timed_out = True
+    except asyncio.CancelledError:
+        tree.kill()
+        await asyncio.shield(communication)
+        raise
+    finally:
+        tree.close()
+
     return CommandRun(
         command=command,
-        exit_code=process.returncode,
+        exit_code=None if timed_out else process.returncode,
         stdout=stdout_b.decode("utf-8", errors="replace"),
         stderr=stderr_b.decode("utf-8", errors="replace"),
-        timed_out=False,
+        timed_out=timed_out,
     )
 
 
