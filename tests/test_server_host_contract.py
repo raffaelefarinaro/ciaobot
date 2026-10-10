@@ -1241,6 +1241,7 @@ def _make_legacy_bundle(root: Path) -> Path:
     return bundle
 
 
+@requires_posix_uid
 def test_superseded_verifier_accepts_only_the_revision_one_layout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1263,6 +1264,7 @@ def test_superseded_verifier_accepts_only_the_revision_one_layout(
         verify_owned_host(legacy, ownership_path=record, runner=runner)
 
 
+@requires_posix_uid
 def test_superseded_verifier_refuses_the_current_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
