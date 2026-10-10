@@ -765,6 +765,9 @@
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
 }
+/* As a workspace-editor sub-row the plain row's padding would otherwise win
+   over .set-subrow and pull the label out of line with its neighbours. */
+.settings-switch-row.set-subrow { padding-left: 16px; }
 .settings-switch-row .hint {
   margin: 0;
   font-size: var(--text-sm);

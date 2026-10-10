@@ -785,7 +785,10 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 # Upsert — body keys: name, default_provider,
 # gws_profile, color (pink|cyan|amber|emerald|violet; default
 # pink — PWA accent only), disallowed_tools (extra tools, CSV or list,
-# null = defaults). claude.ai connector MCPs are always allowed. POST
+# null = defaults), claude_ai_connectors (boolean, default true). When false,
+# Claude chats in the workspace start with ENABLE_CLAUDEAI_MCP_SERVERS=false, so
+# the Claude account's claude.ai connectors (Slack, Jira, ...) do not load into
+# them; a non-boolean value is a 400. Memory passes never load them. POST
 # creates `<CIAO_VAULT_ROOT>/<name>` and PATCH /api/workspaces/{name} updates
 # metadata in place. `vault_root` in a request body is ignored: locations are
 # read-only here so a routine settings save cannot relocate a workspace.
