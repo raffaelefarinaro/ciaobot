@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -73,18 +74,21 @@ def _cap_output(text: str, cap: int = SCHEDULE_COMMAND_OUTPUT_CAP) -> str:
     return f"{text[:half]}\n... [{omitted} characters omitted] ...\n{text[-half:]}"
 
 
-async def run_schedule_command(command: str, workspace_root: Path) -> CommandRun:
-    """Run ``command`` in the workspace with the operator's environment.
+async def run_schedule_command(
+    command: str, cwd: Path, extra_env: Mapping[str, str]
+) -> CommandRun:
+    """Run ``command`` in ``cwd`` with the engine's environment plus ``extra_env``.
 
-    The workspace is the working directory, and ``CIAO_WORKSPACE`` is set the
-    way the CLI sets it for the engine. Output is read through asyncio pipes so
-    the engine loop keeps running while the command works.
+    The dispatcher passes the schedule's workspace: its agent root as ``cwd``
+    and the workspace-scoped variables a chat in that workspace gets. Output is
+    read through asyncio pipes so the engine loop keeps running while the
+    command works.
     """
     env = dict(os.environ)
-    env["CIAO_WORKSPACE"] = str(workspace_root)
+    env.update(extra_env)
     process = await asyncio.create_subprocess_shell(
         command,
-        cwd=str(workspace_root),
+        cwd=str(cwd),
         env=env,
         stdin=subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,

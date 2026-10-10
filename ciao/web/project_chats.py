@@ -4307,6 +4307,34 @@ class ProjectChatManager:
             workspace = self._config.primary_workspace()
         return self._config.agent_root(workspace)
 
+    def _schedule_target_project(self, entry: object) -> ProjectInfo | None:
+        """The project a schedule runs in: its target chat's, else its named project."""
+        web_chat_id = getattr(entry, "web_chat_id", None)
+        if web_chat_id:
+            chat = self._chats.get(web_chat_id)
+            project = self._projects.get(chat.project_id) if chat else None
+            if project is not None:
+                return project
+        web_project_id = getattr(entry, "web_project_id", None)
+        if web_project_id:
+            return self._projects.get(web_project_id)
+        return None
+
+    def schedule_command_env(self, entry: object) -> tuple[Path, dict[str, str]]:
+        """The working directory and extra environment for a schedule's command.
+
+        The same workspace a chat in this schedule would run in: the agent root
+        and the workspace-scoped env that a chat turn gets, with CIAO_WORKSPACE
+        left at the install root.
+        """
+        project = self._schedule_target_project(entry)
+        workspace = self.schedule_workspace(entry)
+        if not self._is_known_workspace(workspace):
+            workspace = self._config.primary_workspace()
+        env = {"CIAO_WORKSPACE": str(self._config.workspace_root)}
+        env.update(self.workspace_shell_env(workspace, project))
+        return self._config.agent_root(workspace), env
+
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
@@ -4679,19 +4707,9 @@ class ProjectChatManager:
 
     def schedule_workspace(self, entry: object) -> str:
         """Resolve the workspace that owns a schedule's execution context."""
-        web_chat_id = getattr(entry, "web_chat_id", None)
-        if web_chat_id:
-            chat = self._chats.get(web_chat_id)
-            project = self._projects.get(chat.project_id) if chat else None
-            if project is not None:
-                return project.workspace
-
-        web_project_id = getattr(entry, "web_project_id", None)
-        if web_project_id:
-            project = self._projects.get(web_project_id)
-            if project is not None:
-                return project.workspace
-
+        project = self._schedule_target_project(entry)
+        if project is not None:
+            return project.workspace
         return self._schedule_workspace_hint(entry)
 
     def schedule_effective_routing(self, entry: object) -> tuple[str, str, str]:
@@ -4855,21 +4873,22 @@ class ProjectChatManager:
             return chat.thinking_level
         return ""
 
-    def _build_extra_env(self, chat: ChatInfo) -> dict[str, str]:
-        """Build extra environment variables for the provider.
+    def workspace_shell_env(self, workspace: str, project: ProjectInfo | None) -> dict[str, str]:
+        """The workspace-scoped environment a process run for ``workspace`` gets.
 
-        Workspace, project, chat, and provider markers for the spawned CLI.
-        No upstream overrides: each provider authenticates itself.
+        Shared by a chat turn (``_build_extra_env``) and a schedule's shell
+        command, so a ``ciao`` or ``gws`` call behaves the same in both: the
+        engine's CLI leads PATH, the vault is the workspace's own agent vault,
+        and the Google profile is the workspace's. Chat-only keys (the chat id,
+        model, provider, agent tokens) are not part of it, and CIAO_WORKSPACE
+        (the install root) is set by the caller.
         """
         env: dict[str, str] = {}
-        project = self._projects.get(chat.project_id)
-        env["CIAO_WORKSPACE"] = str(self._config.workspace_root)
         # The running engine's own executable directory goes at the front of the
         # agent's PATH so a ``ciao <command>`` the agent runs is THIS engine's
         # CLI, not a stale install earlier on the user's PATH. The user's PATH
         # stays behind it, so their own tools still resolve (#989).
         env["PATH"] = prepend_engine_path()
-        workspace = project.workspace if project else ""
         # The vault this chat's CLI commands should read and write. Exported
         # explicitly rather than inherited, because there is one process-level
         # CIAO_VAULT_ROOT and after the re-rooting there are N vaults, so a
@@ -4901,6 +4920,18 @@ class ProjectChatManager:
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
+        return env
+
+    def _build_extra_env(self, chat: ChatInfo) -> dict[str, str]:
+        """Build extra environment variables for the provider.
+
+        Workspace, project, chat, and provider markers for the spawned CLI.
+        No upstream overrides: each provider authenticates itself.
+        """
+        project = self._projects.get(chat.project_id)
+        env: dict[str, str] = {"CIAO_WORKSPACE": str(self._config.workspace_root)}
+        workspace = project.workspace if project else ""
+        env.update(self.workspace_shell_env(workspace, project))
         env["CIAO_MODEL"] = chat.model
         env["CIAO_PROVIDER"] = chat.provider
         env["CIAO_CHAT_ID"] = chat.chat_id

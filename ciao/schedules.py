@@ -2033,6 +2033,11 @@ class ScheduleManager:
             if stamp_run_outcome(latest, dispatch_id, status):
                 self._store.replace(latest)
             return
+        if status == "missing-chat" and entry.command:
+            # A command printed output but the dispatcher found no chat to
+            # report it into. A prompt entry with no chat is disabled in
+            # _fire_interval; a command entry only learns this here.
+            self._disable_interval(latest, "no chat left to dispatch into")
         latest.last_status = status
         rehomed = bool(entry.web_chat_id) and entry.web_chat_id != bound_before
         if rehomed and latest.web_chat_id == bound_before:

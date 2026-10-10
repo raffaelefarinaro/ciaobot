@@ -95,6 +95,10 @@ class _ScheduleHost:
         assert chat_id == "chat-1"
         return self._config.workspace_root
 
+    def schedule_command_env(self, entry: ScheduleEntry) -> tuple[Path, dict[str, str]]:
+        del entry
+        return self._config.workspace_root, {"CIAO_WORKSPACE": str(self._config.workspace_root)}
+
     def _resolve_schedule_project(
         self, stale_id: str, entry: ScheduleEntry
     ) -> ProjectInfo | None:
