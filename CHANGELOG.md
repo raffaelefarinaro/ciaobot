@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.5.0 - 2026-10-12
+
+**Heads up:**
+- **Settings → MCP is now read-only.** It lists the MCP servers Claude Code and OpenCode are configured with, and shows their live status in running chats. It no longer adds, edits or deletes servers or their keys. Add and sign in to a server with the provider's own CLI from the workspace folder: `claude mcp add` / `claude mcp login`, or `opencode mcp add` / `opencode mcp auth`. Servers you already set up keep working.
+- **Schedule commands:** an agent can now attach a shell command to a schedule only from a chat in bypass mode. In any other mode, add the command yourself in the schedule's edit card ([#1284](https://github.com/raffaelefarinaro/ciaobot/issues/1284)).
+
+### New features
+- **Compact a chat on demand:** a Compact button beside the context meter (Work details, and the side rail on wide screens) shrinks the chat's history when it is getting full.
+- **Install help from Home:** when your browser does not offer an install prompt, the Home setup card links to the install steps for every platform, and it marks the step as done once the app is installed.
+
+### Improvements
+- Ciaobot opens faster: the first page loads less up front, and the archive and Settings load their data when you open them.
+- A chat that stops on a weekly or monthly usage limit now retries once a day (up to a week), and it shows under "needs you" on Home with the error and what to do next. A newer run of the same routine replaces the old one.
+- Uploaded documents keep their original file in the project folder next to the Markdown version, and the agent can read the original PDF too.
+- Settings → MCP shows one status row for each running chat, instead of starting servers to check them.
+- Sandboxed MCP servers launched through `npx` now start.
+- When a project is closed, its memory pass runs on the model of the project's last-used chat, as archived chats already do.
+- On narrow panes the chat title sits above the project name instead of both being cut off. On phones the chat header is a single row.
+- Settings shows one scope badge per row, puts the capability card near the top, and keeps the side rail at 1280px wide ([#1294](https://github.com/raffaelefarinaro/ciaobot/issues/1294)).
+
+### Bug fixes
+- Provider usage-limit errors showed "Unknown error — The operation did not complete" instead of a quota card ([#1292](https://github.com/raffaelefarinaro/ciaobot/issues/1292))
+- Stopping a turn sent "Background agents finished" when no background agents had run ([#1290](https://github.com/raffaelefarinaro/ciaobot/issues/1290))
+- After Stop, the spinner could start again on a turn that had already finished, for up to 10 seconds on OpenCode
+- Your first message showed twice after switching a chat to another provider or forking it
+- Creating a project from the sidebar left you on Home instead of opening the project ([#1293](https://github.com/raffaelefarinaro/ciaobot/issues/1293))
+- When a schedule command timed out, the processes it had started kept running and its partial output was lost ([#1283](https://github.com/raffaelefarinaro/ciaobot/issues/1283))
+- An in-app update from v1.3.0 did not move to the new Ciaobot Server login item, and a failed rollback could leave no server host at all (macOS) ([#1281](https://github.com/raffaelefarinaro/ciaobot/issues/1281), [#1282](https://github.com/raffaelefarinaro/ciaobot/issues/1282))
+- A memory pass that you stopped and then continued was never archived
+- A tool error that mentions a quota, such as "disk quota exceeded", was shown as a provider error
+
+[Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.4.0...v1.5.0)
+
 ## v1.4.0 - 2026-10-10
 
 **Heads up:** on macOS, the background service now shows as "Ciaobot Server" in System Settings → General → Login Items. The update replaces the server host, so if you had granted it Accessibility or Automation access, macOS asks once more.
