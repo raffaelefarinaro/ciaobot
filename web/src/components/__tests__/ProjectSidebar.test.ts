@@ -11,6 +11,7 @@ import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import type { Task } from '../../lib/types'
+import { pendingPrompt } from '../../lib/prompt'
 
 const chatId = 'chat-1234-abcd'
 
@@ -327,6 +328,83 @@ describe('ProjectSidebar chat actions', () => {
     expect(wrapper.findAll('.chat-item')).toHaveLength(1)
     expect(wrapper.text()).not.toContain('Sweep the callers')
     expect(wrapper.find('.subagent-toggle').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  async function mountWithProjectRoute() {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: { template: '<div />' } },
+        { path: '/project/:projectId', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+    return { router, wrapper }
+  }
+
+  it('opens the new project after creating it from the sidebar dialog', async () => {
+    const store = useProjectStore()
+    store.bootstrapped = true
+    const create = vi.spyOn(store, 'createProject').mockResolvedValue({
+      ...store.projects[0],
+      project_id: 'project-9',
+      name: 'Research',
+      is_auto: false,
+    })
+    const { router, wrapper } = await mountWithProjectRoute()
+
+    await wrapper.get('button[aria-label="New project"]').trigger('click')
+    await flushPromises()
+    expect(pendingPrompt.value?.title).toBe('New project')
+    pendingPrompt.value!.resolve('Research')
+    await flushPromises()
+
+    expect(create).toHaveBeenCalledWith('Research')
+    expect(router.currentRoute.value.path).toBe('/project/project-9')
+    expect(wrapper.emitted('chat-selected')).toBeTruthy()
+
+    wrapper.unmount()
+  })
+
+  it('stays put and shows a toast when creating the project fails', async () => {
+    const store = useProjectStore()
+    store.bootstrapped = true
+    vi.spyOn(store, 'createProject').mockRejectedValue(new Error('boom'))
+    const toast = vi.spyOn(store, 'pushErrorToast')
+    const { router, wrapper } = await mountWithProjectRoute()
+
+    await wrapper.get('button[aria-label="New project"]').trigger('click')
+    await flushPromises()
+    pendingPrompt.value!.resolve('Research')
+    await flushPromises()
+
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(toast).toHaveBeenCalledWith('Could not create project', expect.anything())
+
+    wrapper.unmount()
+  })
+
+  it('does nothing when the dialog is cancelled', async () => {
+    const store = useProjectStore()
+    store.bootstrapped = true
+    const create = vi.spyOn(store, 'createProject')
+    const { router, wrapper } = await mountWithProjectRoute()
+
+    await wrapper.get('button[aria-label="New project"]').trigger('click')
+    await flushPromises()
+    pendingPrompt.value!.resolve(null)
+    await flushPromises()
+
+    expect(create).not.toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/')
 
     wrapper.unmount()
   })
