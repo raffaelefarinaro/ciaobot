@@ -314,6 +314,12 @@ class SubagentWatchers:
         # every 3s tick re-ran `last_activity_at = now` + `_save()` and another
         # steer attempt for the watcher's full hour.
         nudge_attempted = False
+        # Only a chat that actually had background work gets the synthesis
+        # nudge: one this watcher saw running, or one the latest turn launched
+        # (an agent that already finished before the turn ended still needs its
+        # report). A plain turn — including a stopped one — has nothing to
+        # synthesize (#1290).
+        saw_running = False
         task_wake_sent = False
         cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
@@ -330,6 +336,8 @@ class SubagentWatchers:
                     last_size = size
                     state = subagent_tracking.parse_session_subagents(path)
                 count = subagent_tracking.running_background_agents(path, state)
+                if count > 0:
+                    saw_running = True
                 pending = state.notification_pending
                 # CLI-owned tasks (Monitor / background Bash): when the CLI
                 # subprocess that owns them is gone, their completion will
@@ -362,6 +370,7 @@ class SubagentWatchers:
                 ready_to_nudge = (
                     count == 0
                     and not nudge_attempted
+                    and (saw_running or state.background_dispatched_in_latest_turn)
                     and (not pending or grace_expired)
                 )
                 if count != last_count or ready_to_nudge:
