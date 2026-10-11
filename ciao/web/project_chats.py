@@ -440,6 +440,11 @@ class ChatInfo:
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
     user_turn_count: int = 0
+    # `user_turn_count` when the current provider session lineage began. A
+    # handover or fork starts a fresh session whose own user turns number from
+    # zero, while the counter (and so every live echo's `turn_index`) carries
+    # on; /messages adds this base so both name the same turn.
+    turn_index_base: int = 0
     # Map of user-turn index → list of image ref filenames (relative to
     # media_root). JSON round-trip turns int keys into strings, so lookups
     # must tolerate both.
@@ -949,6 +954,7 @@ class ProjectChatManager:
                 last_response=cd.get("last_response", ""),
                 last_response_status=cd.get("last_response_status", ""),
                 user_turn_count=cd.get("user_turn_count", 0),
+                turn_index_base=int(cd.get("turn_index_base", 0) or 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
@@ -1056,6 +1062,7 @@ class ProjectChatManager:
                     "last_response": c.last_response,
                     "last_response_status": c.last_response_status,
                     "user_turn_count": c.user_turn_count,
+                    "turn_index_base": c.turn_index_base,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
                     "user_turn_unattended": c.user_turn_unattended,
@@ -3491,6 +3498,7 @@ class ProjectChatManager:
                 row.pop("images", None)
             copied_turn_index += 1
         fork.user_turn_count = copied_turn_index
+        fork.turn_index_base = copied_turn_index
 
         self._chats[fork.chat_id] = fork
         try:
@@ -3567,6 +3575,7 @@ class ProjectChatManager:
         # the old lineage doesn't apply. Visible history instead carries over
         # via `handover_messages` above.
         chat.previous_session_ids = []
+        chat.turn_index_base = chat.user_turn_count
         chat.last_activity_at = chat_service._now_iso()
 
         ctx = ChatContext.for_web(chat_id)
@@ -4041,6 +4050,7 @@ class ProjectChatManager:
         # Reset session
         chat.session_id = ""
         chat.previous_session_ids = []
+        chat.turn_index_base = 0
         chat.context_digest = ""
         chat.context_session_id = ""
         chat.archived = False

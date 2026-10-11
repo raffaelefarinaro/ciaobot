@@ -1081,7 +1081,7 @@ async def _assemble_chat_messages(
             seen.add(sid_str)
             session_ids.append(sid_str)
         rendered: list[dict] = []
-        start_user_idx = 0
+        start_user_idx = chat.turn_index_base
         for sid in session_ids:
             try:
                 opencode_thread = await OpencodeProvider.read_thread(
@@ -1183,7 +1183,7 @@ async def _assemble_chat_messages(
             return [*handover_messages, *archived]
         return list(handover_messages)
 
-    user_idx = 0
+    user_idx = chat.turn_index_base
     failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         if m.type == "assistant":
