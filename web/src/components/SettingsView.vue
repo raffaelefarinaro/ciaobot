@@ -1955,11 +1955,9 @@
         </div>
       </template>
 
-      <!-- MCP TAB. The panel renders; `useMcpServers` holds the state and
-           talks to /api/mcp/*; this view decides when it loads and owns the
-           one action that needs the project store and the router. -->
+      <!-- Native provider MCP inventory, scoped to the selected workspace. -->
       <template v-if="currentTab === 'mcp'">
-        <SettingsMcpServers :mcp="mcp" @create-via-chat="createMcpViaChat" />
+        <SettingsMcpServers :mcp="mcp" />
       </template>
       </div>
 
@@ -2114,23 +2112,8 @@ const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
 const housekeeping = useHousekeepingStore()
 
-// Settings → MCP. The controller holds every MCP ref and every /api/mcp/*
-// call; this view keeps only the two things the controller deliberately has
-// no access to — when the data loads (its own onMounted, below) and the
-// "Add via chat" path, which needs the project store and the router.
-const mcp = useMcpServers({
-  api,
-  notifySaved: (body, title) => notifySaved(body, title),
-  notifyFailed: (title, detail) => notifyFailed(title, detail),
-  confirmDelete: (name) => askConfirm(`Are you sure you want to delete MCP server "${name}"?`, {
-    title: 'Delete MCP server',
-    confirmLabel: 'Delete server',
-    destructive: true,
-  }),
-  // A workspace's `.mcp.json` and `.env` live in its own agent root, so the
-  // tab reads and writes that one root rather than the install root.
-  workspace: () => projectStore.activeWorkspace,
-})
+// Native MCP inventory follows the sidebar's selected workspace.
+const mcp = useMcpServers({ api, workspace: () => projectStore.activeWorkspace })
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
@@ -2271,32 +2254,6 @@ const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 
-async function createMcpViaChat() {
-  const activeProj = projectStore.activeProject
-  let projectId = activeProj?.project_id
-  if (!projectId) {
-    projectId = projectStore.workspaceProjects[0]?.project_id
-  }
-  if (!projectId) {
-    projectId = projectStore.projects[0]?.project_id
-  }
-  if (!projectId) {
-    notifySaved('Create a project first, then start the chat.', 'No project yet')
-    return
-  }
-
-  try {
-    const chat = await projectStore.createChat(projectId, 'New MCP Server')
-    if (chat) {
-      router.push({
-        path: `/chat/${chat.chat_id}`,
-        query: { initialPrompt: 'Help me set up and configure a new MCP server for this project.' }
-      })
-    }
-  } catch (e) {
-    notifyFailed('Could not create chat', errorMessage(e))
-  }
-}
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
 // The scale itself, its bounds, its step and its persistence live in
@@ -4143,8 +4100,6 @@ onMounted(async () => {
   fetchUpdateStatus()
   fetchProviderKeys().then(scrollToChatProvidersIfLinked)
   mcp.fetchStatus()
-  mcp.fetchUsage()
-  mcp.fetchAgentStatus()
   // Render from cache immediately, then pick up anything connected elsewhere.
   fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
   fetchGwsIntegration()
@@ -4473,9 +4428,7 @@ async function localHandback(confirmWarnings = false) {
   actionPending.value = null
 }
 
-// The memory-backup panel opens the setup chat's route itself; opening it is a
-// navigation, and the panel holds no router. Same shape as the MCP panel's
-// one `create-via-chat` emit.
+// The memory-backup panel holds no router, so this view opens its setup chat.
 function openBackupSetupChat(chatId: string) {
   if (chatId) router.push(`/chat/${chatId}`)
 }

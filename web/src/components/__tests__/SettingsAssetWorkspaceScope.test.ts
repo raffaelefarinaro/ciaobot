@@ -23,7 +23,7 @@ const responses: Record<string, unknown> = {
   '/api/admin/skills': { counts: {}, skills: [] },
   '/api/commands': { commands: [], skills: [] },
   '/api/agent-assets': { subagents: [], commands: [], health: { status: 'ok', checks: [] } },
-  '/api/mcp/status': { enabled: false, bound: false, tool_count: 0, project_servers: [] },
+  '/api/mcp/status': { workspace: 'personal', agent_root: '/workspace/personal', providers: [] },
   '/api/mcp/usage': {},
   '/api/settings/providers': { connections: {} },
 }

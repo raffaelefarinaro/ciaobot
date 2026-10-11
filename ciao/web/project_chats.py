@@ -4333,6 +4333,63 @@ class ProjectChatManager:
             workspace = self._config.primary_workspace()
         return workspace
 
+    async def provider_mcp_runtime_connections(
+        self, workspace: str, server_names: dict[str, list[str]]
+    ) -> dict[str, dict[str, list[dict[str, str]]]]:
+        """Read provider-native MCP status from cached live sessions only."""
+        result: dict[str, dict[str, list[dict[str, str]]]] = {
+            provider: {name: [] for name in names}
+            for provider, names in server_names.items()
+        }
+        sessions: list[tuple[str, str, Any]] = []
+        for chat_id, provider_service in list(self._providers.items()):
+            chat = self._chats.get(chat_id)
+            if chat is None or chat.provider not in {"opencode", "claude"}:
+                continue
+            if self._workspace_for_chat(chat_id) != workspace:
+                continue
+            provider = getattr(provider_service, "_provider", None)
+            if chat.provider == "opencode" and bool(getattr(provider, "has_live_server", False)):
+                sessions.append((chat_id, chat.provider, provider))
+            elif chat.provider == "claude" and bool(getattr(provider, "_connected", False)):
+                sessions.append((chat_id, chat.provider, provider))
+
+        async def read(
+            session: tuple[str, str, Any]
+        ) -> tuple[str, str, dict[str, str] | None]:
+            chat_id, provider_name, provider = session
+            try:
+                states = await provider.read_mcp_status()
+            except Exception:  # noqa: BLE001 — status must not expose provider errors
+                return chat_id, provider_name, None
+            return chat_id, provider_name, states
+
+        states_by_session = await asyncio.gather(*(read(session) for session in sessions))
+        for chat_id, provider_name, states in states_by_session:
+            provider_result = result.setdefault(provider_name, {})
+            all_names = set(server_names.get(provider_name, []))
+            if states is not None:
+                all_names.update(states)
+            for name in all_names:
+                connections = provider_result.setdefault(name, [])
+                raw_state = states.get(name) if states is not None else None
+                state = raw_state if raw_state in {
+                    "connected", "failed", "disabled", "needs_auth"
+                } else "unknown"
+                connection = {
+                    "state": state,
+                    "provider": provider_name,
+                    "chat_id": chat_id,
+                }
+                if state == "failed":
+                    connection["error"] = "MCP server connection failed. Check the provider logs."
+                elif state == "needs_auth":
+                    connection["error"] = "MCP server needs authentication."
+                elif states is None:
+                    connection["error"] = "Could not read provider MCP status."
+                connections.append(connection)
+        return result
+
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         """Resolve the agent root for a chat's owning workspace.
 

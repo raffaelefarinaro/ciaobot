@@ -73,7 +73,7 @@ from ciao.providers.base import (
 from ciao.execution_modes import (
     opencode_credential_deny_rules,
 )
-from ciao.fs_sandbox import opencode_sandbox_prefix
+from ciao.fs_sandbox import node_tool_read_roots, opencode_sandbox_prefix
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
 from ciao.providers._sse import SSEDecoder
 from ciao.tool_path import resolve_tool
@@ -1314,7 +1314,7 @@ def _validate_form_answer(
     return answer
 
 
-def _sandboxed_server_dirs(binary: str) -> tuple[list[Path], list[Path], Path]:
+def _sandboxed_server_dirs(binary: str, *, path: str | None = None) -> tuple[list[Path], list[Path], Path]:
     """The folders a sandboxed ``opencode serve`` needs beyond the workspace.
 
     Read-write: its data folder (login and session database), its state folder
@@ -1336,6 +1336,7 @@ def _sandboxed_server_dirs(binary: str) -> tuple[list[Path], list[Path], Path]:
         xdg("XDG_DATA_HOME", home / ".local" / "share") / "opencode",
         xdg("XDG_STATE_HOME", home / ".local" / "state") / "opencode",
         cache_home / "opencode",
+        cache_home / "npm",
         Path(tempfile.gettempdir()) / "opencode",
     ]
     install = Path(binary).resolve().parent
@@ -1354,9 +1355,11 @@ def _sandboxed_server_dirs(binary: str) -> tuple[list[Path], list[Path], Path]:
         )
         if folder.exists()
     ]
+    read_only = [folder.resolve() for folder in read_only]
+    read_only.extend(node_tool_read_roots(os.environ.get("PATH", "") if path is None else path))
     return (
         [folder.resolve() for folder in writable],
-        [folder.resolve() for folder in read_only],
+        list(dict.fromkeys(read_only)),
         cache_home,
     )
 
@@ -1488,6 +1491,40 @@ class OpencodeProvider(BaseSDKProvider):
     @property
     def current_session_id(self) -> str | None:
         return self._session_id or None
+
+    async def read_mcp_status(self) -> dict[str, str]:
+        """Read MCP connection states from this already-running V2 server.
+
+        An absent/dead server is not started for a Settings read. The V2
+        ``/api/mcp`` contract returns ``data`` rows with a nested status
+        discriminator. Unknown or malformed rows are omitted so callers can
+        report uncertainty instead of claiming a connection.
+        """
+        client = self._client
+        if not self.has_live_server or client is None:
+            return {}
+        response = await client.get("/api/mcp", timeout=2.0)
+        response.raise_for_status()
+        body = response.json()
+        rows = body.get("data") if isinstance(body, Mapping) else None
+        if not isinstance(rows, list):
+            raise ValueError("OpenCode MCP status response is malformed")
+        result: dict[str, str] = {}
+        allowed = {
+            "connected", "failed", "disabled", "needs_auth", "pending",
+            "needs_client_registration",
+        }
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            name = str(row.get("name") or "").strip()
+            status = row.get("status")
+            state = str(status.get("status") or "") if isinstance(status, Mapping) else ""
+            if name and state in allowed:
+                result[name] = (
+                    "needs_auth" if state == "needs_client_registration" else state
+                )
+        return result
 
     @property
     def has_live_server(self) -> bool:
@@ -1669,7 +1706,8 @@ class OpencodeProvider(BaseSDKProvider):
         argv = [binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"]
         if request.agent_fs_scope != "workspace":
             return argv, {}
-        writable, read_only, cache_home = _sandboxed_server_dirs(binary)
+        effective_env = {**os.environ, **(request.extra_env or {})}
+        writable, read_only, cache_home = _sandboxed_server_dirs(binary, path=effective_env.get("PATH", ""))
         roots = [Path(root) for root in request.agent_roots] + writable
         prefix = opencode_sandbox_prefix(roots=roots, read_only=read_only)
         for folder in writable:
@@ -1678,7 +1716,10 @@ class OpencodeProvider(BaseSDKProvider):
         # ~/.local/bin, which is outside every granted folder, so bwrap cannot
         # follow it. The resolved file is inside the read-only install.
         argv[0] = str(Path(binary).resolve())
-        return [*prefix, *argv], {"XDG_CACHE_HOME": str(cache_home)}
+        return [*prefix, *argv], {
+            "XDG_CACHE_HOME": str(cache_home),
+            "npm_config_cache": str(cache_home / "npm"),
+        }
 
     async def _start_server_once(
         self, request: AgentRequest, binary: str

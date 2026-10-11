@@ -18,6 +18,7 @@ from ciao.fs_sandbox import (
     claude_file_tool_guard,
     claude_sandbox_settings,
     engine_read_roots,
+    node_tool_read_roots,
     path_outside_roots,
     opencode_sandbox_prefix,
 )
@@ -701,3 +702,28 @@ def test_engine_inside_a_writable_root_is_read_only_after_the_bind_on_bwrap(tmp_
     # so it sits on top of it.
     assert len(bind_at) == 1 and len(ro_at) == 1
     assert ro_at[0] > bind_at[0]
+
+
+def test_node_tool_roots_keep_npm_code_read_only_and_exclude_home_cache(tmp_path, monkeypatch):
+    if sys.platform == "win32":
+        return  # Windows does not use these sandbox grants or POSIX npm symlinks.
+    install = tmp_path / "node-install"
+    binary = install / "bin"
+    binary.mkdir(parents=True)
+    node = binary / "node"
+    node.write_text("node")
+    package = install / "lib" / "node_modules" / "npm"
+    (package / "bin").mkdir(parents=True)
+    (package / "package.json").write_text("{}")
+    for tool in ("npm", "npx"):
+        entry = package / "bin" / f"{tool}-cli.js"
+        entry.write_text("npm code")
+        (binary / tool).symlink_to(entry)
+    monkeypatch.setattr(shutil, "which", lambda tool, path: str(binary / tool))
+    roots = node_tool_read_roots(str(binary))
+    assert node in roots
+    assert package in roots
+    assert binary / "npx" in roots
+    assert install not in roots
+    assert tmp_path not in roots
+    assert tmp_path / ".npm" not in roots

@@ -269,31 +269,18 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   guide, then Use Ciaobot as an app, Notifications, Keyboard shortcuts and the
   update task history.
   The "On this page" navigation is built from the rendered sections in DOM order,
-  so it follows that order. The MCP tab is the first one out.
-  `composables/useMcpServers.ts` owns the MCP state and every
-  `/api/mcp/*` call — the status, the per-server edit drafts, the expansion
-  map, the secret inputs, the tool probes and the add form. It imports no
-  store, no router and no lifecycle hook: the API client, `notifySaved`,
-  `notifyFailed` and the delete confirmation all arrive as options, so
-  `composables/useMcpServers.test.ts` drives all of it without mounting
-  anything. `components/settings/SettingsMcpServers.vue` owns only the markup;
-  it takes the controller as one prop and emits `create-via-chat` for the one
-  action it cannot do itself (creating a chat and navigating).
-  `SettingsView` keeps the tab routing, the project store and the router, and
-  keeps deciding *when* MCP data loads — `fetchStatus()`/`fetchUsage()` still
-  run from its `onMounted` for every tab. `/api/mcp/usage` is fetched even
-  though no template renders it: the operator reads that endpoint by hand to
-  decide which MCP tools to prune. Do not drop the call.
-  **Skills, Subagents, Commands and MCP servers are scoped to one workspace** —
-  the one selected in the sidebar, named `assetScope` in `SettingsView` and
-  passed to `useMcpServers` as its `workspace` option. The name rides every read
-  AND every write, because a workspace's agent assets and its `.mcp.json`/`.env`
-  live in that workspace's own agent root: an unscoped request resolves the
-  install root, which on a re-rooted install is a different directory from the
-  one the list just showed. `assetScope` is the single place to change if that
-  ever moves; a `watch` on `projectStore.activeWorkspace` refetches all four.
-  `useMcpServers` takes the workspace as an option rather than reading a store,
-  to stay composable and unit-testable without Pinia.
+  so it follows that order. The MCP tab is a read-only provider inventory:
+  `composables/useMcpServers.ts` owns status and usage reads, while
+  `components/settings/SettingsMcpServers.vue` renders provider configuration,
+  per-chat connection states, and provider-native setup/auth instructions.
+  Settings never edits native MCP configuration, handles secret values, probes
+  servers, or starts a provider/MCP process. The selected workspace scopes
+  `/api/mcp/status`; only already running chats in that workspace contribute
+  connection states. An empty connections list means unchecked, and unreadable
+  configuration/provider state is unknown. Claude's workspace server allowlist
+  remains authoritative and is never broadened by Settings. Add/authenticate
+  servers with `claude mcp add` / `claude mcp login` or `opencode mcp add` /
+  `opencode mcp auth` from that workspace's directory.
   Shared settings styling lives in `components/settings/settingsPanels.css`,
   loaded by both sides with `<style scoped src>` — a parent's scoped rules
   never reach a child, and the alternative is silently unstyled markup. New
@@ -377,3 +364,5 @@ CI runs it as a blocking step of the existing `test` job, straight after
 Browser automation does not reproduce iOS PWA suspension, the software
 keyboard, or native-shell behaviour. The device checklist in "iOS PWA gotchas"
 above still has to be walked by hand on a real phone before a release.
+
+The MCP Settings panel shows provider-native configuration separately from per-chat connection states returned by `/api/mcp/status`. No running observable session means connection not checked, and unreadable configuration/provider status is unknown.

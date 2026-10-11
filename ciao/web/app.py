@@ -21,10 +21,6 @@ from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao.package_version import make_cached_package_status
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
 from ciao.web.routes_mcp import (
-    mcp_env_keys_endpoint,
-    mcp_server_item_endpoint,
-    mcp_server_tools_endpoint,
-    mcp_servers_collection_endpoint,
     mcp_status_endpoint,
     mcp_usage_endpoint,
 )
@@ -616,10 +612,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/agent/status", agent_status_endpoint, methods=["GET"]),
         Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
         Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
-        Route("/api/mcp/env-keys", mcp_env_keys_endpoint, methods=["POST"]),
-        Route("/api/mcp/servers", mcp_servers_collection_endpoint, methods=["POST"]),
-        Route("/api/mcp/servers/{name}", mcp_server_item_endpoint, methods=["PATCH", "DELETE"]),
-        Route("/api/mcp/servers/{name}/tools", mcp_server_tools_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),
         Route("/api/push/subscribe", push_subscribe, methods=["POST"]),

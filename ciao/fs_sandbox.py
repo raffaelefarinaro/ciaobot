@@ -154,6 +154,32 @@ def _user_scheme_install_paths() -> list[Path]:
     ]
 
 
+def node_tool_read_roots(path: str) -> list[Path]:
+    """Read-only Node and npm code reached by the provider's actual PATH.
+
+    nvm and similar installers put npm outside the workspace. Grant the
+    executable, its symlink hops, and npm's own package, never the user's
+    home or global npm cache. Sandboxed npx gets a separate writable cache.
+    """
+    roots: list[Path] = []
+    for tool in ("node", "npm", "npx"):
+        executable = shutil.which(tool, path=path)
+        if executable is None:
+            continue
+        original = Path(executable).absolute()
+        resolved = original.resolve()
+        candidates = [original, resolved, *_symlink_hops(original)]
+        if tool in {"npm", "npx"}:
+            # npm's own entry points are <npm>/bin/{npm,npx}-cli.js.
+            package = resolved.parent.parent
+            if resolved.parent.name == "bin" and (package / "package.json").is_file():
+                candidates.append(package)
+        for candidate in candidates:
+            if candidate not in roots:
+                roots.append(candidate)
+    return roots
+
+
 def _shadowed_engine_roots(roots: Sequence[Path], engine: Sequence[Path]) -> list[Path]:
     """Engine folders inside a writable root: readable there, but never writable."""
     return [path for path in engine if any(path.is_relative_to(root) for root in roots)]

@@ -132,13 +132,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/memory/entity-types` | The vault's category list (`?workspace=` required) as `{workspace, vault, types}`, where each row is `{id, label, kind, folder, description, aliases, stale_after_days, enabled, builtin, note_count}`. `GET` returns every effective entry, disabled ones included; `note_count` is the notes carrying that `type:` (an alias counts for its category, drift under its own spelling). A `PATCH` sends the whole desired list as `{"types": [...]}` — a row whose `id` is a shipped one is a partial override of that category's default (an omitted field falls back to the shipped default; a custom row's omitted fields take the built-in defaults instead, so send the whole list), only rows that differ from the shipped default are written to `<agent vault root>/entity-types.yaml`, and the write regenerates `VOCABULARY.md` with a `## Categories` section. 400 for a malformed body, a duplicate id, two enabled categories sharing a folder, an alias that is another entry's id, a missing label, a negative `stale_after_days`, or a delete of a custom category whose notes still name it; 500 when the file cannot be written (the old file is left in place) |
 | GET, PATCH | `/api/status` | Read or update status |
-| GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); `?workspace=<name>` scopes it to that workspace's own `.mcp.json`. Ciaobot's own surface is reported by `/api/agent/status` |
+| GET | `/api/mcp/status` | Read-only provider-native MCP inventory for `?workspace=<name>` (or the primary workspace). Returns `{workspace, agent_root, providers}`. Each provider row has `{provider, available, inventory_state, servers, setup}`. Server rows contain safe metadata `{name, scope, source, kind, enabled, allowed, connections}`; connections are per-chat `{chat_id, state, error?}` with state `connected`, `failed`, `disabled`, `needs_auth`, or `unknown`. `allowed` is `false` when Claude workspace policy blocks the server, `true` when a project server is permitted, and `null` when policy is not applicable/known. No running session produces an empty connections array. Invalid native config yields `inventory_state: "unknown"`; secrets, endpoint URLs, arguments and raw provider errors are never returned. The route does not start providers or MCP servers. Use the provider's own CLI to add/authenticate servers; `setup.add` and `setup.authenticate` give workspace-specific instructions |
 | GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
-| POST | `/api/mcp/env-keys` | Save project-MCP env secrets into the workspace `.env` (optionally bind new keys into a server via `server`); values never returned |
-| POST | `/api/mcp/servers` | Create a project MCP server in `.mcp.json`; `?workspace=<name>` writes that workspace's own file |
-| PATCH | `/api/mcp/servers/{name}` | Update a project MCP server connection (and optional env keys); `?workspace=<name>` scopes the file |
-| DELETE | `/api/mcp/servers/{name}` | Remove a project MCP server from `.mcp.json`; `?workspace=<name>` scopes the file |
-| GET | `/api/mcp/servers/{name}/tools` | Lazy tool discovery for one project MCP server (HTTP `tools/list` probe, or observed telemetry for stdio); `?workspace=<name>` scopes the lookup |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); guards a drain before an engine restart |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
@@ -935,35 +930,18 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
   -d '{"revision":"<revision-from-GET>","keyboard_shortcuts":{"archiveChat":"Mod+KeyK","workspace2":"disabled"},"keyboard_send_mode":"enter"}'
 ```
 
-**Project MCP servers (Settings → MCP tab)**
+**MCP inventory and status (Settings → MCP)**
 
 ```bash
-# Create a project MCP server in .mcp.json. Pass url for an HTTP server, or
-# command (+ optional args) for a stdio one; one of the two is required.
-# env_keys binds placeholder names to .env keys the server needs.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/mcp/servers" \
-  -H 'content-type: application/json' \
-  -d '{"name":"linear","url":"https://mcp.linear.app/sse","env_keys":{"LINEAR_API_KEY":""}}'
+# Read native Claude Code and OpenCode configuration plus already running
+# chat connections for one registered workspace. This is read-only; it never
+# starts a provider or MCP server.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/mcp/status?workspace=personal"
 
-# Update one server. Omitted transport fields (url, command, args) keep their
-# current values, so a PATCH can change env bindings alone.
-curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear" \
-  -H 'content-type: application/json' \
-  -d '{"env_keys":{"LINEAR_API_KEY":"LINEAR_TOKEN"}}'
-
-# Delete one server. 404 when the name is not in .mcp.json.
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear?workspace=personal"
-
-# Discover a server's tools on demand (HTTP probe, or previously observed names).
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear/tools"
-
-# Save MCP secrets into the workspace .env. Values are write-only: they are
-# never returned by any endpoint. Keys already known from a discovered server
-# are accepted bare; an unknown key needs "server" so it can be bound into that
-# server's .mcp.json env map.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/mcp/env-keys" \
-  -H 'content-type: application/json' \
-  -d '{"server":"linear","keys":{"LINEAR_API_KEY":"lin_api_..."}}'
+# Add or authenticate MCP servers through the provider CLI from the workspace
+# directory. Claude Code: `claude mcp add --scope local --transport http <name> <url>`
+# and `/mcp` (or `claude mcp login <name>`) for OAuth. OpenCode V2:
+# `opencode mcp add <name> --url <url>` and `opencode mcp auth <name>`.
 ```
 
 **Workspace git sync**

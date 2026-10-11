@@ -101,42 +101,32 @@ export interface ArchivedWorkspacesResponse {
   archived: ArchivedWorkspace[]
 }
 
-export interface McpEnvKey {
-  key: string
-  configured: boolean
-  source: string
+export interface McpConnection {
+  state: 'connected' | 'failed' | 'disabled' | 'needs_auth' | 'unknown'
+  chat_id: string
+  error?: string
 }
 
-export interface McpProjectServer {
+export interface McpNativeServer {
   name: string
-  url?: string
-  command?: string
-  args?: string[]
-  transport?: 'http' | 'stdio' | string
+  scope: string
   source: string
-  config_path?: string
-  env_path?: string
-  env_keys?: McpEnvKey[]
-  ready?: boolean
-  tool_prefix?: string
-  tools?: string[]
-  tools_source?: 'observed' | 'probed' | 'none' | string
-  tools_note?: string
+  allowed: boolean | null
+  connections: McpConnection[]
+}
+
+export interface McpProviderInventory {
+  provider: 'claude' | 'opencode'
+  available: boolean
+  inventory_state: 'loaded' | 'unknown'
+  servers: McpNativeServer[]
+  setup: { add: string; authenticate: string }
 }
 
 export interface McpStatus {
-  enabled: boolean
-  bound: boolean
-  url?: string
-  tool_count: number
-  tools?: string[]
-  env_path?: string
-  /** The workspace these servers belong to; '' is the install root. */
-  workspace?: string
-  project_servers?: McpProjectServer[]
-  active_sessions?: number
-  providers?: string[]
-  last_error?: string
+  workspace: string
+  agent_root: string
+  providers: McpProviderInventory[]
 }
 
 /** Status of the agent CLI surface (Settings → Agent CLI), from /api/agent/status. */

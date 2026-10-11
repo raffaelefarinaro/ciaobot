@@ -19,6 +19,7 @@ from claude_agent_sdk import ClaudeSDKError
 
 from ciao.providers.claude import ClaudeProvider, _sdk_permission_mode
 from ciao.providers.opencode import OpencodeProvider
+from ciao.web.project_chats import ProjectChatManager
 
 
 @pytest.fixture
@@ -105,6 +106,52 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     bash_hooks = options.hooks["PreToolUse"]
     matchers = {hook.matcher for hook in bash_hooks}
     assert matchers == {"Bash", "Monitor"}
+
+
+@pytest.mark.asyncio
+async def test_claude_live_mcp_status_is_normalized_and_excludes_secrets(
+    claude_provider: ClaudeProvider,
+) -> None:
+    class FakeClient:
+        async def get_mcp_status(self):
+            return {
+                "mcpServers": [
+                    {"name": "notion", "status": "connected", "tools": [{"name": "search"}]},
+                    {"name": "private", "status": "needs-auth", "error": "credential=secret"},
+                ]
+            }
+
+    claude_provider._client = FakeClient()
+    claude_provider._connected = True
+
+    assert await claude_provider.read_mcp_status() == {
+        "notion": "connected", "private": "needs_auth"
+    }
+
+
+@pytest.mark.asyncio
+async def test_claude_mcp_status_timeout_becomes_unknown_in_runtime_status():
+    class Claude:
+        _connected = True
+
+        async def read_mcp_status(self):
+            raise TimeoutError("sensitive timeout detail")
+
+    manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._chats = {"chat": SimpleNamespace(provider="claude")}
+    manager._providers = {"chat": SimpleNamespace(_provider=Claude())}
+    manager._workspace_for_chat = lambda _chat_id: "work"
+
+    rows = await manager.provider_mcp_runtime_connections("work", {"claude": ["notion"]})
+
+    assert rows == {
+        "claude": {
+            "notion": [{
+                "state": "unknown", "provider": "claude", "chat_id": "chat",
+                "error": "Could not read provider MCP status.",
+            }]
+        }
+    }
 
 
 @pytest.mark.asyncio
@@ -1368,6 +1415,15 @@ def _capture_spawn(monkeypatch, envs: list[dict] | None = None) -> list[tuple[st
 
 async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypatch):
     provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    request.extra_env = {"PATH": str(tmp_path / "node-bin")}
+    node_code = tmp_path / "node-code"
+    paths: list[str] = []
+
+    def native_node_roots(path):
+        paths.append(path)
+        return [node_code]
+
+    monkeypatch.setattr("ciao.providers.opencode.node_tool_read_roots", native_node_roots)
     envs: list[dict] = []
     spawned = _capture_spawn(monkeypatch, envs)
     calls: list[tuple[list[Path], list[Path]]] = []
@@ -1389,6 +1445,8 @@ async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypa
         await provider._start_server_once(request, str(binary))
 
     roots, read_only = calls[0]
+    assert paths == [str(tmp_path / "node-bin")]
+    assert node_code in read_only
     assert roots[:2] == [tmp_path / "agent", tmp_path / "vault"]
     sandbox_cache = Path.home() / ".cache" / "ciaobot-opencode-sandbox"
     # The server writes its data and state, and a cache no unconfined server
@@ -1397,9 +1455,12 @@ async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypa
     assert (xdg / "data" / "opencode").resolve() in roots
     assert (xdg / "state" / "opencode").resolve() in roots
     assert (sandbox_cache / "opencode").resolve() in roots
-    assert read_only == [(xdg / "config" / "opencode").resolve(), (tmp_path / "install").resolve()]
+    assert (xdg / "config" / "opencode").resolve() in read_only
+    assert (tmp_path / "install").resolve() in read_only
+    assert (sandbox_cache / "npm").resolve() in roots
     assert not set(read_only) & set(roots)
     assert envs[0]["XDG_CACHE_HOME"] == str(sandbox_cache)
+    assert envs[0]["npm_config_cache"] == str(sandbox_cache / "npm")
     argv = spawned[0]
     assert argv[:3] == ("sandbox-exec", "-p", "PROFILE")
     assert argv[3:6] == (str(binary), "serve", "--port")

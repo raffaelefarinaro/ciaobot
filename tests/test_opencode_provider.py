@@ -3547,3 +3547,43 @@ async def test_the_ephemeral_server_degrades_when_the_wrapper_is_broken(
 
     async with mod._EphemeralServer(tmp_path) as client:
         assert client is None
+
+
+@pytest.mark.parametrize("failure", [False, True])
+async def test_live_mcp_status_uses_v2_contract_and_is_bounded(tmp_path, failure):
+    from types import SimpleNamespace
+
+    provider = OpencodeProvider(tmp_path)
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            if failure:
+                raise TimeoutError("private upstream detail")
+
+        def json(self):
+            return {
+                "data": [
+                    {"name": "notion", "status": {"status": "failed", "error": "secret"}},
+                    {"name": "linear", "status": {"status": "connected"}},
+                    {"name": "disabled", "status": {"status": "disabled"}},
+                ]
+            }
+
+    class Client:
+        async def get(self, path, *, timeout):
+            calls.append((path, timeout))
+            if failure:
+                raise TimeoutError("private upstream detail")
+            return Response()
+
+    provider._client = Client()
+    provider._process = SimpleNamespace(returncode=None)
+    if failure:
+        with pytest.raises(TimeoutError):
+            await provider.read_mcp_status()
+    else:
+        assert await provider.read_mcp_status() == {
+            "notion": "failed", "linear": "connected", "disabled": "disabled"
+        }
+    assert calls == [("/api/mcp", 2.0)]

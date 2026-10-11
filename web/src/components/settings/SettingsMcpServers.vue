@@ -1,353 +1,94 @@
 <template>
-  <div class="card" id="mcp-servers">
+  <section class="card" id="mcp-servers">
     <div class="settings-card-header settings-card-header--split">
       <div>
-        <p class="section-title">MCP servers</p>
-        <p class="hint">
-          Servers give Ciaobot agents tools, such as your calendar or a database.
-          The list below shows the servers of the <strong>{{ workspaceLabel }}</strong> workspace: connections in its <code>.mcp.json</code> and secrets in its <code>.env</code>.
-        </p>
-        <p class="hint">MCP servers installed directly in Claude Code or opencode may also be available in chats run by that provider. See their connection status under Models &amp; providers. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/models.html#inherit" target="_blank" rel="noopener noreferrer">How provider tools carry over</a></p>
+        <h2 class="section-title">MCP servers</h2>
+        <p class="hint">Connections belong to Claude Code or OpenCode. This list shows their configuration for the <strong>{{ status?.workspace || 'selected' }}</strong> workspace and connection status from open chats.</p>
       </div>
-      <div class="settings-card-header-actions mcp-head-actions">
-        <button class="mcp-quiet-link" type="button" @click="emit('create-via-chat')">Ask Ciao to add one</button>
-        <button class="btn-small" type="button" :aria-expanded="showAddServer" @click="toggleAddServer">
-          {{ showAddServer ? 'Cancel' : 'New MCP server' }}
-        </button>
-      </div>
+      <button class="btn-small" type="button" :disabled="loading" @click="fetchStatus">{{ loading ? 'Checking…' : 'Refresh' }}</button>
     </div>
-
-    <!-- Add MCP Server Form -->
-    <div v-if="showAddServer" class="settings-form-panel">
-      <div class="settings-field-grid">
-        <label class="settings-field">
-          <span class="ws-label">Server name</span>
-          <input class="routine-input" v-model="newName" :disabled="addingServer" placeholder="e.g. postgres-db" />
-        </label>
-        <label class="settings-field">
-          <span class="ws-label">Transport</span>
-          <select class="routine-select" v-model="newTransport" :disabled="addingServer">
-            <option value="http">HTTP / SSE</option>
-            <option value="stdio">stdio (Command)</option>
-          </select>
-        </label>
-        <label v-if="newTransport === 'http'" class="settings-field settings-field--wide">
-          <span class="ws-label">Server URL</span>
-          <input class="routine-input" v-model="newUrl" :disabled="addingServer" placeholder="https://mcp.example.com/http" />
-        </label>
-        <label v-else class="settings-field settings-field--wide">
-          <span class="ws-label">Command</span>
-          <input class="routine-input" v-model="newCommand" :disabled="addingServer" placeholder="npx -y @modelcontextprotocol/server-postgres postgresql://..." />
-        </label>
-      </div>
-      <div class="action-row settings-actions">
-        <button class="btn-primary" @click="addCustomServer" :disabled="addingServer || !newName.trim() || (newTransport === 'http' ? !newUrl.trim() : !newCommand.trim())">
-          {{ addingServer ? 'Adding...' : 'Add MCP server' }}
-        </button>
-      </div>
-      <div v-if="addServerResult" class="action-result" :class="{ '--error': addServerError }">{{ addServerResult }}</div>
-    </div>
-
-    <!-- An empty state that explains what these are for, instead of nothing. -->
-    <div
-      v-if="status && !(status.project_servers && status.project_servers.length) && !showAddServer"
-      class="mcp-empty"
-    >
-      <span class="mcp-empty-text">
-        <span class="mcp-empty-title">No MCP servers yet.</span>
-        <span class="mcp-empty-sub">Add one to give Ciaobot a tool it does not have out of the box.</span>
-      </span>
-      <button class="mcp-link" type="button" @click="toggleAddServer">Add one</button>
-    </div>
-
-    <!-- List of MCP Servers (exact skill-list / skill-row UI) -->
-    <div v-if="status?.project_servers?.length" class="skill-list">
-      <!-- Custom & Project .mcp.json Servers -->
-      <template v-if="status?.project_servers && status.project_servers.length">
-        <div
-          v-for="srv in status.project_servers"
-          :key="srv.name"
-          class="skill-row"
-          :class="{ expanded: isExpanded(srv.name) }"
-          @click="toggleServer(srv.name)"
-        >
-          <div class="skill-main">
-            <div class="skill-title-row command-title-row">
-              <span class="skill-chevron">{{ isExpanded(srv.name) ? '&#9662;' : '&#9656;' }}</span>
-              <span class="skill-name">{{ srv.name }}</span>
-              <span class="skill-badges">
-                <span :class="assetOriginClass(mcpServerOrigin(srv))">{{ assetOriginLabel(mcpServerOrigin(srv)) }}</span>
-                <span
-                  class="badge"
-                  :class="srv.ready === false ? 'badge--warn' : 'badge--success'"
-                >
-                  {{ srv.ready === false ? 'needs .env' : 'ready' }}
-                </span>
-              </span>
-            </div>
-            <p v-if="srv.url" class="skill-description">URL: {{ srv.url }}</p>
-            <p v-else-if="srv.command" class="skill-description">
-              Command: {{ commandLine(srv) }}
-            </p>
-            <div v-if="isExpanded(srv.name)" class="skill-detail" @click.stop>
-              <div class="settings-field-grid mcp-edit-grid">
-                <label v-if="(editDraft(srv).transport || srv.transport) === 'http'" class="settings-field settings-field--wide">
-                  <span class="ws-label">URL</span>
-                  <input
-                    class="routine-input"
-                    :value="editDraft(srv).url"
-                    :disabled="serverSaving === srv.name"
-                    aria-label="MCP server URL"
-                    @input="setEditField(srv.name, 'url', ($event.target as HTMLInputElement).value)"
-                  />
-                </label>
-                <template v-else>
-                  <label class="settings-field">
-                    <span class="ws-label">Command</span>
-                    <input
-                      class="routine-input"
-                      :value="editDraft(srv).command"
-                      :disabled="serverSaving === srv.name"
-                      aria-label="MCP server command"
-                      @input="setEditField(srv.name, 'command', ($event.target as HTMLInputElement).value)"
-                    />
-                  </label>
-                  <label class="settings-field settings-field--wide">
-                    <span class="ws-label">Args</span>
-                    <input
-                      class="routine-input"
-                      :value="editDraft(srv).argsText"
-                      :disabled="serverSaving === srv.name"
-                      placeholder="e.g. -y @notionhq/notion-mcp-server"
-                      aria-label="MCP server args"
-                      @input="setEditField(srv.name, 'argsText', ($event.target as HTMLInputElement).value)"
-                    />
-                  </label>
-                </template>
-                <p v-if="srv.env_path || status?.env_path" class="settings-field settings-field--wide hint hint--compact">
-                  Secrets are saved to <code>{{ srv.env_path || status?.env_path }}</code>. Connection config stays in <code>.mcp.json</code>.
-                </p>
-              </div>
-
-              <div class="mcp-env-block">
-                <p class="skill-meta">
-                  <span class="skill-meta-label">Secrets for this server</span>
-                </p>
-                <p class="hint hint--compact">
-                  Paste the token into the field below. It is saved to the workspace <code>.env</code> (not into <code>.mcp.json</code>).
-                </p>
-                <div
-                  v-for="envKey in envKeysFor(srv)"
-                  :key="`${srv.name}:${envKey.key}`"
-                  class="credential-row mcp-env-row"
-                >
-                  <div class="setting-row-main setting-row-main--inline">
-                    <div class="routine-info">
-                      <span class="routine-name">{{ envKey.key }}</span>
-                      <p v-if="envKey.hint" class="hint hint--compact">{{ envKey.hint }}</p>
-                    </div>
-                    <span class="badge" :class="envKey.configured ? 'badge--success' : 'badge--error'">
-                      {{ envKey.configured ? 'Configured' : 'Missing' }}
-                    </span>
-                  </div>
-                  <input
-                    type="password"
-                    class="routine-input"
-                    :value="envInputs[envKey.key] || ''"
-                    :placeholder="envKey.configured ? '•••••••••••• (leave blank to keep)' : `Paste ${envKey.key}`"
-                    :disabled="envSaving"
-                    :aria-label="envKey.key"
-                    @input="envInputs[envKey.key] = ($event.target as HTMLInputElement).value"
-                  />
-                </div>
-                <p v-if="!envKeysFor(srv).length" class="hint hint--compact">
-                  No secrets referenced by this server's <code>.mcp.json</code> config.
-                </p>
-                <div class="action-row settings-actions">
-                  <button
-                    class="btn-small"
-                    :disabled="envSaving || !hasEnvEdits(srv)"
-                    @click="saveEnvKeys(srv)"
-                  >
-                    {{ envSaving ? 'Saving...' : 'Save secrets' }}
-                  </button>
-                  <button
-                    class="btn-small"
-                    :disabled="serverSaving === srv.name || !editDirty(srv)"
-                    @click="saveServer(srv)"
-                  >
-                    {{ serverSaving === srv.name ? 'Saving...' : 'Save connection' }}
-                  </button>
-                </div>
-                <div
-                  v-if="(envResult && envResultServer === srv.name) || (serverResult && serverResultName === srv.name)"
-                  class="action-result"
-                  :class="{ '--error': (envResultServer === srv.name && envError) || (serverResultName === srv.name && serverError) }"
-                >{{ (envResultServer === srv.name && envResult) || (serverResultName === srv.name && serverResult) }}</div>
-              </div>
-
-              <div class="mcp-tools-block">
-                <div class="setting-row setting-row--inline" style="margin-top: 8px;">
-                  <p class="skill-meta" style="margin: 0;">
-                    <span class="skill-meta-label">
-                      Tools ({{ (serverTools[srv.name] || srv.tools || []).length }})
-                      <template v-if="srv.tools_source && srv.tools_source !== 'none'">
-                        · {{ srv.tools_source }}
-                      </template>
-                    </span>
-                  </p>
-                  <button
-                    class="btn-small"
-                    :disabled="toolsLoading[srv.name]"
-                    @click="refreshServerTools(srv)"
-                  >
-                    {{ toolsLoading[srv.name] ? 'Loading...' : (srv.transport === 'http' ? 'Probe tools' : 'Refresh') }}
-                  </button>
-                </div>
-                <p
-                  v-if="toolsError[srv.name] || (!(serverTools[srv.name] || srv.tools || []).length && srv.tools_note)"
-                  class="hint hint--compact"
-                  :class="{ 'hint--warn': !!toolsError[srv.name] }"
-                >
-                  {{ toolsError[srv.name] || srv.tools_note }}
-                </p>
-                <div
-                  v-if="(serverTools[srv.name] || srv.tools || []).length"
-                  class="mcp-tag-grid mcp-tag-grid--wide"
-                >
-                  <span
-                    v-for="tool in (serverTools[srv.name] || srv.tools || [])"
-                    :key="tool"
-                    class="mcp-tag mcp-tag--embedded"
-                  >{{ tool }}</span>
-                </div>
-              </div>
-
-              <div class="asset-actions">
-                <button class="btn-small btn-danger" @click.stop="deleteCustomServer(srv.name)">Delete</button>
-              </div>
-            </div>
-          </div>
+    <p v-if="error" class="action-result --error" role="alert">{{ error }}</p>
+    <p v-if="loading" class="hint" role="status">Reading CLI configuration and open chat connections…</p>
+    <template v-if="status">
+      <p class="hint">Run setup commands on the computer running Ciaobot, in this workspace folder:</p>
+      <code class="mcp-workspace-path">{{ status.agent_root }}</code>
+      <p class="hint">Add and authenticate a server separately in each CLI you use. After changing configuration, start a new chat to load it.</p>
+      <section v-for="inventory in status.providers" :key="inventory.provider" class="mcp-provider" :aria-labelledby="`mcp-${inventory.provider}-title`">
+        <div class="mcp-provider-heading">
+          <h3 :id="`mcp-${inventory.provider}-title`">{{ providerLabel(inventory.provider) }}</h3>
+          <span v-if="!inventory.available" class="badge badge--muted">not installed</span>
         </div>
-      </template>
-    </div>
-  </div>
+        <p v-if="inventory.inventory_state === 'unknown'" class="hint" role="status">Some CLI configuration could not be read. Check this workspace in {{ providerLabel(inventory.provider) }} for the complete list.</p>
+        <p v-else-if="!inventory.servers.length" class="hint">No MCP servers configured for this CLI in this workspace.</p>
+        <div v-for="server in inventory.servers" :key="server.name" class="mcp-server">
+          <div class="mcp-server-heading">
+            <span class="skill-name">{{ server.name }}</span>
+            <span class="badge badge--muted">{{ scopeLabel(server.scope) }}</span>
+            <span v-if="server.allowed === false" class="badge badge--warn">blocked in workspace</span>
+          </div>
+          <p v-if="server.allowed === false" class="hint">This workspace’s tool restrictions prevent access to this server.</p>
+          <div v-for="connection in server.connections" :key="connection.chat_id" class="mcp-connection">
+            <span class="badge" :class="stateClass(connection.state)">{{ stateLabel(connection.state) }}</span>
+            <a :href="`/chat/${encodeURIComponent(connection.chat_id)}`" :aria-label="`Open ${providerLabel(inventory.provider)} chat ${connection.chat_id}`">Open chat</a>
+            <p v-if="connection.error" class="hint">{{ connection.error }}</p>
+          </div>
+          <p v-if="!server.connections.length" class="hint">Connection not checked. Start a {{ providerLabel(inventory.provider) }} chat in this workspace to check it.</p>
+        </div>
+        <details class="mcp-setup">
+          <summary>Set up MCP in {{ providerLabel(inventory.provider) }}</summary>
+          <p class="hint">Replace the example name and URL with your server’s details. These commands add it only for this workspace.</p>
+          <pre tabindex="0" role="region" :aria-label="`${providerLabel(inventory.provider)} workspace setup commands`"><code>{{ inventory.setup.add }}</code></pre>
+          <p class="hint">For a server that requires OAuth sign-in:</p>
+          <pre tabindex="0" role="region" :aria-label="`${providerLabel(inventory.provider)} authentication commands`"><code>{{ inventory.setup.authenticate }}</code></pre>
+          <p class="hint">Sign-in runs through the CLI on the host. For a remote host, connect over SSH and follow the CLI’s browser or headless sign-in instructions.</p>
+          <a class="mcp-doc-link" :href="inventory.provider === 'claude' ? 'https://code.claude.com/docs/en/mcp' : 'https://opencode.ai/v2/docs/mcp-servers'" target="_blank" rel="noopener noreferrer">{{ providerLabel(inventory.provider) }} MCP instructions</a>
+        </details>
+      </section>
+    </template>
+  </section>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-
-// Settings → MCP. Markup only: every piece of state and every `/api/mcp/*`
-// call belongs to the `useMcpServers` controller SettingsView creates and
-// passes in, so this component owns nothing that outlives a render. The one
-// action it cannot perform itself — "Add via chat", which creates a chat and
-// navigates — is reported as an emit.
-//
-// The controller object is created once per SettingsView instance and never
-// replaced, so destructuring its refs here is safe and lets the template read
-// them unwrapped.
-import { assetOriginClass, assetOriginLabel, mcpServerOrigin } from '../../lib/assetOrigin'
 import type { McpServersController } from '../../composables/useMcpServers'
-import type { McpProjectServer } from '../../lib/types'
+import type { McpConnection, McpProviderInventory } from '../../lib/types'
 
 const props = defineProps<{ mcp: McpServersController }>()
+const { status, loading, error, fetchStatus } = props.mcp
 
-const emit = defineEmits<{ 'create-via-chat': [] }>()
+function providerLabel(provider: McpProviderInventory['provider']): string {
+  return provider === 'claude' ? 'Claude Code' : 'OpenCode'
+}
 
-const {
-  status,
-  showAddServer,
-  addingServer,
-  addServerResult,
-  addServerError,
-  newName,
-  newTransport,
-  newUrl,
-  newCommand,
-  envInputs,
-  envSaving,
-  envResult,
-  envError,
-  envResultServer,
-  serverSaving,
-  serverResult,
-  serverError,
-  serverResultName,
-  serverTools,
-  toolsLoading,
-  toolsError,
-  toggleAddServer,
-  isExpanded,
-  toggleServer,
-  editDraft,
-  setEditField,
-  editDirty,
-  envKeysFor,
-  hasEnvEdits,
-  saveEnvKeys,
-  saveServer,
-  refreshServerTools,
-  addCustomServer,
-  deleteCustomServer,
-} = props.mcp
+function scopeLabel(scope: string): string {
+  const labels: Record<string, string> = { local: 'this workspace', project: 'project', user: 'all workspaces', global: 'all workspaces', account: 'account', provider: 'provider' }
+  return labels[scope] || scope
+}
 
-// Which workspace's `.mcp.json` the list above is showing. The controller
-// echoes it back from the status payload, so the copy cannot name a
-// different workspace than the one whose servers are listed.
-const workspaceLabel = computed(
-  () => props.mcp.status.value?.workspace || 'selected',
-)
+function stateLabel(state: McpConnection['state']): string {
+  return { connected: 'connected', failed: 'connection failed', disabled: 'disabled', needs_auth: 'sign-in required', unknown: 'connection not checked' }[state]
+}
 
-// One interpolation, not `{{ srv.command }}<template> {{ args }}</template>`:
-// Vue's whitespace condensing trims the leading space inside the <template>,
-// so `{"command": "python", "args": ["server.py"]}` read as
-// `Command: pythonserver.py`. Args containing whitespace are quoted so the
-// line stays unambiguous.
-function commandLine(srv: McpProjectServer): string {
-  const quote = (arg: string) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)
-  return [srv.command ?? '', ...(srv.args ?? []).map(quote)].join(' ')
+function stateClass(state: McpConnection['state']): string {
+  return state === 'connected' ? 'badge--success' : state === 'failed' ? 'badge--error' : 'badge--warn'
 }
 </script>
 
-<!-- The rules this markup needs used to live in SettingsView's own scoped
-     block, which does not reach a child's subtree. Both sides now load the
-     same sheet. -->
 <style scoped src="./settingsPanels.css"></style>
-
 <style scoped>
-.mcp-head-actions { align-items: center; }
-/* Quiet text actions: secondary routes that must not compete with the one
-   neutral "New MCP server" button. */
-.mcp-quiet-link,
-.mcp-link {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 0;
-  border: 0;
-  background: none;
-  font: inherit;
-  font-size: var(--text-sm);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.mcp-quiet-link { color: var(--fg2); }
-.mcp-link { color: var(--accent); }
-.mcp-quiet-link:hover,
-.mcp-link:hover { text-decoration: underline; text-underline-offset: 3px; }
-.mcp-empty {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  min-height: 72px;
-  padding: var(--space-3) 0;
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-}
-.mcp-empty-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
-.mcp-empty-title { color: var(--fg); font-weight: 500; }
-.mcp-empty-sub { color: var(--fg3); font-size: var(--text-sm); }
+.mcp-workspace-path { display: block; overflow-wrap: anywhere; font-size: var(--text-sm); }
+.mcp-provider { margin-top: var(--space-5); }
+.mcp-provider-heading, .mcp-server-heading { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.mcp-provider-heading h3 { margin: 0; font-size: var(--text-base); font-weight: 600; }
+.mcp-server { padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+.mcp-server-heading { margin-bottom: var(--space-2); }
+.mcp-server .hint { margin: var(--space-2) 0 0; }
+.mcp-connection { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
+.mcp-connection .hint { flex-basis: 100%; }
+.mcp-connection a, .mcp-doc-link { color: var(--accent); font-size: var(--text-sm); }
+.mcp-setup { margin-top: var(--space-3); }
+.mcp-setup summary { cursor: pointer; color: var(--fg2); font-size: var(--text-sm); padding: var(--space-2) 0; }
+.mcp-setup pre { max-width: 100%; overflow-x: auto; background: var(--bg); padding: var(--space-3); border-radius: var(--radius-sm); font-size: var(--text-sm); }
 @media (pointer: coarse) {
-  .mcp-quiet-link, .mcp-link { min-height: var(--touch); }
+  .mcp-setup summary, .mcp-connection a, .mcp-doc-link { min-height: var(--touch); display: inline-flex; align-items: center; }
 }
 </style>

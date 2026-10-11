@@ -462,6 +462,26 @@ class ClaudeProvider(BaseSDKProvider):
         """Session id as currently known to the provider (may be set mid-stream)."""
         return self._session_id
 
+    async def read_mcp_status(self) -> dict[str, str]:
+        """Read MCP status from this already-connected Claude SDK client."""
+        client = self._client
+        if client is None or not self._connected:
+            return {}
+        payload = await asyncio.wait_for(client.get_mcp_status(), timeout=2.0)
+        rows = payload.get("mcpServers") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("Claude MCP status response is malformed")
+        allowed = {"connected", "failed", "disabled", "pending", "needs-auth"}
+        result: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            state = str(row.get("status") or "")
+            if name and state in allowed:
+                result[name] = "needs_auth" if state == "needs-auth" else state
+        return result
+
     def _log_client_turn(self, request: AgentRequest, *, reused: bool, reason: str) -> None:
         """One line per turn: whether the live SDK client was reused or replaced, and why."""
         chat = (request.extra_env or {}).get("CIAO_CHAT_ID") or request.resume_session or "-"
