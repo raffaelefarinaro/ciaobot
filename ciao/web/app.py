@@ -13,9 +13,11 @@ from starlette.middleware import Middleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.routing import Mount, Route, WebSocketRoute
-from starlette.staticfiles import StaticFiles
+from starlette.datastructures import Headers
+from starlette.staticfiles import NotModifiedResponse, StaticFiles
 from starlette.responses import FileResponse, Response
 
+from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao.package_version import make_cached_package_status
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
 from ciao.web.routes_mcp import (
@@ -247,6 +249,19 @@ _HASHED_TEXT_ASSET = re.compile(r"-[A-Za-z0-9_-]{6,}\.(?:js|css)$", re.IGNORECAS
 class CacheControlStaticFiles(StaticFiles):
     """StaticFiles subclass that sets long-term caching for hashed assets."""
 
+    def file_response(self, full_path, stat_result, scope, status_code=200) -> Response:
+        # Starlette guesses from the module-level mimetypes table, which on
+        # Windows reads the registry; see ciao.os_support.media_types.
+        response = FileResponse(
+            full_path,
+            status_code=status_code,
+            stat_result=stat_result,
+            media_type=guess_media_type(str(full_path)),
+        )
+        if self.is_not_modified(response.headers, Headers(scope=scope)):
+            return NotModifiedResponse(response.headers)
+        return response
+
     async def get_response(self, path: str, scope) -> Response:
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = _IMMUTABLE_CACHE
@@ -354,7 +369,7 @@ def _spa_catchall(request):
         candidate = STATIC_DIR / requested
         if candidate.is_file():
             headers = {"Cache-Control": _NO_CACHE} if requested in ("sw.js", "manifest.json") else {}
-            return FileResponse(candidate, headers=headers)
+            return FileResponse(candidate, headers=headers, media_type=guess_media_type(candidate.name))
     index = STATIC_DIR / "index.html"
     headers = {"Cache-Control": _NO_CACHE}
     if index.exists():
