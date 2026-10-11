@@ -7059,10 +7059,6 @@ details[open] > .activity-summary::before {
   }
   :deep(.header-title) { text-align: left; min-width: 0; }
   .header-left { min-width: 0; }
-  /* The header is one row here, led by the menu and Back, so a third leading
-     icon would only squeeze the title: the sidebar drawer and Back already
-     leave the chat. */
-  .close-btn { display: none; }
   /* With the project on the line below, the title keeps to one line so the
      pair stays as tall as the icons beside it. */
   .header-breadcrumb--stacked:has(.breadcrumb-scope) .pane-title.chat-title {
