@@ -21,7 +21,7 @@ async function mountSection(props: Partial<InstanceType<typeof AgentContextSecti
       : new Response('', { status: 404 })
   )))
   const wrapper = mount(AgentContextSection, {
-    props: { project: PROJECT, contextPct: null, ...props },
+    props: { project: PROJECT, contextPct: null, compacting: false, compactDisabled: false, ...props },
     global: { stubs: { RouterLink: RouterLinkStub } },
   })
   await flushPromises()
@@ -89,7 +89,7 @@ describe('AgentContextSection', () => {
         : new Response('', { status: 404 })
     }))
     const wrapper = mount(AgentContextSection, {
-      props: { project: PROJECT, contextPct: null },
+      props: { project: PROJECT, contextPct: null, compacting: false, compactDisabled: false },
       global: { stubs: { RouterLink: RouterLinkStub } },
     })
     await flushPromises()
@@ -101,5 +101,33 @@ describe('AgentContextSection', () => {
     await flushPromises()
     expect(wrapper.find('.agent-context-error').exists()).toBe(false)
     expect(wrapper.text()).toContain('AGENTS.md')
+  })
+
+  it('puts a Compact button beside the context meter and emits compact', async () => {
+    const wrapper = await mountSection({ contextPct: 42 })
+    const button = wrapper.get('.agent-context-meter-row button')
+    expect(button.text()).toBe('Compact')
+    expect(button.attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('[role="meter"]').element.parentElement).toBe(button.element.parentElement)
+    await button.trigger('click')
+    expect(wrapper.emitted('compact')).toHaveLength(1)
+  })
+
+  it('shows no Compact button until the provider has reported a context figure', async () => {
+    const wrapper = await mountSection({ contextPct: null })
+    expect(wrapper.find('.agent-context-compact').exists()).toBe(false)
+  })
+
+  it('disables Compact while the chat streams, and says so while a request is in flight', async () => {
+    const busy = await mountSection({ contextPct: 42, compactDisabled: true })
+    const disabled = busy.get('.agent-context-compact')
+    expect(disabled.attributes('disabled')).toBeDefined()
+    await disabled.trigger('click')
+    expect(busy.emitted('compact')).toBeUndefined()
+
+    const pending = await mountSection({ contextPct: 42, compacting: true, compactDisabled: true })
+    const label = pending.get('.agent-context-compact')
+    expect(label.text()).toBe('Compacting…')
+    expect(label.attributes('aria-busy')).toBe('true')
   })
 })

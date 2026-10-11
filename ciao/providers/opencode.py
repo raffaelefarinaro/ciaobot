@@ -55,6 +55,7 @@ from ciao.models import (
     PermissionRequestEvent,
     ResultEvent,
     StreamEvent,
+    SystemStatusEvent,
     ThinkingEvent,
     TokenUsageEvent,
     ToolUseEvent,
@@ -89,6 +90,7 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
     "/api/session/active",
     "/api/session/{sessionID}",
     "/api/session/{sessionID}/agent",
+    "/api/session/{sessionID}/compact",
     "/api/session/{sessionID}/fork",
     "/api/session/{sessionID}/interrupt",
     "/api/session/{sessionID}/message",
@@ -2062,6 +2064,84 @@ class OpencodeProvider(BaseSDKProvider):
             # it can never become an unretrieved task exception.
             logger.debug("OpenCode interrupt failed for %s", session_id, exc_info=True)
 
+    async def _compact_session(
+        self, client: httpx.AsyncClient, session_id: str, request: AgentRequest
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Compact the session and wait until OpenCode reports it finished.
+
+        Subscribes before posting, as a prompt turn does, so the terminal
+        compaction event cannot be missed. Unlike a prompt turn there is no
+        reconnect or poll backstop: a dropped event stream ends the compaction
+        as an error, and the user can run it again.
+        """
+        error = ""
+        compacted = False
+        try:
+            async with client.stream("GET", "/api/event") as stream:
+                stream.raise_for_status()
+                yield SystemStatusEvent(type="system", status="compacting")
+                response = await client.post(
+                    f"/api/session/{session_id}/compact", json={}
+                )
+                if response.status_code >= 400:
+                    detail = _sanitize_error(response.text)
+                    error = f"OpenCode rejected the compaction: {detail}"
+                else:
+                    decoder = SSEDecoder()
+                    async for sse in decoder.aiter_bytes(stream.aiter_bytes()):
+                        if self._stop_requested == session_id:
+                            break
+                        try:
+                            event = sse.json()
+                        except ValueError:
+                            continue
+                        if not isinstance(event, Mapping):
+                            continue
+                        props = event.get("data")
+                        props = props if isinstance(props, Mapping) else {}
+                        event_session = str(props.get("sessionID") or "")
+                        if event_session and event_session != session_id:
+                            continue
+                        kind = str(event.get("type") or "")
+                        if kind in {"session.compaction.ended", "session.compacted"}:
+                            # Clears the tracked core id, so the next turn re-sends it.
+                            self._event_to_stream(event)
+                            if props.get("error"):
+                                error = error_text(props.get("error"))
+                            else:
+                                compacted = True
+                            break
+                        if kind in {
+                            "session.compaction.failed",
+                            "session.execution.failed",
+                        }:
+                            error = error_text(props.get("error"))
+                            break
+                        if kind == "session.execution.interrupted":
+                            error = "OpenCode execution was interrupted"
+                            break
+        except httpx.HTTPError as exc:
+            error = error or f"OpenCode connection failed: {exc}"
+
+        if compacted:
+            yield SystemStatusEvent(type="system", status="Compacted context")
+        if not compacted and not error:
+            error = (
+                "Compaction was stopped"
+                if self._stop_requested == session_id
+                else "OpenCode ended without reporting the compaction"
+            )
+        await self._augment_context_pct(client, self._turn_model)
+        yield ResultEvent(
+            type="result",
+            result=error,
+            session_id=session_id,
+            is_error=bool(error),
+            effective_model=self._effective_model or request.model,
+            usage=self._usage,
+            cost_usd=self._cost,
+        )
+
     def _prompt_body(
         self, request: AgentRequest, *, system: str = ""
     ) -> dict[str, Any]:
@@ -2979,6 +3059,16 @@ class OpencodeProvider(BaseSDKProvider):
         session_id = await self._ensure_session(request)
         self._reset_turn_state()
         register_handle(OpencodeActiveHandle(self, session_id))
+
+        if request.compact:
+            try:
+                async for converted in self._compact_session(
+                    client, session_id, request
+                ):
+                    yield converted
+            finally:
+                register_handle(None)
+            return
 
         # The chat core is re-sent only when this session's transcript lacks it:
         # a new or replacement session, a handover, or after a compaction

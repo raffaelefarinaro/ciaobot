@@ -946,6 +946,47 @@ def test_claude_convert_system_message_suppresses_allowed_rate_limit(
     assert events3[0].status == "Rate limit exceeded (five_hour)"
 
 
+def test_claude_compact_boundary_reports_the_token_change(
+    claude_provider: ClaudeProvider,
+) -> None:
+    from claude_agent_sdk import SystemMessage
+
+    events = claude_provider._convert_message(
+        SystemMessage(
+            subtype="compact_boundary",
+            data={
+                "compact_metadata": {
+                    "trigger": "manual",
+                    "pre_tokens": 16000,
+                    "post_tokens": 2000,
+                }
+            },
+        )
+    )
+    assert [event.status for event in events] == [
+        "Compacted context: 16,000 → 2,000 tokens"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_compact_sends_only_the_slash_command(
+    claude_provider: ClaudeProvider,
+) -> None:
+    from ciao.models import AgentRequest
+
+    # A capsule ahead of "/compact" makes the SDK answer in text instead of
+    # compacting, so the compact prompt must go out bare.
+    request = AgentRequest(
+        prompt="[CIAO_CONTEXT_BEGIN]\ncapsule\n[CIAO_CONTEXT_END]\n\n/compact",
+        model="opus",
+        mode="normal",
+        compact=True,
+        stable_context_prefix="capsule",
+    )
+    messages = [message async for message in claude_provider._prompt_payload(request)]
+    assert [message["message"]["content"] for message in messages] == ["/compact"]
+
+
 @pytest.mark.parametrize("mode", ["normal", "plan"])
 @pytest.mark.asyncio
 async def test_manual_and_plan_modes_pre_approve_nothing(

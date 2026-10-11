@@ -2659,6 +2659,43 @@ async def chat_prompt(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "chat_id": chat_id})
 
 
+async def chat_compact(request: Request) -> JSONResponse:
+    """Compact the chat's provider session to shrink its context window.
+
+    Runs as a stream like any turn, so the PWA sees the same status and result
+    events. A chat with no provider session yet has nothing to compact, and a
+    chat with a live user turn must wait for it to finish.
+    """
+    from ciao.models import COMPACT_COMMAND
+
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if chat.archived:
+        return JSONResponse(
+            {"error": "chat is archived", "archived": True}, status_code=409
+        )
+    active = pcm.get_active_stream(chat_id)
+    # A between-turns drain is background work that a real run replaces.
+    if active is not None and not active.background:
+        return JSONResponse({"error": "chat is busy"}, status_code=409)
+    if not chat.session_id:
+        return JSONResponse({"error": "nothing to compact yet"}, status_code=409)
+
+    try:
+        pcm.start_stream(chat_id, COMPACT_COMMAND, compact=True)
+    except ValueError as exc:
+        # An open question the user has not answered yet.
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except Exception as exc:
+        logger.exception("Failed to start compaction for %s", chat_id)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"ok": True, "chat_id": chat_id})
+
+
 async def chat_mark_read(request: Request) -> JSONResponse:
     """Mark a chat as read on the server. Emits a chat_read event so other
     tabs/devices clear their unread state, and cancels any pending delayed
