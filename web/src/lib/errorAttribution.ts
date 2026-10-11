@@ -1,4 +1,4 @@
-type ErrorAttributionKind = 'auth' | 'timeout' | 'blocked' | 'remote-http' | 'provider' | 'unknown'
+type ErrorAttributionKind = 'auth' | 'quota' | 'timeout' | 'blocked' | 'remote-http' | 'provider' | 'unknown'
 
 export interface ErrorAttribution {
   kind: ErrorAttributionKind
@@ -15,10 +15,28 @@ export function isProviderAuthError(errorText: string): boolean {
   return text.includes('not logged in') && text.includes('/login')
 }
 
+// A provider usage or rate limit. Same shapes as `_is_terminal_quota_error`
+// and `_is_retryable_quota_error` in ciao/web/chat_service.py.
+export function isUsageLimitError(errorText: string): boolean {
+  const text = (errorText || '').toLowerCase()
+  return /\b(usage limit|session limit|weekly limit|monthly limit|rate limit|quota|too many requests|upgrade for higher limits|usage credits|out of (?:extra )?usage)\b/.test(text)
+    || /\b(?:reached|hit) your\b[^.]*\blimit\b/.test(text)
+}
+
+// Weekly/monthly limits reset days away; no automatic retry is armed.
+function isTerminalUsageLimit(text: string): boolean {
+  return /\b(weekly usage limit|weekly limit|monthly limit|upgrade for higher limits)\b/.test(text)
+}
+
 export function classifyError(errorText: string): ErrorAttribution {
   const text = (errorText || '').toLowerCase()
   if (isProviderAuthError(text)) {
     return { kind: 'auth', label: 'Signed out', copy: 'The AI provider\'s login expired. Sign in again to continue.' }
+  }
+  if (isUsageLimitError(text)) {
+    return isTerminalUsageLimit(text)
+      ? { kind: 'quota', label: 'Usage limit reached', copy: 'The AI provider\'s usage limit is used up and won\'t reset for a while. Its message above says when, or how to upgrade or add credits.' }
+      : { kind: 'quota', label: 'Usage limit reached', copy: 'The AI provider\'s usage limit was reached. Its message above says when it resets.' }
   }
   if (/\b(timeout|timed out|deadline exceeded)\b/.test(text)) {
     return { kind: 'timeout', label: 'Timed out', copy: 'The operation took too long to finish.' }
