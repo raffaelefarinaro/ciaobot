@@ -1713,7 +1713,7 @@ defineExpose({ isBusyAuthoring })
 .pfp-md :deep(blockquote) {
   margin: 0.6em 0;
   padding: 0 0 0 12px;
-  border-left: 3px solid var(--border);
+  border-left: 1px solid var(--border-strong);
   color: var(--fg2);
 }
 .pfp-md :deep(hr) {

@@ -1332,12 +1332,11 @@ function clearedDate(note: VaultClearedNote): string {
 
 /* A note the pass is holding for a person. The box is the row's reason for
    being here now, so it takes the same quiet treatment as the evidence boxes
-   above — a rule and a tinted ground, not a second card. */
+   above — a thin perimeter and a tonal ground. */
 .vr-pending {
   margin-top: var(--space-2);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
   border-radius: var(--radius-sm, 6px);
   background: var(--bg2);
 }
@@ -1374,8 +1373,8 @@ function clearedDate(note: VaultClearedNote): string {
   .vr-pending-link { min-height: var(--touch); }
 }
 
-/* The facts inside a note. Its own border colour from the pending box, because
-   it is the same kind of thing: something decided elsewhere, shown here so the
+/* The facts inside a note use the same quiet perimeter as the pending box:
+   something decided elsewhere, shown here so the
    row is not a bare verdict. Everything in it is one line of one file, so the
    type is deliberately smaller and quieter than the row's own heading — a
    fifty-bullet note must not read as fifty paragraphs of chrome. */
@@ -1383,7 +1382,6 @@ function clearedDate(note: VaultClearedNote): string {
   margin-top: var(--space-2);
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--border);
   border-radius: var(--radius-sm, 6px);
   background: var(--bg2);
 }
@@ -1489,16 +1487,14 @@ function clearedDate(note: VaultClearedNote): string {
   .vr-entry-decision .vr-pending-link { min-height: var(--touch); }
 }
 
-/* A proposal whose revision the note has left. Warning-coloured, because it
-   explains why the pipeline stopped and the row is actionable again — which is
+/* A proposal whose revision the note has left. Its text explains why the
+   pipeline stopped and the row is actionable again — which is
    the opposite of a row that is merely busy. */
 .vr-conflict {
   margin: var(--space-2) 0 0;
   color: var(--fg2);
   font-size: var(--text-sm);
   line-height: 1.5;
-  padding-left: var(--space-2);
-  border-left: 3px solid color-mix(in srgb, var(--warning) 70%, transparent);
 }
 
 /* The note's own words, visible without a click, clamped to two lines. */
