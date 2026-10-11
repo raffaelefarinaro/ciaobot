@@ -1545,6 +1545,7 @@ async function addProject() {
   try {
     const p = await store.createProject(name)
     expandedProjects.add(p.project_id)
+    openProject(p.project_id)
   } catch (e) {
     // A failed create used to reject silently, leaving the same "nothing
     // happened" symptom the missing dialog caused. `alert` is also a no-op in
