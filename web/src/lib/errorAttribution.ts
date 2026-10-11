@@ -16,14 +16,24 @@ export function isProviderAuthError(errorText: string): boolean {
 }
 
 // A provider usage or rate limit. Same shapes as `_is_terminal_quota_error`
-// and `_is_retryable_quota_error` in ciao/web/chat_service.py.
+// and `_is_retryable_quota_error` in ciao/web/chat_service.py. Bare "quota"
+// or "rate limit" is not enough: tools report those too ("disk quota
+// exceeded", "Google API quota exceeded"), so they only match with a provider
+// name or an exhaustion verb.
 export function isUsageLimitError(errorText: string): boolean {
   const text = (errorText || '').toLowerCase()
-  return /\b(usage limit|session limit|weekly limit|monthly limit|rate limit|quota|too many requests|upgrade for higher limits|usage credits|out of (?:extra )?usage)\b/.test(text)
+  return /\b(usage limit|session limit|weekly limit|monthly limit|upgrade for higher limits|usage credits|out of (?:extra )?usage)\b/.test(text)
     || /\b(?:reached|hit) your\b[^.]*\blimit\b/.test(text)
+    || /\brate limit (?:exceeded|reached|hit|exhausted)\b/.test(text)
+    || /\b(?:anthropic|claude|codex|opencode|openai|ollama) quota (?:exceeded|reached|exhausted)\b/.test(text)
+    // A 429 only counts with a limit noun, as in `_is_retryable_quota_error`.
+    || ((/\b429\b/.test(text) || text.includes('too many requests'))
+      && /\b(usage limit|rate limit|quota|session)\b/.test(text))
 }
 
-// Weekly/monthly limits reset days away; no automatic retry is armed.
+// Weekly and monthly limits get one retry a day for up to a week
+// (`quota_terminal` in ciao/web/project_chats.py), not the hourly retry, so
+// the card says the limit will not clear soon.
 function isTerminalUsageLimit(text: string): boolean {
   return /\b(weekly usage limit|weekly limit|monthly limit|upgrade for higher limits)\b/.test(text)
 }
@@ -47,7 +57,7 @@ export function classifyError(errorText: string): ErrorAttribution {
   if (/\b(?:http|status|status code)\s*[45]\d{2}\b|\b[45]\d{2}\s+(?:error|bad gateway|gateway timeout)\b/.test(text)) {
     return { kind: 'remote-http', label: 'Remote service error', copy: 'A remote service returned an HTTP error.' }
   }
-  if (/\b(provider|anthropic|claude|codex|opencode|model|quota|rate limit|token)\b/.test(text)) {
+  if (/\b(provider|anthropic|claude|codex|opencode|model|rate limit|token)\b/.test(text)) {
     return { kind: 'provider', label: 'Provider error', copy: 'The selected AI provider could not complete the request.' }
   }
   return { kind: 'unknown', label: 'Unknown error', copy: 'The operation did not complete.' }

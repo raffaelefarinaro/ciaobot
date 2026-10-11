@@ -8185,6 +8185,8 @@ class ProjectChatManager:
         except (RuntimeError, ValueError):
             # The agent reads a PDF itself, so a failed copy is no reason to drop it.
             if not is_natively_readable(original):
+                # Nothing can read this upload, so drop the copy this call just wrote.
+                Path(original).unlink(missing_ok=True)
                 raise
             logger.warning("Attaching %s without a Markdown copy", Path(original).name, exc_info=True)
             return {**entry, "markdown_path": None, "attach_paths": [original]}

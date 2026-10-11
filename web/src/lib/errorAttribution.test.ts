@@ -16,9 +16,33 @@ describe('classifyError', () => {
     ["You've hit your session limit · resets 3pm", 'quota'],
     ['Rate limit exceeded, retry later', 'quota'],
     ['OpenCode model not found', 'provider'],
+    ['disk quota exceeded', 'unknown'],
+    ['Google API quota exceeded for quota metric generativelanguage.googleapis.com', 'unknown'],
     ['something unexpected', 'unknown'],
   ])('classifies %s as %s', (text, kind) => {
     expect(classifyError(text).kind).toBe(kind)
+  })
+})
+
+describe('isUsageLimitError', () => {
+  it.each([
+    'disk quota exceeded',
+    'Google API quota exceeded for quota metric generativelanguage.googleapis.com',
+    '429 Too Many Requests',
+  ])('does not match tool quota text: %s', (text) => {
+    expect(isUsageLimitError(text)).toBe(false)
+  })
+
+  it.each([
+    'Rate limit exceeded, retry later',
+    'Anthropic quota exceeded',
+    'The usage limit has been reached',
+    'Rate limit exhausted for this key',
+    'Anthropic quota exhausted',
+    'API Error: 429 Too Many Requests: rate limit',
+    'HTTP 429: quota exceeded for this session',
+  ])('matches provider usage-limit phrasing: %s', (text) => {
+    expect(isUsageLimitError(text)).toBe(true)
   })
 })
 
@@ -33,6 +57,12 @@ describe('usage-limit copy', () => {
     const attribution = classifyError('You\'ve hit your session limit')
     expect(attribution.copy).toContain('says when it resets')
     expect(attribution.copy).not.toContain('won\'t reset')
+  })
+
+  it('classifies a 429 usage limit as quota, not a remote HTTP error', () => {
+    // The status 4xx rule would otherwise match first.
+    expect(classifyError('HTTP 429: quota exceeded for this session').kind).toBe('quota')
+    expect(classifyError('API Error: 429 Too Many Requests: rate limit').kind).toBe('quota')
   })
 
   it('exports isUsageLimitError', () => {
