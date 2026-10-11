@@ -5121,20 +5121,32 @@ class ProjectChatManager:
         resume_session: str | None = None,
         unattended: bool = False,
         require_mcp: bool = True,
+        compact: bool = False,
     ) -> AgentRequest:
         """Resolve all routing parameters and construct an AgentRequest.
 
         ``unattended`` marks an automation-driven turn, which changes
-        the permission mode (see ``_effective_mode_for_chat``).
+        the permission mode (see ``_effective_mode_for_chat``). ``compact``
+        marks a context compaction: the prompt is the bare command, so no
+        capsule, file expansion, images or stable-context marker apply.
         """
-        prefix = self._build_prompt_prefix(chat, unattended=unattended)
-        context_digest, context_session_id = self._stable_context_marker(chat)
-        if not prefix:
+        if compact:
+            images = None
+            prefix = ""
             context_digest = ""
             context_session_id = ""
-        provider_prompt = self.expand_file_refs(prompt, chat.chat_id)
-        full_prompt = prefix + provider_prompt if prefix else provider_prompt
-        final_display_prompt = prefix + display_prompt if prefix else display_prompt
+            provider_prompt = prompt
+            full_prompt = prompt
+            final_display_prompt = display_prompt
+        else:
+            prefix = self._build_prompt_prefix(chat, unattended=unattended)
+            context_digest, context_session_id = self._stable_context_marker(chat)
+            if not prefix:
+                context_digest = ""
+                context_session_id = ""
+            provider_prompt = self.expand_file_refs(prompt, chat.chat_id)
+            full_prompt = prefix + provider_prompt if prefix else provider_prompt
+            final_display_prompt = prefix + display_prompt if prefix else display_prompt
 
         # The Ciaobot agent control plane is the only agent-facing control
         # surface. There is no CLI/direct-file fallback to degrade to, so a
@@ -5190,7 +5202,8 @@ class ProjectChatManager:
             thinking_level=self._thinking_level_for_chat(chat),
             context_digest=context_digest,
             context_session_id=context_session_id,
-            stable_context_prefix=self._stable_context_prefix(chat),
+            stable_context_prefix="" if compact else self._stable_context_prefix(chat),
+            compact=compact,
         )
 
     # ── Image-capability pre-flight ──────────────────────────────────────
@@ -5340,12 +5353,14 @@ class ProjectChatManager:
         images: list[ImageAttachment] | None = None,
         *,
         unattended: bool = False,
+        compact: bool = False,
     ) -> AsyncGenerator[StreamEvent, None]:
         async for event in self._streaming.stream_chat(
             chat_id,
             prompt,
             images=images,
             unattended=unattended,
+            compact=compact,
             capability_timeout_s=CAPABILITY_QUESTION_TIMEOUT_S,
             capability_image_message=_CAPABILITY_IMAGE_MSG,
         ):
@@ -6028,6 +6043,7 @@ class ProjectChatManager:
         *,
         is_retry: bool = False,
         unattended: bool = False,
+        compact: bool = False,
     ) -> ChatStream:
         """Start (or return the in-flight) ChatStream for this chat.
 
@@ -6039,6 +6055,9 @@ class ProjectChatManager:
         Auto-title generation and any post-stream work (push notifications)
         are owned by the caller via `stream.prompt_text` and by listening for
         the result event on their own subscription.
+
+        ``compact`` starts a context compaction instead of a user turn: it
+        takes no user-turn slot, echoes no user bubble and never auto-titles.
         """
         existing = self._broker.get(chat_id)
         if existing is not None and not existing.background:
@@ -6076,7 +6095,7 @@ class ProjectChatManager:
         # optimistic bubble it already rendered.
         turn_index: int | None = None
         sent_at_iso: str = ""
-        if chat_meta is not None:
+        if chat_meta is not None and not compact:
             if self._native_question_request_id(chat_meta.pending_question):
                 self._broker.clear(chat_id, stream)
                 stream.finish()
@@ -6135,7 +6154,8 @@ class ProjectChatManager:
             echo_payload["turn_index"] = turn_index
         if sent_at_iso:
             echo_payload["sent_at"] = sent_at_iso
-        stream.publish(echo_payload)
+        if not compact:
+            stream.publish(echo_payload)
 
         if chat_meta is not None:
             self._save()
@@ -6156,7 +6176,7 @@ class ProjectChatManager:
         # with both sides of the exchange and overwrites the early title if it
         # disagrees, so the assistant's framing can still win on the rare cases
         # where it matters.
-        if chat_meta and chat_meta.title == "New Chat" and prompt.strip():
+        if chat_meta and chat_meta.title == "New Chat" and prompt.strip() and not compact:
             chat_meta.title_status = "pending"
             self._events.publish({
                 "type": "chat_title",
@@ -6186,6 +6206,7 @@ class ProjectChatManager:
             stream=stream,
             is_retry=is_retry,
             unattended=unattended,
+            compact=compact,
         )
         return stream
 

@@ -4481,6 +4481,48 @@ describe('deep-link chat navigation', () => {
   })
 })
 
+describe('compact chat', () => {
+  test('posts the compact route and clears its in-flight flag when accepted', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValue({ ok: true, chat_id: 'chat-1' })
+
+    const pending = store.compactChat('chat-1')
+    expect(store.compactRequests['chat-1']).toBe(true)
+    await pending
+
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/chat-1/compact', {})
+    expect(store.compactRequests['chat-1']).toBeUndefined()
+    expect(store.toasts.filter(t => t.variant === 'error')).toHaveLength(0)
+  })
+
+  test('a second request while one is in flight is not sent', async () => {
+    const store = useProjectStore()
+    let accept: (value: unknown) => void = () => {}
+    apiPost.mockReturnValue(new Promise(resolve => { accept = resolve }))
+
+    const first = store.compactChat('chat-1')
+    await store.compactChat('chat-1')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+
+    accept({ ok: true, chat_id: 'chat-1' })
+    await first
+    expect(store.compactRequests['chat-1']).toBeUndefined()
+  })
+
+  test('a refused compaction raises an error toast and clears its flag', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValue(new Error('chat is busy'))
+
+    await store.compactChat('chat-1')
+
+    expect(store.compactRequests['chat-1']).toBeUndefined()
+    const errors = store.toasts.filter(t => t.variant === 'error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].title).toBe('Could not compact chat')
+    expect(errors[0].body).toBe('chat is busy')
+  })
+})
+
 describe('chat creation', () => {
   test('does not duplicate a chat when its event arrives before the POST response', async () => {
     const store = useProjectStore()

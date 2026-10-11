@@ -626,6 +626,84 @@ async def test_context_marker_waits_for_provider_session(tmp_path: Path) -> None
     assert chat.context_session_id == "native-session"
 
 
+def test_compact_request_carries_no_context_capsule(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Compact request", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+
+    normal = manager.build_agent_request(chat, prompt="hi")
+    assert "[CIAO_CONTEXT_BEGIN]" in normal.prompt
+
+    request = manager.build_agent_request(chat, prompt="/compact", compact=True)
+    assert request.compact is True
+    assert request.prompt == "/compact"
+    assert request.context_digest == ""
+    assert request.context_session_id == ""
+    assert request.stable_context_prefix == ""
+    assert request.images == []
+
+
+@pytest.mark.asyncio
+async def test_compact_stream_is_not_a_user_turn(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Compact stream", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    chat.session_id = "native-session"
+    chat.context_digest = "digest-before"
+    chat.context_session_id = "native-session"
+    turns_before = chat.user_turn_count
+    seen: list[dict] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **kwargs):
+        seen.append({"prompt": prompt, **kwargs})
+        yield ResultEvent(
+            type="result",
+            result="",
+            session_id="native-session",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    manager.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = manager.start_stream(chat.chat_id, "/compact", compact=True)
+    events = [event async for event in stream.subscribe()]
+
+    assert seen == [{"prompt": "/compact", "unattended": False, "compact": True}]
+    assert all(event.get("type") != "user_echo" for event in events)
+    assert chat.user_turn_count == turns_before
+    assert chat.context_digest == ""
+    assert chat.context_session_id == ""
+
+
+@pytest.mark.asyncio
+async def test_failed_compaction_is_not_retried_as_a_turn(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Compact retry", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    chat.session_id = "native-session"
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **kwargs):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): reached your session usage limit",
+            session_id="native-session",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    manager.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = manager.start_stream(chat.chat_id, "/compact", compact=True)
+    _ = [event async for event in stream.subscribe()]
+
+    assert chat.retry_status == ""
+
+
 @pytest.mark.asyncio
 async def test_opencode_effective_model_is_persisted_for_model_less_chat(
     tmp_path: Path,

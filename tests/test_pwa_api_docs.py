@@ -25,6 +25,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/chats/{chat_id}/attachments": "browser chat attachment upload",
     "/api/chats/{chat_id}/continue": "browser continuation of archived chat",
     "/api/chats/{chat_id}/prompt": "agents trigger prompts via ciao create-chat, not curl",
+    "/api/chats/{chat_id}/compact": "browser Compact button beside the context meter; agents do not compact their own session",
     "/api/schedules": "agents create/edit schedules via the schedule_* MCP tools, not curl",
     "/api/schedules/{schedule_id}": "agents edit schedules via the schedule_* MCP tools, not curl",
     "/api/status": "internal status PATCH",

@@ -4873,6 +4873,31 @@ export const useProjectStore = defineStore('projects', () => {
     void api.post(`/api/chats/${chatId}/stop`, {})
   }
 
+  // Compact requests in flight, per chat. The Compact button reads this while
+  // the POST is out; once the server's stream starts, its own status events
+  // and streaming state take over.
+  const compactRequests = ref<Record<string, boolean>>({})
+
+  // Compact a chat's provider session to shrink its context window. The server
+  // runs it as a stream, so progress arrives on the chat socket like a turn.
+  async function compactChat(chatId: string) {
+    if (compactRequests.value[chatId]) return
+    compactRequests.value[chatId] = true
+    try {
+      await api.post(`/api/chats/${chatId}/compact`, {})
+      // Reconnect so this tab's socket attaches to the stream the HTTP call
+      // started, as tryChatRetryNow does.
+      if (activeChatId.value === chatId) {
+        disconnectWs(chatId)
+        connectWs(chatId)
+      }
+    } catch (e) {
+      pushErrorToast('Could not compact chat', errorMessage(e))
+    } finally {
+      delete compactRequests.value[chatId]
+    }
+  }
+
   function armPermissionSubmissionTimer(
     chatId: string,
     requestId: string,
@@ -5998,7 +6023,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
-    sendMessage, stopChat, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

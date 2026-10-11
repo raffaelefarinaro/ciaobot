@@ -154,8 +154,9 @@ class _DriveHost:
         images: list[ImageAttachment] | None = None,
         *,
         unattended: bool = False,
+        compact: bool = False,
     ) -> AsyncGenerator[StreamEvent, None]:
-        del chat_id, prompt, images, unattended
+        del chat_id, prompt, images, unattended, compact
         for event in self._events_to_stream:
             yield event
 

@@ -2045,6 +2045,112 @@ async def test_core_is_sent_again_after_compaction(tmp_path, monkeypatch, kind):
     assert _CORE_MARKER not in third
 
 
+class _CompactClient(_FakeServerClient):
+    """Records compact posts and serves a scripted event stream."""
+
+    def __init__(self, lines: list[str], *, status: int = 200) -> None:
+        super().__init__(lines)
+        self.posts: list[tuple[str, dict]] = []
+        self._status = status
+
+    async def post(self, path: str, json=None):
+        self.posts.append((path, json or {}))
+        status = self._status
+
+        class _Response:
+            status_code = status
+            text = "compaction refused"
+
+            def json(self):
+                return {"data": {}}
+
+        return _Response()
+
+
+async def _run_compaction(provider, monkeypatch, client, session_id: str):
+    from ciao.models import AgentRequest
+
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return session_id
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    request = AgentRequest(
+        prompt="/compact", model="", mode="bypass", provider="opencode", compact=True
+    )
+    return [
+        event
+        async for event in provider.run_streaming(request, lambda _handle: None)
+    ]
+
+
+def _sse_event(kind: str, session_id: str, **data) -> str:
+    payload = {"type": kind, "data": {"sessionID": session_id, **data}}
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+@pytest.mark.asyncio
+async def test_compact_posts_to_the_compact_endpoint_and_reports_the_result(
+    tmp_path, monkeypatch
+):
+    provider = _provider(tmp_path)
+    provider._core_sent_session_id = "ses_compact"
+    client = _CompactClient(
+        [_sse_event("session.compacted", "ses_compact")], status=200
+    )
+
+    events = await _run_compaction(provider, monkeypatch, client, "ses_compact")
+
+    assert client.posts == [("/api/session/ses_compact/compact", {})]
+    assert [e.status for e in events if e.type == "system"] == [
+        "compacting",
+        "Compacted context",
+    ]
+    result = events[-1]
+    assert result.type == "result"
+    assert not result.is_error
+    assert result.result == ""
+    assert result.session_id == "ses_compact"
+    # The compacted history no longer holds the chat core.
+    assert provider._core_sent_session_id == ""
+
+
+@pytest.mark.asyncio
+async def test_compact_rejection_ends_the_turn_as_an_error(tmp_path, monkeypatch):
+    client = _CompactClient([], status=409)
+
+    events = await _run_compaction(
+        _provider(tmp_path), monkeypatch, client, "ses_refused"
+    )
+
+    result = events[-1]
+    assert result.type == "result"
+    assert result.is_error
+    assert result.result.startswith("OpenCode rejected the compaction")
+    assert "\n" not in result.result
+
+
+@pytest.mark.asyncio
+async def test_compact_stream_ending_without_a_report_is_an_error(
+    tmp_path, monkeypatch
+):
+    client = _CompactClient(
+        [_sse_event("session.execution.succeeded", "ses_silent")]
+    )
+
+    events = await _run_compaction(
+        _provider(tmp_path), monkeypatch, client, "ses_silent"
+    )
+
+    assert not [e for e in events if e.type == "system" and e.status == "Compacted context"]
+    result = events[-1]
+    assert result.is_error
+    assert result.result == "OpenCode ended without reporting the compaction"
+
+
 @pytest.mark.asyncio
 async def test_core_is_sent_again_for_a_new_session(tmp_path, monkeypatch):
     provider = _provider(tmp_path)

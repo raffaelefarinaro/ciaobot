@@ -131,6 +131,7 @@ class ChatStreamingHost(Protocol):
         resume_session: str | None = None,
         unattended: bool = False,
         require_mcp: bool = True,
+        compact: bool = False,
     ) -> AgentRequest: ...
 
     async def _model_capable(self, model: str, chat: ChatInfo) -> bool: ...
@@ -233,6 +234,7 @@ class ChatStreamingHost(Protocol):
         images: list[ImageAttachment] | None = None,
         *,
         unattended: bool = False,
+        compact: bool = False,
     ) -> AsyncGenerator[StreamEvent, None]: ...
 
     def _drive_stream(
@@ -357,6 +359,7 @@ class ChatStreaming:
         stream: ChatStream,
         is_retry: bool,
         unattended: bool,
+        compact: bool = False,
     ) -> None:
         # The one place a turn begins, so it is the one place a subscriber hears
         # about it. Announced before the task exists: the drive loop is the turn,
@@ -374,6 +377,7 @@ class ChatStreaming:
                 stream=stream,
                 is_retry=is_retry,
                 unattended=unattended,
+                compact=compact,
             )
         )
         self._drive_tasks[chat_id] = (stream, task)
@@ -397,8 +401,13 @@ class ChatStreaming:
         stream: ChatStream,
         is_retry: bool,
         unattended: bool,
+        compact: bool = False,
     ) -> None:
-        """Drive the admitted stream and every queued follow-up turn."""
+        """Drive the admitted stream and every queued follow-up turn.
+
+        Only the first pass can be a compaction: queued follow-ups are user
+        messages and run as ordinary turns.
+        """
         current_prompt = prompt
         current_images = images
         current_turn_index = turn_index
@@ -407,6 +416,13 @@ class ChatStreaming:
         had_error = False
         had_provider_progress = False
         await self._host._await_between_turns_drain(chat_id)
+
+        def _arm_retry(*args: Any, **kwargs: Any) -> bool:
+            # A compaction is a command, not a prompt to replay on a retry.
+            if compact:
+                return False
+            return self._host._arm_retry(*args, **kwargs)
+
         try:
             while True:
                 turn_assistant_text = ""
@@ -419,6 +435,7 @@ class ChatStreaming:
                     run_images: list[ImageAttachment] | None = current_images,
                     run_unattended: bool = turn_unattended,
                     run_turn_index: int | None = current_turn_index,
+                    run_compact: bool = compact,
                 ) -> None:
                     nonlocal turn_assistant_text
                     nonlocal question_paused, had_error
@@ -429,6 +446,7 @@ class ChatStreaming:
                         run_prompt,
                         images=run_images,
                         unattended=run_unattended,
+                        compact=run_compact,
                     ):
                         payload = event_to_json(event)
                         if payload and isinstance(
@@ -484,6 +502,18 @@ class ChatStreaming:
                             stream.publish(payload)
                             if isinstance(event, ResultEvent):
                                 turn_result_published = True
+                        if (
+                            run_compact
+                            and isinstance(event, ResultEvent)
+                            and not event.is_error
+                        ):
+                            # The compacted session no longer holds the stable
+                            # context, so the next user turn must re-send it.
+                            compacted = self._host._chats.get(chat_id)
+                            if compacted is not None:
+                                compacted.context_digest = ""
+                                compacted.context_session_id = ""
+                                self._host._save()
                         turn_steps.feed(event)
                         if isinstance(
                             event,
@@ -620,7 +650,7 @@ class ChatStreaming:
                                 had_error = True
                                 result_text = event.result or ""
                                 if chat_service._is_retryable_quota_error(result_text):
-                                    self._host._arm_retry(
+                                    _arm_retry(
                                         chat_id,
                                         stream,
                                         kind="quota",
@@ -634,7 +664,7 @@ class ChatStreaming:
                                 elif chat_service._is_retryable_connection_error(
                                     result_text
                                 ):
-                                    self._host._arm_retry(
+                                    _arm_retry(
                                         chat_id,
                                         stream,
                                         kind="connection",
@@ -644,7 +674,7 @@ class ChatStreaming:
                                         reason=result_text or "connection error",
                                     )
                                 elif chat_service._is_retryable_auth_error(result_text):
-                                    self._host._arm_retry(
+                                    _arm_retry(
                                         chat_id,
                                         stream,
                                         kind="auth",
@@ -754,7 +784,7 @@ class ChatStreaming:
                             }
                         )
                         had_error = True
-                        if error_chat is not None:
+                        if error_chat is not None and not compact:
                             try:
                                 error_request = self._host.build_agent_request(
                                     error_chat,
@@ -784,7 +814,7 @@ class ChatStreaming:
                                     chat_id,
                                 )
                         if chat_service._is_retryable_provider_startup_error(error_msg):
-                            self._host._arm_retry(
+                            _arm_retry(
                                 chat_id,
                                 stream,
                                 kind="startup",
@@ -794,7 +824,7 @@ class ChatStreaming:
                                 reason=error_msg,
                             )
                         elif chat_service._is_retryable_quota_error(error_msg):
-                            self._host._arm_retry(
+                            _arm_retry(
                                 chat_id,
                                 stream,
                                 kind="quota",
@@ -806,7 +836,7 @@ class ChatStreaming:
                         elif chat_service._is_terminal_quota_error(error_msg):
                             self._host._stop_terminal_quota_retry(chat_id)
                         elif chat_service._is_retryable_connection_error(error_msg):
-                            self._host._arm_retry(
+                            _arm_retry(
                                 chat_id,
                                 stream,
                                 kind="connection",
@@ -816,7 +846,7 @@ class ChatStreaming:
                                 reason=error_msg,
                             )
                         elif chat_service._is_retryable_auth_error(error_msg):
-                            self._host._arm_retry(
+                            _arm_retry(
                                 chat_id,
                                 stream,
                                 kind="auth",
@@ -952,6 +982,7 @@ class ChatStreaming:
                 current_prompt = combined_text
                 current_images = merged_images or None
                 current_turn_index = turn_index2
+                compact = False
         finally:
             _late_fallback = chat_service._fallback_title(prompt) if prompt else None
             if (
@@ -1281,6 +1312,7 @@ class ChatStreaming:
         images: list[ImageAttachment] | None = None,
         *,
         unattended: bool = False,
+        compact: bool = False,
         capability_timeout_s: float = CAPABILITY_QUESTION_TIMEOUT_S,
         capability_image_message: str = CAPABILITY_IMAGE_MESSAGE,
     ) -> AsyncGenerator[StreamEvent, None]:
@@ -1306,6 +1338,7 @@ class ChatStreaming:
             images=images,
             resume_session=chat.session_id or None,
             unattended=unattended,
+            compact=compact,
         )
 
         response_text = ""
@@ -1485,24 +1518,28 @@ class ChatStreaming:
                 self._host.mark_handover_context_used(chat_id)
 
             ctx = ChatContext.for_web(chat_id)
-            self._host._transcripts.record_turn(
-                request,
-                ctx=ctx,
-                response_text=response_text,
-                effective_model=effective_model,
-                session_id=chat.session_id or None,
-                usage=usage,
-                quota=quota,
-                input_kind="text",
-                context_label=chat.title,
-                provider=chat.provider,
-                tool_events=tool_events,
-                is_error=had_error,
-                # A normalized stopped result is an incomplete reply: it is
-                # durable but flagged partial so a reload renders it as cut
-                # short rather than as a finished answer.
-                is_partial=stopped,
-            )
+            # A compaction is not a user exchange: it has no user turn to file
+            # in the durable transcript, only the provider session's own
+            # compaction boundary.
+            if not request.compact:
+                self._host._transcripts.record_turn(
+                    request,
+                    ctx=ctx,
+                    response_text=response_text,
+                    effective_model=effective_model,
+                    session_id=chat.session_id or None,
+                    usage=usage,
+                    quota=quota,
+                    input_kind="text",
+                    context_label=chat.title,
+                    provider=chat.provider,
+                    tool_events=tool_events,
+                    is_error=had_error,
+                    # A normalized stopped result is an incomplete reply: it is
+                    # durable but flagged partial so a reload renders it as cut
+                    # short rather than as a finished answer.
+                    is_partial=stopped,
+                )
             journal.mark_committed()
         finally:
             journal.finish()

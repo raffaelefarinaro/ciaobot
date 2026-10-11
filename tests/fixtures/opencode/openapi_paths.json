@@ -15,6 +15,7 @@
     "/api/session/active": {"get": {}},
     "/api/session/{sessionID}": {"get": {}, "delete": {}},
     "/api/session/{sessionID}/agent": {"post": {}},
+    "/api/session/{sessionID}/compact": {"post": {}},
     "/api/session/{sessionID}/fork": {"post": {}},
     "/api/session/{sessionID}/form": {"get": {}, "post": {}},
     "/api/session/{sessionID}/form/{formID}": {"delete": {}},

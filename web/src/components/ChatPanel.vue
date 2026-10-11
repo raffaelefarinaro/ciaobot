@@ -627,7 +627,10 @@
         <AgentContextSection
           :project="project"
           :context-pct="contextPct"
+          :compacting="compacting"
+          :compact-disabled="store.isStreaming || compacting || Boolean(chat?.archived)"
           @open-file="openInspectorFile"
+          @compact="compactContext"
         />
       </section>
 
@@ -1233,7 +1236,10 @@
         <AgentContextSection
           :project="project"
           :context-pct="contextPct"
+          :compacting="compacting"
+          :compact-disabled="store.isStreaming || compacting || Boolean(chat?.archived)"
           @open-file="openInspectorFile"
+          @compact="compactContext"
         />
       </div>
       <section
@@ -1920,6 +1926,11 @@ const contextPct = computed<number | null>(() => {
   }
   return null
 })
+const compacting = computed(() => Boolean(chat.value && store.compactRequests[chat.value.chat_id]))
+function compactContext() {
+  if (!chat.value || store.isStreaming) return
+  void store.compactChat(chat.value.chat_id)
+}
 
 const runningSubagents = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
 const chatRuns = computed(() => (chat.value?.archived ? [] : store.activeBackgroundRuns))

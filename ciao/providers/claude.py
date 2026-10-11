@@ -30,7 +30,7 @@ import json
 import sys
 import uuid
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -61,6 +61,7 @@ from ciao.fs_sandbox import (
     claude_sandbox_settings,
 )
 from ciao.models import (
+    COMPACT_COMMAND,
     AgentRequest,
     AssistantTextDelta,
     BridgeMode,
@@ -687,6 +688,12 @@ class ClaudeProvider(BaseSDKProvider):
         # Always stream: SDK's can_use_tool gate requires an AsyncIterable
         # prompt at connect() time (claude_agent_sdk>=0.1.63). A plain
         # string raises "can_use_tool callback requires streaming mode".
+        if request.compact:
+            # The SDK compacts only for the bare command: a context capsule
+            # or any other text before it turns it into a normal reply.
+            return build_claude_message_stream(
+                replace(request, prompt=COMPACT_COMMAND, images=[])
+            )
         return build_claude_message_stream(request)
 
     async def disconnect(self) -> None:
@@ -1441,6 +1448,17 @@ class ClaudeProvider(BaseSDKProvider):
             if is_rate_limit_telemetry(status_str):
                 return []
             return [SystemStatusEvent(type="system", status=status_str)]
+
+        if subtype == "compact_boundary":
+            # Manual or automatic compaction finished; the session id is kept.
+            meta = data.get("compact_metadata") or {}
+            pre = meta.get("pre_tokens") if isinstance(meta, dict) else None
+            post = meta.get("post_tokens") if isinstance(meta, dict) else None
+            if isinstance(pre, int) and isinstance(post, int):
+                message = f"Compacted context: {pre:,} → {post:,} tokens"
+            else:
+                message = "Compacted context"
+            return [SystemStatusEvent(type="system", status=message)]
 
         if subtype == "input_required":
             tool_name = data.get("tool_name", "") or data.get("tool", "")

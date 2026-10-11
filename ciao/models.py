@@ -90,6 +90,10 @@ class ImageAttachment:
 # this is a hot import and callers subscript it directly.
 THINKING_LEVELS: dict[str, tuple[str, ...]] = provider_registry.thinking_levels()
 
+# The slash command a Claude session compacts on. The SDK compacts only when
+# the prompt is exactly this text, so nothing may precede it.
+COMPACT_COMMAND = "/compact"
+
 
 @dataclass(slots=True)
 class AgentRequest:
@@ -135,6 +139,10 @@ class AgentRequest:
     # Full stable context held aside for providers that have to replace a
     # missing/invalid resumed session after the request was built.
     stable_context_prefix: str = ""
+    # A manual context compaction (the chat's Compact button). The turn carries
+    # no user prompt, context capsule, file references or images: Claude sends
+    # the bare ``/compact`` command, and opencode calls its compact endpoint.
+    compact: bool = False
     # Filesystem scope of the owning workspace ("machine" or "workspace", see
     # ``ciao.fs_sandbox``). ``agent_roots`` are the resolved directories a
     # workspace-scoped turn may read and write: the agent root first, then the
