@@ -723,3 +723,22 @@ def test_restore_refuses_when_active_folder_exists(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="already exists"):
         pcm.restore_project("work", "dup")
+
+
+def test_complete_project_closure_pass_uses_last_active_chat(tmp_path: Path) -> None:
+    _make_work_project_folder(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+    older = pcm.create_chat(proj.project_id, title="older", model="sonnet")
+    newer = pcm.create_chat(proj.project_id, title="newer", model="opus")
+    older.last_activity_at = "2026-10-01T10:00:00+00:00"
+    newer.last_activity_at = "2026-10-02T10:00:00+00:00"
+    seen: list[object] = []
+    pcm.enqueue_project_closure = lambda **kw: seen.append(kw["source"]) or "pass"  # type: ignore[method-assign]
+    pcm._archive_and_remove_chat = lambda cid: pcm._chats.pop(cid)  # type: ignore[method-assign]
+
+    result = pcm.complete_project(proj.project_id)
+
+    assert result["memory_pass"] == "pass"
+    assert seen == [newer]

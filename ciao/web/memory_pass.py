@@ -585,12 +585,17 @@ class MemoryPassCoordinator:
         outcome: str,
         note: str,
         recorded_at: str,
+        source: ChatInfo | None = None,
     ) -> str | None:
         """Queue one memory pass for a project the user just closed.
 
         Runs after the project's chats have been archived, so their own passes
         are already queued ahead of this one. An empty note is still a closure.
         The same folder, outcome and note hash is not queued twice.
+
+        ``source`` is the project's last-active chat: the pass runs on its
+        provider and Session insights model, as a chat's own pass does. A
+        project with no chats falls back to the workspace default.
         """
         host = self._host
         config = host._config
@@ -616,12 +621,17 @@ class MemoryPassCoordinator:
 
         from ciao.insights import resolve_insights_model
 
-        provider = config.default_provider_for_workspace(workspace)
+        if source is not None:
+            provider = source.provider or "claude"
+            model = host._insights_model_for(source, workspace)
+        else:
+            provider = config.default_provider_for_workspace(workspace)
+            model = resolve_insights_model(config, workspace, provider)
         memory_project = self.ensure_project(workspace)
         chat = host.create_chat(
             memory_project.project_id,
             title="Memory pass · project closure",
-            model=resolve_insights_model(config, workspace, provider),
+            model=model,
             mode="bypass",
             provider=provider,
             helper={

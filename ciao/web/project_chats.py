@@ -2756,6 +2756,16 @@ class ProjectChatManager:
                         break
                 vault_moved = True
 
+        # The closure pass runs on the model of the project's last-active
+        # chat, the same Automatic rule as every other memory pass.
+        project_chats = [c for c in self._chats.values() if c.project_id == project_id]
+        last_chat = max(
+            project_chats,
+            # Timestamps are second-precision; created_at breaks a tie.
+            key=lambda c: (c.last_activity_at or c.created_at, c.created_at),
+            default=None,
+        )
+
         # Use the internal remover: by this point the vault entry has been
         # moved (or was already absent), so the public delete_project guard
         # against vault-backed deletion would either misfire or block us.
@@ -2770,6 +2780,7 @@ class ProjectChatManager:
                 outcome=outcome,
                 note=note,
                 recorded_at=recorded_at,
+                source=last_chat,
             )
         return {
             "ok": True,
@@ -3852,6 +3863,7 @@ class ProjectChatManager:
         outcome: str,
         note: str,
         recorded_at: str,
+        source: ChatInfo | None = None,
     ) -> str | None:
         return self._memory_pass.enqueue_project_closure(
             workspace=workspace,
@@ -3860,6 +3872,7 @@ class ProjectChatManager:
             outcome=outcome,
             note=note,
             recorded_at=recorded_at,
+            source=source,
         )
 
     async def resume_memory_passes(self) -> None:

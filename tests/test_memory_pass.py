@@ -1614,3 +1614,44 @@ def test_over_length_user_resolution_is_dropped_not_truncated() -> None:
     dropped = chat_service._normalize_chat_helper({**base, "user_resolution": over})
     assert kept["user_resolution"] == at_limit
     assert dropped["user_resolution"] == ""
+
+
+def test_project_closure_pass_runs_on_the_source_chat_model(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """Automatic Session insights: a closure pass uses its source chat's model
+    and provider, as a chat's own pass does; with no source chat it uses the
+    workspace default."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Shipped", workspace="work")
+    source = manager.create_chat(
+        project.project_id, title="last", model="vendor/chat-model", provider="opencode"
+    )
+    chat_id = manager.enqueue_project_closure(
+        workspace="work",
+        vault_folder="shipped",
+        project_name="Shipped",
+        outcome="completed",
+        note="",
+        recorded_at="2026-10-11T10:00:00+00:00",
+        source=source,
+    )
+    assert chat_id is not None
+    chat = manager.get_chat(chat_id)
+    assert chat is not None
+    assert (chat.provider, chat.model) == ("opencode", "vendor/chat-model")
+
+    fallback_id = manager.enqueue_project_closure(
+        workspace="work",
+        vault_folder="no-chats",
+        project_name="No chats",
+        outcome="stopped",
+        note="",
+        recorded_at="2026-10-11T10:00:00+00:00",
+    )
+    assert fallback_id is not None
+    fallback = manager.get_chat(fallback_id)
+    assert fallback is not None
+    provider = manager._config.default_provider_for_workspace("work")
+    assert fallback.provider == provider
+    assert fallback.model == manager._config.default_model_for_workspace("work", provider)
