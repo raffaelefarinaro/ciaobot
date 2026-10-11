@@ -513,11 +513,15 @@ and session state so recovery cannot revive it.
 
 Chat transcripts are streamed via WebSocket and archived to `<logs root>/Chats/<chat-id>/<provider>/` (`transcripts.py`), where the logs root is `CiaoConfig.logs_root` — `<vault>/Logs` before the re-rooting and `<install>/Logs` after it, decided by the same migration receipt as `agent_root`. Every reader goes through that seam (or the standalone `config.logs_root_for` when it holds only paths): deriving it as `vault_root / "Logs"` resolves to a path that does not exist on a migrated install, so archiving would recreate it and split the archive in two. `Logs/` is global: a sibling of the workspaces inside the vault root, not a subfolder of any one of them. It stays global through the re-rooting release, which promotes it to `<install>/Logs/` without moving the files, because it holds 1423 of 1985 vault notes (72%), it is derived output rather than curated content, and 1350 chat ids cannot each be resolved back to one workspace. Archive, delete, and new-session cleanup disconnect the live supported provider before reclaiming its session: Claude SDK JSONL blobs via `delete_session` and OpenCode sessions via `DELETE /api/session/{id}`. Cleanup is fail-open so a provider outage cannot prevent the durable Ciaobot archive, and it includes prior session IDs created by rotation. Archived `/messages` falls back to the vault markdown when the supported provider session is gone. The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Fable to Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
 
-Chat document attachments convert supported files into Markdown in the active
-project vault folder. Existing host sources remain at their original paths;
-remote uploads use a temporary host source and persist only Markdown. Images
-and ordinary text retain their existing behavior, and conversion errors are
-per-file and non-fatal.
+Chat document attachments are saved into the active project vault folder as
+uploaded, with a Markdown conversion beside them. Uploads and desktop drops take
+the same path. The prompt references the Markdown copy, plus the original for
+formats the agent reads itself (PDF, where page images keep layout, figures and
+scans that the conversion loses). Images and ordinary text retain their existing
+behavior. A conversion error is per-file and non-fatal and leaves the original
+in the folder; a PDF is still attached without its copy. Originals the file
+viewers cannot preview (`.doc`, `.rtf`, `.epub` and the rest) are served by
+`/api/workspace-binary` as downloads.
 
 The control plane runs as the agent CLI surface. `CiaoControlPlane` wraps the
 existing project/chat, schedule,

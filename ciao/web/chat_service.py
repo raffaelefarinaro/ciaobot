@@ -30,6 +30,7 @@ from ciao.schedules import supports_auto_archive
 # id shape the catalog stopped accepting must stop being accepted here too, in
 # the same commit.
 from ciao.update_task_catalog import SCOPES
+from ciao.web.document_conversion import ANYDOC_EXTENSIONS
 
 # Project-files surface (list + upload). Mirrors the union of the read-only
 # workspace-file/image allowlists plus the new binary one (PDF, ZIP, office
@@ -52,7 +53,10 @@ _PROJECT_BINARY_EXTS = frozenset({
     ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
 })
 
-_PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS
+# Convertible documents are kept as uploaded beside their Markdown copy.
+_PROJECT_UPLOAD_EXTS = (
+    _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS | ANYDOC_EXTENSIONS
+)
 
 _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
