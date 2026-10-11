@@ -1588,15 +1588,32 @@ export const useProjectStore = defineStore('projects', () => {
     return Boolean(chat?.pending_permission)
   }
 
+  // A chat whose last turn ended in an error and that is not running again.
+  // The error stays until a new turn starts or a newer run of the same routine
+  // supersedes it. The server clears `last_error` in both cases, but sends no
+  // event for the earlier run's chat, so a newer run is also checked here.
+  function chatFailed(chatId: string): boolean {
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (!chat || chat.archived || !chat.last_error) return false
+    if (isMemoryPassChat(chat)) return false
+    if (chat.schedule_id && chats.value.some(c =>
+      c.schedule_id === chat.schedule_id && !c.archived && c.created_at > chat.created_at,
+    )) return false
+    return !chatIsWorking(chatId)
+  }
+
   // Whether the user is the one this chat is waiting on: a live question or
-  // permission card (`chatNeedsInput`), or a delegated board task whose agent
-  // stopped for them — it reported needs input or blocked, or ended without a
-  // report. The reply goes in the chat either way, so Home files both under
-  // "Needs you" and both count as attention. Deliberately separate from
-  // `chatNeedsInput`, which drives the question/permission UI and
-  // notifications and must not light up for a task with no card to answer.
+  // permission card (`chatNeedsInput`), a chat whose last turn failed
+  // (`chatFailed`, until a new turn starts or a newer run of its routine
+  // supersedes it), or a delegated board task whose agent stopped for them — it
+  // reported needs input or blocked, or ended without a report. The reply goes
+  // in the chat either way, so Home files these under "Needs you" and all count
+  // as attention. Deliberately separate from `chatNeedsInput`, which drives the
+  // question/permission UI and notifications and must not light up for a task
+  // with no card to answer.
   function chatNeedsYou(chatId: string): boolean {
     if (chatNeedsInput(chatId)) return true
+    if (chatFailed(chatId)) return true
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (!chat) return false
     // Only the loaded workspace's tasks are held, and slugs collide across
@@ -4184,6 +4201,8 @@ export const useProjectStore = defineStore('projects', () => {
         break
       case 'chat_streaming_done': {
         delete projectStreaming.value[msg.chat_id]
+        const doneChat = chats.value.find(c => c.chat_id === msg.chat_id)
+        if (doneChat) doneChat.last_error = msg.last_error || ''
         // The per-chat WS may have missed the `result` event for this
         // turn (WS flap mid-stream, or the broker stream finished and
         // was cleared between the disconnect and reconnect, leaving no
@@ -6006,7 +6025,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
-    chatUnread, chatNeedsInput, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
+    chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,

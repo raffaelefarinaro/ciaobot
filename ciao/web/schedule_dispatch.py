@@ -64,6 +64,8 @@ class ScheduleDispatchHost(Protocol):
 
     def _save(self, *, reason: str = ...) -> None: ...
 
+    def _clear_chat_retry(self, chat: ChatInfo, *, status: str = ...) -> None: ...
+
     def _agent_root_for_chat(self, chat_id: str) -> Path: ...
 
     def schedule_command_env(self, entry: ScheduleEntry) -> tuple[Path, dict[str, str]]: ...
@@ -458,6 +460,7 @@ class ScheduleDispatcher:
                 provider=provider or None,
             )
             _stamp(chat)
+            self._supersede_earlier_runs(chat)
             self._host._save()
             return chat.chat_id
         if web_chat_id:
@@ -513,10 +516,31 @@ class ScheduleDispatcher:
                 provider=provider or None,
             )
             _stamp(chat)
+            self._supersede_earlier_runs(chat)
             self._host._save()
             return chat.chat_id
         logger.warning("Schedule has no web target, skipping")
         return None
+
+    def _supersede_earlier_runs(self, chat: ChatInfo) -> None:
+        """Retire the earlier runs' retries and errors when a routine runs again.
+
+        A routine opens a new chat per run. The newer run redoes the work, so a
+        retry pending on an earlier run would run it twice, and the earlier
+        run's error no longer needs the owner: Home shows one item per routine.
+        """
+        if not chat.schedule_id:
+            return
+        for other in self._host._chats.values():
+            if (
+                other.chat_id == chat.chat_id
+                or other.schedule_id != chat.schedule_id
+                or other.archived
+            ):
+                continue
+            if other.retry_status == "pending":
+                self._host._clear_chat_retry(other)
+            other.last_error = ""
 
     async def dispatch_schedule(
         self,

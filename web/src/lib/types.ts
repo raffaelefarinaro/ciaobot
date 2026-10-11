@@ -204,6 +204,9 @@ export interface ChatInfo {
   // `last_activity_at`. Backs the sidebar unread tile's preview on initial
   // load, before any live `chat_result_ready` WS event has arrived.
   last_snippet?: string
+  // One-line snippet of the error that ended the last turn. Empty or absent
+  // when the last turn did not fail; cleared when a new turn starts.
+  last_error?: string
   local?: boolean
   // Transient UI flag: 'pending' while the server is auto-titling a brand
   // new chat, 'ready' otherwise. Drives the shimmer placeholder in the
@@ -505,7 +508,7 @@ export type EventsWsMessage =
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
-  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
+  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number; nudged?: boolean }
   | { type: 'chat_background_runs'; chat_id: string; project_id: string; runs: BackgroundRunSummary[]; finished?: BackgroundRunSummary }

@@ -182,6 +182,7 @@ import type { ChatInfo, ProjectInfo } from '../lib/types'
 import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, type HomeTiers } from '../lib/homeLanes'
 import { activeInsightSummary, type MemoryInsight } from '../lib/memoryInsights'
 import { formatRelative } from '../lib/relativeTime'
+import { classifyError } from '../lib/errorAttribution'
 import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskSignalsStore } from '../stores/taskSignals'
@@ -472,6 +473,12 @@ function statusPhrase(tier: HomeTierKey, chat: ChatInfo): string {
   // A live question or permission card is what files the row under Needs you,
   // whatever the attempt says (a running turn that raised an approval card).
   if (tier === 'needsYou' && store.chatNeedsInput(chat.chat_id)) return tierPhrase(tier)
+  // A turn that failed names its error and what to do next. A pending retry
+  // will try again on its own; otherwise the user has to switch or retry.
+  if (tier === 'needsYou' && store.chatFailed(chat.chat_id)) {
+    const next = chat.retry?.status === 'pending' ? 'will retry' : 'switch model or retry'
+    return `${classifyError(chat.last_error || '').label.toLowerCase()} · ${next}`
+  }
   const task = taskSignals.taskForChat(chat)
   // A chat from an earlier attempt does not speak for the newer one.
   if (task && taskSignals.chatHoldsTask(chat, task)) {

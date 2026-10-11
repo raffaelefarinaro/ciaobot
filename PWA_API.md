@@ -731,6 +731,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/retry" \
   -H 'content-type: application/json' -d '{"action":"stop"}'
 
+# Weekly and monthly usage limits are retried once a day (up to 7 attempts)
+# rather than hourly; the card reads "Retrying this turn once a day".
+# A failed turn carries `last_error` (one-line snippet, "" when the last turn
+# succeeded or a new turn started) on the chat object, and the
+# `chat_streaming_done` event repeats it as `last_error`.
+
 # Stop an in-flight turn — {stopped: bool}. Same effect as the websocket
 # `stop` message; use this when driving a chat over plain HTTP or when a
 # socket may not be connected.

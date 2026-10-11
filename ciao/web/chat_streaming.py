@@ -188,8 +188,6 @@ class ChatStreamingHost(Protocol):
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
 
-    def _stop_terminal_quota_retry(self, chat_id: str) -> None: ...
-
     @staticmethod
     def _result_snippet(text: str, limit: int = 280) -> str: ...
 
@@ -417,6 +415,8 @@ class ChatStreaming:
         turn_unattended = unattended
         last_assistant_text = ""
         had_error = False
+        # One-line error text that ended the turn, persisted as chat.last_error.
+        last_error_text = ""
         had_provider_progress = False
         await self._host._await_between_turns_drain(chat_id)
 
@@ -441,7 +441,7 @@ class ChatStreaming:
                     run_compact: bool = compact,
                 ) -> None:
                     nonlocal turn_assistant_text
-                    nonlocal question_paused, had_error
+                    nonlocal question_paused, had_error, last_error_text
                     nonlocal had_provider_progress, turn_result_published
                     nonlocal last_assistant_text
                     async for event in self._host.stream_chat(
@@ -652,6 +652,7 @@ class ChatStreaming:
                             elif event.is_error:
                                 had_error = True
                                 result_text = event.result or ""
+                                last_error_text = result_text
                                 if chat_service._is_retryable_quota_error(result_text):
                                     _arm_retry(
                                         chat_id,
@@ -663,7 +664,15 @@ class ChatStreaming:
                                         reason=result_text or "quota limit",
                                     )
                                 elif chat_service._is_terminal_quota_error(result_text):
-                                    self._host._stop_terminal_quota_retry(chat_id)
+                                    _arm_retry(
+                                        chat_id,
+                                        stream,
+                                        kind="quota_terminal",
+                                        current_prompt=run_prompt,
+                                        current_images=run_images,
+                                        had_progress=had_provider_progress,
+                                        reason=result_text or "quota limit",
+                                    )
                                 elif chat_service._is_retryable_connection_error(
                                     result_text
                                 ):
@@ -756,6 +765,7 @@ class ChatStreaming:
                             }
                         )
                         had_error = True
+                        last_error_text = "This chat has been archived."
                         break
                     else:
                         logger.exception("Stream error for chat %s", chat_id)
@@ -787,6 +797,7 @@ class ChatStreaming:
                             }
                         )
                         had_error = True
+                        last_error_text = display_error
                         if error_chat is not None and not compact:
                             try:
                                 error_request = self._host.build_agent_request(
@@ -837,7 +848,15 @@ class ChatStreaming:
                                 reason=error_msg,
                             )
                         elif chat_service._is_terminal_quota_error(error_msg):
-                            self._host._stop_terminal_quota_retry(chat_id)
+                            _arm_retry(
+                                chat_id,
+                                stream,
+                                kind="quota_terminal",
+                                current_prompt=current_prompt,
+                                current_images=current_images,
+                                had_progress=had_provider_progress,
+                                reason=error_msg,
+                            )
                         elif chat_service._is_retryable_connection_error(error_msg):
                             _arm_retry(
                                 chat_id,
@@ -910,6 +929,7 @@ class ChatStreaming:
                     stream.user_stopped = False
                     if next_pending is not None and not park_rest:
                         had_error = False
+                        last_error_text = ""
                 if next_pending is None or had_error or park_rest:
                     stream.accepting_queue = False
                     late = stream.drain_pending()
@@ -1023,6 +1043,11 @@ class ChatStreaming:
                     if last_assistant_text.strip()
                     else "empty"
                 )
+                chat_meta.last_error = (
+                    self._host._result_snippet(last_error_text or "The turn failed.")
+                    if had_error
+                    else ""
+                )
                 # A terminal SSE frame is not proof that a native V2 permission
                 # was delivered. Keep the persisted card until the response
                 # endpoint returns success or an authoritative stale result.
@@ -1035,6 +1060,7 @@ class ChatStreaming:
                     "chat_id": chat_id,
                     "project_id": project_id,
                     "is_error": had_error,
+                    "last_error": chat_meta.last_error if chat_meta is not None else "",
                 }
             )
             chat_for_watcher = self._host._chats.get(chat_id)
@@ -1607,7 +1633,7 @@ class ChatStreaming:
         stream: ChatStream | None = None
         cancelled = False
 
-        def close_stream(had_error: bool) -> None:
+        def close_stream(had_error: bool, last_error: str = "") -> None:
             nonlocal stream
             if stream is None:
                 return
@@ -1619,6 +1645,7 @@ class ChatStreaming:
                     "chat_id": chat_id,
                     "project_id": project_id,
                     "is_error": had_error,
+                    "last_error": last_error,
                 }
             )
             stream = None
@@ -1649,7 +1676,12 @@ class ChatStreaming:
                     text = event.result or ""
                     is_error = bool(event.is_error)
                     self._last_drain_result[chat_id] = (text, is_error)
-                    close_stream(is_error)
+                    last_error = (
+                        self._host._result_snippet(text or "The turn failed.")
+                        if is_error
+                        else ""
+                    )
+                    close_stream(is_error, last_error)
                     chat_now = self._host._chats.get(chat_id)
                     if (
                         not is_error
@@ -1664,6 +1696,7 @@ class ChatStreaming:
                                 -chat_service._PROVIDER_HANDOVER_MAX_CHARS :
                             ]
                             chat_now.last_response_status = "success"
+                            chat_now.last_error = ""
                             self._host._save()
                         title = chat_now.title if chat_now else "Ciaobot"
                         self._host._discard_result_announce(chat_id)
@@ -1691,6 +1724,7 @@ class ChatStreaming:
                             if text.strip()
                             else "empty"
                         )
+                        chat_now.last_error = last_error
                         self._host._save()
                     # A pass that was waiting on background work ends here, and
                     # ends once per terminal result whatever that result was.

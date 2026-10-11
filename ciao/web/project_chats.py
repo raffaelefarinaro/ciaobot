@@ -121,6 +121,7 @@ from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import OpencodeProvider, QuestionResponseResult
+from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,
     ScheduleStore,
@@ -245,9 +246,15 @@ _RESUME_CONTINUE_PROMPT = "continue"
 _MAX_CONNECTION_DROP_RETRIES = 6
 # Cap on hourly quota retries. Claude's session limit resets on a 5-hour
 # window, so six hourly attempts (the five hours of the window plus one) cover
-# a session limit that clears on schedule. Weekly and monthly limits are
-# terminal and never reach this cap (see _stop_terminal_quota_retry).
+# a session limit that clears on schedule. Weekly and monthly limits use the
+# "quota_terminal" kind instead: one attempt a day, capped by
+# _MAX_TERMINAL_QUOTA_RETRIES, and never by this cap.
 _MAX_QUOTA_RETRIES = 6
+# Weekly and monthly usage limits reset on a days-long window, so an hourly
+# retry would only burn attempts. One attempt a day for a week covers a weekly
+# limit that clears on schedule.
+_TERMINAL_QUOTA_RETRY_INTERVAL_SECONDS = 24 * 60 * 60
+_MAX_TERMINAL_QUOTA_RETRIES = 7
 
 # Injected into the parent turn when its background subagents all finish. The
 # CLI does not auto-continue a parent turn after a background `Agent` dispatch
@@ -440,6 +447,9 @@ class ChatInfo:
     # that must not decide from the 280-character display snippet.
     last_response: str = ""
     last_response_status: str = ""
+    # One-line snippet of the error that ended the last turn. Empty when the
+    # last turn did not fail; cleared when a new turn starts.
+    last_error: str = ""
     # Monotonic counter of user turns initiated for this chat. Used as the
     # key when recording image attachments so we can re-emit them alongside
     # the replayed SDK session history (which strips attachments).
@@ -479,9 +489,10 @@ class ChatInfo:
     retry_next_at: str = ""
     retry_last_error: str = ""
     retry_attempts: int = 0
-    # Kind of the failure that armed the pending retry ("quota", "connection",
-    # "startup", "auth"). The attempt counter belongs to one kind: arming a
-    # retry of a different kind starts that kind's budget at zero.
+    # Kind of the failure that armed the pending retry ("quota",
+    # "quota_terminal", "connection", "startup", "auth"). The attempt counter
+    # belongs to one kind: arming a retry of a different kind starts that
+    # kind's budget at zero.
     retry_kind: str = ""
     retry_interval_seconds: int = _RETRY_INTERVAL_SECONDS
     # Visible messages preserved when the chat is handed to a fresh provider
@@ -590,6 +601,7 @@ class ChatInfo:
             "last_activity_at": self.last_activity_at,
             "last_read_at": self.last_read_at,
             "last_snippet": self.last_snippet,
+            "last_error": self.last_error,
             "title_status": self.title_status,
             "pending_question": self.pending_question,
             "pending_permission": self.pending_permission,
@@ -957,6 +969,7 @@ class ProjectChatManager:
                 last_snippet=cd.get("last_snippet", ""),
                 last_response=cd.get("last_response", ""),
                 last_response_status=cd.get("last_response_status", ""),
+                last_error=cd.get("last_error", ""),
                 user_turn_count=cd.get("user_turn_count", 0),
                 turn_index_base=int(cd.get("turn_index_base", 0) or 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
@@ -1065,6 +1078,7 @@ class ProjectChatManager:
                     "last_snippet": c.last_snippet,
                     "last_response": c.last_response,
                     "last_response_status": c.last_response_status,
+                    "last_error": c.last_error,
                     "user_turn_count": c.user_turn_count,
                     "turn_index_base": c.turn_index_base,
                     "user_turn_images": c.user_turn_images,
@@ -5706,7 +5720,9 @@ class ProjectChatManager:
     ) -> bool:
         """Arm a deferred retry for a quota/connection/startup/auth failure.
 
-        ``kind`` is ``"quota"``, ``"connection"``, ``"startup"``, or ``"auth"``.
+        ``kind`` is ``"quota"``, ``"quota_terminal"`` (a weekly or monthly
+        usage limit, retried daily until the window resets), ``"connection"``,
+        ``"startup"``, or ``"auth"``.
         A connection/auth failure that dropped *after* streaming output
         (``had_progress``) resumes the session with a "continue" nudge instead
         of replaying the prompt — replaying could re-run tool calls the partial
@@ -5732,9 +5748,14 @@ class ProjectChatManager:
             and bool(chat.session_id)
         )
         # Every kind is capped: the connection/startup/auth cap guards against
-        # a transient-looking local failure looping forever, and the quota cap
-        # stops hourly retries against a limit that is not clearing.
-        cap = _MAX_QUOTA_RETRIES if kind == "quota" else _MAX_CONNECTION_DROP_RETRIES
+        # a transient-looking local failure looping forever, and the quota caps
+        # stop retries against a limit that is not clearing.
+        if kind == "quota":
+            cap = _MAX_QUOTA_RETRIES
+        elif kind == "quota_terminal":
+            cap = _MAX_TERMINAL_QUOTA_RETRIES
+        else:
+            cap = _MAX_CONNECTION_DROP_RETRIES
         if chat is not None and chat.retry_kind != kind:
             # Each kind gets its own budget: a run of connection retries must
             # not spend the quota window's attempts, and vice versa.
@@ -5758,16 +5779,20 @@ class ProjectChatManager:
         else:
             prompt = current_prompt
             image_refs = self._image_refs(current_images)
-        interval = (
-            _RETRY_CONNECTION_INTERVAL_SECONDS
-            if kind in {"connection", "startup", "auth"}
-            else _RETRY_INTERVAL_SECONDS
-        )
+        if kind in {"connection", "startup", "auth"}:
+            interval = _RETRY_CONNECTION_INTERVAL_SECONDS
+        elif kind == "quota_terminal":
+            interval = _TERMINAL_QUOTA_RETRY_INTERVAL_SECONDS
+        else:
+            interval = _RETRY_INTERVAL_SECONDS
         armed = self.set_chat_retry(
             chat_id,
             prompt,
             image_refs=image_refs,
             reason=reason,
+            next_at=(
+                self._terminal_quota_reset_at(chat) if kind == "quota_terminal" else None
+            ),
             interval_seconds=interval,
         )
         if armed is None:
@@ -5776,15 +5801,38 @@ class ProjectChatManager:
         self._park_pending_for_retry(chat_id, stream)
         return True
 
-    def _stop_terminal_quota_retry(self, chat_id: str) -> None:
-        """End the retry ladder when the provider reports a weekly/monthly limit.
+    def _terminal_quota_reset_at(self, chat: ChatInfo | None) -> str | None:
+        """Return when a rejected Claude weekly bucket resets, plus a minute.
 
-        A retry that was already pending, or a retry attempt that just failed
-        with a terminal limit, must not fire again on the hourly timer.
+        The next daily attempt is pointed at the reset instead of a fixed
+        interval when the saved rate-limit snapshot names one. The file is user
+        state, so every field is type-checked and nothing here raises.
         """
-        chat = self._chats.get(chat_id)
-        if chat is not None and chat.retry_status == "pending":
-            self._clear_chat_retry(chat, status="stopped")
+        if chat is None or chat.provider != "claude":
+            return None
+        try:
+            payload = RateLimitStore(
+                path=default_store_path(self._runtime_root)
+            ).load()
+        except (OSError, ValueError):
+            return None
+        buckets = payload.get("buckets") if isinstance(payload, dict) else None
+        if not isinstance(buckets, dict):
+            return None
+        now = time.time()
+        resets = []
+        for name in ("seven_day", "seven_day_opus", "seven_day_sonnet"):
+            bucket = buckets.get(name)
+            if not isinstance(bucket, dict) or bucket.get("status") != "rejected":
+                continue
+            resets_at = bucket.get("resets_at")
+            if isinstance(resets_at, int) and not isinstance(resets_at, bool) and resets_at > now:
+                resets.append(resets_at)
+        if not resets:
+            return None
+        return datetime.fromtimestamp(min(resets) + 60, UTC).replace(
+            microsecond=0
+        ).isoformat().replace("+00:00", "Z")
 
     def set_chat_retry(
         self,
@@ -6111,6 +6159,9 @@ class ProjectChatManager:
             # A new user turn answers (or supersedes) any legacy paused
             # question, so the persisted picker state no longer applies.
             chat_meta.pending_question = ""
+            # A new turn supersedes the failure that ended the previous one; the
+            # save below persists the clear with the send stamp.
+            chat_meta.last_error = ""
             # Re-seed messages parked when a prior turn paused on a question
             # (see the question_paused branch in _drive). They flush as
             # follow-ups after this (the answer) turn, keeping the user's

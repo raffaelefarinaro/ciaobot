@@ -259,10 +259,11 @@ def _handover_marker(
 
 
 def _is_terminal_quota_error(text: str) -> bool:
-    """Recognize a weekly or monthly usage limit that no hourly retry can clear.
+    """Recognize a weekly or monthly usage limit, retried once a day instead.
 
-    A weekly limit resets days away, so arming the hourly retry only burns
-    attempts (and schedule runs) against a provider that will keep refusing.
+    A weekly limit resets days away, so an hourly retry would only burn
+    attempts (and schedule runs) against a provider that keeps refusing. The
+    caller arms the daily "quota_terminal" retry for these, not the hourly one.
     """
     low = (text or "").lower()
     return any(

@@ -436,7 +436,7 @@ async def ws_events(websocket: WebSocket) -> None:
 
     Event payloads (JSON):
     - `chat_streaming_started`  {chat_id, project_id}
-    - `chat_streaming_done`     {chat_id, project_id, is_error}
+    - `chat_streaming_done`     {chat_id, project_id, is_error, last_error}
     - `chat_result_ready`       {chat_id, project_id, title, snippet}
     - `chat_subagents_ready`    {chat_id, project_id, remaining}
     - `chat_read`               {chat_id, last_read_at}
