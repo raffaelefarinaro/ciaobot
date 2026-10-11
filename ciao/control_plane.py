@@ -5632,22 +5632,37 @@ class CiaoControlPlane:
         ]
         return _ok(rows)
 
-    def _schedule_command(self, principal: AgentPrincipal, value: object) -> str:
+    def _schedule_command(
+        self, principal: AgentPrincipal, value: object, *, current: str = ""
+    ) -> str:
         """Validate a schedule's shell command as a managed chat may set it.
 
-        A command runs with no model turn and no permission prompt, so a
-        scheduled (unattended) turn may not create or change one: a
-        compromised unattended run could otherwise schedule itself a shell
-        command. Clearing a command is always allowed.
+        A command runs later with no model turn and no permission prompt, so
+        it carries the authority of an unprompted shell. A scheduled
+        (unattended) turn may never set one. An attended turn may set one only
+        from a ``bypass`` chat, where the agent already runs shell commands
+        without a prompt; anywhere else only the user can add it, in the
+        PWA. Clearing a command, or restating the one the schedule already
+        runs, is always allowed.
         """
         try:
             command = normalize_schedule_command(value)
         except ValueError as exc:
             raise ControlPlaneError("invalid_command", str(exc)) from exc
-        if command and self._unattended_turn(principal):
+        if not command or command == current:
+            return command
+        if self._unattended_turn(principal):
             raise ControlPlaneError(
                 "unattended_forbidden",
                 "A schedule's command can be set only from an attended turn.",
+            )
+        if self.chat_mode(principal) != "bypass":
+            raise ControlPlaneError(
+                "command_requires_operator",
+                "A schedule's command runs later with no permission prompt, so outside "
+                "bypass mode only the user can set it. Create the schedule without "
+                "--command and ask the user to add the command in Automations → this "
+                "schedule → Prompt → Edit → Command.",
             )
         return command
 
@@ -5926,7 +5941,9 @@ class CiaoControlPlane:
         if unknown:
             raise ControlPlaneError("invalid_fields", f"Unknown schedule fields: {', '.join(unknown)}")
         if "command" in normalized:
-            normalized["command"] = self._schedule_command(principal, normalized["command"])
+            normalized["command"] = self._schedule_command(
+                principal, normalized["command"], current=entry.command
+            )
         if "frequency" in normalized and normalized["frequency"] not in FREQUENCIES:
             raise ControlPlaneError(
                 "invalid_frequency",

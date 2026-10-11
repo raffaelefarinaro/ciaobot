@@ -101,6 +101,16 @@ describe('SchedulePanel property cards', () => {
     while (mounted.length) mounted.pop()?.unmount()
   })
 
+  it('shows the schedule command in the read view', async () => {
+    const wrapper = await mountPanel(makeSchedule({ command: './scripts/sync.sh | tee log' }))
+    expect(wrapper.find('.full-command').text()).toBe('./scripts/sync.sh | tee log')
+  })
+
+  it('shows no command block when the schedule has none', async () => {
+    const wrapper = await mountPanel()
+    expect(wrapper.find('.full-command').exists()).toBe(false)
+  })
+
   it('groups the properties into When, Where it runs, Model and Results sections', async () => {
     const wrapper = await mountPanel()
     const names = wrapper.findAll('.prop-card-name').map(n => n.text())
