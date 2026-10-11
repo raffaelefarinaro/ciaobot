@@ -33,7 +33,9 @@ The assignment happens after the child exists, so a grandchild started in the
 microseconds between ``CreateProcess`` and ``AssignProcessToJobObject`` would
 escape the job. Neither git nor a shell starts children that fast. Closing the
 window needs a suspended spawn (create suspended, assign, resume), which
-``asyncio.create_subprocess_exec`` cannot do.
+``asyncio.create_subprocess_exec`` cannot do. A child that has already exited
+when the assignment runs is refused by Windows (``ERROR_ACCESS_DENIED``); its
+tree is then empty rather than an error.
 """
 
 from __future__ import annotations
@@ -73,6 +75,9 @@ if sys.platform == "win32":
         "SetInformationJobObject", wintypes.BOOL,
         wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
     )
+    _GetExitCodeProcess = _declare(
+        "GetExitCodeProcess", wintypes.BOOL, wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)
+    )
 
     class _IoCounters(ctypes.Structure):
         _fields_ = [(name, ctypes.c_ulonglong) for name in (
@@ -108,7 +113,17 @@ if sys.platform == "win32":
 
     _PROCESS_TERMINATE = 0x0001
     _PROCESS_SET_QUOTA = 0x0100
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _ERROR_ACCESS_DENIED = 5
+    _STILL_ACTIVE = 259
     _KILLED_EXIT_CODE = 1
+
+    def _has_exited(process: Any) -> bool:
+        """True when ``process`` (an open handle) has already terminated."""
+        code = wintypes.DWORD()
+        if not _GetExitCodeProcess(process, ctypes.byref(code)):
+            return False
+        return code.value != _STILL_ACTIVE
 
     def tree_spawn_options(*, dies_with_engine: bool = False) -> dict[str, Any]:
         """Keyword arguments for ``Popen``/``create_subprocess_exec``."""
@@ -132,7 +147,10 @@ if sys.platform == "win32":
                     error = ctypes.get_last_error()
                     _CloseHandle(job)
                     raise ctypes.WinError(error)
-            process = _OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+            process = _OpenProcess(
+                _PROCESS_SET_QUOTA | _PROCESS_TERMINATE | _PROCESS_QUERY_LIMITED_INFORMATION,
+                False, pid,
+            )
             if not process:
                 error = ctypes.get_last_error()
                 _CloseHandle(job)
@@ -140,8 +158,12 @@ if sys.platform == "win32":
             try:
                 if not _AssignProcessToJobObject(job, process):
                     error = ctypes.get_last_error()
-                    _CloseHandle(job)
-                    raise ctypes.WinError(error)
+                    # A child that has already exited cannot join a job: Windows
+                    # answers ERROR_ACCESS_DENIED. Its tree is then empty, and
+                    # kill() on an empty job ends nothing, which is right.
+                    if not (error == _ERROR_ACCESS_DENIED and _has_exited(process)):
+                        _CloseHandle(job)
+                        raise ctypes.WinError(error)
             finally:
                 _CloseHandle(process)
             self._job: int | None = job
