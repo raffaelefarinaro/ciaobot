@@ -602,6 +602,9 @@
                 <p class="hint">
                   Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
                   The defaults below apply to new chats; any chat can override them from the picker.
+                  Session insights is the model that reads chats into memory and names them. On Automatic it
+                  is the chat's own model: a closed project uses its last-active chat, and a task resolution or
+                  a project closed with no chats uses the workspace's default model.
                   <a
                     class="set-link"
                     href="https://www.raffaelefarinaro.com/ciaobot/models.html"
@@ -707,7 +710,7 @@
                   <div class="set-subrow">
                     <span
                       class="ws-label set-subrow-label"
-                      title="Reads archived chats into memory, names new chats, and checks schedule results for this provider."
+                      title="Reads archived chats, closed projects and task resolutions into memory, names new chats, and checks schedule results for this provider. Automatic uses the chat's own model; Claude schedule checks use Haiku."
                     >Session insights</span>
                     <div class="set-subrow-control">
                       <ModelSelector
@@ -2675,8 +2678,8 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
 }
 
 // ── Per-provider Session insights model (Models tab) ────────────────
-// Automatic reads the session with that chat's own model
-// (ciao/insights.py::resolve_insights_model).
+// Automatic reads the session with that chat's own model; a closed project
+// uses its last-active chat (ciao/insights.py::resolve_insights_model).
 const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
 
 function providerInsightsModelSelectorValue(provider: AliasProviderKey): string {
