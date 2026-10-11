@@ -1760,7 +1760,7 @@ async function confirmDeleteChat(chatId: string) {
   /* Project list scrolls internally; keeping overflow off the outer
      sidebar prevents double-scroll and keeps the footer fixed. */
   overflow: hidden;
-  transition: width 0.2s var(--ease), min-width 0.2s var(--ease), transform 0.22s var(--ease);
+  transition: transform 0.22s var(--ease);
   padding-top: var(--safe-top);
   padding-left: var(--safe-left);
   padding-bottom: var(--safe-bottom);
