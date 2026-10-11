@@ -1682,7 +1682,7 @@ function openMemoryPass(): void {
 const memoryPassOrigin = computed<{ chatId: string; title: string } | null>(() => {
   const source = memoryPassSource(chat.value)
   if (!source) return null
-  const title = store.chats.find(c => c.chat_id === source.chatId)?.title || source.title
+  const title = chat.value.memory_source?.title || source.title
   if (!title) return null
   return { chatId: source.chatId, title }
 })
@@ -1701,10 +1701,11 @@ const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | nul
   return handover ? { msg, handover } : null
 })
 
-// The source is archived, so the transcript is the only thing it can open.
+// The source is archived, so the transcript is the only thing it can open. The
+// browser's chat list holds active chats only, so the path comes from the pass's
+// own `memory_source`, which the engine sends on the row.
 function openMemoryPassSource(): void {
-  if (!memoryPassOrigin.value) return
-  const archivePath = store.chats.find(c => c.chat_id === memoryPassOrigin.value?.chatId)?.archive_path
+  const archivePath = chat.value.memory_source?.archive_path
   if (archivePath) void fileViewer.open(archivePath)
 }
 watch(() => chat.value.provider, () => {

@@ -198,7 +198,11 @@ export interface ChatInfo {
   created_at: string
   archived: boolean
   last_activity_at?: string
-  /** Compact origin metadata for an active memory pass; archives load on demand. */
+  /**
+   * Compact origin metadata for a memory pass: its source's title and archive path.
+   * The source may be archived, so it is not in the active chat list; this is how
+   * the pass reaches it.
+   */
   memory_source?: ArchivedChatSummary & { last_activity_at: string }
   last_read_at?: string
   // Truncated text of the last assistant reply, persisted alongside
@@ -1294,6 +1298,12 @@ export interface Task {
    * says it and lets them decide.
    */
   changed_since_delegated: boolean
+  /**
+   * The task's chat is archived. Present only when `chat_id` is set: archived
+   * chats are not in the browser's active chat list, so the board reads this
+   * instead of looking the chat up.
+   */
+  chat_archived?: boolean
 }
 
 /**
@@ -1348,6 +1358,8 @@ export interface TaskAttempt {
    */
   released: boolean
   live: boolean
+  /** The attempt's chat is archived; present only when `chat_id` is set. See `Task.chat_archived`. */
+  chat_archived?: boolean
 }
 
 /** One task's whole attempt history: the live attempt first, live and settled alike. */

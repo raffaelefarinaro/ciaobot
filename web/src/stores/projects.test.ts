@@ -5114,6 +5114,9 @@ describe('workspace and chat transitions', () => {
   })
 })
 
+/** Lets the boot's unawaited orphan offer run to the end. */
+const settle = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
 describe('orphaned draft recovery on load', () => {
   test('fetchAll on first boot offers a toast for a draft whose chat is gone', async () => {
     const store = useProjectStore()
@@ -5130,6 +5133,8 @@ describe('orphaned draft recovery on load', () => {
 
     await store.fetchAll()
 
+    // The offer is not awaited by the boot, so it lands after fetchAll returns.
+    await vi.waitFor(() => expect(store.toasts.some(t => t.restoreDraft?.originalChatId === 'dead-chat')).toBe(true))
     const toast = store.toasts.find(t => t.restoreDraft?.originalChatId === 'dead-chat')
     expect(toast).toBeTruthy()
     expect(toast?.body).toContain('stranded text')
@@ -5151,6 +5156,7 @@ describe('orphaned draft recovery on load', () => {
     await store.fetchAll()
     store.toasts = []
     await store.fetchAll()
+    await settle()
 
     expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
   })
@@ -5168,8 +5174,66 @@ describe('orphaned draft recovery on load', () => {
     })
 
     await store.fetchAll()
+    await settle()
 
     expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
+  })
+
+  test('does not offer a draft whose chat is archived, not gone', async () => {
+    // The boot's list is active chats only, so an archived chat's draft looks like
+    // an orphan there. The full list is what says the chat still exists.
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'archived-chat': { text: 'kept draft', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve(store.projects)
+      if (path === '/api/chats?active_only=1') return Promise.resolve([])
+      if (path === '/api/chats') return Promise.resolve([
+        { chat_id: 'archived-chat', project_id: 'p1', title: 'Old', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: true },
+      ])
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+    await settle()
+
+    expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
+    expect(apiGet).toHaveBeenCalledWith('/api/chats')
+  })
+
+  test('offers nothing when the full chat list cannot be read', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'dead-chat': { text: 'maybe archived', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve([])
+      if (path === '/api/chats?active_only=1') return Promise.resolve([])
+      if (path === '/api/chats') return Promise.reject(new Error('offline'))
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+    await settle()
+
+    expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
+  })
+
+  test('makes no full-list request when no draft is a candidate', async () => {
+    const store = useProjectStore()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve([])
+      if (path === '/api/chats?active_only=1') return Promise.resolve([])
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+    await settle()
+
+    expect(apiGet).not.toHaveBeenCalledWith('/api/chats')
   })
 })
 

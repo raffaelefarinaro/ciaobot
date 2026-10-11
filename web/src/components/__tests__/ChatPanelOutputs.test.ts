@@ -353,6 +353,41 @@ describe('ChatPanel Outputs section', () => {
     expect(new Set(rows.map(row => row.get('.chat-work-output-action').text())).size).toBe(2)
   })
 
+  it('opens the memory source from the pass itself, not the browser chat list', async () => {
+    // After a reload the archived source is not in the active chat list, so the
+    // origin link has to read the path and title the engine sent on this pass.
+    const { wrapper, store, pinia } = await mountPanel()
+    const viewer = useFileViewerStore(pinia)
+    const open = vi.spyOn(viewer, 'open').mockResolvedValue(undefined as never)
+    store.chats = [{
+      ...makeChat('pass-1'),
+      helper: {
+        kind: 'memory_pass',
+        source_chat_id: 'src-1',
+        source_title: 'Stale title',
+        source_project: 'General',
+        archive_path: '',
+        doc_path: '',
+        state: 'done',
+        archive_policy: 'when_clean',
+      } as never,
+      memory_source: {
+        chat_id: 'src-1',
+        title: 'Planning notes',
+        created_at: '',
+        last_activity_at: '',
+        archive_path: 'archive/src-1.md',
+      },
+    }]
+    store.activeChatId = 'pass-1'
+    await flushPromises()
+
+    const link = wrapper.get('.chat-origin-link')
+    expect(link.text()).toBe('Planning notes')
+    await link.trigger('click')
+    expect(open).toHaveBeenCalledWith('archive/src-1.md')
+  })
+
   it('opens the file viewer from a row link, as the old pill did', async () => {
     const { wrapper, store, pinia } = await mountPanel()
     const viewer = useFileViewerStore(pinia)

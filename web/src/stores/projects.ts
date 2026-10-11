@@ -12,7 +12,7 @@ import {
 } from '../lib/serverRestart'
 import { errorMessage } from '../lib/errorMessage'
 import { applyKeyboardSettings } from '../composables/useKeyboardSettings'
-import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft } from '../lib/chatDrafts'
+import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft, type OrphanDraft } from '../lib/chatDrafts'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
 import type {
@@ -89,6 +89,22 @@ const DEFAULT_CHAT_TITLE = 'New Chat'
 
 // How long the composer says how a background run ended before the line goes.
 const FINISHED_RUN_NOTICE_MS = 6000
+
+/**
+ * The boot's draft candidates whose chat is gone for good.
+ *
+ * The boot reads the active-only chat list, which leaves out archived chats, but
+ * their drafts are kept for 14 days. So a candidate is only an orphan when the
+ * full list does not name its chat either. No candidates means no request; a
+ * failed read offers nothing rather than guessing.
+ */
+async function unrecoverableOrphans(candidates: OrphanDraft[]): Promise<OrphanDraft[]> {
+  if (candidates.length === 0) return candidates
+  const all = await api.get<ChatInfo[]>('/api/chats').catch(() => null)
+  if (!all) return []
+  const known = new Set(all.map(chat => chat.chat_id))
+  return candidates.filter(orphan => !known.has(orphan.chatId))
+}
 
 export const useProjectStore = defineStore('projects', () => {
   // Every one-shot timer the store schedules for itself (retries, debounces,
@@ -1798,6 +1814,14 @@ export const useProjectStore = defineStore('projects', () => {
       // Keep an archived deep link's prefetched history through reconciliation.
       if (initialDetail) await initialDetail
       reconcileActiveChats(c)
+      // Offer back any draft whose chat no longer exists — most likely swept
+      // as an abandoned empty chat before its unsent text could be sent (#277).
+      // Load-time only (not on every in-session refresh; `bootstrapped` is
+      // still false until this call finishes, which is the flag that tells the
+      // boot from a refresh). The original key is left in place until the user
+      // restores or dismisses it, so a reload before either happens just
+      // re-offers it rather than losing it.
+      if (!bootstrapped.value) void offerOrphanDrafts(new Set(chats.value.map(ch => ch.chat_id)))
       void refreshRunningSubagents()
       const knownWorkspaceNames = workspaceOptions.value.map(w => w.name)
       if (!knownWorkspaceNames.includes(activeWorkspace.value)) {
@@ -1890,6 +1914,30 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  /**
+   * Offer back drafts whose chat is gone. Called only at boot from `fetchAll`,
+   * with the ids the boot just reconciled (see the comment there).
+   */
+  async function offerOrphanDrafts(validIds: Set<string>) {
+    for (const orphan of await unrecoverableOrphans(readOrphanCandidates(validIds))) {
+      const project = projects.value.find(p => p.project_id === orphan.projectId)
+      const origin = project ? `${project.workspace}/${project.name}` : 'a deleted project'
+      const preview = orphan.text.length > 80 ? `${orphan.text.slice(0, 80)}…` : orphan.text
+      pushToast({
+        chat_id: '',
+        title: 'Recovered an unsent draft',
+        body: `From ${origin}: ${preview}`,
+        variant: 'error',
+        restoreDraft: {
+          originalChatId: orphan.chatId,
+          projectId: orphan.projectId,
+          text: orphan.text,
+          workspace: project?.workspace ?? orphan.workspace,
+        },
+      })
+    }
+  }
+
   function reconcileChatList(nextChats: ChatInfo[]) {
     const applied = applyPendingArchived(nextChats)
     chats.value = applied
@@ -1914,32 +1962,6 @@ export const useProjectStore = defineStore('projects', () => {
     // Prune messages for deleted chats.
     const validIds = new Set(nextChats.map(ch => ch.chat_id))
 
-    // Offer back any draft whose chat no longer exists — most likely swept
-    // as an abandoned empty chat before its unsent text could be sent (#277).
-    // Load-time only (not on every in-session refresh; `bootstrapped` is
-    // still false on the very first call of a page load, same flag used
-    // above in fetchAll to distinguish boot from refresh), and the original
-    // key is left in place until the user restores or dismisses it, so a
-    // reload before either happens just re-offers it rather than losing it.
-    if (!bootstrapped.value) {
-      for (const orphan of readOrphanCandidates(validIds)) {
-        const project = projects.value.find(p => p.project_id === orphan.projectId)
-        const origin = project ? `${project.workspace}/${project.name}` : 'a deleted project'
-        const preview = orphan.text.length > 80 ? `${orphan.text.slice(0, 80)}…` : orphan.text
-        pushToast({
-          chat_id: '',
-          title: 'Recovered an unsent draft',
-          body: `From ${origin}: ${preview}`,
-          variant: 'error',
-          restoreDraft: {
-            originalChatId: orphan.chatId,
-            projectId: orphan.projectId,
-            text: orphan.text,
-            workspace: project?.workspace ?? orphan.workspace,
-          },
-        })
-      }
-    }
     for (const key of Object.keys(messages.value)) {
       if (!validIds.has(key)) delete messages.value[key]
     }

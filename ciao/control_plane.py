@@ -2827,10 +2827,12 @@ class CiaoControlPlane:
             workspace, lambda store: store.newest_by_task()
         )
         rows = [
-            _task_row_with_attempt(
-                document,
-                live.get(document.record.id),
-                current.get(document.record.id),
+            self._with_chat_archived(
+                _task_row_with_attempt(
+                    document,
+                    live.get(document.record.id),
+                    current.get(document.record.id),
+                )
             )
             for document in result.tasks
             if not windowed or _completed_within(document, since, before)
@@ -3670,6 +3672,20 @@ class CiaoControlPlane:
             f"workspace {workspace!r} has no General project to run a delegated task in.",
         )
 
+    def _with_chat_archived(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Add ``chat_archived`` to a task or attempt payload that names a chat.
+
+        Archived chats stay in the registry, so the answer holds after a reload,
+        when the browser's chat list no longer carries them. The board reads this
+        flag instead of looking the chat up itself. A payload with no chat gets no
+        key, so the flag only ever describes a chat that exists.
+        """
+        chat_id = str(payload.get("chat_id") or "")
+        if chat_id:
+            chat = self.pcm.get_chat(chat_id)
+            payload["chat_archived"] = chat is not None and bool(chat.archived)
+        return payload
+
     def _task_with_attempt(
         self, workspace: str, document: TaskDocument, *, include_body: bool = False
     ) -> dict[str, Any]:
@@ -3678,11 +3694,13 @@ class CiaoControlPlane:
         See :func:`_task_row_with_attempt`, which is the whole of the derivation;
         this is that function with the store read done for one task.
         """
-        return _task_row_with_attempt(
-            document,
-            self._attempt_live(workspace, document.record.id),
-            self._attempt_current(workspace, document.record.id),
-            include_body=include_body,
+        return self._with_chat_archived(
+            _task_row_with_attempt(
+                document,
+                self._attempt_live(workspace, document.record.id),
+                self._attempt_current(workspace, document.record.id),
+                include_body=include_body,
+            )
         )
 
     def workspace_task_delegate(
@@ -4627,7 +4645,7 @@ class CiaoControlPlane:
         )
         return {
             "task": self._task_with_attempt(workspace, document, include_body=True),
-            "attempts": [attempt.to_dict() for attempt in history],
+            "attempts": [self._with_chat_archived(attempt.to_dict()) for attempt in history],
         }
 
     def workspace_task_send_update(
