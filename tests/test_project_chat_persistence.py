@@ -723,6 +723,54 @@ async def test_compaction_leaves_transcript_reply_and_title_alone(tmp_path: Path
     assert not journal_dir.exists() or not any(journal_dir.iterdir())
 
 
+@pytest.mark.asyncio
+async def test_compaction_keeps_a_pending_retry_and_handover(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Compact keeps", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    chat.session_id = "native-session"
+    chat.handover_messages = [{"role": "user", "content": "earlier"}]
+    chat.handover_context_pending = True
+    manager.set_chat_retry(chat.chat_id, "the failed prompt", reason="manual")
+
+    async def fake_drive(*, chat_id, request, outcome):
+        event = ResultEvent(
+            type="result",
+            result="",
+            session_id="native-session",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+        outcome.events.append(event)
+        yield event
+
+    manager._drive_stream = fake_drive  # type: ignore[assignment]
+    stream = manager.start_stream(chat.chat_id, "/compact", compact=True)
+    _ = [event async for event in stream.subscribe()]
+
+    # The compaction sent no capsule, so the handover is still owed, and it
+    # is not the user's next attempt, so their armed retry survives.
+    assert chat.handover_context_pending is True
+    assert chat.retry_status == "pending"
+    assert chat.retry_prompt == "the failed prompt"
+    manager.stop_chat_retry(chat.chat_id)
+
+
+def test_compaction_refused_while_a_native_question_is_open(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Compact question", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    chat.session_id = "native-session"
+    chat.pending_question = json.dumps({"request_id": "form-1"})
+
+    with pytest.raises(ValueError, match="Answer the open question"):
+        manager.start_stream(chat.chat_id, "/compact", compact=True)
+    assert manager.get_active_stream(chat.chat_id) is None
+
+
 def test_stopped_compaction_records_no_transcript_turn(tmp_path: Path) -> None:
     from ciao.models import ChatContext
     from ciao.web.chat_streaming import StreamOutcome

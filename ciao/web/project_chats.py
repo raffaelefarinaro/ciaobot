@@ -6072,7 +6072,9 @@ class ProjectChatManager:
             self._cancel_between_turns_drain(chat_id)
             self._broker.clear(chat_id, existing)
 
-        if not is_retry:
+        # A compaction is not the user's next attempt, so it leaves a deferred
+        # retry of their failed prompt armed.
+        if not is_retry and not compact:
             chat_for_retry = self._chats.get(chat_id)
             if chat_for_retry is not None and chat_for_retry.retry_status == "pending":
                 self._clear_chat_retry(chat_for_retry)
@@ -6095,13 +6097,17 @@ class ProjectChatManager:
         # optimistic bubble it already rendered.
         turn_index: int | None = None
         sent_at_iso: str = ""
+        # An open native form owns the provider session: neither a new turn
+        # nor a compaction may start until it is answered.
+        if chat_meta is not None and self._native_question_request_id(
+            chat_meta.pending_question
+        ):
+            self._broker.clear(chat_id, stream)
+            stream.finish()
+            raise ValueError(
+                "Answer the open question before sending another message."
+            )
         if chat_meta is not None and not compact:
-            if self._native_question_request_id(chat_meta.pending_question):
-                self._broker.clear(chat_id, stream)
-                stream.finish()
-                raise ValueError(
-                    "Answer the open question before sending another message."
-                )
             # A new user turn answers (or supersedes) any legacy paused
             # question, so the persisted picker state no longer applies.
             chat_meta.pending_question = ""

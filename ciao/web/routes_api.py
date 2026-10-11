@@ -2686,6 +2686,9 @@ async def chat_compact(request: Request) -> JSONResponse:
 
     try:
         pcm.start_stream(chat_id, COMPACT_COMMAND, compact=True)
+    except ValueError as exc:
+        # An open question the user has not answered yet.
+        return JSONResponse({"error": str(exc)}, status_code=409)
     except Exception as exc:
         logger.exception("Failed to start compaction for %s", chat_id)
         return JSONResponse({"error": str(exc)}, status_code=500)

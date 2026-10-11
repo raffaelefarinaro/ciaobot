@@ -140,9 +140,10 @@ class _CompactChat(_FakeChat):
 
 
 class _FakeCompactPCM:
-    def __init__(self, *, chat=None, active=None):
+    def __init__(self, *, chat=None, active=None, refuse=""):
         self.chat = chat
         self.active = active
+        self.refuse = refuse
         self.stream_started = None
 
     def get_chat(self, chat_id):
@@ -152,6 +153,8 @@ class _FakeCompactPCM:
         return self.active
 
     def start_stream(self, chat_id, prompt, images=None, compact=False):
+        if self.refuse:
+            raise ValueError(self.refuse)
         self.stream_started = {"chat_id": chat_id, "prompt": prompt, "compact": compact}
         return SimpleNamespace()
 
@@ -227,3 +230,15 @@ def test_chat_compact_needs_a_provider_session() -> None:
     assert resp.status_code == 409
     assert resp.json() == {"error": "nothing to compact yet"}
     assert pcm.stream_started is None
+
+
+def test_chat_compact_refused_while_a_question_is_open() -> None:
+    pcm = _FakeCompactPCM(
+        chat=_CompactChat("chat-123"),
+        refuse="Answer the open question before sending another message.",
+    )
+    resp = _post_compact(pcm)
+    assert resp.status_code == 409
+    assert resp.json() == {
+        "error": "Answer the open question before sending another message."
+    }

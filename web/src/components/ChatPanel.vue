@@ -628,7 +628,7 @@
           :project="project"
           :context-pct="contextPct"
           :compacting="compacting"
-          :compact-disabled="store.isStreaming || compacting || Boolean(chat?.archived)"
+          :compact-disabled="compactDisabled"
           @open-file="openInspectorFile"
           @compact="compactContext"
         />
@@ -1237,7 +1237,7 @@
           :project="project"
           :context-pct="contextPct"
           :compacting="compacting"
-          :compact-disabled="store.isStreaming || compacting || Boolean(chat?.archived)"
+          :compact-disabled="compactDisabled"
           @open-file="openInspectorFile"
           @compact="compactContext"
         />
@@ -1927,8 +1927,9 @@ const contextPct = computed<number | null>(() => {
   return null
 })
 const compacting = computed(() => Boolean(chat.value && store.compactRequests[chat.value.chat_id]))
+const compactDisabled = computed(() => store.isStreaming || compacting.value || Boolean(chat.value?.archived))
 function compactContext() {
-  if (!chat.value || store.isStreaming) return
+  if (!chat.value || compactDisabled.value) return
   void store.compactChat(chat.value.chat_id)
 }
 

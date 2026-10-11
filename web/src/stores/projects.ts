@@ -2694,13 +2694,17 @@ export const useProjectStore = defineStore('projects', () => {
   async function tryChatRetryNow(chatId: string) {
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/retry`, { action: 'try_now' })
     replaceChat(c)
-    // If this tab is already on the chat, reconnect so the per-chat WS
-    // attaches to the new broker stream started by the HTTP action.
+    reattachActiveChatSocket(chatId)
+    return c
+  }
+
+  // If this tab is already on the chat, reconnect so the per-chat WS attaches
+  // to a broker stream an HTTP action just started.
+  function reattachActiveChatSocket(chatId: string) {
     if (activeChatId.value === chatId) {
       disconnectWs(chatId)
       connectWs(chatId)
     }
-    return c
   }
 
   function replaceChat(chat: ChatInfo) {
@@ -4885,12 +4889,7 @@ export const useProjectStore = defineStore('projects', () => {
     compactRequests.value[chatId] = true
     try {
       await api.post(`/api/chats/${chatId}/compact`, {})
-      // Reconnect so this tab's socket attaches to the stream the HTTP call
-      // started, as tryChatRetryNow does.
-      if (activeChatId.value === chatId) {
-        disconnectWs(chatId)
-        connectWs(chatId)
-      }
+      reattachActiveChatSocket(chatId)
     } catch (e) {
       pushErrorToast('Could not compact chat', errorMessage(e))
     } finally {

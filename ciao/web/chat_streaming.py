@@ -1340,7 +1340,8 @@ class ChatStreaming:
             chat.last_response = ""
             chat.last_response_status = "running"
             self._host._save()
-        handover_context_sent = bool(
+        # A compaction sends no capsule, so a pending handover is still unsent.
+        handover_context_sent = not compact and bool(
             chat.handover_context_pending and chat.handover_messages
         )
 
