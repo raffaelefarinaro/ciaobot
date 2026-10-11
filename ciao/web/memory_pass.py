@@ -687,9 +687,23 @@ class MemoryPassCoordinator:
             self.pump(workspace)
 
     def on_turn_started(self, chat: ChatInfo) -> None:
-        """Reclaim the workspace slot when the owner continues a stopped pass."""
+        """Reclaim the workspace slot when the owner continues a stopped pass.
+
+        Only an ``attention`` pass is reclaimed: its prompt already ran and was
+        stopped or failed. A ``queued`` pass has not run, and ``pump`` starts it
+        with its own prompt, so a user turn there is refused instead of racing
+        the pump for the same vault. Other states are left untouched.
+        """
         helper = self._helper(chat)
         if chat.archived or helper.get("kind") != MEMORY_PASS_KIND:
+            return
+        state = helper.get("state")
+        if state == "queued":
+            raise ValueError(
+                "This memory pass is queued and starts on its own when the "
+                "workspace is free. Try again after it runs."
+            )
+        if state not in {"attention", "running"}:
             return
         workspace = self._workspace_of(chat)
         if any(
@@ -701,7 +715,7 @@ class MemoryPassCoordinator:
                 "Another memory pass is running in this workspace. "
                 "Try again when it finishes."
             )
-        if helper.get("state") != "running":
+        if state != "running":
             self._set_state(chat, "running")
             self._set_source_step(
                 str(helper.get("source_chat_id") or ""), "running", chat.chat_id

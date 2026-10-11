@@ -192,6 +192,8 @@ _CAPABILITY_IMAGE_MSG = (
 
 _RETRY_INTERVAL_SECONDS = 60 * 60
 _RETRY_CONNECTION_INTERVAL_SECONDS = 30
+# How often the retry loop checks whether its fired retry stream has ended.
+_RETRY_STREAM_POLL_SECONDS = 5
 _RETRY_STATUSES = {"pending", "stopped", ""}
 # Shortest synthesis-nudge reply that still earns an unread badge and a push.
 # Anything shorter is the model's own bookkeeping ("ok", "done."). Applies only
@@ -6038,10 +6040,16 @@ class ProjectChatManager:
                     self._save()
                     self._publish_retry(chat)
                     continue
-                self.try_chat_retry_now(chat_id)
-                # The retry stream now owns success/failure state. If it hits
-                # the same quota error, `_drive` will refresh retry_next_at.
-                await asyncio.sleep(max(1, chat.retry_interval_seconds))
+                fired = self.try_chat_retry_now(chat_id)
+                if fired is None:
+                    continue
+                # The retry stream now owns success/failure state. A failed
+                # retry re-arms `retry_next_at` (a bucket reset, or 30s after a
+                # dropped connection), so wait for the stream to end and re-read
+                # the chat at the top of the loop. Sleeping for the interval
+                # would ignore the re-armed time for a daily retry.
+                while self._broker.get(chat_id) is fired:
+                    await asyncio.sleep(_RETRY_STREAM_POLL_SECONDS)
         except asyncio.CancelledError:
             raise
         finally:
