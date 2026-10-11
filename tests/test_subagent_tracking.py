@@ -1202,3 +1202,25 @@ def test_cli_task_wake_marks_tasks_lost_with_context_prefix(tmp_path: Path) -> N
     assert info.status == "lost"
     assert info.raw_status == "lost"
     assert running_tasks(state) == []
+
+
+def test_latest_turn_dispatch_flag(tmp_path: Path) -> None:
+    records = [
+        _user_text("a"),
+        _assistant_dispatch("toolu_1", "Earlier work"),
+        _dispatch_result("toolu_1", "x1"),
+        _user_text("b"),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.latest_turn_index == 1
+    assert state.background_dispatched_in_latest_turn is False
+
+    records = [
+        _user_text("a"),
+        _assistant_dispatch("toolu_2", "Latest work"),
+        _dispatch_result("toolu_2", "x2"),
+    ]
+    (tmp_path / "second").mkdir()
+    state = parse_session_subagents(_write_session(tmp_path / "second", records))
+    assert state.latest_turn_index == 0
+    assert state.background_dispatched_in_latest_turn is True

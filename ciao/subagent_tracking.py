@@ -189,6 +189,9 @@ class SessionSubagentState:
     # the parent has already written about the result, so the synthesis nudge
     # would only produce a redundant "that was the report above" turn.
     notification_answered: bool = False
+    # 0-based index of the latest countable user turn (aligned with
+    # SubagentInfo.turn_index), or None before the first one.
+    latest_turn_index: int | None = None
 
     @property
     def awaiting_user_answer(self) -> bool:
@@ -201,6 +204,16 @@ class SessionSubagentState:
             1
             for info in self.subagents.values()
             if info.is_async and info.status == "running" and info.kind == "agent"
+        )
+
+    @property
+    def background_dispatched_in_latest_turn(self) -> bool:
+        """True when the latest user turn launched a background agent or CLI task."""
+        if self.latest_turn_index is None:
+            return False
+        return any(
+            info.is_async and info.turn_index == self.latest_turn_index
+            for info in self.subagents.values()
         )
 
 
@@ -835,6 +848,7 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
         for agent_id in current_agent_ids
     )
     state.notification_pending = any(entry is not None for entry in queue)
+    state.latest_turn_index = user_idx - 1 if user_idx > 0 else None
     return state
 
 

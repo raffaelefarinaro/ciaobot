@@ -2932,3 +2932,112 @@ def test_a_background_stream_does_not_count_as_a_live_turn(tmp_path: Path) -> No
         pcm._broker.clear("chat-1", background)
 
     assert calls == [("chat-1", "proj-1", "Title", "interim")]
+
+
+async def _watch_for_steers(
+    tmp_path: Path, monkeypatch, records: list[dict], session_id: str
+) -> list:
+    """Run one completion watcher over a session JSONL and return the steers."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-gate", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-gate-test")
+    chat.session_id = session_id
+    pcm._save()
+
+    session_path = tmp_path / f"{session_id}.jsonl"
+    _write_jsonl(session_path, records)
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root, *, agent_root=None, force_refresh=False: session_path,
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    steer_calls: list = []
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            steer_calls.append(request)
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: None)
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        running_drain.cancel()
+    return steer_calls
+
+
+async def test_watcher_does_not_nudge_a_turn_without_background_work(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A plain turn that dispatched nothing never gets the synthesis nudge (#1290)."""
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "hello there."}]},
+        },
+    ]
+    steer_calls = await _watch_for_steers(tmp_path, monkeypatch, records, "sess-gate-plain")
+    assert steer_calls == []
+
+
+async def test_watcher_does_not_nudge_for_agents_from_an_earlier_turn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An agent reported in an earlier turn does not re-trigger the nudge later."""
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "first"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+        _completion_record("agent-a"),
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "Here is the report."}]},
+        },
+        {"type": "user", "message": {"role": "user", "content": "second"}},
+        {
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "ok."}]},
+        },
+    ]
+    steer_calls = await _watch_for_steers(tmp_path, monkeypatch, records, "sess-gate-earlier")
+    assert steer_calls == []
+
+
+async def test_watcher_nudges_when_the_latest_turns_agent_already_finished(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An agent launched this turn that finished before the turn ended still gets its nudge."""
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking, "has_finished_transcript", lambda *a, **k: True
+    )
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "I'll report back once it finishes."}],
+            },
+        },
+    ]
+    steer_calls = await _watch_for_steers(tmp_path, monkeypatch, records, "sess-gate-finished")
+    assert len(steer_calls) == 1
