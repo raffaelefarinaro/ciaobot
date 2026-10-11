@@ -791,6 +791,9 @@ class FakeHost:
     def after_env_restored(self, live: Path, *, bin_dir: Path, wheel: Path) -> None:
         self._record("after_env_restored", live.name)
 
+    def server_host_migration_needed(self) -> bool:
+        return False
+
     def uv_candidates(self) -> list[str]:
         return self._mac.uv_candidates()
 
