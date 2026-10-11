@@ -6226,6 +6226,13 @@ class ProjectChatManager:
                 "Answer the open question before sending another message."
             )
         if chat_meta is not None and not compact:
+            try:
+                self._memory_pass.on_turn_started(chat_meta)
+            except ValueError:
+                self._broker.clear(chat_id, stream)
+                stream.finish()
+                raise
+        if chat_meta is not None and not compact:
             # A new user turn answers (or supersedes) any legacy paused
             # question, so the persisted picker state no longer applies.
             chat_meta.pending_question = ""

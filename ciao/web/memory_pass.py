@@ -686,6 +686,27 @@ class MemoryPassCoordinator:
             )
             self.pump(workspace)
 
+    def on_turn_started(self, chat: ChatInfo) -> None:
+        """Reclaim the workspace slot when the owner continues a stopped pass."""
+        helper = self._helper(chat)
+        if chat.archived or helper.get("kind") != MEMORY_PASS_KIND:
+            return
+        workspace = self._workspace_of(chat)
+        if any(
+            other.chat_id != chat.chat_id
+            and self._helper(other).get("state") == "running"
+            for other in self._passes_in(workspace)
+        ):
+            raise ValueError(
+                "Another memory pass is running in this workspace. "
+                "Try again when it finishes."
+            )
+        if helper.get("state") != "running":
+            self._set_state(chat, "running")
+            self._set_source_step(
+                str(helper.get("source_chat_id") or ""), "running", chat.chat_id
+            )
+
     async def on_turn_finished(self, chat_id: str) -> bool:
         """Settle one memory pass whose turn ended. True when it archived."""
         host = self._host
@@ -702,7 +723,7 @@ class MemoryPassCoordinator:
             host._broker.get(chat_id) is not None
             or chat.pending_question
             or chat.pending_permission
-            or chat.retry_status
+            or chat.retry_status == "pending"
             or host._subagents.running_count(chat_id) > 0
         ):
             return False
