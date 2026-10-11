@@ -135,6 +135,7 @@ from ciao.transcripts import (
     TurnJournal,
     _claude_projects_dir,
     _global_session_matches,
+    _global_sessions_present,
     parse_archive_turns,
 )
 from ciao.web import chat_service
@@ -2918,10 +2919,31 @@ class ProjectChatManager:
 
     def list_chats_dicts(self, project_id: str | None = None) -> list[dict]:
         """Return chat dicts with a ``local`` flag indicating session availability."""
-        return [
-            c.to_dict(local=self.is_session_local(c))
-            for c in self.list_chats(project_id)
-        ]
+        chats = self.list_chats(project_id)
+        local_flags: dict[str, bool] = {}
+        missing_global: set[str] = set()
+        for chat in chats:
+            if not chat.session_id or chat.provider not in ("", "claude"):
+                local_flags[chat.chat_id] = True
+                continue
+            try:
+                uuid.UUID(chat.session_id)
+            except ValueError:
+                local_flags[chat.chat_id] = False
+                continue
+            preferred = (
+                _claude_projects_dir(self._agent_root_for_chat(chat.chat_id))
+                / f"{chat.session_id}.jsonl"
+            )
+            if preferred.exists():
+                local_flags[chat.chat_id] = True
+            else:
+                missing_global.add(chat.session_id)
+        globally_present = _global_sessions_present(missing_global)
+        for chat in chats:
+            if chat.chat_id not in local_flags:
+                local_flags[chat.chat_id] = chat.session_id in globally_present
+        return [c.to_dict(local=local_flags[c.chat_id]) for c in chats]
 
     def get_chat(self, chat_id: str) -> ChatInfo | None:
         return self._chats.get(chat_id)

@@ -22,6 +22,10 @@ The task board derives four status groups and draws them as four lanes side by s
 
 Production `/assets` serves hashed JavaScript and CSS with gzip negotiation above a 500-byte minimum; API responses and chat streams are outside that compression path. `ChatLayout.vue` loads chat and pinned-file panels on demand, begins the chat download for chat deep links alongside bootstrap data, and loads the file viewer on first open while retaining its mounted dialog lifecycle. Startup progress and the engine monitor share a bounded status request, and a short initial display delay avoids a ready-state curtain flash without persisting readiness.
 
+Chat listings batch cross-cwd Claude session availability checks into one fresh
+directory scan per request. Individual session lookups retain their separate
+freshness contract; listing availability is never cached across requests.
+
 ## App repo layout
 
 ```

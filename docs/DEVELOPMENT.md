@@ -17,6 +17,12 @@ Page-load behavior is covered by `tests/test_static_asset_compression.py` and
 bounded startup request and display delay. Static gzip is limited to hashed
 JavaScript/CSS, while chat code is prefetched only for chat deep links.
 
+`tests/test_is_session_local.py` covers batched chat-list availability, including
+session creation/deletion and newly used working directories between requests.
+`tests/test_claude_session_lookup.py` covers the independent single-session
+lookup freshness contract. Large real catalogs need measurement alongside the
+small browser fixture; asset readiness alone does not measure Home's data wait.
+
 ## Server install
 
 Linux production and every installer-managed macOS install restart the engine

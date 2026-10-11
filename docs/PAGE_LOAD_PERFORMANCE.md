@@ -1,5 +1,26 @@
 # Page loading performance plan
 
+## Installed Home data wait — 2026-10-11
+
+After the asset improvement was installed, the real Home bootstrap still waited
+on `/api/chats`. An authenticated individual request took 2.327 s. A reload
+showed the Home skeleton disappearing 4.822 s after the timing observer started;
+requests for projects, workspaces and vault review were delayed alongside chats.
+These local browser measurements use the real catalog, with no network throttling,
+and are separate from the synthetic asset-download results below.
+
+The read-only profile of 2,324 chat rows found about 513,000 filesystem stats:
+each missing Claude session repeated a cross-cwd lookup across all project slug
+directories. The fix checks preferred session paths as before, then shares one
+fresh directory scan across the remaining requested UUIDs. Individual session
+lookup contracts and all returned availability flags are preserved. No file
+presence cache is retained between requests.
+
+Three alternating old/new comparisons on the same catalog produced byte-for-byte
+equivalent JSON data: old listing computation 2,339 / 2,319 / 2,331 ms, new
+44 / 42 / 41 ms. This measures backend computation, not the final browser
+indicator duration; live activation and browser verification follow separately.
+
 Baseline measured on 2026-10-11 against commit `9fcecf92`; implementation
 verified in the working tree on the same investigation date.
 
