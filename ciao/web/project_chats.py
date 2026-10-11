@@ -156,7 +156,11 @@ from ciao.web.memory_pass import (
     is_memory_pass_chat,
 )
 from ciao.web.schedule_dispatch import ScheduleDispatcher
-from ciao.web.document_conversion import convert_document, is_anydoc_document
+from ciao.web.document_conversion import (
+    convert_document,
+    is_anydoc_document,
+    is_natively_readable,
+)
 from ciao.web.file_snapshots import SnapshotStore
 from ciao.web.subagent_watchers import (
     NUDGE_DECLINED,
@@ -7974,11 +7978,11 @@ class ProjectChatManager:
         candidate = (root / project.vault_folder).resolve()
         return candidate if candidate.is_dir() and candidate.is_relative_to(root) else None
 
-    def convert_chat_document(self, project_id: str, source: Path, *, output_stem: str | None = None) -> dict[str, str]:
+    def convert_chat_document(self, project_id: str, source: Path) -> Path:
         vault_dir = self.active_project_vault_dir(project_id)
         if vault_dir is None:
             raise LookupError("project has no active folder for converted documents")
-        stem = output_stem or source.stem
+        stem = source.stem
         target = vault_dir / f"{stem}.md"
         n = 2
         while os.path.lexists(target):
@@ -7995,26 +7999,32 @@ class ProjectChatManager:
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as output:
                 output.write(markdown)
             break
-        return {"original_path": str(source.resolve()), "markdown_path": str(target.resolve())}
+        return target.resolve()
 
     def save_chat_attachment_upload(self, project_id: str, data: bytes, filename: str) -> dict:
-        if (
-            not filename
-            or "\x00" in filename
-            or not filename.isprintable()
-            or Path(filename).name != filename
-            or filename.startswith(".")
-        ):
-            raise ValueError("invalid filename")
+        """Save a chat attachment into the project folder.
+
+        A convertible document is kept as uploaded, with a Markdown copy beside
+        it. ``attach_paths`` is what the prompt references: the copy, plus the
+        original when the agent reads that format itself (PDF).
+        """
         if not is_anydoc_document(filename):
             entry = self.save_project_file_upload(project_id, data, filename)
-            return {**entry, "original_path": entry["absolute_path"], "markdown_path": None}
-        import tempfile
-        with tempfile.NamedTemporaryFile(prefix="ciao-document-", suffix=Path(filename).suffix) as source:
-            source.write(data)
-            source.flush()
-            entry = self.convert_chat_document(project_id, Path(source.name), output_stem=Path(filename).stem)
-        return {**entry, "original_path": None, "original_filename": filename}
+            return {**entry, "markdown_path": None, "attach_paths": [entry["absolute_path"]]}
+        if self.active_project_vault_dir(project_id) is None:
+            raise LookupError("project has no active folder for converted documents")
+        entry = self.save_project_file_upload(project_id, data, filename)
+        original = entry["absolute_path"]
+        try:
+            markdown = str(self.convert_chat_document(project_id, Path(original)))
+        except (RuntimeError, ValueError):
+            # The agent reads a PDF itself, so a failed copy is no reason to drop it.
+            if not is_natively_readable(original):
+                raise
+            logger.warning("Attaching %s without a Markdown copy", Path(original).name, exc_info=True)
+            return {**entry, "markdown_path": None, "attach_paths": [original]}
+        attach_paths = [original, markdown] if is_natively_readable(original) else [markdown]
+        return {**entry, "markdown_path": markdown, "attach_paths": attach_paths}
 
     def list_project_files(self, project_id: str) -> list[dict]:
         """List files under the project's vault folder, recursive, sorted by mtime desc.

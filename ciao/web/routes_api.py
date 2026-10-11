@@ -51,7 +51,7 @@ from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
 from ciao.web.auth import is_loopback_client
-from ciao.web.document_conversion import is_anydoc_document
+from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
     CLAUDE_MODELS,
@@ -1849,13 +1849,16 @@ async def chat_attachments_upload(request: Request) -> JSONResponse:
     saved: list[dict] = []
     errors: list[dict[str, str]] = []
     total_bytes = 0
+    upload_count = 0
     for key in form:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
-        if len(saved) + len(errors) >= _DESKTOP_DROP_MAX_FILES:
+        # Counted per uploaded file: a PDF yields two refs (original + Markdown).
+        if upload_count >= _DESKTOP_DROP_MAX_FILES:
             errors.append({"filename": "file", "error": "too many files"})
             break
+        upload_count += 1
         filename = getattr(upload, "filename", "") or ""
         display_name = _drop_display_name(Path(filename))
         try:
@@ -1867,11 +1870,8 @@ async def chat_attachments_upload(request: Request) -> JSONResponse:
             entry = await asyncio.to_thread(
                 pcm.save_chat_attachment_upload, chat.project_id, data, filename
             )
-            source = entry.get("markdown_path") or entry.get("absolute_path")
-            if not source:
-                raise ValueError("upload produced no file")
-            ref = pcm.register_file_ref(chat.chat_id, Path(str(source)))
-            saved.append({"ref": ref, "name": display_name})
+            for attach_path in entry["attach_paths"]:
+                saved.append(_desktop_drop_ref(pcm, chat.chat_id, Path(attach_path)))
         except LookupError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         except (ValueError, RuntimeError, OSError) as exc:
@@ -2191,14 +2191,14 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                 continue
             try:
                 if is_anydoc_document(path.name):
-                    converted = await asyncio.to_thread(
-                        pcm.convert_chat_document, project_id, path
+                    data = await asyncio.to_thread(
+                        _read_native_file_limited, path, chat_service._PROJECT_UPLOAD_MAX_BYTES
                     )
-                    generated = Path(str(converted.get("markdown_path") or ""))
-                    if not generated.is_file():
-                        raise ValueError("document conversion produced no file")
-                    file_refs.append(_desktop_drop_ref(pcm, chat_id, generated))
-                    keep_paths.add(path)
+                    entry = await asyncio.to_thread(
+                        pcm.save_chat_attachment_upload, project_id, data, path.name
+                    )
+                    for attach_path in entry["attach_paths"]:
+                        file_refs.append(_desktop_drop_ref(pcm, chat_id, Path(attach_path)))
                 else:
                     file_refs.append(_desktop_drop_ref(pcm, chat_id, path))
                     keep_paths.add(path)
@@ -4620,10 +4620,12 @@ def _entity_types_body(
 # file on disk is served, relative paths anchoring to the workspace. The browser
 # decides whether to render inline (PDF) or save (everything else) based on
 # the inferred MIME type. Saved-page archives are forced to download so their
-# packaged HTML cannot execute under the PWA origin.
-_WORKSPACE_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
-})
+# packaged HTML cannot execute under the PWA origin, and so is every document
+# format kept only as the original of a chat attachment's Markdown copy.
+_WORKSPACE_INLINE_BINARY_EXTS = frozenset({".pdf", ".zip", ".docx", ".xlsx", ".pptx"})
+_WORKSPACE_BINARY_EXTS = (
+    _WORKSPACE_INLINE_BINARY_EXTS | {".mht", ".mhtml"} | (ANYDOC_EXTENSIONS - {".csv"})
+)
 _WORKSPACE_BINARY_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
@@ -4730,10 +4732,10 @@ async def workspace_binary(request: Request) -> Response:
             }
             media_type = _FALLBACK_MIMES.get(resolved.suffix.lower(), "application/octet-stream")
 
-    # `inline` lets PDFs preview in a tab; saved-page archives are explicit
-    # downloads. Custom frame headers let supported previews embed inside the
+    # `inline` lets PDFs preview in a tab; everything else is an explicit
+    # download. Custom frame headers let supported previews embed inside the
     # PWA's same-origin file viewer iframe.
-    disposition = "attachment" if source_ext in {".mht", ".mhtml"} else "inline"
+    disposition = "inline" if source_ext in _WORKSPACE_INLINE_BINARY_EXTS else "attachment"
     headers = {
         "Content-Disposition": f'{disposition}; filename="{filename}"',
         "X-Frame-Options": "SAMEORIGIN",
