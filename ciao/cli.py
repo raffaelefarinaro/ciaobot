@@ -8,7 +8,6 @@ import html
 import http.cookiejar
 import json
 import os
-import plistlib
 import re
 import secrets
 import shutil
@@ -35,7 +34,7 @@ from ciao.server_host import (
 )
 from ciao.setup_marker import RUNTIME_DIR_NAME
 from ciao.setup_status import detect_nested_workspaces
-from ciao.macos_service import default_launch_agents_dir, hosted_service_python
+from ciao.macos_service import default_launch_agents_dir, hosted_service_python, load_server_plist
 from ciao.jsonio import write_private_text
 from ciao.os_support.console import use_utf8_stdio
 from ciao.git_proc import EXACT_BYTES
@@ -418,7 +417,7 @@ def _existing_hosted_definition_serves(launch_agents_dir: Path, workspace: Path)
     """
     if sys.platform != "darwin":
         return False
-    data = _load_server_plist(launch_agents_dir)
+    data = load_server_plist(launch_agents_dir)
     if data is None:
         return False
     program = _hosted_definition_program(data)
@@ -1483,19 +1482,7 @@ def _looks_like_source_checkout(path: Path) -> bool:
 def _plist_workspace(launch_agents_dir: Path) -> Path | None:
     """Workspace the server LaunchAgent currently points at, if set up."""
 
-    return _plist_data_workspace(_load_server_plist(launch_agents_dir))
-
-
-def _load_server_plist(launch_agents_dir: Path) -> dict[str, Any] | None:
-    """The parsed ``com.ciao.server.plist`` dict, or ``None`` if unreadable."""
-
-    plist = launch_agents_dir.expanduser() / "com.ciao.server.plist"
-    try:
-        with plist.open("rb") as handle:
-            data = plistlib.load(handle)
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    return _plist_data_workspace(load_server_plist(launch_agents_dir))
 
 
 def _plist_data_workspace(data: dict[str, Any] | None) -> Path | None:
