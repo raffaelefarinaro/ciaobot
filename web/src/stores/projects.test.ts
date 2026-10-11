@@ -2818,6 +2818,44 @@ describe('provider-neutral input state', () => {
     })
   })
 
+  test('the Stop ack after a result does not restart the spinner', () => {
+    const store = useProjectStore()
+    const chatId = 'stop-ack-after-result'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Stopped',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'tool_use',
+      tool_name: 'shell',
+      tool_input: 'ls',
+      tool_use_id: 'tool-1',
+    }) })
+    expect(store.isStreaming).toBe(true)
+
+    // A turn stopped before any text: the result is empty, and the server
+    // acknowledges the Stop request only after it.
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: '',
+      is_error: false,
+      session_id: 'session-1',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({ type: 'status', message: 'stopped' }) })
+
+    expect(store.isStreaming).toBe(false)
+  })
+
   test('keeps a native permission card across a terminal stream frame', () => {
     const store = useProjectStore()
     const chatId = 'permission-survives-result'

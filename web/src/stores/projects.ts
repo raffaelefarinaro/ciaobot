@@ -5345,8 +5345,13 @@ export const useProjectStore = defineStore('projects', () => {
     // `model_changed` is intentionally omitted: it is emitted after a
     // successful capability fallback's terminal `result`, so including it
     // here would flip streaming back on after the turn already ended.
+    // `status: stopped` is excluded too: it is the Stop request's ack, sent
+    // after the turn's terminal `result`, so counting it would put the
+    // spinner back on a finished turn until history reconciliation gave up.
     const streamingEventTypes = new Set(['text_delta', 'tool_use', 'thinking', 'status', 'user_echo', 'token_usage'])
-    if (streamingEventTypes.has(event.type) && !streaming.value[chatId]) {
+    const impliesStreaming = streamingEventTypes.has(event.type)
+      && !(event.type === 'status' && event.message === 'stopped')
+    if (impliesStreaming && !streaming.value[chatId]) {
       streaming.value[chatId] = true
       if (streamingText.value[chatId] === undefined) streamingText.value[chatId] = ''
       if (streamingThinking.value[chatId] === undefined) streamingThinking.value[chatId] = ''
@@ -5355,7 +5360,7 @@ export const useProjectStore = defineStore('projects', () => {
     // On a WS reconnect mid-turn we don't know the true start, so this is a
     // lower bound (timer resumes from now); the final duration on the result
     // bubble remains authoritative.
-    if (streamingEventTypes.has(event.type) && !streamStartedAt.value[chatId]) {
+    if (impliesStreaming && !streamStartedAt.value[chatId]) {
       streamStartedAt.value[chatId] = Date.now()
       persistStreamStartedAt()
     }
