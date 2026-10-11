@@ -518,7 +518,7 @@ def test_chat_pdf_upload_attaches_original_when_conversion_fails(
     assert not (folder / "scan.md").exists()
 
 
-def test_chat_document_upload_keeps_original_when_conversion_fails(
+def test_chat_document_upload_removes_original_when_conversion_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     folder = _make_work_project(tmp_path, "2026-q2-foo")
@@ -530,17 +530,54 @@ def test_chat_document_upload_keeps_original_when_conversion_fails(
         raise RuntimeError("document conversion failed: corrupt")
 
     monkeypatch.setattr("ciao.web.project_chats.convert_document", fail)
-    response = _make_client(pcm, pcm._config).post(
-        f"/api/chats/{chat.chat_id}/attachments",
-        files={"file": ("report.docx", b"source", "application/octet-stream")},
-    )
+    client = _make_client(pcm, pcm._config)
+    for _ in range(2):
+        response = client.post(
+            f"/api/chats/{chat.chat_id}/attachments",
+            files={"file": ("report.docx", b"source", "application/octet-stream")},
+        )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["file_refs"] == []
-    assert body["errors"][0]["filename"] == "report.docx"
-    assert (folder / "report.docx").read_bytes() == b"source"
-    assert not (folder / "report.md").exists()
+        assert response.status_code == 200
+        body = response.json()
+        assert body["file_refs"] == []
+        assert body["errors"][0]["filename"] == "report.docx"
+    assert sorted(p.name for p in folder.iterdir()) == ["README.md"]
+
+
+def test_save_chat_attachment_upload_raises_and_leaves_no_original_for_docx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    project = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+
+    def fail(source: Path) -> str:
+        raise RuntimeError("document conversion failed: corrupt")
+
+    monkeypatch.setattr("ciao.web.project_chats.convert_document", fail)
+
+    with pytest.raises(RuntimeError, match="document conversion failed"):
+        pcm.save_chat_attachment_upload(project.project_id, b"source", "report.docx")
+    assert sorted(p.name for p in folder.iterdir()) == ["README.md"]
+
+
+def test_save_chat_attachment_upload_keeps_pdf_when_conversion_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    project = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+
+    def fail(source: Path) -> str:
+        raise RuntimeError("document conversion failed: corrupt")
+
+    monkeypatch.setattr("ciao.web.project_chats.convert_document", fail)
+
+    entry = pcm.save_chat_attachment_upload(project.project_id, b"%PDF", "scan.pdf")
+
+    assert entry["markdown_path"] is None
+    assert entry["attach_paths"] == [entry["absolute_path"]]
+    assert folder.joinpath("scan.pdf").read_bytes() == b"%PDF"
 
 
 def test_chat_attachment_response_is_opaque_by_default(tmp_path: Path) -> None:
