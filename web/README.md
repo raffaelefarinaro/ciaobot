@@ -10,6 +10,19 @@ anchored to that chat's agent root, never the sidebar's selected workspace.
 Pins report success explicitly; failed pins keep the modal open, and an older
 pin request cannot close a newer file preview.
 
+The chat panel and pinned-file panel load when their views need them; a direct
+chat or subagent link starts the chat download alongside bootstrap data. The
+file viewer loads on first open and stays mounted afterward so dialog focus
+restoration and edit state keep their normal lifecycle. Home does not fetch
+these optional modules. The engine status request is bounded and shared between
+startup progress and outage monitoring; a ready response within the brief
+startup display delay avoids showing the curtain on a warm load.
+
+Production hashed JavaScript and CSS under `/assets` use negotiated gzip above
+500 bytes. Other static files, API responses, and chat streams keep their
+existing response path. Conditional and ranged asset requests retain their
+identity representation.
+
 ## Dev workflow
 
 ```bash

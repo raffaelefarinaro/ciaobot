@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
+from starlette.middleware.gzip import GZipMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse, Response
@@ -237,6 +240,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 # stale build.
 _IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 _NO_CACHE = "no-cache, no-store, must-revalidate"
+_GZIP_MINIMUM_SIZE = 500
+_HASHED_TEXT_ASSET = re.compile(r"-[A-Za-z0-9_-]{6,}\.(?:js|css)$", re.IGNORECASE)
 
 
 class CacheControlStaticFiles(StaticFiles):
@@ -246,6 +251,96 @@ class CacheControlStaticFiles(StaticFiles):
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = _IMMUTABLE_CACHE
         return response
+
+
+class HashedAssetCompression:
+    """Negotiate gzip only for hashed JavaScript and CSS under /assets."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.static_app = app
+        self.app = GZipMiddleware(app, minimum_size=_GZIP_MINIMUM_SIZE)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.static_app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        headers = list(scope.get("headers", []))
+        accepts_gzip = False
+        for name, value in headers:
+            if name.lower() != b"accept-encoding":
+                continue
+            for item in value.decode("latin-1").split(","):
+                token, _, parameters = item.strip().partition(";")
+                if token.strip().lower() != "gzip":
+                    continue
+                quality = 1.0
+                for parameter in parameters.split(";"):
+                    key, equals, raw_value = parameter.strip().partition("=")
+                    if equals and key.strip().lower() == "q":
+                        try:
+                            parsed_quality = float(raw_value.strip())
+                            quality = parsed_quality if 0 <= parsed_quality <= 1 else 0.0
+                        except ValueError:
+                            quality = 0.0
+                accepts_gzip = quality > 0
+                break
+            break
+
+        eligible = bool(_HASHED_TEXT_ASSET.search(path))
+        if not eligible:
+            await self.static_app(scope, receive, send)
+            return
+        has_range = any(name.lower() == b"range" for name, _ in headers)
+        has_condition = any(
+            name.lower() in (b"if-none-match", b"if-modified-since")
+            for name, _ in headers
+        )
+        should_compress = eligible and accepts_gzip and not has_range and not has_condition
+        # Starlette 1.7 checks for a lowercase substring. Normalize only a
+        # valid gzip negotiation so q=0, xgzip and uppercase tokens behave
+        # according to HTTP token and quality-value rules.
+        headers = [(name, value) for name, value in headers if name.lower() != b"accept-encoding"]
+        if should_compress:
+            headers.append((b"accept-encoding", b"gzip"))
+        extensions = scope.get("extensions", {})
+        if should_compress:
+            # Starlette's FileResponse can use uvicorn's path-send extension,
+            # which streams the original file outside response-body middleware.
+            # Removing that optimization only for compressed text assets lets
+            # gzip see their bytes while preserving identity file serving.
+            extensions = dict(extensions)
+            extensions.pop("http.response.pathsend", None)
+        scope = {**scope, "headers": headers, "extensions": extensions}
+
+        async def send_with_vary(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                response_headers = list(message.get("headers", []))
+                encoded = should_compress and any(
+                    name.lower() == b"content-encoding" and value.lower() == b"gzip"
+                    for name, value in response_headers
+                )
+                if encoded:
+                    response_headers = [
+                        (name, b"W/" + value if name.lower() == b"etag" and not value.startswith(b"W/") else value)
+                        for name, value in response_headers
+                    ]
+                vary_index = next(
+                    (i for i, (name, _) in enumerate(response_headers) if name.lower() == b"vary"),
+                    None,
+                )
+                if vary_index is None:
+                    response_headers.append((b"vary", b"Accept-Encoding"))
+                else:
+                    name, value = response_headers[vary_index]
+                    vary_tokens = [part.strip().lower() for part in value.split(b",")]
+                    if b"*" not in vary_tokens and b"accept-encoding" not in vary_tokens:
+                        response_headers[vary_index] = (name, value + b", Accept-Encoding")
+                message = {**message, "headers": response_headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_vary)
 
 
 def _spa_catchall(request):
@@ -633,7 +728,13 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     if STATIC_DIR.exists():
         assets_dir = STATIC_DIR / "assets"
         if assets_dir.is_dir():
-            routes.append(Mount("/assets", app=CacheControlStaticFiles(directory=assets_dir), name="assets"))
+            routes.append(
+                Mount(
+                    "/assets",
+                    app=HashedAssetCompression(CacheControlStaticFiles(directory=assets_dir)),
+                    name="assets",
+                )
+            )
         routes.append(Route("/{path:path}", _spa_catchall))
 
     middleware = [

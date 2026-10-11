@@ -22,19 +22,23 @@ const engine = vi.hoisted(() => ({
   retry: vi.fn(async () => {}),
 }))
 
-vi.mock('../../lib/engineStatus', () => ({
-  createEngineMonitor: (opts: { onChange: (state: string) => void }) => {
-    engine.onChange = opts.onChange
-    return {
-      start: engine.start,
-      stop: engine.stop,
-      retry: engine.retry,
-      get state() {
-        return 'ready'
-      },
-    }
-  },
-}))
+vi.mock('../../lib/engineStatus', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/engineStatus')>()
+  return {
+    ...actual,
+    createEngineMonitor: (opts: { onChange: (state: string) => void }) => {
+      engine.onChange = opts.onChange
+      return {
+        start: engine.start,
+        stop: engine.stop,
+        retry: engine.retry,
+        get state() {
+          return 'ready'
+        },
+      }
+    },
+  }
+})
 
 const stubs = {
   StartupView: true,
@@ -63,6 +67,10 @@ async function mountApp(extraStubs: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  engine.onChange = null
+  engine.start.mockClear()
+  engine.stop.mockClear()
+  engine.retry.mockReset().mockResolvedValue(undefined)
   vi.stubGlobal('fetch', vi.fn(async () => ({
     ok: true,
     json: async () => ({ overall_ready: true, phases: [] }),
@@ -78,6 +86,103 @@ describe('engine offline screen wiring', () => {
     const wrapper = await mountApp()
     expect(wrapper.find('.engine-offline-stub').exists()).toBe(false)
     expect(engine.start).toHaveBeenCalled()
+  })
+
+  it('does not flash startup UI when a ready response arrives before the display delay', async () => {
+    vi.useFakeTimers()
+    const wrapper = await mountApp({ StartupView: startupStub })
+
+    expect(wrapper.find('.startup-stub').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(wrapper.find('.startup-stub').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows boot phases after the short delay and does not poll twice when the delay expires', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => ({ overall_ready: false, phases: [{ name: 'engine', status: 'in_progress' }] }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountApp({ StartupView: startupStub })
+
+    expect(wrapper.find('.startup-stub').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(wrapper.find('.startup-stub').exists()).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('ignores a late startup result after unmount', async () => {
+    vi.useFakeTimers()
+    let resolveFetch: ((value: { status: number; ok: boolean; json: () => Promise<unknown> }) => void) | undefined
+    const fetchMock = vi.fn(() => new Promise<{ status: number; ok: boolean; json: () => Promise<unknown> }>((resolve) => {
+      resolveFetch = resolve
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountApp({ StartupView: startupStub })
+
+    await vi.advanceTimersByTimeAsync(200)
+    expect(wrapper.find('.startup-stub').exists()).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+    resolveFetch?.({ status: 200, ok: true, json: async () => ({ overall_ready: true, phases: [] }) })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([401, 403])('keeps a %i auth challenge clear of the startup curtain and stops startup polling', async (status) => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(async () => ({ status, ok: false, json: async () => ({}) }))
+    vi.stubGlobal('fetch', fetchMock)
+    engine.retry.mockImplementationOnce(async () => { engine.onChange?.('auth_required') })
+    const wrapper = await mountApp({ StartupView: startupStub })
+
+    await vi.advanceTimersByTimeAsync(200)
+    expect(wrapper.find('.startup-stub').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('resumes startup status after the engine monitor clears an auth challenge', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ status: 401, ok: false, json: async () => ({}) })
+      .mockResolvedValueOnce({ status: 200, ok: true, json: async () => ({ overall_ready: true, phases: [] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    engine.retry.mockImplementationOnce(async () => { engine.onChange?.('auth_required') })
+    const wrapper = await mountApp({ StartupView: startupStub })
+    await vi.advanceTimersByTimeAsync(200)
+    expect(wrapper.find('.startup-stub').exists()).toBe(false)
+
+    engine.onChange?.('ready')
+    await flushPromises()
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('.startup-stub').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('retries a startup request after its real abort deadline', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const wrapper = await mountApp({ StartupView: startupStub })
+
+    await vi.advanceTimersByTimeAsync(200)
+    expect(wrapper.find('.startup-stub').exists()).toBe(true)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(4000)
   })
 
   it('covers the route without unmounting it, and clears on recovery', async () => {

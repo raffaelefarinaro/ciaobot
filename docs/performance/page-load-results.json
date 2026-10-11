@@ -1,0 +1,340 @@
+{
+  "date": "2026-10-11",
+  "commit": "9fcecf92",
+  "viewport": {
+    "width": 390,
+    "height": 844,
+    "mobile": true,
+    "touch": true
+  },
+  "simulated_mobile": {
+    "latency_ms": 150,
+    "download_bytes_per_second": 200000,
+    "upload_bytes_per_second": 93750,
+    "cpu_slowdown": 4
+  },
+  "service_workers": "blocked",
+  "runs_per_scenario": 3,
+  "readiness": "Home prompt or chat composer has visible dimensions and startup overlay is absent",
+  "scenarios": [
+    {
+      "name": "local baseline",
+      "ready_ms": [
+        517.2,
+        475,
+        474.5
+      ],
+      "median_ready_ms": 475,
+      "completed_resource_transfer_bytes": [
+        1116821,
+        1116821,
+        1116821
+      ],
+      "completed_asset_encoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "4G baseline",
+      "ready_ms": [
+        6833.6,
+        6853.6,
+        6860
+      ],
+      "median_ready_ms": 6853.6,
+      "completed_resource_transfer_bytes": [
+        1112291,
+        1112291,
+        1112291
+      ],
+      "completed_asset_encoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "4G gzip",
+      "ready_ms": [
+        2921.7,
+        2909.9,
+        2908.1
+      ],
+      "median_ready_ms": 2909.9,
+      "completed_resource_transfer_bytes": [
+        328793,
+        328793,
+        328793
+      ],
+      "completed_asset_encoded_bytes": [
+        313107,
+        313107,
+        313107
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "4G gzip + split",
+      "ready_ms": [
+        2495,
+        2481.5,
+        2496.1
+      ],
+      "median_ready_ms": 2495,
+      "completed_resource_transfer_bytes": [
+        245722,
+        245722,
+        245722
+      ],
+      "completed_asset_encoded_bytes": [
+        230036,
+        230036,
+        230036
+      ],
+      "completed_asset_decoded_bytes": [
+        750990,
+        750990,
+        750990
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "local auth +1000ms",
+      "ready_ms": [
+        1102,
+        1114.1,
+        1092.7
+      ],
+      "median_ready_ms": 1102,
+      "completed_resource_transfer_bytes": [
+        1112291,
+        1112291,
+        1116821
+      ],
+      "completed_asset_encoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "local startup +1000ms",
+      "ready_ms": [
+        1473.9,
+        1458.5,
+        1457.7
+      ],
+      "median_ready_ms": 1458.5,
+      "completed_resource_transfer_bytes": [
+        1116821,
+        1116821,
+        1116821
+      ],
+      "completed_asset_encoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "local chats +1000ms",
+      "ready_ms": [
+        1102.9,
+        1098.9,
+        1079.1
+      ],
+      "median_ready_ms": 1098.9,
+      "completed_resource_transfer_bytes": [
+        1112291,
+        1112291,
+        1112291
+      ],
+      "completed_asset_encoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "4G gzip warm cache",
+      "ready_ms": [
+        817.1,
+        791.4,
+        816.9
+      ],
+      "median_ready_ms": 816.9,
+      "completed_resource_transfer_bytes": [
+        13286,
+        13286,
+        13286
+      ],
+      "completed_asset_encoded_bytes": [
+        313107,
+        313107,
+        313107
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "4G gzip chat",
+      "ready_ms": [
+        2914.1,
+        2911.6,
+        2901.6
+      ],
+      "median_ready_ms": 2911.6,
+      "completed_resource_transfer_bytes": [
+        328793,
+        328793,
+        328793
+      ],
+      "completed_asset_encoded_bytes": [
+        313107,
+        313107,
+        313107
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "4G gzip split chat",
+      "ready_ms": [
+        3147.2,
+        3171.1,
+        3136.4
+      ],
+      "median_ready_ms": 3147.2,
+      "completed_resource_transfer_bytes": [
+        316526,
+        316535,
+        316526
+      ],
+      "completed_asset_encoded_bytes": [
+        292427,
+        292427,
+        292427
+      ],
+      "completed_asset_decoded_bytes": [
+        988724,
+        988724,
+        988724
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    },
+    {
+      "name": "4G gzip split chat prefetch",
+      "ready_ms": [
+        2851.5,
+        2830.7,
+        2823.9
+      ],
+      "median_ready_ms": 2830.7,
+      "completed_resource_transfer_bytes": [
+        311124,
+        311124,
+        311124
+      ],
+      "completed_asset_encoded_bytes": [
+        292438,
+        292438,
+        292438
+      ],
+      "completed_asset_decoded_bytes": [
+        988875,
+        988875,
+        988875
+      ],
+      "page_errors": [
+        [],
+        [],
+        []
+      ]
+    }
+  ]
+}

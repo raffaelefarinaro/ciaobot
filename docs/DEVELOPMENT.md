@@ -12,6 +12,11 @@ Chat file-link regressions cover separate agent roots, exact identities across
 text/image/binary/HTML previews, failed pins preserving the modal, and stale pin
 completions not dismissing a newer file (#1167).
 
+Page-load behavior is covered by `tests/test_static_asset_compression.py` and
+`web/src/lib/chatComponents.test.ts`, plus `AppEngineOffline.test.ts` for the
+bounded startup request and display delay. Static gzip is limited to hashed
+JavaScript/CSS, while chat code is prefetched only for chat deep links.
+
 ## Server install
 
 Linux production and every installer-managed macOS install restart the engine

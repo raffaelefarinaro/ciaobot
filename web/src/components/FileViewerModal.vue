@@ -10,6 +10,7 @@
           as-child
           aria-modal="true"
           @open-auto-focus="onOpenAutoFocus"
+          @close-auto-focus="onCloseAutoFocus"
           @escape-key-down="onEscapeKeyDown"
           @pointer-down-outside="onPointerDownOutside"
         >
@@ -352,6 +353,13 @@ const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
 const store = useFileViewerStore()
+const props = withDefaults(defineProps<{ opener?: HTMLElement | null }>(), { opener: null })
+const opener = ref<HTMLElement | null>(props.opener)
+watch(() => store.isOpen, (open, wasOpen) => {
+  if (open && !wasOpen && document.activeElement instanceof HTMLElement) {
+    opener.value = document.activeElement
+  }
+}, { flush: 'sync' })
 const projectsStore = useProjectStore()
 const memoryMapStore = useMemoryMapStore()
 let closePending = false
@@ -379,6 +387,13 @@ function onOpenAutoFocus(event: Event) {
   event.preventDefault()
   focusViewer()
   nextTick(focusViewer)
+}
+
+function onCloseAutoFocus(event: Event) {
+  event.preventDefault()
+  nextTick(() => {
+    if (opener.value?.isConnected) opener.value.focus()
+  })
 }
 
 function onEscapeKeyDown(event: KeyboardEvent) {
@@ -1426,6 +1441,7 @@ watch(
       })
     }
   },
+  { immediate: true },
 )
 
 async function copyPath(): Promise<void> {
@@ -1884,7 +1900,7 @@ watch(
 .fv-md :deep(blockquote) {
   margin: 0.6em 0;
   padding: 0 0 0 12px;
-  border-left: 3px solid var(--border);
+  border-left: 1px solid var(--border-strong);
   color: var(--fg2);
 }
 .fv-md :deep(hr) {
@@ -1931,17 +1947,6 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-.fv-comment-quote {
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--fg2);
-  border-left: 3px solid var(--accent, #60a5fa);
-  padding: 2px 0 2px 8px;
-  max-height: 6em;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 .fv-comment-input {
   width: 100%;
@@ -2282,30 +2287,8 @@ watch(
   padding: 10px 12px;
   position: relative;
 }
-.fv-sidebar-card {
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  padding: 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: 6px;
-  font-size: var(--text-xs);
-  line-height: 1.4;
-  color: var(--fg);
-  cursor: pointer;
-  transition: transform 0.1s, box-shadow 0.1s;
-}
-.fv-sidebar-card:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-}
 .fv-sidebar-spacer {
   height: 100px;
-}
-.fv-sidebar-card.is-pending {
-  border-left-color: var(--accent2, #a78bfa);
 }
 .fv-sidebar-card-header {
   display: flex;
@@ -2340,15 +2323,6 @@ watch(
   cursor: pointer;
 }
 .fv-sidebar-card-remove:hover { background: var(--bg2); color: var(--fg); }
-.fv-sidebar-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.fv-sidebar-card:hover .fv-sidebar-card-actions,
-.fv-sidebar-card.is-editing .fv-sidebar-card-actions { opacity: 1; }
 .fv-sidebar-card-edit {
   flex-shrink: 0;
   width: 18px;

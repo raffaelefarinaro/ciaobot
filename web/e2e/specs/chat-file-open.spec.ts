@@ -1,4 +1,6 @@
 import { expect, test } from '@playwright/test'
+import { readFileSync } from 'node:fs'
+import { gzipSync } from 'node:zlib'
 import { boot, COMPOSER, horizontalOverflow, isolate } from '../support/app'
 
 for (const mobile of [false, true]) {
@@ -20,11 +22,13 @@ for (const mobile of [false, true]) {
     })
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     await expect(page.locator('.startup-overlay')).toHaveCount(0)
-    await page.locator('a[data-file-path="memory-vault/Workspace/draft.md"]').click()
+    const fileLink = page.locator('a[data-file-path="memory-vault/Workspace/draft.md"]')
+    await fileLink.click()
     const viewer = page.locator('.fv-modal')
     await expect(viewer).toBeVisible()
     await expect(viewer).toContainText('Correct source workspace.')
     await expect(viewer.locator('.fv-subtitle')).toContainText(canonical)
+    await expect.poll(() => viewer.evaluate(el => el.contains(document.activeElement))).toBe(true)
     if (!mobile) {
       await expect(page.getByText('Could not update pinned file', { exact: true })).toBeVisible()
       expect(pinAttempts).toBe(1)
@@ -36,5 +40,47 @@ for (const mobile of [false, true]) {
     }
     expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
     await page.screenshot({ path: testInfo.outputPath('file-open.png'), fullPage: true })
+    await page.keyboard.press('Escape')
+    await expect(viewer).toHaveCount(0)
+    await expect(fileLink).toBeFocused()
+    await page.screenshot({ path: testInfo.outputPath('chat-after-close.png'), fullPage: true })
+    await expect(page).toHaveURL(/\/chat\/alpha-chat-1$/)
+    // First lazy mount and subsequent opens must share the same focus contract.
+    await fileLink.press('Enter')
+    await expect(viewer).toBeVisible()
+    await expect.poll(() => viewer.evaluate(el => el.contains(document.activeElement))).toBe(true)
+    await page.keyboard.press('Escape')
+    await expect(viewer).toHaveCount(0)
+    await expect(fileLink).toBeFocused()
   })
 }
+
+test('Home loads chat and file code only when the user needs it', async ({ page }, testInfo) => {
+  await isolate(page, `optional-code-${testInfo.workerIndex}`)
+  const optionalRequests: string[] = []
+  const homeAssets = new Set<string>()
+  page.on('request', request => {
+    const pathname = new URL(request.url()).pathname
+    if (/^\/assets\/.*\.(?:js|css)$/.test(pathname)) homeAssets.add(pathname)
+    if (/\/assets\/(?:ChatPanel|FileViewerModal|PinnedFilePanel)-.*\.js$/.test(pathname)) {
+      optionalRequests.push(pathname)
+    }
+  })
+  await boot(page)
+  expect(optionalRequests).toEqual([])
+  // The fixture does not compress responses. Measure the actual build files
+  // to keep this byte budget independent of the browser or runner's speed.
+  const compressedHomeBytes = [...homeAssets].reduce((total, path) => {
+    const asset = new URL(`../../../ciao/web/static${path}`, import.meta.url)
+    return total + gzipSync(readFileSync(asset)).byteLength
+  }, 0)
+  expect(compressedHomeBytes).toBeLessThan(250_000)
+  await page.screenshot({ path: testInfo.outputPath('home.png'), fullPage: true })
+
+  await boot(page, '/chat/alpha-chat-1', COMPOSER)
+  expect(optionalRequests.some(path => path.includes('/ChatPanel-'))).toBe(true)
+  expect(optionalRequests.some(path => /\/(?:FileViewerModal|PinnedFilePanel)-/.test(path))).toBe(false)
+  await expect(page.locator('.messages')).toHaveAttribute('aria-busy', 'false')
+  await expect(page.locator('.history-skeleton-stack')).toHaveCount(0)
+  await page.screenshot({ path: testInfo.outputPath('chat.png'), fullPage: true })
+})

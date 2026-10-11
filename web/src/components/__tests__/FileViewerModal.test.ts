@@ -194,6 +194,33 @@ describe('FileViewerModal', () => {
     trigger.remove()
   })
 
+  it('restores focus to the opener for each open while the modal stays mounted', async () => {
+    const firstTrigger = document.createElement('button')
+    const secondTrigger = document.createElement('button')
+    document.body.append(firstTrigger, secondTrigger)
+    firstTrigger.focus()
+
+    const store = openViewer()
+    await settle()
+    press(wrapper!.get<HTMLElement>('.fv-modal').element, 'Escape')
+    await flushPromises()
+    await settle()
+    expect(document.activeElement).toBe(firstTrigger)
+
+    secondTrigger.focus()
+    store.path = 'notes/second.md'
+    store.isOpen = true
+    store.loadToken++
+    await settle()
+    press(wrapper!.get<HTMLElement>('.fv-modal').element, 'Escape')
+    await flushPromises()
+    await settle()
+
+    expect(document.activeElement).toBe(secondTrigger)
+    firstTrigger.remove()
+    secondTrigger.remove()
+  })
+
   it('keeps the viewer open for a secondary or ctrl-click backdrop press', async () => {
     const store = openViewer()
     const close = vi.spyOn(store, 'close')

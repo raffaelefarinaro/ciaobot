@@ -290,7 +290,7 @@
         </div>
       </template>
     </div>
-    <FileViewerModal />
+    <FileViewerModal v-if="fileViewerMounted" :opener="fileViewerOpener" />
   </div>
 </template>
 
@@ -304,7 +304,9 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
-import ChatPanel from './ChatPanel.vue'
+import type ChatPanelComponent from './ChatPanel.vue'
+import type PinnedFilePanelComponent from './PinnedFilePanel.vue'
+import { loadChatPanel, loadFileViewerModal, loadPinnedFilePanel, prefetchChatPanelForRoute } from '../lib/chatComponents'
 // The destinations behind the rail are loaded on first visit, not on boot.
 // Statically imported they landed in the same chunk as the chat itself — a
 // third of a megabyte of Settings, Automations, the memory canvas and the
@@ -320,8 +322,9 @@ const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
 const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
 const TaskBoardView = defineAsyncComponent(() => import('./TaskBoardView.vue'))
 const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
-import FileViewerModal from './FileViewerModal.vue'
-import PinnedFilePanel from './PinnedFilePanel.vue'
+const ChatPanel = defineAsyncComponent(loadChatPanel)
+const PinnedFilePanel = defineAsyncComponent(loadPinnedFilePanel)
+const FileViewerModal = defineAsyncComponent(loadFileViewerModal)
 import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
@@ -338,6 +341,14 @@ import { effectiveBinding, keyboardMatches, type ShortcutId } from '../lib/keybo
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
+const fileViewerMounted = ref(fileViewer.isOpen)
+const fileViewerOpener = ref<HTMLElement | null>(null)
+watch(() => fileViewer.isOpen, (open, wasOpen) => {
+  if (open) fileViewerMounted.value = true
+  if (open && !wasOpen && document.activeElement instanceof HTMLElement) {
+    fileViewerOpener.value = document.activeElement
+  }
+}, { flush: 'sync' })
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
 // reach composer-owned actions (archive).
@@ -348,8 +359,8 @@ const fileViewer = useFileViewerStore()
 // holds whichever that is, but tagging only the split-view copy left
 // Cmd+Backspace and the home arrow keys silently dead in the far more common
 // no-pinned-file layout.
-const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
-const pinnedFilePanelRef = ref<InstanceType<typeof PinnedFilePanel> | null>(null)
+const chatPanelRef = ref<InstanceType<typeof ChatPanelComponent> | null>(null)
+const pinnedFilePanelRef = ref<InstanceType<typeof PinnedFilePanelComponent> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
 const projectSidebarRef = ref<InstanceType<typeof ProjectSidebar> | null>(null)
@@ -555,6 +566,7 @@ const taskStore = useTaskStore()
 const memoryMapStore = useMemoryMapStore()
 const route = useRoute()
 const router = useRouter()
+prefetchChatPanelForRoute(route.path, route.params.chatId as string | undefined)
 const projectIdParam = computed(() => (route.params.projectId as string) || '')
 // /chat/:chatId/subagent/:agentId — a read-only view of one subagent's own
 // conversation. It replaces the chat pane rather than opening beside it: the

@@ -1,0 +1,276 @@
+{
+  "date": "2026-10-11",
+  "baseline_commit": "9fcecf92",
+  "implementation": "reviewed working tree; production build",
+  "asset_server": "implemented cases proxy raw hashed JS/CSS responses from ciao.web.app.create_app served by uvicorn; all data and websockets use invented repository fixture",
+  "viewport": {
+    "width": 390,
+    "height": 844,
+    "mobile": true,
+    "touch": true
+  },
+  "simulated_mobile": {
+    "latency_ms": 150,
+    "download_bytes_per_second": 200000,
+    "upload_bytes_per_second": 93750,
+    "cpu_slowdown": 4
+  },
+  "service_workers": "blocked",
+  "runs_per_scenario": 5,
+  "readiness": "Home prompt or chat composer has visible dimensions and startup overlay is absent; transcript completion and send availability are separate",
+  "scenarios": [
+    {
+      "name": "original cold Home",
+      "ready_ms": [
+        6837.1,
+        6832.4,
+        6840.6,
+        6841.2,
+        6845.5
+      ],
+      "median_ready_ms": 6840.6,
+      "completed_resource_transfer_bytes": [
+        1112291,
+        1112291,
+        1112291,
+        1112291,
+        1112291
+      ],
+      "completed_asset_encoded_bytes": [
+        1096605,
+        1096605,
+        1096605,
+        1096605,
+        1096605
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "asset_response_encodings": [
+        "identity"
+      ]
+    },
+    {
+      "name": "implemented cold Home",
+      "ready_ms": [
+        2515.2,
+        2515.9,
+        2501.4,
+        2499.6,
+        2495.1
+      ],
+      "median_ready_ms": 2501.4,
+      "completed_resource_transfer_bytes": [
+        245160,
+        245160,
+        245160,
+        245160,
+        245160
+      ],
+      "completed_asset_encoded_bytes": [
+        229474,
+        229474,
+        229474,
+        229474,
+        229474
+      ],
+      "completed_asset_decoded_bytes": [
+        752179,
+        752179,
+        752179,
+        752179,
+        752179
+      ],
+      "page_errors": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "asset_response_encodings": [
+        "gzip"
+      ]
+    },
+    {
+      "name": "original gzip cold chat",
+      "ready_ms": [
+        2897.4,
+        2895.6,
+        2900.2,
+        2900.2,
+        2905.1
+      ],
+      "median_ready_ms": 2900.2,
+      "completed_resource_transfer_bytes": [
+        328793,
+        328793,
+        328793,
+        328793,
+        328793
+      ],
+      "completed_asset_encoded_bytes": [
+        313107,
+        313107,
+        313107,
+        313107,
+        313107
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "asset_response_encodings": [
+        "gzip"
+      ]
+    },
+    {
+      "name": "implemented cold chat",
+      "ready_ms": [
+        2855.8,
+        2847.7,
+        2854,
+        2848.4,
+        2864.1
+      ],
+      "median_ready_ms": 2854,
+      "completed_resource_transfer_bytes": [
+        310307,
+        310307,
+        310307,
+        310307,
+        310307
+      ],
+      "completed_asset_encoded_bytes": [
+        291621,
+        291621,
+        291621,
+        291621,
+        291621
+      ],
+      "completed_asset_decoded_bytes": [
+        989918,
+        989918,
+        989918,
+        989918,
+        989918
+      ],
+      "page_errors": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "asset_response_encodings": [
+        "gzip",
+        "identity"
+      ]
+    },
+    {
+      "name": "original gzip warm Home",
+      "ready_ms": [
+        806.4,
+        796.9,
+        792.8,
+        814.2,
+        796.2
+      ],
+      "median_ready_ms": 796.9,
+      "completed_resource_transfer_bytes": [
+        13286,
+        13286,
+        13286,
+        13286,
+        13286
+      ],
+      "completed_asset_encoded_bytes": [
+        313107,
+        313107,
+        313107,
+        313107,
+        313107
+      ],
+      "completed_asset_decoded_bytes": [
+        1096605,
+        1096605,
+        1096605,
+        1096605,
+        1096605
+      ],
+      "page_errors": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "asset_response_encodings": [
+        "gzip"
+      ]
+    },
+    {
+      "name": "implemented warm Home",
+      "ready_ms": [
+        761.9,
+        763.2,
+        762.6,
+        762.4,
+        761.9
+      ],
+      "median_ready_ms": 762.4,
+      "completed_resource_transfer_bytes": [
+        13286,
+        13286,
+        13286,
+        13286,
+        13286
+      ],
+      "completed_asset_encoded_bytes": [
+        229474,
+        229474,
+        229474,
+        229474,
+        229474
+      ],
+      "completed_asset_decoded_bytes": [
+        752179,
+        752179,
+        752179,
+        752179,
+        752179
+      ],
+      "page_errors": [
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "asset_response_encodings": [
+        "gzip"
+      ]
+    }
+  ]
+}

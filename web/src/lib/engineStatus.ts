@@ -17,6 +17,47 @@ export const FAILURE_THRESHOLD = 2
 export const HEALTHY_INTERVAL_MS = 10000
 export const RECOVERY_INTERVAL_MS = 2000
 
+export interface StartupStatus {
+  status: number
+  body: unknown
+}
+
+let sharedStartupRequest: Promise<StartupStatus | null> | null = null
+
+/** One bounded read shared by the startup curtain and the engine monitor. */
+export function requestStartupStatus(
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<StartupStatus | null> {
+  const share = fetchImpl === fetch && timeoutMs === PROBE_TIMEOUT_MS
+  if (share && sharedStartupRequest) return sharedStartupRequest
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const request = (async (): Promise<StartupStatus | null> => {
+    try {
+      const res = await fetchImpl('/api/startup-status', {
+        cache: 'no-store', redirect: 'manual', signal: controller.signal,
+      })
+      let body: unknown = null
+      try { body = await res.json() } catch { body = null }
+      return { status: res.status, body }
+    } catch {
+      return null
+    } finally {
+      clearTimeout(timer)
+    }
+  })()
+
+  if (share) {
+    sharedStartupRequest = request
+    void request.finally(() => {
+      if (sharedStartupRequest === request) sharedStartupRequest = null
+    })
+  }
+  return request
+}
+
 /** Pure classification of one /api/startup-status response. */
 export function classifyResponse(status: number, body: unknown): ProbeResult {
   if (status === 401 || status === 403) return 'auth_required'
@@ -26,18 +67,8 @@ export function classifyResponse(status: number, body: unknown): ProbeResult {
 }
 
 export async function probeEngine(fetchImpl: typeof fetch = fetch, timeoutMs = PROBE_TIMEOUT_MS): Promise<ProbeResult> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const res = await fetchImpl('/api/startup-status', { cache: 'no-store', redirect: 'manual', signal: controller.signal })
-    let body: unknown = null
-    try { body = await res.json() } catch { body = null }
-    return classifyResponse(res.status, body)
-  } catch {
-    return 'failure'
-  } finally {
-    clearTimeout(timer)
-  }
+  const response = await requestStartupStatus(fetchImpl, timeoutMs)
+  return response ? classifyResponse(response.status, response.body) : 'failure'
 }
 
 export interface EngineMonitorOptions {
