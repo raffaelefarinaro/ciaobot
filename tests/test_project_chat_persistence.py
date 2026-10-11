@@ -679,6 +679,87 @@ async def test_compact_stream_is_not_a_user_turn(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_compaction_leaves_transcript_reply_and_title_alone(tmp_path: Path) -> None:
+    from ciao.models import ChatContext
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Compact side effects", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    chat.session_id = "native-session"
+    chat.last_response = "the previous reply"
+    chat.last_response_status = "success"
+    titled: list[str] = []
+
+    async def fake_title(chat_id, prompt, assistant_text=""):
+        titled.append(prompt)
+
+    async def fake_drive(*, chat_id, request, outcome):
+        assert request.compact is True
+        event = ResultEvent(
+            type="result",
+            result="",
+            session_id="native-session",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+        outcome.events.append(event)
+        yield event
+
+    manager._auto_title_and_publish = fake_title  # type: ignore[assignment]
+    manager._drive_stream = fake_drive  # type: ignore[assignment]
+    stream = manager.start_stream(chat.chat_id, "/compact", compact=True)
+    _ = [event async for event in stream.subscribe()]
+    await asyncio.sleep(0)
+
+    assert chat.last_response == "the previous reply"
+    assert chat.last_response_status == "success"
+    assert titled == []
+    ctx = ChatContext.for_web(chat.chat_id)
+    assert manager._transcripts.current_messages(ctx, chat.provider) == []
+    journal_dir = tmp_path / ".runtime" / "transcripts" / ctx.key / "journal"
+    assert not journal_dir.exists() or not any(journal_dir.iterdir())
+
+
+def test_stopped_compaction_records_no_transcript_turn(tmp_path: Path) -> None:
+    from ciao.models import ChatContext
+    from ciao.web.chat_streaming import StreamOutcome
+
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Compact stop", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    chat.session_id = "native-session"
+    request = manager.build_agent_request(chat, prompt="/compact", compact=True)
+    ctx = ChatContext.for_web(chat.chat_id)
+    journal = manager._transcripts.open_turn_journal(ctx, chat.provider)
+    outcome = StreamOutcome(effective_model=chat.model)
+    terminal = ResultEvent(
+        type="result",
+        result="",
+        session_id="native-session",
+        is_error=False,
+        effective_model=chat.model,
+        usage={},
+        quota={},
+        cost_usd=0.0,
+    )
+
+    manager._streaming.record_stopped_turn(chat.chat_id, chat, request, outcome, journal)
+    manager._streaming._persist_terminal_turn(
+        chat_id=chat.chat_id,
+        chat=chat,
+        request=request,
+        outcome=outcome,
+        terminal=terminal,
+        journal=journal,
+    )
+
+    assert manager._transcripts.current_messages(ctx, chat.provider) == []
+
+
+@pytest.mark.asyncio
 async def test_failed_compaction_is_not_retried_as_a_turn(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Compact retry", workspace="personal")

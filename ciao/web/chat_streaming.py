@@ -411,6 +411,9 @@ class ChatStreaming:
         current_prompt = prompt
         current_images = images
         current_turn_index = turn_index
+        # ``prompt`` is the bare command when the drive began as a compaction,
+        # so the late title below must not read it as the user's words.
+        began_compact = compact
         turn_unattended = unattended
         last_assistant_text = ""
         had_error = False
@@ -987,6 +990,7 @@ class ChatStreaming:
             _late_fallback = chat_service._fallback_title(prompt) if prompt else None
             if (
                 prompt
+                and not began_compact
                 and chat_meta
                 and (
                     chat_meta.title == "New Chat"
@@ -1002,7 +1006,9 @@ class ChatStreaming:
                 )
             if current_turn_index is not None:
                 self.discard_turn_perf(chat_id, current_turn_index)
-            if chat_meta is not None:
+            # ``compact`` is still set only when the last pass was the
+            # compaction, which leaves the previous reply as the last one.
+            if chat_meta is not None and not compact:
                 chat_meta.last_response = last_assistant_text[
                     -chat_service._PROVIDER_HANDOVER_MAX_CHARS :
                 ]
@@ -1238,6 +1244,8 @@ class ChatStreaming:
         journal: TurnJournal,
     ) -> None:
         """Persist a force-stopped provider pass as a partial transcript turn."""
+        if request.compact:
+            return
         try:
             # Only the top-level turn's deltas are the user-visible answer.
             # Subagent text carries a parent_tool_use_id and belongs to the
@@ -1283,6 +1291,8 @@ class ChatStreaming:
         durable exactly once with the terminal's actual flags instead of a
         duplicate stopped-partial turn.
         """
+        if request.compact:
+            return
         try:
             self._host._transcripts.record_turn(
                 request,
@@ -1324,9 +1334,12 @@ class ChatStreaming:
             raise ValueError("Cannot send messages to an archived chat")
 
         self._host._get_provider(chat_id)
-        chat.last_response = ""
-        chat.last_response_status = "running"
-        self._host._save()
+        # A compaction leaves the last reply in place: it is no exchange of its
+        # own, and handover and the control plane read the reply.
+        if not compact:
+            chat.last_response = ""
+            chat.last_response_status = "running"
+            self._host._save()
         handover_context_sent = bool(
             chat.handover_context_pending and chat.handover_messages
         )
@@ -1424,13 +1437,16 @@ class ChatStreaming:
         journal = self._host._transcripts.open_turn_journal(
             ChatContext.for_web(chat_id), chat.provider
         )
-        journal.begin(
-            {
-                "provider": chat.provider,
-                "prompt": (request.display_prompt or request.prompt)[:2000],
-                "started_at": chat_service._now_iso(),
-            }
-        )
+        # A compaction has no user turn for crash recovery to restore; an
+        # unbegun journal records nothing.
+        if not request.compact:
+            journal.begin(
+                {
+                    "provider": chat.provider,
+                    "prompt": (request.display_prompt or request.prompt)[:2000],
+                    "started_at": chat_service._now_iso(),
+                }
+            )
 
         async def _journalled_stream() -> AsyncGenerator[StreamEvent, None]:
             async for event in self._host._drive_stream(

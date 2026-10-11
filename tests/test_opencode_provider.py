@@ -2134,6 +2134,34 @@ async def test_compact_rejection_ends_the_turn_as_an_error(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_failed_compaction_ends_the_turn_as_an_error(tmp_path, monkeypatch):
+    # OpenCode reports a compaction it could not run (here the model has no
+    # route) as its own event; the wait must end on it rather than hang.
+    client = _CompactClient(
+        [
+            _sse_event(
+                "session.compaction.failed",
+                "ses_failed",
+                reason="manual",
+                error={
+                    "type": "provider.no-route",
+                    "message": "Model unavailable: opencode/gone",
+                },
+            )
+        ]
+    )
+
+    events = await _run_compaction(
+        _provider(tmp_path), monkeypatch, client, "ses_failed"
+    )
+
+    result = events[-1]
+    assert result.type == "result"
+    assert result.is_error
+    assert "Model unavailable" in result.result
+
+
+@pytest.mark.asyncio
 async def test_compact_stream_ending_without_a_report_is_an_error(
     tmp_path, monkeypatch
 ):

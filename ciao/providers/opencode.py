@@ -2111,7 +2111,10 @@ class OpencodeProvider(BaseSDKProvider):
                             else:
                                 compacted = True
                             break
-                        if kind == "session.execution.failed":
+                        if kind in {
+                            "session.compaction.failed",
+                            "session.execution.failed",
+                        }:
                             error = error_text(props.get("error"))
                             break
                         if kind == "session.execution.interrupted":
