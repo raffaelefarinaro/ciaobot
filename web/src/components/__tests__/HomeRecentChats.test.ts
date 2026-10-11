@@ -750,3 +750,21 @@ describe('delegated task chats on Home', () => {
     wrapper.unmount()
   })
 })
+
+it('files a chat whose last turn failed under needs you with the error and next step', async () => {
+  const store = seedChats()
+  store.chats.push({
+    chat_id: 'failed', project_id: 'personal-project', title: 'Failed turn',
+    created_at: timestamp(60 * 60), last_activity_at: timestamp(60 * 60), last_read_at: timestamp(60 * 60),
+    archived: false, local: true,
+    last_error: 'API Error: Request rejected (429) · you (x) have reached your weekly usage limit, upgrade for higher limits',
+  } as unknown as typeof store.chats[number])
+  const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+  const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+  await nextTick()
+
+  const needsYou = wrapper.find('.home-tier--needsYou')
+  expect(needsYou.text()).toContain('Failed turn')
+  expect(needsYou.text()).toContain('usage limit reached · switch model or retry')
+  wrapper.unmount()
+})

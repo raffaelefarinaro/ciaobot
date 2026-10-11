@@ -4229,12 +4229,14 @@ function formatRetryTime(value: string): string {
   return formatTime(d.toISOString())
 }
 
-// Quota retries wait an hour; connection, startup and auth retries 30s.
+// Quota retries wait an hour, weekly/monthly limits a day; connection, startup
+// and auth retries 30s.
 const retryCardTitle = computed(() => {
   const retry = chat.value?.retry
   if (retry && isProviderAuthError(retry.last_error)) return 'Signed out — retrying this turn'
   const seconds = retry?.interval_seconds || 0
   if (seconds && seconds < 3600) return 'Retrying this turn shortly'
+  if (seconds >= 86400) return 'Retrying this turn once a day'
   return 'Retrying this turn every hour'
 })
 

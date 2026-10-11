@@ -304,6 +304,20 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
+  it('says a weekly or monthly limit retries once a day', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-06T15:45:00Z',
+      last_error: 'weekly usage limit',
+      attempts: 0,
+      interval_seconds: 86400,
+    }
+    await flushPromises()
+    expect(wrapper.find('.retry-card-title').text()).toBe('Retrying this turn once a day')
+    wrapper.unmount()
+  })
+
   it('does not promise an hourly retry for a 30s connection retry', async () => {
     const { wrapper, store } = await mountPanel()
     store.chats[0].retry = {

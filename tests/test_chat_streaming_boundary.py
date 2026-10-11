@@ -286,6 +286,7 @@ async def test_drive_keeps_websocket_payloads_and_lifecycle_events(
             "chat_id": "chat-1",
             "project_id": "project-1",
             "is_error": False,
+            "last_error": "",
         }
     ]
     assert host.drain_awaits == ["chat-1"]

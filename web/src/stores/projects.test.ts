@@ -6665,3 +6665,65 @@ describe('delegated task signals', () => {
     expect(taskReads()).not.toContain('/api/tasks?workspace=personal')
   })
 })
+
+describe('failed chats count as needs you', () => {
+  test('a chat whose last turn failed needs you until it is working again, archived, or cleared', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'failed', project_id: 'p1', title: 'Failed', archived: false, local: true, last_error: 'usage limit reached' },
+      { chat_id: 'busy', project_id: 'p1', title: 'Busy', archived: false, local: true, last_error: 'boom' },
+      { chat_id: 'archived', project_id: 'p1', title: 'Archived', archived: true, local: true, last_error: 'boom' },
+      { chat_id: 'clean', project_id: 'p1', title: 'Clean', archived: false, local: true, last_error: '' },
+    ] as unknown as ChatInfo[]
+    store.projectStreaming.busy = true
+
+    expect(store.chatNeedsYou('failed')).toBe(true)
+    expect(store.chatNeedsYou('busy')).toBe(false)
+    expect(store.chatNeedsYou('archived')).toBe(false)
+    expect(store.chatNeedsYou('clean')).toBe(false)
+    expect(store.attentionChatCount).toBe(1)
+  })
+
+  test('a newer run of the same routine supersedes the earlier run\'s failure', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'run-1', project_id: 'p1', title: 'Care - Oct 10', archived: false, local: true, schedule_id: 'sched-care', created_at: '2026-10-10T06:00:00Z', last_error: 'weekly usage limit' },
+      { chat_id: 'run-2', project_id: 'p1', title: 'Care - Oct 11', archived: false, local: true, schedule_id: 'sched-care', created_at: '2026-10-11T06:00:00Z', last_error: 'weekly usage limit' },
+      { chat_id: 'other', project_id: 'p1', title: 'Other - Oct 9', archived: false, local: true, schedule_id: 'sched-other', created_at: '2026-10-09T06:00:00Z', last_error: 'boom' },
+    ] as unknown as ChatInfo[]
+
+    expect(store.chatNeedsYou('run-1')).toBe(false)
+    expect(store.chatNeedsYou('run-2')).toBe(true)
+    expect(store.chatNeedsYou('other')).toBe(true)
+    expect(store.attentionChatCount).toBe(2)
+  })
+
+  test('chat_streaming_done carries last_error onto the chat and an empty one clears it', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'c-err', project_id: 'p1', title: 'Err', archived: false, local: true },
+    ] as unknown as ChatInfo[]
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done', chat_id: 'c-err', project_id: 'p1',
+        is_error: true, last_error: 'API Error: bad request',
+      }),
+    })
+    expect(store.chats[0].last_error).toBe('API Error: bad request')
+    expect(store.chatNeedsYou('c-err')).toBe(true)
+
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done', chat_id: 'c-err', project_id: 'p1',
+        is_error: false, last_error: '',
+      }),
+    })
+    expect(store.chats[0].last_error).toBe('')
+    expect(store.chatNeedsYou('c-err')).toBe(false)
+  })
+})
