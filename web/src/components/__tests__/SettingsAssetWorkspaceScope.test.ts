@@ -90,9 +90,13 @@ describe('Settings asset tabs are scoped to the active workspace', () => {
     store.activeWorkspace = 'personal'
     paths = []
 
-    const { app, host } = await mountSettings()
+    const { app, router, host } = await mountSettings()
     try {
-      for (const path of ['/api/admin/skills', '/api/commands', '/api/agent-assets', '/api/mcp/status']) {
+      expect(paths).toContain('/api/admin/skills?workspace=personal')
+      expect(paths).not.toContain('/api/commands?workspace=personal')
+      for (const [tab, path] of [['commands', '/api/commands'], ['subagents', '/api/agent-assets'], ['mcp', '/api/mcp/status']]) {
+        await router.push(`/settings/${tab}`)
+        await nextTick()
         expect(paths).toContain(`${path}?workspace=personal`)
       }
     } finally {
@@ -106,7 +110,7 @@ describe('Settings asset tabs are scoped to the active workspace', () => {
     await store.fetchWorkspaces()
     store.activeWorkspace = 'personal'
 
-    const { app, host } = await mountSettings()
+    const { app, router, host } = await mountSettings()
     try {
       paths = []
       // Switching the sidebar's workspace switches which agent root these
@@ -119,9 +123,51 @@ describe('Settings asset tabs are scoped to the active workspace', () => {
       await nextTick()
 
       expect(paths).toContain('/api/admin/skills?workspace=work')
-      expect(paths).toContain('/api/agent-assets?workspace=work')
-      expect(paths).toContain('/api/commands?workspace=work')
-      expect(paths).toContain('/api/mcp/status?workspace=work')
+      expect(paths).not.toContain('/api/agent-assets?workspace=work')
+      expect(paths).not.toContain('/api/commands?workspace=work')
+      expect(paths).not.toContain('/api/mcp/status?workspace=work')
+      for (const [tab, path] of [['commands', '/api/commands'], ['subagents', '/api/agent-assets'], ['mcp', '/api/mcp/status']]) {
+        await router.push(`/settings/${tab}`)
+        await nextTick()
+        expect(paths).toContain(`${path}?workspace=work`)
+      }
+    } finally {
+      app.unmount()
+      host.remove()
+    }
+  })
+
+  it('drops a slower asset response from the workspace that was just left', async () => {
+    const store = useProjectStore()
+    await store.fetchWorkspaces()
+    store.activeWorkspace = 'personal'
+    let releasePersonal: (value: unknown) => void = () => {}
+    vi.mocked(api.get).mockImplementation(async (raw: string) => {
+      paths.push(raw)
+      if (raw === '/api/admin/skills?workspace=personal') {
+        return new Promise(resolve => { releasePersonal = resolve }) as never
+      }
+      if (raw === '/api/admin/skills?workspace=work') {
+        return { counts: {}, skills: [{ name: 'work-only', label: 'custom', source: 'workspace', source_type: 'custom', description: '', path: '', content: '', installed_targets: [] }] } as never
+      }
+      const path = raw.split('?')[0]
+      return (path in responses ? responses[path] : {}) as never
+    })
+
+    const { app, host } = await mountSettings('skills')
+    try {
+      store.activeWorkspace = 'work'
+      await nextTick()
+      await nextTick()
+      await Promise.resolve()
+      await nextTick()
+      await vi.waitFor(() => expect(host.textContent).toContain('work-only'))
+
+      releasePersonal({ counts: {}, skills: [{ name: 'personal-only', label: 'custom', source: 'workspace', source_type: 'custom', description: '', path: '', content: '', installed_targets: [] }] })
+      await Promise.resolve()
+      await nextTick()
+      expect(host.textContent).toContain('work-only')
+      expect(host.textContent).not.toContain('personal-only')
     } finally {
       app.unmount()
       host.remove()

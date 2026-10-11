@@ -26,7 +26,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useProposalsStore } from '../stores/proposals'
@@ -170,16 +170,6 @@ const visibleItems = computed(() => items.value.filter(
 // every open pass as one row under *memory insights* (HomeRecentChats), which
 // is the entry that opens it. A single "open the newest pass" shortcut on top
 // of that was a second way into one row out of many.
-
-watch(
-  () => projects.activeWorkspace,
-  (workspace) => {
-    if (!workspace) return
-    void proposals.ensureLoaded()
-    void retirement.ensureLoaded(workspace)
-  },
-  { immediate: true },
-)
 
 function formatRun(value: string): string {
   const date = new Date(value)

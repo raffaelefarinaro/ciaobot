@@ -842,7 +842,7 @@ onMounted(async () => {
     if (store.activeChatId && store.activeChatId !== selectedBeforeFetch) {
       store.clearActiveChatView()
     }
-  } else if (chatId && store.chats.find(c => c.chat_id === chatId)) {
+  } else if (chatId && store.activeChatId !== chatId) {
     await store.openChatFromDeepLink(chatId)
   }
   // Auto-collapse sidebar on mobile when a chat is active
@@ -870,7 +870,7 @@ watch(
       if (isHomeRoute(path)) clearRetainedChatView()
       return
     }
-    if (!store.chats.find(c => c.chat_id === id)) return
+    if (!store.bootstrapped) return
     if (store.activeChatId !== id) void store.openChatFromDeepLink(id)
     else void store.markRead(id)
     if (isMobile.value) sidebarCollapsed.value = true

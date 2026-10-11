@@ -268,38 +268,45 @@
           <p v-else class="empty-row">No automations deliver prompts to this project.</p>
         </section>
 
-        <section v-if="archivedChats.length" class="project-section" aria-labelledby="project-archived-title">
+        <section class="project-section" aria-labelledby="project-archived-title">
           <div class="section-head">
-            <h3 id="project-archived-title">Archived<span class="section-count">{{ archivedChats.length }}</span></h3>
-          </div>
-          <div class="chat-list">
+            <h3 id="project-archived-title">Archived<span v-if="archiveData" class="section-count">{{ archiveData.total }}</span></h3>
             <button
-              v-for="chat in pagedArchivedChats"
-              :key="chat.chat_id"
               type="button"
-              class="chat-row archived"
-              :class="{ clickable: chat.archive_path }"
-              :disabled="!chat.archive_path"
-              @click="openArchive(chat)"
-            >
-              <span class="chat-row-main">
-                <span class="chat-name">{{ chat.title }}</span>
-              </span>
-              <span class="chat-row-time">{{ formatDate(chat.created_at) }}</span>
-            </button>
+              class="btn-small archive-toggle"
+              :aria-expanded="archiveOpen"
+              :aria-controls="`${uid}-archives`"
+              @click="archiveOpen = !archiveOpen"
+            >{{ archiveOpen ? 'Hide archived chats' : 'Show archived chats' }}</button>
           </div>
-          <div v-if="archivedChats.length > ARCHIVED_PER_PAGE" class="pagination">
-            <button
-              class="btn-small"
-              :disabled="archivedPage === 0"
-              @click="archivedPage--"
-            >Previous</button>
-            <span class="page-info">{{ archivedPage + 1 }} / {{ totalArchivedPages }}</span>
-            <button
-              class="btn-small"
-              :disabled="archivedPage >= totalArchivedPages - 1"
-              @click="archivedPage++"
-            >Next</button>
+          <div v-if="archiveOpen" :id="`${uid}-archives`" :aria-busy="archiveLoading">
+            <SkeletonLoader v-if="archiveLoading" label="Loading archived chats" :count="3" />
+            <p v-else-if="archiveError" class="empty-row" role="alert">
+              {{ archiveError }}
+              <button type="button" class="btn-small" @click="loadArchives">Retry</button>
+            </p>
+            <template v-else-if="archiveData">
+              <div v-if="archiveData.items.length" class="chat-list">
+                <button
+                  v-for="chat in archiveData.items"
+                  :key="chat.chat_id"
+                  type="button"
+                  class="chat-row archived"
+                  :class="{ clickable: chat.archive_path }"
+                  :disabled="!chat.archive_path"
+                  @click="openArchive(chat)"
+                >
+                  <span class="chat-row-main"><span class="chat-name">{{ chat.title }}</span></span>
+                  <span class="chat-row-time">{{ formatDate(chat.created_at) }}</span>
+                </button>
+              </div>
+              <p v-else class="empty-row">No archived chats.</p>
+            </template>
+            <div v-if="archiveData && archiveData.total > ARCHIVED_PER_PAGE" class="pagination">
+              <button type="button" class="btn-small" :aria-disabled="archiveLoading || archivedPage === 0" @click="!archiveLoading && archivedPage > 0 && archivedPage--">Previous</button>
+              <span class="page-info" aria-live="polite">{{ archivedPage + 1 }} / {{ totalArchivedPages }}</span>
+              <button type="button" class="btn-small" :aria-disabled="archiveLoading || archivedPage >= totalArchivedPages - 1" @click="!archiveLoading && archivedPage < totalArchivedPages - 1 && archivedPage++">Next</button>
+            </div>
           </div>
         </section>
       </div>
@@ -312,7 +319,7 @@
             <div class="rail-kv"><span>Working</span><strong>{{ workingCount }}</strong></div>
             <div class="rail-kv"><span>Unread</span><strong>{{ totalUnread }}</strong></div>
             <div class="rail-kv"><span>Active chats</span><strong>{{ activeChats.length }}</strong></div>
-            <div v-if="archivedChats.length" class="rail-kv"><span>Archived</span><strong>{{ archivedChats.length }}</strong></div>
+            <div v-if="archiveData" class="rail-kv"><span>Archived</span><strong>{{ archiveData.total }}</strong></div>
             <div v-if="project.created_at" class="rail-kv"><span>Created</span><strong>{{ formatDate(project.created_at) }}</strong></div>
           </div>
         </section>
@@ -390,7 +397,7 @@ import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
-import type { ChatInfo, Schedule } from '../lib/types'
+import type { ChatInfo, ChatArchivePage, Schedule } from '../lib/types'
 
 interface ProjectFile {
   path: string
@@ -460,11 +467,7 @@ const activeChats = computed(() =>
     // list read as unsorted.
     .sort((a, b) => chatActivityTimestamp(b).localeCompare(chatActivityTimestamp(a)))
 )
-const archivedChats = computed(() =>
-  allChats.value
-    .filter(c => c.archived)
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))
-)
+
 const totalUnread = computed(() => store.projectUnread(props.projectId))
 const needsInputCount = computed(() => store.projectNeedsInput(props.projectId))
 const workingCount = computed(() =>
@@ -538,12 +541,50 @@ function openAutomation(id: string): void {
 }
 
 const ARCHIVED_PER_PAGE = 10
+const archiveOpen = ref(false)
 const archivedPage = ref(0)
-const pagedArchivedChats = computed(() => {
-  const start = archivedPage.value * ARCHIVED_PER_PAGE
-  return archivedChats.value.slice(start, start + ARCHIVED_PER_PAGE)
+const archiveData = ref<ChatArchivePage | null>(null)
+const archiveLoading = ref(false)
+const archiveError = ref('')
+let archiveRequest = 0
+const totalArchivedPages = computed(() => Math.ceil((archiveData.value?.total || 0) / ARCHIVED_PER_PAGE) || 1)
+
+async function loadArchives(): Promise<void> {
+  const request = ++archiveRequest
+  const projectId = props.projectId
+  archiveLoading.value = true
+  archiveError.value = ''
+  try {
+    const data = await api.get<ChatArchivePage>(
+      `/api/projects/${encodeURIComponent(projectId)}/chats?archived=1&limit=${ARCHIVED_PER_PAGE}&offset=${archivedPage.value * ARCHIVED_PER_PAGE}`,
+    )
+    if (request !== archiveRequest || projectId !== props.projectId) return
+    archiveData.value = data
+    const lastPage = Math.max(0, Math.ceil(data.total / ARCHIVED_PER_PAGE) - 1)
+    if (archivedPage.value > lastPage) archivedPage.value = lastPage
+  } catch {
+    if (request === archiveRequest) archiveError.value = 'Could not load archived chats.'
+  } finally {
+    if (request === archiveRequest) archiveLoading.value = false
+  }
+}
+watch([archiveOpen, archivedPage], ([open]) => {
+  if (open) void loadArchives()
 })
-const totalArchivedPages = computed(() => Math.ceil(archivedChats.value.length / ARCHIVED_PER_PAGE) || 1)
+watch(() => props.projectId, () => {
+  archiveRequest++
+  archiveOpen.value = false
+  archivedPage.value = 0
+  archiveData.value = null
+  archiveError.value = ''
+  archiveLoading.value = false
+})
+// Archive/delete events update the catalog; refresh only an archive already
+// being viewed, never fetch hidden pages during ordinary chat activity.
+watch(() => allChats.value.filter(chat => chat.archived).map(chat => chat.chat_id).join(','), () => {
+  if (archiveOpen.value) void loadArchives()
+})
+onBeforeUnmount(() => { archiveRequest++ })
 
 // ── Name edit ──────────────────────────────────────────────────────────
 const editingName = ref(false)
@@ -1273,6 +1314,10 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   justify-content: center;
   gap: 12px;
   margin-top: 10px;
+}
+.pagination button[aria-disabled='true'] { opacity: 0.5; cursor: not-allowed; }
+@media (max-width: 640px) {
+  .archive-toggle, .pagination .btn-small { min-height: var(--touch); }
 }
 .page-info {
   font-size: var(--text-sm);

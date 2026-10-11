@@ -122,7 +122,7 @@ export function memoryInsights(input: MemoryInsightInput): MemoryInsight[] {
     if (chat.archived || !isMemoryPassChat(chat)) continue
     const source = memoryPassSource(chat)
     if (!source) continue
-    const origin = byId.get(source.chatId)
+    const origin = byId.get(source.chatId) || chat.memory_source
     if (!rows.has(source.chatId)) {
       rows.set(source.chatId, origin
         ? createRow(source.chatId, origin.title, chatActivityTimestamp(origin), origin.archive_path || '')

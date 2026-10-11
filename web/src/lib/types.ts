@@ -171,6 +171,15 @@ export interface ProjectInfo {
   kind?: string
 }
 
+export type ArchivedChatSummary = Pick<ChatInfo, 'chat_id' | 'title' | 'created_at' | 'archive_path'>
+
+export interface ChatArchivePage {
+  items: ArchivedChatSummary[]
+  total: number
+  offset: number
+  limit: number
+}
+
 export interface ChatInfo {
   chat_id: string
   project_id: string
@@ -189,6 +198,8 @@ export interface ChatInfo {
   created_at: string
   archived: boolean
   last_activity_at?: string
+  /** Compact origin metadata for an active memory pass; archives load on demand. */
+  memory_source?: ArchivedChatSummary & { last_activity_at: string }
   last_read_at?: string
   // Truncated text of the last assistant reply, persisted alongside
   // `last_activity_at`. Backs the sidebar unread tile's preview on initial

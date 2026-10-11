@@ -120,7 +120,7 @@ describe('HomeReviewSummary', () => {
     wrapper.unmount()
   })
 
-  it('initializes the retirement queue for a fresh home visit', async () => {
+  it('leaves review queue loading to the shared sidebar', async () => {
     const retirement = useVaultReviewStore()
     retirement.loadedWorkspace = null
     get.mockImplementation((url: string) => {
@@ -138,8 +138,7 @@ describe('HomeReviewSummary', () => {
     const wrapper = mount(HomeReviewSummary)
     await flushPromises()
 
-    expect(get).toHaveBeenCalledWith(expect.stringContaining('workspace=personal'))
-    expect(wrapper.findAll('.home-review-title').map(node => node.text())).toContain('1 note to revisit')
+    expect(get).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 

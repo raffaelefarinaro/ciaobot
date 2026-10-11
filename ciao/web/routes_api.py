@@ -113,6 +113,8 @@ from ciao.async_reads import run_read
 from ciao.web.project_chats import (
     _ALLOWED_IMAGE_EXTENSIONS,
     ChatPinConflictError,
+    ChatInfo,
+    ProjectChatManager,
 )
 from ciao.web.routes_helpers import (
     _allowed_roots,
@@ -1766,6 +1768,35 @@ async def project_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
     chats = pcm.list_chats(project_id)
+    if request.query_params.get("archived") == "1":
+        if pcm.get_project(project_id) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        try:
+            offset = int(request.query_params.get("offset", "0"))
+            limit = int(request.query_params.get("limit", "10"))
+        except ValueError:
+            return JSONResponse({"error": "invalid pagination"}, status_code=400)
+        if offset < 0 or not 1 <= limit <= 100:
+            return JSONResponse({"error": "invalid pagination"}, status_code=400)
+        archived = sorted(
+            (chat for chat in chats if chat.archived),
+            key=lambda chat: (chat.created_at, chat.chat_id),
+            reverse=True,
+        )
+        return JSONResponse({
+            "items": [
+                {
+                    "chat_id": chat.chat_id,
+                    "title": chat.title,
+                    "created_at": chat.created_at,
+                    "archive_path": chat.archive_path,
+                }
+                for chat in archived[offset:offset + limit]
+            ],
+            "total": len(archived),
+            "offset": offset,
+            "limit": limit,
+        })
     return JSONResponse([c.to_dict() for c in chats])
 
 
@@ -2333,23 +2364,55 @@ def _resolve_pin_path(config, raw_path: str, *, agent_root: Path | None = None) 
     return resolved
 
 
+def _chat_memory_source(pcm: ProjectChatManager, chat: ChatInfo) -> dict[str, Any] | None:
+    """The small source record Home needs for an open memory pass."""
+    if chat.helper.get("kind") != "memory_pass":
+        return None
+    source = pcm.get_chat(str(chat.helper.get("source_chat_id") or ""))
+    if source is None:
+        return None
+    return {
+        "chat_id": source.chat_id,
+        "title": source.title,
+        "created_at": source.created_at,
+        "last_activity_at": source.last_activity_at,
+        "archive_path": source.archive_path,
+    }
+
+
 async def list_all_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     # `?active_only=1` skips archived chats. The PWA's frequent syncLatest poll
     # uses it: the archive can be huge (thousands of rows) and is not needed to
     # keep the sidebar/home in sync — archived rows are already held locally and
-    # loaded once at boot. Filter BEFORE the per-chat `is_session_local` probe
+    # loaded on demand. Filter BEFORE the per-chat `is_session_local` probe
     # (filesystem stat) so the poll never touches the archived rows at all.
     active_only = request.query_params.get("active_only") in {"1", "true"}
     if active_only:
         chats = [c for c in pcm.list_chats() if not c.archived]
-        return JSONResponse([c.to_dict(local=True) for c in chats])
+        rows = []
+        for chat in chats:
+            row = chat.to_dict(local=True)
+            source = _chat_memory_source(pcm, chat)
+            if source is not None:
+                row["memory_source"] = source
+            rows.append(row)
+        return JSONResponse(rows)
     return JSONResponse(pcm.list_chats_dicts())
 
 
 async def chat_detail(request: Request) -> Response:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
+    if request.method == "GET":
+        chat = pcm.get_chat(chat_id)
+        if chat is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        row = chat.to_dict(local=True if chat.archived else pcm.is_session_local(chat))
+        source = _chat_memory_source(pcm, chat)
+        if source is not None:
+            row["memory_source"] = source
+        return JSONResponse(row)
     if request.method == "DELETE":
         import logging
         # Log who deletes a chat so an unexpected deletion is auditable: the

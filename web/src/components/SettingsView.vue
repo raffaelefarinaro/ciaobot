@@ -2341,6 +2341,9 @@ const hasDeployError = computed(() => {
 })
 
 const skillsInventory = ref<SkillInventory | null>(null)
+let skillsLoadSequence = 0
+let commandsLoadSequence = 0
+let agentAssetsLoadSequence = 0
 const skillsLoaded = ref(false)
 const skillsError = ref('')
 const commands = ref<SlashCommand[]>([])
@@ -3181,37 +3184,55 @@ const assetScope = computed(() => {
 const assetWorkspaceLabel = computed(() => projectStore.activeWorkspace || 'selected')
 
 async function fetchSkills() {
+  const sequence = ++skillsLoadSequence
+  const scope = assetScope.value
+  skillsLoaded.value = false
   skillsError.value = ''
   try {
-    skillsInventory.value = await api.get<SkillInventory>(`/api/admin/skills${assetScope.value}`)
+    const inventory = await api.get<SkillInventory>(`/api/admin/skills${scope}`)
+    if (sequence === skillsLoadSequence && scope === assetScope.value) skillsInventory.value = inventory
   } catch (e) {
-    skillsError.value = `Failed to load skills: ${errorMessage(e)}`
+    if (sequence === skillsLoadSequence && scope === assetScope.value) {
+      skillsError.value = `Failed to load skills: ${errorMessage(e)}`
+    }
   } finally {
-    skillsLoaded.value = true
+    if (sequence === skillsLoadSequence && scope === assetScope.value) skillsLoaded.value = true
   }
 }
 
 async function fetchCommands() {
+  const sequence = ++commandsLoadSequence
+  const scope = assetScope.value
+  commandsLoaded.value = false
   commandsError.value = ''
   try {
-    const res = await api.get<CommandsResponse>(`/api/commands${assetScope.value}`)
-    commands.value = Array.isArray(res.commands) ? res.commands : []
+    const res = await api.get<CommandsResponse>(`/api/commands${scope}`)
+    if (sequence === commandsLoadSequence && scope === assetScope.value) {
+      commands.value = Array.isArray(res.commands) ? res.commands : []
+    }
   } catch (e) {
-    commandsError.value = `Failed to load commands: ${errorMessage(e)}`
+    if (sequence === commandsLoadSequence && scope === assetScope.value) {
+      commandsError.value = `Failed to load commands: ${errorMessage(e)}`
+    }
   } finally {
-    commandsLoaded.value = true
+    if (sequence === commandsLoadSequence && scope === assetScope.value) commandsLoaded.value = true
   }
 }
 
 async function fetchAgentAssets() {
-  agentAssetsError.value = ''
+  const sequence = ++agentAssetsLoadSequence
+  const scope = assetScope.value
   agentAssetsLoaded.value = false
+  agentAssetsError.value = ''
   try {
-    agentAssets.value = await api.get<AgentAssetsResponse>(`/api/agent-assets${assetScope.value}`)
+    const assets = await api.get<AgentAssetsResponse>(`/api/agent-assets${scope}`)
+    if (sequence === agentAssetsLoadSequence && scope === assetScope.value) agentAssets.value = assets
   } catch (e) {
-    agentAssetsError.value = `Failed to load agent assets: ${errorMessage(e)}`
+    if (sequence === agentAssetsLoadSequence && scope === assetScope.value) {
+      agentAssetsError.value = `Failed to load workspace assets: ${errorMessage(e)}`
+    }
   } finally {
-    agentAssetsLoaded.value = true
+    if (sequence === agentAssetsLoadSequence && scope === assetScope.value) agentAssetsLoaded.value = true
   }
 }
 
@@ -4086,46 +4107,69 @@ async function restoreWorkspace(item: ArchivedWorkspace) {
   }
 }
 
-onMounted(async () => {
+// Each tab loads only the data its visible controls use. A completed or
+// in-flight load is reused while this view stays mounted; workspace-scoped
+// tabs get a separate load after switching roots.
+const tabLoads = new Map<string, Promise<void>>()
+function loadSettingsTab(tab: string): Promise<void> {
+  const scoped = ['models', 'skills', 'subagents', 'commands', 'mcp'].includes(tab)
+  const key = scoped ? `${tab}:${projectStore.activeWorkspace}` : tab
+  const prior = tabLoads.get(key)
+  if (prior) return prior
+  let reads: Promise<unknown>[]
+  switch (tab) {
+    case 'home':
+      reads = [fetchLocalStatus().then(() => {
+        if (localStatus.value?.dev_mode) return refreshDebugIssues()
+      }), fetchAuthSettings(), fetchRoutines(), fetchWorkspaceMove(), fetchPackageStatus(), fetchUpdateStatus()]
+      break
+    case 'models':
+      reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), mcp.fetchStatus(), fetchWorkspaceModels()]
+      break
+    case 'workspaces':
+      reads = [fetchGwsIntegration(), fetchWorkspacesList(), fetchArchivedWorkspaces()]
+      break
+    case 'skills':
+      reads = [fetchSkills()]
+      break
+    case 'commands':
+      reads = [fetchCommands(), fetchAgentAssets()]
+      break
+    case 'subagents':
+      reads = [fetchAgentAssets()]
+      break
+    case 'mcp':
+      reads = [mcp.fetchStatus()]
+      break
+    default:
+      reads = []
+  }
+  const request = Promise.all(reads).then(() => {})
+  tabLoads.set(key, request)
+  return request
+}
+
+onMounted(() => {
   loadAppearanceSettings()
-  fetchSkills()
-  fetchCommands()
-  fetchAgentAssets()
-  // Idempotent store init; the open-source card's star nudge mirrors its list.
   housekeeping.init()
-  fetchLocalStatus().then(() => {
-    if (localStatus.value?.dev_mode) refreshDebugIssues()
-  })
-  fetchAuthSettings()
-  fetchRoutines()
-  fetchWorkspaceMove()
-  fetchPackageStatus()
-  fetchUpdateStatus()
-  fetchProviderKeys().then(scrollToChatProvidersIfLinked)
-  mcp.fetchStatus()
-  // Render from cache immediately, then pick up anything connected elsewhere.
-  fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
-  fetchGwsIntegration()
-  fetchWorkspacesList()
-  fetchArchivedWorkspaces()
+  void loadSettingsTab(currentTab.value)
 })
+watch(currentTab, tab => { void loadSettingsTab(tab) })
 
-// Another tab or device archived or restored a workspace: this view keeps its
-// own copy of the registry and the archived list, so refetch both.
 watch(() => projectStore.workspaceRegistryRevision, () => {
-  fetchWorkspacesList()
-  fetchArchivedWorkspaces()
+  tabLoads.delete('workspaces')
+  if (currentTab.value === 'workspaces') void loadSettingsTab('workspaces')
 })
 
-// Switching the sidebar's workspace switches which agent root these four tabs
-// describe, so their lists are refetched. Without this the page would keep
-// showing the previous workspace's skills, commands, subagents and MCP servers
-// while every write went to the new one.
 watch(() => projectStore.activeWorkspace, () => {
-  fetchSkills()
-  fetchCommands()
-  fetchAgentAssets()
-  mcp.fetchStatus()
+  // Asset refs hold one workspace's data, so invalidate cached scope keys:
+  // returning to an earlier root must never show a different root's rows.
+  for (const key of tabLoads.keys()) {
+    if (key.includes(':')) tabLoads.delete(key)
+  }
+  if (['models', 'skills', 'subagents', 'commands', 'mcp'].includes(currentTab.value)) {
+    void loadSettingsTab(currentTab.value)
+  }
 })
 
 

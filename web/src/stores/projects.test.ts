@@ -3403,7 +3403,7 @@ describe('latest status sync', () => {
     store.projectStreaming[chatId] = true
 
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: chatId, project_id: 'p1', title: 'Mid turn', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
@@ -4237,7 +4237,8 @@ describe('deep-link chat navigation', () => {
             { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
           ])
         }
-        if (path === '/api/chats') return Promise.resolve([LIVE, ARCHIVED])
+        if (path === '/api/chats?active_only=1') return Promise.resolve([LIVE])
+        if (path === '/api/chats/c-archived') return Promise.resolve(ARCHIVED)
         return Promise.resolve([])
       })
 
@@ -4245,6 +4246,7 @@ describe('deep-link chat navigation', () => {
 
       expect(store.activeChatId).toBe(ARCHIVED.chat_id)
       expect(store.activeChat?.archived).toBe(true)
+      expect(fetchedPaths()).toContain('/api/chats/c-archived')
       await vi.waitFor(() => {
         expect(fetchedPaths().filter(p => p.includes('/api/chats/c-archived/messages'))).toHaveLength(1)
       })
@@ -4621,7 +4623,7 @@ describe('workspace and chat transitions', () => {
           { project_id: 'p-client', name: 'General', workspace: 'client', context: '', created_at: '', order: 0, vault_folder: 'general' },
         ])
       }
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: 'c-client', project_id: 'p-client', title: 'Client chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
@@ -4650,7 +4652,7 @@ describe('workspace and chat transitions', () => {
           { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
         ])
       }
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: 'c-saved', project_id: 'p1', title: 'Last open', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
@@ -4683,7 +4685,7 @@ describe('workspace and chat transitions', () => {
             { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
           ])
         }
-        if (path === '/api/chats') {
+        if (path === '/api/chats?active_only=1') {
           return Promise.resolve([
             { chat_id: 'c1', project_id: 'p1', title: 'Long chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
           ])
@@ -4730,7 +4732,7 @@ describe('workspace and chat transitions', () => {
           { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
         ])
       }
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: 'c1', project_id: 'p1', title: 'Done', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
@@ -5122,7 +5124,7 @@ describe('orphaned draft recovery on load', () => {
     apiGet.mockImplementation((path: string) => {
       if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
       if (path === '/api/projects') return Promise.resolve(store.projects)
-      if (path === '/api/chats') return Promise.resolve([]) // dead-chat no longer exists server-side
+      if (path === '/api/chats?active_only=1') return Promise.resolve([]) // dead-chat no longer exists server-side
       return Promise.resolve([])
     })
 
@@ -5142,7 +5144,7 @@ describe('orphaned draft recovery on load', () => {
     apiGet.mockImplementation((path: string) => {
       if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
       if (path === '/api/projects') return Promise.resolve([])
-      if (path === '/api/chats') return Promise.resolve([])
+      if (path === '/api/chats?active_only=1') return Promise.resolve([])
       return Promise.resolve([])
     })
 
@@ -5159,7 +5161,7 @@ describe('orphaned draft recovery on load', () => {
     apiGet.mockImplementation((path: string) => {
       if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
       if (path === '/api/projects') return Promise.resolve([])
-      if (path === '/api/chats') return Promise.resolve([
+      if (path === '/api/chats?active_only=1') return Promise.resolve([
         { chat_id: 'live-chat', project_id: 'p1', title: 'New Chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
       ])
       return Promise.resolve([])

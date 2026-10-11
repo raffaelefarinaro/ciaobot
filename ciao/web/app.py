@@ -416,7 +416,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats", list_all_chats, methods=["GET"]),
         # /read-all must precede /{chat_id} so the literal isn't swallowed.
         Route("/api/chats/read-all", chats_mark_all_read, methods=["POST"]),
-        Route("/api/chats/{chat_id}", chat_detail, methods=["PATCH", "DELETE"]),
+        Route("/api/chats/{chat_id}", chat_detail, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/file-path", chat_file_path, methods=["GET"]),
         Route("/api/chats/{chat_id}/new", chat_new_session, methods=["POST"]),
         Route("/api/chats/{chat_id}/handover", chat_handover, methods=["POST"]),

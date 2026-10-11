@@ -1758,87 +1758,81 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Data fetching ───────────────────────────────────────────────────
 
   async function fetchAll() {
+    const { router } = await import('../router')
+    const routeChatId = () => (router.currentRoute.value.params.chatId as string | undefined)
+      || (typeof window !== 'undefined'
+        ? window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
+        : undefined)
+    const initialChatId = !bootstrapped.value ? routeChatId() : undefined
+    // History and the named chat's metadata start together with the small
+    // active catalog. Neither waits for the archive or review scans.
+    const initialHistory = initialChatId
+      ? loadMessages(initialChatId, { waitForSettledReply: true })
+      : undefined
+    const initialDetail = initialChatId
+      ? api.get<ChatInfo>(`/api/chats/${encodeURIComponent(initialChatId)}`)
+        .then(chat => {
+          if (routeChatId() === initialChatId) {
+            replaceChat(chat)
+            activeChatId.value = initialChatId
+          }
+          return chat
+        }).catch(() => null)
+      : undefined
     try {
-      restoreMessages()
-      restoreState()
-      restoreUnread()
+      if (!bootstrapped.value) {
+        restoreMessages()
+        restoreState()
+        restoreUnread()
+      }
       const [workspaceResponse, p, c] = await Promise.all([
         api.get<WorkspacesResponse>('/api/workspaces'),
         api.get<ProjectInfo[]>('/api/projects'),
-        api.get<ChatInfo[]>('/api/chats'),
+        api.get<ChatInfo[]>('/api/chats?active_only=1'),
       ])
       workspaces.value = workspaceResponse.workspaces || []
       workspaceProviderOptions.value = workspaceResponse.provider_options?.length
         ? workspaceResponse.provider_options
         : [{ value: 'claude', label: 'Claude' }]
       projects.value = p
-      reconcileChatList(c)
+      // Keep an archived deep link's prefetched history through reconciliation.
+      if (initialDetail) await initialDetail
+      reconcileActiveChats(c)
       void refreshRunningSubagents()
       const knownWorkspaceNames = workspaceOptions.value.map(w => w.name)
       if (!knownWorkspaceNames.includes(activeWorkspace.value)) {
         activeWorkspace.value = workspaceResponse.active || knownWorkspaceNames[0] || 'personal'
       }
       reloadTaskSignals()
-
-      // Initial active-chat resolution:
-      //   1) URL /chat/:chatId represents the user's direct intent on a
-      //      reload, notification, or deep link.
-      //   2) Ordinary launches stay on the home screen. In particular, do not
-      //      reopen the chat that happened to be active in the previous run.
-      const { router } = await import('../router')
-      const urlChatId = (router.currentRoute.value.params.chatId as string | undefined)
-        || (typeof window !== 'undefined'
-          ? window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
-          : undefined)
-      if (urlChatId && canOpenChat(urlChatId, c)) {
+      if (initialDetail) {
+        const detail = await initialDetail
+        // The catalog may have been captured before this particular chat.
+        if (detail && routeChatId() === initialChatId) replaceChat(detail)
+      }
+      // Resolve the current route after bootstrap: navigation during the
+      // requests must not be undone by the route that started them.
+      const urlChatId = routeChatId()
+      if (urlChatId && !canOpenChat(urlChatId)) await ensureChatInfo(urlChatId)
+      if (urlChatId && canOpenChat(urlChatId)) {
         await ensureWorkspaceForChat(urlChatId)
         activeChatId.value = urlChatId
       } else if (!bootstrapped.value) {
-        // Boot only. fetchAll is also a refresh — SchedulePanel calls it
-        // while the app is running — and clearing the selection there dropped
-        // the user's open chat just because the current route was /schedules,
-        // sending them to the home screen when they navigated back.
         activeChatId.value = null
       }
       persistState()
       if (activeChatId.value) {
-        // Only clear unread if the chat is actually on screen. This used to mark
-        // read unconditionally, so a fetchAll while the window was hidden (the
-        // desktop app launching at login, or a background tab) silently cleared
-        // a just-finished chat's unread — losing both the tray badge and the
-        // in-app marker. The chat_result_ready handler already gates on
-        // visibility for the same reason; match it.
-        if (typeof document === 'undefined' || document.visibilityState === 'visible') {
-          void markRead(activeChatId.value)
-        }
-        // Detached on purpose: `bootstrapped` is set when fetchAll resolves and
-        // it gates the app shell, so awaiting the active chat's full history
-        // here made the whole home page wait on parsing one (possibly very
-        // long) transcript. `messages` is reactive, so the chat pane fills in
-        // on its own.
-        //
-        // The two calls stay ordered inside: connecting the socket before the
-        // fetch resolves would let an incoming message be clobbered by the
-        // fetch result overwriting messages[chatId].
-        //
-        // A deep link to an archived chat fetches its history once and stops,
-        // exactly as `switchChat` leaves it: /messages serves the archived
-        // vault transcript, but there is no session left to dial a socket to.
         const bootChatId = activeChatId.value
-        if (isArchivedChat(bootChatId)) {
-          void loadMessages(bootChatId)
-        } else {
-          void (async () => {
-            await loadMessages(bootChatId, { waitForSettledReply: true })
-            connectWs(bootChatId)
-          })()
+        if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+          void markRead(bootChatId)
         }
+        const history = bootChatId === initialChatId && initialHistory
+          ? initialHistory
+          : loadMessages(bootChatId, { waitForSettledReply: !isArchivedChat(bootChatId) })
+        void history.then(() => {
+          if (activeChatId.value === bootChatId && !isArchivedChat(bootChatId)) connectWs(bootChatId)
+        })
       }
-      // Open the cross-chat awareness socket once per app session.
       connectEventsWs()
-      // If a push arrived while the PWA was closed/suspended and
-      // notificationclick didn't fire (iOS quirk), the SW still has the
-      // target chat cached. Query it and navigate if present.
       checkPendingTarget()
       if (!bootstrapped.value) {
         void checkPackageStatus()
@@ -2821,6 +2815,15 @@ export const useProjectStore = defineStore('projects', () => {
     try {
       await loadMessagesFromServer(chatId)
       if (opts?.waitForSettledReply && !opts?.background) {
+        // A direct chat link starts history and metadata in parallel. Wait for
+        // the small catalog/detail response before deciding whether a missing
+        // tail belongs to a live stream; archived chats never receive result WS.
+        for (const delay of [50, 100, 150, 200, 300]) {
+          if (chats.value.some(chat => chat.chat_id === chatId) || bootstrapped.value) break
+          await sleep(delay)
+        }
+      }
+      if (opts?.waitForSettledReply && !opts?.background && !isArchivedChat(chatId)) {
         const last = (messages.value[chatId] || []).at(-1)
         // Anything that is not a settled row leaves the turn's answer missing:
         // the trailing user bubble of an unanswered question, or a trace-only
@@ -3525,8 +3528,18 @@ export const useProjectStore = defineStore('projects', () => {
     persistState()
   }
 
+  async function ensureChatInfo(chatId: string): Promise<void> {
+    if (canOpenChat(chatId)) return
+    try {
+      replaceChat(await api.get<ChatInfo>(`/api/chats/${encodeURIComponent(chatId)}`))
+    } catch {
+      // A deleted or inaccessible deep link must not select an unknown chat.
+    }
+  }
+
   /** Deep-link / tray / notification navigation into a specific chat. */
   async function openChatFromDeepLink(chatId: string) {
+    await ensureChatInfo(chatId)
     if (!canOpenChat(chatId)) return
     await ensureWorkspaceForChat(chatId)
     if (activeChatId.value === chatId) {
