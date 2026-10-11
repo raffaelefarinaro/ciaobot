@@ -2400,10 +2400,12 @@ describe('TaskBoardView', () => {
   })
 
   it('offers to continue an archived chat\'s attempt in a new chat, never to resume it', async () => {
-    useProjectStore().chats = [{ chat_id: 'chat-7', project_id: 'p1', archived: true } as never]
+    // After a reload the browser's chat list holds no archived chat, so the answer
+    // has to come from the server's `chat_archived` on the row.
+    expect(useProjectStore().chats).toEqual([])
     const wrapper = await mountWithBody([settledTask({
       attempt_outcome: 'blocked', attempt_summary: 'Schema done; need creds.',
-      attempt_detail: 'the chat was archived',
+      attempt_detail: 'the chat was archived', chat_archived: true,
     })])
     const shown = card(wrapper, 'Broke halfway')
     const labels = shown.findAll('.task-chip').map((c) => c.text())
@@ -2416,6 +2418,25 @@ describe('TaskBoardView', () => {
     await flushPromises()
     await nextTick()
     expect(wrapper.get('.task-delegate-actions .task-chip').text()).toBe('Continue in a new chat')
+    wrapper.unmount()
+  })
+
+  it('offers a new chat when the chat was archived after the board loaded', async () => {
+    // Archiving does not re-publish the board's rows, so the server flag still
+    // says false here. The live chat list is what knows the archive happened.
+    useProjectStore().chats = [{ chat_id: 'chat-7', project_id: 'p1', archived: true } as never]
+    const wrapper = await mountWithBody([settledTask({ chat_archived: false })])
+    const labels = card(wrapper, 'Broke halfway').findAll('.task-chip').map((c) => c.text())
+    expect(labels).not.toContain('Resume')
+    expect(labels).toContain('Continue in new chat')
+    wrapper.unmount()
+  })
+
+  it('keeps Resume while the live chat is active and the server flag is false', async () => {
+    useProjectStore().chats = [{ chat_id: 'chat-7', project_id: 'p1', archived: false } as never]
+    const wrapper = await mountWithBody([settledTask({ chat_archived: false })])
+    const labels = card(wrapper, 'Broke halfway').findAll('.task-chip').map((c) => c.text())
+    expect(labels).toEqual(['Chat', 'Resume', 'Retry'])
     wrapper.unmount()
   })
 

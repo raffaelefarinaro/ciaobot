@@ -170,6 +170,7 @@ class _RecordingPcm:
             project_id=project_id,
             title=title,
             mode=mode,
+            archived=False,
             helper=helper or {},
             pending_question="",
             pending_permission="",

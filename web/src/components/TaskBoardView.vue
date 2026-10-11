@@ -579,7 +579,7 @@ const delegateFocusActive = computed(
 function delegateModeFor(task: Task): DelegateMode {
   if (task.live_attempt_id) return 'open_chat'
   // An archived chat cannot be resumed; a new one is handed what it did.
-  if (isSettledLinked(task)) return chatArchived(task.chat_id) ? 'retry' : 'resume'
+  if (isSettledLinked(task)) return chatArchived(task) ? 'retry' : 'resume'
   return 'delegate'
 }
 
@@ -853,14 +853,20 @@ function retryHistory() {
 }
 
 /**
- * Whether this attempt's chat is archived.
+ * Whether a task's or attempt's chat is archived.
  *
  * An archived chat still opens, read-only, from its vault transcript, but no
  * turn can run in it: Resume is not offered, and the way on is a new chat that
- * is handed what this one did.
+ * is handed what this one did. Two sources answer it, and each covers a gap in
+ * the other. The server's `chat_archived` holds across a reload, when the chat
+ * list no longer carries archived chats. The live chat list covers an archive
+ * made in this session after the board loaded: archiving does not re-publish
+ * the board's rows, so the flag is stale until the next load.
  */
-function chatArchived(chatId: string): boolean {
-  return Boolean(chatId) && projectStore.chats.some((chat) => chat.chat_id === chatId && chat.archived)
+function chatArchived(row: { chat_id: string; chat_archived?: boolean }): boolean {
+  if (!row.chat_id) return false
+  if (row.chat_archived === true) return true
+  return projectStore.chats.some((chat) => chat.chat_id === row.chat_id && chat.archived)
 }
 
 /** Whether a card title carries a link, which the reader must be able to reach. */
@@ -1975,7 +1981,7 @@ const today = localDateKey()
                   <!-- The agent's own words on where it got to, or the engine's
                        note when it said nothing. Clamped: the editor has the rest. -->
                   <p v-if="attemptNote(task)" class="task-agent-note">{{ attemptNote(task) }}</p>
-                  <p v-if="task.chat_id && chatArchived(task.chat_id) && !isReviewReady(task)" class="task-changed">
+                  <p v-if="chatArchived(task) && !isReviewReady(task)" class="task-changed">
                     The chat was archived. Continue in a new chat — it is handed what
                     this one did.
                   </p>
@@ -2044,7 +2050,7 @@ const today = localDateKey()
                          abandon the one that failed. -->
                     <template v-else-if="isSettledLinked(task)">
                       <button
-                        v-if="!chatArchived(task.chat_id)"
+                        v-if="!chatArchived(task)"
                         type="button"
                         class="btn-chip task-chip"
                         :disabled="busyTaskId === task.id"
@@ -2057,7 +2063,7 @@ const today = localDateKey()
                         :disabled="busyTaskId === task.id"
                         :aria-label="`Start a new attempt at ${task.title}`"
                         @click.stop="actOnAttempt(task, 'retry')"
-                      >{{ chatArchived(task.chat_id) ? 'Continue in new chat' : 'Retry' }}</button>
+                      >{{ chatArchived(task) ? 'Continue in new chat' : 'Retry' }}</button>
                     </template>
                     <template v-else-if="task.live_attempt_id">
                       <button
@@ -2545,7 +2551,7 @@ const today = localDateKey()
               <span class="badge" :class="detailAttemptBadgeClass">{{
                 taskAttemptLabel(detailAttemptState, detailTask?.attempt_outcome, detailTask?.attempt_detail)
               }}</span>
-              <span v-if="detailTask?.chat_id && chatArchived(detailTask.chat_id)" class="hint">
+              <span v-if="detailTask && chatArchived(detailTask)" class="hint">
                 The chat is archived; it opens read-only from the list below.
               </span>
             </p>
@@ -2644,7 +2650,7 @@ const today = localDateKey()
                       class="btn-chip task-chip"
                       :aria-label="`Open the chat attempt ${attempt.attempt_id} ran in`"
                       @click="openAttemptChat({ ...detailTask!, chat_id: attempt.chat_id })"
-                    >{{ chatArchived(attempt.chat_id) ? 'Archived chat' : 'Chat' }}</button>
+                    >{{ chatArchived(attempt) ? 'Archived chat' : 'Chat' }}</button>
                   </div>
                   <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
                   <div

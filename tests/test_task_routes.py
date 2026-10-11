@@ -118,6 +118,7 @@ class _Pcm:
             project_id=project_id,
             title=title,
             mode=mode,
+            archived=False,
             helper=helper or {},
             pending_question="",
             pending_permission="",
@@ -1405,6 +1406,41 @@ def test_the_complete_route_approves_a_review_ready_result(world) -> None:
     ).json()["attempts"]
     assert [row["attempt_id"] for row in history] == [attempt_id]
     assert [row["state"] for row in history] == ["ready_for_review"]
+
+
+def test_the_board_says_when_a_linked_chat_is_archived(world) -> None:
+    """The flag the board reads instead of the browser's chat list.
+
+    After a reload the browser holds active chats only, so an archived chat cannot
+    be looked up there. The task and its attempts carry ``chat_archived`` from the
+    registry, and only where a chat is named: an unlinked task has no such key.
+    """
+    client, cookies, _config, pcm = world
+    _create(client, cookies, title="Never delegated")
+    task = _create(client, cookies, title="Archived later")
+    _delegate(client, cookies, task, pcm)
+    chat_id = pcm.start_stream_calls[-1][0]
+
+    def listed(title: str) -> dict:
+        rows = client.get("/api/tasks?workspace=personal", cookies=cookies).json()["tasks"]
+        return next(row for row in rows if row["title"] == title)
+
+    assert listed("Archived later")["chat_archived"] is False
+    assert "chat_archived" not in listed("Never delegated")
+
+    pcm.chats[chat_id].archived = True
+
+    assert listed("Archived later")["chat_archived"] is True
+    assert "chat_archived" not in listed("Never delegated")
+    read = client.get(
+        f"/api/tasks/{task['id']}?workspace=personal", cookies=cookies
+    ).json()["task"]
+    assert read["chat_archived"] is True
+    history = client.get(
+        f"/api/tasks/{task['id']}/attempts?workspace=personal", cookies=cookies
+    ).json()
+    assert history["task"]["chat_archived"] is True
+    assert [row["chat_archived"] for row in history["attempts"]] == [True]
 
 
 def test_the_complete_route_still_refuses_a_turn_still_running(world) -> None:
