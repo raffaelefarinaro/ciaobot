@@ -5,7 +5,10 @@ import {
   _resetInstallPromptForTests,
   canPromptInstall,
   installed,
+  installedAppProbed,
+  installedOnDevice,
   listenForInstallPrompt,
+  probeInstalledApp,
   promptInstall,
 } from './installPrompt'
 
@@ -53,5 +56,29 @@ describe('install prompt listener', () => {
 
   it('resolves false when the browser never offered a prompt', async () => {
     await expect(promptInstall()).resolves.toBe(false)
+  })
+
+  it('reports an app installed on this device where Chromium can tell', async () => {
+    const nav = { getInstalledRelatedApps: vi.fn(async () => [{ platform: 'webapp', url: '/manifest.json' }]) }
+    await probeInstalledApp(nav as unknown as Navigator)
+    expect(installedOnDevice.value).toBe(true)
+  })
+
+  it('lets a view wait for the startup probe before deciding', async () => {
+    let answer!: (apps: { platform: string }[]) => void
+    const nav = { getInstalledRelatedApps: () => new Promise(resolve => { answer = resolve }) }
+    void probeInstalledApp(nav as unknown as Navigator)
+    const waited = installedAppProbed().then(() => installedOnDevice.value)
+    answer([{ platform: 'webapp' }])
+    expect(await waited).toBe(true)
+  })
+
+  it('stays unknown without the API, with no app, or when the probe throws', async () => {
+    await probeInstalledApp({} as Navigator)
+    expect(installedOnDevice.value).toBe(false)
+    await probeInstalledApp({ getInstalledRelatedApps: async () => [] } as unknown as Navigator)
+    expect(installedOnDevice.value).toBe(false)
+    await probeInstalledApp({ getInstalledRelatedApps: async () => { throw new Error('blocked') } } as unknown as Navigator)
+    expect(installedOnDevice.value).toBe(false)
   })
 })

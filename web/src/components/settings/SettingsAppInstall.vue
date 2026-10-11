@@ -1,5 +1,5 @@
 <template>
-  <div class="card">
+  <div id="install-app" class="card">
     <div class="settings-card-header">
       <h2 class="section-title">Use Ciaobot as an app</h2>
       <p class="hint">
@@ -28,7 +28,7 @@
         </span>
       </div>
     </div>
-    <details class="install-platforms">
+    <details class="install-platforms" :open="expandSteps || undefined">
       <summary class="install-summary">Steps for every platform</summary>
       <ul class="install-routes">
         <li
@@ -52,6 +52,8 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import { installedOnDevice } from '../../lib/installPrompt'
 import { isLoopbackPage } from '../../lib/loopback'
 import {
   isAndroid,
@@ -149,12 +151,18 @@ function currentInstallRoute(): string | null {
 
 const currentRoute = currentInstallRoute()
 
-/** About this window only. A browser tab cannot see whether the app is
- *  installed on the device, and must never claim that it is. */
+/** Opens the platform steps when the Home setup card linked here. */
+defineProps<{ expandSteps?: boolean }>()
+
+/** About this window, plus the one device fact a tab can learn: Chromium
+ *  reports an installed app to its own origin. Elsewhere a tab cannot see it,
+ *  and must never claim that it is installed. */
 const standalone = isStandalone()
-const standaloneDetail = standalone
-  ? 'Only this window can tell. Another tab, or another device, may still be the browser.'
-  : 'Everything already works here. Installing is what adds the icon and the separate window.'
+const standaloneDetail = computed(() => {
+  if (standalone) return 'Only this window can tell. Another tab, or another device, may still be the browser.'
+  if (installedOnDevice.value) return 'The app is installed on this device too. Open it from its icon for its own window.'
+  return 'Everything already works here. Installing is what adds the icon and the separate window.'
+})
 
 /** Browsers only install the app, and only allow push, on a secure origin:
  *  HTTPS, or the host's own localhost. Plain HTTP on a LAN address is neither,

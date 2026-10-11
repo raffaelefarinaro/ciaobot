@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { installInstructions, isIos, isStandalone, SETUP_CARD_DISMISSED_KEY } from '../lib/pwaPlatform'
-import { canPromptInstall, installed, promptInstall } from '../lib/installPrompt'
+import { canPromptInstall, installed, installedAppProbed, installedOnDevice, promptInstall } from '../lib/installPrompt'
 import { errorMessage } from '../lib/errorMessage'
 import HomeNoticeWindow from './HomeNoticeWindow.vue'
 import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
@@ -34,13 +34,17 @@ const error = ref('')
  *  readable. It still auto-hides on the next mount, when both steps were
  *  already done. */
 const touched = ref(false)
-/** True once the push probe settled, one way or the other. Deciding `visible`
+/** True once the push and install probes settled, one way or the other. Deciding `visible`
  *  before that would flash the card on every Home visit for the users who
  *  already finished setup, and would keep it up forever where push cannot
  *  exist, because `pushOn` could never become true there. */
 const probed = ref(false)
 
-const installDone = computed(() => standalone.value || installed.value)
+const installDone = computed(() => standalone.value || installed.value || installedOnDevice.value)
+/** Installed, but this is still a browser tab: say where the app is instead. */
+const installedHint = computed(() => standalone.value || installed.value
+  ? 'Installed'
+  : 'Installed on this device. Open it from its icon instead of this tab.')
 const needsInstallFirst = computed(() => isIos() && !standalone.value)
 
 /** Both real steps are finished (or cannot be finished here). */
@@ -72,9 +76,13 @@ onBeforeUnmount(() => noticeWindows.clearAvailable('device-setup'))
 onMounted(async () => {
   pushAvailable.value = pushSupported()
   denied.value = typeof Notification !== 'undefined' && Notification.permission === 'denied'
+  // The install answer arrives asynchronously too; deciding before it would
+  // show the card and then hide it under the user's finger.
+  const installProbe = installedAppProbed()
   try {
     pushOn.value = await isPushEnabled()
   } catch { /* keep the step visible: the user can still try to enable it */ }
+  await installProbe
   probed.value = true
 })
 
@@ -123,8 +131,11 @@ function hide() {
       <li class="home-setup-step" :data-done="installDone">
         <div class="home-setup-text">
           <strong>Install the app</strong>
-          <span v-if="installDone" class="hint">Installed</span>
-          <span v-else-if="!canPromptInstall" class="hint">{{ installInstructions() }}</span>
+          <span v-if="installDone" class="hint">{{ installedHint }}</span>
+          <span v-else-if="!canPromptInstall" class="hint">
+            {{ installInstructions() }}
+            <RouterLink class="home-setup-link" to="/settings#install-app">How to install</RouterLink>
+          </span>
         </div>
         <button
           v-if="!installDone && canPromptInstall"
@@ -180,6 +191,7 @@ function hide() {
   flex: 1 1 14rem;
 }
 .home-setup-step[data-done="true"] strong { color: var(--fg3); }
+.home-setup-link { white-space: nowrap; }
 @container (max-width: 560px) {
   .home-setup-step > button { width: 100%; min-height: 44px; }
 }

@@ -238,7 +238,7 @@
 
         <!-- Installing is optional and the guidance is permanent: the Home setup
              reminder can be closed for good, so Settings keeps the steps. -->
-        <SettingsAppInstall />
+        <SettingsAppInstall :expand-steps="route.hash === '#install-app'" />
 
         <!-- Notifications. -->
         <SettingsNotifications />
@@ -3152,6 +3152,19 @@ function scrollToChatProvidersIfLinked(): void {
   })
 }
 watch(() => route.fullPath, scrollToChatProvidersIfLinked)
+
+// The Home setup card's "How to install" lands on /settings#install-app; the
+// card is mounted with the home tab, so only the scroll needs waiting for.
+watch(
+  () => route.hash,
+  hash => {
+    if (hash !== '#install-app') return
+    void nextTick(() => {
+      document.getElementById('install-app')?.scrollIntoView?.({ block: 'start' })
+    })
+  },
+  { immediate: true },
+)
 
 /** Summary line for the collapsed "What this CLI brings" disclosure. */
 function providerBringsCounts(providerId: string, conn: ProviderConnection): string {
@@ -6434,7 +6447,7 @@ a.btn-secondary {
   .provider-brings > summary::before { transition: none; }
 }
 /* /settings/providers scrolls here; keep the card clear of the pane header. */
-#chat-providers { scroll-margin-top: var(--space-4); }
+#chat-providers, #install-app { scroll-margin-top: var(--space-4); }
 .provider-brings > summary:hover { color: var(--fg); }
 .provider-brings > summary:focus-visible {
   outline: 2px solid var(--accent);
