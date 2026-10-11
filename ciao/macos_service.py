@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Sequence
+from xml.parsers.expat import ExpatError
 
 from ciao.server_host import ServerHostError, parse_service_command
 
@@ -234,14 +235,30 @@ def parse_launchctl_print_arguments(text: str) -> list[str] | None:
     return launchctl_print_list(text, "arguments")
 
 
-def _plist_program_arguments(plist_path: Path) -> list[str] | None:
-    """The ``ProgramArguments`` of a LaunchAgent plist on disk, or ``None``."""
+def load_server_plist(launch_agents_dir: Path | None = None) -> dict[str, Any] | None:
+    """The parsed ``com.ciao.server.plist``, or ``None`` when missing or unreadable.
+
+    The one reader of the server LaunchAgent. ``launch_agents_dir`` defaults
+    to :func:`default_launch_agents_dir`. A missing, unreadable, malformed or
+    half-written plist (``ExpatError`` is not a ``ValueError``) and one whose
+    root is not a dict all answer ``None``.
+    """
+    agents = (
+        default_launch_agents_dir()
+        if launch_agents_dir is None
+        else Path(launch_agents_dir).expanduser()
+    )
     try:
-        with plist_path.open("rb") as handle:
-            plist = plistlib.load(handle)
-    except (OSError, plistlib.InvalidFileException):
+        with (agents / f"{SERVER_LABEL}.plist").open("rb") as handle:
+            data: Any = plistlib.load(handle)
+    except (OSError, ValueError, ExpatError):
         return None
-    arguments = plist.get("ProgramArguments") if isinstance(plist, dict) else None
+    return data if isinstance(data, dict) else None
+
+
+def _plist_program_arguments(plist: dict[str, Any] | None) -> list[str] | None:
+    """The ``ProgramArguments`` of a parsed LaunchAgent plist, or ``None``."""
+    arguments = plist.get("ProgramArguments") if plist is not None else None
     if (
         not isinstance(arguments, list)
         or not arguments
@@ -365,14 +382,7 @@ def discover_runtime(
         else Path(launch_agents_dir).expanduser()
     )
     plist_path = agents / f"{SERVER_LABEL}.plist"
-    plist: dict[str, Any] = {}
-    try:
-        with plist_path.open("rb") as handle:
-            loaded = plistlib.load(handle)
-        if isinstance(loaded, dict):
-            plist = loaded
-    except (OSError, plistlib.InvalidFileException):
-        pass
+    plist: dict[str, Any] = load_server_plist(agents) or {}
 
     plist_env = plist.get("EnvironmentVariables")
     if not isinstance(plist_env, dict):
@@ -476,7 +486,7 @@ def service_status(
     loaded_python_path = service_python_path(loaded_arguments) if loaded_arguments else None
     plist_matches_loaded = _plist_matches_loaded(
         loaded_arguments,
-        _plist_program_arguments(Path(runtime.server_plist)),
+        _plist_program_arguments(load_server_plist(Path(runtime.server_plist).parent)),
     )
     reachable = server_reachable(runtime.port)
     active = active_chat_ids(runtime.port) if reachable else []
@@ -603,7 +613,7 @@ def restart_service(
         loaded, loaded_arguments = _loaded_definition(resolved_uid, runner)
         plist_matches = _plist_matches_loaded(
             loaded_arguments,
-            _plist_program_arguments(Path(runtime.server_plist)),
+            _plist_program_arguments(load_server_plist(Path(runtime.server_plist).parent)),
         )
         if loaded and plist_matches is False:
             if os.environ.get("CIAO_CHAT_ID"):

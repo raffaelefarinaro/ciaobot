@@ -1088,3 +1088,38 @@ def test_restart_kickstarts_when_the_job_is_not_loaded(tmp_path: Path, monkeypat
 
     assert calls[-1] == ["launchctl", "kickstart", "-k", "gui/501/com.ciao.server"]
     assert not any("bootstrap" in call for call in calls)
+
+
+def test_load_server_plist_reads_the_server_agent(tmp_path: Path) -> None:
+    with (tmp_path / "com.ciao.server.plist").open("wb") as handle:
+        plistlib.dump({"ProgramArguments": ["/x", "serve"]}, handle)
+
+    assert macos_service.load_server_plist(tmp_path)["ProgramArguments"] == ["/x", "serve"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        b"garbage",
+        b'<?xml version="1.0"?><plist><dict><key>a</key>',
+        plistlib.dumps(["a"]),
+    ],
+    ids=["missing", "garbage", "truncated-xml", "non-dict-root"],
+)
+def test_load_server_plist_answers_none_for_missing_malformed_truncated_and_non_dict(
+    tmp_path: Path, content: bytes | None
+) -> None:
+    if content is not None:
+        (tmp_path / "com.ciao.server.plist").write_bytes(content)
+
+    assert macos_service.load_server_plist(tmp_path) is None
+
+
+def test_load_server_plist_defaults_to_the_isolated_launch_agents_dir() -> None:
+    agents = macos_service.default_launch_agents_dir()
+    agents.mkdir(parents=True, exist_ok=True)
+    with (agents / "com.ciao.server.plist").open("wb") as handle:
+        plistlib.dump({"ProgramArguments": ["/x", "serve"]}, handle)
+
+    assert macos_service.load_server_plist() == {"ProgramArguments": ["/x", "serve"]}
