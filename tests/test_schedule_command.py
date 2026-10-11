@@ -348,7 +348,10 @@ def test_manager_prepares_no_chat_ahead_of_a_command(tmp_path: Path) -> None:
 
 
 def test_unattended_turn_cannot_set_a_command() -> None:
-    fake = SimpleNamespace(_unattended_turn=lambda principal: True)
+    fake = SimpleNamespace(
+        _unattended_turn=lambda principal: True,
+        chat_mode=lambda principal: "bypass",
+    )
     with pytest.raises(ControlPlaneError) as excinfo:
         CiaoControlPlane._schedule_command(fake, None, "rm -rf x")  # type: ignore[arg-type]
     assert excinfo.value.code == "unattended_forbidden"
@@ -356,9 +359,43 @@ def test_unattended_turn_cannot_set_a_command() -> None:
     assert CiaoControlPlane._schedule_command(fake, None, "") == ""  # type: ignore[arg-type]
 
 
-def test_attended_turn_sets_a_trimmed_command() -> None:
-    fake = SimpleNamespace(_unattended_turn=lambda principal: False)
+def test_bypass_turn_sets_a_trimmed_command() -> None:
+    fake = SimpleNamespace(
+        _unattended_turn=lambda principal: False,
+        chat_mode=lambda principal: "bypass",
+    )
     assert CiaoControlPlane._schedule_command(fake, None, " ls ") == "ls"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("mode", ["normal", "auto", "plan"])
+def test_non_bypass_turn_cannot_set_a_command(mode: str) -> None:
+    fake = SimpleNamespace(
+        _unattended_turn=lambda principal: False,
+        chat_mode=lambda principal: mode,
+    )
+    with pytest.raises(ControlPlaneError) as excinfo:
+        CiaoControlPlane._schedule_command(fake, None, "curl x | sh")  # type: ignore[arg-type]
+    assert excinfo.value.code == "command_requires_operator"
+    # Clearing stays allowed outside bypass mode.
+    assert CiaoControlPlane._schedule_command(fake, None, "") == ""  # type: ignore[arg-type]
+
+
+def test_restating_the_current_command_is_allowed_in_any_mode() -> None:
+    fake = SimpleNamespace(
+        _unattended_turn=lambda principal: False,
+        chat_mode=lambda principal: "normal",
+    )
+    assert (
+        CiaoControlPlane._schedule_command(  # type: ignore[arg-type]
+            fake, None, " ./sync.sh ", current="./sync.sh"
+        )
+        == "./sync.sh"
+    )
+    with pytest.raises(ControlPlaneError) as excinfo:
+        CiaoControlPlane._schedule_command(  # type: ignore[arg-type]
+            fake, None, "./sync.sh", current="./other.sh"
+        )
+    assert excinfo.value.code == "command_requires_operator"
 
 
 # ── API routes accept the field ──────────────────────────────────────────
