@@ -236,6 +236,16 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">What can Ciaobot do?</p>
+            <p class="hint">
+              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
+            </p>
+            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
+          </div>
+        </div>
+
         <!-- Installing is optional and the guidance is permanent: the Home setup
              reminder can be closed for good, so Settings keeps the steps. -->
         <SettingsAppInstall :expand-steps="route.hash === '#install-app'" />
@@ -251,16 +261,6 @@
              so it stays on General, and it owns its own fetch because Home may
              never have been opened in this session. -->
         <SettingsUpdateTasks />
-
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">What can Ciaobot do?</p>
-            <p class="hint">
-              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
-            </p>
-            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
-          </div>
-        </div>
 
         <!-- Appearance -->
         <div class="card">
@@ -1773,7 +1773,6 @@
                     <span class="skill-name">{{ agent.name }}</span>
                     <span class="skill-badges">
                       <span :class="assetOriginClass(subagentOrigin(agent))">{{ assetOriginLabel(subagentOrigin(agent)) }}</span>
-                      <span v-if="agent.scope && agent.scope !== 'custom' && agent.scope !== 'built-in'" class="badge badge--muted command-source">{{ agent.scope }}</span>
                       <button
                         v-if="agent.editable"
                         type="button"
@@ -1893,7 +1892,6 @@
                     <span v-if="command.argument_hint" class="command-args">{{ command.argument_hint }}</span>
                     <span class="skill-badges">
                       <span :class="assetOriginClass(commandOrigin(command))">{{ assetOriginLabel(commandOrigin(command)) }}</span>
-                      <span v-if="command.scope && command.scope !== 'custom' && command.scope !== 'built-in'" class="badge badge--muted command-source">{{ command.scope }}</span>
                       <button
                         v-if="command.editable"
                         type="button"
@@ -5064,9 +5062,18 @@ onUnmounted(stopUpdatePoll)
   white-space: nowrap;
 }
 
-/* Narrow panes collapse the grid; a table of contents under the page it
-   indexes would only be something to scroll past. */
+/* The rail here is navigation, not context, so it outlasts the shared
+   page grid's 940px collapse: a compact column down to a 760px pane (a
+   1280px window with the widest sidebar is 780px), then gone — a table of
+   contents under the page it indexes would only be something to scroll
+   past. */
 @container chat-pane (max-width: 940px) {
+  .settings-grid { grid-template-columns: minmax(0, 1fr) 200px; gap: var(--space-6); }
+  .settings-rail { position: sticky; }
+  .settings-toc-item { white-space: normal; }
+}
+@container chat-pane (max-width: 760px) {
+  .settings-grid { grid-template-columns: minmax(0, 1fr); }
   .settings-rail { display: none; }
 }
 

@@ -42,16 +42,18 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
   try {
     const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
     // Built from the page itself, in page order, headings in sentence case.
-    // Updates leads, then the everyday device sections, then the update task
-    // history, then everything else in its existing order.
-    expect(labels.slice(0, 5)).toEqual([
+    // Updates leads, then the capability help, then the everyday device
+    // sections, then the update task history, then everything else in its
+    // existing order.
+    expect(labels.slice(0, 6)).toEqual([
       'Updates',
+      'What can Ciaobot do?',
       'Use Ciaobot as an app',
       'Notifications',
       'Keyboard shortcuts',
       'Update task history',
     ])
-    expect(labels.slice(5, 8)).toEqual(['What can Ciaobot do?', 'Appearance', 'This host'])
+    expect(labels.slice(6, 8)).toEqual(['Appearance', 'This host'])
     expect(labels.indexOf('Open source')).toBeGreaterThan(labels.indexOf('Keyboard shortcuts'))
     // The client/role callout is a notice, not a section to jump to.
     expect(labels).not.toContain('Connection role unavailable')
