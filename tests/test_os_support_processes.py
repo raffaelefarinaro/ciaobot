@@ -147,6 +147,18 @@ def test_windows_starts_a_new_process_group() -> None:
     assert tree_spawn_options() == {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Job Objects are the Windows branch")
+@pytest.mark.parametrize("dies_with_engine", [False, True])
+def test_windows_a_child_that_already_exited_gives_an_empty_tree(dies_with_engine: bool) -> None:
+    child = subprocess.Popen(
+        [sys.executable, "-c", "pass"], **tree_spawn_options(dies_with_engine=dies_with_engine)
+    )
+    child.wait(timeout=30)
+    tree = ProcessTree(child.pid, dies_with_engine=dies_with_engine)  # used to raise WinError 5
+    tree.kill()  # empty job: no error
+    tree.close()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="KILL_ON_JOB_CLOSE is the Windows branch")
 def test_windows_a_tree_that_dies_with_the_engine_ends_when_closed(tmp_path: Path) -> None:
     """The engine exiting closes the job handle; that must end the tree."""
