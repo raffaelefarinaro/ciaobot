@@ -1377,6 +1377,32 @@ async def test_continuing_a_pass_respects_another_running_pass(
     assert manager._streaming.drive_task(first_id) is None
 
 
+async def test_a_user_turn_on_a_queued_pass_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None,
+) -> None:
+    """A queued pass has never run, so the owner's message must not take its slot."""
+    manager = _make_manager(tmp_path)
+    archive = _archive_file(tmp_path)
+    with monkeypatch.context() as setup:
+        setup.setattr(manager, "start_stream", _FakeStreams())
+        manager.enqueue_memory_pass(_source(manager, "First"), None, archive, "")
+        queued_source = _source(manager, "Second")
+        queued_id = manager.enqueue_memory_pass(queued_source, None, archive, "")
+    queued = manager.get_chat(queued_id)
+    assert queued is not None
+    assert queued.helper["state"] == "queued"
+    step_before = queued_source.postprocess["steps"]["memory_pass"]["status"]
+
+    with pytest.raises(ValueError, match="queued"):
+        manager.start_stream(queued_id, "Also remember this")
+    assert queued.helper["state"] == "queued"
+    assert queued_source.postprocess["steps"]["memory_pass"]["status"] == step_before
+    assert manager._broker.get(queued_id) is None
+    assert manager._streaming.drive_task(queued_id) is None
+
+
 async def test_an_errored_drain_settles_a_pass_waiting_on_background_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from ciao.config import CiaoConfig
 from ciao.models import ChatContext, ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web import chat_service
 from ciao.web.project_chats import ProjectChatManager
 
 from tests.conftest import attach_stub_mcp
@@ -1106,3 +1109,59 @@ async def test_connection_retries_do_not_consume_quota_budget(tmp_path: Path) ->
     assert updated.retry_kind == "quota"
     assert updated.retry_attempts == 0
     pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_retry_loop_wakes_at_a_rearmed_retry_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed daily retry that re-arms a near time is retried then, not a day later."""
+    from ciao.web import project_chats
+
+    monkeypatch.setattr(project_chats, "_RETRY_STREAM_POLL_SECONDS", 0.01)
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    near_at = chat_service._iso_after(1)
+    calls: list[str] = []
+    second_call = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append(prompt)
+        if len(calls) == 1:
+            # The first daily retry fails and re-arms a retry one second out.
+            pcm.set_chat_retry(
+                chat_id,
+                prompt,
+                reason="connection",
+                next_at=near_at,
+                interval_seconds=24 * 60 * 60,
+            )
+            return
+        second_call.set()
+        yield ResultEvent(
+            type="result",
+            result="done",
+            session_id="sess-ok",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    pcm.set_chat_retry(
+        chat.chat_id,
+        "run me",
+        reason="quota",
+        next_at="2000-01-01T00:00:00Z",
+        interval_seconds=24 * 60 * 60,
+    )
+    await asyncio.wait_for(second_call.wait(), timeout=5.0)
+    while (current := pcm.get_chat(chat.chat_id)) is not None and current.retry_status == "pending":
+        await asyncio.sleep(0.01)
+
+    assert calls == ["run me", "run me"]
+    assert current is not None
+    assert current.retry_status == ""
