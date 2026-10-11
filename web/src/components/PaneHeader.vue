@@ -394,6 +394,20 @@ const hasCenter = computed(() => props.brand || !!props.pageTag)
     text-align: left;
     min-width: 0;
   }
+  /* Nothing to centre (the chat, a subagent, a pinned file): row 1 would hold
+     only the menu, Back and the actions around an empty middle, spending a
+     whole row of a phone screen on chrome. One row instead - lead, title,
+     actions - with the title taking the slack between them. */
+  .pane-header--no-center:has(.header-title) {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    /* Same as the top inset, so the two-line title block sits centred. */
+    padding-bottom: var(--space-3);
+  }
+  .pane-header--no-center .header-center { display: none; }
+  .pane-header--no-center .header-title {
+    grid-column: 2;
+    grid-row: 1;
+  }
   :deep(.header-left) { min-width: 0; }
   :deep(.header-actions) {
     flex-shrink: 0;

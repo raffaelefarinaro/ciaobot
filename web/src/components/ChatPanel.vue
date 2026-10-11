@@ -30,7 +30,7 @@
               <line x1="6" y1="6" x2="18" y2="18"/>
             </svg>
           </button>
-          <div class="header-breadcrumb">
+          <div class="header-breadcrumb" :class="{ 'header-breadcrumb--stacked': !isWidePane }">
             <!-- The project is the context envelope for this chat. The workspace
                  is already the sidebar's scope, so repeating it here would add
                  a second, competing location cue. It links to the project page. -->
@@ -4765,6 +4765,22 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   flex: 0 1 auto;
 }
 
+/* A pane too narrow for the Work details rail (a phone, or a desktop pane
+   squeezed by the sidebar or a pinned file) gives the title its own row and
+   puts the project under it, so neither truncates the other to a stub. */
+.header-breadcrumb--stacked {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  row-gap: 2px;
+}
+.header-breadcrumb--stacked .chat-title {
+  width: 100%;
+}
+.header-breadcrumb--stacked .breadcrumb-scope {
+  max-width: 100%;
+}
+
 .breadcrumb-scope {
   flex: 0 1 auto;
   max-width: 40%;
@@ -7034,28 +7050,23 @@ details[open] > .activity-summary::before {
 }
 
 @media (max-width: 768px) {
-  /* Mobile header: spend the narrow width on the chat context, not on a
-     giant one-line truncation. The project and title can wrap to two compact
-     lines while the action buttons keep their safe tap targets. */
+  /* Mobile header: the title/project stack comes from
+     .header-breadcrumb--stacked (a phone is never wide enough for the rail);
+     this keeps the action buttons on safe tap targets. */
   :deep(.pane-header) {
     padding-left: calc(12px + var(--safe-left));
     padding-right: calc(12px + var(--safe-right));
   }
   :deep(.header-title) { text-align: left; min-width: 0; }
   .header-left { min-width: 0; }
-  .header-breadcrumb {
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: center;
-    row-gap: 2px;
-  }
-  .header-breadcrumb .chat-title {
-    flex: 0 1 auto;
-    width: 100%;
-  }
-  .breadcrumb-scope {
-    max-width: 100%;
-    align-self: flex-start;
+  /* The header is one row here, led by the menu and Back, so a third leading
+     icon would only squeeze the title: the sidebar drawer and Back already
+     leave the chat. */
+  .close-btn { display: none; }
+  /* With the project on the line below, the title keeps to one line so the
+     pair stays as tall as the icons beside it. */
+  .header-breadcrumb--stacked:has(.breadcrumb-scope) .pane-title.chat-title {
+    -webkit-line-clamp: 1;
   }
   .chat-archive-btn {
     color: var(--fg2);
