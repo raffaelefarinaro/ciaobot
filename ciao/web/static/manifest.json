@@ -9,6 +9,7 @@
   "background_color": "#1a1a2e",
   "theme_color": "#1a1a2e",
   "orientation": "any",
+  "related_applications": [{ "platform": "webapp", "url": "/manifest.json" }],
   "shortcuts": [
     { "name": "New chat", "url": "/?new=1" },
     { "name": "Memory", "url": "/memory/suggested" },
