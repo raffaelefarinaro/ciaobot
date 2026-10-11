@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from ciao.config import CiaoConfig, WorkspaceConfig, reset_reroot_cache
 from ciao.web import commands as commands_module
 from ciao.web.commands import (
-    Command,
     _parse_frontmatter,
     _workspace_root,
     list_commands,

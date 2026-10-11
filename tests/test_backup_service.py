@@ -401,7 +401,7 @@ async def test_the_rest_of_the_runtime_root_is_still_refused(tmp_path: Path) -> 
     the other `.runtime` paths are reported as pending work this run will not
     commit, beside the one it will."""
     world = _world(tmp_path)
-    service = _service(world)
+    _service(world)
     _schedules(world, json.dumps({"schedules": []}))
     _write(world.workspace / ".runtime" / "custom_providers.json", "{}")
     _write(world.workspace / ".runtime" / "node_state.json", "{}")

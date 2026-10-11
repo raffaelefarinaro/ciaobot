@@ -2503,7 +2503,7 @@ def test_a_check_in_cooldown_stops_the_queue_asking_again(tmp_path: Path) -> Non
 
     rows = _queue(tmp_path)
     row = next(
-        c for c in _queue(tmp_path)
+        c for c in rows
         if c.path.endswith("People/Old.md")
     )
     assert "unverified" not in row.signals

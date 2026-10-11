@@ -1284,7 +1284,6 @@ async def _assemble_chat_messages(
             continue
 
         content = _extract_text_content(m.message)
-        raw_prompt = content
         if m.type == "user":
             content = _strip_injected_context(content)
         content = content.strip()

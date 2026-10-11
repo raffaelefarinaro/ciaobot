@@ -818,26 +818,15 @@ def test_the_fold_writer_puts_a_redated_bullet_back(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("writer", ["project", "people"])
-def test_both_accept_paths_run_the_invalidator(
+def test_project_and_people_writers_preserve_unmodified_verification_stamps(
     writer: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Neither fold rewrites the file, so no writer strips stamps anymore.
+    """Accepting one fact leaves an unrelated verified entry unchanged.
 
-    Both accepts write a single entry through the note receipts — an update
-    splices one span, an add appends one bullet — and every other bullet,
-    stamped or not, is never touched. An untouched bullet's `[verified:]`
-    stamp is unchanged because its bytes are unchanged, not because a
-    whole-file rewrite was scrubbed afterwards.
+    Each writer applies its selected change without invalidating a verification
+    stamp on an unrelated entry.
     """
-    import inspect
-
     from ciao import project_doc_update as pdu
-
-    assert not hasattr(pdu, "_invalidate_stamps")
-    source = inspect.getsource(
-        pdu.update_project_doc if writer == "project" else pdu.fold_fact_into_person_note
-    )
-    assert "_invalidate_stamps(" not in source, f"the {writer} writer strips stamps"
 
     async def fake_oneshot(prompt, *, system_prompt, model, **kwargs):
         return fake_oneshot.reply

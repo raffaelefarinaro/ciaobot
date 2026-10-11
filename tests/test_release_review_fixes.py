@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 
 from ciao.web.transcript_service import _overlay_transcript_metadata
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-import pytest
 from itsdangerous import URLSafeTimedSerializer
 from starlette.applications import Starlette
 from starlette.middleware import Middleware

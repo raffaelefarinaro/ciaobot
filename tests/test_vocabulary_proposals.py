@@ -423,7 +423,6 @@ def test_audit_vocabulary_proposals_aggregates_across_workspace_vaults(tmp_path:
     """Usage must be counted globally, so a non-canonical type split across
     two workspace vaults reaches the threshold when summed, and the proposal
     carries both workspaces."""
-    from ciao import vault_index as vi_mod
     from ciao.vocabulary_proposals import audit_vocabulary_proposals
 
     personal = tmp_path / "personal" / "memory-vault"

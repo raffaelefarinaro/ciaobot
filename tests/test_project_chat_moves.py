@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.config import CiaoConfig
 from ciao.schedules import ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore

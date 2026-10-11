@@ -332,6 +332,10 @@ async def test_connection_error_exception_marks_turn_for_fast_retry(tmp_path: Pa
     assert updated.retry_status == "pending"
     assert updated.retry_prompt == "do the thing"
     assert updated.retry_interval_seconds == 30
+    assert any(
+        event.get("type") == "chat_retry" and event.get("status") == "pending"
+        for event in events
+    )
     pcm.stop_chat_retry(chat.chat_id)
 
 

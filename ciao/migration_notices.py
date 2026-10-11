@@ -560,7 +560,7 @@ def _links_scope(config: Any, runtime_dir: Path | None) -> _Scope:
         return _Scope()
     vault = Path(vault_raw)
     try:
-        from ciao.vault_migrate_links import read_receipt, receipt_path
+        from ciao.vault_migrate_links import read_receipt
 
         completed = read_receipt(runtime_dir)
     except Exception:  # noqa: BLE001 — advisory; an unreadable receipt is unknown

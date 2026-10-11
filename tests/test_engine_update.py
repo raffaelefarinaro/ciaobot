@@ -53,7 +53,7 @@ from ciao.update_host import (
     MacUpdateHost,
     UpdateHost,
 )
-from ciao import install_receipt, macos_service
+from ciao import macos_service
 from ciao.install_receipt import InstallReceipt, read_receipt, write_receipt
 from ciao.release_manifest import artifact_entry, build_manifest
 from ciao.os_support.private import is_private

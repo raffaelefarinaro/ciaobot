@@ -51,7 +51,7 @@ from tests.test_engine_update import (
     _server_plist_path,
     _staged,
     _write_server_plist,
-    phases,
+    phases as phases,
 )
 
 UPDATER_PLIST = "com.ciao.updater.plist"

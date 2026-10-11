@@ -176,19 +176,9 @@ def test_gate_node_evaluates_callable() -> None:
     def is_even(ctx):
         return ctx.get("count", 0) % 2 == 0
 
-    dag = [
-        Node(id="a", kind="bash", payload={"cmd": _echo("4")}),
-        Node(id="check", kind="gate", payload={"fn": is_even}),
-    ]
-    edges = [Edge(src="a", dst="check")]
-    ctx = run(dag, edges, job="unit", label="gate")
-    # gate reads ctx but doesn't write the input; provide it via initial_ctx
-    dag2 = [
-        Node(id="a", kind="bash", payload={"cmd": _echo("done")}),
-        Node(id="check", kind="gate", payload={"fn": is_even}),
-    ]
-    ctx2 = run(dag2, edges, job="unit", label="gate", initial_ctx={"count": 4})
-    assert ctx2["check"].ok is True
+    dag = [Node(id="check", kind="gate", payload={"fn": is_even})]
+    ctx = run(dag, [], job="unit", label="gate", initial_ctx={"count": 4})
+    assert ctx["check"].ok is True
 
 
 def test_gate_rejects_non_callable() -> None:

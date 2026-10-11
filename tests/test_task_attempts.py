@@ -41,7 +41,6 @@ from ciao.task_attempts import (
     PreviousAttempt,
     RESUMABLE_STATES,
     SETTLED_STATES,
-    TaskAttempt,
     TaskAttemptError,
     TaskAttemptStore,
     build_prompt,
@@ -517,6 +516,7 @@ def test_a_release_takes_a_reviewed_attempt_out_of_the_live_set(tmp_path: Path) 
     store = _store(tmp_path)
     attempt = _start(store).attempt
     reviewed = store.finish(attempt.attempt_id, "ready_for_review")
+    assert reviewed.state == "ready_for_review"
     assert store.get_live(TASK_ID) is not None, "a reviewed result still holds the task"
 
     released = store.release(attempt.attempt_id)

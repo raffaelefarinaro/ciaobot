@@ -572,8 +572,6 @@ def test_a_malformed_line_is_reported_kept_and_reflected_in_the_exit_code(
         "- [2024-13-45] debugging: an impossible date\n"
         "- A bullet that does migrate.\n",
     )
-    before = _learnings(vault)
-
     code = _run(
         "learnings-migrate",
         "--vault-root",

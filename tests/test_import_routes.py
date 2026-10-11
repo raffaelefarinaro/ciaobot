@@ -415,6 +415,7 @@ def test_an_opencode_session_this_workspace_lists_is_still_exported(
 
     # The export answers this fake with the listing's own shape, which is not a
     # session; the point is only that it was asked for the listed id.
+    assert response.status_code == 200, response.text
     assert [args[:2] for args in calls] == [("session", "list"), ("session", "export")]
     assert calls[-1][2] == "ses_mine"
 

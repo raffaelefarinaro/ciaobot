@@ -12,9 +12,7 @@ capability source (opencode's own model catalog).
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
-from typing import Literal
 
 from ciao.config import CiaoConfig
 from ciao.models import ImageAttachment, ResultEvent

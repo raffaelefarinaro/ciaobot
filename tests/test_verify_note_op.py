@@ -1082,7 +1082,6 @@ def test_an_entry_update_files_a_replace_entry_proposal(tmp_path: Path) -> None:
     from ciao import note_receipts as nr
 
     install, root, note, entry = _entry_install(tmp_path)
-    vault = install.workspace_vault_root("personal")
     plane = _plane(install)
     replacement = "- Sofia runs the platform team [verified: 2024-01-05]"
 

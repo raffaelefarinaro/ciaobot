@@ -792,30 +792,8 @@ def _entry_request(
     )
 
 
-def _entry_digest(request: Any) -> str:
-    """A short, stable id for the question an entry payload asks.
-
-    The same reasoning as :func:`_verification_digest`, and for the same reason:
-    the off-loop read coalesces by key, so the key has to carry the whole verdict
-    and not only the entry it is about. Over the fields that decide the answer —
-    outcome, coverage, evidence and the edit's two images — and not over the
-    request's identity, which the key already spells out.
-    """
-    edit = request.edit
-    body = {
-        "outcome": str(request.outcome or ""),
-        "coverage": str(request.coverage or ""),
-        "evidence": [row.as_dict() for row in request.evidence],
-        "before": "" if edit is None else edit.before,
-        "after": "" if edit is None else edit.after,
-    }
-    return hashlib.sha256(
-        json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()[:16]
-
-
 def _verification_digest(request: Any) -> str:
-    """A short, stable id for *the question this payload asks*.
+    """A short, stable id for the verdict question this payload asks.
 
     The off-loop read is coalesced by key, so the key has to carry the whole
     verdict and not only the note it is about. Keyed on the note and the expected
@@ -827,9 +805,9 @@ def _verification_digest(request: Any) -> str:
     coalescing exists to avoid.
 
     Over the fields that decide the answer — outcome, coverage, evidence and the
-    edit's two images — and not over the request's identity (the note, the
-    revision, the workspace), which the key already spells out. Sorted keys, so
-    two payloads that differ only in field order are the same question.
+    edit's two images — and not over request identity, which the surrounding key
+    already spells out. Sorted keys make payloads that differ only in field
+    order the same question. This is shared by note and entry verification.
     """
     edit = request.edit
     body = {
@@ -1941,7 +1919,7 @@ class CiaoControlPlane:
             f"verify-entry:{self._search_runtime_dir()}:{workspace}:"
             f"{request.relative_path}:{request.identity}:"
             f"{request.entry_fingerprint}:{request.expected_revision}:"
-            f"{_entry_digest(request)}"
+            f"{_verification_digest(request)}"
         )
         reported: dict[str, Any] = await run_read(key, _run, coalesce=True)
         return _ok(reported)

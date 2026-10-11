@@ -44,6 +44,7 @@ from ciao import async_reads, update_task_catalog, update_tasks
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.update_task_catalog import CATALOG_FILENAME, UpdateTask
 from ciao.update_tasks import Detection
+from ciao.web import app as web_app
 from ciao.web import chat_service, routes_api, update_task_launch
 from ciao.web.routes_api import dismiss_update_task
 from ciao.web.routes_api import list_update_tasks
@@ -1349,23 +1350,23 @@ def test_update_task_helper_survives_the_store_normalizer(packaged: Any) -> None
     assert chat_service._normalize_chat_helper(helper) == helper
 
 
-def test_real_app_registers_the_update_task_routes() -> None:
-    """Every update-task route must exist in the real app.py route table.
+def test_real_app_registers_the_update_task_routes(tmp_path: Path) -> None:
+    """The constructed application exposes every update-task endpoint."""
+    app = web_app.create_app(_config(tmp_path))
+    expected = {
+        "/api/update-tasks": (list_update_tasks, "GET"),
+        "/api/update-tasks/{task_id}/start": (start_update_task, "POST"),
+        "/api/update-tasks/{task_id}/dismiss": (dismiss_update_task, "POST"),
+        "/api/update-tasks/{task_id}/reopen": (reopen_update_task, "POST"),
+    }
 
-    A route registered nowhere does not exist however well it is unit-tested.
-    """
-    repo = Path(__file__).resolve().parents[1]
-    app_source = (repo / "ciao" / "web" / "app.py").read_text(encoding="utf-8")
-    assert 'Route("/api/update-tasks", list_update_tasks, methods=["GET"])' in app_source
-    assert (
-        'Route("/api/update-tasks/{task_id}/start", start_update_task, methods=["POST"])'
-        in app_source
-    )
-    assert (
-        'Route("/api/update-tasks/{task_id}/dismiss", dismiss_update_task, methods=["POST"])'
-        in app_source
-    )
-    assert (
-        'Route("/api/update-tasks/{task_id}/reopen", reopen_update_task, methods=["POST"])'
-        in app_source
-    )
+    registered = {
+        route.path: route
+        for route in app.routes
+        if isinstance(route, Route) and route.path in expected
+    }
+    assert set(registered) == set(expected)
+    for path, (endpoint, method) in expected.items():
+        route = registered[path]
+        assert route.endpoint is endpoint
+        assert method in route.methods

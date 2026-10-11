@@ -548,6 +548,12 @@ with revocable per-device credentials; those remain follow-up work for #546.
 
 ## Quality gates
 
+For task progress/history changes, run `tests/test_task_updates.py`,
+`tests/test_task_log.py`, `tests/test_task_resolution.py`,
+`tests/test_task_markdown.py` and `tests/test_task_board_store.py`. Progress-note
+coverage must preserve literal section markers, encoded marker text and old
+unversioned items through add and edit operations.
+
 Backend type-checking, coverage, and dependency audits run in CI and are also available locally via `scripts/dev-commands.sh`:
 
 ```bash

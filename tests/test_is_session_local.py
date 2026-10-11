@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 import pytest
-from unittest.mock import MagicMock
 
 from ciao.agent_paths import claude_project_slug
 from ciao.config import CiaoConfig

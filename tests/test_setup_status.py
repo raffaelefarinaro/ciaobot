@@ -16,7 +16,7 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
 from ciao.setup_marker import read_setup_vault_mode
-from ciao.setup_status import claude_auth_status, claude_path_command, setup_status
+from ciao.setup_status import claude_auth_status, setup_status
 from ciao.web.auth import AuthMiddleware
 from ciao.web.routes_api import (
     provider_connection_action,

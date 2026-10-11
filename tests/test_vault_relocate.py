@@ -442,6 +442,8 @@ def test_apply_rolls_back_moves_when_the_registry_cannot_be_written(
 
     result = apply(config, "scandit", runtime)
 
+    assert result["status"] == "refused"
+    assert any("could not persist the new location in the registry" in r for r in result["refusals"])
     entries = json.loads((runtime / "workspaces.json").read_text(encoding="utf-8"))
     scandit_entry = next(e for e in entries if e["name"] == "scandit")
     assert scandit_entry["vault_root"] == str(install / "memory-vault")
@@ -466,7 +468,6 @@ def test_apply_unstages_earlier_sources_when_a_later_stage_fails(
 
     def flaky_git(root: Path, *args: str) -> tuple[int, str]:
         if args[:2] == ("add", "-A") and len(args) >= 4:
-            target = args[-1]
             # "other" is not part of this relocation; the real git add for
             # the second planned source is the one that fails.
             adds["n"] += 1

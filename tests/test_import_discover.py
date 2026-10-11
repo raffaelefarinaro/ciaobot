@@ -585,7 +585,7 @@ def test_the_preview_lists_opencode_once_for_the_whole_selection(
         rows=[{"id": "ses_one", "directory": str(tmp_path)}, {"id": "ses_two", "directory": str(tmp_path)}],
     )
 
-    preview = preview_selected(
+    preview_selected(
         config,
         "personal",
         [

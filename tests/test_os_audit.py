@@ -6,7 +6,6 @@ import datetime
 import json
 from pathlib import Path
 
-from ciao import memory_tool as mt
 from ciao import vault_lint
 
 def _seed_guide(guide: Path, *, memory: list[str] | None = None, profile: list[str] | None = None) -> Path:

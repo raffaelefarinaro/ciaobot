@@ -1213,7 +1213,7 @@ def test_note_receipt_id_covers_both_revisions(tmp_path):
     """
     vault = _vault(tmp_path)
     path = _write(vault, NOTE, "R0\n")
-    journal = _journal(vault)
+    _journal(vault)
 
     first = _apply(vault, after="R1\n")
     # Something takes the note back to R0 — a hand edit, or the undo below.

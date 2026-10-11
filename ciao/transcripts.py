@@ -1423,32 +1423,6 @@ def _global_session_matches(
         return [slug / target for slug in slugs if (slug / target).exists()]
 
 
-def _global_session_candidates() -> list[Path]:
-    """One cached pass over ``~/.claude/projects/*/`` returning *.jsonl paths.
-
-    Kept for callers that want the full unfiltered listing; session lookups
-    should prefer :func:`_global_session_matches`, which stays file-fresh
-    via per-slug stats and refreshes the slug list on a miss. Callers may
-    ``stat`` a candidate before trusting it.
-    """
-    projects_root = Path.home() / ".claude" / "projects"
-    now = time.monotonic()
-    slugs = _global_session_slugs_fresh(projects_root, now)
-    if slugs is None:
-        with _global_session_scan_lock:
-            now = time.monotonic()
-            slugs = _global_session_slugs_fresh(projects_root, now)
-            if slugs is None:
-                slugs = _global_session_slugs_locked(projects_root, now)
-    candidates: list[Path] = []
-    for slug in slugs or []:
-        try:
-            candidates.extend(slug.glob("*.jsonl"))
-        except OSError:
-            continue
-    return candidates
-
-
 def find_claude_session_file(
     session_id: str,
     workspace_root: Path | str,
@@ -1694,4 +1668,3 @@ def get_session_messages_full(
     except Exception:
         logger.exception("get_session_messages_full custom chain failed for %s; falling back", session_id)
         return _fallback(get_session_messages)
-

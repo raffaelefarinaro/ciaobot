@@ -912,7 +912,7 @@ def test_the_check_state_is_a_versioned_relative_path_sidecar(
 
 def test_a_foreign_schema_honours_no_check(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
-    note = _write(vault, NOTE, PLAIN)
+    _write(vault, NOTE, PLAIN)
     state = nv.note_check_state_path(vault)
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text(

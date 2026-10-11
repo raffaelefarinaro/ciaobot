@@ -21,6 +21,8 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
+from ciao._task_markdown import split_marked_items
+
 LOG_OPEN = "<!-- ciao:task-log -->"
 LOG_CLOSE = "<!-- /ciao:task-log -->"
 LOG_HEADING = "## Delegation log"
@@ -141,32 +143,6 @@ def log_text(body: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _items(section_inner: str) -> list[tuple[str, str]]:
-    """``(attempt_id or "", text)`` per item, in order, from the section's inside.
-
-    An item is a line starting with ``- `` plus every line after it that does not
-    start a new item. Text in the section that is not an item (the heading, a
-    stray note) is carried as an item with no id, so nothing a user wrote there
-    is lost by a rewrite.
-    """
-    items: list[tuple[str, str]] = []
-    current: list[str] = []
-    for line in section_inner.splitlines():
-        if line.startswith("- ") and current:
-            items.append(_finish(current))
-            current = []
-        current.append(line)
-    if current:
-        items.append(_finish(current))
-    return items
-
-
-def _finish(lines: list[str]) -> tuple[str, str]:
-    text = "\n".join(lines).rstrip()
-    match = _ITEM_MARK.search(lines[0]) if lines[0].startswith("- ") else None
-    return (match.group(1) if match else "", text)
-
-
 def upsert_item(body: str, attempt_id: str, item: str) -> str:
     """The body with *item* recorded for *attempt_id* in the log section.
 
@@ -181,7 +157,7 @@ def upsert_item(body: str, attempt_id: str, item: str) -> str:
         head = text.rstrip()
         return f"{head}\n\n{section}\n" if head else f"{section}\n"
     inner = match.group(0)[len(LOG_OPEN) : -len(LOG_CLOSE)].strip("\n")
-    entries = _items(inner)
+    entries = split_marked_items(inner, _ITEM_MARK)
     replaced = False
     rebuilt: list[str] = []
     for found_id, entry in entries:
