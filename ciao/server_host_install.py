@@ -483,7 +483,10 @@ def install_server_host(
     canonical target path, so a process killed after the rename leaves a
     consistent, verified host rather than a bundle no record vouches for; a
     Python failure removes both the bundle this run renamed into place and the
-    record it wrote. No service, launchd, plist or permission surface is touched.
+    record it wrote. When putting a replaced revision-1 host back fails, the
+    rollback stops there: the staging copy and the record are kept and the error
+    names where the host is. No service, launchd, plist or permission surface is
+    touched.
     """
     _require_macos()
     path = Path(archive_path)
@@ -524,6 +527,7 @@ def install_server_host(
     keep_record = False
     superseded_record: HostOwnership | None = None
     moved_aside = False
+    keep_stage = False
     aside = stage / "superseded"
     try:
         staged_app = extract_host_archive(path, stage)
@@ -606,7 +610,7 @@ def install_server_host(
         _fsync_dir(parent)
 
         return verify_owned_host(bundle, ownership_path=record_path, runner=runner)
-    except BaseException:
+    except BaseException as failure:
         # Nothing of this run survives a failure: the staging directory is
         # removed either way, and a bundle that was renamed into place is taken
         # away again so a recordless host is never left behind, together with a
@@ -615,25 +619,56 @@ def install_server_host(
         # run put it there" from "this run found it" - and `keep_record` is the
         # fact that separates a concurrent creation (where the record verifies
         # the winner's identical host) from an install failure this run caused.
+        #
+        # The rollback stops at its first failure. Whatever it could not put
+        # back stays where it is - the revision-1 bundle in the staging
+        # directory, the record as it is - and the error says exactly where.
+        problem = ""
         if renamed:
             shutil.rmtree(bundle, ignore_errors=True)
-        if moved_aside and not os.path.lexists(bundle):
+        if moved_aside:
             # MIGRATION (#1249): put the revision-1 host back, with its record.
-            try:
-                os.rename(aside, bundle)
-                if superseded_record is not None and recorded and not keep_record:
+            if os.path.lexists(bundle):
+                problem = (
+                    f"the new host could not be removed from {bundle}; the "
+                    f"revision-1 host is kept at {aside}"
+                )
+            else:
+                try:
+                    os.rename(aside, bundle)
+                except OSError as exc:
+                    problem = (
+                        f"the revision-1 host could not be moved back to {bundle} "
+                        f"({exc}); it is kept at {aside}"
+                    )
+            if problem:
+                keep_stage = True
+            elif superseded_record is not None and recorded and not keep_record:
+                try:
                     _write_ownership_record(superseded_record, record_path)
                     recorded = False
-            except OSError:
-                pass
-        if recorded and not keep_record:
+                except OSError as exc:
+                    problem = (
+                        f"the revision-1 host was restored at {bundle}, but its "
+                        f"ownership record could not be written back to "
+                        f"{record_path} ({exc})"
+                    )
+        if recorded and not keep_record and not problem:
             try:
                 record_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        if problem and isinstance(failure, Exception):
+            raise ServerHostInstallError(
+                f"{problem}; the install failed first: {failure}",
+                code=INSTALL_FAILED,
+            ) from failure
+        if problem:
+            failure.add_note(problem)
         raise
     finally:
-        shutil.rmtree(stage, ignore_errors=True)
+        if not keep_stage:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def main(argv: list[str] | None = None) -> int:
