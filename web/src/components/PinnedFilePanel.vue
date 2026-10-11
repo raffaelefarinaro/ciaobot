@@ -157,24 +157,24 @@
           <template v-else>
             <!-- Document properties from YAML frontmatter: a quiet header in
                  the document's own measure, not a card of uppercase pills. -->
-            <section v-if="frontmatter" class="pfp-meta" aria-label="Document properties">
+            <section v-if="metadata.frontmatter" class="pfp-meta" aria-label="Document properties">
               <div class="pfp-meta-line">
                 <span class="pfp-meta-kind">
-                  <template v-if="fmType">{{ humanizeMeta(fmType) }}</template>
-                  <template v-if="fmType && fmStatus"> · </template>
-                  <span v-if="fmStatus" class="pfp-meta-status" :class="`pfp-meta-status--${fmStatus}`">{{ humanizeMeta(fmStatus) }}</span>
+                  <template v-if="metadata.type">{{ humanizeVaultMetadata(metadata.type) }}</template>
+                  <template v-if="metadata.type && metadata.status"> · </template>
+                  <span v-if="metadata.status" class="pfp-meta-status" :class="`pfp-meta-status--${metadata.status}`">{{ humanizeVaultMetadata(metadata.status) }}</span>
                 </span>
-                <span v-if="fmUpdated" class="pfp-meta-date">Updated {{ fmUpdated }}</span>
-                <span v-else-if="fmCreated" class="pfp-meta-date">Created {{ fmCreated }}</span>
+                <span v-if="metadata.updated" class="pfp-meta-date">Updated {{ metadata.updated }}</span>
+                <span v-else-if="metadata.created" class="pfp-meta-date">Created {{ metadata.created }}</span>
               </div>
-              <p v-if="showFmName" class="pfp-meta-name" :title="fmName">{{ fmName }}</p>
-              <p v-if="fmProse" class="pfp-meta-summary">{{ fmProse }}</p>
-              <p v-if="fmTags.length" class="pfp-meta-tags">
-                <span v-for="t in fmTags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
+              <p v-if="metadata.showName" class="pfp-meta-name" :title="metadata.name">{{ metadata.name }}</p>
+              <p v-if="metadata.summary" class="pfp-meta-summary">{{ metadata.summary }}</p>
+              <p v-if="metadata.tags.length" class="pfp-meta-tags">
+                <span v-for="t in metadata.tags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
               </p>
-              <dl v-if="fmListExtras.length || fmExtraEntries.length" class="pfp-meta-fields">
-                <template v-for="listExtra in fmListExtras" :key="listExtra.key">
-                  <dt>{{ humanizeMeta(listExtra.key) }}</dt>
+              <dl v-if="metadata.listExtras.length || metadata.extraEntries.length" class="pfp-meta-fields">
+                <template v-for="listExtra in metadata.listExtras" :key="listExtra.key">
+                  <dt>{{ humanizeVaultMetadata(listExtra.key) }}</dt>
                   <dd>
                     <template v-for="(item, i) in listExtra.items" :key="i">
                       <a
@@ -188,11 +188,11 @@
                     </template>
                   </dd>
                 </template>
-                <template v-for="entry in fmExtraEntries" :key="entry.key">
-                  <dt>{{ humanizeMeta(entry.key) }}</dt>
+                <template v-for="entry in metadata.extraEntries" :key="entry.key">
+                  <dt>{{ humanizeVaultMetadata(entry.key) }}</dt>
                   <dd>
                     <a
-                      v-if="isUrl(entry.value)"
+                      v-if="isVaultMetadataUrl(entry.value)"
                       :href="entry.value"
                       target="_blank"
                       rel="noopener noreferrer"
@@ -327,9 +327,7 @@ import {
 } from 'reka-ui'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
-import { parseFrontmatter } from '../lib/markdownFrontmatter'
-import { renderFileMarkdown } from '../lib/safeMarkdown'
-import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
+import { buildVaultDocumentMetadata, humanizeVaultMetadata, isVaultMetadataUrl, renderVaultMarkdown } from '../lib/vaultDocument'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
@@ -473,11 +471,6 @@ const basename = computed(() => {
   return idx === -1 ? p : p.slice(idx + 1)
 })
 const fileBasenameForPop = computed(() => basename.value)
-// Frontmatter words for display: "in-discussion" -> "In discussion".
-function humanizeMeta(value: string): string {
-  const text = String(value).replace(/[_-]+/g, ' ').trim()
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text
-}
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(cleanPath.value))
 const isCsv = computed(() => isCsvPath(cleanPath.value))
 
@@ -486,105 +479,10 @@ const docDir = computed(() => {
   return idx === -1 ? '' : cleanPath.value.slice(0, idx + 1)
 })
 
-function joinRelative(dir: string, rel: string): string {
-  const parts = (dir + rel).split('/')
-  const out: string[] = []
-  for (const p of parts) {
-    if (p === '' || p === '.') continue
-    if (p === '..') { out.pop(); continue }
-    out.push(p)
-  }
-  return out.join('/')
-}
+const metadata = computed(() => buildVaultDocumentMetadata(content.value, cleanPath.value, markdownPaths.value))
+const renderedMarkdown = computed(() => renderVaultMarkdown(metadata.value.body, cleanPath.value, markdownPaths.value))
 
-const _ABSOLUTE_SRC_RE = /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i
-
-// Split frontmatter off so the body renders cleanly and the metadata card
-// at the top can show key fields as pills/chips.
-const splitContent = computed(() => parseFrontmatter(content.value))
-const frontmatter = computed(() => splitContent.value.frontmatter)
-const bodyOnly = computed(() => splitContent.value.body)
-
-const renderedMarkdown = computed(() => {
-  const dir = docDir.value
-  return renderFileMarkdown(bodyOnly.value, {
-    filePath: cleanPath.value,
-    markdownPaths: markdownPaths.value,
-    resolveImageSrc: (href) => {
-      if (href && !_ABSOLUTE_SRC_RE.test(href)) {
-        const resolved = joinRelative(dir, href)
-        return `/api/workspace-image?path=${encodeURIComponent(resolved)}`
-      }
-      return href
-    },
-  })
-})
-
-// ── Metadata card (parsed frontmatter) ───────────────────────────────
-// Surface the most useful fields as pills; prose fields (description, etc.)
-// read as a summary; list fields (aliases, related) as compact chips.
-// `title` is the canonical human label in the vault schema; `name` is the
-// retired synonym still present on older pages. Prefer title, fall back.
-const fmName = computed(() => fmString('title') || fmString('name'))
-// The title usually repeats the file name or the body's first heading; show it
-// only when it says something neither of those does.
-const showFmName = computed(() => {
-  const name = fmName.value.trim()
-  if (!name || name === basename.value.replace(/\.md$/, '')) return false
-  const heading = /^#\s+(.+?)\s*#*\s*$/m.exec(splitContent.value.body || '')
-  return !heading || heading[1].trim() !== name
-})
-const fmType = computed(() => fmString('type'))
-const fmStatus = computed(() => fmString('status'))
-const fmTags = computed(() => fmList('tags'))
-const fmCreated = computed(() => fmString('created'))
-const fmUpdated = computed(() => fmString('updated'))
-
-const PRIMARY_KEYS = new Set(['title', 'name', 'type', 'status', 'tags', 'created', 'updated'])
-const PROSE_KEYS = new Set(['description', 'summary', 'notes'])
-const LIST_EXTRA_KEYS = new Set(['aliases', 'related', 'links'])
-
-const fmProse = computed(() => {
-  for (const key of ['description', 'summary', 'notes']) {
-    const v = fmString(key)
-    if (v.trim()) return v
-  }
-  return ''
-})
-
-// `related`/`links` items are bare vault refs (`People/Mo`) to other notes —
-// resolve to file paths so the pills are clickable (same as body links). A
-// `[[...]]` wrapper is still tolerated for notes that predate the
-// markdown-link swap. `aliases` name this note, not links, so stay plain.
-const _LINK_LIST_KEYS = new Set(['related', 'links'])
-const _linkIndex = computed(() => buildMarkdownIndex(markdownPaths.value || []))
-const _linkPathSet = computed(() => new Set(markdownPaths.value || []))
-
-function resolveListItem(raw: string): { label: string; path: string | null } {
-  const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
-  const [ref, alias] = inner.split('|')
-  // A related note reads by its name, not its vault path; the full path stays
-  // in the link's title.
-  const label = (alias ?? (ref.split('/').pop() || ref).replace(/\.md$/i, '')).trim()
-  const path = ref.trim()
-    ? resolveVaultLinkTarget(ref.trim(), cleanPath.value, _linkIndex.value, _linkPathSet.value)
-    : null
-  return { label, path }
-}
-
-const fmListExtras = computed(() => {
-  const out: { key: string; items: { label: string; path: string | null }[] }[] = []
-  for (const key of ['aliases', 'related', 'links']) {
-    const items = fmList(key)
-    if (!items.length) continue
-    const resolved = _LINK_LIST_KEYS.has(key)
-      ? items.map(resolveListItem)
-      : [{ label: items.join(', '), path: null }]
-    out.push({ key, items: resolved })
-  }
-  return out
-})
-
+// ── Metadata card view model is shared with FileViewerModal. ──────────
 function openRelated(path: string): void {
   if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(path)) {
     void fileViewer.openImage(path)
@@ -593,40 +491,8 @@ function openRelated(path: string): void {
   }
 }
 
-const fmExtraEntries = computed(() => {
-  const fm = frontmatter.value
-  if (!fm) return [] as { key: string; value: string }[]
-  const skip = new Set([...PRIMARY_KEYS, ...PROSE_KEYS, ...LIST_EXTRA_KEYS])
-  const out: { key: string; value: string }[] = []
-  for (const [k, v] of Object.entries(fm)) {
-    if (skip.has(k)) continue
-    if (v == null) continue
-    const text = Array.isArray(v) ? v.join(', ') : String(v)
-    if (!text.trim()) continue
-    out.push({ key: k, value: text })
-  }
-  return out
-})
-
-function fmString(key: string): string {
-  const v = frontmatter.value?.[key]
-  if (v == null) return ''
-  return Array.isArray(v) ? v.join(', ') : String(v)
-}
-// Render a bare http(s) frontmatter value (e.g. `url:`) as a clickable link.
-// Only http/https so the href can't be a javascript:/data: scheme.
-function isUrl(value: string): boolean {
-  return /^https?:\/\/\S+$/.test(value.trim())
-}
-function fmList(key: string): string[] {
-  const v = frontmatter.value?.[key]
-  if (v == null) return []
-  return Array.isArray(v) ? v : [String(v)]
-}
-
-
 const contentLines = computed(() => {
-  const text = bodyOnly.value
+  const text = metadata.value.body
   if (text.endsWith('\n')) {
     return text.slice(0, -1).split('\n')
   }

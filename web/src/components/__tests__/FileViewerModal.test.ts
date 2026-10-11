@@ -86,6 +86,41 @@ describe('FileViewerModal', () => {
     expect(document.activeElement).toBe(dialog.element)
   })
 
+  it('renders shared vault metadata and resolves related notes in the viewer', async () => {
+    const store = openViewer()
+    store.path = 'notes/lv-order-capture.md'
+    store.markdownPaths = ['notes/lv-order-capture.md', 'notes/related-note.md']
+    store.content = [
+      '---',
+      'type: project',
+      'title: "LV order capture"',
+      'description: "Read the order number."',
+      'url: https://example.test/spec',
+      'unsafe: javascript:alert(1)',
+      'aliases:',
+      '  - LV OCR',
+      'related:',
+      '  - "./related-note.md|Related note"',
+      '---',
+      '',
+      '# LV order capture',
+      '',
+      'Body.',
+    ].join('\n')
+    await settle()
+
+    const meta = wrapper!.get('.fv-meta')
+    expect(meta.find('.fv-meta-name').exists()).toBe(false)
+    expect(meta.get('.fv-meta-summary').text()).toBe('Read the order number.')
+    expect(meta.text()).toContain('LV OCR')
+    expect(meta.get('a[href="https://example.test/spec"]').text()).toBe('https://example.test/spec')
+    expect(meta.text()).toContain('javascript:alert(1)')
+    expect(meta.find('a[href^="javascript:"]').exists()).toBe(false)
+    const related = meta.get('.fv-meta-link')
+    expect(related.text()).toBe('Related note')
+    expect(related.attributes('title')).toBe('notes/related-note.md')
+  })
+
   it('keeps the viewer open after an automatic pin failure', async () => {
     vi.stubGlobal('innerWidth', 1280)
     const projects = useProjectStore()

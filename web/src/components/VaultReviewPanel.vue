@@ -346,7 +346,6 @@ function entryOperationLabel(operation: string): string {
  * and the row's own buttons are about the whole file.
  */
 async function openEntryProposal(
-  candidate: VaultReviewCandidate,
   proposal: VaultReviewEntryProposal,
 ) {
   await proposals.ensureLoaded()
@@ -892,7 +891,7 @@ function clearedDate(note: VaultClearedNote): string {
                             type="button"
                             class="mr-link vr-pending-link"
                             title="Open the proposal in Suggested, where the change and its evidence are"
-                            @click="openEntryProposal(candidate, link)"
+                            @click="openEntryProposal(link)"
                           >Open the proposal</button>
                         </p>
                       </li>
@@ -945,7 +944,7 @@ function clearedDate(note: VaultClearedNote): string {
                     type="button"
                     class="mr-link vr-pending-link"
                     title="Open the proposal in Suggested, where the change and its evidence are"
-                    @click="openEntryProposal(candidate, link)"
+                    @click="openEntryProposal(link)"
                   >Open the proposal</button>
                 </p>
 

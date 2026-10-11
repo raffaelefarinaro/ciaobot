@@ -76,9 +76,9 @@ function actionButton(view: VueWrapper) {
 }
 
 /** The 409/503 envelope: `error` beside the freshest status the route read. */
-function failure(status_: number, message: string, fresh: Record<string, unknown>) {
+function failure(statusCode: number, message: string, fresh: Record<string, unknown>) {
   return Object.assign(new Error(message), {
-    status,
+    status: statusCode,
     payload: { error: message, ...status(fresh) },
   })
 }

@@ -225,7 +225,7 @@ describe('createEngineMonitor', () => {
     // Each remaining round is one probe plus one recovery interval. Two live
     // loops would double that.
     await vi.advanceTimersByTimeAsync((3000 + RECOVERY_INTERVAL_MS) * 4)
-    expect(probe.mock.calls.length).toBeLessThanOrEqual(4)
+    expect(probe.mock.calls.length).toBe(4)
     monitor.stop()
   })
 })

@@ -7,7 +7,7 @@ from starlette.middleware import Middleware
 from starlette.routing import Mount
 from starlette.testclient import TestClient
 
-from ciao.web.app import CacheControlStaticFiles, HashedAssetCompression
+from ciao.web.app import _GZIP_MINIMUM_SIZE, CacheControlStaticFiles, HashedAssetCompression
 from ciao.web.security import SecurityHeadersMiddleware
 
 
@@ -54,6 +54,29 @@ def test_identity_and_small_assets_are_valid_varying_representations(tmp_path) -
     assert "content-encoding" not in small.headers
     assert small.headers["vary"] == "Accept-Encoding"
     assert small.text == "a{color:red}"
+
+
+def test_gzip_minimum_size_boundary(tmp_path) -> None:
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    # The response boundary follows Starlette's production middleware setting:
+    # 500 bytes is the first size eligible for compression.
+    asset_dir.joinpath("below-12345678.js").write_bytes(b"x" * (_GZIP_MINIMUM_SIZE - 1))
+    asset_dir.joinpath("at-12345678.js").write_bytes(b"y" * _GZIP_MINIMUM_SIZE)
+    client = TestClient(Starlette(routes=[Mount(
+        "/assets",
+        app=HashedAssetCompression(CacheControlStaticFiles(directory=asset_dir)),
+    )]))
+
+    below = client.get("/assets/below-12345678.js", headers={"Accept-Encoding": "gzip"})
+    at = client.get("/assets/at-12345678.js", headers={"Accept-Encoding": "gzip"})
+
+    assert "content-encoding" not in below.headers
+    assert below.content == b"x" * (_GZIP_MINIMUM_SIZE - 1)
+    assert at.headers["content-encoding"] == "gzip"
+    with client.stream("GET", "/assets/at-12345678.js", headers={"Accept-Encoding": "gzip"}) as response:
+        encoded = b"".join(response.iter_raw())
+    assert gzip.decompress(encoded) == b"y" * _GZIP_MINIMUM_SIZE
 
 
 def test_zero_quality_and_non_gzip_tokens_do_not_enable_compression(tmp_path) -> None:

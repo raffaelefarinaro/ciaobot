@@ -195,7 +195,7 @@ export const useProjectStore = defineStore('projects', () => {
     activeChatId,
     ownerOf: (id) => (chats.value.some(c => c.chat_id === id) ? 'chat' : 'project'),
     mutateChatPin: (chatId, path, expectedRevision) => patchChatPin(chatId, path, expectedRevision),
-    notifyPinError: (chatId, message) => {
+    notifyPinError: (_chatId, message) => {
       pushErrorToast('Could not update pinned file', message)
     },
   })

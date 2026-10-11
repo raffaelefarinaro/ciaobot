@@ -422,7 +422,7 @@ describe('a transition the server refuses', () => {
     await store.refreshUpdateTasks('personal')
 
     const pending: { release: (() => void) | null } = { release: null }
-    vi.mocked(api.post).mockImplementationOnce(() => new Promise((resolve, reject) => {
+    vi.mocked(api.post).mockImplementationOnce(() => new Promise((_resolve, reject) => {
       pending.release = () => reject(refused(409, { error: 'nope' }))
     }))
     const slow = store.startUpdateTask(task())

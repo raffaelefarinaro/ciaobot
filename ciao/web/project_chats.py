@@ -10,7 +10,6 @@ import logging
 import os
 import re
 import shutil
-import sys
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
@@ -91,7 +90,7 @@ def _restored_pin_paths(raw: Any) -> list[str]:
 import yaml
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import job_runs, subagent_tracking
+from ciao import subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -166,7 +165,6 @@ from ciao.web.subagent_watchers import (
     NudgeOutcome,
     SubagentWatchers,
 )
-from ciao.workspace_guide import guide_path as workspace_guide_path
 
 logger = logging.getLogger(__name__)
 

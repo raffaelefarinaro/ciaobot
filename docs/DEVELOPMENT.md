@@ -392,8 +392,12 @@ npm install          # optional root Node tooling
 cd web
 npm install
 npm run build        # typecheck + Vite build, outputs to ciao/web/static/
-npm test             # 61 test files under web/src
+npm test             # full frontend suite under web/src
 ```
+
+The build's TypeScript check rejects unused locals and parameters. Remove dead
+code; prefix an intentionally unused callback parameter with `_` when its
+position is required by the callback contract.
 
 ## macOS engine development
 
