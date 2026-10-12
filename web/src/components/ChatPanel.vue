@@ -344,7 +344,19 @@
               class="retry-btn"
               @click="retryFromError(i)"
             >Retry</button>
+            <!-- See errorBubbleAction for which fix a known error gets. -->
             <button
+              v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
+              class="retry-btn fix-btn"
+              @click="retryHourlyFromError(i)"
+            >Retry every hour</button>
+            <button
+              v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
+              class="retry-btn fix-btn"
+              @click="toggleModelPicker"
+            >Switch model</button>
+            <button
+              v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
               class="retry-btn fix-btn"
               @click="openFixChat(i)"
             >Fix this error</button>
@@ -370,7 +382,19 @@
               class="retry-btn"
               @click="retryFromError(i)"
             >Retry</button>
+            <!-- See errorBubbleAction for which fix a known error gets. -->
             <button
+              v-if="errorBubbleAction(i, item.msg.content) === 'retry-hourly'"
+              class="retry-btn fix-btn"
+              @click="retryHourlyFromError(i)"
+            >Retry every hour</button>
+            <button
+              v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
+              class="retry-btn fix-btn"
+              @click="toggleModelPicker"
+            >Switch model</button>
+            <button
+              v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
               class="retry-btn fix-btn"
               @click="openFixChat(i)"
             >Fix this error</button>
@@ -1350,7 +1374,7 @@ import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
-import { classifyError, isProviderAuthError } from '../lib/errorAttribution'
+import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { backgroundRunElapsed, backgroundRunLabel, backgroundRunOutcome } from '../lib/backgroundRuns'
 import BackgroundRunRows from './BackgroundRunRows.vue'
@@ -4207,6 +4231,34 @@ function retryFromError(errorIdx: number) {
     prior.text,
     { composed: prior.text, imageRefs: prior.images.length ? prior.images : undefined, fileComments: [], chatComments: [] },
   )
+}
+
+// A known error gets its own fix instead of a diagnosis chat: a usage limit
+// retries hourly until it resets (nothing while a retry is armed, the retry
+// card owns it), a missing or unsuitable model opens the model picker, and a
+// signed-out provider gets the sign-in steps under the bubble. When that fix
+// cannot run here (archived chat, no prior turn to resend), the bubble falls
+// back to the "Fix this error" chat rather than offering nothing.
+function errorBubbleAction(errorIdx: number, content: string): 'retry-hourly' | 'switch-model' | 'fix' | null {
+  const action = errorQuickAction(content)
+  if (action === 'fix') return 'fix'
+  if (chat.value.archived) return 'fix'
+  if (action === 'switch-model') return 'switch-model'
+  if (!lastUserBefore(errorIdx)) return 'fix'
+  if (action === 'sign-in') return null
+  return chat.value.retry?.status === 'pending' ? null : 'retry-hourly'
+}
+
+// Arm the chat's hourly deferred retry with the turn that hit the limit.
+async function retryHourlyFromError(errorIdx: number) {
+  if (chat.value.archived) return
+  const prior = lastUserBefore(errorIdx)
+  if (!prior) return
+  try {
+    await store.setChatRetry(chat.value.chat_id, prior.text, prior.images)
+  } catch (e) {
+    store.pushErrorToast('Could not schedule the retry', `${(e as Error)?.message || e}`)
+  }
 }
 
 // Open a fresh chat in the General project seeded with this error + the last

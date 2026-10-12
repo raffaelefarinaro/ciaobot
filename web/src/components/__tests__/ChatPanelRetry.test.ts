@@ -222,7 +222,7 @@ describe('ChatPanel retry from error bubble', () => {
       },
       {
         role: 'assistant',
-        content: 'Error: this model does not support image input',
+        content: 'Error: tool crashed while reading the video',
         timestamp: '2026-08-08T15:51:01Z',
         is_error: true,
       },
@@ -239,11 +239,86 @@ describe('ChatPanel retry from error bubble', () => {
 
     expect(fixError).toHaveBeenCalledTimes(1)
     const args = fixError.mock.calls[0][0] as { errorText: string; context?: string }
-    expect(args.errorText).toContain('this model does not support image input')
+    expect(args.errorText).toContain('tool crashed while reading the video')
     // context must be a string, not the {text, images} object — the prior
     // shape change in lastUserBefore would silently break fixError.
     expect(typeof args.context).toBe('string')
     expect(args.context).toBe('Check the video')
+    wrapper.unmount()
+  })
+
+  it('offers an hourly retry instead of a fix chat under a usage limit', async () => {
+    const { wrapper, store } = await mountPanel()
+    const setRetry = vi.spyOn(store, 'setChatRetry').mockResolvedValue(undefined as never)
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Tidy my memory', timestamp: '2026-10-11T18:01:00Z' },
+      {
+        role: 'assistant',
+        content: 'you have reached your weekly usage limit, upgrade for higher limits',
+        timestamp: '2026-10-11T18:01:01Z',
+        is_error: true,
+      },
+    ]
+    await flushPromises()
+
+    const labels = wrapper.findAll('.retry-btn').map(b => b.text())
+    expect(labels).toEqual(['Retry', 'Retry every hour'])
+    await wrapper.findAll('.retry-btn')[1].trigger('click')
+    await flushPromises()
+    expect(setRetry).toHaveBeenCalledWith('chat-1', 'Tidy my memory', [])
+
+    // Once the retry is armed the retry card owns it.
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-12T11:00:00Z',
+      last_error: 'manual',
+      attempts: 0,
+      interval_seconds: 3600,
+    }
+    await flushPromises()
+    expect(wrapper.findAll('.retry-btn').map(b => b.text())).toEqual(['Retry'])
+    wrapper.unmount()
+  })
+
+  it('falls back to a fix chat when there is no turn to retry hourly', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      {
+        role: 'assistant',
+        content: 'you have reached your weekly usage limit, upgrade for higher limits',
+        timestamp: '2026-10-11T18:01:01Z',
+        is_error: true,
+      },
+    ]
+    await flushPromises()
+    expect(wrapper.findAll('.retry-btn').map(b => b.text())).toEqual(['Fix this error'])
+    wrapper.unmount()
+  })
+
+  it('offers a model switch instead of a fix chat when the model cannot take the turn', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Check the video', timestamp: '2026-08-08T15:51:00Z' },
+      {
+        role: 'assistant',
+        content: 'Error: this model does not support image input',
+        timestamp: '2026-08-08T15:51:01Z',
+        is_error: true,
+      },
+    ]
+    await flushPromises()
+    expect(wrapper.findAll('.retry-btn').map(b => b.text())).toEqual(['Retry', 'Switch model'])
+    wrapper.unmount()
+  })
+
+  it('leaves a signed-out error to the sign-in steps, without a fix chat', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'Summarise my inbox', timestamp: '2026-10-05T15:44:00Z' },
+      { role: 'assistant', content: 'Not logged in · Please run /login', timestamp: '2026-10-05T15:44:01Z', is_error: true },
+    ]
+    await flushPromises()
+    expect(wrapper.findAll('.retry-btn').map(b => b.text())).toEqual(['Retry'])
     wrapper.unmount()
   })
 
