@@ -62,3 +62,21 @@ export function classifyError(errorText: string): ErrorAttribution {
   }
   return { kind: 'unknown', label: 'Unknown error', copy: 'The operation did not complete.' }
 }
+
+export type ErrorQuickAction = 'retry-hourly' | 'switch-model' | 'sign-in' | 'fix'
+
+// The model is unknown to the provider, or cannot take what the turn sent.
+// Picking another model is the fix; a diagnosis chat would only say so.
+function isModelMismatchError(text: string): boolean {
+  return /\bmodel not found\b|\b(?:unknown|invalid|unsupported) model\b|\bdoes not support image input/.test(text)
+}
+
+// The one action an error bubble offers next to Retry. Errors with a known
+// cause get that cause's fix; only the rest open a "Fix this error" chat.
+export function errorQuickAction(errorText: string): ErrorQuickAction {
+  const text = (errorText || '').toLowerCase()
+  if (isProviderAuthError(text)) return 'sign-in'
+  if (isUsageLimitError(text)) return 'retry-hourly'
+  if (isModelMismatchError(text)) return 'switch-model'
+  return 'fix'
+}

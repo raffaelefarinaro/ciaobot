@@ -5946,9 +5946,13 @@ class ProjectChatManager:
         image_refs: list[str] | None = None,
         reason: str = "manual",
         next_at: str | None = None,
-        interval_seconds: int | None = None,
+        interval_seconds: int = _RETRY_INTERVAL_SECONDS,
     ) -> ChatInfo | None:
-        """Mark a chat turn for hourly deferred retry."""
+        """Mark a chat turn for deferred retry, hourly unless told otherwise.
+
+        A manual or MCP retry is always hourly, even when an earlier automatic
+        retry on this chat ran on a shorter or daily interval.
+        """
         chat = self._chats.get(chat_id)
         if chat is None or chat.archived:
             return None
@@ -5959,8 +5963,7 @@ class ProjectChatManager:
         chat.retry_prompt = clean_prompt
         chat.retry_image_refs = list(image_refs or [])
         chat.retry_last_error = reason
-        if interval_seconds is not None:
-            chat.retry_interval_seconds = interval_seconds
+        chat.retry_interval_seconds = interval_seconds
         chat.retry_next_at = next_at or chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)

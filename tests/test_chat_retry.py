@@ -91,6 +91,18 @@ def test_manual_retry_can_be_set_and_stopped(tmp_path: Path) -> None:
     assert stopped.retry_prompt == ""
 
 
+def test_manual_retry_is_hourly_after_a_daily_automatic_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.retry_interval_seconds = 24 * 60 * 60
+
+    updated = pcm.set_chat_retry(chat.chat_id, "retry this hourly", reason="manual")
+
+    assert updated is not None
+    assert updated.retry_interval_seconds == 60 * 60
+
+
 async def test_try_retry_now_starts_stream_when_chat_is_idle(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")

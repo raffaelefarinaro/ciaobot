@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { classifyError, isProviderAuthError, isUsageLimitError } from './errorAttribution'
+import { classifyError, errorQuickAction, isProviderAuthError, isUsageLimitError } from './errorAttribution'
 
 const OLLAMA_WEEKLY = 'you (lozioraf) have reached your weekly usage limit, upgrade for higher limits: https://ollama.com/upgrade or add usage credits: https://ollama.com/settings (ref: c95e827a-1234)'
 
@@ -76,5 +76,20 @@ describe('isProviderAuthError', () => {
     // A revoked API key needs a different fix than signing in again.
     expect(isProviderAuthError('Failed to authenticate: invalid x-api-key')).toBe(false)
     expect(isProviderAuthError('Error: OAuth session expired')).toBe(true)
+  })
+})
+
+describe('errorQuickAction', () => {
+  it.each([
+    ['Not logged in · Please run /login', 'sign-in'],
+    [OLLAMA_WEEKLY, 'retry-hourly'],
+    ['Rate limit exceeded, retry later', 'retry-hourly'],
+    ['OpenCode model not found', 'switch-model'],
+    ['Error: this model does not support image input', 'switch-model'],
+    ['request timed out after 30s', 'fix'],
+    ['disk quota exceeded', 'fix'],
+    ['something unexpected', 'fix'],
+  ])('maps %s to %s', (text, action) => {
+    expect(errorQuickAction(text)).toBe(action)
   })
 })
