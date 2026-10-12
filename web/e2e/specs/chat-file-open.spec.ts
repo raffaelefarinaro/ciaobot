@@ -16,6 +16,8 @@ for (const mobile of [false, true]) {
     await page.route('**/api/workspace-file?*', route => route.fulfill({ body: '# Workspace draft\n\nCorrect source workspace.', contentType: 'text/plain' }))
     let pinAttempts = 0
     await page.route('**/api/chats/alpha-chat-1', route => {
+      // The boot also GETs the chat detail; only the pin write (PATCH) is mocked.
+      if (route.request().method() !== 'PATCH') return route.fallback()
       pinAttempts++
       expect(route.request().postDataJSON().pin.path).toBe(canonical)
       return route.fulfill({ status: 404, json: { error: 'not found' } })
