@@ -52,6 +52,7 @@ function task(overrides: Partial<Task> = {}): Task {
     assignee: 'user',
     chat_id: '',
     attempt_id: '',
+    linked_chats: [],
     created_at: '2026-03-01T09:00:00+00:00',
     updated_at: '2026-03-01T09:00:00+00:00',
     // A hex string, and it has to stay one: the store sends this exact value
@@ -460,5 +461,14 @@ describe('Done keeps to today on the unfiltered board', () => {
     const filtered = taskLanes([untimed], { status: 'done', now: FIXTURE_DAY })[0]!
     expect(filtered.tasks.map(t => t.id)).toEqual(['untimed'])
     expect(filtered.earlierDone).toBe(0)
+  })
+})
+
+describe('linked chats', () => {
+  it('reads linked_chats defensively', () => {
+    expect(taskDetailFrom({ id: 'ship' } as never).linked_chats).toEqual([])
+    expect(taskDetailFrom({ id: 'ship', linked_chats: 'c1' } as never).linked_chats).toEqual([])
+    expect(taskDetailFrom({ id: 'ship', linked_chats: ['c1', 2, '', 'c2', null] } as never).linked_chats)
+      .toEqual(['c1', 'c2'])
   })
 })

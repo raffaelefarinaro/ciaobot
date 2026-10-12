@@ -514,6 +514,40 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     }
   }
 
+  /**
+   * Link a chat to the task, or unlink it (`remove`). A linked chat is a record
+   * that it worked on the task, not a delegation: status and assignee never move.
+   */
+  async function linkChat(
+    workspace: string,
+    taskId: string,
+    expectedRevision: string,
+    chatId: string,
+    remove = false,
+  ): Promise<TaskDetail | null> {
+    if (!workspace || !taskId || !expectedRevision || !chatId) return null
+    descriptionSeq++
+    saving.value = true
+    error.value = ''
+    try {
+      const data = await api.post<{ task?: unknown }>(`${taskUrl(taskId)}/chats`, {
+        workspace,
+        expected_revision: expectedRevision,
+        chat_id: chatId,
+        remove,
+      })
+      if (!drawingWorkspace(workspace)) return null
+      const task = adopt(data?.task)
+      if (task.id && described.value?.id === task.id) described.value = task
+      return task
+    } catch (e) {
+      error.value = taskApiErrorMessage(e, 'Could not update the linked chats')
+      return null
+    } finally {
+      saving.value = false
+    }
+  }
+
   /** Reword one progress note. Its author and recorded time stay. */
   async function editUpdate(
     workspace: string,
@@ -786,7 +820,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     rows, loadedWorkspace, loading, loadError, error, saving, described,
     attempts, attemptsTaskId, attemptsLoading, attemptsLoaded, attemptsError,
     reload, revisionOf, get,
-    create, update, complete, addUpdate, editUpdate, reviewResolution, remove, clearError,
+    create, update, complete, addUpdate, linkChat, editUpdate, reviewResolution, remove, clearError,
     delegate, attemptAction, sendUpdate,
     ensureAttempts, invalidateAttempts, resetAttempts,
   }

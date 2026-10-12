@@ -1326,3 +1326,110 @@ def test_incoming_completion_history_is_not_accepted_without_stored_history(
     assert scrubbed.record.status == "done"
     assert parse_completions(scrubbed.body) == []
     assert COMPLETIONS_OPEN not in scrubbed.body
+
+
+# ── Linked chats (#1334) ─────────────────────────────────────────────
+
+
+def test_set_linked_chats_adds_and_removes_in_order(tmp_path: Path) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    created = store.create(title="linked")
+    task_id = created.record.id
+
+    first = store.set_linked_chats(task_id, expected_revision=created.revision, add="chat-a")
+    second = store.set_linked_chats(task_id, expected_revision=first.revision, add="chat-b")
+    third = store.set_linked_chats(task_id, expected_revision=second.revision, remove="chat-a")
+
+    assert third.record.linked_chats == ("chat-b",)
+    assert b"linked_chats: chat-b\n" in third.raw
+    assert third.record.status == created.record.status
+    assert third.record.assignee == created.record.assignee
+    assert third.record.chat_id is None and third.record.attempt_id is None
+
+
+def test_set_linked_chats_is_idempotent(tmp_path: Path) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    created = store.create(title="linked")
+    task_id = created.record.id
+    linked = store.set_linked_chats(task_id, expected_revision=created.revision, add="chat-a")
+
+    again = store.set_linked_chats(task_id, expected_revision=linked.revision, add="chat-a")
+    assert again.revision == linked.revision
+    absent = store.set_linked_chats(task_id, expected_revision=linked.revision, remove="chat-z")
+    assert absent.revision == linked.revision
+
+
+def test_set_linked_chats_refuses_stale_revision_and_bad_ids(tmp_path: Path) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    created = store.create(title="linked")
+    task_id = created.record.id
+
+    with pytest.raises(TaskBoardError) as stale:
+        store.set_linked_chats(task_id, expected_revision="0" * 64, add="chat-a")
+    assert stale.value.code == "revision_conflict"
+
+    for bad in ("a b", "", "../x"):
+        with pytest.raises(TaskBoardError) as excinfo:
+            store.set_linked_chats(task_id, expected_revision=created.revision, add=bad)
+        assert excinfo.value.code == "invalid_task"
+
+    with pytest.raises(TaskBoardError) as both:
+        store.set_linked_chats(task_id, expected_revision=created.revision, add="a", remove="a")
+    assert both.value.code == "invalid_task"
+    with pytest.raises(TaskBoardError) as neither:
+        store.set_linked_chats(task_id, expected_revision=created.revision)
+    assert neither.value.code == "invalid_task"
+
+    current = created
+    for index in range(20):
+        current = store.set_linked_chats(
+            task_id, expected_revision=current.revision, add=f"chat-{index}"
+        )
+    assert len(current.record.linked_chats) == 20
+    with pytest.raises(TaskBoardError) as full:
+        store.set_linked_chats(task_id, expected_revision=current.revision, add="chat-20")
+    assert full.value.code == "invalid_task"
+    assert "at most 20" in full.value.message
+
+
+def test_linked_chats_cannot_be_written_by_update(tmp_path: Path) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    created = store.create(title="linked")
+    with pytest.raises(TaskBoardError) as excinfo:
+        store.update(
+            created.record.id,
+            expected_revision=created.revision,
+            changes={"linked_chats": ["x"]},
+            actor="user",
+        )
+    assert excinfo.value.code == "invalid_task"
+    assert store.get(created.record.id).raw == created.raw
+
+
+def test_linked_chats_does_not_block_completion(tmp_path: Path) -> None:
+    store = make_store(tmp_path / "vault", tmp_path / "runtime", Clock())
+    created = store.create(title="linked")
+    linked = store.set_linked_chats(
+        created.record.id, expected_revision=created.revision, add="chat-a"
+    )
+    done = store.update(
+        created.record.id,
+        expected_revision=linked.revision,
+        changes={"status": "done"},
+        actor="user",
+    )
+    assert done.record.status == "done"
+    assert done.record.linked_chats == ("chat-a",)
+
+
+def test_absent_and_null_linked_chats_read_empty(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    task_id = "a" * 32
+    hand_file(vault, task_id, valid_frontmatter(task_id))
+    absent = make_store(vault, tmp_path / "runtime", Clock()).get(task_id)
+    assert absent.record.linked_chats == ()
+
+    other = "b" * 32
+    hand_file(vault, other, valid_frontmatter(other, extra=["linked_chats: null"]))
+    nulled = make_store(vault, tmp_path / "runtime", Clock()).get(other)
+    assert nulled.record.linked_chats == ()

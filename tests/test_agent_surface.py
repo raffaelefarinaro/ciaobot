@@ -445,6 +445,14 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
             ("task_action", {"action": "complete", "task_id": "a1b2", "expected_revision": "rev1"}),
         ),
         (
+            ["task", "link-chat", "a" * 32, "--revision", "r"],
+            ("task_link_chat", {"task_id": "a" * 32, "expected_revision": "r", "remove": False}),
+        ),
+        (
+            ["task", "link-chat", "a" * 32, "--revision", "r", "--chat", "c", "--remove"],
+            ("task_link_chat", {"task_id": "a" * 32, "expected_revision": "r", "chat_id": "c", "remove": True}),
+        ),
+        (
             ["run", "start", "--label", "report", "--timeout-s", "900", "--env", "A=1", "--", "bash", "-lc", "a && b"],
             ("background_run_start", {"cmd": ["bash", "-lc", "a && b"], "env": {"A": "1"}, "timeout_s": 900, "label": "report"}),
         ),
@@ -482,6 +490,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "task complete": ["a" * 32, "--revision", "r"],
         "task delegate": ["a" * 32, "--revision", "r"],
         "task add-update": ["a" * 32, "--revision", "r", "--text-file", str(summary)],
+        "task link-chat": ["a" * 32, "--revision", "r"],
         "task report": ["a" * 32, "--outcome", "done", "--summary-file", str(summary)],
         "task attempt": ["a" * 32, "stop"],
         "schedule update": ["s"], "schedule pause": ["s"],

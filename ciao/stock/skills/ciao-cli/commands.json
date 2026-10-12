@@ -57,6 +57,7 @@
   "workspace list": "workspaces_list",
   "task delegate": "task_delegate",
   "task add-update": "task_add_update",
+  "task link-chat": "task_link_chat",
   "task report": "task_report",
   "task attempt": "task_attempt_action"
 }

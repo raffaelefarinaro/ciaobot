@@ -276,6 +276,11 @@ def build_parser() -> argparse.ArgumentParser:
     tnote.add_argument("task_id")
     tnote.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
     tnote.add_argument("--text-file", required=True, metavar="FILE", help="Markdown file holding the progress note.")
+    tlink = task.add_parser("link-chat", help="Link a chat (default: this one) to a task, or --remove it. Not a delegation.")
+    tlink.add_argument("task_id")
+    tlink.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
+    tlink.add_argument("--chat", default=None, help="Chat id or exact title; omit for this chat.")
+    tlink.add_argument("--remove", action="store_true")
     treport = task.add_parser("report", help="Report how far you got on the task this chat was handed.")
     treport.add_argument("task_id")
     treport.add_argument("--outcome", required=True, choices=["done", "blocked", "needs_input"])
@@ -606,6 +611,11 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             if args.project is not None:
                 arguments["project_id"] = args.project
             return "task_delegate", arguments
+        if verb == "link-chat":
+            arguments = {"task_id": args.task_id, "expected_revision": args.revision, "remove": bool(args.remove)}
+            if args.chat is not None:
+                arguments["chat_id"] = args.chat
+            return "task_link_chat", arguments
         if verb == "add-update":
             return "task_add_update", {
                 "task_id": args.task_id,

@@ -552,6 +552,7 @@ def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict
         "assignee": record.assignee,
         "chat_id": record.chat_id,
         "attempt_id": record.attempt_id,
+        "linked_chats": list(record.linked_chats),
         "created_at": record.created_at.isoformat(),
         "updated_at": record.updated_at.isoformat(),
         "revision": document.revision,
@@ -3005,14 +3006,21 @@ class CiaoControlPlane:
         if actor == "agent":
             # Same gate as `task report`: an agent note is that agent's word about
             # its own work, so only the chat holding a live attempt may write one.
-            if live is None or live.chat_id != chat_id:
+            # A chat linked to the task with `task link-chat` may also write one,
+            # stamped with that chat and no attempt (#1334).
+            holds_live = live is not None and live.chat_id == chat_id
+            linked = bool(chat_id) and chat_id in document.record.linked_chats
+            if live is not None and holds_live:
+                attempt_id = live.attempt_id
+                linked_chat = live.chat_id
+            elif linked:
+                linked_chat = chat_id
+            else:
                 raise ControlPlaneError(
                     "task_report_not_holder",
-                    "only the chat working on this task can add a progress note to it; "
-                    "this chat does not hold a live attempt for it.",
+                    "only the chat working on this task, or a chat linked to it with "
+                    "`task link-chat`, can add a progress note to it.",
                 )
-            attempt_id = live.attempt_id
-            linked_chat = live.chat_id
         if send and (live is None or not live.is_live):
             raise ControlPlaneError(
                 "invalid_action",
@@ -3045,6 +3053,43 @@ class CiaoControlPlane:
         task = self._task_with_attempt(workspace, written, include_body=True)
         task["update_sent"] = sent
         return task
+
+    def workspace_task_link_chat(
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        chat_id: str,
+        remove: bool = False,
+    ) -> dict[str, Any]:
+        """Record that a chat worked on the task, or unlink it. Not a delegation.
+
+        A linked chat has no lifecycle meaning: it never completes, moves or
+        assigns the task, and it never touches ``chat_id``/``attempt_id``. It may
+        add progress notes (:meth:`workspace_task_add_update`). Linking requires
+        the chat to exist in this workspace; unlinking does not, so a deleted
+        chat can still be removed from the list.
+        """
+        clean = str(task_id or "").strip()
+        chat = str(chat_id or "").strip()
+        if not chat:
+            raise ControlPlaneError("invalid_task", "a chat id is required")
+        if not remove:
+            found = self.pcm.get_chat(chat)
+            project = self.pcm.get_project(found.project_id) if found is not None else None
+            if found is None or project is None or project.workspace != workspace:
+                raise ControlPlaneError("chat_not_found", f"Chat '{chat}' was not found.")
+        written = self._task_call(
+            workspace,
+            lambda store: store.set_linked_chats(
+                clean,
+                expected_revision=expected_revision,
+                add="" if remove else chat,
+                remove=chat if remove else "",
+            ),
+        )
+        return self._task_with_attempt(workspace, written, include_body=True)
 
     def workspace_task_edit_update(
         self,
@@ -5218,6 +5263,34 @@ class CiaoControlPlane:
                 text=text,
                 actor="agent",
                 chat_id=principal.chat_id,
+            )
+        )
+
+    def task_link_chat(
+        self,
+        principal: AgentPrincipal,
+        task_id: str,
+        *,
+        expected_revision: str,
+        chat_id: str | None = None,
+        remove: bool = False,
+    ) -> dict[str, Any]:
+        """Link a chat (default: this one) to a task, or unlink it. Not a delegation."""
+        workspace = self._workspace(principal)
+        try:
+            resolved = self._chat_id(principal, chat_id)
+        except ControlPlaneError as exc:
+            # A deleted chat can still be unlinked by its id; linking needs it to exist.
+            if not (remove and chat_id and exc.code == "chat_not_found"):
+                raise
+            resolved = str(chat_id).strip()
+        return _ok(
+            self.workspace_task_link_chat(
+                workspace,
+                task_id,
+                expected_revision=expected_revision,
+                chat_id=resolved,
+                remove=remove,
             )
         )
 

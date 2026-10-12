@@ -209,6 +209,7 @@ from ciao.web.routes_tasks import (
     task_attempts,
     task_complete,
     task_edit_update,
+    task_link_chat,
     task_resolution_review,
     task_create,
     task_delegate,
@@ -483,6 +484,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
         Route("/api/tasks/{task_id}/updates", task_add_update, methods=["POST"]),
+        Route("/api/tasks/{task_id}/chats", task_link_chat, methods=["POST"]),
         Route(
             "/api/tasks/{task_id}/updates/{update_id}",
             task_edit_update,

@@ -648,6 +648,41 @@ async def task_add_update(request: Request) -> JSONResponse:
     return JSONResponse({"workspace": workspace, "task": task})
 
 
+async def task_link_chat(request: Request) -> JSONResponse:
+    """Link one chat to a task, or unlink it: ``{"workspace", "expected_revision", "chat_id", "remove"}``.
+
+    A linked chat is a record that the chat worked on the task, not a
+    delegation: it never completes, moves or assigns the task.
+    """
+    plane = _control_plane(request)
+    if plane is None:
+        return _unavailable()
+    body = await _body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    revision = _revision(body)
+    if isinstance(revision, JSONResponse):
+        return revision
+    chat_id = body.get("chat_id")
+    if not isinstance(chat_id, str) or not chat_id.strip():
+        return _refusal("invalid_task", "chat_id must be a string", 400)
+    workspace = _workspace(request.app.state.config, body.get("workspace"))
+    if workspace is None:
+        return _workspace_required()
+    try:
+        task = await asyncio.to_thread(
+            plane.workspace_task_link_chat,
+            workspace,
+            str(request.path_params.get("task_id") or ""),
+            expected_revision=revision,
+            chat_id=chat_id,
+            remove=body.get("remove") is True,
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+    return JSONResponse({"workspace": workspace, "task": task})
+
+
 async def task_edit_update(request: Request) -> JSONResponse:
     """Reword one progress note at ``expected_revision``."""
     plane = _control_plane(request)
