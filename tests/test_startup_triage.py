@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import ciao.startup_triage as startup_triage
 from ciao import job_runs
 from ciao.startup_triage import (
     TRIAGE_COOLDOWN_S,

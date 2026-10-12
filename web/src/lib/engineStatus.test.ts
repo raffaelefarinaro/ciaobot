@@ -7,11 +7,13 @@ import {
   classifyResponse,
   createEngineMonitor,
   probeEngine,
+  requestStartupStatus,
   type ProbeResult,
 } from './engineStatus'
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 describe('classifyResponse', () => {
@@ -58,6 +60,38 @@ describe('probeEngine', () => {
     const pending = probeEngine(hanging as unknown as typeof fetch)
     await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS)
     await expect(pending).resolves.toBe('failure')
+  })
+})
+
+describe('requestStartupStatus', () => {
+  it('shares an in-flight default request between startup and engine consumers', async () => {
+    const fetchMock = vi.fn(async () => ({
+      status: 200,
+      json: async () => ({ overall_ready: true }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const [startup, monitor] = await Promise.all([requestStartupStatus(), requestStartupStatus()])
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(startup).toEqual({ status: 200, body: { overall_ready: true } })
+    expect(monitor).toEqual(startup)
+  })
+
+  it('aborts a shared request that never responds', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const first = requestStartupStatus()
+    const second = requestStartupStatus()
+
+    await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS)
+
+    await expect(first).resolves.toBeNull()
+    await expect(second).resolves.toBeNull()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -191,7 +225,7 @@ describe('createEngineMonitor', () => {
     // Each remaining round is one probe plus one recovery interval. Two live
     // loops would double that.
     await vi.advanceTimersByTimeAsync((3000 + RECOVERY_INTERVAL_MS) * 4)
-    expect(probe.mock.calls.length).toBeLessThanOrEqual(4)
+    expect(probe.mock.calls.length).toBe(4)
     monitor.stop()
   })
 })

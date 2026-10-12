@@ -983,13 +983,30 @@ const hasBlockingHousekeeping = computed(() => housekeeping.actions.some(action 
 const settingsNeedsAttention = computed(() => Boolean(store.packageStatus?.update_available || hasBlockingHousekeeping.value))
 
 onMounted(() => {
-  // These signals are needed by the rail even when the home or review pane has
-  // never been opened. Both store initializers are idempotent.
   housekeeping.init()
-  void proposals.ensureLoaded()
-  void vaultReview.ensureLoaded(store.activeWorkspace)
   document.addEventListener('click', closeWorkspaceMenuOnOutside)
 })
+
+// Badges still load on every page, after the primary content has painted.
+// Waiting for the named chat's history avoids competing with its first read.
+watch(
+  [() => store.bootstrapped, () => store.messageHistoryLoading, () => store.activeWorkspace],
+  ([ready, historyLoading, workspace], _, onCleanup) => {
+    if (!ready || historyLoading || !workspace) return
+    let secondFrame = 0
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        void proposals.ensureLoaded()
+        void vaultReview.ensureLoaded(workspace)
+      })
+    })
+    onCleanup(() => {
+      cancelAnimationFrame(firstFrame)
+      cancelAnimationFrame(secondFrame)
+    })
+  },
+  { immediate: true, flush: 'post' },
+)
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', closeWorkspaceMenuOnOutside)
@@ -1545,6 +1562,7 @@ async function addProject() {
   try {
     const p = await store.createProject(name)
     expandedProjects.add(p.project_id)
+    openProject(p.project_id)
   } catch (e) {
     // A failed create used to reject silently, leaving the same "nothing
     // happened" symptom the missing dialog caused. `alert` is also a no-op in
@@ -1742,7 +1760,7 @@ async function confirmDeleteChat(chatId: string) {
   /* Project list scrolls internally; keeping overflow off the outer
      sidebar prevents double-scroll and keeps the footer fixed. */
   overflow: hidden;
-  transition: width 0.2s var(--ease), min-width 0.2s var(--ease), transform 0.22s var(--ease);
+  transition: transform 0.22s var(--ease);
   padding-top: var(--safe-top);
   padding-left: var(--safe-left);
   padding-bottom: var(--safe-bottom);

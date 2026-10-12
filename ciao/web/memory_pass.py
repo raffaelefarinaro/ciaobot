@@ -585,12 +585,17 @@ class MemoryPassCoordinator:
         outcome: str,
         note: str,
         recorded_at: str,
+        source: ChatInfo | None = None,
     ) -> str | None:
         """Queue one memory pass for a project the user just closed.
 
         Runs after the project's chats have been archived, so their own passes
         are already queued ahead of this one. An empty note is still a closure.
         The same folder, outcome and note hash is not queued twice.
+
+        ``source`` is the project's last-active chat: the pass runs on its
+        provider and Session insights model, as a chat's own pass does. A
+        project with no chats falls back to the workspace default.
         """
         host = self._host
         config = host._config
@@ -616,12 +621,17 @@ class MemoryPassCoordinator:
 
         from ciao.insights import resolve_insights_model
 
-        provider = config.default_provider_for_workspace(workspace)
+        if source is not None:
+            provider = source.provider or "claude"
+            model = host._insights_model_for(source, workspace)
+        else:
+            provider = config.default_provider_for_workspace(workspace)
+            model = resolve_insights_model(config, workspace, provider)
         memory_project = self.ensure_project(workspace)
         chat = host.create_chat(
             memory_project.project_id,
             title="Memory pass · project closure",
-            model=resolve_insights_model(config, workspace, provider),
+            model=model,
             mode="bypass",
             provider=provider,
             helper={
@@ -676,6 +686,41 @@ class MemoryPassCoordinator:
             )
             self.pump(workspace)
 
+    def on_turn_started(self, chat: ChatInfo) -> None:
+        """Reclaim the workspace slot when the owner continues a stopped pass.
+
+        Only an ``attention`` pass is reclaimed: its prompt already ran and was
+        stopped or failed. A ``queued`` pass has not run, and ``pump`` starts it
+        with its own prompt, so a user turn there is refused instead of racing
+        the pump for the same vault. Other states are left untouched.
+        """
+        helper = self._helper(chat)
+        if chat.archived or helper.get("kind") != MEMORY_PASS_KIND:
+            return
+        state = helper.get("state")
+        if state == "queued":
+            raise ValueError(
+                "This memory pass is queued and starts on its own when the "
+                "workspace is free. Try again after it runs."
+            )
+        if state not in {"attention", "running"}:
+            return
+        workspace = self._workspace_of(chat)
+        if any(
+            other.chat_id != chat.chat_id
+            and self._helper(other).get("state") == "running"
+            for other in self._passes_in(workspace)
+        ):
+            raise ValueError(
+                "Another memory pass is running in this workspace. "
+                "Try again when it finishes."
+            )
+        if state != "running":
+            self._set_state(chat, "running")
+            self._set_source_step(
+                str(helper.get("source_chat_id") or ""), "running", chat.chat_id
+            )
+
     async def on_turn_finished(self, chat_id: str) -> bool:
         """Settle one memory pass whose turn ended. True when it archived."""
         host = self._host
@@ -692,7 +737,7 @@ class MemoryPassCoordinator:
             host._broker.get(chat_id) is not None
             or chat.pending_question
             or chat.pending_permission
-            or chat.retry_status
+            or chat.retry_status == "pending"
             or host._subagents.running_count(chat_id) > 0
         ):
             return False

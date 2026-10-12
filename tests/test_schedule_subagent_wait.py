@@ -6,7 +6,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from ciao.config import CiaoConfig
-from ciao.models import ToolUseEvent
 from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore

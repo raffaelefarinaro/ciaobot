@@ -1339,7 +1339,7 @@ def test_accepting_refuses_a_row_that_is_not_a_skill_proposal(tmp_path: Path) ->
 
 def test_accepting_an_unknown_or_settled_proposal_is_not_found(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    source = _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
+    _write_skill_proposal(config, "personal", "2026-08-09-defuddle")
     pcm = _FakePcm()
     row = _skill_row(_client(config, pcm))
     assert _client(config, pcm).post(f"/api/proposals/{row['id']}/dismiss").status_code == 200
@@ -1670,7 +1670,6 @@ def test_dismiss_route_runs_the_locked_transaction_off_the_event_loop(
     the event loop would stall for the wait. The rewrite helper must be
     dispatched through `asyncio.to_thread`.
     """
-    import asyncio
 
     config = _config(tmp_path)
     _write_queue(config, "personal", "# Proposals\n\n- [memory] Remember the thing\n")

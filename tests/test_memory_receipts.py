@@ -1224,7 +1224,7 @@ def test_multi_bracket_prepares_before_the_rewrite(tmp_path):
         actor="operator",
         source="pwa",
         vault_root=tmp_path,
-    ) as base:
+    ):
         queue.write_text("# Memory Proposals\n\n", encoding="utf-8")
 
     # The bracket settles its transaction row and the per-fact rows.

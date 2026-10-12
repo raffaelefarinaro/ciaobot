@@ -2045,6 +2045,140 @@ async def test_core_is_sent_again_after_compaction(tmp_path, monkeypatch, kind):
     assert _CORE_MARKER not in third
 
 
+class _CompactClient(_FakeServerClient):
+    """Records compact posts and serves a scripted event stream."""
+
+    def __init__(self, lines: list[str], *, status: int = 200) -> None:
+        super().__init__(lines)
+        self.posts: list[tuple[str, dict]] = []
+        self._status = status
+
+    async def post(self, path: str, json=None):
+        self.posts.append((path, json or {}))
+        status = self._status
+
+        class _Response:
+            status_code = status
+            text = "compaction refused"
+
+            def json(self):
+                return {"data": {}}
+
+        return _Response()
+
+
+async def _run_compaction(provider, monkeypatch, client, session_id: str):
+    from ciao.models import AgentRequest
+
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return session_id
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    request = AgentRequest(
+        prompt="/compact", model="", mode="bypass", provider="opencode", compact=True
+    )
+    return [
+        event
+        async for event in provider.run_streaming(request, lambda _handle: None)
+    ]
+
+
+def _sse_event(kind: str, session_id: str, **data) -> str:
+    payload = {"type": kind, "data": {"sessionID": session_id, **data}}
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+@pytest.mark.asyncio
+async def test_compact_posts_to_the_compact_endpoint_and_reports_the_result(
+    tmp_path, monkeypatch
+):
+    provider = _provider(tmp_path)
+    provider._core_sent_session_id = "ses_compact"
+    client = _CompactClient(
+        [_sse_event("session.compacted", "ses_compact")], status=200
+    )
+
+    events = await _run_compaction(provider, monkeypatch, client, "ses_compact")
+
+    assert client.posts == [("/api/session/ses_compact/compact", {})]
+    assert [e.status for e in events if e.type == "system"] == [
+        "compacting",
+        "Compacted context",
+    ]
+    result = events[-1]
+    assert result.type == "result"
+    assert not result.is_error
+    assert result.result == ""
+    assert result.session_id == "ses_compact"
+    # The compacted history no longer holds the chat core.
+    assert provider._core_sent_session_id == ""
+
+
+@pytest.mark.asyncio
+async def test_compact_rejection_ends_the_turn_as_an_error(tmp_path, monkeypatch):
+    client = _CompactClient([], status=409)
+
+    events = await _run_compaction(
+        _provider(tmp_path), monkeypatch, client, "ses_refused"
+    )
+
+    result = events[-1]
+    assert result.type == "result"
+    assert result.is_error
+    assert result.result.startswith("OpenCode rejected the compaction")
+    assert "\n" not in result.result
+
+
+@pytest.mark.asyncio
+async def test_failed_compaction_ends_the_turn_as_an_error(tmp_path, monkeypatch):
+    # OpenCode reports a compaction it could not run (here the model has no
+    # route) as its own event; the wait must end on it rather than hang.
+    client = _CompactClient(
+        [
+            _sse_event(
+                "session.compaction.failed",
+                "ses_failed",
+                reason="manual",
+                error={
+                    "type": "provider.no-route",
+                    "message": "Model unavailable: opencode/gone",
+                },
+            )
+        ]
+    )
+
+    events = await _run_compaction(
+        _provider(tmp_path), monkeypatch, client, "ses_failed"
+    )
+
+    result = events[-1]
+    assert result.type == "result"
+    assert result.is_error
+    assert "Model unavailable" in result.result
+
+
+@pytest.mark.asyncio
+async def test_compact_stream_ending_without_a_report_is_an_error(
+    tmp_path, monkeypatch
+):
+    client = _CompactClient(
+        [_sse_event("session.execution.succeeded", "ses_silent")]
+    )
+
+    events = await _run_compaction(
+        _provider(tmp_path), monkeypatch, client, "ses_silent"
+    )
+
+    assert not [e for e in events if e.type == "system" and e.status == "Compacted context"]
+    result = events[-1]
+    assert result.is_error
+    assert result.result == "OpenCode ended without reporting the compaction"
+
+
 @pytest.mark.asyncio
 async def test_core_is_sent_again_for_a_new_session(tmp_path, monkeypatch):
     provider = _provider(tmp_path)
@@ -2185,6 +2319,54 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
     assert provider._process is None
     assert provider._client is None
     FakeProcess.returncode = None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("live_roots", "expect_restart"),
+    [(("/w/agent",), True), (("/w/agent", "/w/data"), False)],
+)
+async def test_a_changed_root_set_restarts_the_opencode_server(
+    tmp_path, monkeypatch, live_roots, expect_restart
+):
+    """The sandbox profile wraps the server process, so a changed root set (a
+    setup chat granted the data root) must restart it; an unchanged one keeps it."""
+    from types import SimpleNamespace
+
+    from ciao.models import provider_reuse_key
+
+    provider = _provider(tmp_path)
+    live_client = object()
+    provider._client = live_client  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "workspace"
+        agent_roots = ("/w/agent", "/w/data")
+
+    request = Request()
+    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
+    provider._fs_scope_key = ("workspace", live_roots)
+    stopped: list[bool] = []
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._process = None
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    # Stop after the reuse decision: with no binary, a restart raises here.
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
+
+    if expect_restart:
+        with pytest.raises(FileNotFoundError):
+            await provider._ensure_server(request)  # type: ignore[arg-type]
+        assert stopped == [True]
+    else:
+        assert await provider._ensure_server(request) is live_client  # type: ignore[arg-type]
+        assert stopped == []
 
 
 @pytest.mark.asyncio
@@ -3413,3 +3595,43 @@ async def test_the_ephemeral_server_degrades_when_the_wrapper_is_broken(
 
     async with mod._EphemeralServer(tmp_path) as client:
         assert client is None
+
+
+@pytest.mark.parametrize("failure", [False, True])
+async def test_live_mcp_status_uses_v2_contract_and_is_bounded(tmp_path, failure):
+    from types import SimpleNamespace
+
+    provider = OpencodeProvider(tmp_path)
+    calls = []
+
+    class Response:
+        def raise_for_status(self):
+            if failure:
+                raise TimeoutError("private upstream detail")
+
+        def json(self):
+            return {
+                "data": [
+                    {"name": "notion", "status": {"status": "failed", "error": "secret"}},
+                    {"name": "linear", "status": {"status": "connected"}},
+                    {"name": "disabled", "status": {"status": "disabled"}},
+                ]
+            }
+
+    class Client:
+        async def get(self, path, *, timeout):
+            calls.append((path, timeout))
+            if failure:
+                raise TimeoutError("private upstream detail")
+            return Response()
+
+    provider._client = Client()
+    provider._process = SimpleNamespace(returncode=None)
+    if failure:
+        with pytest.raises(TimeoutError):
+            await provider.read_mcp_status()
+    else:
+        assert await provider.read_mcp_status() == {
+            "notion": "failed", "linear": "connected", "disabled": "disabled"
+        }
+    assert calls == [("/api/mcp", 2.0)]

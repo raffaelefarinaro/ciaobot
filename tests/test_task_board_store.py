@@ -23,7 +23,6 @@ from ciao.task_board import (
     MAX_TASK_BYTES,
     TaskBoardError,
     TaskBoardStore,
-    parse_task,
     patch_task,
 )
 from ciao.task_resolution import (

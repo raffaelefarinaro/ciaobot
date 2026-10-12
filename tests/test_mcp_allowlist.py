@@ -179,7 +179,7 @@ def test_migration_keeps_unrelated_unknown_keys(tmp_path: Path) -> None:
             }
         ],
     )
-    config = _config(tmp_path)
+    _config(tmp_path)
     entries = _registry_entries(tmp_path)
     personal = next(e for e in entries if e["name"] == "personal")
     # The unknown key survives the migration write untouched.

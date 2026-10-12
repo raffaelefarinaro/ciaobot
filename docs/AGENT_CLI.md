@@ -112,12 +112,14 @@ there is no Ciaobot MCP server to attach. Every chat is on the CLI surface, so
 `CIAO_AGENT_TOKEN` into the foreground shell. The provider's own process is
 restarted when the token changes (`provider_reuse_key`).
 
-Separately, Settings → Assets → MCP servers can create, update, and delete
-**project** MCP server entries in the workspace `.mcp.json` (stdio/HTTP), write
-matching env-key secrets into `.env`, and probe tools
-(`POST/PATCH/DELETE /api/mcp/servers`, `GET /api/mcp/servers/{name}/tools`).
-Those third-party servers are the agent's *external* tools and stay MCP; they
-are distinct from Ciaobot's own surface.
+Separately, Claude Code and OpenCode own their external MCP server configuration
+and authentication. Settings → MCP is a read-only native-config inventory plus
+live status from already running chats in the selected workspace; it does not
+write configuration or credentials, probe a server, or start a provider/MCP
+process. Add and authenticate servers through the provider CLI from the
+workspace directory (`claude mcp add` / `claude mcp login`, or OpenCode V2's
+`opencode mcp add` / `opencode mcp auth`). Claude's workspace allowlist remains
+authoritative and is never expanded by Settings.
 
 Static configuration in an unrelated terminal is intentionally unsupported: the
 token is a live chat capability, not an operator credential. Use Ciaobot's

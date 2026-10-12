@@ -2818,6 +2818,44 @@ describe('provider-neutral input state', () => {
     })
   })
 
+  test('the Stop ack after a result does not restart the spinner', () => {
+    const store = useProjectStore()
+    const chatId = 'stop-ack-after-result'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Stopped',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'tool_use',
+      tool_name: 'shell',
+      tool_input: 'ls',
+      tool_use_id: 'tool-1',
+    }) })
+    expect(store.isStreaming).toBe(true)
+
+    // A turn stopped before any text: the result is empty, and the server
+    // acknowledges the Stop request only after it.
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: '',
+      is_error: false,
+      session_id: 'session-1',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({ type: 'status', message: 'stopped' }) })
+
+    expect(store.isStreaming).toBe(false)
+  })
+
   test('keeps a native permission card across a terminal stream frame', () => {
     const store = useProjectStore()
     const chatId = 'permission-survives-result'
@@ -3365,7 +3403,7 @@ describe('latest status sync', () => {
     store.projectStreaming[chatId] = true
 
     apiGet.mockImplementation((path: string) => {
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: chatId, project_id: 'p1', title: 'Mid turn', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
@@ -4199,7 +4237,8 @@ describe('deep-link chat navigation', () => {
             { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
           ])
         }
-        if (path === '/api/chats') return Promise.resolve([LIVE, ARCHIVED])
+        if (path === '/api/chats?active_only=1') return Promise.resolve([LIVE])
+        if (path === '/api/chats/c-archived') return Promise.resolve(ARCHIVED)
         return Promise.resolve([])
       })
 
@@ -4207,6 +4246,7 @@ describe('deep-link chat navigation', () => {
 
       expect(store.activeChatId).toBe(ARCHIVED.chat_id)
       expect(store.activeChat?.archived).toBe(true)
+      expect(fetchedPaths()).toContain('/api/chats/c-archived')
       await vi.waitFor(() => {
         expect(fetchedPaths().filter(p => p.includes('/api/chats/c-archived/messages'))).toHaveLength(1)
       })
@@ -4481,6 +4521,48 @@ describe('deep-link chat navigation', () => {
   })
 })
 
+describe('compact chat', () => {
+  test('posts the compact route and clears its in-flight flag when accepted', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValue({ ok: true, chat_id: 'chat-1' })
+
+    const pending = store.compactChat('chat-1')
+    expect(store.compactRequests['chat-1']).toBe(true)
+    await pending
+
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/chat-1/compact', {})
+    expect(store.compactRequests['chat-1']).toBeUndefined()
+    expect(store.toasts.filter(t => t.variant === 'error')).toHaveLength(0)
+  })
+
+  test('a second request while one is in flight is not sent', async () => {
+    const store = useProjectStore()
+    let accept: (value: unknown) => void = () => {}
+    apiPost.mockReturnValue(new Promise(resolve => { accept = resolve }))
+
+    const first = store.compactChat('chat-1')
+    await store.compactChat('chat-1')
+    expect(apiPost).toHaveBeenCalledTimes(1)
+
+    accept({ ok: true, chat_id: 'chat-1' })
+    await first
+    expect(store.compactRequests['chat-1']).toBeUndefined()
+  })
+
+  test('a refused compaction raises an error toast and clears its flag', async () => {
+    const store = useProjectStore()
+    apiPost.mockRejectedValue(new Error('chat is busy'))
+
+    await store.compactChat('chat-1')
+
+    expect(store.compactRequests['chat-1']).toBeUndefined()
+    const errors = store.toasts.filter(t => t.variant === 'error')
+    expect(errors).toHaveLength(1)
+    expect(errors[0].title).toBe('Could not compact chat')
+    expect(errors[0].body).toBe('chat is busy')
+  })
+})
+
 describe('chat creation', () => {
   test('does not duplicate a chat when its event arrives before the POST response', async () => {
     const store = useProjectStore()
@@ -4541,7 +4623,7 @@ describe('workspace and chat transitions', () => {
           { project_id: 'p-client', name: 'General', workspace: 'client', context: '', created_at: '', order: 0, vault_folder: 'general' },
         ])
       }
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: 'c-client', project_id: 'p-client', title: 'Client chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
@@ -4570,7 +4652,7 @@ describe('workspace and chat transitions', () => {
           { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
         ])
       }
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: 'c-saved', project_id: 'p1', title: 'Last open', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
@@ -4603,7 +4685,7 @@ describe('workspace and chat transitions', () => {
             { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
           ])
         }
-        if (path === '/api/chats') {
+        if (path === '/api/chats?active_only=1') {
           return Promise.resolve([
             { chat_id: 'c1', project_id: 'p1', title: 'Long chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
           ])
@@ -4650,7 +4732,7 @@ describe('workspace and chat transitions', () => {
           { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
         ])
       }
-      if (path === '/api/chats') {
+      if (path === '/api/chats?active_only=1') {
         return Promise.resolve([
           { chat_id: 'c1', project_id: 'p1', title: 'Done', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
         ])
@@ -5032,6 +5114,9 @@ describe('workspace and chat transitions', () => {
   })
 })
 
+/** Lets the boot's unawaited orphan offer run to the end. */
+const settle = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
 describe('orphaned draft recovery on load', () => {
   test('fetchAll on first boot offers a toast for a draft whose chat is gone', async () => {
     const store = useProjectStore()
@@ -5042,12 +5127,14 @@ describe('orphaned draft recovery on load', () => {
     apiGet.mockImplementation((path: string) => {
       if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
       if (path === '/api/projects') return Promise.resolve(store.projects)
-      if (path === '/api/chats') return Promise.resolve([]) // dead-chat no longer exists server-side
+      if (path === '/api/chats?active_only=1') return Promise.resolve([]) // dead-chat no longer exists server-side
       return Promise.resolve([])
     })
 
     await store.fetchAll()
 
+    // The offer is not awaited by the boot, so it lands after fetchAll returns.
+    await vi.waitFor(() => expect(store.toasts.some(t => t.restoreDraft?.originalChatId === 'dead-chat')).toBe(true))
     const toast = store.toasts.find(t => t.restoreDraft?.originalChatId === 'dead-chat')
     expect(toast).toBeTruthy()
     expect(toast?.body).toContain('stranded text')
@@ -5062,13 +5149,14 @@ describe('orphaned draft recovery on load', () => {
     apiGet.mockImplementation((path: string) => {
       if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
       if (path === '/api/projects') return Promise.resolve([])
-      if (path === '/api/chats') return Promise.resolve([])
+      if (path === '/api/chats?active_only=1') return Promise.resolve([])
       return Promise.resolve([])
     })
 
     await store.fetchAll()
     store.toasts = []
     await store.fetchAll()
+    await settle()
 
     expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
   })
@@ -5079,15 +5167,73 @@ describe('orphaned draft recovery on load', () => {
     apiGet.mockImplementation((path: string) => {
       if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
       if (path === '/api/projects') return Promise.resolve([])
-      if (path === '/api/chats') return Promise.resolve([
+      if (path === '/api/chats?active_only=1') return Promise.resolve([
         { chat_id: 'live-chat', project_id: 'p1', title: 'New Chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
       ])
       return Promise.resolve([])
     })
 
     await store.fetchAll()
+    await settle()
 
     expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
+  })
+
+  test('does not offer a draft whose chat is archived, not gone', async () => {
+    // The boot's list is active chats only, so an archived chat's draft looks like
+    // an orphan there. The full list is what says the chat still exists.
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'archived-chat': { text: 'kept draft', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve(store.projects)
+      if (path === '/api/chats?active_only=1') return Promise.resolve([])
+      if (path === '/api/chats') return Promise.resolve([
+        { chat_id: 'archived-chat', project_id: 'p1', title: 'Old', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: true },
+      ])
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+    await settle()
+
+    expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
+    expect(apiGet).toHaveBeenCalledWith('/api/chats')
+  })
+
+  test('offers nothing when the full chat list cannot be read', async () => {
+    const store = useProjectStore()
+    localStorage.setItem('ciao-chat-drafts', JSON.stringify({ 'dead-chat': { text: 'maybe archived', projectId: 'p1', updatedAt: Date.now() } }))
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve([])
+      if (path === '/api/chats?active_only=1') return Promise.resolve([])
+      if (path === '/api/chats') return Promise.reject(new Error('offline'))
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+    await settle()
+
+    expect(store.toasts.some(t => t.restoreDraft)).toBe(false)
+  })
+
+  test('makes no full-list request when no draft is a candidate', async () => {
+    const store = useProjectStore()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') return Promise.resolve({ workspaces: [], active: 'personal', provider_options: [] })
+      if (path === '/api/projects') return Promise.resolve([])
+      if (path === '/api/chats?active_only=1') return Promise.resolve([])
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+    await settle()
+
+    expect(apiGet).not.toHaveBeenCalledWith('/api/chats')
   })
 })
 
@@ -6621,5 +6767,67 @@ describe('delegated task signals', () => {
     await store.fetchAll()
     expect(taskReads()).toContain('/api/tasks?workspace=work')
     expect(taskReads()).not.toContain('/api/tasks?workspace=personal')
+  })
+})
+
+describe('failed chats count as needs you', () => {
+  test('a chat whose last turn failed needs you until it is working again, archived, or cleared', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'failed', project_id: 'p1', title: 'Failed', archived: false, local: true, last_error: 'usage limit reached' },
+      { chat_id: 'busy', project_id: 'p1', title: 'Busy', archived: false, local: true, last_error: 'boom' },
+      { chat_id: 'archived', project_id: 'p1', title: 'Archived', archived: true, local: true, last_error: 'boom' },
+      { chat_id: 'clean', project_id: 'p1', title: 'Clean', archived: false, local: true, last_error: '' },
+    ] as unknown as ChatInfo[]
+    store.projectStreaming.busy = true
+
+    expect(store.chatNeedsYou('failed')).toBe(true)
+    expect(store.chatNeedsYou('busy')).toBe(false)
+    expect(store.chatNeedsYou('archived')).toBe(false)
+    expect(store.chatNeedsYou('clean')).toBe(false)
+    expect(store.attentionChatCount).toBe(1)
+  })
+
+  test('a newer run of the same routine supersedes the earlier run\'s failure', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'run-1', project_id: 'p1', title: 'Care - Oct 10', archived: false, local: true, schedule_id: 'sched-care', created_at: '2026-10-10T06:00:00Z', last_error: 'weekly usage limit' },
+      { chat_id: 'run-2', project_id: 'p1', title: 'Care - Oct 11', archived: false, local: true, schedule_id: 'sched-care', created_at: '2026-10-11T06:00:00Z', last_error: 'weekly usage limit' },
+      { chat_id: 'other', project_id: 'p1', title: 'Other - Oct 9', archived: false, local: true, schedule_id: 'sched-other', created_at: '2026-10-09T06:00:00Z', last_error: 'boom' },
+    ] as unknown as ChatInfo[]
+
+    expect(store.chatNeedsYou('run-1')).toBe(false)
+    expect(store.chatNeedsYou('run-2')).toBe(true)
+    expect(store.chatNeedsYou('other')).toBe(true)
+    expect(store.attentionChatCount).toBe(2)
+  })
+
+  test('chat_streaming_done carries last_error onto the chat and an empty one clears it', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [
+      { chat_id: 'c-err', project_id: 'p1', title: 'Err', archived: false, local: true },
+    ] as unknown as ChatInfo[]
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done', chat_id: 'c-err', project_id: 'p1',
+        is_error: true, last_error: 'API Error: bad request',
+      }),
+    })
+    expect(store.chats[0].last_error).toBe('API Error: bad request')
+    expect(store.chatNeedsYou('c-err')).toBe(true)
+
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done', chat_id: 'c-err', project_id: 'p1',
+        is_error: false, last_error: '',
+      }),
+    })
+    expect(store.chats[0].last_error).toBe('')
+    expect(store.chatNeedsYou('c-err')).toBe(false)
   })
 })

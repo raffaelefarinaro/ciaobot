@@ -37,13 +37,13 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/projects/{project_id}/complete` | Close a vault-backed project. Body `{"outcome": "completed"\|"stopped", "note": "..."}`; both fields optional (`completed` and an empty note when omitted). The note is written into the project document before the folder moves to `completed/`. Chats are archived. Open tasks stay on the board |
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
-| GET, POST | `/api/projects/{project_id}/chats` | List or create project chats |
+| GET, POST | `/api/projects/{project_id}/chats` | List or create project chats. `?archived=1&offset=0&limit=10` returns a paginated compact archive catalog |
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
-| GET | `/api/chats` | List all chats |
+| GET | `/api/chats` | List all chats; `?active_only=1` returns only active chats plus compact memory-pass source metadata for Home |
 | GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
 | POST | `/api/chats/read-all` | Mark all chats read |
-| PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it); see **Chat pins** below |
+| GET, PATCH, DELETE | `/api/chats/{chat_id}` | Read compact chat metadata (including archived chats), update, or delete chat. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it); see **Chat pins** below |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
 | POST | `/api/chats/{chat_id}/handover` | Continue chat on a fresh provider session |
 | POST | `/api/chats/{chat_id}/fork` | Fork chat continuing from a completed turn |
@@ -52,6 +52,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
 | POST | `/api/chats/{chat_id}/unread` | Mark chat unread on purpose ("come back to this"); clears the read stamp and emits a cross-device `chat_unread` event |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
+| POST | `/api/chats/{chat_id}/compact` | Compact the chat's provider session to shrink its context window (the Compact button beside the context meter). Runs as a stream like a turn, so status and result events arrive on the chat socket. 404 unknown chat; 409 `{error:"chat is archived", archived:true}`, `{error:"chat is busy"}` while a turn runs, the open-question error while a native question awaits an answer, or `{error:"nothing to compact yet"}` before the chat has a provider session |
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
@@ -82,7 +83,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/schedules` | List or create automations of any cadence, including `frequency: "interval"` |
 | POST | `/api/schedule-run/{schedule_id}` | Run now. 409 for an interval entry whose target chat has a turn in flight (refused, not queued) |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update, pause/resume (`{"enabled": bool}`), or delete |
-| GET | `/api/tasks?workspace=` | One workspace's board rows (`?workspace=` is required, 400 otherwise), valid tasks in board order followed by one row per file that could not be read as a task — a row carrying `code` and no task fields, so a malformed file never reads as an empty board. A row carries `id`, `title`, `status`, `project_id`, `due`, `assignee`, `chat_id`, `attempt_id`, `created_at`, `updated_at`, `revision` and `relative_path` |
+| GET | `/api/tasks?workspace=` | One workspace's board rows (`?workspace=` is required, 400 otherwise), valid tasks in board order followed by one row per file that could not be read as a task — a row carrying `code` and no task fields, so a malformed file never reads as an empty board. A row carries `id`, `title`, `status`, `project_id`, `due`, `assignee`, `chat_id`, `attempt_id`, `created_at`, `updated_at`, `revision` and `relative_path`, and `chat_archived` whenever `chat_id` is set (the registry's answer, so an archived chat is known after a reload) |
 | GET | `/api/tasks/{task_id}?workspace=` | One task as the store reads it now, `body` included — the list above deliberately carries no description, so this is the read an editor needs before it writes one back. `?workspace=` is required (400 otherwise), an unknown id in this workspace is a 404 |
 | POST | `/api/tasks` | File one task: `{"workspace", "title", "body", "project_id", "due"}`. `project_id` takes an id or a name and must be a project of this workspace (400 otherwise). Answers 201 with the record as stored, `body` and `revision` included |
 | PATCH | `/api/tasks/{task_id}` | Edit one task at `expected_revision` (required, 400 without it): only the fields sent change — `title`, `status` (`backlog` \| `in_progress` \| `in_review` \| `done`), `project_id`, `due`, `assignee`, and `body` replacing the description wholesale. Any other key is a 400. A stale revision is a **409** and writes nothing |
@@ -92,7 +93,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | PATCH | `/api/tasks/{task_id}/updates/{update_id}` | Reword one progress note at `expected_revision`: `{"workspace", "expected_revision", "text"}`. The author and recorded time stay. A stale revision is a 409 |
 | POST | `/api/tasks/{task_id}/resolution-review` | Ask for a learning pass over the task's **saved** resolution: `{"workspace", "expected_revision"}`. Editing a resolution never queues a pass by itself; this is the explicit ask. The same text on the same completion is not extracted twice. Answers `{workspace, queued, completion_id, memory_chat_id}`, or `{queued: false, reason: "session insights off"}` when Session insights is off. A task with no saved resolution is a 400, a resolution holding the closing fence token is a 400, and a stale revision is a 409 |
 | POST | `/api/tasks/{task_id}/delegate` | Hand one task to the agent as **one ordinary chat**, at `expected_revision` (required): `{"workspace", "expected_revision", "project_id"}` and nothing else — there is no body key for prompt text, because the prompt is built server-side from the record's own fields. `project_id` takes an id or a name in this workspace and overrides where the chat is hosted; omit it to use the task's own project, or the workspace's General. The turn runs with the **default** attendance — never `unattended`, so an approval card it raises is an ordinary Needs-you card. Answers 200 with `{workspace, created, attempt, chat_id, project_id, project_origin, task, changed_since_delegated}`; `created: false` means a live attempt already existed and nothing was created or sent |
-| GET | `/api/tasks/{task_id}/attempts?workspace=` | One task's whole attempt history, the live attempt first. A row is `{attempt_id, task_id, task_revision, chat_id, state, created_at, updated_at, ended_at, detail, live}`; `state` is one of `running`, `needs_you`, `failed`, `interrupted`, `ready_for_review`, `stopped` |
+| GET | `/api/tasks/{task_id}/attempts?workspace=` | One task's whole attempt history, the live attempt first. A row is `{attempt_id, task_id, task_revision, chat_id, state, created_at, updated_at, ended_at, detail, live}`, plus `chat_archived` when `chat_id` is set (the `task` carries the same flag); `state` is one of `running`, `needs_you`, `failed`, `interrupted`, `ready_for_review`, `stopped` |
 | POST | `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` | One lifecycle gesture on one attempt; `{"workspace"}` is the only body key, because the gesture acts on an attempt rather than editing a record (there is no field to present a revision at). `action` is `stop` (ends the turn irreversibly; the task keeps its linkage and stays uncompletable), `resume` (continues the **same** chat under the **same** attempt; only an attempt that did not finish is resumable), `retry` (starts a **new** attempt in a new chat, leaving the previous one as history) or `detach` (stops the turn if running and clears the linkage, which is what makes the task completable again). An unknown verb is a 400 `invalid_action`; an unknown attempt id is a 404 |
 | POST | `/api/tasks/{task_id}/attempt/{attempt_id}/update` | **Send update**: `{"workspace", "expected_revision", "message"}` and nothing else. Sends one ordinary attended message into that attempt's own chat — no second chat, no second attempt, the linkage untouched, and the turn watched so the agent's answer advances the card — and then rebinds the attempt to `expected_revision`, so `changed_since_delegated` comes back `false` and the control retires. `message` is the text the board previewed, so it travels with the request; the revision is what the server checks, and a stale one is a **409** with nothing sent. A turn already running in that chat gets the message queued into it and the answer is `queued: true`; a chat that will not take it yet is a **409** `task_update_busy`, also with nothing sent and nothing rebound. An attempt that no longer holds the task is a 400 `invalid_action` — continuing a dead turn is `resume`, not this |
 | GET | `/api/webhooks?workspace=` | List a workspace's webhook triggers (public records only, never secrets) |
@@ -131,13 +132,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/models` | List configured models, plus `providers[]` (id, labels, capabilities) from the runtime-provider registry. `?refresh=1` bypasses the provider catalog caches |
 | GET, PATCH | `/api/memory/entity-types` | The vault's category list (`?workspace=` required) as `{workspace, vault, types}`, where each row is `{id, label, kind, folder, description, aliases, stale_after_days, enabled, builtin, note_count}`. `GET` returns every effective entry, disabled ones included; `note_count` is the notes carrying that `type:` (an alias counts for its category, drift under its own spelling). A `PATCH` sends the whole desired list as `{"types": [...]}` — a row whose `id` is a shipped one is a partial override of that category's default (an omitted field falls back to the shipped default; a custom row's omitted fields take the built-in defaults instead, so send the whole list), only rows that differ from the shipped default are written to `<agent vault root>/entity-types.yaml`, and the write regenerates `VOCABULARY.md` with a `## Categories` section. 400 for a malformed body, a duplicate id, two enabled categories sharing a folder, an alias that is another entry's id, a missing label, a negative `stale_after_days`, or a delete of a custom category whose notes still name it; 500 when the file cannot be written (the old file is left in place) |
 | GET, PATCH | `/api/status` | Read or update status |
-| GET | `/api/mcp/status` | Project MCP server inventory (env-key status + observed tools) and active-session counts (no credentials); `?workspace=<name>` scopes it to that workspace's own `.mcp.json`. Ciaobot's own surface is reported by `/api/agent/status` |
+| GET | `/api/mcp/status` | Read-only provider-native MCP inventory for `?workspace=<name>` (or the primary workspace). Returns `{workspace, agent_root, providers}`. Each provider row has `{provider, available, inventory_state, servers, setup}`. Server rows contain safe metadata `{name, scope, source, kind, enabled, allowed, connections}`; connections are per-chat `{chat_id, state, error?}` with state `connected`, `failed`, `disabled`, `needs_auth`, or `unknown`. `allowed` is `false` when Claude workspace policy blocks the server, `true` when a project server is permitted, and `null` when policy is not applicable/known. No running session produces an empty connections array. Invalid native config yields `inventory_state: "unknown"`; secrets, endpoint URLs, arguments and raw provider errors are never returned. The route does not start providers or MCP servers. Use the provider's own CLI to add/authenticate servers; `setup.add` and `setup.authenticate` give workspace-specific instructions |
 | GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
-| POST | `/api/mcp/env-keys` | Save project-MCP env secrets into the workspace `.env` (optionally bind new keys into a server via `server`); values never returned |
-| POST | `/api/mcp/servers` | Create a project MCP server in `.mcp.json`; `?workspace=<name>` writes that workspace's own file |
-| PATCH | `/api/mcp/servers/{name}` | Update a project MCP server connection (and optional env keys); `?workspace=<name>` scopes the file |
-| DELETE | `/api/mcp/servers/{name}` | Remove a project MCP server from `.mcp.json`; `?workspace=<name>` scopes the file |
-| GET | `/api/mcp/servers/{name}/tools` | Lazy tool discovery for one project MCP server (HTTP `tools/list` probe, or observed telemetry for stdio); `?workspace=<name>` scopes the lookup |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); guards a drain before an engine restart |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
@@ -730,6 +726,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/retry" \
   -H 'content-type: application/json' -d '{"action":"stop"}'
 
+# Weekly and monthly usage limits are retried once a day (up to 7 attempts)
+# rather than hourly; the card reads "Retrying this turn once a day".
+# A failed turn carries `last_error` (one-line snippet, "" when the last turn
+# succeeded or a new turn started) on the chat object, and the
+# `chat_streaming_done` event repeats it as `last_error`.
+
 # Stop an in-flight turn — {stopped: bool}. Same effect as the websocket
 # `stop` message; use this when driving a chat over plain HTTP or when a
 # socket may not be connected.
@@ -934,35 +936,18 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
   -d '{"revision":"<revision-from-GET>","keyboard_shortcuts":{"archiveChat":"Mod+KeyK","workspace2":"disabled"},"keyboard_send_mode":"enter"}'
 ```
 
-**Project MCP servers (Settings → MCP tab)**
+**MCP inventory and status (Settings → MCP)**
 
 ```bash
-# Create a project MCP server in .mcp.json. Pass url for an HTTP server, or
-# command (+ optional args) for a stdio one; one of the two is required.
-# env_keys binds placeholder names to .env keys the server needs.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/mcp/servers" \
-  -H 'content-type: application/json' \
-  -d '{"name":"linear","url":"https://mcp.linear.app/sse","env_keys":{"LINEAR_API_KEY":""}}'
+# Read native Claude Code and OpenCode configuration plus already running
+# chat connections for one registered workspace. This is read-only; it never
+# starts a provider or MCP server.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/mcp/status?workspace=personal"
 
-# Update one server. Omitted transport fields (url, command, args) keep their
-# current values, so a PATCH can change env bindings alone.
-curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear" \
-  -H 'content-type: application/json' \
-  -d '{"env_keys":{"LINEAR_API_KEY":"LINEAR_TOKEN"}}'
-
-# Delete one server. 404 when the name is not in .mcp.json.
-curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear?workspace=personal"
-
-# Discover a server's tools on demand (HTTP probe, or previously observed names).
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear/tools"
-
-# Save MCP secrets into the workspace .env. Values are write-only: they are
-# never returned by any endpoint. Keys already known from a discovered server
-# are accepted bare; an unknown key needs "server" so it can be bound into that
-# server's .mcp.json env map.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/mcp/env-keys" \
-  -H 'content-type: application/json' \
-  -d '{"server":"linear","keys":{"LINEAR_API_KEY":"lin_api_..."}}'
+# Add or authenticate MCP servers through the provider CLI from the workspace
+# directory. Claude Code: `claude mcp add --scope local --transport http <name> <url>`
+# and `/mcp` (or `claude mcp login <name>`) for OAuth. OpenCode V2:
+# `opencode mcp add <name> --url <url>` and `opencode mcp auth <name>`.
 ```
 
 **Workspace git sync**

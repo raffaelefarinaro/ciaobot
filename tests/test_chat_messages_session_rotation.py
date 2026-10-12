@@ -330,3 +330,51 @@ async def test_flagged_compact_recap_is_hidden_on_the_sdk_fallback_path(
         for row in rows
     )
 
+
+
+@pytest.mark.asyncio
+async def test_messages_number_post_handover_turns_after_earlier_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first turn after a provider handover must render with the same
+    turn_index its live echo carried. The new session numbers its own turns
+    from zero; without the base the PWA saw two different turns and drew the
+    user bubble twice.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Handover numbering", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    chat.session_id = "sess-old"
+    chat.user_turn_count = 3
+    pcm._save()
+
+    pcm.handover_chat(
+        chat.chat_id,
+        provider="claude",
+        model="haiku",
+        messages=[
+            {"role": "user", "content": "earlier question"},
+            {"role": "assistant", "content": "earlier answer"},
+        ],
+    )
+    assert chat.turn_index_base == 3
+    # What the send path records for the next turn.
+    chat.user_turn_count = 4
+    chat.user_turn_timings["3"] = {"sent_at": "2026-10-11T11:38:00Z"}
+    chat.session_id = "sess-after"
+    pcm._save()
+
+    fake_sdk = SimpleNamespace(
+        get_session_messages=lambda session_id, directory: [
+            _Msg("user", "check childcare costs"),
+            _Msg("assistant", "searching"),
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    rows = json.loads(response.body)
+    rows = rows["items"] if isinstance(rows, dict) else rows
+    user = next(r for r in rows if r.get("content") == "check childcare costs")
+    assert user["turn_index"] == 3
+    assert user["sent_at"] == "2026-10-11T11:38:00Z"

@@ -30,6 +30,7 @@ from ciao.schedules import supports_auto_archive
 # id shape the catalog stopped accepting must stop being accepted here too, in
 # the same commit.
 from ciao.update_task_catalog import SCOPES
+from ciao.web.document_conversion import ANYDOC_EXTENSIONS
 
 # Project-files surface (list + upload). Mirrors the union of the read-only
 # workspace-file/image allowlists plus the new binary one (PDF, ZIP, office
@@ -52,7 +53,10 @@ _PROJECT_BINARY_EXTS = frozenset({
     ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
 })
 
-_PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS
+# Convertible documents are kept as uploaded beside their Markdown copy.
+_PROJECT_UPLOAD_EXTS = (
+    _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS | ANYDOC_EXTENSIONS
+)
 
 _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -255,10 +259,11 @@ def _handover_marker(
 
 
 def _is_terminal_quota_error(text: str) -> bool:
-    """Recognize a weekly or monthly usage limit that no hourly retry can clear.
+    """Recognize a weekly or monthly usage limit, retried once a day instead.
 
-    A weekly limit resets days away, so arming the hourly retry only burns
-    attempts (and schedule runs) against a provider that will keep refusing.
+    A weekly limit resets days away, so an hourly retry would only burn
+    attempts (and schedule runs) against a provider that keeps refusing. The
+    caller arms the daily "quota_terminal" retry for these, not the hourly one.
     """
     low = (text or "").lower()
     return any(

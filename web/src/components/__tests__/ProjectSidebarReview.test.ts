@@ -7,16 +7,20 @@
  * Settings listed its sections here — two navigation patterns for one app.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { Mock } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
+import { api } from '../../lib/api'
 import { useProposalsStore } from '../../stores/proposals'
 import { useVaultReviewStore } from '../../stores/vaultReview'
 import { useMemoryMapStore } from '../../stores/memoryMap'
 import type { ProposalRow, VaultReviewCandidate } from '../../lib/types'
+
+const apiGet = api.get as unknown as Mock
 
 const EVIDENCE: VaultReviewCandidate['evidence'] = {
   backlinks: [], outbound_links: [], bridge: false, duplicate_group: [],
@@ -55,7 +59,27 @@ async function mountSidebar() {
 }
 
 describe('ProjectSidebar review section', () => {
+  it('waits for the primary view to paint before loading review badges', async () => {
+    const store = useProjectStore()
+    useProposalsStore().loaded = false
+    useProposalsStore().rows = []
+    useVaultReviewStore().loadedWorkspace = null
+    const wrapper = await mountSidebar()
+    expect(apiGet.mock.calls.map(([path]) => path)).not.toContain('/api/proposals')
+    expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review'))).toBe(false)
+
+    store.bootstrapped = true
+    await nextTick()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    await nextTick()
+
+    expect(apiGet).toHaveBeenCalledWith('/api/proposals')
+    expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review?workspace=personal'))).toBe(true)
+    wrapper.unmount()
+  })
+
   beforeEach(() => {
+    apiGet.mockClear()
     setActivePinia(createPinia())
     const store = useProjectStore()
     store.workspaces = [

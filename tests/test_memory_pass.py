@@ -1170,11 +1170,13 @@ async def test_unclean_finish_marks_attention_and_pumps_next(
     assert streams.chat_ids == ids
 
 
-async def test_pending_permission_keeps_the_slot(
+@pytest.mark.parametrize("pending_kind", ["permission", "retry"])
+async def test_pending_work_keeps_the_slot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     passes_enabled: None,
     streams: _FakeStreams,
+    pending_kind: str,
 ) -> None:
     manager = _make_manager(tmp_path)
     archive = tmp_path / "archive.md"
@@ -1186,7 +1188,10 @@ async def test_pending_permission_keeps_the_slot(
     first, second = (manager.get_chat(cid) for cid in ids)
     _stub_archive(manager, monkeypatch)
     _replied(first, "May I run the ciao memory command?")
-    first.pending_permission = '{"request_id":"r1","tool_name":"Bash"}'
+    if pending_kind == "permission":
+        first.pending_permission = '{"request_id":"r1","tool_name":"Bash"}'
+    else:
+        first.retry_status = "pending"
 
     # The pass is blocked on the owner, so it is not over: it keeps the slot
     # and the next pass waits rather than racing it for the same notes.
@@ -1296,6 +1301,106 @@ async def test_an_unclean_foreground_turn_frees_the_workspace_slot(
             with contextlib.suppress(asyncio.CancelledError):
                 await second_turn
         await _await_detached(manager)
+
+
+@pytest.mark.parametrize("is_retry", [True, False])
+@pytest.mark.parametrize("is_error", [True, False])
+@pytest.mark.parametrize("retry_status", ["", "stopped"])
+async def test_continuing_a_stopped_pass_settles_the_new_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None,
+    is_retry: bool,
+    is_error: bool,
+    retry_status: str,
+) -> None:
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    pass_id = manager.enqueue_memory_pass(source, None, _archive_file(tmp_path), "")
+    assert pass_id is not None
+    manager._providers[pass_id] = _SilentProvider()  # type: ignore[assignment]
+    archived = _stub_archive(manager, monkeypatch)
+    turn = manager._streaming.drive_task(pass_id)
+    assert turn is not None
+    await asyncio.sleep(0)
+    turn.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await turn
+    await _await_detached(manager)
+    chat = manager.get_chat(pass_id)
+    assert chat is not None
+    assert chat.helper["state"] == "attention"
+    chat.retry_status = retry_status
+
+    manager._providers[pass_id] = _TerminalProvider(  # type: ignore[assignment]
+        [ResultEvent(type="result", result="Updated memory.", is_error=is_error)]
+    )
+    manager.start_stream(pass_id, "Continue the memory pass.", is_retry=is_retry)
+    assert chat.helper["state"] == "running"
+    assert source.postprocess["steps"]["memory_pass"]["status"] == "running"
+    turn = manager._streaming.drive_task(pass_id)
+    assert turn is not None
+    await turn
+    await _await_detached(manager)
+
+    assert chat.archived is not is_error
+    assert archived == ([] if is_error else [pass_id])
+    assert chat.helper["state"] == ("attention" if is_error else "done")
+    assert source.postprocess["steps"]["memory_pass"]["status"] == (
+        "attention" if is_error else "ok"
+    )
+
+
+async def test_continuing_a_pass_respects_another_running_pass(
+    tmp_path: Path,
+    passes_enabled: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = _make_manager(tmp_path)
+    with monkeypatch.context() as setup:
+        setup.setattr(manager, "start_stream", _FakeStreams())
+        first_id = manager.enqueue_memory_pass(
+            _source(manager, "First"), None, _archive_file(tmp_path), ""
+        )
+        first = manager.get_chat(first_id)
+        _replied(first, "Stopped", status="interrupted")
+        await manager._memory_pass.on_turn_finished(first_id)
+        second_id = manager.enqueue_memory_pass(
+            _source(manager, "Second"), None, _archive_file(tmp_path), ""
+        )
+        assert manager.get_chat(second_id).helper["state"] == "running"
+
+    with pytest.raises(ValueError, match="Another memory pass is running"):
+        manager.start_stream(first_id, "Retry", is_retry=True)
+    assert first.helper["state"] == "attention"
+    assert manager._broker.get(first_id) is None
+    assert manager._streaming.drive_task(first_id) is None
+
+
+async def test_a_user_turn_on_a_queued_pass_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    passes_enabled: None,
+) -> None:
+    """A queued pass has never run, so the owner's message must not take its slot."""
+    manager = _make_manager(tmp_path)
+    archive = _archive_file(tmp_path)
+    with monkeypatch.context() as setup:
+        setup.setattr(manager, "start_stream", _FakeStreams())
+        manager.enqueue_memory_pass(_source(manager, "First"), None, archive, "")
+        queued_source = _source(manager, "Second")
+        queued_id = manager.enqueue_memory_pass(queued_source, None, archive, "")
+    queued = manager.get_chat(queued_id)
+    assert queued is not None
+    assert queued.helper["state"] == "queued"
+    step_before = queued_source.postprocess["steps"]["memory_pass"]["status"]
+
+    with pytest.raises(ValueError, match="queued"):
+        manager.start_stream(queued_id, "Also remember this")
+    assert queued.helper["state"] == "queued"
+    assert queued_source.postprocess["steps"]["memory_pass"]["status"] == step_before
+    assert manager._broker.get(queued_id) is None
+    assert manager._streaming.drive_task(queued_id) is None
 
 
 async def test_an_errored_drain_settles_a_pass_waiting_on_background_work(
@@ -1614,3 +1719,44 @@ def test_over_length_user_resolution_is_dropped_not_truncated() -> None:
     dropped = chat_service._normalize_chat_helper({**base, "user_resolution": over})
     assert kept["user_resolution"] == at_limit
     assert dropped["user_resolution"] == ""
+
+
+def test_project_closure_pass_runs_on_the_source_chat_model(
+    tmp_path: Path, passes_enabled: None, streams: _FakeStreams
+) -> None:
+    """Automatic Session insights: a closure pass uses its source chat's model
+    and provider, as a chat's own pass does; with no source chat it uses the
+    workspace default."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Shipped", workspace="work")
+    source = manager.create_chat(
+        project.project_id, title="last", model="vendor/chat-model", provider="opencode"
+    )
+    chat_id = manager.enqueue_project_closure(
+        workspace="work",
+        vault_folder="shipped",
+        project_name="Shipped",
+        outcome="completed",
+        note="",
+        recorded_at="2026-10-11T10:00:00+00:00",
+        source=source,
+    )
+    assert chat_id is not None
+    chat = manager.get_chat(chat_id)
+    assert chat is not None
+    assert (chat.provider, chat.model) == ("opencode", "vendor/chat-model")
+
+    fallback_id = manager.enqueue_project_closure(
+        workspace="work",
+        vault_folder="no-chats",
+        project_name="No chats",
+        outcome="stopped",
+        note="",
+        recorded_at="2026-10-11T10:00:00+00:00",
+    )
+    assert fallback_id is not None
+    fallback = manager.get_chat(fallback_id)
+    assert fallback is not None
+    provider = manager._config.default_provider_for_workspace("work")
+    assert fallback.provider == provider
+    assert fallback.model == manager._config.default_model_for_workspace("work", provider)

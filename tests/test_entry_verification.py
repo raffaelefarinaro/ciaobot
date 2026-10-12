@@ -600,7 +600,7 @@ def test_a_restamp_needs_complete_coverage_and_a_real_citation(
     unciteable judgement is a real answer with a cooldown, and a re-ask is not.
     """
     vault = _vault(tmp_path)
-    note = _write(vault)
+    _write(vault)
     entry = _entry()
 
     partial = _verify(vault, _request(entry, coverage=ev.COVERAGE_PARTIAL))
@@ -883,7 +883,7 @@ def test_an_outcome_this_version_does_not_know_is_a_caller_bug(
     """Reported before the cooldown, so it cannot hide behind "already checked"
     for the rest of the month."""
     vault = _vault(tmp_path)
-    note = _write(vault)
+    _write(vault)
     entry = _entry()
     ev.record_entry_check(
         vault,

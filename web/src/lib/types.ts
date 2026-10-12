@@ -101,42 +101,32 @@ export interface ArchivedWorkspacesResponse {
   archived: ArchivedWorkspace[]
 }
 
-export interface McpEnvKey {
-  key: string
-  configured: boolean
-  source: string
+export interface McpConnection {
+  state: 'connected' | 'failed' | 'disabled' | 'needs_auth' | 'unknown'
+  chat_id: string
+  error?: string
 }
 
-export interface McpProjectServer {
+export interface McpNativeServer {
   name: string
-  url?: string
-  command?: string
-  args?: string[]
-  transport?: 'http' | 'stdio' | string
+  scope: string
   source: string
-  config_path?: string
-  env_path?: string
-  env_keys?: McpEnvKey[]
-  ready?: boolean
-  tool_prefix?: string
-  tools?: string[]
-  tools_source?: 'observed' | 'probed' | 'none' | string
-  tools_note?: string
+  allowed: boolean | null
+  connections: McpConnection[]
+}
+
+export interface McpProviderInventory {
+  provider: 'claude' | 'opencode'
+  available: boolean
+  inventory_state: 'loaded' | 'unknown'
+  servers: McpNativeServer[]
+  setup: { add: string; authenticate: string }
 }
 
 export interface McpStatus {
-  enabled: boolean
-  bound: boolean
-  url?: string
-  tool_count: number
-  tools?: string[]
-  env_path?: string
-  /** The workspace these servers belong to; '' is the install root. */
-  workspace?: string
-  project_servers?: McpProjectServer[]
-  active_sessions?: number
-  providers?: string[]
-  last_error?: string
+  workspace: string
+  agent_root: string
+  providers: McpProviderInventory[]
 }
 
 /** Status of the agent CLI surface (Settings → Agent CLI), from /api/agent/status. */
@@ -181,6 +171,15 @@ export interface ProjectInfo {
   kind?: string
 }
 
+export type ArchivedChatSummary = Pick<ChatInfo, 'chat_id' | 'title' | 'created_at' | 'archive_path'>
+
+export interface ChatArchivePage {
+  items: ArchivedChatSummary[]
+  total: number
+  offset: number
+  limit: number
+}
+
 export interface ChatInfo {
   chat_id: string
   project_id: string
@@ -199,11 +198,20 @@ export interface ChatInfo {
   created_at: string
   archived: boolean
   last_activity_at?: string
+  /**
+   * Compact origin metadata for a memory pass: its source's title and archive path.
+   * The source may be archived, so it is not in the active chat list; this is how
+   * the pass reaches it.
+   */
+  memory_source?: ArchivedChatSummary & { last_activity_at: string }
   last_read_at?: string
   // Truncated text of the last assistant reply, persisted alongside
   // `last_activity_at`. Backs the sidebar unread tile's preview on initial
   // load, before any live `chat_result_ready` WS event has arrived.
   last_snippet?: string
+  // One-line snippet of the error that ended the last turn. Empty or absent
+  // when the last turn did not fail; cleared when a new turn starts.
+  last_error?: string
   local?: boolean
   // Transient UI flag: 'pending' while the server is auto-titling a brand
   // new chat, 'ready' otherwise. Drives the shimmer placeholder in the
@@ -505,7 +513,7 @@ export type EventsWsMessage =
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
-  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
+  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number; nudged?: boolean }
   | { type: 'chat_background_runs'; chat_id: string; project_id: string; runs: BackgroundRunSummary[]; finished?: BackgroundRunSummary }
@@ -1290,6 +1298,12 @@ export interface Task {
    * says it and lets them decide.
    */
   changed_since_delegated: boolean
+  /**
+   * The task's chat is archived. Present only when `chat_id` is set: archived
+   * chats are not in the browser's active chat list, so the board reads this
+   * instead of looking the chat up.
+   */
+  chat_archived?: boolean
 }
 
 /**
@@ -1344,6 +1358,8 @@ export interface TaskAttempt {
    */
   released: boolean
   live: boolean
+  /** The attempt's chat is archived; present only when `chat_id` is set. See `Task.chat_archived`. */
+  chat_archived?: boolean
 }
 
 /** One task's whole attempt history: the live attempt first, live and settled alike. */

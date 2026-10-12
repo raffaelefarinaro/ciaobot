@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import time
 from pathlib import Path
 from threading import Lock
 from typing import Any, cast

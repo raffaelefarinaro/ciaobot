@@ -30,7 +30,7 @@ import json
 import sys
 import uuid
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -61,6 +61,7 @@ from ciao.fs_sandbox import (
     claude_sandbox_settings,
 )
 from ciao.models import (
+    COMPACT_COMMAND,
     AgentRequest,
     AssistantTextDelta,
     BridgeMode,
@@ -461,6 +462,26 @@ class ClaudeProvider(BaseSDKProvider):
         """Session id as currently known to the provider (may be set mid-stream)."""
         return self._session_id
 
+    async def read_mcp_status(self) -> dict[str, str]:
+        """Read MCP status from this already-connected Claude SDK client."""
+        client = self._client
+        if client is None or not self._connected:
+            return {}
+        payload = await asyncio.wait_for(client.get_mcp_status(), timeout=2.0)
+        rows = payload.get("mcpServers") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("Claude MCP status response is malformed")
+        allowed = {"connected", "failed", "disabled", "pending", "needs-auth"}
+        result: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            state = str(row.get("status") or "")
+            if name and state in allowed:
+                result[name] = "needs_auth" if state == "needs-auth" else state
+        return result
+
     def _log_client_turn(self, request: AgentRequest, *, reused: bool, reason: str) -> None:
         """One line per turn: whether the live SDK client was reused or replaced, and why."""
         chat = (request.extra_env or {}).get("CIAO_CHAT_ID") or request.resume_session or "-"
@@ -687,6 +708,12 @@ class ClaudeProvider(BaseSDKProvider):
         # Always stream: SDK's can_use_tool gate requires an AsyncIterable
         # prompt at connect() time (claude_agent_sdk>=0.1.63). A plain
         # string raises "can_use_tool callback requires streaming mode".
+        if request.compact:
+            # The SDK compacts only for the bare command: a context capsule
+            # or any other text before it turns it into a normal reply.
+            return build_claude_message_stream(
+                replace(request, prompt=COMPACT_COMMAND, images=[])
+            )
         return build_claude_message_stream(request)
 
     async def disconnect(self) -> None:
@@ -1441,6 +1468,17 @@ class ClaudeProvider(BaseSDKProvider):
             if is_rate_limit_telemetry(status_str):
                 return []
             return [SystemStatusEvent(type="system", status=status_str)]
+
+        if subtype == "compact_boundary":
+            # Manual or automatic compaction finished; the session id is kept.
+            meta = data.get("compact_metadata") or {}
+            pre = meta.get("pre_tokens") if isinstance(meta, dict) else None
+            post = meta.get("post_tokens") if isinstance(meta, dict) else None
+            if isinstance(pre, int) and isinstance(post, int):
+                message = f"Compacted context: {pre:,} → {post:,} tokens"
+            else:
+                message = "Compacted context"
+            return [SystemStatusEvent(type="system", status=message)]
 
         if subtype == "input_required":
             tool_name = data.get("tool_name", "") or data.get("tool", "")

@@ -35,17 +35,18 @@ from ciao.web.routes_api import create_schedule, schedule_detail
 from ciao.web.schedule_dispatch import ScheduleDispatchHost, ScheduleDispatcher
 from tests.test_claude_ai_connectors import _manager
 from tests.test_interval_schedule_api import _ProjectChats, _StateStore
+from tests.test_os_support_processes import _beats_stopped
 from tests.test_schedule_dispatch_boundary import _entry, _ScheduleHost
 
 
-def _py(code: str) -> str:
-    """A shell command that runs ``code`` under this interpreter.
-
-    The command goes through the platform shell, so it is quoted the way that
-    shell reads it: POSIX quoting for ``/bin/sh``, ``list2cmdline`` for cmd.exe.
-    """
-    argv = [sys.executable, "-c", code]
+def _quoted(argv: list[str]) -> str:
+    """``argv`` as one shell command, quoted the way the platform shell reads it."""
     return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+
+
+def _py(code: str) -> str:
+    """A shell command that runs ``code`` under this interpreter."""
+    return _quoted([sys.executable, "-c", code])
 
 
 # ── Store round-trip and validation ──────────────────────────────────────
@@ -143,6 +144,77 @@ async def test_timeout_kills_the_command(tmp_path: Path, monkeypatch: pytest.Mon
     assert run.exit_code is None
     assert run.quiet is False
     assert "timed out" in run.compose_prompt("Go.")
+
+
+async def test_timeout_keeps_output_written_before_the_kill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(schedule_command_module, "SCHEDULE_COMMAND_TIMEOUT_S", 1.0)
+    run = await run_schedule_command(
+        _py(
+            "import sys, time; print('partial-out', flush=True); "
+            "sys.stderr.write('partial-err'); sys.stderr.flush(); time.sleep(30)"
+        ),
+        tmp_path,
+        {},
+    )
+    assert run.timed_out is True
+    assert run.exit_code is None
+    assert "partial-out" in run.stdout
+    assert "partial-err" in run.stderr
+    assert "partial-out" in run.compose_prompt("Go.")
+
+
+_LEADER = """\
+import subprocess, sys, time
+subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
+time.sleep(30)
+"""
+
+_GRANDCHILD = """\
+import sys, time
+while True:
+    with open(sys.argv[1], "w") as handle:
+        handle.write(str(time.monotonic()))
+    time.sleep(0.05)
+"""
+
+
+def _tree_command(tmp_path: Path, beat: Path) -> str:
+    """A command whose shell starts a leader, which starts a heartbeating grandchild."""
+    leader = tmp_path / "leader.py"
+    grandchild = tmp_path / "grandchild.py"
+    leader.write_text(_LEADER)
+    grandchild.write_text(_GRANDCHILD)
+    argv = [sys.executable, str(leader), str(grandchild), str(beat)]
+    return _quoted(argv)
+
+
+async def test_timeout_kills_the_commands_children_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(schedule_command_module, "SCHEDULE_COMMAND_TIMEOUT_S", 3.0)
+    beat = tmp_path / "beat"
+    run = await run_schedule_command(_tree_command(tmp_path, beat), tmp_path, {})
+    assert run.timed_out is True
+    assert beat.exists()
+    assert _beats_stopped(beat)
+
+
+async def test_cancel_kills_the_command_tree(tmp_path: Path) -> None:
+    beat = tmp_path / "beat"
+    task = asyncio.create_task(
+        run_schedule_command(_tree_command(tmp_path, beat), tmp_path, {})
+    )
+    deadline = asyncio.get_running_loop().time() + 30
+    while not beat.exists():
+        if asyncio.get_running_loop().time() > deadline:
+            pytest.fail("the grandchild never started")
+        await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _beats_stopped(beat)
 
 
 async def test_long_output_keeps_head_and_tail_within_the_cap(tmp_path: Path) -> None:
@@ -276,7 +348,10 @@ def test_manager_prepares_no_chat_ahead_of_a_command(tmp_path: Path) -> None:
 
 
 def test_unattended_turn_cannot_set_a_command() -> None:
-    fake = SimpleNamespace(_unattended_turn=lambda principal: True)
+    fake = SimpleNamespace(
+        _unattended_turn=lambda principal: True,
+        chat_mode=lambda principal: "bypass",
+    )
     with pytest.raises(ControlPlaneError) as excinfo:
         CiaoControlPlane._schedule_command(fake, None, "rm -rf x")  # type: ignore[arg-type]
     assert excinfo.value.code == "unattended_forbidden"
@@ -284,9 +359,43 @@ def test_unattended_turn_cannot_set_a_command() -> None:
     assert CiaoControlPlane._schedule_command(fake, None, "") == ""  # type: ignore[arg-type]
 
 
-def test_attended_turn_sets_a_trimmed_command() -> None:
-    fake = SimpleNamespace(_unattended_turn=lambda principal: False)
+def test_bypass_turn_sets_a_trimmed_command() -> None:
+    fake = SimpleNamespace(
+        _unattended_turn=lambda principal: False,
+        chat_mode=lambda principal: "bypass",
+    )
     assert CiaoControlPlane._schedule_command(fake, None, " ls ") == "ls"  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("mode", ["normal", "auto", "plan"])
+def test_non_bypass_turn_cannot_set_a_command(mode: str) -> None:
+    fake = SimpleNamespace(
+        _unattended_turn=lambda principal: False,
+        chat_mode=lambda principal: mode,
+    )
+    with pytest.raises(ControlPlaneError) as excinfo:
+        CiaoControlPlane._schedule_command(fake, None, "curl x | sh")  # type: ignore[arg-type]
+    assert excinfo.value.code == "command_requires_operator"
+    # Clearing stays allowed outside bypass mode.
+    assert CiaoControlPlane._schedule_command(fake, None, "") == ""  # type: ignore[arg-type]
+
+
+def test_restating_the_current_command_is_allowed_in_any_mode() -> None:
+    fake = SimpleNamespace(
+        _unattended_turn=lambda principal: False,
+        chat_mode=lambda principal: "normal",
+    )
+    assert (
+        CiaoControlPlane._schedule_command(  # type: ignore[arg-type]
+            fake, None, " ./sync.sh ", current="./sync.sh"
+        )
+        == "./sync.sh"
+    )
+    with pytest.raises(ControlPlaneError) as excinfo:
+        CiaoControlPlane._schedule_command(  # type: ignore[arg-type]
+            fake, None, "./sync.sh", current="./other.sh"
+        )
+    assert excinfo.value.code == "command_requires_operator"
 
 
 # ── API routes accept the field ──────────────────────────────────────────

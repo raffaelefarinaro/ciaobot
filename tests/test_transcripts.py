@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 
 from ciao.models import AgentRequest, ChatContext
 from ciao.transcripts import TranscriptStore, read_archive_skills

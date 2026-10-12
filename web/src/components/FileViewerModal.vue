@@ -10,6 +10,7 @@
           as-child
           aria-modal="true"
           @open-auto-focus="onOpenAutoFocus"
+          @close-auto-focus="onCloseAutoFocus"
           @escape-key-down="onEscapeKeyDown"
           @pointer-down-outside="onPointerDownOutside"
         >
@@ -164,24 +165,24 @@
             <template v-else>
             <!-- Document properties from YAML frontmatter: a quiet header in
                  the document's own measure, not a card of uppercase pills. -->
-            <section v-if="frontmatter" class="fv-meta" aria-label="Document properties">
+            <section v-if="metadata.frontmatter" class="fv-meta" aria-label="Document properties">
               <div class="fv-meta-line">
                 <span class="fv-meta-kind">
-                  <template v-if="fmType">{{ humanizeMeta(fmType) }}</template>
-                  <template v-if="fmType && fmStatus"> · </template>
-                  <span v-if="fmStatus" class="fv-meta-status" :class="`fv-meta-status--${fmStatus}`">{{ humanizeMeta(fmStatus) }}</span>
+                  <template v-if="metadata.type">{{ humanizeVaultMetadata(metadata.type) }}</template>
+                  <template v-if="metadata.type && metadata.status"> · </template>
+                  <span v-if="metadata.status" class="fv-meta-status" :class="`fv-meta-status--${metadata.status}`">{{ humanizeVaultMetadata(metadata.status) }}</span>
                 </span>
-                <span v-if="fmUpdated" class="fv-meta-date">Updated {{ fmUpdated }}</span>
-                <span v-else-if="fmCreated" class="fv-meta-date">Created {{ fmCreated }}</span>
+                <span v-if="metadata.updated" class="fv-meta-date">Updated {{ metadata.updated }}</span>
+                <span v-else-if="metadata.created" class="fv-meta-date">Created {{ metadata.created }}</span>
               </div>
-              <p v-if="showFmName" class="fv-meta-name" :title="fmName">{{ fmName }}</p>
-              <p v-if="fmProse" class="fv-meta-summary">{{ fmProse }}</p>
-              <p v-if="fmTags.length" class="fv-meta-tags">
-                <span v-for="t in fmTags" :key="t" class="fv-meta-tag">#{{ t }}</span>
+              <p v-if="metadata.showName" class="fv-meta-name" :title="metadata.name">{{ metadata.name }}</p>
+              <p v-if="metadata.summary" class="fv-meta-summary">{{ metadata.summary }}</p>
+              <p v-if="metadata.tags.length" class="fv-meta-tags">
+                <span v-for="t in metadata.tags" :key="t" class="fv-meta-tag">#{{ t }}</span>
               </p>
-              <dl v-if="fmListExtras.length || fmExtraEntries.length" class="fv-meta-fields">
-                <template v-for="listExtra in fmListExtras" :key="listExtra.key">
-                  <dt>{{ humanizeMeta(listExtra.key) }}</dt>
+              <dl v-if="metadata.listExtras.length || metadata.extraEntries.length" class="fv-meta-fields">
+                <template v-for="listExtra in metadata.listExtras" :key="listExtra.key">
+                  <dt>{{ humanizeVaultMetadata(listExtra.key) }}</dt>
                   <dd>
                     <template v-for="(item, i) in listExtra.items" :key="i">
                       <a
@@ -195,11 +196,11 @@
                     </template>
                   </dd>
                 </template>
-                <template v-for="entry in fmExtraEntries" :key="entry.key">
-                  <dt>{{ humanizeMeta(entry.key) }}</dt>
+                <template v-for="entry in metadata.extraEntries" :key="entry.key">
+                  <dt>{{ humanizeVaultMetadata(entry.key) }}</dt>
                   <dd>
                     <a
-                      v-if="isUrl(entry.value)"
+                      v-if="isVaultMetadataUrl(entry.value)"
                       :href="entry.value"
                       target="_blank"
                       rel="noopener noreferrer"
@@ -333,9 +334,7 @@ import { errorMessage } from '../lib/errorMessage'
 import { useProjectStore } from '../stores/projects'
 import { router } from '../router'
 import { useMemoryMapStore, memorySectionPath } from '../stores/memoryMap'
-import { parseFrontmatter } from '../lib/markdownFrontmatter'
-import { renderFileMarkdown } from '../lib/safeMarkdown'
-import { buildMarkdownIndex, resolveVaultLinkTarget } from '../lib/vaultLinks'
+import { buildVaultDocumentMetadata, humanizeVaultMetadata, isVaultMetadataUrl, renderVaultMarkdown } from '../lib/vaultDocument'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
@@ -352,6 +351,13 @@ const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 const HtmlArtifactViewer = defineAsyncComponent(() => import('./HtmlArtifactViewer.vue'))
 
 const store = useFileViewerStore()
+const props = withDefaults(defineProps<{ opener?: HTMLElement | null }>(), { opener: null })
+const opener = ref<HTMLElement | null>(props.opener)
+watch(() => store.isOpen, (open, wasOpen) => {
+  if (open && !wasOpen && document.activeElement instanceof HTMLElement) {
+    opener.value = document.activeElement
+  }
+}, { flush: 'sync' })
 const projectsStore = useProjectStore()
 const memoryMapStore = useMemoryMapStore()
 let closePending = false
@@ -381,15 +387,16 @@ function onOpenAutoFocus(event: Event) {
   nextTick(focusViewer)
 }
 
+function onCloseAutoFocus(event: Event) {
+  event.preventDefault()
+  nextTick(() => {
+    if (opener.value?.isConnected) opener.value.focus()
+  })
+}
+
 function onEscapeKeyDown(event: KeyboardEvent) {
   event.preventDefault()
   void requestClose()
-}
-
-// Frontmatter words for display: "in-discussion" -> "In discussion".
-function humanizeMeta(value: string): string {
-  const text = String(value).replace(/[_-]+/g, ' ').trim()
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text
 }
 
 function onPointerDownOutside(event: PointerDownOutsideEvent) {
@@ -459,74 +466,12 @@ const canEdit = computed(() => {
   return store.kind === 'text'
 })
 
-// Split frontmatter off so the body renders cleanly and the metadata card
-// at the top can show key fields as pills/chips. Mirrors PinnedFilePanel.
-const splitContent = computed(() => parseFrontmatter(store.content))
-const frontmatter = computed(() => splitContent.value.frontmatter)
-const bodyOnly = computed(() => splitContent.value.body)
-
-// `title` is the canonical human label in the vault schema; `name` is the
-// retired synonym still present on older pages. Prefer title, fall back.
-const fmName = computed(() => fmString('title') || fmString('name'))
-// The title usually repeats the file name or the body's first heading; show it
-// only when it says something neither of those does.
-const showFmName = computed(() => {
-  const name = fmName.value.trim()
-  if (!name || name === basename.value.replace(/\.md$/, '')) return false
-  const heading = /^#\s+(.+?)\s*#*\s*$/m.exec(bodyOnly.value || '')
-  return !heading || heading[1].trim() !== name
-})
-const fmType = computed(() => fmString('type'))
-const fmStatus = computed(() => fmString('status'))
-const fmTags = computed(() => fmList('tags'))
-const fmCreated = computed(() => fmString('created'))
-const fmUpdated = computed(() => fmString('updated'))
-
-const PRIMARY_KEYS = new Set(['title', 'name', 'type', 'status', 'tags', 'created', 'updated'])
-const PROSE_KEYS = new Set(['description', 'summary', 'notes'])
-const LIST_EXTRA_KEYS = new Set(['aliases', 'related', 'links'])
-
-const fmProse = computed(() => {
-  for (const key of ['description', 'summary', 'notes']) {
-    const v = fmString(key)
-    if (v.trim()) return v
-  }
-  return ''
-})
-
-// `related`/`links` frontmatter items are bare vault refs (`People/Mo`) —
-// resolve them to file paths so the pills are clickable (same resolution as
-// body links). A `[[...]]` wrapper is still tolerated so notes that predate
-// the markdown-link swap keep working. `aliases` are alternative names for
-// THIS note, not links, so they stay plain text.
-const _LINK_LIST_KEYS = new Set(['related', 'links'])
-const _linkIndex = computed(() => buildMarkdownIndex(store.markdownPaths || []))
-const _linkPathSet = computed(() => new Set<string>(store.markdownPaths || []))
-
-function resolveListItem(raw: string): { label: string; path: string | null } {
-  const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
-  const [ref, alias] = inner.split('|')
-  // A related note reads by its name, not its vault path; the full path stays
-  // in the link's title.
-  const label = (alias ?? (ref.split('/').pop() || ref).replace(/\.md$/i, '')).trim()
-  const path = ref.trim()
-    ? resolveVaultLinkTarget(ref.trim(), store.path, _linkIndex.value, _linkPathSet.value)
-    : null
-  return { label, path }
-}
-
-const fmListExtras = computed(() => {
-  const out: { key: string; items: { label: string; path: string | null }[] }[] = []
-  for (const key of ['aliases', 'related', 'links']) {
-    const items = fmList(key)
-    if (!items.length) continue
-    const resolved = _LINK_LIST_KEYS.has(key)
-      ? items.map(resolveListItem)
-      : [{ label: items.join(', '), path: null }]
-    out.push({ key, items: resolved })
-  }
-  return out
-})
+const metadata = computed(() => buildVaultDocumentMetadata(
+  store.content,
+  store.path,
+  store.markdownPaths,
+))
+const renderedMarkdown = computed(() => renderVaultMarkdown(metadata.value.body, store.path, store.markdownPaths))
 
 function openRelated(path: string): void {
   const cid = store.chatId || ''
@@ -537,131 +482,19 @@ function openRelated(path: string): void {
   }
 }
 
-const fmExtraEntries = computed(() => {
-  const fm = frontmatter.value
-  if (!fm) return [] as { key: string; value: string }[]
-  const skip = new Set([...PRIMARY_KEYS, ...PROSE_KEYS, ...LIST_EXTRA_KEYS])
-  const out: { key: string; value: string }[] = []
-  for (const [k, v] of Object.entries(fm)) {
-    if (skip.has(k)) continue
-    if (v == null) continue
-    const text = Array.isArray(v) ? v.join(', ') : String(v)
-    if (!text.trim()) continue
-    out.push({ key: k, value: text })
-  }
-  return out
-})
-
-function fmString(key: string): string {
-  const v = frontmatter.value?.[key]
-  if (v == null) return ''
-  return Array.isArray(v) ? v.join(', ') : String(v)
-}
-function fmList(key: string): string[] {
-  const v = frontmatter.value?.[key]
-  if (v == null) return []
-  return Array.isArray(v) ? v : [String(v)]
-}
-// A frontmatter value that is a bare http(s) URL (e.g. `url:`) renders as a
-// clickable link rather than plain text. Only http/https so the href can't be
-// a javascript:/data: scheme.
-function isUrl(value: string): boolean {
-  return /^https?:\/\/\S+$/.test(value.trim())
-}
-
-// ── File comments (durable, shown in sidebar + highlights) ─────────
+// ── File comments (durable, shown inline as highlights and popovers) ─
 const activeFileComments = computed(() =>
   projectsStore.fileCommentsFor(cleanPath(store.path))
 )
 
 // ── Pre line rendering & line-based highlighting ───────────────────
 const contentLines = computed(() => {
-  const text = bodyOnly.value
+  const text = metadata.value.body
   if (text.endsWith('\n')) {
     return text.slice(0, -1).split('\n')
   }
   return text.split('\n')
 })
-
-// ── Sidebar Google Docs-style alignment ───────────────────────────────
-const sidebarListEl = ref<HTMLElement>()
-const sidebarSpacerEl = ref<HTMLElement>()
-const commentPositions = ref<Record<string, number>>({})
-const CARD_GAP = 8
-
-function updateCommentPositions(): void {
-  if (!bodyEl.value) return
-  const body = bodyEl.value
-  const bodyRect = body.getBoundingClientRect()
-  const positions: Record<string, number> = {}
-
-  // Find the first highlight for each comment id and record its top relative
-  // to the scrollable body content. We use getBoundingClientRect instead of
-  // offsetTop because CSV cells live inside their own positioned overflow
-  // container (.csv-scroll), so their offsetParent is that inner scroller
-  // rather than the body — offsetTop would be measured against the wrong
-  // origin and the card would land at the top-left instead of beside its cell.
-  const highlights = body.querySelectorAll('.comment-highlight[data-comment-id], .pre-line.comment-highlight[data-comment-id]')
-  for (const el of Array.from(highlights)) {
-    const id = (el as HTMLElement).dataset.commentId
-    if (id && !(id in positions)) {
-      const rect = (el as HTMLElement).getBoundingClientRect()
-      positions[id] = rect.top - bodyRect.top + body.scrollTop
-    }
-  }
-
-  commentPositions.value = positions
-
-  // Ensure the sidebar list is at least as tall as the body content so
-  // absolutely positioned cards never float past the end.
-  if (sidebarSpacerEl.value) {
-    sidebarSpacerEl.value.style.height = Math.max(body.scrollHeight, 100) + 'px'
-  }
-}
-
-// Push-down pass to keep cards from overlapping. Cards prefer to sit at
-// their highlight's offsetTop (Google Docs style) but slide down by their
-// own height + GAP whenever a previous card would otherwise spill into
-// them. Mutates DOM directly so we don't re-render-loop on measured
-// heights changing reactive state.
-function layoutSidebarCards(): void {
-  if (!sidebarListEl.value) return
-  const els = Array.from(
-    sidebarListEl.value.querySelectorAll<HTMLElement>('.fv-sidebar-card[data-card-id]')
-  )
-  if (!els.length) return
-  // Sort by the desired top encoded on the element; fall back to current
-  // style.top from the v-bind. Items without a desired position trail at
-  // the end (those are unpositioned fallbacks).
-  const items = els.map(el => {
-    const desiredAttr = el.dataset.desiredTop
-    const desired = desiredAttr ? parseFloat(desiredAttr) : NaN
-    return {
-      el,
-      desiredTop: Number.isFinite(desired) ? desired : parseFloat(el.style.top || '0'),
-      height: el.offsetHeight,
-    }
-  })
-  items.sort((a, b) => a.desiredTop - b.desiredTop)
-  let prevBottom = 0
-  for (const item of items) {
-    const top = Math.max(item.desiredTop, prevBottom + (prevBottom === 0 ? 0 : CARD_GAP))
-    item.el.style.top = top + 'px'
-    prevBottom = top + item.height
-  }
-  // Stretch the spacer if the laid-out cards exceed it, so the last card
-  // is fully scrollable into view.
-  if (sidebarSpacerEl.value) {
-    const minHeight = prevBottom + CARD_GAP
-    const cur = parseFloat(sidebarSpacerEl.value.style.height || '0')
-    if (minHeight > cur) sidebarSpacerEl.value.style.height = minHeight + 'px'
-  }
-}
-
-// Cards sorted by source line number first, then by visual position.
-// Line-number ordering is more predictable than visual position when
-// text wraps or images shift the layout. Falls back to visual position
-// for comments without line info (e.g. legacy or cross-file selections).
 
 let popupOpenTimestamp = 0
 
@@ -733,81 +566,17 @@ function scrollToTarget(): void {
   bodyEl.value.scrollTo({ top: Math.max(target, 0), behavior: 'smooth' })
 }
 
-// Scroll sync: keep sidebar vertically aligned with the document body.
-let isSyncing = false
-function syncBodyToSidebar(): void {
-  if (isSyncing || !bodyEl.value || !sidebarListEl.value) return
-  isSyncing = true
-  sidebarListEl.value.scrollTop = bodyEl.value.scrollTop
-  requestAnimationFrame(() => { isSyncing = false })
-}
-function syncSidebarToBody(): void {
-  if (isSyncing || !bodyEl.value || !sidebarListEl.value) return
-  isSyncing = true
-  bodyEl.value.scrollTop = sidebarListEl.value.scrollTop
-  requestAnimationFrame(() => { isSyncing = false })
-}
-
 function onBodyScroll(): void {
   onScrollReanchor()
-  syncBodyToSidebar()
 }
 
-function attachScrollSync(): void {
+function attachBodyScrollListener(): void {
   if (!bodyEl.value) return
-  detachScrollSync()
+  detachBodyScrollListener()
   bodyEl.value.addEventListener('scroll', onBodyScroll, { passive: true })
-  sidebarListEl.value?.addEventListener('scroll', syncSidebarToBody, { passive: true })
-  observeBody()
 }
-function detachScrollSync(): void {
+function detachBodyScrollListener(): void {
   bodyEl.value?.removeEventListener('scroll', onBodyScroll)
-  sidebarListEl.value?.removeEventListener('scroll', syncSidebarToBody)
-  unobserveBody()
-}
-
-// Re-measure comment anchors whenever the body's rendered content changes.
-// Async children (the lazily-loaded CsvViewer parses its content in its own
-// watcher, images decode, fonts settle) can paint their highlight elements
-// *after* the reposition watcher already ran, which would otherwise leave
-// every card stranded at the top-left fallback. The observers close that
-// race by re-running the measurement once the DOM actually settles.
-let bodyMutationObserver: MutationObserver | null = null
-let bodyResizeObserver: ResizeObserver | null = null
-let remeasureRaf = 0
-
-function scheduleRemeasure(): void {
-  if (remeasureRaf) return
-  remeasureRaf = requestAnimationFrame(() => {
-    remeasureRaf = 0
-    updateCommentPositions()
-    nextTick(() => layoutSidebarCards())
-  })
-}
-
-function observeBody(): void {
-  unobserveBody()
-  const body = bodyEl.value
-  if (!body) return
-  if (typeof MutationObserver !== 'undefined') {
-    bodyMutationObserver = new MutationObserver(() => scheduleRemeasure())
-    bodyMutationObserver.observe(body, { childList: true, subtree: true, characterData: true })
-  }
-  if (typeof ResizeObserver !== 'undefined') {
-    bodyResizeObserver = new ResizeObserver(() => scheduleRemeasure())
-    bodyResizeObserver.observe(body)
-  }
-}
-
-function unobserveBody(): void {
-  bodyMutationObserver?.disconnect()
-  bodyMutationObserver = null
-  bodyResizeObserver?.disconnect()
-  bodyResizeObserver = null
-  if (remeasureRaf) {
-    cancelAnimationFrame(remeasureRaf)
-    remeasureRaf = 0
-  }
 }
 
 // ── Mobile popup for reading a comment on tap ───────────────────────
@@ -1256,48 +1025,6 @@ const basename = computed(() => {
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(store.path))
 const isCsv = computed(() => isCsvPath(store.path))
 
-// Directory portion of the current MD file, used to resolve relative image
-// references inside the markdown. Strips any `:line` suffix the viewer
-// accepts on text files so it doesn't end up joined into a bogus path.
-const docDir = computed(() => {
-  const cleaned = store.path.replace(/:\d+$/, '')
-  const idx = cleaned.lastIndexOf('/')
-  return idx === -1 ? '' : cleaned.slice(0, idx + 1)
-})
-
-// Join a workspace-relative dir with a (possibly dotted) relative path,
-// collapsing `.` and `..` segments. Mirrors posixpath.normpath for the
-// cases that appear in markdown image srcs.
-function joinRelative(dir: string, rel: string): string {
-  const parts = (dir + rel).split('/')
-  const out: string[] = []
-  for (const p of parts) {
-    if (p === '' || p === '.') continue
-    if (p === '..') { out.pop(); continue }
-    out.push(p)
-  }
-  return out.join('/')
-}
-
-// True for anything that already resolves without our help: absolute URLs,
-// protocol-relative, data/blob URIs, and site-root paths.
-const _ABSOLUTE_SRC_RE = /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i
-
-const renderedMarkdown = computed(() => {
-  const dir = docDir.value
-  return renderFileMarkdown(bodyOnly.value, {
-    filePath: store.path,
-    markdownPaths: store.markdownPaths,
-    resolveImageSrc: (href) => {
-      if (href && !_ABSOLUTE_SRC_RE.test(href)) {
-        const resolved = joinRelative(dir, href)
-        return `/api/workspace-image?path=${encodeURIComponent(resolved)}`
-      }
-      return href
-    },
-  })
-})
-
 // Scroll the modal into focus + jump to line if requested whenever the
 // store finishes loading a new file.
 watch(
@@ -1318,18 +1045,13 @@ watch(
   },
 )
 
-// Re-apply markdown highlights and sidebar positions whenever the content
-// or comment list changes.
+// Re-apply markdown highlights whenever the content or comment list changes.
 watch(
   () => `${store.loadToken}|${store.path}|${activeFileComments.value.map(c => c.id).join(',')}|${renderedMarkdown.value.length}|${store.content.length}`,
   () => nextTick(() => {
     applyHighlights()
     scrollToTarget()
-    nextTick(() => {
-      updateCommentPositions()
-      attachScrollSync()
-      nextTick(() => layoutSidebarCards())
-    })
+    nextTick(attachBodyScrollListener)
   }),
   { flush: 'post' },
 )
@@ -1369,10 +1091,6 @@ function onScrollReanchor(): void {
 if (typeof document !== 'undefined') {
   document.addEventListener('selectionchange', comments.onSelectionChange)
 }
-function onSidebarResize(): void {
-  updateCommentPositions()
-  nextTick(() => layoutSidebarCards())
-}
 function onBeforeUnload(e: BeforeUnloadEvent): void {
   if (store.isDirty) {
     e.preventDefault()
@@ -1380,7 +1098,6 @@ function onBeforeUnload(e: BeforeUnloadEvent): void {
   }
 }
 if (typeof window !== 'undefined') {
-  window.addEventListener('resize', onSidebarResize)
   window.addEventListener('beforeunload', onBeforeUnload)
 }
 onBeforeUnmount(() => {
@@ -1388,10 +1105,9 @@ onBeforeUnmount(() => {
     document.removeEventListener('selectionchange', comments.onSelectionChange)
   }
   if (typeof window !== 'undefined') {
-    window.removeEventListener('resize', onSidebarResize)
     window.removeEventListener('beforeunload', onBeforeUnload)
   }
-  detachScrollSync()
+  detachBodyScrollListener()
 })
 
 // Reset draft + anchor whenever the file changes or the modal closes.
@@ -1417,15 +1133,12 @@ watch(
       artifactDraftHighlight.value = null
       comments.lastSelectionRange = null
       activePopupId.value = null
-      detachScrollSync()
+      detachBodyScrollListener()
     } else {
-      nextTick(() => {
-        updateCommentPositions()
-        attachScrollSync()
-        nextTick(() => layoutSidebarCards())
-      })
+      nextTick(attachBodyScrollListener)
     }
   },
+  { immediate: true },
 )
 
 async function copyPath(): Promise<void> {
@@ -1884,7 +1597,7 @@ watch(
 .fv-md :deep(blockquote) {
   margin: 0.6em 0;
   padding: 0 0 0 12px;
-  border-left: 3px solid var(--border);
+  border-left: 1px solid var(--border-strong);
   color: var(--fg2);
 }
 .fv-md :deep(hr) {
@@ -1919,72 +1632,6 @@ watch(
 }
 .fv-comment-trigger:hover { filter: none; opacity: 0.9; }
 .fv-comment-trigger-icon { flex: none; }
-.fv-comment-popover {
-  position: absolute;
-  z-index: 6;
-  width: min(420px, 90%);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px 12px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.fv-comment-quote {
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--fg2);
-  border-left: 3px solid var(--accent, #60a5fa);
-  padding: 2px 0 2px 8px;
-  max-height: 6em;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.fv-comment-input {
-  width: 100%;
-  resize: vertical;
-  min-height: 60px;
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.45;
-  color: var(--fg);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  outline: none;
-  box-sizing: border-box;
-}
-.fv-comment-input:focus { border-color: var(--accent, #60a5fa); }
-.fv-comment-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-}
-.fv-btn-sm {
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--fg);
-  cursor: pointer;
-}
-.fv-btn-sm:hover { background: var(--bg2, rgba(255, 255, 255, 0.04)); }
-.fv-btn-sm.primary {
-  background: var(--accent, #60a5fa);
-  border-color: var(--accent, #60a5fa);
-  color: var(--on-accent);
-}
-.fv-btn-sm.danger {
-  background: var(--error, #f87171);
-  border-color: var(--error, #f87171);
-  color: white;
-}
-
 /* History list */
 .fv-empty {
   padding: 24px;
@@ -2156,58 +1803,6 @@ watch(
   z-index: 20;
   background: transparent;
 }
-.fv-comment-drawer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 21;
-  width: 300px;
-  max-width: 85%;
-  border-left: 1px solid var(--border);
-  background: var(--bg2, rgba(20, 20, 40, 0.98));
-  box-shadow: -6px 0 20px rgba(0, 0, 0, 0.28);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.fv-drawer-close {
-  background: transparent;
-  border: none;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: calc(16px * var(--font-scale));
-  line-height: 1;
-  padding: 0 4px;
-  margin-left: auto;
-}
-.fv-drawer-close:hover { color: var(--fg); }
-.fv-drawer-empty {
-  padding: 16px 14px;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-
-.fv-comments-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
-}
-.fv-comments-toggle:hover { background: var(--bg3); color: var(--fg); }
-.fv-comments-toggle.active { border-color: var(--accent, #60a5fa); color: var(--fg); }
-.fv-comments-toggle-icon { font-size: var(--text-sm); line-height: 1; }
-.fv-comments-toggle-count { font-variant-numeric: tabular-nums; }
-
 .fv-comment-pop {
   position: absolute;
   z-index: 32;
@@ -2255,77 +1850,6 @@ watch(
   .fv-pop-actions .fv-sidebar-card-edit,
   .fv-pop-actions .fv-sidebar-card-remove { min-height: var(--touch); }
 }
-.fv-sidebar-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.fv-sidebar-title {
-  font-size: var(--text-base);
-  font-weight: 600;
-  color: var(--fg);
-}
-.fv-sidebar-count {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  color: var(--accent, #60a5fa);
-  background: var(--bg);
-  padding: 1px 6px;
-  border-radius: 999px;
-}
-.fv-sidebar-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 10px 12px;
-  position: relative;
-}
-.fv-sidebar-card {
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  padding: 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: 6px;
-  font-size: var(--text-xs);
-  line-height: 1.4;
-  color: var(--fg);
-  cursor: pointer;
-  transition: transform 0.1s, box-shadow 0.1s;
-}
-.fv-sidebar-card:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-}
-.fv-sidebar-spacer {
-  height: 100px;
-}
-.fv-sidebar-card.is-pending {
-  border-left-color: var(--accent2, #a78bfa);
-}
-.fv-sidebar-card-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
-}
-.fv-sidebar-card-file {
-  font-weight: 600;
-  font-size: var(--text-xs);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex: 1;
-  min-width: 0;
-}
-.fv-sidebar-card-line {
-  color: var(--fg2);
-  font-weight: 400;
-}
 .fv-sidebar-card-remove {
   flex-shrink: 0;
   width: 18px;
@@ -2340,15 +1864,6 @@ watch(
   cursor: pointer;
 }
 .fv-sidebar-card-remove:hover { background: var(--bg2); color: var(--fg); }
-.fv-sidebar-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.fv-sidebar-card:hover .fv-sidebar-card-actions,
-.fv-sidebar-card.is-editing .fv-sidebar-card-actions { opacity: 1; }
 .fv-sidebar-card-edit {
   flex-shrink: 0;
   width: 18px;
@@ -2363,72 +1878,15 @@ watch(
   cursor: pointer;
 }
 .fv-sidebar-card-edit:hover { background: var(--bg2); color: var(--fg); }
-.fv-sidebar-edit-body { margin-top: 4px; }
-.fv-sidebar-edit-input {
-  width: 100%;
-  resize: vertical;
-  min-height: 44px;
-  font-family: inherit;
-  font-size: var(--text-base);
-  line-height: 1.45;
-  color: var(--fg);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  outline: none;
-  box-sizing: border-box;
-  margin-bottom: 6px;
-}
-.fv-sidebar-edit-input:focus { border-color: var(--accent, #60a5fa); }
-.fv-sidebar-edit-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-}
-.fv-sidebar-card-quote {
-  color: var(--fg2);
-  font-style: italic;
-  margin-bottom: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
 .fv-sidebar-card-note {
   color: var(--fg);
   word-break: break-word;
-}
-.fv-sidebar-draft-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
 }
 .fv-sidebar-card-images {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 4px;
-}
-.fv-sidebar-edit-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-.draft-image-preview {
-  position: relative;
-  display: inline-flex;
-}
-.draft-image-thumb {
-  height: 40px;
-  width: 40px;
-  object-fit: cover;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--bg);
 }
 .card-image-thumb {
   height: 36px;
@@ -2438,81 +1896,6 @@ watch(
   border: 1px solid var(--border);
   background: var(--bg);
 }
-.draft-image-remove {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: var(--bg3);
-  color: var(--fg);
-  font-size: 12px;
-  line-height: 14px;
-  cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-}
-.image-btn-sm {
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--fg2);
-  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
-}
-.image-btn-sm:hover { background: var(--bg3); color: var(--fg); border-color: var(--fg2); }
-
-/* Sidebar draft composer: sits between header and the scrollable list. */
-.fv-sidebar-draft {
-  padding: 10px 12px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-.fv-sidebar-draft-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-.fv-sidebar-draft-label {
-  font-weight: 600;
-  font-size: var(--text-xs);
-  color: var(--accent, #60a5fa);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  flex: 1;
-}
-.fv-sidebar-draft-input {
-  width: 100%;
-  resize: vertical;
-  min-height: 60px;
-  font-family: inherit;
-  font-size: var(--text-base);
-  line-height: 1.45;
-  color: var(--fg);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  outline: none;
-  box-sizing: border-box;
-  margin-bottom: 8px;
-}
-.fv-sidebar-draft-input:focus {
-  border-color: var(--accent, #60a5fa);
-}
-.fv-sidebar-draft-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
 /* Text highlights inside the document.
    Use :deep() because markdown highlights are created dynamically via
    DOM manipulation and won't carry Vue's scoped attribute. */
@@ -2556,14 +1939,6 @@ watch(
   white-space: pre;
 }
 
-/* Read-only comment popup (mobile) */
-.fv-comment-note {
-  font-size: 13px;
-  line-height: 1.45;
-  color: var(--fg);
-  word-break: break-word;
-}
-
 @media (max-width: 640px) {
   .fv-backdrop { padding: 0; }
   .fv-modal {
@@ -2576,18 +1951,6 @@ watch(
   }
   .fv-body { padding: 14px 16px; }
   .fv-md { max-width: none; }
-  .fv-comment-drawer {
-    left: 0;
-    top: auto;
-    width: auto;
-    max-width: none;
-    max-height: 60vh;
-    border-left: none;
-    border-top: 1px solid var(--border);
-    border-top-left-radius: 14px;
-    border-top-right-radius: 14px;
-    box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.32);
-  }
   .fv-comment-pop {
     left: 8px !important;
     right: 8px;
@@ -2598,7 +1961,6 @@ watch(
 
 /* Coarse-pointer targets: the visible marks are small, the hit areas are not. */
 @media (pointer: coarse) {
-  .image-btn-sm,
   .fv-comment-trigger {
     min-width: var(--touch);
     min-height: var(--touch);
@@ -2608,13 +1970,6 @@ watch(
   .fv-sidebar-card-edit {
     width: var(--touch);
     height: var(--touch);
-  }
-
-  .draft-image-remove {
-    box-sizing: content-box;
-    top: -12px;
-    right: -12px;
-    padding: 14px;
   }
 }
 

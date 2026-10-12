@@ -298,7 +298,6 @@ async def test_drive_finally_runs_second_title_pass_for_meta_question(
     one, so the sidebar only sees a second chat_title event when the late
     title actually differs.
     """
-    from ciao.web import project_chats as pc
     from ciao.web.project_chats import ProjectChatManager
 
     class FakeChat:
@@ -342,7 +341,6 @@ async def test_drive_overwrites_title_when_assistant_framing_disagrees(
 ) -> None:
     """When the post-reply titleer yields a different label than the early one,
     a second chat_title event is published so the sidebar can update."""
-    from ciao.web import project_chats as pc
     from ciao.web.project_chats import ProjectChatManager
 
     class FakeChat:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import yaml
 from pathlib import Path
 import pytest
 

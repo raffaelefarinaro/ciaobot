@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import threading
@@ -1423,30 +1424,35 @@ def _global_session_matches(
         return [slug / target for slug in slugs if (slug / target).exists()]
 
 
-def _global_session_candidates() -> list[Path]:
-    """One cached pass over ``~/.claude/projects/*/`` returning *.jsonl paths.
+def _global_sessions_present(session_ids: set[str]) -> set[str]:
+    """Return requested Claude session ids present in any projects slug.
 
-    Kept for callers that want the full unfiltered listing; session lookups
-    should prefer :func:`_global_session_matches`, which stays file-fresh
-    via per-slug stats and refreshes the slug list on a miss. Callers may
-    ``stat`` a candidate before trusting it.
+    Unlike the single-session lookup this deliberately does not use the slug
+    cache: chat listings need one fresh pass over each slug, rather than one
+    stat per chat (and cached file-presence would make deletions stale).
     """
+    if not session_ids:
+        return set()
+    targets = {f"{session_id}.jsonl": session_id for session_id in session_ids}
     projects_root = Path.home() / ".claude" / "projects"
-    now = time.monotonic()
-    slugs = _global_session_slugs_fresh(projects_root, now)
-    if slugs is None:
-        with _global_session_scan_lock:
-            now = time.monotonic()
-            slugs = _global_session_slugs_fresh(projects_root, now)
-            if slugs is None:
-                slugs = _global_session_slugs_locked(projects_root, now)
-    candidates: list[Path] = []
-    for slug in slugs or []:
-        try:
-            candidates.extend(slug.glob("*.jsonl"))
-        except OSError:
-            continue
-    return candidates
+    found: set[str] = set()
+    try:
+        slug_entries = os.scandir(projects_root)
+    except OSError:
+        return found
+    with slug_entries:
+        for slug_entry in slug_entries:
+            try:
+                if not slug_entry.is_dir():
+                    continue
+                with os.scandir(slug_entry.path) as files:
+                    for file_entry in files:
+                        session_id = targets.get(file_entry.name)
+                        if session_id is not None and Path(file_entry.path).exists():
+                            found.add(session_id)
+            except OSError:
+                continue
+    return found
 
 
 def find_claude_session_file(
@@ -1694,4 +1700,3 @@ def get_session_messages_full(
     except Exception:
         logger.exception("get_session_messages_full custom chain failed for %s; falling back", session_id)
         return _fallback(get_session_messages)
-

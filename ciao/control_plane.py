@@ -792,30 +792,8 @@ def _entry_request(
     )
 
 
-def _entry_digest(request: Any) -> str:
-    """A short, stable id for the question an entry payload asks.
-
-    The same reasoning as :func:`_verification_digest`, and for the same reason:
-    the off-loop read coalesces by key, so the key has to carry the whole verdict
-    and not only the entry it is about. Over the fields that decide the answer —
-    outcome, coverage, evidence and the edit's two images — and not over the
-    request's identity, which the key already spells out.
-    """
-    edit = request.edit
-    body = {
-        "outcome": str(request.outcome or ""),
-        "coverage": str(request.coverage or ""),
-        "evidence": [row.as_dict() for row in request.evidence],
-        "before": "" if edit is None else edit.before,
-        "after": "" if edit is None else edit.after,
-    }
-    return hashlib.sha256(
-        json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    ).hexdigest()[:16]
-
-
 def _verification_digest(request: Any) -> str:
-    """A short, stable id for *the question this payload asks*.
+    """A short, stable id for the verdict question this payload asks.
 
     The off-loop read is coalesced by key, so the key has to carry the whole
     verdict and not only the note it is about. Keyed on the note and the expected
@@ -827,9 +805,9 @@ def _verification_digest(request: Any) -> str:
     coalescing exists to avoid.
 
     Over the fields that decide the answer — outcome, coverage, evidence and the
-    edit's two images — and not over the request's identity (the note, the
-    revision, the workspace), which the key already spells out. Sorted keys, so
-    two payloads that differ only in field order are the same question.
+    edit's two images — and not over request identity, which the surrounding key
+    already spells out. Sorted keys make payloads that differ only in field
+    order the same question. This is shared by note and entry verification.
     """
     edit = request.edit
     body = {
@@ -1941,7 +1919,7 @@ class CiaoControlPlane:
             f"verify-entry:{self._search_runtime_dir()}:{workspace}:"
             f"{request.relative_path}:{request.identity}:"
             f"{request.entry_fingerprint}:{request.expected_revision}:"
-            f"{_entry_digest(request)}"
+            f"{_verification_digest(request)}"
         )
         reported: dict[str, Any] = await run_read(key, _run, coalesce=True)
         return _ok(reported)
@@ -2849,10 +2827,12 @@ class CiaoControlPlane:
             workspace, lambda store: store.newest_by_task()
         )
         rows = [
-            _task_row_with_attempt(
-                document,
-                live.get(document.record.id),
-                current.get(document.record.id),
+            self._with_chat_archived(
+                _task_row_with_attempt(
+                    document,
+                    live.get(document.record.id),
+                    current.get(document.record.id),
+                )
             )
             for document in result.tasks
             if not windowed or _completed_within(document, since, before)
@@ -3692,6 +3672,20 @@ class CiaoControlPlane:
             f"workspace {workspace!r} has no General project to run a delegated task in.",
         )
 
+    def _with_chat_archived(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Add ``chat_archived`` to a task or attempt payload that names a chat.
+
+        Archived chats stay in the registry, so the answer holds after a reload,
+        when the browser's chat list no longer carries them. The board reads this
+        flag instead of looking the chat up itself. A payload with no chat gets no
+        key, so the flag only ever describes a chat that exists.
+        """
+        chat_id = str(payload.get("chat_id") or "")
+        if chat_id:
+            chat = self.pcm.get_chat(chat_id)
+            payload["chat_archived"] = chat is not None and bool(chat.archived)
+        return payload
+
     def _task_with_attempt(
         self, workspace: str, document: TaskDocument, *, include_body: bool = False
     ) -> dict[str, Any]:
@@ -3700,11 +3694,13 @@ class CiaoControlPlane:
         See :func:`_task_row_with_attempt`, which is the whole of the derivation;
         this is that function with the store read done for one task.
         """
-        return _task_row_with_attempt(
-            document,
-            self._attempt_live(workspace, document.record.id),
-            self._attempt_current(workspace, document.record.id),
-            include_body=include_body,
+        return self._with_chat_archived(
+            _task_row_with_attempt(
+                document,
+                self._attempt_live(workspace, document.record.id),
+                self._attempt_current(workspace, document.record.id),
+                include_body=include_body,
+            )
         )
 
     def workspace_task_delegate(
@@ -4649,7 +4645,7 @@ class CiaoControlPlane:
         )
         return {
             "task": self._task_with_attempt(workspace, document, include_body=True),
-            "attempts": [attempt.to_dict() for attempt in history],
+            "attempts": [self._with_chat_archived(attempt.to_dict()) for attempt in history],
         }
 
     def workspace_task_send_update(
@@ -5654,22 +5650,37 @@ class CiaoControlPlane:
         ]
         return _ok(rows)
 
-    def _schedule_command(self, principal: AgentPrincipal, value: object) -> str:
+    def _schedule_command(
+        self, principal: AgentPrincipal, value: object, *, current: str = ""
+    ) -> str:
         """Validate a schedule's shell command as a managed chat may set it.
 
-        A command runs with no model turn and no permission prompt, so a
-        scheduled (unattended) turn may not create or change one: a
-        compromised unattended run could otherwise schedule itself a shell
-        command. Clearing a command is always allowed.
+        A command runs later with no model turn and no permission prompt, so
+        it carries the authority of an unprompted shell. A scheduled
+        (unattended) turn may never set one. An attended turn may set one only
+        from a ``bypass`` chat, where the agent already runs shell commands
+        without a prompt; anywhere else only the user can add it, in the
+        PWA. Clearing a command, or restating the one the schedule already
+        runs, is always allowed.
         """
         try:
             command = normalize_schedule_command(value)
         except ValueError as exc:
             raise ControlPlaneError("invalid_command", str(exc)) from exc
-        if command and self._unattended_turn(principal):
+        if not command or command == current:
+            return command
+        if self._unattended_turn(principal):
             raise ControlPlaneError(
                 "unattended_forbidden",
                 "A schedule's command can be set only from an attended turn.",
+            )
+        if self.chat_mode(principal) != "bypass":
+            raise ControlPlaneError(
+                "command_requires_operator",
+                "A schedule's command runs later with no permission prompt, so outside "
+                "bypass mode only the user can set it. Create the schedule without "
+                "--command and ask the user to add the command in Automations → this "
+                "schedule → Prompt → Edit → Command.",
             )
         return command
 
@@ -5948,7 +5959,9 @@ class CiaoControlPlane:
         if unknown:
             raise ControlPlaneError("invalid_fields", f"Unknown schedule fields: {', '.join(unknown)}")
         if "command" in normalized:
-            normalized["command"] = self._schedule_command(principal, normalized["command"])
+            normalized["command"] = self._schedule_command(
+                principal, normalized["command"], current=entry.command
+            )
         if "frequency" in normalized and normalized["frequency"] not in FREQUENCIES:
             raise ControlPlaneError(
                 "invalid_frequency",

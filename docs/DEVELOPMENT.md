@@ -12,6 +12,17 @@ Chat file-link regressions cover separate agent roots, exact identities across
 text/image/binary/HTML previews, failed pins preserving the modal, and stale pin
 completions not dismissing a newer file (#1167).
 
+Page-load behavior is covered by `tests/test_static_asset_compression.py` and
+`web/src/lib/chatComponents.test.ts`, plus `AppEngineOffline.test.ts` for the
+bounded startup request and display delay. Static gzip is limited to hashed
+JavaScript/CSS, while chat code is prefetched only for chat deep links.
+
+`tests/test_is_session_local.py` covers batched chat-list availability, including
+session creation/deletion and newly used working directories between requests.
+`tests/test_claude_session_lookup.py` covers the independent single-session
+lookup freshness contract. Large real catalogs need measurement alongside the
+small browser fixture; asset readiness alone does not measure Home's data wait.
+
 ## Server install
 
 Linux production and every installer-managed macOS install restart the engine
@@ -387,8 +398,12 @@ npm install          # optional root Node tooling
 cd web
 npm install
 npm run build        # typecheck + Vite build, outputs to ciao/web/static/
-npm test             # 61 test files under web/src
+npm test             # full frontend suite under web/src
 ```
+
+The build's TypeScript check rejects unused locals and parameters. Remove dead
+code; prefix an intentionally unused callback parameter with `_` when its
+position is required by the callback contract.
 
 ## macOS engine development
 
@@ -538,6 +553,12 @@ isolate browser storage/service workers, or replace the host password protocol
 with revocable per-device credentials; those remain follow-up work for #546.
 
 ## Quality gates
+
+For task progress/history changes, run `tests/test_task_updates.py`,
+`tests/test_task_log.py`, `tests/test_task_resolution.py`,
+`tests/test_task_markdown.py` and `tests/test_task_board_store.py`. Progress-note
+coverage must preserve literal section markers, encoded marker text and old
+unversioned items through add and edit operations.
 
 Backend type-checking, coverage, and dependency audits run in CI and are also available locally via `scripts/dev-commands.sh`:
 
@@ -2055,3 +2076,5 @@ against a fake manager over a temp packaged root.
 - **Name the encoding.** Every text `open()`, `read_text()`, `write_text()`, `os.fdopen()` and every `subprocess` call that decodes (`text=True`) passes `encoding="utf-8"` — with `errors="replace"` only for tool output that is displayed or logged, never for output that is parsed. Windows' default is the ANSI code page, not UTF-8, and nothing may rely on Python's UTF-8 mode. `tests/test_explicit_encoding.py` fails on a new call without one.
 - **Verify UI accessibility.** For PWA layout changes, check keyboard operation, visible focus, browser zoom, and 44px mobile targets at a narrow-phone viewport in addition to the build.
 - Keyboard shortcut changes also need coverage for shared `/ws/events` updates, custom-binding conflicts, IME composition, picker precedence, and Enter behavior on touch layouts.
+
+MCP status verification: cover native Claude/OpenCode configuration, scope precedence, workspace isolation, safe metadata, multiple chat connections, failed/unknown/needs-auth states, and unavailable provider status. Settings reads running provider sessions only; no status check should start a provider or MCP subprocess. Provider-native setup and authentication are performed from the workspace through each provider's CLI; Settings does not edit configuration, credentials, or workspace allowlists. Browser coverage lives in `web/e2e/specs/mcp-status.spec.ts`.

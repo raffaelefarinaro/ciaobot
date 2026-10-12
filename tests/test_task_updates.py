@@ -15,6 +15,7 @@ from ciao.task_updates import (
     TaskUpdate,
     append_update,
     parse_updates,
+    replace_update,
     unseen_updates,
 )
 
@@ -68,6 +69,99 @@ def test_progress_round_trips_and_stays_out_of_the_description(tmp_path: Path) -
     assert "A rewritten description." in saved.body
     assert parse_updates(saved.body)[0].text == "Schema is in.\nWaiting on credentials."
     assert "Schema is in." not in saved.body.split(OPEN)[0]
+
+
+def test_progress_marker_literals_round_trip_through_add_and_edit(tmp_path: Path) -> None:
+    markers = [
+        "<!-- ciao:task-updates -->",
+        "&lt;!-- ciao:task-updates --&gt;",
+        "&amp;lt;!-- ciao:task-updates --&gt;",
+        "<!-- /ciao:task-updates -->",
+        "&lt;!-- /ciao:task-updates --&gt;",
+        "&amp;lt;!-- /ciao:task-updates --&gt;",
+    ]
+    added = " | ".join([*markers, "&amp;copy;"])
+    edited = " | ".join([*reversed(markers), "&amp;copy;"])
+    store = _store(tmp_path)
+    created = store.create(title="In flight", body="Do the thing.")
+    active = store.update(
+        created.record.id,
+        expected_revision=created.revision,
+        changes={"status": "in_progress"},
+        actor="user",
+    )
+    written = store.add_update(
+        active.record.id,
+        expected_revision=active.revision,
+        actor="user",
+        text=added,
+    )
+    note = parse_updates(written.body)[0]
+    assert note.text == added
+
+    saved = store.edit_update(
+        written.record.id,
+        note.id,
+        expected_revision=written.revision,
+        text=edited,
+    )
+    assert parse_updates(saved.body)[0].text == edited
+
+
+@pytest.mark.parametrize(
+    ("escaped", "raw"),
+    [
+        ("&lt;!-- ciao:task-updates --&gt;", "<!-- ciao:task-updates -->"),
+        ("&lt;!-- /ciao:task-updates --&gt;", "<!-- /ciao:task-updates -->"),
+        (
+            "&amp;lt;!-- ciao:task-updates --&gt;",
+            "&amp;lt;!-- ciao:task-updates --&gt;",
+        ),
+        (
+            "&amp;lt;!-- /ciao:task-updates --&gt;",
+            "&amp;lt;!-- /ciao:task-updates --&gt;",
+        ),
+    ],
+)
+def test_legacy_escaped_progress_marker_still_decodes(
+    escaped: str, raw: str
+) -> None:
+    # Older writers escaped raw section markers without stacking an existing
+    # entity-like literal. Keep interpreting that saved representation as raw.
+    body = (
+        f"{OPEN}\n## Progress\n\n"
+        "- 2026-10-09T12:00:00+00:00 · user <!-- update:"
+        + "a" * 32
+        + f" -->\n  {escaped}\n"
+        f"{CLOSE}"
+    )
+    assert parse_updates(body)[0].text == raw
+
+
+def test_editing_a_legacy_note_upgrades_only_that_note() -> None:
+    first_id, second_id = "a" * 32, "b" * 32
+    body = (
+        f"{OPEN}\n## Progress\n\n"
+        f"- 2026-10-09T12:00:00+00:00 · user <!-- update:{first_id} -->\n"
+        "  &lt;!-- ciao:task-updates --&gt;\n"
+        f"- 2026-10-08T12:00:00+00:00 · agent <!-- update:{second_id} -->\n"
+        "  &amp;lt;!-- ciao:task-updates --&gt;\n"
+        f"{CLOSE}"
+    )
+
+    edited = replace_update(
+        body,
+        first_id,
+        "<!-- /ciao:task-updates -->",
+        datetime(2026, 10, 10, 12, 0, tzinfo=UTC),
+    )
+
+    notes = parse_updates(edited)
+    assert notes[0].text == "<!-- /ciao:task-updates -->"
+    assert notes[1].text == "&amp;lt;!-- ciao:task-updates --&gt;"
+    assert "<!-- encoding:1 -->" in edited
+    second_item = edited.split(f"update:{second_id}", 1)[1]
+    assert "encoding:1" not in second_item
 
 
 def test_an_edit_cannot_blank_a_progress_note(tmp_path: Path) -> None:

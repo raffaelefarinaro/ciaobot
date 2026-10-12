@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { flushPromises, mount, RouterLinkStub, type VueWrapper } from '@vue/test-utils'
 import HomeSetupCard from '../HomeSetupCard.vue'
 import { enablePush } from '../../lib/push'
 import { SETUP_CARD_DISMISSED_KEY } from '../../lib/pwaPlatform'
@@ -9,6 +9,7 @@ import { resetHomeNoticeWindows } from '../../composables/useHomeNoticeWindows'
 import {
   _resetInstallPromptForTests,
   canPromptInstall,
+  installedOnDevice,
   listenForInstallPrompt,
 } from '../../lib/installPrompt'
 
@@ -28,7 +29,7 @@ const IPHONE_UA =
 let wrapper: VueWrapper | null = null
 
 async function mountCard() {
-  wrapper = mount(HomeSetupCard)
+  wrapper = mount(HomeSetupCard, { global: { stubs: { RouterLink: RouterLinkStub } } })
   await flushPromises()
   return wrapper
 }
@@ -76,7 +77,23 @@ describe('HomeSetupCard', () => {
     // No programmatic prompt in this browser, so it has to say where the
     // control lives instead of showing a button that cannot work.
     expect(view.text()).toContain('Install option in the address bar or menu')
+    expect(view.getComponent(RouterLinkStub).props('to')).toBe('/settings#install-app')
     expect(hasButton(view, 'Enable')).toBe(true)
+  })
+
+  it('says the app is already installed when Chromium reports it to a tab', async () => {
+    installedOnDevice.value = true
+    state.pushEnabled = true
+    const view = await mountCard()
+
+    // Install done and push on: nothing left to set up on this device.
+    expect(view.text()).not.toContain('Set up this device')
+
+    state.pushEnabled = false
+    view.unmount()
+    const fresh = await mountCard()
+    expect(fresh.text()).toContain('Installed on this device')
+    expect(fresh.findComponent(RouterLinkStub).exists()).toBe(false)
   })
 
   it('shows the native Install button when the browser offered a prompt', async () => {
@@ -208,7 +225,7 @@ describe('HomeSetupCard', () => {
       }),
     })
 
-    wrapper = mount(HomeSetupCard)
+    wrapper = mount(HomeSetupCard, { global: { stubs: { RouterLink: RouterLinkStub } } })
     // `pushOn` is only known after the probe, and Home remounts on every
     // return from a chat, so a first frame that guesses wrong would make the
     // recent-chats list jump under the user's finger.

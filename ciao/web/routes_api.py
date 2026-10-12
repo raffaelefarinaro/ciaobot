@@ -51,7 +51,7 @@ from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
 from ciao.web.auth import is_loopback_client
-from ciao.web.document_conversion import is_anydoc_document
+from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
     CLAUDE_MODELS,
@@ -113,6 +113,8 @@ from ciao.async_reads import run_read
 from ciao.web.project_chats import (
     _ALLOWED_IMAGE_EXTENSIONS,
     ChatPinConflictError,
+    ChatInfo,
+    ProjectChatManager,
 )
 from ciao.web.routes_helpers import (
     _allowed_roots,
@@ -1766,6 +1768,35 @@ async def project_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
     chats = pcm.list_chats(project_id)
+    if request.query_params.get("archived") == "1":
+        if pcm.get_project(project_id) is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        try:
+            offset = int(request.query_params.get("offset", "0"))
+            limit = int(request.query_params.get("limit", "10"))
+        except ValueError:
+            return JSONResponse({"error": "invalid pagination"}, status_code=400)
+        if offset < 0 or not 1 <= limit <= 100:
+            return JSONResponse({"error": "invalid pagination"}, status_code=400)
+        archived = sorted(
+            (chat for chat in chats if chat.archived),
+            key=lambda chat: (chat.created_at, chat.chat_id),
+            reverse=True,
+        )
+        return JSONResponse({
+            "items": [
+                {
+                    "chat_id": chat.chat_id,
+                    "title": chat.title,
+                    "created_at": chat.created_at,
+                    "archive_path": chat.archive_path,
+                }
+                for chat in archived[offset:offset + limit]
+            ],
+            "total": len(archived),
+            "offset": offset,
+            "limit": limit,
+        })
     return JSONResponse([c.to_dict() for c in chats])
 
 
@@ -1849,13 +1880,16 @@ async def chat_attachments_upload(request: Request) -> JSONResponse:
     saved: list[dict] = []
     errors: list[dict[str, str]] = []
     total_bytes = 0
+    upload_count = 0
     for key in form:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
-        if len(saved) + len(errors) >= _DESKTOP_DROP_MAX_FILES:
+        # Counted per uploaded file: a PDF yields two refs (original + Markdown).
+        if upload_count >= _DESKTOP_DROP_MAX_FILES:
             errors.append({"filename": "file", "error": "too many files"})
             break
+        upload_count += 1
         filename = getattr(upload, "filename", "") or ""
         display_name = _drop_display_name(Path(filename))
         try:
@@ -1867,11 +1901,8 @@ async def chat_attachments_upload(request: Request) -> JSONResponse:
             entry = await asyncio.to_thread(
                 pcm.save_chat_attachment_upload, chat.project_id, data, filename
             )
-            source = entry.get("markdown_path") or entry.get("absolute_path")
-            if not source:
-                raise ValueError("upload produced no file")
-            ref = pcm.register_file_ref(chat.chat_id, Path(str(source)))
-            saved.append({"ref": ref, "name": display_name})
+            for attach_path in entry["attach_paths"]:
+                saved.append(_desktop_drop_ref(pcm, chat.chat_id, Path(attach_path)))
         except LookupError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         except (ValueError, RuntimeError, OSError) as exc:
@@ -2191,14 +2222,14 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                 continue
             try:
                 if is_anydoc_document(path.name):
-                    converted = await asyncio.to_thread(
-                        pcm.convert_chat_document, project_id, path
+                    data = await asyncio.to_thread(
+                        _read_native_file_limited, path, chat_service._PROJECT_UPLOAD_MAX_BYTES
                     )
-                    generated = Path(str(converted.get("markdown_path") or ""))
-                    if not generated.is_file():
-                        raise ValueError("document conversion produced no file")
-                    file_refs.append(_desktop_drop_ref(pcm, chat_id, generated))
-                    keep_paths.add(path)
+                    entry = await asyncio.to_thread(
+                        pcm.save_chat_attachment_upload, project_id, data, path.name
+                    )
+                    for attach_path in entry["attach_paths"]:
+                        file_refs.append(_desktop_drop_ref(pcm, chat_id, Path(attach_path)))
                 else:
                     file_refs.append(_desktop_drop_ref(pcm, chat_id, path))
                     keep_paths.add(path)
@@ -2333,23 +2364,55 @@ def _resolve_pin_path(config, raw_path: str, *, agent_root: Path | None = None) 
     return resolved
 
 
+def _chat_memory_source(pcm: ProjectChatManager, chat: ChatInfo) -> dict[str, Any] | None:
+    """The small source record Home needs for an open memory pass."""
+    if chat.helper.get("kind") != "memory_pass":
+        return None
+    source = pcm.get_chat(str(chat.helper.get("source_chat_id") or ""))
+    if source is None:
+        return None
+    return {
+        "chat_id": source.chat_id,
+        "title": source.title,
+        "created_at": source.created_at,
+        "last_activity_at": source.last_activity_at,
+        "archive_path": source.archive_path,
+    }
+
+
 async def list_all_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     # `?active_only=1` skips archived chats. The PWA's frequent syncLatest poll
     # uses it: the archive can be huge (thousands of rows) and is not needed to
     # keep the sidebar/home in sync — archived rows are already held locally and
-    # loaded once at boot. Filter BEFORE the per-chat `is_session_local` probe
+    # loaded on demand. Filter BEFORE the per-chat `is_session_local` probe
     # (filesystem stat) so the poll never touches the archived rows at all.
     active_only = request.query_params.get("active_only") in {"1", "true"}
     if active_only:
         chats = [c for c in pcm.list_chats() if not c.archived]
-        return JSONResponse([c.to_dict(local=True) for c in chats])
+        rows = []
+        for chat in chats:
+            row = chat.to_dict(local=True)
+            source = _chat_memory_source(pcm, chat)
+            if source is not None:
+                row["memory_source"] = source
+            rows.append(row)
+        return JSONResponse(rows)
     return JSONResponse(pcm.list_chats_dicts())
 
 
 async def chat_detail(request: Request) -> Response:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
+    if request.method == "GET":
+        chat = pcm.get_chat(chat_id)
+        if chat is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        row = chat.to_dict(local=True if chat.archived else pcm.is_session_local(chat))
+        source = _chat_memory_source(pcm, chat)
+        if source is not None:
+            row["memory_source"] = source
+        return JSONResponse(row)
     if request.method == "DELETE":
         import logging
         # Log who deletes a chat so an unexpected deletion is auditable: the
@@ -2654,6 +2717,43 @@ async def chat_prompt(request: Request) -> JSONResponse:
         pcm.start_stream(chat_id, prompt, images=images or None)
     except Exception as exc:
         logger.exception("Failed to start stream for %s", chat_id)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"ok": True, "chat_id": chat_id})
+
+
+async def chat_compact(request: Request) -> JSONResponse:
+    """Compact the chat's provider session to shrink its context window.
+
+    Runs as a stream like any turn, so the PWA sees the same status and result
+    events. A chat with no provider session yet has nothing to compact, and a
+    chat with a live user turn must wait for it to finish.
+    """
+    from ciao.models import COMPACT_COMMAND
+
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if chat.archived:
+        return JSONResponse(
+            {"error": "chat is archived", "archived": True}, status_code=409
+        )
+    active = pcm.get_active_stream(chat_id)
+    # A between-turns drain is background work that a real run replaces.
+    if active is not None and not active.background:
+        return JSONResponse({"error": "chat is busy"}, status_code=409)
+    if not chat.session_id:
+        return JSONResponse({"error": "nothing to compact yet"}, status_code=409)
+
+    try:
+        pcm.start_stream(chat_id, COMPACT_COMMAND, compact=True)
+    except ValueError as exc:
+        # An open question the user has not answered yet.
+        return JSONResponse({"error": str(exc)}, status_code=409)
+    except Exception as exc:
+        logger.exception("Failed to start compaction for %s", chat_id)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     return JSONResponse({"ok": True, "chat_id": chat_id})
@@ -4620,10 +4720,12 @@ def _entity_types_body(
 # file on disk is served, relative paths anchoring to the workspace. The browser
 # decides whether to render inline (PDF) or save (everything else) based on
 # the inferred MIME type. Saved-page archives are forced to download so their
-# packaged HTML cannot execute under the PWA origin.
-_WORKSPACE_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
-})
+# packaged HTML cannot execute under the PWA origin, and so is every document
+# format kept only as the original of a chat attachment's Markdown copy.
+_WORKSPACE_INLINE_BINARY_EXTS = frozenset({".pdf", ".zip", ".docx", ".xlsx", ".pptx"})
+_WORKSPACE_BINARY_EXTS = (
+    _WORKSPACE_INLINE_BINARY_EXTS | {".mht", ".mhtml"} | (ANYDOC_EXTENSIONS - {".csv"})
+)
 _WORKSPACE_BINARY_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
@@ -4730,10 +4832,10 @@ async def workspace_binary(request: Request) -> Response:
             }
             media_type = _FALLBACK_MIMES.get(resolved.suffix.lower(), "application/octet-stream")
 
-    # `inline` lets PDFs preview in a tab; saved-page archives are explicit
-    # downloads. Custom frame headers let supported previews embed inside the
+    # `inline` lets PDFs preview in a tab; everything else is an explicit
+    # download. Custom frame headers let supported previews embed inside the
     # PWA's same-origin file viewer iframe.
-    disposition = "attachment" if source_ext in {".mht", ".mhtml"} else "inline"
+    disposition = "inline" if source_ext in _WORKSPACE_INLINE_BINARY_EXTS else "attachment"
     headers = {
         "Content-Disposition": f'{disposition}; filename="{filename}"',
         "X-Frame-Options": "SAMEORIGIN",
@@ -7338,6 +7440,9 @@ async def local_backup_setup_chat(request: Request) -> JSONResponse:
         None,
     )
     if live is not None:
+        # A setup chat opened before the data-root grant existed gets it here,
+        # so the repository it is working on can be created.
+        pcm.grant_data_root(live.chat_id)
         # Re-arming a live chat is harmless: the answer is owed until the
         # repository actually verifies, and a retry must not consume it.
         service.begin_guided_setup()
@@ -7355,8 +7460,12 @@ async def local_backup_setup_chat(request: Request) -> JSONResponse:
     # and model, which is where the owner's configured agent already is. A
     # pinned Claude model would name a model the opencode backend does not
     # have, and setup is not the place to fail on that.
+    # The one chat that may write the data root: the repository the setup
+    # creates lives there, above every workspace folder the chat is confined to.
     chat = pcm.create_chat(
-        project.project_id, title=backup_service.SETUP_CHAT_TITLE
+        project.project_id,
+        title=backup_service.SETUP_CHAT_TITLE,
+        grants_data_root=True,
     )
     pcm.start_stream(chat.chat_id, backup_service.render_setup_prompt(config, context))
     service.begin_guided_setup()

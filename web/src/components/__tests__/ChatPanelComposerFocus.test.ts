@@ -133,6 +133,7 @@ async function mountLayout(
   const taskStore = useTaskStore()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
+  await import('../ChatPanel.vue')
   const { default: ChatLayout } = await import('../ChatLayout.vue')
   const wrapper = mount(ChatLayout, {
     attachTo: document.body,

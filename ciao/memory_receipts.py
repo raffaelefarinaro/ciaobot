@@ -1470,11 +1470,6 @@ def _bullets_match(text: str, needle: str, kind: str = "") -> bool:
     return False
 
 
-def _bullets_containing(text: str, needle: str) -> bool:
-    """Back-compat shim: exact text match with no kind constraint."""
-    return _bullets_match(text, needle)
-
-
 def _reconcile_queue(
     receipt: dict[str, Any],
     journal: Path,
@@ -2061,4 +2056,3 @@ def recover_memory_journals(config: Any) -> dict[str, list[dict[str, Any]]]:
         except Exception:  # noqa: BLE001 — recovery must never fail startup
             logger.exception("memory receipts: recovery failed for %s", journal)
     return {"reconciled": reconciled, "conflicts": conflicts}
-

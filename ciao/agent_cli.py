@@ -41,6 +41,11 @@ _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
 
 _SKILL_PATH = Path(__file__).resolve().parent / "stock" / "skills" / "ciao-cli" / "SKILL.md"
 
+_SCHEDULE_FLAG_HELP: dict[str, str] = {
+    "--command": "Shell command run before the prompt. Only a bypass-mode chat may set one; "
+    "otherwise ask the user to add it in the schedule's Prompt card.",
+}
+
 _SCHEDULE_FLAGS: tuple[tuple[str, str, Any], ...] = (
     # (flag, tool parameter, type)
     ("--prompt", "prompt", str),
@@ -286,11 +291,17 @@ def build_parser() -> argparse.ArgumentParser:
     for verb in ("create", "preview"):
         sub = schedule.add_parser(verb)
         for flag, _param, kind in _SCHEDULE_FLAGS:
-            sub.add_argument(flag, default=None, type=(int if kind is int else str))
+            sub.add_argument(
+                flag, default=None, type=(int if kind is int else str),
+                help=_SCHEDULE_FLAG_HELP.get(flag),
+            )
     upd = schedule.add_parser("update")
     upd.add_argument("schedule_id")
     for flag, _param, kind in _SCHEDULE_FLAGS:
-        upd.add_argument(flag, default=None, type=(int if kind is int else str))
+        upd.add_argument(
+            flag, default=None, type=(int if kind is int else str),
+            help=_SCHEDULE_FLAG_HELP.get(flag),
+        )
     for verb in ("pause", "resume", "run", "delete"):
         sub = schedule.add_parser(verb)
         sub.add_argument("schedule_id")

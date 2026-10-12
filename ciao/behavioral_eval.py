@@ -971,12 +971,6 @@ _FACT_STOPWORDS = frozenset(
 )
 
 
-def _fact_tokens(text: str) -> set[str]:
-    """Content words (len >= 3, non-trivial) used to compare facts."""
-    words = re.findall(r"[a-z0-9]+", str(text).casefold())
-    return {w for w in words if len(w) >= 3 and w not in _FACT_STOPWORDS}
-
-
 def _stem(token: str) -> str:
     """A light singular stem so ``tab``/``tabs`` and ``space``/``spaces`` agree."""
     return token[:-1] if len(token) >= 4 and token.endswith("s") else token
@@ -2426,12 +2420,6 @@ def _glob_matches(pattern: str, value: str) -> bool:
     if pattern.endswith("*"):
         return value.startswith(pattern[:-1])
     return value.startswith(pattern)
-
-
-def _ns(**kwargs: Any) -> Any:
-    from types import SimpleNamespace
-
-    return SimpleNamespace(**kwargs)
 
 
 def _check_unattended_forbidden(tmp_root: Path, scenario_set: ScenarioSet) -> ContractCheck:

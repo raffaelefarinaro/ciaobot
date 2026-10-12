@@ -26,6 +26,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from ciao._task_markdown import split_marked_items
+
 OPEN = "<!-- ciao:task-completions -->"
 CLOSE = "<!-- /ciao:task-completions -->"
 HEADING = "## Completion history"
@@ -174,39 +176,8 @@ def extract_section(body: str) -> str:
     return match.group(0) if match is not None else ""
 
 
-def _items(section_inner: str) -> list[tuple[str, str]]:
-    """``(completion_id or "", text)`` per item, in order, from the section's inside.
-
-    An item is a line starting with ``- `` plus every line after it that does not
-    start a new item. Text in the section that is not an item (the heading, a
-    stray note) is carried as an item with no id, so nothing a user wrote there
-    is lost by a rewrite.
-    """
-    items: list[tuple[str, str]] = []
-    current: list[str] = []
-    for line in section_inner.splitlines():
-        if line.startswith("- ") and current:
-            items.append(_finish(current))
-            current = []
-        current.append(line)
-    if current:
-        items.append(_finish(current))
-    return items
-
-
-def _finish(lines: list[str]) -> tuple[str, str]:
-    text = "\n".join(lines).rstrip()
-    if not lines[0].startswith("- "):
-        return ("", text)
-    # The authoritative id is the trailing item mark the renderer wrote, not
-    # the first completion-looking comment in the headline: the resolution is
-    # user prose and may name a literal ``<!-- completion:<id> -->``.
-    tail = _TAIL.search(lines[0])
-    return (tail.group(1) if tail else "", text)
-
-
 def _parse_item(item_id: str, text: str) -> Completion | None:
-    """One ``_items`` entry as a :class:`Completion`, or None when unreadable.
+    """One split section entry as a :class:`Completion`, or None when unreadable.
 
     An unreadable item is skipped by the parser but kept by every rewrite:
     a hand edit the engine cannot read is still the user's text.
@@ -274,7 +245,7 @@ def parse_completions(body: str) -> list[Completion]:
         return []
     inner = match.group(0)[len(OPEN) : -len(CLOSE)].strip("\n")
     found: list[Completion] = []
-    for item_id, text in _items(inner):
+    for item_id, text in split_marked_items(inner, _TAIL):
         if not item_id:
             continue
         parsed = _parse_item(item_id, text)
@@ -299,7 +270,7 @@ def append_completion(body: str, completion: Completion) -> str:
         head = text.rstrip()
         return f"{head}\n\n{section}\n" if head else f"{section}\n"
     inner = match.group(0)[len(OPEN) : -len(CLOSE)].strip("\n")
-    entries = _items(inner)
+    entries = split_marked_items(inner, _TAIL)
     if any(found_id == completion.id for found_id, _ in entries if found_id):
         raise ValueError(f"completion {completion.id} is already recorded")
     at = next(
@@ -336,7 +307,7 @@ def replace_resolution(
     if match is None:
         raise ValueError(f"unknown completion {completion_id}")
     inner = match.group(0)[len(OPEN) : -len(CLOSE)].strip("\n")
-    entries = _items(inner)
+    entries = split_marked_items(inner, _TAIL)
     at = next(
         (index for index, (found_id, _) in enumerate(entries) if found_id == completion_id),
         None,

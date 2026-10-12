@@ -1,187 +1,57 @@
 // @vitest-environment jsdom
-//
-// Settings → MCP, mounted on its own. No SettingsView, no router, no Pinia:
-// the panel's only input is a `useMcpServers` controller built over a stub
-// API client, which is exactly the boundary the split introduced.
-
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { nextTick } from 'vue'
 import SettingsMcpServers from '../settings/SettingsMcpServers.vue'
-import { useMcpServers, type McpApiClient, type McpServersController } from '../../composables/useMcpServers'
+import { useMcpServers } from '../../composables/useMcpServers'
 import type { McpStatus } from '../../lib/types'
-
-function makeApi(): McpApiClient & Record<string, ReturnType<typeof vi.fn>> {
-  return {
-    get: vi.fn(async () => ({ ok: true, tools: [] }) as never),
-    post: vi.fn(async () => ({}) as never),
-    patch: vi.fn(async () => ({}) as never),
-    del: vi.fn(async () => ({}) as never),
-  }
+function panel(change?: (status: McpStatus) => void) {
+  const status: McpStatus = { workspace: 'personal', agent_root: '/workspace/personal', providers: [
+    { provider: 'claude', available: true, inventory_state: 'loaded', servers: [
+      { name: 'notion', scope: 'project', source: '.mcp.json', allowed: false, connections: [] },
+    ], setup: { add: 'cd /workspace/personal && claude mcp add --scope local example --transport http https://example.com/mcp', authenticate: 'claude mcp login example' } },
+    { provider: 'opencode', available: true, inventory_state: 'loaded', servers: [
+      { name: 'notion', scope: 'project', source: 'opencode.json', allowed: null, connections: [{ chat_id: 'chat-one', state: 'failed', error: 'MCP server connection failed.' }, { chat_id: 'chat-two', state: 'needs_auth' }] },
+    ], setup: { add: 'opencode mcp add example --url https://example.com/mcp', authenticate: 'opencode mcp auth example' } },
+  ] }
+  change?.(status)
+  const get = vi.fn().mockResolvedValue(status)
+  const mcp = useMcpServers({ api: { get } })
+  mcp.status.value = status
+  return { wrapper: mount(SettingsMcpServers, { props: { mcp } }), get }
 }
-
-const STATUS: McpStatus = {
-  enabled: true,
-  bound: true,
-  tool_count: 2,
-  env_path: '/ws/.env',
-  project_servers: [
-    {
-      name: 'notion',
-      source: 'project',
-      transport: 'http',
-      url: 'https://mcp.notion.com/mcp',
-      ready: false,
-      env_keys: [{ key: 'NOTION_TOKEN', configured: false, source: 'env' }],
-    },
-  ],
-}
-
-function mountPanel(seed?: (mcp: McpServersController) => void) {
-  const api = makeApi()
-  const mcp = useMcpServers({
-    api,
-    notifySaved: vi.fn(),
-    notifyFailed: vi.fn(),
-    confirmDelete: async () => true,
+describe('Settings MCP native inventory', () => {
+  it('shows providers and live connections without inferring readiness', () => {
+    const { wrapper } = panel()
+    expect(wrapper.findAll('h3').map(row => row.text())).toEqual(['Claude Code', 'OpenCode'])
+    expect(wrapper.text()).toContain('blocked in workspace')
+    expect(wrapper.text()).toContain('Connection not checked.')
+    expect(wrapper.text()).toContain('connection failed')
+    expect(wrapper.text()).toContain('sign-in required')
+    expect(wrapper.findAll('.badge--success')).toHaveLength(0)
+    expect(wrapper.findAll('input')).toHaveLength(0)
+    expect(wrapper.findAll('.mcp-connection a').map(link => link.attributes('href'))).toEqual(['/chat/chat-one', '/chat/chat-two'])
   })
-  mcp.status.value = structuredClone(STATUS)
-  seed?.(mcp)
-  const wrapper = mount(SettingsMcpServers, { props: { mcp } })
-  return { wrapper, mcp, api }
-}
-
-describe('SettingsMcpServers', () => {
-  it('lists project MCP servers without the agent CLI control surface', () => {
-    const { wrapper } = mountPanel()
-    const names = wrapper.findAll('.skill-name').map(n => n.text())
-    expect(names).toEqual(['notion'])
-    expect(wrapper.find('#mcp-servers').exists()).toBe(true)
+  it('provides workspace setup and CLI authentication instructions', () => {
+    const { wrapper } = panel()
+    expect(wrapper.text()).toContain('/workspace/personal')
+    expect(wrapper.findAll('details')).toHaveLength(2)
+    expect(wrapper.text()).toContain('claude mcp login example')
+    expect(wrapper.text()).toContain('opencode mcp auth example')
   })
-
-  it('explains an empty list and opens the add form from it', async () => {
-    const { wrapper, mcp } = mountPanel(m => { m.status.value = { enabled: true, bound: true, tool_count: 0, project_servers: [] } })
-    expect(wrapper.find('.mcp-empty').text()).toContain('No MCP servers yet.')
-    await wrapper.find('.mcp-empty button').trigger('click')
-    expect(mcp.showAddServer.value).toBe(true)
-  })
-
-  it('badges a server that is missing its secrets', () => {
-    const { wrapper } = mountPanel()
-    expect(wrapper.text()).toContain('needs .env')
-  })
-
-  // The command line is built in one interpolation. Vue's whitespace
-  // condensing trims the leading space inside a <template>, so the old
-  // `{{ srv.command }}<template> {{ args }}</template>` markup ran the two
-  // together and a stdio server read as `Command: pythonserver.py`.
-  it("shows a stdio server's command and args separated by a space", () => {
-    const { wrapper } = mountPanel(m => {
-      m.status.value = {
-        ...STATUS,
-        project_servers: [
-          { name: 'local', source: 'project', transport: 'stdio', command: 'python', args: ['server.py'], ready: true },
-        ],
-      }
+  it('distinguishes unreadable configuration from empty inventory', () => {
+    const { wrapper } = panel(status => {
+      status.providers[0]!.inventory_state = 'unknown'
+      status.providers[0]!.servers = []
+      status.providers[1]!.servers = []
+      status.providers[1]!.available = false
     })
-    expect(wrapper.find('.skill-description').text()).toBe('Command: python server.py')
-    expect(wrapper.text()).not.toContain('pythonserver.py')
+    expect(wrapper.text()).toContain('Some CLI configuration could not be read')
+    expect(wrapper.text()).toContain('No MCP servers configured')
+    expect(wrapper.text()).toContain('not installed')
   })
-
-  it('quotes args that contain spaces', () => {
-    const { wrapper } = mountPanel(m => {
-      m.status.value = {
-        ...STATUS,
-        project_servers: [
-          { name: 'local', source: 'project', transport: 'stdio', command: 'python', args: ['--name', 'a b'], ready: true },
-        ],
-      }
-    })
-    expect(wrapper.find('.skill-description').text()).toBe('Command: python --name "a b"')
-  })
-
-  it('shows only the command when there are no args', () => {
-    const noArgsKey = mountPanel(m => {
-      m.status.value = {
-        ...STATUS,
-        project_servers: [
-          { name: 'local', source: 'project', transport: 'stdio', command: 'python', ready: true },
-        ],
-      }
-    })
-    expect(noArgsKey.wrapper.find('.skill-description').text()).toBe('Command: python')
-
-    const emptyArgs = mountPanel(m => {
-      m.status.value = {
-        ...STATUS,
-        project_servers: [
-          { name: 'local', source: 'project', transport: 'stdio', command: 'python', args: [], ready: true },
-        ],
-      }
-    })
-    expect(emptyArgs.wrapper.find('.skill-description').text()).toBe('Command: python')
-  })
-
-  it('reports "Add via chat" upward instead of navigating itself', async () => {
-    const { wrapper } = mountPanel()
-    await wrapper.findAll('.settings-card-header-actions button')[0].trigger('click')
-    expect(wrapper.emitted('create-via-chat')).toHaveLength(1)
-  })
-
-  it('opens the add form through the controller and posts the typed server', async () => {
-    const { wrapper, mcp, api } = mountPanel()
-    const buttons = wrapper.findAll('.settings-card-header-actions button')
-    await buttons[1].trigger('click')
-    expect(mcp.showAddServer.value).toBe(true)
-
-    const panel = wrapper.find('.settings-form-panel')
-    await panel.findAll('input')[0].setValue('postgres')
-    await panel.findAll('input')[1].setValue('https://db.example/mcp')
-    await panel.find('.settings-actions button').trigger('click')
-
-    expect(api.post).toHaveBeenCalledWith('/api/mcp/servers', {
-      name: 'postgres',
-      url: 'https://db.example/mcp',
-    })
-  })
-
-  it('expands a server row and shows its editable connection and secret fields', async () => {
-    const { wrapper, mcp } = mountPanel()
-    await wrapper.findAll('.skill-row')[0].trigger('click')
-    await nextTick()
-    expect(mcp.isExpanded('notion')).toBe(true)
-    expect(wrapper.find('input[aria-label="MCP server URL"]').exists()).toBe(true)
-    expect(wrapper.find('input[aria-label="NOTION_TOKEN"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('/ws/.env')
-  })
-
-  it('keeps Save secrets and Save connection disabled until something is typed', async () => {
-    const { wrapper } = mountPanel(mcp => { mcp.toggleServer('notion') })
-    await nextTick()
-    const actions = wrapper.find('.mcp-env-block .settings-actions').findAll('button')
-    expect(actions[0].attributes('disabled')).toBeDefined()
-    expect(actions[1].attributes('disabled')).toBeDefined()
-
-    await wrapper.find('input[aria-label="NOTION_TOKEN"]').setValue('secret')
-    await wrapper.find('input[aria-label="MCP server URL"]').setValue('https://elsewhere/mcp')
-    const after = wrapper.find('.mcp-env-block .settings-actions').findAll('button')
-    expect(after[0].attributes('disabled')).toBeUndefined()
-    expect(after[1].attributes('disabled')).toBeUndefined()
-  })
-
-  it('deletes through the controller', async () => {
-    const { wrapper, api } = mountPanel(mcp => { mcp.toggleServer('notion') })
-    await nextTick()
-    await wrapper.find('.asset-actions .btn-danger').trigger('click')
-    expect(api.del).toHaveBeenCalledWith('/api/mcp/servers/notion')
-  })
-
-  // The panel's markup was lifted out of SettingsView's scoped stylesheet, so
-  // the shared sheet has to come with it: a scoped rule in the parent never
-  // reaches a child's subtree.
-  it('carries its own scoped stylesheet', () => {
-    const { wrapper } = mountPanel()
-    const attrs = Object.keys(wrapper.find('.skill-row').attributes())
-    expect(attrs.some(a => a.startsWith('data-v-'))).toBe(true)
+  it('refreshes the read-only inventory', async () => {
+    const { wrapper, get } = panel()
+    await wrapper.get('button').trigger('click')
+    expect(get).toHaveBeenCalledWith('/api/mcp/status')
   })
 })

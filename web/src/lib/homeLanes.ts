@@ -10,7 +10,7 @@ export interface HomeTiers {
   older: ChatInfo[]
 }
 
-export function chatActivityTimestamp(chat: ChatInfo): string {
+export function chatActivityTimestamp(chat: Pick<ChatInfo, 'last_activity_at' | 'created_at'>): string {
   return chat.last_activity_at || chat.created_at
 }
 

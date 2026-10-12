@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from ciao.config import CiaoConfig
 from ciao.models import ChatContext, ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web import chat_service
 from ciao.web.project_chats import ProjectChatManager
 
 from tests.conftest import attach_stub_mcp
@@ -332,6 +335,10 @@ async def test_connection_error_exception_marks_turn_for_fast_retry(tmp_path: Pa
     assert updated.retry_status == "pending"
     assert updated.retry_prompt == "do the thing"
     assert updated.retry_interval_seconds == 30
+    assert any(
+        event.get("type") == "chat_retry" and event.get("status") == "pending"
+        for event in events
+    )
     pcm.stop_chat_retry(chat.chat_id)
 
 
@@ -749,8 +756,8 @@ OLLAMA_WEEKLY_LIMIT = (
 )
 
 
-def test_weekly_usage_limit_is_terminal_not_retryable() -> None:
-    """A weekly limit resets days out; the hourly retry must not be armed."""
+def test_weekly_usage_limit_is_terminal_not_hourly() -> None:
+    """A weekly limit resets days out; it takes the daily retry, never the hourly one."""
     from ciao.web.chat_service import (
         _is_retryable_quota_error,
         _is_terminal_quota_error,
@@ -775,8 +782,8 @@ def test_session_limit_and_capacity_stay_retryable() -> None:
         assert _is_retryable_quota_error(text) is True
 
 
-async def test_weekly_limit_error_arms_no_retry(tmp_path: Path) -> None:
-    """A terminal weekly limit surfaces as an error and leaves no retry pending."""
+async def test_weekly_limit_error_arms_daily_retry(tmp_path: Path) -> None:
+    """A weekly limit surfaces as an error and arms the once-a-day retry."""
     from ciao.models import AssistantTextDelta
 
     pcm = _make_manager(tmp_path)
@@ -803,27 +810,162 @@ async def test_weekly_limit_error_arms_no_retry(tmp_path: Path) -> None:
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.retry_status != "pending"
-    assert not any(
-        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
-    )
+    assert updated.retry_status == "pending"
+    assert updated.retry_kind == "quota_terminal"
+    assert updated.retry_interval_seconds == 86400
+    assert any(e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events)
     assert any(
         e.get("type") == "result" and e.get("is_error") for e in events
     )
+    pcm.stop_chat_retry(chat.chat_id)
 
 
-async def test_pending_retry_is_stopped_by_terminal_weekly_limit(tmp_path: Path) -> None:
-    """A retry attempt that hits a weekly limit must not refire on the hourly timer."""
+async def test_terminal_quota_retries_stop_after_cap(tmp_path: Path) -> None:
+    """After _MAX_TERMINAL_QUOTA_RETRIES daily retries, a further weekly limit arms nothing."""
+    from ciao.web.project_chats import _MAX_TERMINAL_QUOTA_RETRIES
+
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
-    pcm.set_chat_retry(chat.chat_id, "do the thing", reason="rate limit")
+    chat.retry_attempts = _MAX_TERMINAL_QUOTA_RETRIES
+    chat.retry_kind = "quota_terminal"
+    pcm._save()
 
-    pcm._stop_terminal_quota_retry(chat.chat_id)
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield ResultEvent(
+            type="result",
+            result=OLLAMA_WEEKLY_LIMIT,
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.retry_status == "stopped"
+    assert updated.retry_status != "pending"
+
+
+def test_terminal_quota_reset_at_uses_claude_weekly_bucket(tmp_path: Path) -> None:
+    """The daily retry lands just after a rejected Claude weekly bucket resets."""
+    import json
+    import time
+
+    from ciao.rate_limits import default_store_path
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test", provider="claude")
+    store = default_store_path(pcm._runtime_root)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    resets_at = int(time.time()) + 3 * 86400
+    store.write_text(
+        json.dumps({
+            "buckets": {
+                "seven_day": {"status": "rejected", "resets_at": resets_at},
+                "five_hour": {"status": "allowed", "resets_at": resets_at + 60},
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    from datetime import UTC, datetime
+
+    expected = datetime.fromtimestamp(resets_at + 60, UTC).replace(microsecond=0)
+    assert pcm._terminal_quota_reset_at(chat) == (
+        expected.isoformat().replace("+00:00", "Z")
+    )
+
+    chat.provider = "opencode"
+    assert pcm._terminal_quota_reset_at(chat) is None
+    chat.provider = "claude"
+
+    store.write_text(
+        json.dumps({"buckets": {"seven_day": {"status": "allowed", "resets_at": resets_at}}}),
+        encoding="utf-8",
+    )
+    assert pcm._terminal_quota_reset_at(chat) is None
+
+    store.write_text(
+        json.dumps({"buckets": {"seven_day": {"status": "rejected", "resets_at": 1}}}),
+        encoding="utf-8",
+    )
+    assert pcm._terminal_quota_reset_at(chat) is None
+
+    store.write_text("{not json", encoding="utf-8")
+    assert pcm._terminal_quota_reset_at(chat) is None
+
+
+async def test_failed_turn_sets_last_error_and_next_turn_clears_it(tmp_path: Path) -> None:
+    """A failed turn persists its error on the chat and in the done event; a clean turn clears it."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    pcm._events.publish = capture_publish  # type: ignore[method-assign]
+
+    outcomes = iter([
+        ResultEvent(
+            type="result",
+            result="API Error: Request rejected (400): bad request body",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        ),
+        ResultEvent(
+            type="result",
+            result="all good",
+            session_id="",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        ),
+    ])
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield next(outcomes)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "first")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.sleep(0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert "bad request body" in updated.last_error
+    assert updated.to_dict()["last_error"] == updated.last_error
+    done = [e for e in published if e.get("type") == "chat_streaming_done"]
+    assert done and done[-1]["last_error"] == updated.last_error
+
+    stream = pcm.start_stream(chat.chat_id, "second")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.sleep(0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.last_error == ""
+    done = [e for e in published if e.get("type") == "chat_streaming_done"]
+    assert done[-1]["last_error"] == ""
 
 
 async def test_quota_retries_stop_after_cap(tmp_path: Path) -> None:
@@ -967,3 +1109,59 @@ async def test_connection_retries_do_not_consume_quota_budget(tmp_path: Path) ->
     assert updated.retry_kind == "quota"
     assert updated.retry_attempts == 0
     pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_retry_loop_wakes_at_a_rearmed_retry_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed daily retry that re-arms a near time is retried then, not a day later."""
+    from ciao.web import project_chats
+
+    monkeypatch.setattr(project_chats, "_RETRY_STREAM_POLL_SECONDS", 0.01)
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    near_at = chat_service._iso_after(1)
+    calls: list[str] = []
+    second_call = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append(prompt)
+        if len(calls) == 1:
+            # The first daily retry fails and re-arms a retry one second out.
+            pcm.set_chat_retry(
+                chat_id,
+                prompt,
+                reason="connection",
+                next_at=near_at,
+                interval_seconds=24 * 60 * 60,
+            )
+            return
+        second_call.set()
+        yield ResultEvent(
+            type="result",
+            result="done",
+            session_id="sess-ok",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    pcm.set_chat_retry(
+        chat.chat_id,
+        "run me",
+        reason="quota",
+        next_at="2000-01-01T00:00:00Z",
+        interval_seconds=24 * 60 * 60,
+    )
+    await asyncio.wait_for(second_call.wait(), timeout=5.0)
+    while (current := pcm.get_chat(chat.chat_id)) is not None and current.retry_status == "pending":
+        await asyncio.sleep(0.01)
+
+    assert calls == ["run me", "run me"]
+    assert current is not None
+    assert current.retry_status == ""

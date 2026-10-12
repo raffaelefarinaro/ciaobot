@@ -486,6 +486,10 @@
         </div>
         <p v-if="schedule.description" class="schedule-description">{{ schedule.description }}</p>
         <p class="full-prompt">{{ schedule.prompt }}</p>
+        <template v-if="schedule.command">
+          <h3 class="command-label">Command <span class="label-hint">runs first, before the prompt</span></h3>
+          <pre class="full-command"><code>{{ schedule.command }}</code></pre>
+        </template>
       </section>
       </div>
 
@@ -770,7 +774,6 @@ function onEditKeydown(event: KeyboardEvent) {
 }
 
 onMounted(() => {
-  if (!store.models) store.fetchModels()
   if (!store.schedulesLoaded) refreshSchedules()
   pollTimer = window.setInterval(refreshSchedules, 30_000)
   document.addEventListener('visibilitychange', onVisibilityChange)
@@ -1271,6 +1274,9 @@ const cardDirty = computed(() => editingCard.value !== '' && editSnapshot() !== 
 
 function startCardEdit(card: Exclude<EditCard, ''>) {
   if (!schedule.value) return
+  if (card === 'engine' && schedule.value.scope !== 'system' && !inheritsChatModel.value && !store.models) {
+    void store.fetchModels()
+  }
   const isSystem = schedule.value.scope === 'system'
   if (isSystem) {
     if (card !== 'engine' && card !== 'advanced') return
@@ -1688,6 +1694,27 @@ function closeSchedule() {
   color: var(--fg);
   font-size: var(--text-base);
   line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.command-label {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 650;
+}
+
+/* The command is code: monospace, never re-wrapped into prose. */
+.full-command {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

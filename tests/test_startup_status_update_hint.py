@@ -9,7 +9,6 @@ and the endpoint only ever reads the last value it stored.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from types import SimpleNamespace
 

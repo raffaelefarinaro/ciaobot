@@ -124,6 +124,10 @@ async function mountLayout(seed: { questions?: ReturnType<typeof makeQuestion>[]
   const taskStore = useTaskStore()
   vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
 
+  // ChatPanel now enters through the same lazy loader as the app. Resolve its
+  // real module before mounting so these interaction tests start at the same
+  // post-load point as their former static import.
+  await import('../ChatPanel.vue')
   const { default: ChatLayout } = await import('../ChatLayout.vue')
   const wrapper = mount(ChatLayout, {
     attachTo: document.body,

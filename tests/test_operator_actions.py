@@ -544,8 +544,6 @@ def test_detector_raising_is_logged_and_skipped(tmp_path: Path) -> None:
     """A broken detector must not sink the pass."""
     from ciao.operator_actions import _DETECTORS
 
-    broken = object.__new__(type("Broken", (), {}))
-
     def boom(_context):
         raise RuntimeError("boom")
 

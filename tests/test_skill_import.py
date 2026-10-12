@@ -10,7 +10,6 @@ import pytest
 
 from ciao.skill_import import (
     MAX_SKILL_ASSET_BYTES,
-    MAX_SKILL_TOTAL_BYTES,
     extract_skill_zip,
     validate_skill_zip,
 )
@@ -224,8 +223,6 @@ def test_import_rejects_a_missing_or_malformed_content_length(tmp_path: Path) ->
     chunked/HTTP2 client that omits (or mangles) the header must be rejected
     before `request.form()` spools the whole body to disk or proxy memory.
     """
-    import io
-    import zipfile
     from types import SimpleNamespace
 
     from ciao.config import CiaoConfig, WorkspaceConfig
@@ -331,7 +328,8 @@ def test_concurrent_non_force_imports_of_the_same_skill_do_not_clobber(
     # loser is refused with "already exists", never a silent replacement.
     assert len(succeeded) == 1, results
     assert len(results) == 2
-    refused_errors = [e for _n, errs in results if _n is None for e in errs]
+    assert len(refused) == 1, results
+    refused_errors = [error for _name, errors in refused for error in errors]
     assert any("already exists" in e for e in refused_errors), refused_errors
     # And the winner's content is intact (not half-deleted).
     installed = (tmp_path / "demo" / "asset.bin").read_bytes()

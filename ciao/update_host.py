@@ -697,13 +697,8 @@ class MacUpdateHost:
         command = _loaded_server_command(self._launchctl, self._uid)
         if command is not None:
             return command
-        path = macos_service.default_launch_agents_dir() / f"{SERVER_LABEL}.plist"
-        try:
-            with path.open("rb") as handle:
-                loaded: Any = plistlib.load(handle)
-        except (OSError, plistlib.InvalidFileException, ValueError):
-            return None
-        if not isinstance(loaded, dict):
+        loaded = macos_service.load_server_plist()
+        if loaded is None:
             return None
         arguments = loaded.get("ProgramArguments")
         if not isinstance(arguments, list) or not arguments:
@@ -994,8 +989,11 @@ class MacUpdateHost:
         """MIGRATION (#1249): a revision-1 host its record proves ours, under a hosted agent.
 
         A current host, no host, or a direct LaunchAgent (which runs no host and
-        has nothing to repoint) answers False.
+        has nothing to repoint) answers False, and a direct agent answers before
+        any bundle probe.
         """
+        if self._hosted_agent_python() is None:
+            return False
         bundle = default_bundle_path()
         try:
             verify_owned_host(bundle)
@@ -1006,20 +1004,11 @@ class MacUpdateHost:
             verify_superseded_host(bundle)
         except ServerHostError:
             return False
-        return self._hosted_agent_python() is not None
-
-    def _server_agent_plist(self) -> dict[str, Any] | None:
-        path = macos_service.default_launch_agents_dir() / f"{SERVER_LABEL}.plist"
-        try:
-            with path.open("rb") as handle:
-                loaded: Any = plistlib.load(handle)
-        except (OSError, plistlib.InvalidFileException, ValueError):
-            return None
-        return loaded if isinstance(loaded, dict) else None
+        return True
 
     def _hosted_agent_python(self) -> str | None:
         """The interpreter the server LaunchAgent's hosted command serves, or None."""
-        data = self._server_agent_plist()
+        data = macos_service.load_server_plist()
         if data is None:
             return None
         return macos_service.hosted_service_python(data.get("ProgramArguments"))
@@ -1044,7 +1033,7 @@ class MacUpdateHost:
                 "host to move"
             )
         host = self._install_host(archive, entry)
-        data = self._server_agent_plist()
+        data = macos_service.load_server_plist()
         if data is None:
             raise RuntimeError("the server LaunchAgent could not be read after the host install")
         data["ProgramArguments"] = list(

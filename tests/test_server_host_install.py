@@ -593,6 +593,139 @@ def test_a_revision_one_host_that_cannot_be_moved_aside_is_left_in_place(
 
 
 @requires_posix_uid
+def test_a_revision_one_host_that_cannot_be_moved_back_is_kept_in_the_staging_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    legacy = _make_legacy_bundle(target.parent)
+    record = tmp_path / "records" / "server-host.json"
+    _record_legacy_host(legacy, record)
+    real_rename = os.rename
+
+    def refuse_the_move_back(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(str(src)).name == "superseded":
+            raise OSError(errno.EPERM, "operation not permitted")
+        real_rename(src, dst, *args, **kwargs)
+
+    def refuse_final_proof(*args: Any, **kwargs: Any) -> None:
+        raise server_host.ServerHostError("simulated failure", code="not_owned")
+
+    monkeypatch.setattr(server_host_install.os, "rename", refuse_the_move_back)
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse_final_proof)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert "kept at" in str(caught.value)
+    # The revision-1 bundle survives in the staging directory the error names.
+    stages = [
+        item
+        for item in target.parent.iterdir()
+        if item.name.startswith(server_host_install.STAGING_PREFIX)
+    ]
+    assert len(stages) == 1
+    assert (stages[0] / "superseded" / _LEGACY_EXE_REL).read_bytes() == (
+        b"revision-one-host-binary"
+    )
+    assert record.exists()
+
+
+@requires_posix_uid
+def test_a_restored_revision_one_host_whose_record_cannot_be_rewritten_keeps_a_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    legacy = _make_legacy_bundle(target.parent)
+    record = tmp_path / "records" / "server-host.json"
+    _record_legacy_host(legacy, record)
+    real_write = server_host_install._write_ownership_record
+    writes: list[Path] = []
+
+    def fail_the_restore(snapshot: Any, path: Path) -> None:
+        # The first write is the new host's record; the second is the restore.
+        writes.append(path)
+        if len(writes) == 1:
+            real_write(snapshot, path)
+            return
+        raise OSError(errno.EIO, "io")
+
+    def refuse_final_proof(*args: Any, **kwargs: Any) -> None:
+        raise server_host.ServerHostError("simulated failure", code="not_owned")
+
+    monkeypatch.setattr(
+        server_host_install, "_write_ownership_record", fail_the_restore
+    )
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse_final_proof)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert "ownership record could not be written back" in str(caught.value)
+    assert (target / _LEGACY_EXE_REL).read_bytes() == b"revision-one-host-binary"
+    assert record.exists()
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_a_new_host_that_cannot_be_removed_keeps_the_revision_one_host_in_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    legacy = _make_legacy_bundle(target.parent)
+    record = tmp_path / "records" / "server-host.json"
+    _record_legacy_host(legacy, record)
+    real_rmtree = shutil.rmtree
+
+    def leave_the_new_host(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(str(path)) == target:
+            return
+        real_rmtree(path, *args, **kwargs)
+
+    def refuse_final_proof(*args: Any, **kwargs: Any) -> None:
+        raise server_host.ServerHostError("simulated failure", code="not_owned")
+
+    monkeypatch.setattr(server_host_install.shutil, "rmtree", leave_the_new_host)
+    monkeypatch.setattr(server_host_install, "verify_owned_host", refuse_final_proof)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive,
+            entry,
+            bundle_path=target,
+            ownership_path=record,
+            runner=_FakeRunner(),
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    assert "could not be removed" in str(caught.value)
+    stages = [
+        item
+        for item in target.parent.iterdir()
+        if item.name.startswith(server_host_install.STAGING_PREFIX)
+    ]
+    assert len(stages) == 1
+    assert (stages[0] / "superseded" / _LEGACY_EXE_REL).exists()
+    assert record.exists()
+
+
+@requires_posix_uid
 def test_a_revision_one_host_without_its_record_is_refused_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

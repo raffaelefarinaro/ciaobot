@@ -187,6 +187,7 @@ def _chat() -> SimpleNamespace:
         archive_path="",
         handover_messages=[],
         user_turn_images={},
+        turn_index_base=0,
         user_turn_timings={},
         user_turn_unattended={},
     )

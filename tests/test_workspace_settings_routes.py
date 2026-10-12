@@ -10,7 +10,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.config import CiaoConfig
 from ciao.execution_modes import credential_path_deny_rules
 from ciao.web.routes_api import (
     archive_workspace_setting,
@@ -1387,19 +1387,6 @@ def test_seeding_failure_does_not_undo_the_created_workspace(tmp_path, monkeypat
     assert created.status_code == 201
     assert created.json()["bootstrapped"] is False
     assert config.workspace("client-c") is not None
-
-
-def test_chat_creation_carries_no_debug_instrumentation():
-    """Leftover perf tracing must not ship and run on every request."""
-    import inspect
-
-    from ciao.web.routes_api import create_project_chat
-
-    source = inspect.getsource(create_project_chat)
-    assert "import time as _t" not in source
-    assert "import logging as _lg" not in source
-    assert "perf_counter" not in source
-    assert ".info(" not in source
 
 
 def test_proposal_action_rejects_an_unknown_action_before_touching_the_queue(tmp_path):

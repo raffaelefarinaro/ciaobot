@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import SettingsAppInstall from '../settings/SettingsAppInstall.vue'
 import { SETUP_CARD_DISMISSED_KEY } from '../../lib/pwaPlatform'
+import { _resetInstallPromptForTests, installedOnDevice } from '../../lib/installPrompt'
 
 const MAC_SAFARI_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15'
@@ -91,8 +92,8 @@ function setLocation(location: { hostname: string; protocol: string }) {
   override(window, 'location', { ...window.location, href, ...location })
 }
 
-function mountCard() {
-  wrapper = mount(SettingsAppInstall, { attachTo: document.body })
+function mountCard(props: { expandSteps?: boolean } = {}) {
+  wrapper = mount(SettingsAppInstall, { attachTo: document.body, props })
   return wrapper
 }
 
@@ -305,5 +306,23 @@ describe('SettingsAppInstall', () => {
     expect(summary.attributes('tabindex')).toBeUndefined()
     expect(summary.attributes('role')).toBeUndefined()
     expect(details.findAll('li')).toHaveLength(5)
+  })
+
+  it('names an app installed on this device from a browser tab', () => {
+    setStandalone(false)
+    installedOnDevice.value = true
+    try {
+      const view = mountCard()
+      expect(view.text()).toContain('A browser tab')
+      expect(view.text()).toContain('The app is installed on this device too')
+    } finally {
+      _resetInstallPromptForTests()
+    }
+  })
+
+  it('opens the platform steps when linked from the Home setup card', () => {
+    expect(mountCard({ expandSteps: true }).get('details').element.open).toBe(true)
+    wrapper?.unmount()
+    expect(mountCard().get('details').element.open).toBe(false)
   })
 })

@@ -19,6 +19,7 @@ from claude_agent_sdk import ClaudeSDKError
 
 from ciao.providers.claude import ClaudeProvider, _sdk_permission_mode
 from ciao.providers.opencode import OpencodeProvider
+from ciao.web.project_chats import ProjectChatManager
 
 
 @pytest.fixture
@@ -105,6 +106,52 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     bash_hooks = options.hooks["PreToolUse"]
     matchers = {hook.matcher for hook in bash_hooks}
     assert matchers == {"Bash", "Monitor"}
+
+
+@pytest.mark.asyncio
+async def test_claude_live_mcp_status_is_normalized_and_excludes_secrets(
+    claude_provider: ClaudeProvider,
+) -> None:
+    class FakeClient:
+        async def get_mcp_status(self):
+            return {
+                "mcpServers": [
+                    {"name": "notion", "status": "connected", "tools": [{"name": "search"}]},
+                    {"name": "private", "status": "needs-auth", "error": "credential=secret"},
+                ]
+            }
+
+    claude_provider._client = FakeClient()
+    claude_provider._connected = True
+
+    assert await claude_provider.read_mcp_status() == {
+        "notion": "connected", "private": "needs_auth"
+    }
+
+
+@pytest.mark.asyncio
+async def test_claude_mcp_status_timeout_becomes_unknown_in_runtime_status():
+    class Claude:
+        _connected = True
+
+        async def read_mcp_status(self):
+            raise TimeoutError("sensitive timeout detail")
+
+    manager = ProjectChatManager.__new__(ProjectChatManager)
+    manager._chats = {"chat": SimpleNamespace(provider="claude")}
+    manager._providers = {"chat": SimpleNamespace(_provider=Claude())}
+    manager._workspace_for_chat = lambda _chat_id: "work"
+
+    rows = await manager.provider_mcp_runtime_connections("work", {"claude": ["notion"]})
+
+    assert rows == {
+        "claude": {
+            "notion": [{
+                "state": "unknown", "provider": "claude", "chat_id": "chat",
+                "error": "Could not read provider MCP status.",
+            }]
+        }
+    }
 
 
 @pytest.mark.asyncio
@@ -946,6 +993,47 @@ def test_claude_convert_system_message_suppresses_allowed_rate_limit(
     assert events3[0].status == "Rate limit exceeded (five_hour)"
 
 
+def test_claude_compact_boundary_reports_the_token_change(
+    claude_provider: ClaudeProvider,
+) -> None:
+    from claude_agent_sdk import SystemMessage
+
+    events = claude_provider._convert_message(
+        SystemMessage(
+            subtype="compact_boundary",
+            data={
+                "compact_metadata": {
+                    "trigger": "manual",
+                    "pre_tokens": 16000,
+                    "post_tokens": 2000,
+                }
+            },
+        )
+    )
+    assert [event.status for event in events] == [
+        "Compacted context: 16,000 → 2,000 tokens"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_claude_compact_sends_only_the_slash_command(
+    claude_provider: ClaudeProvider,
+) -> None:
+    from ciao.models import AgentRequest
+
+    # A capsule ahead of "/compact" makes the SDK answer in text instead of
+    # compacting, so the compact prompt must go out bare.
+    request = AgentRequest(
+        prompt="[CIAO_CONTEXT_BEGIN]\ncapsule\n[CIAO_CONTEXT_END]\n\n/compact",
+        model="opus",
+        mode="normal",
+        compact=True,
+        stable_context_prefix="capsule",
+    )
+    messages = [message async for message in claude_provider._prompt_payload(request)]
+    assert [message["message"]["content"] for message in messages] == ["/compact"]
+
+
 @pytest.mark.parametrize("mode", ["normal", "plan"])
 @pytest.mark.asyncio
 async def test_manual_and_plan_modes_pre_approve_nothing(
@@ -1202,6 +1290,85 @@ async def test_claude_workspace_scope_keeps_vault_inside_agent_root_out_of_add_d
 
 
 @pytest.mark.asyncio
+async def test_a_changed_root_set_rebuilds_the_claude_client(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The sandbox is fixed when the CLI process starts, so a turn whose roots
+    differ from the live client's (a setup chat granted the data root) must
+    disconnect it and build a new one with the widened sandbox."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    captured = {}
+    stopped: list[bool] = []
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    agent_root = tmp_path / "agent"
+    data_root = tmp_path
+    provider._client = object()  # type: ignore[assignment]
+    provider._connected = True
+    provider._fs_scope_key = ("workspace", (str(agent_root),))
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._connected = False
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(agent_root), str(data_root)),
+    )
+
+    await provider._ensure_connected(request)
+
+    assert stopped == [True]
+    assert captured["options"].sandbox["filesystem"]["allowWrite"] == [
+        str(agent_root),
+        str(data_root),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_root_set_reuses_the_claude_client(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    stopped: list[bool] = []
+    provider = ClaudeProvider(tmp_path)
+    live = object()
+    provider._client = live  # type: ignore[assignment]
+    provider._connected = True
+    # Model and mode already match the turn, so only the roots can decide.
+    provider._current_model = "sonnet"
+    provider._current_mode = "auto"
+    agent_root = str(tmp_path / "agent")
+    provider._fs_scope_key = ("workspace", (agent_root,))
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(agent_root,),
+    )
+
+    assert await provider._ensure_connected(request) is live
+    assert stopped == []
+
+
+@pytest.mark.asyncio
 async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 
@@ -1327,6 +1494,15 @@ def _capture_spawn(monkeypatch, envs: list[dict] | None = None) -> list[tuple[st
 
 async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypatch):
     provider, request = _opencode_scope_fixture(tmp_path, "workspace")
+    request.extra_env = {"PATH": str(tmp_path / "node-bin")}
+    node_code = tmp_path / "node-code"
+    paths: list[str] = []
+
+    def native_node_roots(path):
+        paths.append(path)
+        return [node_code]
+
+    monkeypatch.setattr("ciao.providers.opencode.node_tool_read_roots", native_node_roots)
     envs: list[dict] = []
     spawned = _capture_spawn(monkeypatch, envs)
     calls: list[tuple[list[Path], list[Path]]] = []
@@ -1348,6 +1524,8 @@ async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypa
         await provider._start_server_once(request, str(binary))
 
     roots, read_only = calls[0]
+    assert paths == [str(tmp_path / "node-bin")]
+    assert node_code in read_only
     assert roots[:2] == [tmp_path / "agent", tmp_path / "vault"]
     sandbox_cache = Path.home() / ".cache" / "ciaobot-opencode-sandbox"
     # The server writes its data and state, and a cache no unconfined server
@@ -1356,9 +1534,12 @@ async def test_opencode_workspace_scope_prefixes_sandbox_exec(tmp_path, monkeypa
     assert (xdg / "data" / "opencode").resolve() in roots
     assert (xdg / "state" / "opencode").resolve() in roots
     assert (sandbox_cache / "opencode").resolve() in roots
-    assert read_only == [(xdg / "config" / "opencode").resolve(), (tmp_path / "install").resolve()]
+    assert (xdg / "config" / "opencode").resolve() in read_only
+    assert (tmp_path / "install").resolve() in read_only
+    assert (sandbox_cache / "npm").resolve() in roots
     assert not set(read_only) & set(roots)
     assert envs[0]["XDG_CACHE_HOME"] == str(sandbox_cache)
+    assert envs[0]["npm_config_cache"] == str(sandbox_cache / "npm")
     argv = spawned[0]
     assert argv[:3] == ("sandbox-exec", "-p", "PROFILE")
     assert argv[3:6] == (str(binary), "serve", "--port")

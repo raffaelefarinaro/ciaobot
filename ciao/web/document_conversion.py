@@ -9,8 +9,14 @@ ANYDOC_EXTENSIONS = frozenset({
     ".xls", ".xlsx", ".xlsm", ".xlsb", ".odt", ".ods", ".odp", ".rtf", ".epub", ".csv", ".pdf",
 })
 
+# Formats the agent reads itself; the Markdown copy is attached beside them.
+NATIVELY_READABLE_EXTENSIONS = frozenset({".pdf"})
+
 def is_anydoc_document(filename: str) -> bool:
     return Path(filename).suffix.lower() in ANYDOC_EXTENSIONS
+
+def is_natively_readable(filename: str) -> bool:
+    return Path(filename).suffix.lower() in NATIVELY_READABLE_EXTENSIONS
 
 def convert_document(path: Path) -> str:
     if path.stat().st_size > ANYDOC_MAX_BYTES:

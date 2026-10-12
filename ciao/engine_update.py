@@ -680,6 +680,44 @@ def _stage_server_host(
         logger.warning("%s", op.host_error)
 
 
+def _late_stage_server_host(
+    op: Operation, host: UpdateHost, *, fetch: Fetch, release_base: str
+) -> None:
+    """MIGRATION (#1281): stage the host now when the old engine could not.
+
+    An update staged by an engine without host staging (v1.3.0) reaches the
+    apply with no ``host_archive`` and no ``host_status``. The apply runs from
+    the new env, so it fetches the host here, from the manifest that staging
+    already verified and saved, before the engine is stopped. Best effort, as
+    in :func:`_stage_server_host`: a failure is recorded on the operation and
+    never fails the update.
+    """
+    if op.host_archive or op.host_status:
+        return
+    if not host.server_host_migration_needed():
+        return
+    stage = Path(op.stage_dir)
+    try:
+        manifest = release_manifest.verify_manifest(
+            (stage / MANIFEST_NAME).read_bytes(),
+            (stage / SIGNATURE_NAME).read_text(encoding="utf-8"),
+            release_manifest.RELEASE_PUBLIC_KEY,
+        )
+    except Exception as exc:
+        op.host_status = "failed"
+        op.host_error = f"the Ciaobot Server host was not staged: {_reason(exc)}"
+        logger.warning("%s", op.host_error)
+        return
+    _stage_server_host(
+        op,
+        manifest,
+        stage_dir=stage,
+        release_url=f"{release_base}/v{op.to_version}",
+        fetch=fetch,
+        host=host,
+    )
+
+
 def _migrate_server_host(op: Operation, host: UpdateHost) -> None:
     """MIGRATION (#1249): move a revision-1 host to revision 2 during the apply.
 
@@ -1313,6 +1351,8 @@ def run_apply(
     clock: Clock = time.monotonic,
     receipt_path: Path | None = None,
     host: UpdateHost | None = None,
+    fetch: Fetch = default_fetch,
+    release_base: str = RELEASE_BASE,
 ) -> Operation:
     """Stop, swap, start, verify — or roll back. Runs in the updater job.
 
@@ -1327,7 +1367,10 @@ def run_apply(
     Nothing here resolves a dependency: the environment the swap installs is the
     one :func:`stage_update` built and verified, moved rather than rebuilt
     (#611). That is what makes an apply work with no network at all, and what
-    makes "apply what was verified" true rather than nearly true.
+    makes "apply what was verified" true rather than nearly true. (The one
+    exception is the revision-1 host migration, #1281: an update staged by an
+    engine without host staging fetches the host before the engine is stopped,
+    best effort.)
 
     Nothing here raises once the engine is down: every failure is answered by a
     rollback and a persisted phase, because the process that has to survive this
@@ -1433,6 +1476,11 @@ def run_apply(
         )
         if disagreement:
             return record(disagreement)
+        # MIGRATION (#1281): an update staged by v1.3.0 carries no host; fetch it
+        # now, while the engine still serves, so the swap below stays offline.
+        _late_stage_server_host(op, platform, fetch=fetch, release_base=release_base)
+        if op.host_archive or op.host_status:
+            write_operation(op, root)
         previous_env = Path(op.stage_dir) / PREVIOUS_ENV_NAME
         env_moved = False
 

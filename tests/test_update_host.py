@@ -51,7 +51,7 @@ from tests.test_engine_update import (
     _server_plist_path,
     _staged,
     _write_server_plist,
-    phases,
+    phases as phases,
 )
 
 UPDATER_PLIST = "com.ciao.updater.plist"
@@ -791,6 +791,9 @@ class FakeHost:
     def after_env_restored(self, live: Path, *, bin_dir: Path, wheel: Path) -> None:
         self._record("after_env_restored", live.name)
 
+    def server_host_migration_needed(self) -> bool:
+        return False
+
     def uv_candidates(self) -> list[str]:
         return self._mac.uv_candidates()
 
@@ -1232,4 +1235,30 @@ def test_migration_is_needed_only_for_a_revision_one_host_under_a_hosted_agent(
     # A record that does not prove the host is refused as a migration too.
     _hosted_agent(legacy)
     monkeypatch.setattr(update_host, "verify_superseded_host", _no_host)
+    assert host.server_host_migration_needed() is False
+
+
+def test_migration_check_never_probes_the_bundle_under_a_direct_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = update_host.MacUpdateHost(
+        launchctl=lambda args: subprocess.CompletedProcess(args, 1, "", ""), uid=501
+    )
+
+    def _probed(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a direct LaunchAgent must not probe the host bundle")
+
+    monkeypatch.setattr(update_host, "verify_owned_host", _probed)
+    monkeypatch.setattr(update_host, "verify_superseded_host", _probed)
+
+    # No server plist at all.
+    assert host.server_host_migration_needed() is False
+
+    # A direct-shape plist.
+    from ciao import macos_service
+
+    agents = macos_service.default_launch_agents_dir()
+    agents.mkdir(parents=True, exist_ok=True)
+    with (agents / "com.ciao.server.plist").open("wb") as handle:
+        plistlib.dump({"Label": "com.ciao.server", "ProgramArguments": ["/env/bin/python", "-m", "ciao.cli", "run"]}, handle)
     assert host.server_host_migration_needed() is False

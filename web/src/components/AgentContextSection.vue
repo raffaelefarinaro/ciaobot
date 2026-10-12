@@ -4,16 +4,26 @@
   <section class="rail-section agent-context" aria-labelledby="agent-context-label">
     <p id="agent-context-label" class="rail-label">Agent context</p>
     <template v-if="contextPct != null">
-      <div
-        class="agent-context-meter"
-        role="meter"
-        :aria-valuenow="contextPct"
-        aria-valuemin="0"
-        aria-valuemax="100"
-        aria-label="Context window used"
-      >
-        <span class="agent-context-track"><span class="agent-context-fill" :style="{ width: `${Math.min(100, contextPct)}%` }"></span></span>
-        <strong>{{ contextPctLabel }}</strong>
+      <div class="agent-context-meter-row">
+        <div
+          class="agent-context-meter"
+          role="meter"
+          :aria-valuenow="contextPct"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-label="Context window used"
+        >
+          <span class="agent-context-track"><span class="agent-context-fill" :style="{ width: `${Math.min(100, contextPct)}%` }"></span></span>
+          <strong>{{ contextPctLabel }}</strong>
+        </div>
+        <button
+          type="button"
+          class="btn-small agent-context-compact"
+          :disabled="compactDisabled"
+          :aria-busy="compacting ? 'true' : undefined"
+          title="Compact this chat's context into a shorter summary"
+          @click="emit('compact')"
+        >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
       </div>
       <p class="rail-note agent-context-meter-note">of the model's context window, as of the last reply.</p>
     </template>
@@ -65,8 +75,12 @@ const props = defineProps<{
   project: ProjectInfo | null | undefined
   /** Percent of the context window used as of the last reply, when the provider reported it. */
   contextPct: number | null
+  /** A compact request is in flight. */
+  compacting: boolean
+  /** The chat is streaming or a compact request is in flight. */
+  compactDisabled: boolean
 }>()
-const emit = defineEmits<{ 'open-file': [path: string] }>()
+const emit = defineEmits<{ 'open-file': [path: string]; compact: [] }>()
 
 const guide = ref<WorkspaceGuide>({ path: '', content: '', error: '' })
 let guideSeq = 0
@@ -124,11 +138,22 @@ const contextPctLabel = computed(() => {
 </script>
 
 <style scoped>
-.agent-context-meter {
+.agent-context-meter-row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   margin: 4px 0 0;
+}
+.agent-context-meter {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.agent-context-compact { flex: none; white-space: nowrap; }
+@media (pointer: coarse) {
+  .agent-context-compact { min-height: 44px; min-width: 44px; }
 }
 .agent-context-track {
   flex: 1;

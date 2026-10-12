@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.web.auth import AuthMiddleware, SESSION_COOKIE, make_serializer
+from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_auth import auth_login, auth_logout
 
 

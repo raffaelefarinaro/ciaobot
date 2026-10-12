@@ -40,7 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, date
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict

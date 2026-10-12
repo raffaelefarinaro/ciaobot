@@ -236,9 +236,19 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">What can Ciaobot do?</p>
+            <p class="hint">
+              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
+            </p>
+            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
+          </div>
+        </div>
+
         <!-- Installing is optional and the guidance is permanent: the Home setup
              reminder can be closed for good, so Settings keeps the steps. -->
-        <SettingsAppInstall />
+        <SettingsAppInstall :expand-steps="route.hash === '#install-app'" />
 
         <!-- Notifications. -->
         <SettingsNotifications />
@@ -251,16 +261,6 @@
              so it stays on General, and it owns its own fetch because Home may
              never have been opened in this session. -->
         <SettingsUpdateTasks />
-
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">What can Ciaobot do?</p>
-            <p class="hint">
-              Ask Ciaobot “What can you do?” in any chat for an answer you can follow up on.
-            </p>
-            <a class="settings-guide-link" href="https://www.raffaelefarinaro.com/ciaobot/features.html" target="_blank" rel="noopener noreferrer">Explore the feature guide</a>
-          </div>
-        </div>
 
         <!-- Appearance -->
         <div class="card">
@@ -602,6 +602,9 @@
                 <p class="hint">
                   Each provider CLI manages its own login and credentials. Ciaobot verifies every connection.
                   The defaults below apply to new chats; any chat can override them from the picker.
+                  Session insights is the model that reads chats into memory and names them. On Automatic it
+                  is the chat's own model: a closed project uses its last-active chat, and a task resolution or
+                  a project closed with no chats uses the workspace's default model.
                   <a
                     class="set-link"
                     href="https://www.raffaelefarinaro.com/ciaobot/models.html"
@@ -707,7 +710,7 @@
                   <div class="set-subrow">
                     <span
                       class="ws-label set-subrow-label"
-                      title="Reads archived chats into memory, names new chats, and checks schedule results for this provider."
+                      title="Reads archived chats, closed projects and task resolutions into memory, names new chats, and checks schedule results for this provider. Automatic uses the chat's own model; Claude schedule checks use Haiku."
                     >Session insights</span>
                     <div class="set-subrow-control">
                       <ModelSelector
@@ -1773,7 +1776,6 @@
                     <span class="skill-name">{{ agent.name }}</span>
                     <span class="skill-badges">
                       <span :class="assetOriginClass(subagentOrigin(agent))">{{ assetOriginLabel(subagentOrigin(agent)) }}</span>
-                      <span v-if="agent.scope && agent.scope !== 'custom' && agent.scope !== 'built-in'" class="badge badge--muted command-source">{{ agent.scope }}</span>
                       <button
                         v-if="agent.editable"
                         type="button"
@@ -1893,7 +1895,6 @@
                     <span v-if="command.argument_hint" class="command-args">{{ command.argument_hint }}</span>
                     <span class="skill-badges">
                       <span :class="assetOriginClass(commandOrigin(command))">{{ assetOriginLabel(commandOrigin(command)) }}</span>
-                      <span v-if="command.scope && command.scope !== 'custom' && command.scope !== 'built-in'" class="badge badge--muted command-source">{{ command.scope }}</span>
                       <button
                         v-if="command.editable"
                         type="button"
@@ -1957,11 +1958,9 @@
         </div>
       </template>
 
-      <!-- MCP TAB. The panel renders; `useMcpServers` holds the state and
-           talks to /api/mcp/*; this view decides when it loads and owns the
-           one action that needs the project store and the router. -->
+      <!-- Native provider MCP inventory, scoped to the selected workspace. -->
       <template v-if="currentTab === 'mcp'">
-        <SettingsMcpServers :mcp="mcp" @create-via-chat="createMcpViaChat" />
+        <SettingsMcpServers :mcp="mcp" />
       </template>
       </div>
 
@@ -2116,23 +2115,8 @@ const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
 const housekeeping = useHousekeepingStore()
 
-// Settings → MCP. The controller holds every MCP ref and every /api/mcp/*
-// call; this view keeps only the two things the controller deliberately has
-// no access to — when the data loads (its own onMounted, below) and the
-// "Add via chat" path, which needs the project store and the router.
-const mcp = useMcpServers({
-  api,
-  notifySaved: (body, title) => notifySaved(body, title),
-  notifyFailed: (title, detail) => notifyFailed(title, detail),
-  confirmDelete: (name) => askConfirm(`Are you sure you want to delete MCP server "${name}"?`, {
-    title: 'Delete MCP server',
-    confirmLabel: 'Delete server',
-    destructive: true,
-  }),
-  // A workspace's `.mcp.json` and `.env` live in its own agent root, so the
-  // tab reads and writes that one root rather than the install root.
-  workspace: () => projectStore.activeWorkspace,
-})
+// Native MCP inventory follows the sidebar's selected workspace.
+const mcp = useMcpServers({ api, workspace: () => projectStore.activeWorkspace })
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
@@ -2273,32 +2257,6 @@ const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 
-async function createMcpViaChat() {
-  const activeProj = projectStore.activeProject
-  let projectId = activeProj?.project_id
-  if (!projectId) {
-    projectId = projectStore.workspaceProjects[0]?.project_id
-  }
-  if (!projectId) {
-    projectId = projectStore.projects[0]?.project_id
-  }
-  if (!projectId) {
-    notifySaved('Create a project first, then start the chat.', 'No project yet')
-    return
-  }
-
-  try {
-    const chat = await projectStore.createChat(projectId, 'New MCP Server')
-    if (chat) {
-      router.push({
-        path: `/chat/${chat.chat_id}`,
-        query: { initialPrompt: 'Help me set up and configure a new MCP server for this project.' }
-      })
-    }
-  } catch (e) {
-    notifyFailed('Could not create chat', errorMessage(e))
-  }
-}
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
 // The scale itself, its bounds, its step and its persistence live in
@@ -2383,6 +2341,9 @@ const hasDeployError = computed(() => {
 })
 
 const skillsInventory = ref<SkillInventory | null>(null)
+let skillsLoadSequence = 0
+let commandsLoadSequence = 0
+let agentAssetsLoadSequence = 0
 const skillsLoaded = ref(false)
 const skillsError = ref('')
 const commands = ref<SlashCommand[]>([])
@@ -2720,8 +2681,8 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
 }
 
 // ── Per-provider Session insights model (Models tab) ────────────────
-// Automatic reads the session with that chat's own model
-// (ciao/insights.py::resolve_insights_model).
+// Automatic reads the session with that chat's own model; a closed project
+// uses its last-active chat (ciao/insights.py::resolve_insights_model).
 const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
 
 function providerInsightsModelSelectorValue(provider: AliasProviderKey): string {
@@ -3153,6 +3114,19 @@ function scrollToChatProvidersIfLinked(): void {
 }
 watch(() => route.fullPath, scrollToChatProvidersIfLinked)
 
+// The Home setup card's "How to install" lands on /settings#install-app; the
+// card is mounted with the home tab, so only the scroll needs waiting for.
+watch(
+  () => route.hash,
+  hash => {
+    if (hash !== '#install-app') return
+    void nextTick(() => {
+      document.getElementById('install-app')?.scrollIntoView?.({ block: 'start' })
+    })
+  },
+  { immediate: true },
+)
+
 /** Summary line for the collapsed "What this CLI brings" disclosure. */
 function providerBringsCounts(providerId: string, conn: ProviderConnection): string {
   const mcps = connectionMcps(providerId).length
@@ -3210,37 +3184,55 @@ const assetScope = computed(() => {
 const assetWorkspaceLabel = computed(() => projectStore.activeWorkspace || 'selected')
 
 async function fetchSkills() {
+  const sequence = ++skillsLoadSequence
+  const scope = assetScope.value
+  skillsLoaded.value = false
   skillsError.value = ''
   try {
-    skillsInventory.value = await api.get<SkillInventory>(`/api/admin/skills${assetScope.value}`)
+    const inventory = await api.get<SkillInventory>(`/api/admin/skills${scope}`)
+    if (sequence === skillsLoadSequence && scope === assetScope.value) skillsInventory.value = inventory
   } catch (e) {
-    skillsError.value = `Failed to load skills: ${errorMessage(e)}`
+    if (sequence === skillsLoadSequence && scope === assetScope.value) {
+      skillsError.value = `Failed to load skills: ${errorMessage(e)}`
+    }
   } finally {
-    skillsLoaded.value = true
+    if (sequence === skillsLoadSequence && scope === assetScope.value) skillsLoaded.value = true
   }
 }
 
 async function fetchCommands() {
+  const sequence = ++commandsLoadSequence
+  const scope = assetScope.value
+  commandsLoaded.value = false
   commandsError.value = ''
   try {
-    const res = await api.get<CommandsResponse>(`/api/commands${assetScope.value}`)
-    commands.value = Array.isArray(res.commands) ? res.commands : []
+    const res = await api.get<CommandsResponse>(`/api/commands${scope}`)
+    if (sequence === commandsLoadSequence && scope === assetScope.value) {
+      commands.value = Array.isArray(res.commands) ? res.commands : []
+    }
   } catch (e) {
-    commandsError.value = `Failed to load commands: ${errorMessage(e)}`
+    if (sequence === commandsLoadSequence && scope === assetScope.value) {
+      commandsError.value = `Failed to load commands: ${errorMessage(e)}`
+    }
   } finally {
-    commandsLoaded.value = true
+    if (sequence === commandsLoadSequence && scope === assetScope.value) commandsLoaded.value = true
   }
 }
 
 async function fetchAgentAssets() {
-  agentAssetsError.value = ''
+  const sequence = ++agentAssetsLoadSequence
+  const scope = assetScope.value
   agentAssetsLoaded.value = false
+  agentAssetsError.value = ''
   try {
-    agentAssets.value = await api.get<AgentAssetsResponse>(`/api/agent-assets${assetScope.value}`)
+    const assets = await api.get<AgentAssetsResponse>(`/api/agent-assets${scope}`)
+    if (sequence === agentAssetsLoadSequence && scope === assetScope.value) agentAssets.value = assets
   } catch (e) {
-    agentAssetsError.value = `Failed to load agent assets: ${errorMessage(e)}`
+    if (sequence === agentAssetsLoadSequence && scope === assetScope.value) {
+      agentAssetsError.value = `Failed to load workspace assets: ${errorMessage(e)}`
+    }
   } finally {
-    agentAssetsLoaded.value = true
+    if (sequence === agentAssetsLoadSequence && scope === assetScope.value) agentAssetsLoaded.value = true
   }
 }
 
@@ -4115,48 +4107,69 @@ async function restoreWorkspace(item: ArchivedWorkspace) {
   }
 }
 
-onMounted(async () => {
+// Each tab loads only the data its visible controls use. A completed or
+// in-flight load is reused while this view stays mounted; workspace-scoped
+// tabs get a separate load after switching roots.
+const tabLoads = new Map<string, Promise<void>>()
+function loadSettingsTab(tab: string): Promise<void> {
+  const scoped = ['models', 'skills', 'subagents', 'commands', 'mcp'].includes(tab)
+  const key = scoped ? `${tab}:${projectStore.activeWorkspace}` : tab
+  const prior = tabLoads.get(key)
+  if (prior) return prior
+  let reads: Promise<unknown>[]
+  switch (tab) {
+    case 'home':
+      reads = [fetchLocalStatus().then(() => {
+        if (localStatus.value?.dev_mode) return refreshDebugIssues()
+      }), fetchAuthSettings(), fetchRoutines(), fetchWorkspaceMove(), fetchPackageStatus(), fetchUpdateStatus()]
+      break
+    case 'models':
+      reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), mcp.fetchStatus(), fetchWorkspaceModels()]
+      break
+    case 'workspaces':
+      reads = [fetchGwsIntegration(), fetchWorkspacesList(), fetchArchivedWorkspaces()]
+      break
+    case 'skills':
+      reads = [fetchSkills()]
+      break
+    case 'commands':
+      reads = [fetchCommands(), fetchAgentAssets()]
+      break
+    case 'subagents':
+      reads = [fetchAgentAssets()]
+      break
+    case 'mcp':
+      reads = [mcp.fetchStatus()]
+      break
+    default:
+      reads = []
+  }
+  const request = Promise.all(reads).then(() => {})
+  tabLoads.set(key, request)
+  return request
+}
+
+onMounted(() => {
   loadAppearanceSettings()
-  fetchSkills()
-  fetchCommands()
-  fetchAgentAssets()
-  // Idempotent store init; the open-source card's star nudge mirrors its list.
   housekeeping.init()
-  fetchLocalStatus().then(() => {
-    if (localStatus.value?.dev_mode) refreshDebugIssues()
-  })
-  fetchAuthSettings()
-  fetchRoutines()
-  fetchWorkspaceMove()
-  fetchPackageStatus()
-  fetchUpdateStatus()
-  fetchProviderKeys().then(scrollToChatProvidersIfLinked)
-  mcp.fetchStatus()
-  mcp.fetchUsage()
-  mcp.fetchAgentStatus()
-  // Render from cache immediately, then pick up anything connected elsewhere.
-  fetchWorkspaceModels().then(() => fetchWorkspaceModels(true))
-  fetchGwsIntegration()
-  fetchWorkspacesList()
-  fetchArchivedWorkspaces()
+  void loadSettingsTab(currentTab.value)
 })
+watch(currentTab, tab => { void loadSettingsTab(tab) })
 
-// Another tab or device archived or restored a workspace: this view keeps its
-// own copy of the registry and the archived list, so refetch both.
 watch(() => projectStore.workspaceRegistryRevision, () => {
-  fetchWorkspacesList()
-  fetchArchivedWorkspaces()
+  tabLoads.delete('workspaces')
+  if (currentTab.value === 'workspaces') void loadSettingsTab('workspaces')
 })
 
-// Switching the sidebar's workspace switches which agent root these four tabs
-// describe, so their lists are refetched. Without this the page would keep
-// showing the previous workspace's skills, commands, subagents and MCP servers
-// while every write went to the new one.
 watch(() => projectStore.activeWorkspace, () => {
-  fetchSkills()
-  fetchCommands()
-  fetchAgentAssets()
-  mcp.fetchStatus()
+  // Asset refs hold one workspace's data, so invalidate cached scope keys:
+  // returning to an earlier root must never show a different root's rows.
+  for (const key of tabLoads.keys()) {
+    if (key.includes(':')) tabLoads.delete(key)
+  }
+  if (['models', 'skills', 'subagents', 'commands', 'mcp'].includes(currentTab.value)) {
+    void loadSettingsTab(currentTab.value)
+  }
 })
 
 
@@ -4462,9 +4475,7 @@ async function localHandback(confirmWarnings = false) {
   actionPending.value = null
 }
 
-// The memory-backup panel opens the setup chat's route itself; opening it is a
-// navigation, and the panel holds no router. Same shape as the MCP panel's
-// one `create-via-chat` emit.
+// The memory-backup panel holds no router, so this view opens its setup chat.
 function openBackupSetupChat(chatId: string) {
   if (chatId) router.push(`/chat/${chatId}`)
 }
@@ -5051,9 +5062,18 @@ onUnmounted(stopUpdatePoll)
   white-space: nowrap;
 }
 
-/* Narrow panes collapse the grid; a table of contents under the page it
-   indexes would only be something to scroll past. */
+/* The rail here is navigation, not context, so it outlasts the shared
+   page grid's 940px collapse: a compact column down to a 760px pane (a
+   1280px window with the widest sidebar is 780px), then gone — a table of
+   contents under the page it indexes would only be something to scroll
+   past. */
 @container chat-pane (max-width: 940px) {
+  .settings-grid { grid-template-columns: minmax(0, 1fr) 200px; gap: var(--space-6); }
+  .settings-rail { position: sticky; }
+  .settings-toc-item { white-space: normal; }
+}
+@container chat-pane (max-width: 760px) {
+  .settings-grid { grid-template-columns: minmax(0, 1fr); }
   .settings-rail { display: none; }
 }
 
@@ -6434,7 +6454,7 @@ a.btn-secondary {
   .provider-brings > summary::before { transition: none; }
 }
 /* /settings/providers scrolls here; keep the card clear of the pane header. */
-#chat-providers { scroll-margin-top: var(--space-4); }
+#chat-providers, #install-app { scroll-margin-top: var(--space-4); }
 .provider-brings > summary:hover { color: var(--fg); }
 .provider-brings > summary:focus-visible {
   outline: 2px solid var(--accent);

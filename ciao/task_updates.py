@@ -18,6 +18,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from ciao._task_markdown import split_marked_items
+
 OPEN = "<!-- ciao:task-updates -->"
 CLOSE = "<!-- /ciao:task-updates -->"
 HEADING = "## Progress"
@@ -32,6 +34,7 @@ _SECTION = re.compile(
 _TAIL = re.compile(
     r"<!-- update:([0-9a-f]{32}) -->"
     r"(?:\s*<!-- edited:([^<>]+?) -->)?"
+    r"(?:\s*<!-- encoding:(1) -->)?"
     r"\s*$"
 )
 _ATTEMPT = re.compile(r" · attempt `([^`]+)`")
@@ -39,6 +42,7 @@ _CHAT = re.compile(r" · chat `([^`]+)`")
 
 _ESCAPED_OPEN = "&lt;!-- ciao:task-updates --&gt;"
 _ESCAPED_CLOSE = "&lt;!-- /ciao:task-updates --&gt;"
+_ENCODED_TAIL = re.compile(r"&((?:amp;)*)(lt;!-- /?ciao:task-updates --&gt;)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,10 +71,31 @@ def mint_id() -> str:
 
 
 def _escape(text: str) -> str:
-    return text.replace(OPEN, _ESCAPED_OPEN).replace(CLOSE, _ESCAPED_CLOSE)
+    # Add one ampersand layer to already-encoded literals before escaping raw
+    # markers. This distinguishes raw markers, encoded text and doubled text.
+    stacked = _ENCODED_TAIL.sub(
+        lambda match: "&amp;" + match.group(1) + match.group(2), text
+    )
+    return stacked.replace(OPEN, _ESCAPED_OPEN).replace(CLOSE, _ESCAPED_CLOSE)
 
 
 def _unescape(text: str) -> str:
+    parts: list[str] = []
+    position = 0
+    for match in _ENCODED_TAIL.finditer(text):
+        parts.append(text[position : match.start()])
+        stacked, tail = match.group(1), match.group(2)
+        if not stacked:
+            parts.append(OPEN if tail == _ESCAPED_OPEN[1:] else CLOSE)
+        else:
+            parts.append("&" + stacked[4:] + tail)
+        position = match.end()
+    parts.append(text[position:])
+    return "".join(parts)
+
+
+def _unescape_legacy(text: str) -> str:
+    """Decode the original format without changing encoded user literals."""
     return text.replace(_ESCAPED_OPEN, OPEN).replace(_ESCAPED_CLOSE, CLOSE)
 
 
@@ -90,6 +115,9 @@ def render_update(update: TaskUpdate) -> str:
             " <!-- edited:"
             f"{update.edited_at.astimezone(UTC).isoformat(timespec='seconds')} -->"
         )
+    # The version marker distinguishes the injective stacked encoding from
+    # older items whose exact entity-like user text must remain untouched.
+    headline += " <!-- encoding:1 -->"
     if len(lines) > 1:
         rest = "\n".join(f"  {line}" if line.strip() else "" for line in lines[1:])
         first = lines[0]
@@ -108,27 +136,6 @@ def extract_section(body: str) -> str:
     """The progress section span, or ``""`` when absent."""
     match = _SECTION.search(body or "")
     return match.group(0) if match is not None else ""
-
-
-def _items(section_inner: str) -> list[tuple[str, str]]:
-    items: list[tuple[str, str]] = []
-    current: list[str] = []
-    for line in section_inner.splitlines():
-        if line.startswith("- ") and current:
-            items.append(_finish(current))
-            current = []
-        current.append(line)
-    if current:
-        items.append(_finish(current))
-    return items
-
-
-def _finish(lines: list[str]) -> tuple[str, str]:
-    text = "\n".join(lines).rstrip()
-    if not lines or not lines[0].startswith("- "):
-        return ("", text)
-    tail = _TAIL.search(lines[0])
-    return (tail.group(1) if tail else "", text)
 
 
 def _parse_item(item_id: str, text: str) -> TaskUpdate | None:
@@ -170,7 +177,7 @@ def _parse_item(item_id: str, text: str) -> TaskUpdate | None:
         id=item_id,
         recorded_at=recorded_at,
         actor=actor,
-        text=_unescape(body),
+        text=_unescape(body) if tail.group(3) == "1" else _unescape_legacy(body),
         edited_at=edited_at,
         attempt_id=attempt.group(1) if attempt else "",
         chat_id=chat.group(1) if chat else "",
@@ -184,7 +191,7 @@ def parse_updates(body: str) -> list[TaskUpdate]:
         return []
     inner = match.group(0)[len(OPEN) : -len(CLOSE)].strip("\n")
     found: list[TaskUpdate] = []
-    for item_id, text in _items(inner):
+    for item_id, text in split_marked_items(inner, _TAIL):
         if not item_id:
             continue
         parsed = _parse_item(item_id, text)
@@ -236,7 +243,7 @@ def append_update(body: str, update: TaskUpdate) -> str:
         head = text.rstrip()
         return f"{head}\n\n{section}\n" if head else f"{section}\n"
     inner = match.group(0)[len(OPEN) : -len(CLOSE)].strip("\n")
-    entries = _items(inner)
+    entries = split_marked_items(inner, _TAIL)
     if any(found_id == update.id for found_id, _ in entries if found_id):
         raise ValueError(f"update {update.id} is already recorded")
     at = next(
@@ -258,7 +265,7 @@ def replace_update(body: str, update_id: str, text: str, edited_at: datetime) ->
     if match is None:
         raise ValueError(f"unknown update {update_id}")
     inner = match.group(0)[len(OPEN) : -len(CLOSE)].strip("\n")
-    entries = _items(inner)
+    entries = split_marked_items(inner, _TAIL)
     at = next(
         (index for index, (found_id, _) in enumerate(entries) if found_id == update_id),
         None,

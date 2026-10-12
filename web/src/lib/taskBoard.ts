@@ -173,6 +173,7 @@ function taskFrom(raw: Partial<Task> | null | undefined): Task {
     attempt_detail: asString(row.attempt_detail),
     live_attempt_id: asString(row.live_attempt_id),
     changed_since_delegated: row.changed_since_delegated === true,
+    chat_archived: row.chat_archived === true,
     completed_at: row.completed_at ? asString(row.completed_at) : null,
     has_resolution: row.has_resolution === true,
   }
@@ -321,6 +322,7 @@ export function toTaskListRow(detail: TaskDetail | Task): Task {
     attempt_detail: detail.attempt_detail,
     live_attempt_id: detail.live_attempt_id,
     changed_since_delegated: detail.changed_since_delegated,
+    chat_archived: detail.chat_archived === true,
     completed_at: detail.completed_at,
     has_resolution: detail.has_resolution,
   }
@@ -352,6 +354,7 @@ export function taskAttemptFrom(raw: unknown): TaskAttempt {
     // second definition free to disagree with the one every gesture depends on.
     released: row.released === true,
     live: row.live === true,
+    chat_archived: row.chat_archived === true,
   }
 }
 
@@ -425,6 +428,8 @@ export function taskReconcileBadgeClass(code: TaskReconcileCode | string): strin
  * - A released `ready_for_review` (no `live_attempt_id`) is what an approved or
  *   detached card looks like, not a contradiction — that is the state the
  *   approval gesture leaves behind.
+ * - A `chat_id` is not reported as unseeable when the server says it is archived,
+ *   since the browser's list holds active chats only after a reload.
  * - A `chat_id` is only reported as unseeable when the caller passes a
  *   non-empty set. An empty set means "this browser has not loaded its chats",
  *   which is true on a fresh mount and on a workspace that holds none, and
@@ -479,7 +484,9 @@ export function taskReconcileNotes(
     })
   }
   const known = options.knownChatIds
-  if (task.chat_id && known && known.size > 0 && !known.has(task.chat_id)) {
+  // An archived chat is real and reported as such; the browser's list is only the
+  // active ones, so it is not a reason to say the chat is missing.
+  if (task.chat_id && known && known.size > 0 && !known.has(task.chat_id) && !task.chat_archived) {
     notes.push({
       code: 'chat_not_visible',
       text:

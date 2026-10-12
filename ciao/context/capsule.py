@@ -8,6 +8,7 @@ only request-scoped routing facts; native ``CLAUDE.md`` /
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from ciao.memory_policy import UNATTENDED_CAPSULE_GUIDANCE
@@ -42,6 +43,16 @@ TASK_BOARD_HINT = (
 )
 
 
+def _file_access_line(file_roots: Sequence[str]) -> str:
+    """One line: where a workspace-scoped chat may write, and who can widen it."""
+    roots = ", ".join(_field(root, limit=300) for root in file_roots)
+    return (
+        f"file_access=workspace only: read and write under {roots}; other paths "
+        'are refused by the sandbox ("Operation not permitted"). The owner changes '
+        "this in Settings → Workspaces → Edit → File access."
+    )
+
+
 def build_context_capsule(
     *,
     workspace: str = "",
@@ -53,15 +64,19 @@ def build_context_capsule(
     unattended: bool = False,
     handover: str = "",
     include_stable: bool = True,
+    file_roots: Sequence[str] = (),
 ) -> str:
     """Render the compact context visible to every provider.
 
     ``workspace_vault_root`` is the active workspace's vault, relative to the
     provider's cwd, so a path the model writes is usable verbatim.
 
+    ``file_roots`` are the folders a workspace-scoped chat may read and write.
+    Empty means no file-access line (machine scope).
+
     Stable project facts can be omitted after the first turn of a provider
-    session. The date, the unattended marker and handover data are sent on
-    every turn.
+    session. The date, the unattended marker, the file-access line and handover
+    data are sent on every turn.
 
     The task-board hint is neither: it is a constant line rather than a routing
     fact, so it rides with the stable block and costs the same in every
@@ -92,6 +107,8 @@ def build_context_capsule(
     dynamic: list[str] = [f"today={datetime.now(UTC).date().isoformat()}"]
     if unattended:
         dynamic.append(UNATTENDED_CAPSULE_GUIDANCE)
+    if file_roots:
+        dynamic.append(_file_access_line(file_roots))
 
     parts: list[str] = []
     if include_stable:

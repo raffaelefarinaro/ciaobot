@@ -412,7 +412,6 @@ def test_subagent_tracking_uncached_net_survives_import_failure(
     tmp_path: Path, projects_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without the transcripts helper, the uncached glob net still finds it."""
-    import sys
     from ciao import subagent_tracking
 
     sid = _sid(16)

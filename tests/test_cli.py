@@ -2514,7 +2514,7 @@ def test_cli_skill_proposal_remove_reads_a_bom_verification_file(
         config = CiaoConfig.from_env(
             {**os.environ, "PWA_AUTH_TOKEN": "t"}, export=False
         )
-        stored = skill_proposals.upsert_proposal(
+        skill_proposals.upsert_proposal(
             config,
             skill_proposals.SkillProposal(
                 id=skill_proposals.proposal_id("personal", "web-research"),

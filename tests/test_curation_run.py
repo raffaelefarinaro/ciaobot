@@ -17,6 +17,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -30,6 +31,9 @@ from ciao.learning_records import (
     entry_revision,
     render_learning,
 )
+
+if TYPE_CHECKING:
+    from ciao.entity_types import EntityTypeRegistry
 
 
 MEMORY_START = "<!-- ciao:memory:start -->"
@@ -83,7 +87,7 @@ def _categories(vault: Path) -> "EntityTypeRegistry":
     :func:`test_a_cluster_the_registry_already_knows_is_not_offered` is the one
     that separates them.
     """
-    from ciao.entity_types import EntityTypeRegistry, load_entity_types
+    from ciao.entity_types import load_entity_types
 
     return load_entity_types(vault)
 

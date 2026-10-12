@@ -4,22 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
+from starlette.middleware.gzip import GZipMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from starlette.routing import Mount, Route, WebSocketRoute
-from starlette.staticfiles import StaticFiles
+from starlette.datastructures import Headers
+from starlette.staticfiles import NotModifiedResponse, StaticFiles
 from starlette.responses import FileResponse, Response
 
+from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao.package_version import make_cached_package_status
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
 from ciao.web.routes_mcp import (
-    mcp_env_keys_endpoint,
-    mcp_server_item_endpoint,
-    mcp_server_tools_endpoint,
-    mcp_servers_collection_endpoint,
     mcp_status_endpoint,
     mcp_usage_endpoint,
 )
@@ -68,6 +69,7 @@ from ciao.web.routes_api import (
     chat_messages,
     chat_message_part,
     chat_retry,
+    chat_compact,
     chat_prompt,
     chat_stop,
     chat_background_run_cancel,
@@ -237,15 +239,120 @@ STATIC_DIR = Path(__file__).parent / "static"
 # stale build.
 _IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
 _NO_CACHE = "no-cache, no-store, must-revalidate"
+_GZIP_MINIMUM_SIZE = 500
+_HASHED_TEXT_ASSET = re.compile(r"-[A-Za-z0-9_-]{6,}\.(?:js|css)$", re.IGNORECASE)
 
 
 class CacheControlStaticFiles(StaticFiles):
     """StaticFiles subclass that sets long-term caching for hashed assets."""
 
+    def file_response(self, full_path, stat_result, scope, status_code=200) -> Response:
+        # Starlette guesses from the module-level mimetypes table, which on
+        # Windows reads the registry; see ciao.os_support.media_types.
+        response = FileResponse(
+            full_path,
+            status_code=status_code,
+            stat_result=stat_result,
+            media_type=guess_media_type(str(full_path)),
+        )
+        if self.is_not_modified(response.headers, Headers(scope=scope)):
+            return NotModifiedResponse(response.headers)
+        return response
+
     async def get_response(self, path: str, scope) -> Response:
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = _IMMUTABLE_CACHE
         return response
+
+
+class HashedAssetCompression:
+    """Negotiate gzip only for hashed JavaScript and CSS under /assets."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.static_app = app
+        self.app = GZipMiddleware(app, minimum_size=_GZIP_MINIMUM_SIZE)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.static_app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        headers = list(scope.get("headers", []))
+        accepts_gzip = False
+        for name, value in headers:
+            if name.lower() != b"accept-encoding":
+                continue
+            for item in value.decode("latin-1").split(","):
+                token, _, parameters = item.strip().partition(";")
+                if token.strip().lower() != "gzip":
+                    continue
+                quality = 1.0
+                for parameter in parameters.split(";"):
+                    key, equals, raw_value = parameter.strip().partition("=")
+                    if equals and key.strip().lower() == "q":
+                        try:
+                            parsed_quality = float(raw_value.strip())
+                            quality = parsed_quality if 0 <= parsed_quality <= 1 else 0.0
+                        except ValueError:
+                            quality = 0.0
+                accepts_gzip = quality > 0
+                break
+            break
+
+        eligible = bool(_HASHED_TEXT_ASSET.search(path))
+        if not eligible:
+            await self.static_app(scope, receive, send)
+            return
+        has_range = any(name.lower() == b"range" for name, _ in headers)
+        has_condition = any(
+            name.lower() in (b"if-none-match", b"if-modified-since")
+            for name, _ in headers
+        )
+        should_compress = eligible and accepts_gzip and not has_range and not has_condition
+        # Starlette 1.7 checks for a lowercase substring. Normalize only a
+        # valid gzip negotiation so q=0, xgzip and uppercase tokens behave
+        # according to HTTP token and quality-value rules.
+        headers = [(name, value) for name, value in headers if name.lower() != b"accept-encoding"]
+        if should_compress:
+            headers.append((b"accept-encoding", b"gzip"))
+        extensions = scope.get("extensions", {})
+        if should_compress:
+            # Starlette's FileResponse can use uvicorn's path-send extension,
+            # which streams the original file outside response-body middleware.
+            # Removing that optimization only for compressed text assets lets
+            # gzip see their bytes while preserving identity file serving.
+            extensions = dict(extensions)
+            extensions.pop("http.response.pathsend", None)
+        scope = {**scope, "headers": headers, "extensions": extensions}
+
+        async def send_with_vary(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                response_headers = list(message.get("headers", []))
+                encoded = should_compress and any(
+                    name.lower() == b"content-encoding" and value.lower() == b"gzip"
+                    for name, value in response_headers
+                )
+                if encoded:
+                    response_headers = [
+                        (name, b"W/" + value if name.lower() == b"etag" and not value.startswith(b"W/") else value)
+                        for name, value in response_headers
+                    ]
+                vary_index = next(
+                    (i for i, (name, _) in enumerate(response_headers) if name.lower() == b"vary"),
+                    None,
+                )
+                if vary_index is None:
+                    response_headers.append((b"vary", b"Accept-Encoding"))
+                else:
+                    name, value = response_headers[vary_index]
+                    vary_tokens = [part.strip().lower() for part in value.split(b",")]
+                    if b"*" not in vary_tokens and b"accept-encoding" not in vary_tokens:
+                        response_headers[vary_index] = (name, value + b", Accept-Encoding")
+                message = {**message, "headers": response_headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_vary)
 
 
 def _spa_catchall(request):
@@ -259,7 +366,7 @@ def _spa_catchall(request):
         candidate = STATIC_DIR / requested
         if candidate.is_file():
             headers = {"Cache-Control": _NO_CACHE} if requested in ("sw.js", "manifest.json") else {}
-            return FileResponse(candidate, headers=headers)
+            return FileResponse(candidate, headers=headers, media_type=guess_media_type(candidate.name))
     index = STATIC_DIR / "index.html"
     headers = {"Cache-Control": _NO_CACHE}
     if index.exists():
@@ -309,7 +416,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats", list_all_chats, methods=["GET"]),
         # /read-all must precede /{chat_id} so the literal isn't swallowed.
         Route("/api/chats/read-all", chats_mark_all_read, methods=["POST"]),
-        Route("/api/chats/{chat_id}", chat_detail, methods=["PATCH", "DELETE"]),
+        Route("/api/chats/{chat_id}", chat_detail, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/file-path", chat_file_path, methods=["GET"]),
         Route("/api/chats/{chat_id}/new", chat_new_session, methods=["POST"]),
         Route("/api/chats/{chat_id}/handover", chat_handover, methods=["POST"]),
@@ -331,6 +438,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
             methods=["POST"],
         ),
         Route("/api/chats/{chat_id}/prompt", chat_prompt, methods=["POST"]),
+        Route("/api/chats/{chat_id}/compact", chat_compact, methods=["POST"]),
         Route("/api/chats/{chat_id}/messages", chat_messages, methods=["GET"]),
         Route("/api/chats/{chat_id}/messages/part", chat_message_part, methods=["GET"]),
         Route("/api/chats/{chat_id}/subagents", chat_subagents, methods=["GET"]),
@@ -504,10 +612,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/agent/status", agent_status_endpoint, methods=["GET"]),
         Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
         Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
-        Route("/api/mcp/env-keys", mcp_env_keys_endpoint, methods=["POST"]),
-        Route("/api/mcp/servers", mcp_servers_collection_endpoint, methods=["POST"]),
-        Route("/api/mcp/servers/{name}", mcp_server_item_endpoint, methods=["PATCH", "DELETE"]),
-        Route("/api/mcp/servers/{name}/tools", mcp_server_tools_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),
         Route("/api/push/subscribe", push_subscribe, methods=["POST"]),
@@ -633,7 +737,13 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     if STATIC_DIR.exists():
         assets_dir = STATIC_DIR / "assets"
         if assets_dir.is_dir():
-            routes.append(Mount("/assets", app=CacheControlStaticFiles(directory=assets_dir), name="assets"))
+            routes.append(
+                Mount(
+                    "/assets",
+                    app=HashedAssetCompression(CacheControlStaticFiles(directory=assets_dir)),
+                    name="assets",
+                )
+            )
         routes.append(Route("/{path:path}", _spa_catchall))
 
     middleware = [

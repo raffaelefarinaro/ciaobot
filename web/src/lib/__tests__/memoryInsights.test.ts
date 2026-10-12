@@ -59,6 +59,14 @@ function run(chats: ChatInfo[], over: Partial<MemoryInsightInput> = {}) {
 }
 
 describe('memoryInsights', () => {
+  it('uses compact source metadata without downloading the archived catalog', () => {
+    const [row] = run([pass('running', { memory_source: {
+      chat_id: 'src', title: 'Original title', created_at: '2026-07-01',
+      last_activity_at: '2026-07-02', archive_path: 'chats/src.md',
+    } })])
+    expect(row).toMatchObject({ title: 'Original title', timestamp: '2026-07-02', archivePath: 'chats/src.md', passChatId: 'pass-1' })
+  })
+
   it('reports nothing for a settled conversation', () => {
     expect(run([
       source({ postprocess: { steps: { memory_pass: { status: 'ok', extra: { chat_id: 'pass-1' } } } } }),

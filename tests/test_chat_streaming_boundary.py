@@ -154,8 +154,9 @@ class _DriveHost:
         images: list[ImageAttachment] | None = None,
         *,
         unattended: bool = False,
+        compact: bool = False,
     ) -> AsyncGenerator[StreamEvent, None]:
-        del chat_id, prompt, images, unattended
+        del chat_id, prompt, images, unattended, compact
         for event in self._events_to_stream:
             yield event
 
@@ -285,6 +286,7 @@ async def test_drive_keeps_websocket_payloads_and_lifecycle_events(
             "chat_id": "chat-1",
             "project_id": "project-1",
             "is_error": False,
+            "last_error": "",
         }
     ]
     assert host.drain_awaits == ["chat-1"]

@@ -1041,7 +1041,7 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView keeps effort choices when a catalog refresh fails and saves effort', async () => {
+  it('SettingsView loads the model catalog once on tab open and saves effort', async () => {
     const originalGet = vi.mocked(api.get).getMockImplementation()!
     vi.mocked(api.get).mockImplementation((path: string) => {
       if (path === '/api/models?refresh=1') return Promise.reject(new Error('catalog unavailable'))
@@ -1058,7 +1058,7 @@ describe('component mount smoke', () => {
       await flushPromises()
       const effort = wrapper.find('select[aria-labelledby="thinking-label-claude"]')
       expect(effort.findAll('option').map((el) => el.attributes('value'))).toContain('high')
-      expect(wrapper.find('[role="alert"]').text()).toContain('catalog unavailable')
+      expect(api.get).not.toHaveBeenCalledWith('/api/models?refresh=1')
       await effort.setValue('high')
       await flushPromises()
       expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {

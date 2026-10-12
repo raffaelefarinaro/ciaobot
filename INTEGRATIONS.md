@@ -100,11 +100,11 @@ operations Ciaobot uses against `/openapi.json`. Chat output arrives on the
 
 Workspace assets need almost no projection: OpenCode discovers
 `.claude/skills/`, `.agents/skills/`, and `AGENTS.md` natively, so
-`ciao sync-skills` only generates `.opencode/agents/` (canonical subagents),
-`.opencode/commands/` (canonical commands), and the `mcp` object in
-`opencode.json`. Generated files carry a Ciaobot marker and only marked files
-are pruned; `opencode.json` tracks Ciaobot-owned server names in
-`.opencode/.ciao-managed-mcps.json` because JSON has no comment syntax.
+`ciao sync-skills` only generates `.opencode/agents/` (canonical subagents) and
+`.opencode/commands/` (canonical commands). MCP servers are owned by OpenCode;
+Ciaobot reads provider configuration and live chat status without editing
+`opencode.json` or launching a server from Settings. Keep existing MCP entries
+in the provider configuration. See the [OpenCode V2 MCP documentation](https://opencode.ai/v2/docs/mcp-servers/).
 
 Ciaobot sends V2 text/file prompts with queued delivery, so a message produced
 during an active turn remains a later turn instead of steering the current one.
@@ -269,11 +269,17 @@ These MCP servers reach the session through the claude.ai connector bridge. They
 
 If a connector's tools don't show up, the fix is on the claude.ai side: toggle the connector for the workspace, then start a new session.
 
-### Self-hosted MCP (project-scoped)
+### Provider-owned MCP servers
 
-`n8n_mcp` is not a claude.ai connector. It can be registered in `.mcp.json` as an HTTP MCP server and authenticated with a bearer token read from the `N8N_MCP_TOKEN` env var (never inline the token in `.mcp.json`). `scripts/run-ciao.sh` sources `.env` so ciao-spawned `claude` subprocesses inherit the token. Like the claude.ai connectors, n8n is usually workspace-scoped: add it to the denylist for workspaces where it should not be available.
+Claude Code and OpenCode own their MCP configuration and authentication. Settings → MCP reads provider-native configuration and already running chat sessions; it never starts an MCP process, edits provider files, or stores credentials. The status endpoint reports configured servers separately from per-chat connection states. No live chat means the connection has not been checked. An unreadable configuration or provider status remains unknown.
 
-Project MCP servers in `.mcp.json` are consumed by the provider runtimes from the shared project source. Ciaobot preserves user-owned provider configuration and keeps credentials as `${ENV_VAR}` references.
+To add a Claude server to just this workspace, run Claude Code from that workspace root and use `claude mcp add --scope local <name> -- <command> [args...]` for stdio, or `claude mcp add --scope local --transport http <name> <url>` for HTTP. Authenticate with `/mcp` in Claude Code or `claude mcp login <name>`. Claude's `local` scope is user-specific to the current project; `project` scope writes `.mcp.json` and requires project approval. Ciaobot does not widen the workspace's `allowed_mcp_servers` policy, so Settings may show a declared project server as blocked. See [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
+
+To add an OpenCode server, run `opencode mcp add <name> --url <url>` from the workspace for a remote server, or `opencode mcp add <name> -- <command> [args...]` for a local stdio server. Authenticate with `opencode mcp auth <name>`; use `/mcps` in OpenCode to inspect or connect servers. Project scope is the default; `--global` applies to all projects. See [OpenCode V2 MCP documentation](https://opencode.ai/v2/docs/mcp-servers/).
+
+Sandboxed OpenCode sessions read the Node/npm runtime from their effective PATH and use a separate npm cache at `~/.cache/ciaobot-opencode-sandbox/npm`. The engine supplies `npm_config_cache` internally; operators do not configure it. The ordinary user npm cache and runtime installation remain unwritable.
+
+Keep secrets in provider-supported credential stores or environment variables referenced by provider configuration. Do not put bearer tokens directly in `.mcp.json` or `opencode.json`.
 
 The one-line macOS installer preserves a configured workspace discovered from
 the current LaunchAgent. On a clean installation it starts the packaged
@@ -299,7 +305,7 @@ removing it.
 
 **Ciaobot agent control plane:**
 
-- The CLI-first agent surface is the only control path and is always on; there is no enable/disable switch and no alternative surface. The former embedded MCP endpoint was removed in the S6 break; third-party project MCP servers (the agent's external tools) are still managed through Settings → Assets.
+- The CLI-first agent surface is the only control path and is always on; there is no enable/disable switch and no alternative surface. The former embedded MCP endpoint was removed in the S6 break. External MCP servers are owned and configured by Claude Code or OpenCode; Settings → MCP is a read-only inventory and live status view.
 - `CIAO_AGENT_TOKEN` / `CIAO_AGENT_URL`: internal. Ciaobot hands the scoped short-lived token and the `POST /agent/v1/{op}` base URL to the managed provider's foreground shell so `ciao <noun> <verb>` commands can call the control plane (D-01). Background runs strip the token. Operators must not configure or persist either.
 
 The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/agent/v1/{op}`. Ciaobot generates a scoped short-lived token and configures its managed provider process. See [docs/AGENT_CLI.md](docs/AGENT_CLI.md).
@@ -322,9 +328,7 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **OpenAI:** Ciaobot does not use an OpenAI API key. OpenAI-compatible models are reached through opencode.
 
-**n8n MCP:** `N8N_MCP_TOKEN` (bearer token for the self-hosted `n8n_mcp` HTTP server in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`.
-
-**Notion MCP:** `NOTION_TOKEN` (internal integration secret from https://www.notion.so/profile/integrations, used by the official `@notionhq/notion-mcp-server` stdio MCP registered in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`. Workspace-scoped: add `mcp__notion` to a workspace's `disallowed_tools` to keep it out of that workspace — for example, to make Notion personal-only, set the **work** workspace's denylist to the harness defaults plus `mcp__notion`. Tools surface as `mcp__notion__*`.
+**MCP credentials:** MCP credentials belong to the provider that owns each connection. Configure them through the provider's supported environment or credential-store mechanism; Ciaobot Settings does not read or write MCP secret values. Claude workspace reachability remains governed by `allowed_mcp_servers` and `disallowed_tools`; adding a server never broadens that policy.
 
 **Provider connections.** The chat providers card in Settings → Models &
 providers launches, verifies, and logs out Claude Code and opencode through

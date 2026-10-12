@@ -37,7 +37,7 @@ import NewChatPicker from './components/NewChatPicker.vue'
 import PromptDialog from './components/PromptDialog.vue'
 import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'
-import { createEngineMonitor, type EngineState } from './lib/engineStatus'
+import { createEngineMonitor, requestStartupStatus, type EngineState } from './lib/engineStatus'
 import { normalizeWorkspaceColor } from './lib/workspaceColors'
 import { isLoopbackPage } from './lib/loopback'
 import { useProjectStore } from './stores/projects'
@@ -55,6 +55,8 @@ const phases = ref<Phase[]>([])
 const overallReady = ref(false)
 const skipped = ref(false)
 const startupDone = ref(false)
+const startupDelayElapsed = ref(false)
+const STARTUP_CURTAIN_DELAY_MS = 180
 // The engine is either on this machine (a loopback origin) or on another one
 // the user reached over the network; the offline curtain names one or the other.
 const canUseDeviceControls = isLoopbackPage()
@@ -73,17 +75,24 @@ const engineMonitor = createEngineMonitor({
     const prev = engineState.value
     engineState.value = s
     const wasDown = prev === 'unreachable' || prev === 'updating'
-    if (wasDown && s === 'booting') { startupDone.value = false; skipped.value = false }   // show boot progress again
+    if (wasDown && s === 'booting') {
+      startupDone.value = false
+      skipped.value = false
+      startupDelayElapsed.value = true
+    }
     if (wasDown && (s === 'ready' || s === 'booting')) projectStore.reconnectNow()
   },
 })
 const engineUnreachable = computed(() => engineState.value === 'unreachable' || engineState.value === 'updating')
+const shouldPollStartup = computed(() => !startupDone.value && !skipped.value
+  && !engineUnreachable.value && engineState.value !== 'auth_required')
 
 // A cold launch with the engine down never gets a startup answer, so the boot
 // view would have nothing to show: the curtain replaces it whenever the engine
 // is unreachable (it then has to boot out loud before we trust it), and the two
 // are never on screen together.
-const showStartup = computed(() => !startupDone.value && !skipped.value && !engineUnreachable.value)
+const showStartup = computed(() => startupDelayElapsed.value && !startupDone.value && !skipped.value
+  && !engineUnreachable.value && engineState.value !== 'auth_required')
 // Over the app, never replacing it: the route, its scroll position and its
 // in-memory state have to survive the outage.
 const showEngineOffline = computed(() => engineUnreachable.value)
@@ -98,38 +107,50 @@ const workspaceColor = computed(() => {
 })
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+let startupDelayTimer: ReturnType<typeof setTimeout> | null = null
+let polling = false
+let pollGeneration = 0
+let appMounted = false
 
-async function pollStartup() {
-  try {
-    const res = await fetch('/api/startup-status', { redirect: 'manual' })
-    if (!res.ok) return
-    const data = await res.json()
-    const nextPhases = data.phases || []
-    if (JSON.stringify(phases.value) !== JSON.stringify(nextPhases)) {
-      phases.value = nextPhases
-    }
-    const nextReady = data.overall_ready || false
-    if (overallReady.value !== nextReady) {
-      overallReady.value = nextReady
-    }
-    if (overallReady.value) {
-      startupDone.value = true
-    }
-  } catch {
-    // A failed probe is no news: the boot curtain keeps showing and the next
-    // tick re-reads it.
+async function pollStartup(generation: number) {
+  const response = await requestStartupStatus()
+  if (!appMounted || generation !== pollGeneration) return
+  if (response?.status === 401 || response?.status === 403) {
+    // Move the monitor's own state too, so its next healthy probe reports
+    // recovery and lets startup status resume without a parallel poll loop.
+    void engineMonitor.retry().catch(() => {})
+    return
   }
+  if (!response || response.status < 200 || response.status >= 300) return
+  const data = response.body as { phases?: Phase[]; overall_ready?: boolean } | null
+  const nextPhases = data?.phases || []
+  if (JSON.stringify(phases.value) !== JSON.stringify(nextPhases)) phases.value = nextPhases
+  const nextReady = data?.overall_ready || false
+  if (overallReady.value !== nextReady) overallReady.value = nextReady
+  if (overallReady.value) startupDone.value = true
 }
 
-function scheduleNextPoll() {
-  if (!showStartup.value) return
-  pollTimer = setTimeout(async () => {
-    await pollStartup()
-    scheduleNextPoll()
-  }, 1500)
+function startPolling() {
+  if (!appMounted || !shouldPollStartup.value || polling || pollTimer) return
+  polling = true
+  const generation = pollGeneration
+  void pollStartup(generation).finally(() => {
+    polling = false
+    if (generation !== pollGeneration) {
+      if (appMounted && shouldPollStartup.value) startPolling()
+      return
+    }
+    if (appMounted && shouldPollStartup.value) {
+      pollTimer = setTimeout(() => {
+        pollTimer = null
+        startPolling()
+      }, 1500)
+    }
+  })
 }
 
 function stopPolling() {
+  pollGeneration++
   if (pollTimer) {
     clearTimeout(pollTimer)
     pollTimer = null
@@ -137,18 +158,25 @@ function stopPolling() {
 }
 
 onMounted(() => {
-  pollStartup().then(scheduleNextPoll)
+  appMounted = true
+  startupDelayTimer = setTimeout(() => {
+    startupDelayTimer = null
+    startupDelayElapsed.value = true
+  }, STARTUP_CURTAIN_DELAY_MS)
+  startPolling()
   engineMonitor.start()
 })
 
 onUnmounted(() => {
+  appMounted = false
   stopPolling()
+  if (startupDelayTimer) clearTimeout(startupDelayTimer)
   engineMonitor.stop()
 })
 
-watch(showStartup, (show) => {
-  if (!show) stopPolling()
-  else if (!pollTimer) void pollStartup().then(scheduleNextPoll)
+watch(shouldPollStartup, (shouldPoll) => {
+  if (!shouldPoll) stopPolling()
+  else startPolling()
 })
 </script>
 
@@ -814,21 +842,11 @@ input:focus, textarea:focus, select:focus {
   margin: 0;
   line-height: 1.5;
 }
-.hint--info {
-  display: block;
-  color: var(--fg2);
-  background: color-mix(in srgb, var(--accent2) 6%, var(--bg2));
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent2);
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
-}
 .hint--warn {
   display: block;
   color: var(--fg2);
   background: color-mix(in srgb, var(--warning) 6%, var(--bg2));
   border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--warning);
   border-radius: var(--radius-sm);
   padding: 10px 12px;
 }

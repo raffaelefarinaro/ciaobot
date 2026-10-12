@@ -538,7 +538,6 @@ def _entry_proposal_operations(root: Path) -> dict[str, str]:
     than failing the queue. The check state beside it still says the entry is
     being decided, which is the fact the row exists to show.
     """
-    from ciao import entry_verification as ev
     from ciao import note_edit_proposals as nep
 
     operations: dict[str, str] = {}

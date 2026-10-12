@@ -41,7 +41,6 @@ from ciao.async_reads import run_read
 from ciao.migration_notices import (
     LINKS_CLEAN,
     LINKS_FAILED,
-    LINKS_FOUND,
     LINKS_SCAN_TTL_S,
     RELOCATION_MISPLACED,
     UNMIGRATED_LINKS_NOTICE,

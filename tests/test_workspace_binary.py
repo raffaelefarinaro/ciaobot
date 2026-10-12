@@ -199,3 +199,12 @@ def test_pptx_conversion_success(workspace: Path, monkeypatch: pytest.MonkeyPatc
     assert resp.content == b"%PDF-1.4\n%%EOF\n"
     assert resp.headers["content-type"] == "application/pdf"
     assert "presentation.pdf" in resp.headers["content-disposition"]
+
+
+@pytest.mark.parametrize("name", ["letter.doc", "notes.rtf", "book.epub", "sheet.ods"])
+def test_attachment_original_formats_download(workspace: Path, name: str) -> None:
+    (workspace / "docs" / name).write_bytes(b"original")
+    resp = _make_client(workspace).get("/api/workspace-binary", params={"path": f"docs/{name}"})
+    assert resp.status_code == 200
+    assert resp.content == b"original"
+    assert resp.headers["content-disposition"].startswith("attachment")

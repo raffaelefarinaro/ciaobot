@@ -98,3 +98,51 @@ def test_backlink_persists_across_reload(tmp_path: Path) -> None:
     assert chat is not None
     assert chat.schedule_id == "sched-persist"
     assert chat.schedule_title == "Daily curation"
+
+def test_newer_routine_run_supersedes_earlier_retry_and_error(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    proj = pcm.create_project("Holder", workspace="personal")
+    earlier = pcm.create_chat(proj.project_id, title="Briefing - Jul 30")
+    earlier.schedule_id = "sched-abc"
+    earlier.last_error = "usage limit reached"
+    pcm.set_chat_retry(earlier.chat_id, "Morning briefing.", reason="rate limit")
+    unrelated = pcm.create_chat(proj.project_id, title="Other")
+    unrelated.last_error = "boom"
+
+    entry = _entry(schedule_id="sched-abc", web_project_id=proj.project_id,
+                   title="Morning briefing")
+    chat_id = pcm.prepare_schedule_chat(entry, entry.prompt, "opus", "auto", "claude")
+
+    assert chat_id is not None and chat_id != earlier.chat_id
+    superseded = pcm.get_chat(earlier.chat_id)
+    assert superseded is not None
+    assert superseded.retry_status != "pending"
+    assert superseded.last_error == ""
+    kept = pcm.get_chat(unrelated.chat_id)
+    assert kept is not None
+    assert kept.last_error == "boom"
+
+
+def test_newer_system_routine_run_supersedes_earlier_retry_and_error(tmp_path: Path) -> None:
+    # Stock routines such as Workspace care take the system-scope branch, not
+    # the project branch, and must supersede the earlier run the same way.
+    import dataclasses
+
+    pcm = _make_manager(tmp_path)
+    entry = dataclasses.replace(
+        _entry(schedule_id="sched-care", title="Workspace care"), scope="system",
+    )
+    first_id = pcm.prepare_schedule_chat(entry, entry.prompt, "opus", "auto", "claude")
+    assert first_id is not None
+    earlier = pcm.get_chat(first_id)
+    assert earlier is not None
+    earlier.last_error = "usage limit reached"
+    pcm.set_chat_retry(first_id, "Workspace care.", reason="weekly usage limit")
+
+    second_id = pcm.prepare_schedule_chat(entry, entry.prompt, "opus", "auto", "claude")
+
+    assert second_id is not None and second_id != first_id
+    superseded = pcm.get_chat(first_id)
+    assert superseded is not None
+    assert superseded.retry_status != "pending"
+    assert superseded.last_error == ""

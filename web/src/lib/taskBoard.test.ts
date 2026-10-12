@@ -76,6 +76,17 @@ function task(overrides: Partial<Task> = {}): Task {
 }
 
 describe('taskRowsFrom', () => {
+  it('keeps the server\'s archived-chat flag and reads its absence as false', () => {
+    const [archived, plain] = taskRowsFrom({
+      tasks: [
+        task({ id: 'x', chat_id: 'chat-7', chat_archived: true }),
+        task({ id: 'y' }),
+      ],
+    }) as Task[]
+    expect(archived!.chat_archived).toBe(true)
+    expect(plain!.chat_archived).toBe(false)
+  })
+
   it('reads a list row with every field the board needs', () => {
     const rows = taskRowsFrom({
       workspace: 'personal',
@@ -339,6 +350,17 @@ describe('taskReconcileNotes', () => {
       live_attempt_id: '',
     })
     expect(taskReconcileNotes(released)).toEqual([])
+  })
+
+  it('does not call an archived chat missing from the browser list', () => {
+    // After a reload the list holds active chats only. The server's flag is what
+    // says the chat exists, so the card must not claim it is not visible.
+    const linked = task({ chat_id: 'chat-7', attempt_id: 'b'.repeat(32), attempt_state: 'interrupted' })
+    const known = new Set(['chat-other'])
+    expect(taskReconcileNotes(linked, { knownChatIds: known }).map((n) => n.code))
+      .toContain('chat_not_visible')
+    expect(taskReconcileNotes({ ...linked, chat_archived: true }, { knownChatIds: known }).map((n) => n.code))
+      .not.toContain('chat_not_visible')
   })
 
   it('still flags a live ready_for_review whose Review badge is missing', () => {
