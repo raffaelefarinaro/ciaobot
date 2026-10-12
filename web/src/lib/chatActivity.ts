@@ -175,7 +175,7 @@ export function shortDirname(filePath: string): string {
 
 /**
  * What a turn cost, as tokens in and out. Deliberately not the context-window
- * occupancy: the Work details rail states that as a meter against the window's
+ * occupancy: the Chat details rail states that as a meter against the window's
  * size, labelled "of the model's context window, as of the last reply", so
  * repeating the bare percentage in a transcript footer gave the same number two
  * homes and no clearer meaning in either.
@@ -488,7 +488,7 @@ export function fileCardIcon(filePath: string): FileCardIcon {
 
 
 /* ------------------------------------------------------------------ *
- * Tool usage for the chat's Work details rail: which skills and MCP
+ * Tool usage for the Chat details rail: which skills and MCP
  * tools a chat's turns called, read from the same activity lines the
  * trace renders ("<icon> <ToolName> <summary>", subagent lines prefixed
  * with ↳). Both providers write that shape; they differ in naming:

@@ -1543,7 +1543,7 @@ def test_cwd_default_is_the_workspace_root(tmp_path: Path) -> None:
 
 
 def test_rail_routes_only_reach_the_chats_own_runs(tmp_path: Path) -> None:
-    """The Work details rail reads a run's log and stops it, for its own chat only."""
+    """The Chat details rail reads a run's log and stops it, for its own chat only."""
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient

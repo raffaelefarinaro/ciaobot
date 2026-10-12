@@ -54,7 +54,7 @@ test.describe('workbench layout', () => {
     }
   })
 
-  test('the Work details rail reopens without scrolling sideways', async ({ page }) => {
+  test('the Chat details rail reopens without scrolling sideways', async ({ page }) => {
     // The hide button overhung the rail's right edge, so the rail was wider
     // than itself; focusing the button on reopen scrolled it sideways and cut
     // off the rail's left edge.

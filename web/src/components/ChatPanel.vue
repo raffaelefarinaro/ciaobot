@@ -57,7 +57,7 @@
       </template>
       <template #actions>
         <!-- Archive is the header's one action, so it gets words, not just a
-             glyph. Work details moved out: it opens from the info tab at the
+             glyph. Chat details moved out: it opens from the info tab at the
              top right of the chat body and hides from its own heading. -->
         <button
           v-if="!chat.archived"
@@ -78,7 +78,7 @@
          share the header title's left edge; the rail on the right is Work
          details, shown in place on panes wide enough for it. -->
     <div class="chat-body">
-    <!-- Work details, when it is not showing: the rail is hidden on a wide
+    <!-- Chat details, when it is not showing: the rail is hidden on a wide
          pane, or the pane is too narrow for one and it opens as a drawer. -->
     <button
       v-if="!railShown"
@@ -87,8 +87,8 @@
       class="btn-icon work-inspector-trigger"
       :aria-expanded="isWidePane ? false : inspectorOpen"
       :aria-controls="isWidePane ? 'chat-work-rail' : 'chat-work-inspector'"
-      aria-label="Show work details"
-      title="Show work details"
+      aria-label="Show chat details"
+      title="Show chat details"
       @click="toggleWorkDetails"
     >
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="11" x2="12" y2="16" /><line x1="12" y1="8" x2="12.01" y2="8" /></svg>
@@ -97,7 +97,7 @@
     <!-- What this chat is, when nothing else on the surface says it. A memory
          pass is an ordinary chat in a hidden project, so the transcript reads
          as a conversation that began mid-thought; this names the conversation
-         it belongs to. Only when the Work details rail is hidden — with the
+         it belongs to. Only when the Chat details rail is hidden — with the
          rail shown the same sentence sits at its top instead. -->
     <p v-if="memoryPassOrigin && !railShown && !inspectorOpen" class="chat-origin-note">
       <AppIcon class="chat-origin-note-icon" name="spark" :size="16" />
@@ -591,12 +591,12 @@
       aria-labelledby="chat-work-inspector-title"
     >
       <header class="chat-work-inspector-header">
-        <h2 id="chat-work-inspector-title">Work details</h2>
+        <h2 id="chat-work-inspector-title">Chat details</h2>
         <button
           ref="inspectorCloseButton"
           type="button"
           class="btn-icon"
-          aria-label="Close work details"
+          aria-label="Close chat details"
           title="Close"
           @click="inspectorOpen = false"
         ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
@@ -969,7 +969,7 @@
 
     <!-- Background command runs: a status line, not a dock pill. Nothing here
          is the user's move, so it does not join the strip's disclosure; it
-         names the run and how long it has gone, and opens Work details, where
+         names the run and how long it has gone, and opens Chat details, where
          the run has its log and a Stop. Hidden while the turn's own live line
          is showing activity; it is the quiet gap after the turn that needs it.
          For a few seconds after a run ends it says how it ended. -->
@@ -978,8 +978,8 @@
         type="button"
         class="run-status"
         :class="`run-status--${runStatus.tone}`"
-        title="Show in Work details"
-        :aria-label="`${runStatus.prefix}${runStatus.text}. Show in Work details`"
+        title="Show in Chat details"
+        :aria-label="`${runStatus.prefix}${runStatus.text}. Show in Chat details`"
         @click="openRunDetails"
       >
         <span class="run-status-dot" aria-hidden="true" />
@@ -1193,9 +1193,9 @@
     </div>
     </div>
 
-    <!-- Work details as a rail. The same three sections the narrow-pane drawer
+    <!-- Chat details as a rail. The same three sections the narrow-pane drawer
          shows as tabs, stacked, because on a wide pane there is room to see
-         them together. Hidden with the header's Work details toggle. -->
+         them together. Hidden with the header's Chat details toggle. -->
     <aside
       v-if="railShown"
       id="chat-work-rail"
@@ -1204,15 +1204,15 @@
       aria-labelledby="chat-work-rail-title"
     >
       <div class="chat-rail-head">
-        <h2 id="chat-work-rail-title" class="rail-title">Work details</h2>
+        <h2 id="chat-work-rail-title" class="rail-title">Chat details</h2>
         <button
           ref="railHideButton"
           type="button"
           class="btn-icon chat-rail-hide"
           aria-expanded="true"
           aria-controls="chat-work-rail"
-          aria-label="Hide work details"
-          title="Close work details"
+          aria-label="Hide chat details"
+          title="Close chat details"
           @click="hideRail"
         ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
       </div>
@@ -1912,7 +1912,7 @@ const mentionedFiles = computed<string[]>(() => {
 
 // How full the model's context window was at the end of the latest turn, from
 // the usage the provider reported (the last model call of that turn). This is
-// the transcript's only statement of occupancy: the Work details rail shows it
+// the transcript's only statement of occupancy: the Chat details rail shows it
 // as a meter, because a percentage means nothing without the window's size
 // beside it. Providers report it as text ("13.2%"), so parseFloat, not
 // Number. Null when it reported none.
@@ -1968,7 +1968,7 @@ function openInspector() {
   inspectorOpen.value = true
 }
 // On a pane wide enough for the page grid's rail (the same 940px break the
-// shared .page-grid uses), Work details is shown in place instead of as a
+// shared .page-grid uses), Chat details is shown in place instead of as a
 // drawer. Measured on the panel rather than the window, because the sidebar
 // and a pinned file both take width from this pane.
 const panelEl = ref<HTMLElement | null>(null)
@@ -4511,7 +4511,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
    --page-max, centred, with the gutter inside. The left column holds the
    whole conversation (context bar, transcript, dock, composer), so the
    transcript, the composer and the header title share one left edge; the
-   rail takes --page-rail on the right when Work details is shown in place. */
+   rail takes --page-rail on the right when Chat details is shown in place. */
 .chat-body {
   flex: 1;
   display: flex;
@@ -4616,14 +4616,14 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 .chat-rail-origin a:hover { text-decoration-color: currentColor; }
 
-/* The same origin sentence for a chat whose Work details rail is hidden, above
+/* The same origin sentence for a chat whose Chat details rail is hidden, above
    the transcript. Flat, and sharing the rail's link treatment: one sentence in
    two places, never two different sentences. */
 .chat-origin-note {
   display: flex;
   gap: 10px;
   align-items: center;
-  /* Clear of the header rule and of the Work details tab over its corner. */
+  /* Clear of the header rule and of the Chat details tab over its corner. */
   margin: 12px 0;
   padding: 9px calc(34px + 12px) 9px 12px;
   border: 1px solid var(--border);
@@ -4780,7 +4780,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   flex: 0 1 auto;
 }
 
-/* A pane too narrow for the Work details rail (a phone, or a desktop pane
+/* A pane too narrow for the Chat details rail (a phone, or a desktop pane
    squeezed by the sidebar or a pinned file) gives the title its own row and
    puts the project under it, so neither truncates the other to a stub. */
 .header-breadcrumb--stacked {
