@@ -397,6 +397,17 @@ def test_the_remember_command_states_the_provenance_rule() -> None:
     assert "carrying the same `--request <id>` the queued copy used" in command
 
 
+def test_the_capabilities_catalog_describes_the_memory_backup() -> None:
+    """The catalog has to name the three entry points a user will look for in
+    Settings, and say that the engine then runs on its own."""
+    skill = " ".join(_stock("skills/ciao-capabilities/SKILL.md").split())
+    assert "**Memory backup** (Settings → General → Memory backup)" in skill
+    assert "**Set up in Ciaobot**" in skill
+    assert "**Copy setup prompt**" in skill
+    assert "GitHub CLI signed in" in skill
+    assert "every five minutes on its own" in skill
+
+
 def test_the_capabilities_catalog_describes_the_routing_without_overclaiming() -> None:
     """The catalog is what a user asks "what can it do" and gets an answer from.
 

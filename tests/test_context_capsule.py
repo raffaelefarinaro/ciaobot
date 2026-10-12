@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from pathlib import Path
+
+import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.context.capsule import TASK_BOARD_HINT, build_context_capsule, context_digest
@@ -204,3 +207,39 @@ def test_the_board_hint_travels_with_the_stable_block_only() -> None:
     # The parts that must never be dropped are untouched by that choice.
     assert "today=" in without_stable
 
+
+
+def test_the_file_access_line_names_the_roots_only_for_a_confined_chat() -> None:
+    """A workspace-scoped chat is told where it may write and who can widen it,
+    once per turn. A chat with no roots (machine scope) gets no such line."""
+    capsule = build_context_capsule(
+        workspace="work",
+        file_roots=("/work/agent", "/work/agent/memory-vault/work"),
+    )
+
+    line = next(
+        entry for entry in capsule.splitlines() if entry.startswith("file_access=")
+    )
+    assert "/work/agent, /work/agent/memory-vault/work" in line
+    assert '"Operation not permitted"' in line
+    assert "Settings → Workspaces → Edit → File access" in line
+    assert "file_access=" not in build_context_capsule(workspace="work")
+
+
+@pytest.mark.parametrize(("scope", "confined"), [("workspace", True), ("machine", False)])
+def test_the_prompt_prefix_states_file_access_only_for_workspace_scope(
+    tmp_path: Path, scope: str, confined: bool
+) -> None:
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("work")
+    assert workspace is not None
+    config.workspaces["work"] = dataclasses.replace(workspace, agent_fs_scope=scope)
+    project = manager.create_project("Ciaobot", workspace="work")
+    chat = manager.create_chat(project.project_id)
+
+    prefix = manager._build_prompt_prefix(chat)
+
+    assert ("file_access=workspace only" in prefix) is confined
+    if confined:
+        assert str(config.agent_root("work").resolve()) in prefix

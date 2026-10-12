@@ -307,6 +307,7 @@ class _FakePCM:
         self.streamed = None
         self.chats: list[_FakeChat] = []
         self.sent: list[dict] = []
+        self.granted: list[str] = []
 
     def list_projects(self, workspace):
         assert workspace == "personal"
@@ -316,10 +317,13 @@ class _FakePCM:
         return list(self.chats)
 
     def create_chat(self, project_id, title=None, model=None, **kw):
-        self.created = {"project_id": project_id, "title": title, "model": model}
+        self.created = {"project_id": project_id, "title": title, "model": model, **kw}
         chat = _FakeChat(title=title or "")
         self.chats.append(chat)
         return chat
+
+    def grant_data_root(self, chat_id):
+        self.granted.append(chat_id)
 
     def start_stream(self, chat_id, prompt, images=None):
         self.streamed = {"chat_id": chat_id, "prompt": prompt}
@@ -614,10 +618,15 @@ def test_the_setup_chat_sends_the_prompt_and_a_second_call_reuses_it(
     assert second.json()["reused"] is True
     assert second.json()["chat_id"] == first.json()["chat_id"]
     assert len(pcm.chats) == 1
+    # The reused chat is granted the data root too, so a setup chat opened
+    # before the grant existed can create the repository (#1328).
+    assert pcm.granted == [first.json()["chat_id"]]
     # Sent, not drafted: exactly one turn, carrying exactly the copied text.
     assert len(pcm.sent) == 1
     assert pcm.sent[0]["prompt"] == prompt
     assert pcm.created["title"] == SETUP_CHAT_TITLE
+    # The one chat granted the data root, where the repository is created.
+    assert pcm.created["grants_data_root"] is True
 
 
 def test_an_archived_setup_chat_is_replaced_not_re_entered(tmp_path: Path) -> None:
