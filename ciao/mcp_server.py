@@ -1120,6 +1120,31 @@ async def _op_task_add_update(service: CiaoMcpService, task_id: str,
     )
 
 
+async def _op_task_link_chat(service: CiaoMcpService, task_id: str,
+                             expected_revision: str, chat_id: str = "",
+                             remove: bool = False) -> dict[str, Any]:
+    """Record that a chat worked on a task, or unlink it. This is not a
+    delegation: it does not complete, move or assign the task.
+
+    A linked chat may add progress notes with task_add_update. Read the task
+    first and pass the revision that read returned.
+
+    Args:
+        task_id: The task's 32-hex id.
+        expected_revision: The `revision` you just read.
+        chat_id: The chat to link, by id or exact title. Empty links this chat.
+        remove: Unlink the chat instead of linking it.
+    """
+    return await service._invoke(
+        "task_link_chat",
+        lambda cp, p: cp.task_link_chat(
+            p, task_id, expected_revision=expected_revision,
+            chat_id=chat_id or None, remove=remove,
+        ),
+        mutating=True,
+    )
+
+
 async def _op_task_report(service: CiaoMcpService, task_id: str, outcome: str,
                           summary: str) -> dict[str, Any]:
     """Report how far you got on the task this chat was handed. Call it once,
@@ -1395,6 +1420,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("task_action", _WRITE, _op_task_action.__doc__ or "", _op_task_action),
     Operation("task_delegate", _WRITE, _op_task_delegate.__doc__ or "", _op_task_delegate),
     Operation("task_add_update", _WRITE, _op_task_add_update.__doc__ or "", _op_task_add_update),
+    Operation("task_link_chat", _WRITE, _op_task_link_chat.__doc__ or "", _op_task_link_chat),
     Operation("task_report", _WRITE, _op_task_report.__doc__ or "", _op_task_report),
     # `_DESTRUCTIVE`, because `stop` ends a turn irreversibly: an ask-class
     # operation, where every other task write is allow-class.

@@ -3025,3 +3025,70 @@ async def test_a_refused_resolution_leaves_the_review_linked_and_open(
     assert still["attempt_id"] == settled["attempt_id"]
     assert still["revision"] == settled["revision"]
     assert _attempt_store(plane).get(attempt_id).state == "ready_for_review"
+
+
+# ── Linked chats (#1334) ─────────────────────────────────────────────
+
+
+def _register_agent_chat(pcm: _RecordingPcm, chat_id: str = "chat-agent", project_id: str = "project-home") -> None:
+    pcm.chats[chat_id] = SimpleNamespace(
+        chat_id=chat_id,
+        project_id=project_id,
+        title="Agent chat",
+        mode=None,
+        archived=False,
+        helper={},
+        pending_question="",
+        pending_permission="",
+    )
+
+
+async def test_an_agent_links_its_own_chat_and_may_then_add_a_note(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    _register_agent_chat(pcm)
+    task = _create(plane, title="Worked in an ordinary chat")
+
+    linked = plane.task_link_chat(_principal(), task["id"], expected_revision=task["revision"])
+    assert linked["ok"] is True
+    assert linked["data"]["linked_chats"] == ["chat-agent"]
+    assert linked["data"]["chat_id"] is None
+    assert linked["data"]["attempt_id"] is None
+
+    moved = plane.workspace_task_update(
+        "personal",
+        task["id"],
+        expected_revision=linked["data"]["revision"],
+        changes={"status": "in_progress"},
+        actor="user",
+    )
+    noted = plane.task_add_update(
+        _principal(), task["id"], expected_revision=moved["revision"], text="Halfway."
+    )
+    assert noted["data"]["revision"] != moved["revision"]
+    body = (_tasks_dir(plane) / f"{task['id']}.md").read_text(encoding="utf-8")
+    assert "chat `chat-agent`" in body
+    assert "attempt:" not in body
+
+
+async def test_linking_a_chat_from_another_workspace_is_refused(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    _register_agent_chat(pcm, chat_id="chat-work", project_id="project-work")
+    task = _create(plane, title="Stay in your lane")
+    with pytest.raises(ControlPlaneError) as refused:
+        plane.workspace_task_link_chat(
+            "personal", task["id"], expected_revision=task["revision"], chat_id="chat-work"
+        )
+    assert refused.value.code == "chat_not_found"
+    assert _get_task(plane, task["id"])["linked_chats"] == []
+
+
+async def test_an_unlinked_chat_still_cannot_add_a_note(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    _register_agent_chat(pcm)
+    task = _create(plane, title="Not linked")
+    with pytest.raises(ControlPlaneError) as refused:
+        plane.task_add_update(
+            _principal(), task["id"], expected_revision=task["revision"], text="Progress."
+        )
+    assert refused.value.code == "task_report_not_holder"
+    assert "task link-chat" in refused.value.args[0]

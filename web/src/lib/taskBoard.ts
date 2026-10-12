@@ -160,6 +160,9 @@ function taskFrom(raw: Partial<Task> | null | undefined): Task {
     assignee: row.assignee === 'agent' ? 'agent' : 'user',
     chat_id: asString(row.chat_id),
     attempt_id: asString(row.attempt_id),
+    linked_chats: Array.isArray(row.linked_chats)
+      ? row.linked_chats.filter((id): id is string => typeof id === 'string' && id !== '')
+      : [],
     created_at: asString(row.created_at),
     updated_at: asString(row.updated_at),
     revision: asString(row.revision),
@@ -312,6 +315,7 @@ export function toTaskListRow(detail: TaskDetail | Task): Task {
     assignee: detail.assignee,
     chat_id: detail.chat_id,
     attempt_id: detail.attempt_id,
+    linked_chats: detail.linked_chats,
     created_at: detail.created_at,
     updated_at: detail.updated_at,
     revision: detail.revision,

@@ -799,6 +799,31 @@ function openAttemptChat(task: Task) {
   void projectStore.switchChat(task.chat_id)
 }
 
+/** The title a linked chat is listed under; a chat the store no longer knows reads as "Chat". */
+function linkedChatTitle(chatId: string): string {
+  const chat = projectStore.chats.find((entry) => entry.chat_id === chatId)
+  if (!chat) return 'Chat'
+  return chat.archived ? `${chat.title} (archived)` : chat.title
+}
+
+function openLinkedChat(chatId: string) {
+  void projectStore.switchChat(chatId)
+}
+
+const linkedChatsError = ref('')
+
+/** Unlink one chat from the task. Linking is only ever a record, so this never touches status. */
+async function unlinkChat(chatId: string) {
+  const task = detailTask.value
+  if (!task || detailSaving.value) return
+  linkedChatsError.value = ''
+  const saved = await board.linkChat(workspace.value, task.id, task.revision, chatId, true)
+  if (!saved) {
+    linkedChatsError.value = board.error || 'Could not update the linked chats.'
+    board.clearError()
+  }
+}
+
 // ── Review loop, history, reconcile ────────────────────────────────────────
 //
 // Three things the review needs that a badge cannot carry: where the result is,
@@ -2426,6 +2451,17 @@ const today = localDateKey()
             </p>
           </div>
 
+          <section v-if="detailTask?.linked_chats.length" class="task-linked-chats" aria-labelledby="task-linked-chats-title">
+            <h4 id="task-linked-chats-title" class="task-delegate-title">Linked chats</h4>
+            <ul class="task-linked-chat-list">
+              <li v-for="chatId in detailTask.linked_chats" :key="chatId" class="task-linked-chat">
+                <button type="button" class="btn-chip task-chip" :aria-label="`Open chat ${linkedChatTitle(chatId)}`" @click="openLinkedChat(chatId)">{{ linkedChatTitle(chatId) }}</button>
+                <button type="button" class="btn-chip task-chip" :disabled="detailSaving" :aria-label="`Unlink chat ${linkedChatTitle(chatId)}`" @click="unlinkChat(chatId)">×</button>
+              </li>
+            </ul>
+            <p v-if="linkedChatsError" class="hint" role="alert">{{ linkedChatsError }}</p>
+          </section>
+
           <section class="task-progress" aria-labelledby="task-progress-title">
             <h4 id="task-progress-title" class="task-delegate-title">Activity</h4>
             <p class="hint">Milestones and blockers. These notes are what the next resume and the completion memory pass read. They are not a copy of the chat.</p>
@@ -3227,6 +3263,15 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
+.task-linked-chat-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.task-linked-chat { display: inline-flex; gap: var(--space-1); }
 .task-delegate-explain { max-width: 62ch; line-height: 1.5; }
 .task-delegate-explain strong { color: var(--fg); font-weight: 600; }
 .task-delegate-state {

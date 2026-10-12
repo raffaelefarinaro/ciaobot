@@ -1252,6 +1252,8 @@ export interface Task {
   chat_id: string
   /** The attempt holding the task, empty when nothing is delegated. */
   attempt_id: string
+  /** Chats that worked on the task outside delegation; no lifecycle meaning. */
+  linked_chats: string[]
   created_at: string
   updated_at: string
   /** SHA-256 of the file's exact bytes, hex. Every write presents the one it read. */

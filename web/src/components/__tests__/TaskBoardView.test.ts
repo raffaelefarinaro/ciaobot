@@ -62,6 +62,7 @@ function task(overrides: Partial<Task> = {}): Task {
     assignee: 'user',
     chat_id: '',
     attempt_id: '',
+    linked_chats: [],
     created_at: '2026-03-01T09:00:00+00:00',
     updated_at: '2026-03-01T09:00:00+00:00',
     revision: REVISION,
@@ -495,6 +496,44 @@ describe('TaskBoardView', () => {
     expect(unreadable.text()).toContain('no title in frontmatter')
     // It is not a card: it has no status to move and nothing to edit.
     expect(wrapper.findAll('.task-card')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('lists linked chats and unlinks one', async () => {
+    useProjectStore().chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Design review', archived: false } as never,
+    ]
+    const linked = task({ linked_chats: ['c1'] })
+    apiGet.mockImplementation((url: string) => Promise.resolve(
+      url.includes('/api/tasks?')
+        ? { workspace: 'personal', tasks: [linked] }
+        : detailAnswer(linked, 'Prose the list never carried.'),
+    ))
+    apiPost.mockResolvedValue({
+      workspace: 'personal',
+      task: { ...linked, linked_chats: [], revision: THIRD_REVISION, body: '' },
+    })
+    const wrapper = mount(TaskBoardView, { attachTo: document.body })
+    await flushPromises()
+    await nextTick()
+
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    const section = wrapper.get('.task-linked-chats')
+    expect(section.text()).toContain('Linked chats')
+    expect(section.text()).toContain('Design review')
+
+    await section.get('[aria-label="Unlink chat Design review"]').trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/chats', {
+      workspace: 'personal',
+      expected_revision: NEXT_REVISION,
+      chat_id: 'c1',
+      remove: true,
+    })
+    expect(wrapper.find('.task-linked-chats').exists()).toBe(false)
     wrapper.unmount()
   })
 

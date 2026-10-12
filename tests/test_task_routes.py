@@ -41,6 +41,7 @@ from ciao.web.routes_tasks import (
     task_delegate,
     task_delete,
     task_get,
+    task_link_chat,
     task_list,
     task_resolution_review,
     task_send_update,
@@ -205,6 +206,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 task_resolution_review,
                 methods=["POST"],
             ),
+            Route("/api/tasks/{task_id}/chats", task_link_chat, methods=["POST"]),
             Route("/api/tasks/{task_id}/delegate", task_delegate, methods=["POST"]),
             Route("/api/tasks/{task_id}/attempts", task_attempts, methods=["GET"]),
             Route(
@@ -1697,3 +1699,37 @@ def test_resolution_review_queues_and_complete_still_succeeds_when_enqueue_raise
         thread.join(timeout=5)
         loop.close()
 
+
+def test_link_chat_route_links_and_unlinks(world) -> None:
+    """`POST /api/tasks/{id}/chats` records a linked chat and removes it again (#1334)."""
+    client, cookies, _config, pcm = world
+    pcm.chats["chat-user"] = SimpleNamespace(
+        chat_id="chat-user", project_id="project-home", title="Working chat", archived=False
+    )
+    created = _create(client, cookies, title="Linked from a chat")
+
+    linked = client.post(
+        f"/api/tasks/{created['id']}/chats",
+        json={
+            "workspace": "personal",
+            "expected_revision": created["revision"],
+            "chat_id": "chat-user",
+        },
+        cookies=cookies,
+    )
+    assert linked.status_code == 200, linked.text
+    assert linked.json()["task"]["linked_chats"] == ["chat-user"]
+    assert linked.json()["task"]["status"] == created["status"]
+
+    unlinked = client.post(
+        f"/api/tasks/{created['id']}/chats",
+        json={
+            "workspace": "personal",
+            "expected_revision": linked.json()["task"]["revision"],
+            "chat_id": "chat-user",
+            "remove": True,
+        },
+        cookies=cookies,
+    )
+    assert unlinked.status_code == 200, unlinked.text
+    assert unlinked.json()["task"]["linked_chats"] == []

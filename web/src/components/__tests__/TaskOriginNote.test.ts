@@ -38,6 +38,7 @@ function task(overrides: Partial<Task> = {}): Task {
     assignee: 'agent',
     chat_id: 'chat-1',
     attempt_id: 'att-1',
+    linked_chats: [],
     created_at: '',
     updated_at: '',
     revision: REVISION,
