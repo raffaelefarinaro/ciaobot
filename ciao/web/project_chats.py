@@ -90,7 +90,7 @@ def _restored_pin_paths(raw: Any) -> list[str]:
 import yaml
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import subagent_tracking
+from ciao import backup_scope, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -587,6 +587,11 @@ class ChatInfo:
     pinned_file_path: str = ""
     dismissed_pin_paths: list[str] = field(default_factory=list)
     pin_revision: int = 0
+    # Set only by the memory-backup setup route (#1328). A workspace-scoped
+    # chat with this flag may also read and write the install's data root,
+    # the parent of every workspace folder, because a git repository there is
+    # what the setup creates. Not settable from any request body.
+    grants_data_root: bool = False
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         d = {
@@ -1010,6 +1015,7 @@ class ProjectChatManager:
                 pinned_file_path=str(cd.get("pinned_file_path", "") or ""),
                 dismissed_pin_paths=_restored_pin_paths(cd.get("dismissed_pin_paths")),
                 pin_revision=int(cd.get("pin_revision", 0) or 0),
+                grants_data_root=bool(cd.get("grants_data_root", False)),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
                 # chat reports what it managed to finish instead of pulsing
@@ -1114,6 +1120,7 @@ class ProjectChatManager:
                     "pinned_file_path": c.pinned_file_path,
                     "dismissed_pin_paths": list(c.dismissed_pin_paths),
                     "pin_revision": c.pin_revision,
+                    "grants_data_root": c.grants_data_root,
                 }
                 for cid, c in self._chats.items()
             },
@@ -2994,6 +3001,7 @@ class ProjectChatManager:
         mode: str | None = None,
         provider: str | None = None,
         helper: dict | None = None,
+        grants_data_root: bool = False,
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -3038,11 +3046,27 @@ class ProjectChatManager:
             thinking_level=default_thinking,
             created_at=chat_service._now_iso(),
             helper=chat_service._normalize_chat_helper(helper),
+            grants_data_root=grants_data_root,
         )
         self._chats[cid] = chat
         self._save()
         self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
         return chat
+
+    def grant_data_root(self, chat_id: str) -> None:
+        """Give an existing chat the data-root grant (#1328), persisted.
+
+        Used for a live setup chat opened before the grant existed. The chat's
+        next turn sees new roots, so its provider process is rebuilt (see the
+        reuse checks in the providers) rather than keeping the old sandbox.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            raise ValueError(f"Chat '{chat_id}' not found")
+        if chat.grants_data_root:
+            return
+        chat.grants_data_root = True
+        self._save()
 
     def is_empty_chat(self, chat_id: str) -> bool:
         """Public form of `_is_empty_chat`, for the conditional-delete route.
@@ -4466,8 +4490,10 @@ class ProjectChatManager:
         """The chat's workspace filesystem scope and the roots it confines to.
 
         Roots are the chat's agent root and that workspace's vault root,
-        resolved and de-duplicated, agent root first. Machine scope never
-        reads them, so they are only computed for the workspace case.
+        resolved and de-duplicated, agent root first. A chat granted the data
+        root (the memory-backup setup chat, #1328) also gets that root, last.
+        Machine scope never reads them, so they are only computed for the
+        workspace case.
         """
         workspace = self._workspace_for_chat(chat.chat_id)
         config = self._config.workspace(workspace)
@@ -4475,8 +4501,10 @@ class ProjectChatManager:
             return "machine", ()
         agent_root = self._config.agent_root(workspace).resolve()
         vault_root = self._config.workspace_vault_root(workspace).resolve()
-        roots = tuple(dict.fromkeys((str(agent_root), str(vault_root))))
-        return "workspace", roots
+        roots = [str(agent_root), str(vault_root)]
+        if chat.grants_data_root:
+            roots.append(str(backup_scope.data_root(self._config).resolve()))
+        return "workspace", tuple(dict.fromkeys(roots))
 
     def _revoke_mcp_chat(self, chat_id: str) -> None:
         service = self._mcp_service
@@ -4511,6 +4539,9 @@ class ProjectChatManager:
             or chat.handover_context_pending
         )
         handover = self._format_handover_context(chat)
+        # Only a workspace-scoped chat is confined, so only it is told where
+        # it can write; a machine-scope chat gets no file-access line at all.
+        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -4521,6 +4552,7 @@ class ProjectChatManager:
             unattended=unattended,
             handover=handover,
             include_stable=include_stable,
+            file_roots=fs_roots if fs_scope == "workspace" else (),
         )
         if capsule:
             capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"

@@ -2322,6 +2322,54 @@ async def test_a_server_that_fails_validation_is_reaped(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("live_roots", "expect_restart"),
+    [(("/w/agent",), True), (("/w/agent", "/w/data"), False)],
+)
+async def test_a_changed_root_set_restarts_the_opencode_server(
+    tmp_path, monkeypatch, live_roots, expect_restart
+):
+    """The sandbox profile wraps the server process, so a changed root set (a
+    setup chat granted the data root) must restart it; an unchanged one keeps it."""
+    from types import SimpleNamespace
+
+    from ciao.models import provider_reuse_key
+
+    provider = _provider(tmp_path)
+    live_client = object()
+    provider._client = live_client  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "workspace"
+        agent_roots = ("/w/agent", "/w/data")
+
+    request = Request()
+    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
+    provider._fs_scope_key = ("workspace", live_roots)
+    stopped: list[bool] = []
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._process = None
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    # Stop after the reuse decision: with no binary, a restart raises here.
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
+
+    if expect_restart:
+        with pytest.raises(FileNotFoundError):
+            await provider._ensure_server(request)  # type: ignore[arg-type]
+        assert stopped == [True]
+    else:
+        assert await provider._ensure_server(request) is live_client  # type: ignore[arg-type]
+        assert stopped == []
+
+
+@pytest.mark.asyncio
 async def test_database_lock_during_startup_retries_after_contention(tmp_path, monkeypatch):
     """A shared opencode SQLite lock gets short in-process startup retries."""
     provider = _provider(tmp_path)

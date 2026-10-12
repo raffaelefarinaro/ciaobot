@@ -7440,6 +7440,9 @@ async def local_backup_setup_chat(request: Request) -> JSONResponse:
         None,
     )
     if live is not None:
+        # A setup chat opened before the data-root grant existed gets it here,
+        # so the repository it is working on can be created.
+        pcm.grant_data_root(live.chat_id)
         # Re-arming a live chat is harmless: the answer is owed until the
         # repository actually verifies, and a retry must not consume it.
         service.begin_guided_setup()
@@ -7457,8 +7460,12 @@ async def local_backup_setup_chat(request: Request) -> JSONResponse:
     # and model, which is where the owner's configured agent already is. A
     # pinned Claude model would name a model the opencode backend does not
     # have, and setup is not the place to fail on that.
+    # The one chat that may write the data root: the repository the setup
+    # creates lives there, above every workspace folder the chat is confined to.
     chat = pcm.create_chat(
-        project.project_id, title=backup_service.SETUP_CHAT_TITLE
+        project.project_id,
+        title=backup_service.SETUP_CHAT_TITLE,
+        grants_data_root=True,
     )
     pcm.start_stream(chat.chat_id, backup_service.render_setup_prompt(config, context))
     service.begin_guided_setup()

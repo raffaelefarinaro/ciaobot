@@ -1290,6 +1290,85 @@ async def test_claude_workspace_scope_keeps_vault_inside_agent_root_out_of_add_d
 
 
 @pytest.mark.asyncio
+async def test_a_changed_root_set_rebuilds_the_claude_client(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The sandbox is fixed when the CLI process starts, so a turn whose roots
+    differ from the live client's (a setup chat granted the data root) must
+    disconnect it and build a new one with the widened sandbox."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    captured = {}
+    stopped: list[bool] = []
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    agent_root = tmp_path / "agent"
+    data_root = tmp_path
+    provider._client = object()  # type: ignore[assignment]
+    provider._connected = True
+    provider._fs_scope_key = ("workspace", (str(agent_root),))
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._connected = False
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(str(agent_root), str(data_root)),
+    )
+
+    await provider._ensure_connected(request)
+
+    assert stopped == [True]
+    assert captured["options"].sandbox["filesystem"]["allowWrite"] == [
+        str(agent_root),
+        str(data_root),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_root_set_reuses_the_claude_client(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    stopped: list[bool] = []
+    provider = ClaudeProvider(tmp_path)
+    live = object()
+    provider._client = live  # type: ignore[assignment]
+    provider._connected = True
+    # Model and mode already match the turn, so only the roots can decide.
+    provider._current_model = "sonnet"
+    provider._current_mode = "auto"
+    agent_root = str(tmp_path / "agent")
+    provider._fs_scope_key = ("workspace", (agent_root,))
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        agent_fs_scope="workspace",
+        agent_roots=(agent_root,),
+    )
+
+    assert await provider._ensure_connected(request) is live
+    assert stopped == []
+
+
+@pytest.mark.asyncio
 async def test_claude_machine_scope_omits_sandbox(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 

@@ -1407,6 +1407,26 @@ def test_the_prompt_does_not_put_one_path_in_both_lists(tmp_path: Path) -> None:
     assert "anchored to the repository root" in step
 
 
+def test_the_setup_prompt_says_what_to_do_when_the_data_folder_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A setup chat has to say why it stopped. If the sandbox refuses a write
+    to the data folder, the agent reports the missing access and the owner's way
+    to grant it, instead of failing silently."""
+    world = _world_in(tmp_path / "ciao install")
+    prompt = backup_service.render_setup_prompt(world.config)
+
+    # The bullet sits in the "what that means" list, before the numbered steps.
+    assert prompt.index("What that means") < prompt.index("The work happens in the data folder")
+    assert prompt.index("The work happens in the data folder") < prompt.index("\n1. Look before")
+    rejoined = " ".join(prompt.split())
+    assert '(for example with "Operation not permitted")' in rejoined
+    assert "stop and tell the owner" in rejoined
+    assert (
+        "Settings → Workspaces → Edit → File access → Whole machine" in rejoined
+    )
+
+
 def test_a_folder_with_spaces_stays_one_path(tmp_path: Path) -> None:
     """A data folder with a space in it is the ordinary case on macOS, and a
     prompt that printed it bare would have the agent's first ``cd`` land
