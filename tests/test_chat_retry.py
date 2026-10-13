@@ -749,6 +749,35 @@ def test_a_plainly_stated_usage_limit_arms_the_hourly_retry() -> None:
     assert _is_retryable_quota_error("Token limit exhausted for this key") is True
 
 
+def test_a_tool_quota_error_does_not_arm_the_provider_retry() -> None:
+    """"quota" alone is a noun tools and the OS use too, so it is not a provider limit.
+
+    "disk quota exceeded" ended a turn and armed the hourly provider retry,
+    re-running the turn against a problem that is not a provider limit. A
+    quota counts only when it is the caller's own (exceeded your quota) or a
+    named provider's (OpenAI quota exceeded).
+    """
+    from ciao.web.chat_service import _is_retryable_quota_error
+
+    assert _is_retryable_quota_error("OSError: [Errno 122] Disk quota exceeded") is False
+    assert (
+        _is_retryable_quota_error(
+            "Google API quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute'"
+        )
+        is False
+    )
+    assert _is_retryable_quota_error("storage quota reached") is False
+    assert _is_retryable_quota_error("You have exceeded your daily request quota for this API") is False
+    assert (
+        _is_retryable_quota_error(
+            "You exceeded your current quota, please check your plan and billing details"
+        )
+        is True
+    )
+    assert _is_retryable_quota_error("OpenAI quota exceeded") is True
+    assert _is_retryable_quota_error("API Error: 429 Too Many Requests: quota") is True
+
+
 def test_a_limit_noun_alone_still_needs_the_429_marker() -> None:
     """The gate exists so ordinary prose mentioning a quota is not a quota error.
 
