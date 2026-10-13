@@ -847,6 +847,20 @@ def _launchd_runner(calls: list[list[str]], printed: str, *, print_returncode: i
     return run
 
 
+def test_a_revision_one_host_argv_is_not_hosted() -> None:
+    # The retired executable name is no longer the hosted shape, so it reads as
+    # an ordinary argv: no hosted interpreter, and the service python is argv[0]
+    # as it is for any other unrecognised command.
+    argv = [
+        "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+        "serve",
+        "--python",
+        "/x/python",
+    ]
+    assert macos_service.hosted_service_python(argv) is None
+    assert macos_service.service_python_path(argv) == argv[0]
+
+
 def test_parse_launchctl_print_arguments_reads_the_hosted_argv() -> None:
     parsed = macos_service.parse_launchctl_print_arguments(HOSTED_PRINT)
 

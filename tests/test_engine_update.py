@@ -291,6 +291,40 @@ def test_read_operation_reads_a_record_written_before_env_freeze(
     assert op.env_python.endswith("/env/bin/python")
 
 
+def test_read_operation_ignores_the_retired_host_fields(
+    tmp_path: Path,
+) -> None:
+    # A record written by v1.5.x carries the retired host-migration fields. The
+    # reader drops them rather than refusing the record, so an update staged
+    # before this release still applies.
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / OPERATION_NAME).write_text(
+        json.dumps(
+            {
+                "id": "20260925T100000-1.2.3",
+                "phase": "staged",
+                "from_version": "1.2.2",
+                "to_version": "1.2.3",
+                "started_at": "2026-09-25T10:00:00+00:00",
+                "updated_at": "2026-09-25T10:00:05+00:00",
+                "env_python": "/u/.local/state/ciaobot/updates/1.2.3/env/bin/python",
+                "host_archive": "/x/host.zip",
+                "host_status": "migrated",
+                "host_error": "boom",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    op = read_operation(state)
+
+    assert op is not None
+    assert op.id == "20260925T100000-1.2.3"
+    assert op.phase == "staged"
+    assert not hasattr(op, "host_status")
+
+
 def test_stage_update_rejects_bad_signature(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -3003,6 +3037,30 @@ def test_a_hosted_command_with_a_non_python_interpreter_refuses(
     assert "not the receipt's environment" in result.error
     assert engine.changed_jobs() == []
     assert engine.starts == 0
+
+
+@mac_update_host
+def test_a_loaded_revision_one_host_is_refused_without_touching_anything(
+    tmp_path: Path,
+) -> None:
+    # A revision-1 host still loaded under the hosted command serves the
+    # receipt's own env, but the executable it runs is the retired name. The
+    # parser no longer accepts that name, so the pre-flight must refuse the swap
+    # rather than read the job as agreeing, and nothing may be changed.
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    launchctl = _loaded_hosted_job(
+        engine, engine.live_env / "bin" / "python", executable="CiaobotServerHost"
+    )
+
+    result = _run(engine, op, state, receipt_path, launchctl=launchctl)
+
+    assert result.phase == "failed"
+    assert "not the receipt's environment" in result.error
+    assert engine.changed_jobs() == []
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert engine.run_calls == []
+    assert _env_version(engine.live_env) == FROM_VERSION
 
 
 @mac_update_host

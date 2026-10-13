@@ -471,6 +471,44 @@ def test_install_refuses_a_foreign_bundle_without_touching_it(
     assert runner.commands == []
 
 
+@requires_posix_uid
+def test_install_refuses_a_revision_one_host_without_touching_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A revision-1 bundle is named CiaobotServerHost. Its own record says
+    # revision 1, which the revision-2 installer does not accept, so the install
+    # is refused and neither the bundle nor the record is replaced.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    legacy_exe = target / "Contents" / "MacOS" / "CiaobotServerHost"
+    legacy_exe.parent.mkdir(parents=True)
+    legacy_exe.write_bytes(b"revision-one-host-binary")
+    info = BUILD.bundle_info()
+    info["CFBundleExecutable"] = "CiaobotServerHost"
+    info["CFBundleVersion"] = "1"
+    info["CFBundleShortVersionString"] = "1"
+    with (target / _PLIST_REL).open("wb") as handle:
+        plistlib.dump(info, handle)
+    record = tmp_path / "records" / "server-host.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(
+        json.dumps({"host_revision": 1, "bundle_path": str(target)}), encoding="utf-8"
+    )
+    exe_before = legacy_exe.read_bytes()
+    record_before = record.read_bytes()
+    runner = _FakeRunner()
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive, entry, bundle_path=target, ownership_path=record, runner=runner
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert legacy_exe.read_bytes() == exe_before
+    assert record.read_bytes() == record_before
+    assert runner.commands == []
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
 @requires_posix_uid
 def test_install_refuses_a_symlinked_target(
