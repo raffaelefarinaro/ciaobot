@@ -233,7 +233,7 @@ function submitNote(withoutNote: boolean): void {
   padding: 10px 12px;
 }
 .task-origin--note {
-  /* Clear of the header rule, and of the Work details tab that sits over the
+  /* Clear of the header rule, and of the Chat details tab that sits over the
      note's top-right corner (34px, 44px on touch) while the rail is hidden. */
   margin: 12px 0;
   padding: 9px calc(34px + 12px) 9px 12px;

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // The aligned chat layout: the model trigger in the composer, the per-message
-// action row, and Work details shown as a rail on a wide pane.
+// action row, and Chat details shown as a rail on a wide pane.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -204,7 +204,7 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
-  it('shows Work details as a rail on a wide pane, hidden from its heading and reopened from the info tab', async () => {
+  it('shows Chat details as a rail on a wide pane, hidden from its heading and reopened from the info tab', async () => {
     // ChatPanel observes more than one element; report a wide pane to all.
     const observers: Array<() => void> = []
     vi.stubGlobal('ResizeObserver', class {
@@ -231,7 +231,7 @@ describe('ChatPanel aligned layout', () => {
     expect(origins.map(o => o.props('variant'))).toEqual(['rail'])
 
     // The header carries Archive only, as an icon button (labelled on wide
-    // panes, icon-only on narrow); the toggle lives with Work details.
+    // panes, icon-only on narrow); the toggle lives with Chat details.
     const actions = wrapper.get('.pane-header .header-actions')
     expect(actions.findAll('button').map(b => b.text())).toEqual(['Archive'])
     expect(actions.get('button').classes()).toContain('btn-icon')

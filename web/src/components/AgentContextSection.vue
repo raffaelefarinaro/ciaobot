@@ -1,6 +1,6 @@
 <template>
   <!-- What the agent is given for this chat, each with when it is sent. Shared
-       by the Work details rail and the narrow-pane drawer. -->
+       by the Chat details rail and the narrow-pane drawer. -->
   <section class="rail-section agent-context" aria-labelledby="agent-context-label">
     <p id="agent-context-label" class="rail-label">Agent context</p>
     <template v-if="contextPct != null">
