@@ -126,7 +126,7 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 |---|---|---|
 | `project list [--include-completed]` | List projects in the active workspace. | — |
 | `project get [ID]` | Get one project by id or name. | Omit for the active project. |
-| `project create --name N [--context TEXT]` | Create a project. | `--vault-folder` is not a create-time flag; set it with `project update` after creating. |
+| `project create --name N [--context TEXT]` | Create a project. | Also creates `projects/active/<slug>/<slug>.md` with valid frontmatter and binds it; edit that note, do not write a new one. Skipped when the folder name is taken. `--vault-folder` is not a create-time flag; set it with `project update` after creating. |
 | `project update ID [--name] [--context] [--vault-folder]` | Update project metadata or its safe vault-folder binding. | Omit `ID` for the active project; an omitted flag keeps its current value. |
 | `project restore STEM` | Restore a completed vault project into the active workspace. | Takes the completed project's *stem*, not a project id. |
 | `project complete ID` | Move a vault-backed project to completed and archive its active record. | Destructive. |
@@ -272,6 +272,7 @@ ciao chat send --chat chat_91ab --prompt "Re-run the nightly check now"
 Projects:
 ```bash
 ciao project create --name "Q4 Launch" --context "Coordinates the Q4 rollout"
+# creates projects/active/q4-launch/q4-launch.md and binds it
 ```
 ```json
 {"ok": true, "data": {"project_id": "proj_q4launch", "name": "Q4 Launch"}}

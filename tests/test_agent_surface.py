@@ -822,6 +822,11 @@ class _NamesPcm:
             "chat-w": self._chat("chat-w", "project-w", "Work only"),
         }
         self.updated: list[tuple[str, dict]] = []
+        self.created: list[dict] = []
+
+    def create_project(self, name, workspace, context="", *, scaffold=False):
+        self.created.append({"name": name, "workspace": workspace, "context": context, "scaffold": scaffold})
+        return SimpleNamespace(to_dict=lambda: {"name": name})
 
     @staticmethod
     def _chat(chat_id: str, project_id: str, title: str, *, archived: bool = False):
@@ -876,6 +881,13 @@ def _names_service(tmp_path: Path):
     )
     service.bind(plane)
     return service, plane, pcm
+
+
+def test_project_create_scaffolds_the_vault_note(tmp_path: Path) -> None:
+    service, plane, pcm = _names_service(tmp_path)
+    principal = SimpleNamespace(workspace="personal")
+    plane.project_create(principal, "Q4", "ctx")
+    assert pcm.created[-1]["scaffold"] is True
 
 
 def test_chats_list_accepts_a_project_name(tmp_path: Path) -> None:
