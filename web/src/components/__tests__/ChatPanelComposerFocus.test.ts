@@ -231,7 +231,7 @@ describe('composer focus on opening a chat', () => {
     await nextTick()
     const inspector = wrapper.get('.chat-work-inspector')
     expect(inspector.attributes('role')).toBe('dialog')
-    expect(inspector.get('button[aria-label="Close work details"]').element).toBe(document.activeElement)
+    expect(inspector.get('button[aria-label="Close chat details"]').element).toBe(document.activeElement)
 
     const tabs = inspector.findAll('[role="tab"]')
     const contextTab = tabs[0].element as HTMLElement

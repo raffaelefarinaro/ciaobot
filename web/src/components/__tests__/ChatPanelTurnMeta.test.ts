@@ -181,7 +181,7 @@ describe('ChatPanel turn footer placement', () => {
     const footer = bubbles[1].find('.message-meta')
     expect(footer.exists()).toBe(true)
     // Every fact the turn produced, on the bubble that closes it — except the
-    // context-window occupancy, which the Work details rail states as a meter
+    // context-window occupancy, which the Chat details rail states as a meter
     // against the window's size. The footer reports cost, not occupancy.
     expect(footer.text()).toContain('openai/gpt-5.6-luna')
     expect(footer.text()).toContain('23s')

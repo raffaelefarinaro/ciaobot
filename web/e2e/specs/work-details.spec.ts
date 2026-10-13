@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { boot, COMPOSER, isolate } from '../support/app'
 
 for (const mobile of [false, true]) {
-  test.describe(mobile ? 'Work details drawer' : 'Work details window', () => {
+  test.describe(mobile ? 'Chat details drawer' : 'Chat details window', () => {
     test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 }, hasTouch: mobile })
 
     test('shows readable context and supports closing and reopening', async ({ page }, testInfo) => {
@@ -29,7 +29,7 @@ for (const mobile of [false, true]) {
       await expect(surface.locator('.agent-context-doc')).toHaveCount(0)
       await documentLink.focus()
       await expect(documentLink).toBeFocused()
-      const close = surface.getByRole('button', { name: mobile ? 'Close work details' : 'Hide work details' })
+      const close = surface.getByRole('button', { name: mobile ? 'Close chat details' : 'Hide chat details' })
       await expect(close.locator('svg path')).toHaveAttribute('d', 'm6 6 12 12M18 6 6 18')
       const size = await close.boundingBox()
       if (mobile) {
