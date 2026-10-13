@@ -69,12 +69,10 @@ describe('ProjectSidebar review section', () => {
     expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review'))).toBe(false)
 
     store.bootstrapped = true
-    await nextTick()
-    await new Promise(resolve => setTimeout(resolve, 50))
-    await nextTick()
-
-    expect(apiGet).toHaveBeenCalledWith('/api/proposals')
-    expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review?workspace=personal'))).toBe(true)
+    await vi.waitFor(() => {
+      expect(apiGet).toHaveBeenCalledWith('/api/proposals')
+      expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review?workspace=personal'))).toBe(true)
+    }, { timeout: 2000 })
     wrapper.unmount()
   })
 
