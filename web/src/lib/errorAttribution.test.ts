@@ -28,6 +28,7 @@ describe('isUsageLimitError', () => {
   it.each([
     'disk quota exceeded',
     'Google API quota exceeded for quota metric generativelanguage.googleapis.com',
+    'You have exceeded your daily request quota for this API',
     '429 Too Many Requests',
   ])('does not match tool quota text: %s', (text) => {
     expect(isUsageLimitError(text)).toBe(false)
@@ -43,6 +44,10 @@ describe('isUsageLimitError', () => {
     'HTTP 429: quota exceeded for this session',
   ])('matches provider usage-limit phrasing: %s', (text) => {
     expect(isUsageLimitError(text)).toBe(true)
+  })
+
+  it('matches the OpenAI "exceeded your current quota" phrasing', () => {
+    expect(isUsageLimitError('You exceeded your current quota, please check your plan and billing details')).toBe(true)
   })
 })
 

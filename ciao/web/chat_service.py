@@ -258,6 +258,12 @@ def _handover_marker(
     }
 
 
+_PROVIDER_QUOTA_RE = re.compile(
+    r"\b(?:exceeded|reached|exhausted) your (?:current )?quota\b"
+    r"|\b(?:anthropic|claude|codex|opencode|openai|ollama) quota (?:exceeded|reached|exhausted)\b"
+)
+
+
 def _is_terminal_quota_error(text: str) -> bool:
     """Recognize a weekly or monthly usage limit, retried once a day instead.
 
@@ -300,11 +306,17 @@ def _is_retryable_quota_error(text: str) -> bool:
     # phrasings above — opencode/OpenAI surfaces "The usage limit has been
     # reached". Pairing a limit noun with an exhaustion verb is unambiguous in a
     # way the bare nouns are not, which is why those still need the 429 marker
-    # below: "quota" or "session" alone appears in plenty of prose that is not
-    # an exhaustion error.
-    if any(noun in low for noun in ("usage limit", "rate limit", "quota", "token limit")) and any(
+    # below: "session" alone appears in plenty of prose that is not an
+    # exhaustion error.
+    if any(noun in low for noun in ("usage limit", "rate limit", "token limit")) and any(
         verb in low for verb in ("reached", "exceeded", "exhausted")
     ):
+        return True
+    # "quota" alone is not enough: tools and the OS say "disk quota exceeded"
+    # or "Google API quota exceeded" too. It counts only as the caller's own
+    # quota or a named provider's, the same rule as isUsageLimitError in
+    # web/src/lib/errorAttribution.ts.
+    if _PROVIDER_QUOTA_RE.search(low):
         return True
     if "429" not in low and "too many requests" not in low:
         return False
