@@ -1132,6 +1132,11 @@ async function submitResolution() {
   board.clearError()
   let saved: TaskDetail | null = null
   try {
+    if (detailOpen.value && detailId.value === task.id && !(await flushDetail())) {
+      resolutionError.value = board.error || 'Could not save the task edits.'
+      board.clearError()
+      return
+    }
     if (resolutionMode.value === 'complete' && !(await releaseForDone(task))) {
       resolutionError.value = board.error || ''
       board.clearError()
@@ -1153,8 +1158,20 @@ async function submitResolution() {
     board.clearError()
     return
   }
+  const completed = resolutionMode.value === 'complete'
+  const closeCompletedDetail = completed && detailOpen.value && detailId.value === saved.id
   if (detailOpen.value && detailId.value === saved.id) detailForm.status = saved.status
   resetResolution()
+  if (closeCompletedDetail) {
+    await closeDetail()
+    if (!detailOpen.value) {
+      await nextTick()
+      const card = paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${saved.id}"] .task-open`)
+      const target = card ?? paneEl.value?.querySelector<HTMLElement>('.task-new')
+      target?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
+      target?.focus()
+    }
+  }
   board.clearError()
 }
 
@@ -3227,6 +3244,13 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 
 /* ── Dialogs ───────────────────────────────────────────────────────────── */
 .task-sheet { padding: 0; }
+.task-form textarea {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  max-height: 50dvh;
+  resize: vertical;
+}
 /* The shared `.btn-icon` is already 44px square, but a scoped rule for the
    board's own headers wins on specificity over a change to the shared one, and
    the close button is the one target in the dialog a coarse pointer cannot miss

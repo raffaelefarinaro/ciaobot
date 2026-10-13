@@ -176,7 +176,7 @@ export function shortDirname(filePath: string): string {
 /**
  * What a turn cost, as tokens in and out. Deliberately not the context-window
  * occupancy: the Chat details rail states that as a meter against the window's
- * size, labelled "of the model's context window, as of the last reply", so
+ * size, so
  * repeating the bare percentage in a transcript footer gave the same number two
  * homes and no clearer meaning in either.
  */

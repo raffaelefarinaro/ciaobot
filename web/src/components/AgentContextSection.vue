@@ -25,7 +25,6 @@
           @click="emit('compact')"
         >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
       </div>
-      <p class="rail-note agent-context-meter-note">of the model's context window, as of the last reply.</p>
     </template>
     <div class="rail-list">
       <button
@@ -142,7 +141,7 @@ const contextPctLabel = computed(() => {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin: 4px 0 0;
+  margin: 4px 0 10px;
 }
 .agent-context-meter {
   flex: 1;
@@ -170,7 +169,6 @@ const contextPctLabel = computed(() => {
   background: var(--fg2);
 }
 .agent-context-meter strong { font-variant-numeric: tabular-nums; }
-.agent-context-meter-note { margin: 2px 0 10px; }
 .agent-context-row { gap: 1px; }
 .agent-context-row-top {
   display: flex;
