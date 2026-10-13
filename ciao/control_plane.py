@@ -42,6 +42,7 @@ from ciao.memory_tool import (
     resolve_region,
     update_region,
 )
+from ciao.note_related import RELATED_NOTES_LIMIT
 from ciao.schedule_command import normalize_schedule_command
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
@@ -1654,6 +1655,34 @@ class CiaoControlPlane:
         return _ok(result)
 
     # ---- note verification ---------------------------------------------
+
+    async def note_related(
+        self, principal: AgentPrincipal, *, path: str = "", limit: int = RELATED_NOTES_LIMIT
+    ) -> dict[str, Any]:
+        """The notes connected to one note in this workspace's vault.
+
+        Read-only and model-free: it scans the vault itself rather than the FTS
+        index, so it records no retrieval hits. Each related note carries the
+        ``revision`` and ``due`` flag a ``verify_note`` payload for it needs.
+        """
+        from ciao import memory_receipts as mr
+        from ciao.note_related import find_related_notes
+
+        if not str(path or "").strip():
+            raise ControlPlaneError("note_related_invalid", "A note path is required.")
+        workspace = self._workspace(principal)
+        root = Path(self.config.workspace_vault_root(workspace))
+        today = date.today()
+
+        def _run() -> dict[str, Any]:
+            try:
+                found = find_related_notes(root, path, workspace=workspace, today=today, limit=limit)
+            except mr.MemoryReceiptError as exc:
+                raise ControlPlaneError("note_related_invalid", str(exc)) from exc
+            return found.as_dict()
+
+        reported: dict[str, Any] = await run_read(f"note_related:{root}:{path}:{limit}", _run)
+        return _ok(reported)
 
     async def verify_note(self, principal: AgentPrincipal, *, payload_file: str = "") -> dict[str, Any]:
         """Record one stale note's verdict through the managed verification service.

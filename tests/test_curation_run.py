@@ -1548,6 +1548,63 @@ def test_the_memory_skill_routes_note_verification_through_the_operation() -> No
     assert "leaves no receipt" in skill
 
 
+def test_the_schedule_compares_a_stale_note_with_its_related_notes() -> None:
+    prompt = next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+    stale = prompt[prompt.index("**`stale_notes`**") : prompt.index("## 4.")]
+
+    assert "ciao note related" in stale
+    assert "Reading a note is not checking it" in stale
+    assert '"due": true' in stale
+    assert "- [review]" in stale
+    assert "**What needs you**" in stale
+
+
+def test_a_note_verified_outside_the_worklist_is_not_planned(tmp_path: Path) -> None:
+    """Crediting a related note needs no engine change: a verdict for a note that
+    was never a planned item records a check, and the next plan skips it."""
+    from types import SimpleNamespace
+
+    from ciao import note_verification as nv
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    today = date(2026, 9, 19)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Aldo.md", updated="2024-01-05")
+    other = _note(vault, "People/Bruno.md", updated="2024-01-05")
+    assert {item.label for item in _stale_items(vault, guide, today=today)} == {"Aldo", "Bruno"}
+
+    result = nv.verify_note(
+        nv.VerificationRequest(
+            workspace="personal",
+            relative_path="People/Bruno.md",
+            expected_revision=mr.content_revision(other.read_text(encoding="utf-8")),
+            outcome=nv.UNVERIFIED,
+            reason="no source this pass reached",
+        ),
+        vault_root=vault,
+        config=SimpleNamespace(workspace_vault_root=lambda _name: vault),
+        today=today,
+    )
+
+    assert result.status == nv.UNVERIFIED
+    assert {item.label for item in _stale_items(vault, guide, today=today)} == {"Aldo"}
+
+
+def test_the_memory_skill_points_at_note_related() -> None:
+    assert "ciao note related" in _stock("skills/ciao-memory/SKILL.md")
+
+
+def test_the_memory_skill_did_not_grow() -> None:
+    skill = _stock("skills/ciao-memory/SKILL.md")
+
+    assert len(skill.encode()) <= 15884
+
+
 # ── The Learnings cleanup pass (#728-E) ──────────────────────────────────────
 
 

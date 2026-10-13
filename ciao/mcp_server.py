@@ -446,6 +446,30 @@ async def _op_verify_note(service: CiaoMcpService, payload_file: str = "") -> di
     )
 
 
+async def _op_note_related(service: CiaoMcpService, path: str = "", limit: int = 15) -> dict[str, Any]:
+    """List the notes connected to one vault note, before giving a verdict on it.
+
+    `path` is the note, vault-relative (`People/Sofia.md`). Returns its title
+    and `revision`, and `related`: the notes it links to (`links_to`), the notes
+    linking to it (`linked_from`) and the notes whose body names its title or an
+    alias (`mentions`), link relations first, at most `limit` (default 15,
+    1-50) with the overflow counted in `truncated`. Read each related note's
+    claims about the same subject: one that disagrees is evidence to cite.
+
+    Each related note carries its own `revision` and a `due` flag. Those are
+    what a `verify_note` payload for that note needs as `expected_revision`, and
+    `due: false` means a check already settles it, so a verdict would come back
+    `already_checked`. Reading a note is not checking it: only send a verdict
+    for a related note whose facts you checked against a real source.
+
+    Read-only. It records no search hits and does not touch the search index.
+    """
+    return await service._invoke(
+        "note_related",
+        lambda cp, p: cp.note_related(p, path=path, limit=limit),
+    )
+
+
 async def _op_gws_status(service: CiaoMcpService) -> dict[str, Any]:
     """Report whether the active workspace's Google Workspace account is
     connected and its token is valid.
@@ -1387,6 +1411,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
+    Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
     Operation("gws_status", _READ, _op_gws_status.__doc__ or "", _op_gws_status),
     Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
     Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),

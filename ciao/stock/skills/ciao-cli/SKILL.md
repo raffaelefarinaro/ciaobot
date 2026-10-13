@@ -58,6 +58,7 @@ Not for:
 
 | Command | Purpose | Guard |
 |---|---|---|
+| `note related PATH [--limit N]` | List the vault notes connected to one note: the ones it links to, the ones linking to it and the ones whose body names its title or an alias. Read it before a verdict on a stale note. | Read-only, scoped to this workspace's vault, `PATH` vault-relative. Each related note prints its own `revision` and `due`: `revision` is the `expected_revision` a `note verify` payload for that note needs, and `due: false` means a check already settles it. |
 | `note verify --payload-file FILE` | Record one stale note's verification verdict — or one stale **entry's**, with `entry` + `entry_fingerprint`: `still_valid`, `update`, `retire` or `unverified`, with its evidence. | `FILE` is JSON: `relative_path`, `expected_revision`, `outcome`, `coverage`, `evidence[]`, `before`/`after`, `reason`, plus `entry`/`entry_fingerprint` for the one-fact case. Every field is note prose or a citation, so it never travels as a shell argument — pass the path and let the server read it. The file must be inside this workspace and under the size cap. `expected_revision` is the lowercase hex SHA-256 of the note's full text as UTF-8, unmodified; the `stale_note` item you were given prints it as `revision <hex>`, so pass that rather than hashing it yourself. With `entry` set, `before`/`after` are the **entry's** text — a whole-note replacement there would rewrite every other fact in the file — and the `stale_entry` item's `reason` prints the note's `revision <hex>`, the `entry identity <hex>`, the `entry fingerprint <hex>` and the `at characters <start>-<end>` span to fill the three fields with, all of them whole: a truncated fingerprint is a different string and comes back `conflict`, and an `entry` that is not all 64 characters is refused before the note is opened. The reply gains `scope: "entry"`. |
 
 The reply's `status` is the whole decision, and the words are not
@@ -340,6 +341,7 @@ ciao context get
   "vault review restore-completed": "vault_review",
   "vault review delete": "vault_review",
   "note verify": "verify_note",
+  "note related": "note_related",
   "file surface": "file_surface",
   "chat list": "chats_list",
   "chat get": "chat_get",
