@@ -259,7 +259,7 @@ def _handover_marker(
 
 
 _PROVIDER_QUOTA_RE = re.compile(
-    r"\b(?:exceeded|reached|exhausted) your\b[^.]*\bquota\b"
+    r"\b(?:exceeded|reached|exhausted) your (?:current )?quota\b"
     r"|\b(?:anthropic|claude|codex|opencode|openai|ollama) quota (?:exceeded|reached|exhausted)\b"
 )
 

@@ -26,7 +26,7 @@ export function isUsageLimitError(errorText: string): boolean {
     || /\b(?:reached|hit) your\b[^.]*\blimit\b/.test(text)
     || /\brate limit (?:exceeded|reached|hit|exhausted)\b/.test(text)
     || /\b(?:anthropic|claude|codex|opencode|openai|ollama) quota (?:exceeded|reached|exhausted)\b/.test(text)
-    || /\b(?:exceeded|reached|exhausted) your\b[^.]*\bquota\b/.test(text)
+    || /\b(?:exceeded|reached|exhausted) your (?:current )?quota\b/.test(text)
     // A 429 only counts with a limit noun, as in `_is_retryable_quota_error`.
     || ((/\b429\b/.test(text) || text.includes('too many requests'))
       && /\b(usage limit|rate limit|quota|session)\b/.test(text))

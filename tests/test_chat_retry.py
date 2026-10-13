@@ -767,6 +767,7 @@ def test_a_tool_quota_error_does_not_arm_the_provider_retry() -> None:
         is False
     )
     assert _is_retryable_quota_error("storage quota reached") is False
+    assert _is_retryable_quota_error("You have exceeded your daily request quota for this API") is False
     assert (
         _is_retryable_quota_error(
             "You exceeded your current quota, please check your plan and billing details"

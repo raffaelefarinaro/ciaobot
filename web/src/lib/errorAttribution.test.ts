@@ -28,6 +28,7 @@ describe('isUsageLimitError', () => {
   it.each([
     'disk quota exceeded',
     'Google API quota exceeded for quota metric generativelanguage.googleapis.com',
+    'You have exceeded your daily request quota for this API',
     '429 Too Many Requests',
   ])('does not match tool quota text: %s', (text) => {
     expect(isUsageLimitError(text)).toBe(false)
