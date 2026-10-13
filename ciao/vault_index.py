@@ -608,6 +608,24 @@ def build_filename_index(
     return idx
 
 
+def vault_relative(rendered: str, prefix: Path) -> str:
+    """One rendered entry path as the vault-relative spelling everything keys on.
+
+    :func:`ciao.memory_audit.find_stale_notes` reports the path
+    :func:`scan_vault` rendered, which carries the render
+    prefix; the worklist key, :mod:`ciao.note_verification`'s check state and the
+    note-edit sidecar all key on the vault-relative POSIX path instead. A
+    rendered path that is not under the prefix (a hand-built entry in a test) is
+    taken as already relative — the same total answer
+    :func:`ciao.vault_index._strip_prefix` gives, rather than refusing a
+    selection because a path was spelled unusually.
+    """
+    try:
+        return Path(rendered).relative_to(prefix).as_posix()
+    except ValueError:
+        return Path(rendered).as_posix()
+
+
 def _strip_prefix(path: Path, prefix: Path) -> Path:
     """``path`` relative to ``prefix``, or unchanged when it is not under it.
 

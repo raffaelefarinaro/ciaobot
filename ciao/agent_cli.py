@@ -159,6 +159,9 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--confirm", required=True, help="Repeat the candidate id.")
 
     note = _verbs(nouns.add_parser("note", help="Verification of stale vault notes."))
+    related = note.add_parser("related", help="List the vault notes connected to one note.")
+    related.add_argument("path", help="The note, vault-relative (People/Sofia.md).")
+    related.add_argument("--limit", type=int, default=15, help="At most this many related notes (1-50).")
     verify = note.add_parser("verify", help="Record one stale note's verification verdict.")
     # A path, not the payload itself. The verdict's before/after text and its
     # citations are user prose: as a shell argument it would be mangled by
@@ -502,6 +505,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         wire = "restore_completed" if action == "restore-completed" else action
         return "vault_review", {"action": wire, "candidate_id": args.candidate}
     if noun == "note":
+        if verb == "related":
+            return "note_related", {"path": args.path, "limit": args.limit}
         # The path crosses to the server as written. Reading the document here
         # and posting the parsed object would move the size cap, the workspace
         # confinement and the "is this actually a file" check into the one place

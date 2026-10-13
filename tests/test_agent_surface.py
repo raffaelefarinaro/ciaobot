@@ -140,6 +140,14 @@ def test_note_verification_dispatches_on_cli_only_and_is_write_gated(
     assert set(inspect.signature(operation.fn).parameters) == {"service", "payload_file"}
 
 
+def test_note_related_is_a_read(tmp_path: Path) -> None:
+    from ciao import mcp_server
+
+    service, _ = _service(tmp_path)
+    assert "note_related" in service.operation_table
+    assert mcp_server.OPERATIONS_BY_NAME["note_related"].annotations == mcp_server._READ
+
+
 def test_a_plan_mode_chat_cannot_verify_a_note(tmp_path: Path) -> None:
     """The gate, end to end, through the CLI surface."""
     service, _ = _service(tmp_path, mode="plan")
@@ -358,6 +366,7 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["vault", "review", "restore-completed", "--candidate", "c1"], ("vault_review", {"action": "restore_completed", "candidate_id": "c1"})),
         (["file", "surface", "out/report.md"], ("file_surface", {"path": "out/report.md"})),
         # The payload crosses as a path; the verdict's prose never does.
+        (["note", "related", "People/Mo.md"], ("note_related", {"path": "People/Mo.md", "limit": 15})),
         (["note", "verify", "--payload-file", "out/verify.json"], ("verify_note", {"payload_file": "out/verify.json"})),
         (
             ["chat", "list", "--project", "p1"],
@@ -481,7 +490,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],
         "vault review restore": ["--candidate", "c"], "vault review delete": ["--candidate", "c", "--confirm", "c"],
         "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
-        "note verify": ["--payload-file", "p.json"],
+        "note related": ["People/Mo.md"], "note verify": ["--payload-file", "p.json"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
         "project complete": ["p"], "project delete": ["p"], "task create": ["--title", "t"],

@@ -47,6 +47,7 @@ from typing import Any, Iterator
 
 from ciao import skill_proposals
 from ciao.entity_types import EntityTypeRegistry
+from ciao.vault_index import vault_relative
 from ciao.os_support.locks import lock_exclusive, unlock
 
 logger = logging.getLogger(__name__)
@@ -422,24 +423,6 @@ def _audit_items(guide_path: Path, *, workspace_dir: Path, today: date) -> list[
     ]
 
 
-def _vault_relative(rendered: str, prefix: Path) -> str:
-    """One rendered entry path as the vault-relative spelling everything keys on.
-
-    :func:`ciao.memory_audit.find_stale_notes` reports the path
-    :func:`ciao.vault_index.scan_vault` rendered, which carries the render
-    prefix; the worklist key, :mod:`ciao.note_verification`'s check state and the
-    note-edit sidecar all key on the vault-relative POSIX path instead. A
-    rendered path that is not under the prefix (a hand-built entry in a test) is
-    taken as already relative — the same total answer
-    :func:`ciao.vault_index._strip_prefix` gives, rather than refusing a
-    selection because a path was spelled unusually.
-    """
-    try:
-        return Path(rendered).relative_to(prefix).as_posix()
-    except ValueError:
-        return Path(rendered).as_posix()
-
-
 @dataclass(frozen=True, slots=True)
 class _ScannedNote:
     """One note the audit looked at, and the audit's own verdict about it.
@@ -563,7 +546,7 @@ def _stale_findings(
         rendered = entry.path_key
         mtime = _mtime_of(root, rendered, prefix)
         note_type = (entry.type or "").strip()
-        relative = _vault_relative(rendered, prefix)
+        relative = vault_relative(rendered, prefix)
         verification = note_verification(
             note_type,
             entry.updated,
@@ -629,7 +612,7 @@ def _mtime_of(root: Path, rendered: str, prefix: Path) -> float:
     back as this pass could invent.
     """
     try:
-        return (root / _vault_relative(rendered, prefix)).stat().st_mtime
+        return (root / vault_relative(rendered, prefix)).stat().st_mtime
     except OSError:
         return 0.0
 
