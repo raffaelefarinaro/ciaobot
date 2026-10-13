@@ -1673,6 +1673,7 @@ async def create_project(request: Request) -> JSONResponse:
         # filtered out of every workspace's sidebar.
         workspace=body.get("workspace") or config.primary_workspace(),
         context=body.get("context", ""),
+        scaffold=True,
     )
     return JSONResponse(project.to_dict(), status_code=201)
 

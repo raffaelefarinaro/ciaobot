@@ -2303,7 +2303,7 @@ class CiaoControlPlane:
         clean_name = name.strip()
         if not clean_name:
             raise ControlPlaneError("invalid_name", "Project name is required.")
-        return _ok(self.pcm.create_project(clean_name, workspace, context).to_dict())
+        return _ok(self.pcm.create_project(clean_name, workspace, context, scaffold=True).to_dict())
 
     def project_update(
         self,

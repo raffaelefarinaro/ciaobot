@@ -1745,6 +1745,54 @@ class ProjectChatManager:
         except OSError as exc:
             logger.warning("Could not seed %s: %s", target, exc)
 
+    def _scaffold_project_note(self, project: ProjectInfo) -> None:
+        """Create ``projects/active/<slug>/<slug>.md`` and bind the project to it.
+
+        Frontmatter goes through ``yaml.safe_dump`` so any name or context is
+        valid YAML. An existing active folder is adopted, never overwritten; a
+        slug already bound elsewhere or present under completed/ leaves the
+        project registry-only.
+        """
+        slug = chat_service._project_reference_key(project.name)
+        if not slug or not chat_service._VAULT_FOLDER_RE.fullmatch(slug):
+            return
+        if not self._is_known_workspace(project.workspace):
+            return
+        try:
+            active = self._vault_active_root(project.workspace)
+            completed = self._vault_completed_root(project.workspace)
+        except ValueError:
+            return
+        taken = any(
+            other is not project and other.workspace == project.workspace and other.vault_folder == slug
+            for other in self._projects.values()
+        )
+        if taken or (completed / slug).exists():
+            logger.info("Not scaffolding %s: vault folder %r is taken", project.name, slug)
+            return
+        folder = active / slug
+        doc = folder / f"{slug}.md"
+        readme = folder / "README.md"
+        if not folder.exists():
+            today = chat_service._now_iso()[:10]
+            meta: dict[str, object] = {"type": "project", "title": project.name}
+            if project.context.strip():
+                meta["description"] = project.context.strip()
+            meta.update({"status": "active", "created": today, "updated": today})
+            front = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, width=10_000)
+            body = f"---\n{front}---\n\n# {project.name}\n"
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                doc.write_text(body, encoding="utf-8", newline="")
+            except OSError as exc:
+                logger.warning("Could not scaffold project note %s: %s", doc, exc)
+                shutil.rmtree(folder, ignore_errors=True)
+                return
+        project.vault_folder = slug
+        existing = readme if readme.is_file() else doc
+        if existing.is_file():
+            project.vault_doc_path = self._display_path(existing)
+
     def _vault_active_root(self, workspace: str) -> Path:
         """Return the active/ directory for the given workspace, no existence check.
 
@@ -2578,7 +2626,10 @@ class ProjectChatManager:
         name: str,
         workspace: str,
         context: str = "",
+        *,
+        scaffold: bool = False,
     ) -> ProjectInfo:
+        """Register a project; with ``scaffold`` also create and bind its vault note."""
         pid = f"proj-{chat_service._uuid8()}"
         project = ProjectInfo(
             project_id=pid,
@@ -2589,6 +2640,8 @@ class ProjectChatManager:
             order=len(self._projects),
         )
         self._projects[pid] = project
+        if scaffold:
+            self._scaffold_project_note(project)
         self._save()
         self._events.publish({
             "type": "project_created",
