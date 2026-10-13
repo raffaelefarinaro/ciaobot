@@ -955,7 +955,8 @@ describe('TaskBoardView', () => {
       expected_revision: NEXT_REVISION,
       resolution: '',
     })
-    expect(wrapper.get('[data-status="done"]').attributes('aria-checked')).toBe('true')
+    expect(wrapper.find('#task-detail-name').exists()).toBe(false)
+    expect(card(wrapper, 'Ship the board').classes()).toContain('task-card--done')
     wrapper.unmount()
   })
 
@@ -1262,6 +1263,7 @@ describe('TaskBoardView', () => {
     await nextTick()
     expect(sheet().exists()).toBe(false)
     expect(apiPost).not.toHaveBeenCalled()
+    expect(wrapper.find('#task-detail-name').exists()).toBe(true)
 
     // Reopen, write the note, and submit: one POST carrying status and note.
     await openResolutionSheet(wrapper)
@@ -1278,6 +1280,7 @@ describe('TaskBoardView', () => {
     })
     expect(apiPatch).not.toHaveBeenCalled()
     expect(sheet().exists()).toBe(false)
+    expect(wrapper.find('#task-detail-name').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -1295,6 +1298,7 @@ describe('TaskBoardView', () => {
 
     expect(apiPost).toHaveBeenCalledTimes(1)
     expect(wrapper.get('.task-resolution-sheet .task-action-error').text()).toContain('that task changed on disk')
+    expect(wrapper.find('#task-detail-name').exists()).toBe(true)
     expect((wrapper.get('#task-resolution-text').element as HTMLTextAreaElement).value).toBe('Draft note')
 
     // Refresh task re-reads the board and the task; the draft is still there and
