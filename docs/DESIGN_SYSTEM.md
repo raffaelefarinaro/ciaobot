@@ -117,7 +117,7 @@ Anything else (`.fv-btn-sm`, `.pfp-btn-sm`, `.csv-tool-btn`, `.fix-btn`, …) is
 migration target, not a precedent. Do not add to that list.
 
 **Rule L1.3** — Interactive elements meet `--touch` (44px) on touch devices, per
-`CLAUDE.md`. Current known failure: the queued-message glyph buttons in
+`AGENTS.md`. Current known failure: the queued-message glyph buttons in
 `ChatPanel.vue` (`▲ ▼ ✎ ✓ ✕ ×`).
 
 ### L2 — Components
