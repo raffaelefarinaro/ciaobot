@@ -28,7 +28,7 @@
         :error="engineUpdateOperation?.error"
       />
     </div>
-    <PaneHeader page-tag="Settings" @open-sidebar="emit('open-sidebar')" />
+    <PaneHeader :page-tag="settingsTabLabel(route.path)" @open-sidebar="emit('open-sidebar')" />
     <div ref="bodyEl" class="pane-body" @scroll.passive="onBodyScroll">
       <div class="page-grid settings-grid">
       <div ref="mainEl" class="page-main settings-main">
@@ -2097,6 +2097,7 @@ import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
 import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 import { isLoopbackHostname } from '../lib/loopback'
+import { settingsTabLabel } from '../lib/settingsNav'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 

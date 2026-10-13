@@ -906,6 +906,7 @@ import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import { SETTINGS_NAV } from '../lib/settingsNav'
 import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 import { workspaceLabel } from '../lib/workspaceLabel'
@@ -1032,16 +1033,6 @@ function promptTitle(prompt: string): string {
 // The scope menu opens even with one workspace: it is also where a new
 // workspace is started.
 const canOpenWorkspaceMenu = computed(() => store.workspaceOptions.length > 0)
-// Settings tabs, in rail order. /settings is the General tab (route kept as-is).
-const SETTINGS_NAV = [
-  { to: '/settings', label: 'General' },
-  { to: '/settings/workspaces', label: 'Workspaces' },
-  { to: '/settings/models', label: 'Models & providers' },
-  { to: '/settings/skills', label: 'Skills' },
-  { to: '/settings/subagents', label: 'Subagents' },
-  { to: '/settings/commands', label: 'Commands' },
-  { to: '/settings/mcp', label: 'MCP servers' },
-] as const
 // The chord ChatLayout binds for New chat: Option/Alt+N, because the browser
 // keeps Cmd+T for its own new-tab.
 const newChatShortcut = isApplePlatform() ? '⌥N' : 'Alt+N'
