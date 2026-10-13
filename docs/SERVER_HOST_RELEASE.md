@@ -112,11 +112,7 @@ the prebuilt archive is the artifact a user receives. Its Accessibility and
 Automation grants are tied to the exact signed bytes, so any rebuild changes the
 CDHash and can require the user to reapprove the prompt.
 
-Revision 2 renames the executable from `CiaobotServerHost` to `Ciaobot Server`
-(#1249) so the Login Items row reads "Ciaobot Server". That changes the bytes
-and the path, so every installed revision-1 host needs its Accessibility and
-Automation grants approved again once. The installer replaces a revision-1
-host only when its own record proves it ours, and prints a warning when it does.
+Revision 2 (#1249) names the executable `Ciaobot Server`, so the Login Items row reads "Ciaobot Server".
 
 ## What this does not do
 
@@ -127,11 +123,8 @@ host only when its own record proves it ours, and prints a warning when it does.
 - It does not make the engine updater overwrite an installed host: an installed
   compatible host is never auto-replaced by an engine update, because the host
   is authenticated but opt-in and its revision is independent of the engine.
-- A host upgrade is an explicit, warned action. The one-liner installer and an
-  in-app update that finds a revision-1 host perform the revision-1 to
-  revision-2 replacement (see `SERVER_HOST.md`). An in-app update replaces the
-  host only when it is revision 1 and its own record proves it; an engine-only
-  update never does.
+- A host upgrade is a separate, explicit, warned action reviewed on its own; it
+  is not implied by an engine update and is not implemented here.
 - It documents no release/admin procedure to run: cutting a release, signing it
   and publishing it remain the maintainer's, and are not performed by this
   change.

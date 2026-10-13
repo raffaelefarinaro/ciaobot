@@ -139,7 +139,7 @@ workspace=$(/usr/libexec/PlistBuddy -c 'Print :WorkingDirectory' \
 arguments), so the password and vault root survive the re-render.
 
 **Hosted service (`Ciaobot Server.app`).** When the plist's `ProgramArguments`
-start with `…/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost serve --python
+start with `…/Ciaobot Server.app/Contents/MacOS/Ciaobot Server serve --python
 <interpreter>`, `ciao setup` deliberately keeps that live hosted definition
 byte-for-byte (`_existing_hosted_definition_serves` in `ciao/cli.py`), so the
 command above exits 0 and changes nothing: the service keeps running the old

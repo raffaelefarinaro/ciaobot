@@ -179,37 +179,6 @@ in System Settings. That is why ordinary engine updates must keep these bytes
 unchanged, and why a host upgrade is a separate, explicit, warned action. The
 builder and tests never edit TCC and never remove a grant.
 
-### Upgrade from revision 1 (#1249)
-
-Revision 1 shipped the executable as `CiaobotServerHost`, so the Login Items row
-read that name. Revision 2 names it `Ciaobot Server`. The one-liner installer
-(`scripts/install-engine.sh`) handles the change:
-
-1. `ciao.server_host_install` replaces an existing `~/Applications/Ciaobot Server.app`
-   only when `ciao.server_host.verify_superseded_host` proves it is the revision-1
-   host its own record describes. Anything else at that path is still refused.
-2. The revision-1 bundle is moved aside inside the staging directory, the revision-2
-   record is written, the new bundle is renamed in, and the aside copy is removed.
-   A failure restores the revision-1 bundle and its record byte for byte.
-3. `ciao setup` then re-renders the LaunchAgent for the new host, and its
-   `--load-launchd` unloads the job that still names the old executable before
-   `ciao service start`.
-4. The installer prints one warning on stderr that macOS will ask again for
-   Accessibility and Automation. Those grants are tied to the signed bytes, so the
-   user approves them once.
-
-An in-app update (`ciao update`) does the same move. Staging downloads the
-release's host archive only when a revision-1 host is installed, and the apply
-moves the host after the engine swap and before the service starts. The
-LaunchAgent's `ProgramArguments` is rewritten to name the new host, and every
-other key is kept. If the host move fails, the engine update still succeeds on
-the old host, and `ciao update status` says why in a `note:` line. A moved host
-prints the same `warning:` line as the installer. The revision-1 recognition
-exists only in `verify_superseded_host`, the installer's migration branch, the
-two migration callers (`MacUpdateHost.server_host_migration_needed` and
-`migrate_server_host`) and the `accept_legacy_host` flag of
-`parse_service_command`, all marked for deletion in the code.
-
 ## Tests
 
 `tests/test_server_host.py` runs the pure checks everywhere (identity distinct

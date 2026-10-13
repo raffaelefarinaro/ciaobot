@@ -804,7 +804,7 @@ def test_migration_classify_names_a_mac_with_nothing_to_migrate(
     assert payload["details"]["kind"] == "none"
 
 
-HOSTED_HOST = "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+HOSTED_HOST = "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"
 
 # What `launchctl print gui/<uid>/com.ciao.server` renders for a loaded hosted job.
 HOSTED_PRINT = f"""gui/501/com.ciao.server = {{
@@ -845,6 +845,20 @@ def _launchd_runner(calls: list[list[str]], printed: str, *, print_returncode: i
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     return run
+
+
+def test_a_revision_one_host_argv_is_not_hosted() -> None:
+    # The retired executable name is no longer the hosted shape, so it reads as
+    # an ordinary argv: no hosted interpreter, and the service python is argv[0]
+    # as it is for any other unrecognised command.
+    argv = [
+        "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost",
+        "serve",
+        "--python",
+        "/x/python",
+    ]
+    assert macos_service.hosted_service_python(argv) is None
+    assert macos_service.service_python_path(argv) == argv[0]
 
 
 def test_parse_launchctl_print_arguments_reads_the_hosted_argv() -> None:
