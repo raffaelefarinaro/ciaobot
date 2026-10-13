@@ -1,6 +1,6 @@
 # Issue plan template
 
-The issue body. Written for an implementer that follows instructions literally and does not explore. Every step names a file and an anchor (function/class name, plus line number at the time of writing). Delete sections that don't apply; never leave placeholders.
+The issue body — the output of addy `spec-driven-development` (Problem, design, acceptance, boundaries) and `planning-and-task-breakdown` (the numbered tasks), shaped for this repo. Written for an implementer that follows instructions literally and does not explore. Every step names a file and an anchor (function/class name, plus line number at the time of writing). Delete sections that don't apply; never leave placeholders.
 
 ```markdown
 ## Problem
@@ -11,6 +11,7 @@ The issue body. Written for an implementer that follows instructions literally a
 
 ## Implementation plan
 Base: `develop` @ <sha7>. Anchors are line numbers at that commit — search by the named symbol if they drifted.
+Each numbered item is one task: a thin vertical slice that leaves the tree green, with its own test from the Tests section. Order them by dependency.
 
 1. **`ciao/<file>.py` — `<function>` (~L<n>)**
    - Change: <exactly what; include signatures, constant names, return shapes>.
