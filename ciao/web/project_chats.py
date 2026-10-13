@@ -1754,7 +1754,9 @@ class ProjectChatManager:
         project registry-only.
         """
         slug = chat_service._project_reference_key(project.name)
-        if not slug:
+        if not slug or not chat_service._VAULT_FOLDER_RE.fullmatch(slug):
+            return
+        if not self._is_known_workspace(project.workspace):
             return
         try:
             active = self._vault_active_root(project.workspace)
@@ -1779,13 +1781,12 @@ class ProjectChatManager:
             meta.update({"status": "active", "created": today, "updated": today})
             front = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, width=10_000)
             body = f"---\n{front}---\n\n# {project.name}\n"
-            if project.context.strip():
-                body += f"\n{project.context.strip()}\n"
             try:
                 folder.mkdir(parents=True, exist_ok=True)
                 doc.write_text(body, encoding="utf-8", newline="")
             except OSError as exc:
                 logger.warning("Could not scaffold project note %s: %s", doc, exc)
+                shutil.rmtree(folder, ignore_errors=True)
                 return
         project.vault_folder = slug
         existing = readme if readme.is_file() else doc
