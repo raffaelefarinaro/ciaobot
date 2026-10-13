@@ -44,6 +44,10 @@ describe('isUsageLimitError', () => {
   ])('matches provider usage-limit phrasing: %s', (text) => {
     expect(isUsageLimitError(text)).toBe(true)
   })
+
+  it('matches the OpenAI "exceeded your current quota" phrasing', () => {
+    expect(isUsageLimitError('You exceeded your current quota, please check your plan and billing details')).toBe(true)
+  })
 })
 
 describe('usage-limit copy', () => {
