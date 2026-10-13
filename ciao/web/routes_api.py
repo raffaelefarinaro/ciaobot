@@ -2656,7 +2656,7 @@ def _chat_background_run(request: Request) -> tuple[Any, Any] | JSONResponse:
 
 
 async def chat_background_run_log(request: Request) -> JSONResponse:
-    """The last lines of a background run's log, for the Work details rail."""
+    """The last lines of a background run's log, for the Chat details rail."""
     resolved = _chat_background_run(request)
     if isinstance(resolved, JSONResponse):
         return resolved
@@ -2665,7 +2665,7 @@ async def chat_background_run_log(request: Request) -> JSONResponse:
 
 
 async def chat_background_run_cancel(request: Request) -> JSONResponse:
-    """Stop a background run from the Work details rail.
+    """Stop a background run from the Chat details rail.
 
     The finish edge announces itself over /ws/events and wakes the chat, the
     same as a cancel the agent asked for.

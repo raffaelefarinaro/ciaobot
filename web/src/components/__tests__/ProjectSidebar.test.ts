@@ -303,7 +303,7 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  // Running subagents are listed in the chat's Work details rail, not as
+  // Running subagents are listed in the Chat details rail, not as
   // rows under the chat in this tree.
   it('does not list running subagents as rows in the tree', async () => {
     const store = useProjectStore()

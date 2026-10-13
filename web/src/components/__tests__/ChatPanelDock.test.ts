@@ -171,16 +171,16 @@ describe('ChatPanel automation origin', () => {
   // Automation controls used to sit above the transcript whenever the rail was
   // hidden. They are gone: the rail names the automation, its page holds the
   // controls.
-  it('has no automation controls bar when Work details is hidden', async () => {
+  it('has no automation controls bar when Chat details is hidden', async () => {
     const { wrapper } = await mountPanel(undefined, [makeIntervalSchedule('schedule-1')])
     expect(wrapper.find('.ctx-bar').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('Automation controls')
     wrapper.unmount()
   })
 
-  // With Work details shown as a rail, the automation is one line at the top of
+  // With Chat details shown as a rail, the automation is one line at the top of
   // it naming where the chat came from; cadence and controls stay on its page.
-  it('names the automation at the top of the Work details rail on a wide pane', async () => {
+  it('names the automation at the top of the Chat details rail on a wide pane', async () => {
     const observers: Array<() => void> = []
     vi.stubGlobal('ResizeObserver', class {
       private cb: ResizeObserverCallback
@@ -275,7 +275,7 @@ describe('ChatPanel action dock', () => {
   // A background run is not the user's move, so it is no longer a pill in the
   // strip's disclosure — which had nothing to disclose for it, leaving a
   // chevron that flipped and opened nothing. It is a status line naming the
-  // run that opens Work details, where the run has its log and Stop.
+  // run that opens Chat details, where the run has its log and Stop.
   it('names a background run on its own line instead of a dead strip pill', async () => {
     const { wrapper, store } = await mountPanel(s => {
       s.backgroundRuns = {
@@ -308,7 +308,7 @@ describe('ChatPanel action dock', () => {
     wrapper.unmount()
   })
 
-  it('opens Work details on the Activity tab from the run line on a narrow pane', async () => {
+  it('opens Chat details on the Activity tab from the run line on a narrow pane', async () => {
     const { wrapper } = await mountPanel(s => {
       s.backgroundRuns = {
         'chat-1': [{ run_id: 'r1', label: 'Clone rizzo-flow', cmd: [], started_at: new Date().toISOString(), status: 'running', exit_code: null }],
