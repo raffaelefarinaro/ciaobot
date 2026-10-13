@@ -83,6 +83,7 @@ PASS_STALE_ENTRY = "stale_entry"
 PASS_CATEGORIES = "categories"
 PASS_LEARNINGS = "learnings"
 PASS_LEARNINGS_CLEANUP = "learnings_cleanup"
+PASS_OBSERVATIONS = "observations"
 PASS_HYGIENE = "hygiene"
 PASS_GUIDE = "guide"
 PASS_LOGS = "logs"
@@ -113,6 +114,10 @@ PASS_ORDER: tuple[str, ...] = (
     # and decides. Putting it earlier would let it judge a proposal the same run
     # has not looked at yet.
     PASS_LEARNINGS_CLEANUP,
+    # After the learnings passes because it is the same kind of work on a second
+    # file: it only queues proposals and reorganises `Observations.md`, so it
+    # reads nothing the earlier passes write.
+    PASS_OBSERVATIONS,
     PASS_HYGIENE,
     PASS_GUIDE,
     PASS_LOGS,
@@ -176,6 +181,11 @@ STALE_ENTRY_MAX_ITEMS = 5
 # and the suppression store makes a second run a no-op, so the only cost of
 # being slow is that the Active list stays a little longer than it needs to.
 LEARNINGS_CLEANUP_MAX_ITEMS = 10
+
+# How many due observations one run may propose. Each proposal is a queue row
+# the user has to read, so a backlog is released a few a night rather than all
+# at once; the rest wait and are reported in a worklist note.
+OBSERVATIONS_MAX_ITEMS = 5
 
 
 class CurationBusy(RuntimeError):
@@ -1034,6 +1044,65 @@ def _learning_items(
     ]
 
 
+def _observation_items(
+    vault_root: Path, *, workspace: str, today: date, weekly_due: bool
+) -> tuple[list[WorklistItem], str]:
+    """The observations due for a merge, a proposal or a prune, and a note.
+
+    Prune is one command, so it is one key however many entries it archives.
+    Merge is one key too, planned on the weekly pass when one subject has two
+    or more Active observations: two wordings of one pattern each stay below
+    the proposal threshold, so nothing else would ever bring them together.
+    """
+    from ciao import observations
+    from ciao.learning_records import SECTION_ACTIVE
+
+    path = vault_root / observations.OBSERVATIONS_RELATIVE
+    text = _read_text(path)
+    if not text:
+        return [], ""
+    entries = observations.parse_observations(text, workspace=workspace)
+    due = sorted(
+        (obs for obs in entries if observations.due_for_proposal(obs)),
+        key=lambda obs: obs.record.first_seen or date.max,
+    )
+    prune = sum(1 for obs in entries if observations.due_for_prune(obs, today=today))
+    active_subjects = [obs.about for obs in entries if obs.section == SECTION_ACTIVE]
+    merge = weekly_due and len(active_subjects) > len(set(active_subjects))
+    subjects = ["merge"] if merge else []
+    subjects += [f"propose:{obs.record.learning_id}" for obs in due[:OBSERVATIONS_MAX_ITEMS]]
+    if prune:
+        subjects.append("prune")
+    if not subjects:
+        return [], ""
+    reasons = []
+    if merge:
+        reasons.append("a subject has several active observations to compare")
+    if due:
+        reasons.append(
+            f"{len(due)} observation(s) seen in "
+            f"{observations.OBSERVATION_PROPOSE_CHATS}+ chats"
+        )
+    if prune:
+        reasons.append(
+            f"{prune} x1 observation(s) older than "
+            f"{observations.OBSERVATION_PRUNE_DAYS} days"
+        )
+    note = ""
+    if len(due) > OBSERVATIONS_MAX_ITEMS:
+        note = (
+            f"{len(due)} observations are due for a proposal; this run plans "
+            f"{OBSERVATIONS_MAX_ITEMS} and the rest wait for the next one"
+        )
+    item = WorklistItem(
+        pass_id=PASS_OBSERVATIONS,
+        label="Propose recurring observations",
+        reason="; ".join(reasons),
+        keys=tuple(item_key(PASS_OBSERVATIONS, subject) for subject in subjects),
+    )
+    return [item], note
+
+
 def _learnings_cleanup_items(
     vault_root: Path,
     *,
@@ -1430,6 +1499,18 @@ def build_worklist(
         collected.extend(cleanup_items)
         if cleanup_note:
             notes.append(cleanup_note)
+    if workspace is None:
+        notes.append(
+            "observations were not planned: no registered workspace name was "
+            "resolved for this vault, and an observation id is minted under it"
+        )
+    else:
+        observation_items, observation_note = _observation_items(
+            vault_root, workspace=workspace, today=today, weekly_due=weekly_due
+        )
+        collected.extend(observation_items)
+        if observation_note:
+            notes.append(observation_note)
     collected.extend(_hygiene_items(weekly_due=weekly_due))
     collected.extend(_guide_items(weekly_due=weekly_due))
     collected.extend(_log_items(vault_root))

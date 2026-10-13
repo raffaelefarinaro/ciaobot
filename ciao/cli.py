@@ -4306,6 +4306,212 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _observation_context(args: argparse.Namespace) -> tuple[Path, str] | int:
+    """``(vault root, workspace name)`` for an observation command, or an exit code.
+
+    An observation id is minted under the registered workspace name, so every
+    command resolves it the way the learnings commands do.
+    """
+    try:
+        vault_root, workspace, _runtime_root = _learnings_workspace(args)
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    if not vault_root.is_dir():
+        print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
+        return 1
+    return vault_root, workspace
+
+
+def _read_argv_safe(value: str, path: str, what: str) -> str | None:
+    """*value*, or the stripped contents of *path*; ``None`` after printing why not."""
+    if value and path:
+        print(f"pass {what} either inline or via its -file option, not both", file=sys.stderr)
+        return None
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            print(f"could not read {path}: {exc}", file=sys.stderr)
+            return None
+    return value.strip()
+
+
+def _emit_json(payload: object) -> None:
+    json.dump(payload, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+def _observation_add_command(args: argparse.Namespace) -> int:
+    """Count one chat's sighting of a behavioural pattern in ``Workspace/Observations.md``.
+
+    The text goes through ``--text-file`` for the reason ``memory-proposal-add``
+    has one: it is transcript-derived prose and must not reach a shell.
+    """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.observations import USER_SUBJECT, add_observation
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    about = _read_argv_safe(args.about or "", args.about_file or "", "--about")
+    text = _read_argv_safe("", args.text_file or "", "the observation")
+    if about is None or text is None:
+        return 2
+    if about.lower() == "user":
+        about = USER_SUBJECT
+    try:
+        operation = add_observation(
+            vault_root,
+            workspace=workspace,
+            about=about,
+            text=text,
+            source=args.source or "",
+        )
+    except ValueError as exc:
+        print(f"ciao observation-add: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        _emit_json({"operation": operation, "about": about, "source": args.source})
+    elif operation == "add":
+        print(f"Added an observation about {about}.")
+    elif operation == "update":
+        print(f"Counted a new chat for the observation about {about}.")
+    else:
+        print(f"Already counted this chat for the observation about {about}.")
+    return 0
+
+
+def _observations_command(args: argparse.Namespace) -> int:
+    """List the observations with their counts and what is due. Read-only."""
+    from ciao.observations import (
+        OBSERVATIONS_RELATIVE,
+        due_for_proposal,
+        due_for_prune,
+        parse_observations,
+    )
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    path = vault_root / OBSERVATIONS_RELATIVE
+    text = path.read_bytes().decode("utf-8") if path.exists() else ""
+    today = datetime.datetime.now(datetime.UTC).date()
+    rows = []
+    for obs in parse_observations(text, workspace=workspace):
+        due = (
+            "propose"
+            if due_for_proposal(obs)
+            else "prune"
+            if due_for_prune(obs, today=today)
+            else None
+        )
+        record = obs.record
+        rows.append(
+            {
+                "id": record.learning_id,
+                "about": obs.about,
+                "statement": obs.statement,
+                "section": obs.section,
+                "chats": list(obs.chats),
+                "count": record.count,
+                "first_seen": record.first_seen.isoformat() if record.first_seen else None,
+                "last_seen": record.last_seen.isoformat() if record.last_seen else None,
+                "due": due,
+            }
+        )
+    if args.json:
+        _emit_json({"observations": rows})
+        return 0
+    if not rows:
+        print("No observations recorded.")
+    for row in rows:
+        due_tag = f" [due: {row['due']}]" if row["due"] else ""
+        print(
+            f"- {row['id']} ({row['section']}, x{row['count']}) "
+            f"About {row['about']}: {row['statement']}{due_tag}"
+        )
+    return 0
+
+
+def _observation_propose_command(args: argparse.Namespace) -> int:
+    """Queue the proposal for one observation seen in enough chats."""
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.observations import propose_observation
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    try:
+        result = propose_observation(
+            vault_root, workspace=workspace, observation_id=args.id
+        )
+    except ValueError as exc:
+        print(f"ciao observation-propose: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        _emit_json(result)
+    elif result["queued"]:
+        print(f"Queued a [{result['destination']}] proposal for {result['id']}.")
+    else:
+        print(f"Nothing queued for {result['id']}; it is now resolved.")
+    return 0
+
+
+def _observation_merge_command(args: argparse.Namespace) -> int:
+    """Merge two Active observations that say the same thing."""
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.observations import merge_observations
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    try:
+        result = merge_observations(
+            vault_root,
+            workspace=workspace,
+            keep_id=args.keep_id,
+            drop_id=args.drop_id,
+        )
+    except ValueError as exc:
+        print(f"ciao observation-merge: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        _emit_json(result)
+    else:
+        print(f"Merged {result['dropped']} into {result['kept']} ({result['chats']} chats).")
+    return 0
+
+
+def _observation_prune_command(args: argparse.Namespace) -> int:
+    """Archive x1 observations that never recurred."""
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.observations import prune_observations
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    result = prune_observations(vault_root, workspace=workspace)
+    if args.json:
+        _emit_json(result)
+    else:
+        print(f"Archived {len(result['archived'])} observation(s).")
+    return 0
+
+
 def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     """Dismiss (delete) one memory proposal from the review queue.
 
@@ -7469,6 +7675,86 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-file a previously dismissed fact for review; promoted facts remain deduped.",
     )
     memory_proposal_add_parser.set_defaults(func=_memory_proposal_add_command)
+
+    def _observation_options(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--vault-root",
+            type=Path,
+            default=None,
+            help="Vault root. Defaults to the workspace's registered vault.",
+        )
+        parser.add_argument(
+            "--workspace",
+            default=None,
+            help=(
+                "Registered workspace name. Defaults to the workspace that owns "
+                "--vault-root, else CIAO_ACTIVE_WORKSPACE, else the primary workspace."
+            ),
+        )
+        parser.add_argument(
+            "--json", action="store_true", help="Emit the structured result as JSON."
+        )
+
+    observation_add_parser = subparsers.add_parser(
+        "observation-add",
+        help="Count one chat's sighting of a behavioural pattern.",
+        description=(
+            "Records a low-confidence pattern in `Workspace/Observations.md`. A "
+            "chat counts at most once per observation; at three distinct chats "
+            "the nightly Workspace care run proposes it for review."
+        ),
+    )
+    observation_add_parser.add_argument(
+        "--about",
+        default="",
+        help="`user`, or the name of the person the pattern is about.",
+    )
+    observation_add_parser.add_argument(
+        "--about-file",
+        default="",
+        help="Read --about from this file; the argv-safe form for names with quotes.",
+    )
+    observation_add_parser.add_argument(
+        "--source", default="", help="The chat id this was seen in (required)."
+    )
+    observation_add_parser.add_argument(
+        "--text-file",
+        default="",
+        help="Read the one-sentence pattern verbatim from this file.",
+    )
+    _observation_options(observation_add_parser)
+    observation_add_parser.set_defaults(func=_observation_add_command)
+
+    observations_parser = subparsers.add_parser(
+        "observations",
+        help="List counted observations and what is due.",
+    )
+    _observation_options(observations_parser)
+    observations_parser.set_defaults(func=_observations_command)
+
+    observation_propose_parser = subparsers.add_parser(
+        "observation-propose",
+        help="Queue a proposal for an observation seen in three chats.",
+    )
+    observation_propose_parser.add_argument("id", help="The observation id.")
+    _observation_options(observation_propose_parser)
+    observation_propose_parser.set_defaults(func=_observation_propose_command)
+
+    observation_merge_parser = subparsers.add_parser(
+        "observation-merge",
+        help="Merge two observations that say the same thing.",
+    )
+    observation_merge_parser.add_argument("keep_id", help="The observation to keep.")
+    observation_merge_parser.add_argument("drop_id", help="The observation folded into it.")
+    _observation_options(observation_merge_parser)
+    observation_merge_parser.set_defaults(func=_observation_merge_command)
+
+    observation_prune_parser = subparsers.add_parser(
+        "observation-prune",
+        help="Archive observations seen once and never again.",
+    )
+    _observation_options(observation_prune_parser)
+    observation_prune_parser.set_defaults(func=_observation_prune_command)
 
     memory_proposal_dismiss_parser = subparsers.add_parser(
         "memory-proposal-dismiss",

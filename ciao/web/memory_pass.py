@@ -99,6 +99,25 @@ MEMORY_PASS_PROMPT = (
 #: positional name, because the draft's own JSON already names the skill).
 DRAFT_COMMAND = "`ciao skill-draft-add --input-file FILE`"
 
+#: Appended to the ordinary pass only. A task-completion or project-closure pass
+#: has no chat to cite, and an observation is counted per distinct chat.
+OBSERVATION_PROMPT = (
+    "\n\nSeparately from durable facts: when this conversation shows a "
+    "**behavioural pattern or preference** of the user or of a person they deal "
+    "with that you would not file as a fact on one sighting (how they like "
+    "answers shaped, what they tend to push back on, a habit), record it as an "
+    "observation: write one plain sentence about it to a scratch file and run "
+    "`ciao observation-add --about user --source {chat_id} --text-file FILE` "
+    "(or `--about \"<Person Name>\"`; use `--about-file` when the name has "
+    "quotes). Run `ciao observations` first and reuse the exact wording of an "
+    "existing observation that says the same thing, so this chat counts as "
+    "another sighting rather than a new entry. Record at most three per "
+    "conversation, never a fact you already filed, never anything from "
+    "automated (unattended) turns, and never anything sensitive (health, "
+    "finances, relationships) about a third party. Observations are not facts "
+    "and are never shown to anyone until they recur."
+)
+
 #: The section an approved delegated task's pass carries (#1069). The user
 #: approved this conversation's result as the task done correctly, which makes it
 #: a worked example: the pass's job widens from "what facts are durable" to "how
@@ -839,7 +858,19 @@ class MemoryPassCoordinator:
             title=helper.get("source_title") or chat.title,
             project=helper.get("source_project") or "no project",
             doc=helper.get("doc_path") or "none",
-        ) + self._focus_section(helper) + self._skill_review_section(chat, helper)
+        ) + (
+            self._focus_section(helper)
+            + self._observation_section(helper)
+            + self._skill_review_section(chat, helper)
+        )
+
+    @staticmethod
+    def _observation_section(helper: dict) -> str:
+        """The observation section, or nothing when there is no chat to cite."""
+        chat_id = str(helper.get("source_chat_id") or "")
+        if not chat_id:
+            return ""
+        return OBSERVATION_PROMPT.format(chat_id=chat_id)
 
     @staticmethod
     def _focus_section(helper: dict) -> str:
