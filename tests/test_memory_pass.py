@@ -1760,3 +1760,33 @@ def test_project_closure_pass_runs_on_the_source_chat_model(
     provider = manager._config.default_provider_for_workspace("work")
     assert fallback.provider == provider
     assert fallback.model == manager._config.default_model_for_workspace("work", provider)
+
+
+# ── Observations (#1338) ──────────────────────────────────────────────────
+
+
+def test_ordinary_pass_carries_observation_section_with_chat_id(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    prompt = manager._memory_pass._prompt_for(_pass_chat(manager))
+
+    assert "ciao observation-add --about user --source chat-1 --text-file FILE" in prompt
+    assert "ciao observations" in prompt
+
+
+def test_task_completion_and_closure_prompts_have_no_observation_section(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)
+    for source_kind in (chat_service.TASK_COMPLETION_SOURCE, chat_service.PROJECT_CLOSURE_SOURCE):
+        chat.helper = {**chat.helper, "source_kind": source_kind}
+        assert "observation-add" not in manager._memory_pass._prompt_for(chat)
+
+
+def test_observation_section_is_skipped_without_a_chat_id() -> None:
+    assert memory_pass.MemoryPassCoordinator._observation_section({}) == ""
+
+
+def test_observation_prompt_formats_its_one_placeholder() -> None:
+    rendered = memory_pass.OBSERVATION_PROMPT.format(chat_id="chat-1")
+    assert "{" not in rendered and "}" not in rendered

@@ -2728,3 +2728,142 @@ def test_the_entry_pass_reads_the_check_state_once(tmp_path: Path) -> None:
         ev.read_entry_checks = monkey  # type: ignore[assignment]
 
     assert len(reads) == 1, f"the sidecar was read {len(reads)} times for one plan"
+
+
+# ── Observations pass (#1338) ─────────────────────────────────────────────
+
+
+def _observation_record(
+    text: str, chats: tuple[str, ...], *, last: date, first: date | None = None
+) -> LearningRecord:
+    from ciao.learning_records import LearningObservation
+
+    return LearningRecord(
+        learning_id=allocate_learning_id("work", f"obs:{text}"),
+        key=text.split()[-1],
+        text=f"About the user: {text}",
+        first_seen=first or last,
+        last_seen=last,
+        count=len(chats),
+        observations=tuple(LearningObservation(source=chat) for chat in chats),
+    )
+
+
+def _observation_vault(tmp_path: Path, *records: LearningRecord, resolved: tuple[LearningRecord, ...] = ()) -> Path:
+    from ciao import observations
+
+    vault = _vault(tmp_path)
+    body = "".join(f"{render_learning(record)}\n" for record in records)
+    done = "".join(f"{render_learning(record)}\n" for record in resolved)
+    (vault / observations.OBSERVATIONS_RELATIVE).write_text(
+        f"{observations.OBSERVATIONS_STUB}{body}\n## Promoted / Resolved\n{done}",
+        encoding="utf-8",
+        newline="",
+    )
+    return vault
+
+
+def _observation_worklist(vault: Path, tmp_path: Path, *, workspace: str | None = "work") -> cr.Worklist:
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    return cr.build_worklist(
+        vault_root=vault,
+        workspace=workspace,
+        guide_path=_guide(tmp_path),
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+
+def _observation_items(worklist: cr.Worklist) -> list[cr.WorklistItem]:
+    return [item for item in worklist.items if item.pass_id == cr.PASS_OBSERVATIONS]
+
+
+def test_observation_pass_plans_propose_and_prune(tmp_path: Path) -> None:
+    due = _observation_record("prefers one line", ("a", "b", "c"), last=date(2026, 9, 10))
+    stale = _observation_record("likes tea", ("a",), last=date(2026, 6, 1))
+    vault = _observation_vault(tmp_path, due, stale)
+
+    (item,) = _observation_items(_observation_worklist(vault, tmp_path))
+
+    assert item.label == "Propose recurring observations"
+    assert item.keys == (
+        cr.item_key(cr.PASS_OBSERVATIONS, f"propose:{due.learning_id}"),
+        cr.item_key(cr.PASS_OBSERVATIONS, "prune"),
+    )
+    assert "1 observation(s) seen in 3+ chats" in item.reason
+    assert "1 x1 observation(s) older than 60 days" in item.reason
+
+
+def test_observation_pass_caps_at_five_and_notes_overflow(tmp_path: Path) -> None:
+    records = [
+        _observation_record(f"habit number{index}", ("a", "b", "c"), last=date(2026, 9, 10),
+                            first=date(2026, 8, index + 1))
+        for index in range(7)
+    ]
+    vault = _observation_vault(tmp_path, *records)
+
+    worklist = _observation_worklist(vault, tmp_path)
+
+    (item,) = _observation_items(worklist)
+    assert len(item.keys) == cr.OBSERVATIONS_MAX_ITEMS
+    oldest = [cr.item_key(cr.PASS_OBSERVATIONS, f"propose:{r.learning_id}") for r in records[:5]]
+    assert list(item.keys) == oldest
+    assert any("7 observations are due" in note for note in worklist.notes)
+
+
+def test_observation_merge_is_planned_weekly_for_a_subject_seen_twice(tmp_path: Path) -> None:
+    one = _observation_record("prefers one line", ("a",), last=date(2026, 9, 10))
+    two = _observation_record("wants a short summary first", ("b",), last=date(2026, 9, 12))
+    vault = _observation_vault(tmp_path, one, two)
+
+    assert _observation_items(_observation_worklist(vault, tmp_path)) == []
+
+    _fresh_log(vault, last_full_pass=date(2026, 9, 1).isoformat())
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace="work",
+        guide_path=_guide(tmp_path),
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+    (item,) = _observation_items(worklist)
+    assert item.keys == (cr.item_key(cr.PASS_OBSERVATIONS, "merge"),)
+
+
+def test_resolved_observations_are_not_planned(tmp_path: Path) -> None:
+    done = _observation_record("prefers one line", ("a", "b", "c"), last=date(2026, 9, 10))
+    stale = _observation_record("likes tea", ("a",), last=date(2026, 1, 1))
+    vault = _observation_vault(tmp_path, resolved=(done, stale))
+
+    assert _observation_items(_observation_worklist(vault, tmp_path)) == []
+
+
+def test_observation_pass_runs_after_learnings_cleanup() -> None:
+    order = cr.PASS_ORDER
+    assert order.index(cr.PASS_OBSERVATIONS) == order.index(cr.PASS_LEARNINGS_CLEANUP) + 1
+    assert order.index(cr.PASS_OBSERVATIONS) < order.index(cr.PASS_HYGIENE)
+
+
+def test_observations_skipped_without_workspace_name(tmp_path: Path) -> None:
+    due = _observation_record("prefers one line", ("a", "b", "c"), last=date(2026, 9, 10))
+    vault = _observation_vault(tmp_path, due)
+
+    worklist = _observation_worklist(vault, tmp_path, workspace=None)
+
+    assert _observation_items(worklist) == []
+    assert any("observations were not planned" in note for note in worklist.notes)
+
+
+def test_the_care_prompt_proposes_observations_between_sections_4_and_5() -> None:
+    prompt = next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+
+    assert "## 4b. Propose recurring observations" in prompt
+    assert prompt.index("## 4. ") < prompt.index("## 4b. ") < prompt.index("## 5. ")
+    for command in ("ciao observation-propose", "ciao observation-merge", "ciao observation-prune"):
+        assert command in prompt
