@@ -138,3 +138,10 @@ def test_scaffold_write_failure_leaves_no_folder(tmp_path: Path, monkeypatch: py
     project = pcm.create_project("Q4 Launch", WS, scaffold=True)
     assert project.vault_folder == ""
     assert not (pcm._vault_active_root(WS) / "q4-launch").exists()
+
+
+def test_description_with_dashes_round_trips(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    pcm.create_project("Dash", WS, "before --- after", scaffold=True)
+    doc = pcm._vault_active_root(WS) / "dash" / "dash.md"
+    assert pcm._read_project_metadata(doc, "x")[1] == "before --- after"

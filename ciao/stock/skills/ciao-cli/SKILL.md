@@ -1,6 +1,6 @@
 ---
 name: ciao-cli
-description: The `ciao` command-line surface for Ciaobot's own state — memory, vault, files, chats, projects, tasks, schedules, webhook triggers, and background runs. Use whenever a chat needs to read or change Ciaobot state itself, not the user's workspace files: checking or editing bounded memory, searching or reviewing the vault, surfacing a file in the pinned panel, listing/creating/sending to/archiving chats, managing projects, filing and moving the workspace task board, creating or running schedules, configuring webhook triggers an external sender can call, or starting/checking/cancelling a tracked background command.
+description: "The `ciao` command-line surface for Ciaobot's own state — memory, vault, files, chats, projects, tasks, schedules, webhook triggers, and background runs. Use whenever a chat needs to read or change Ciaobot state itself, not the user's workspace files: checking or editing bounded memory, searching or reviewing the vault, surfacing a file in the pinned panel, listing/creating/sending to/archiving chats, managing projects, filing and moving the workspace task board, creating or running schedules, configuring webhook triggers an external sender can call, or starting/checking/cancelling a tracked background command."
 ---
 
 # ciao CLI

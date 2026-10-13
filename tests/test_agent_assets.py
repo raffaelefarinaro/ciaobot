@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -564,3 +565,13 @@ def test_deleting_an_asset_removes_only_that_workspaces_copy(tmp_path: Path) -> 
     assert resp.status_code == 200
     assert not (tmp_path / "work" / "commands" / "brief.md").exists()
     assert (tmp_path / "personal" / "commands" / "brief.md").is_file()
+
+
+def test_frontmatter_string_quotes_colon_description() -> None:
+    from ciao.frontmatter import split_frontmatter
+    from ciao.web.agent_assets import _frontmatter_string
+
+    block = _frontmatter_string({"name": "x", "description": "Use when: a thing"})
+    parts = split_frontmatter(block)
+    assert parts is not None
+    assert yaml.safe_load(parts[0]) == {"name": "x", "description": "Use when: a thing"}

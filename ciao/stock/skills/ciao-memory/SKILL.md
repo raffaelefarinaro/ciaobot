@@ -1,6 +1,6 @@
 ---
 name: ciao-memory
-description: Use for writing or curating Ciaobot's durable vault memory: updating people or project notes, organizing learnings, processing memory or skill proposals, consolidating bounded memory, and the scheduled Workspace care run. Not for read-only recall or questions about what Ciaobot can do.
+description: "Use for writing or curating Ciaobot's durable vault memory: updating people or project notes, organizing learnings, processing memory or skill proposals, consolidating bounded memory, and the scheduled Workspace care run. Not for read-only recall or questions about what Ciaobot can do."
 ---
 
 # Durable memory and vault care
