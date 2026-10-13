@@ -153,7 +153,7 @@ def _write_vault_mirror(
             [
                 "---",
                 f"type: {category[:-1].lower()}",
-                f"name: {name}",
+                f"name: {yaml_scalar(name)}",
                 f"title: {yaml_scalar(title.replace(chr(10), ' ').strip())}",
                 f"description: {yaml_scalar(description.replace(chr(10), ' ').strip())}",
                 f"canonical_path: {yaml_scalar(str(rel))}",

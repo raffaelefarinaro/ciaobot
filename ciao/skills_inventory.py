@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ciao.frontmatter import split_frontmatter
+from ciao.frontmatter import split_frontmatter, unquote_scalar
 from ciao.memory_receipts import write_queue_atomically
 
 if TYPE_CHECKING:
@@ -173,7 +173,7 @@ def _read_frontmatter_description(path: Path) -> str:
         if line.startswith("description:"):
             raw = line.split(":", 1)[1].strip()
             if raw and raw not in {"|", ">", "|-", ">-"}:
-                return raw.strip('"\'')
+                return unquote_scalar(raw)
             collecting = True
             continue
         if collecting:
@@ -181,7 +181,7 @@ def _read_frontmatter_description(path: Path) -> str:
                 break
             stripped = line.strip()
             if stripped:
-                values.append(stripped.strip('"\''))
+                values.append(unquote_scalar(stripped))
     return " ".join(values).strip()
 
 
@@ -497,7 +497,7 @@ def _frontmatter_pair(content: str, name: str) -> tuple[str, str]:
             continue
         key = key.strip().casefold()
         if key in {"name", "description"} and key not in fields:
-            fields[key] = value.strip().strip("\"'")
+            fields[key] = unquote_scalar(value)
     declared = fields.get("name", "")
     if declared != name:
         raise ValueError(

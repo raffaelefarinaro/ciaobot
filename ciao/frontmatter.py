@@ -33,3 +33,16 @@ def yaml_scalar(value: object) -> str:
         return json.dumps(value, ensure_ascii=False)
     dumped: str = yaml.safe_dump(value, default_flow_style=True, allow_unicode=True, width=1_000_000)
     return dumped.removesuffix("\n...\n").rstrip("\n")
+
+
+def unquote_scalar(raw: str) -> str:
+    """Decode a one-line YAML scalar a hand-rolled reader pulled off a `key:` line."""
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        try:
+            value = yaml.safe_load(raw)
+        except yaml.YAMLError:
+            return raw[1:-1]
+        if isinstance(value, str):
+            return value
+    return raw

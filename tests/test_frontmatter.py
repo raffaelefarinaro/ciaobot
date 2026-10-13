@@ -35,3 +35,19 @@ def test_yaml_scalar_round_trips(value):
     out = yaml_scalar(value)
     assert "\n" not in out
     assert yaml.safe_load(f"k: {out}") == {"k": value}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('"say \\"hi\\": now"', 'say "hi": now'),
+        ("'it''s: ok'", "it's: ok"),
+        ("Use for: notes", "Use for: notes"),
+        ('"', '"'),
+        ("", ""),
+    ],
+)
+def test_unquote_scalar(raw, expected):
+    from ciao.frontmatter import unquote_scalar
+
+    assert unquote_scalar(raw) == expected

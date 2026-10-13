@@ -575,3 +575,12 @@ def test_frontmatter_string_quotes_colon_description() -> None:
     parts = split_frontmatter(block)
     assert parts is not None
     assert yaml.safe_load(parts[0]) == {"name": "x", "description": "Use when: a thing"}
+
+
+@pytest.mark.parametrize("d", ["Use for: Ciaobot's notes", 'say "hi": now', "it's: ok", "plain"])
+def test_frontmatter_string_round_trips_through_hand_reader(d: str) -> None:
+    from ciao.web.agent_assets import _frontmatter_string
+    from ciao.web.commands import _parse_frontmatter
+
+    text = _frontmatter_string({"name": "x", "description": d}) + "\nbody"
+    assert _parse_frontmatter(text)["description"] == d
