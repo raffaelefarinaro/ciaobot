@@ -804,7 +804,7 @@ def test_migration_classify_names_a_mac_with_nothing_to_migrate(
     assert payload["details"]["kind"] == "none"
 
 
-HOSTED_HOST = "/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
+HOSTED_HOST = "/Applications/Ciaobot Server.app/Contents/MacOS/Ciaobot Server"
 
 # What `launchctl print gui/<uid>/com.ciao.server` renders for a loaded hosted job.
 HOSTED_PRINT = f"""gui/501/com.ciao.server = {{

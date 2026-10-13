@@ -165,9 +165,7 @@ not re-spell them:
 
 - bundle `Ciaobot Server.app`, id `local.ciaobot.server`, executable
   `Ciaobot Server`, icon `CiaobotServer.icns`;
-- `HOST_REVISION` = `2` (revision 1 shipped the executable as `CiaobotServerHost`;
-  `LEGACY_EXECUTABLE_NAME` / `LEGACY_HOST_REVISION` name that layout for the one
-  migration, see below) and `HOST_PROTOCOL` (`CiaobotServerHostProtocol`) = `1`, tied to
+- `HOST_REVISION` = `2` and `HOST_PROTOCOL` (`CiaobotServerHostProtocol`) = `1`, tied to
   the host, never the engine release;
 - `MINIMUM_SYSTEM_VERSION` `13.0`;
 - `STOP_GRACE_SECONDS` 35 and `EXIT_TIMEOUT_SECONDS` 45. The launchd job's
@@ -194,20 +192,6 @@ running launchd job is executing: a plist edited on disk is not the loaded job,
 and a validated bundle is not a live engine. The loaded launchd command remains a
 requirement of the updater (later child C), which must read the live job rather
 than trust the file.
-
-## Migration: revision 1 to revision 2 (#1249)
-
-`verify_superseded_host` is the only reader of the revision-1 layout
-(`LEGACY_EXECUTABLE_NAME`, `LEGACY_HOST_REVISION`). It applies the same exact
-record-and-bundle match as `verify_owned_host`. Two callers use it, the installer
-and the in-app updater's `MacUpdateHost`, and each replaces a revision-1 bundle
-with revision 2. `parse_service_command` accepts the revision-1 command only
-with `accept_legacy_host=True`, which the two runtime readers of a LaunchAgent
-(`macos_service.hosted_service_python` and the update's pre-swap check) pass.
-`verify_owned_host`, `inspect_host_bundle` and `read_host_ownership` accept
-revision 2 only, so a revision-1 bundle is refused everywhere else.
-The branch and the constants are deleted once no supported install can still hold
-a revision-1 bundle.
 
 ## Not in B1
 
