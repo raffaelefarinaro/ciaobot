@@ -43,6 +43,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ciao.frontmatter import yaml_scalar
 from ciao.vault_index import Entry, scan_vault
 
 logger = logging.getLogger(__name__)
@@ -126,8 +127,8 @@ def format_bundle_index(entries: list[Entry], workspace: str = "") -> str:
         "---",
         f"okf_version: {OKF_VERSION}",
         "type: index",
-        f"title: {scope}",
-        f"description: Knowledge bundle exported from a Ciaobot vault ({scope}).",
+        f"title: {yaml_scalar(scope)}",
+        f"description: {yaml_scalar(f'Knowledge bundle exported from a Ciaobot vault ({scope}).')}",
         f"timestamp: {datetime.now(UTC).isoformat().replace('+00:00', 'Z')}",
         "---",
         "",

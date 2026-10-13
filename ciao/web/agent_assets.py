@@ -13,6 +13,7 @@ from typing import Any, Iterable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao.frontmatter import split_frontmatter, yaml_scalar
 from ciao.os_support.links import is_link, link_source, remove_link
 from ciao.sync_skills import sync_workspace_skills
 from ciao.web.commands import _parse_frontmatter
@@ -84,16 +85,15 @@ def _frontmatter_string(fields: dict[str, str]) -> str:
     lines = ["---"]
     for key, value in fields.items():
         cleaned = value.replace("\n", " ").strip()
-        lines.append(f"{key}: {cleaned}")
+        lines.append(f"{key}: {yaml_scalar(cleaned)}")
     lines.append("---")
     return "\n".join(lines)
 
 
 def _body_without_frontmatter(text: str) -> str:
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-        if len(parts) == 3:
-            return parts[2].lstrip()
+    parts = split_frontmatter(text)
+    if parts is not None:
+        return parts[1].lstrip()
     return text
 
 
@@ -153,10 +153,10 @@ def _write_vault_mirror(
             [
                 "---",
                 f"type: {category[:-1].lower()}",
-                f"name: {name}",
-                f"title: {title}",
-                f"description: {description}",
-                f"canonical_path: {rel}",
+                f"name: {yaml_scalar(name)}",
+                f"title: {yaml_scalar(title.replace(chr(10), ' ').strip())}",
+                f"description: {yaml_scalar(description.replace(chr(10), ' ').strip())}",
+                f"canonical_path: {yaml_scalar(str(rel))}",
                 "source: ciao-settings",
                 "---",
                 "",

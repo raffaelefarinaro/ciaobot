@@ -21,6 +21,7 @@ from claude_agent_sdk import (
 )
 
 from ciao.agent_paths import claude_projects_dir
+from ciao.frontmatter import yaml_scalar
 from ciao.jsonio import read_json_dict
 from ciao.memory_policy import is_unattended_turn
 from ciao.models import (
@@ -854,14 +855,14 @@ class TranscriptStore:
         if isinstance(value, list):
             lines = [f"{key}:"]
             for item in value:
-                lines.append(f"  - {item}")
+                lines.append(f"  - {yaml_scalar(item)}")
             return lines
         if isinstance(value, dict):
             lines = [f"{key}:"]
             for subkey, subvalue in value.items():
-                lines.append(f"  {subkey}: {subvalue}")
+                lines.append(f"  {subkey}: {yaml_scalar(subvalue)}")
             return lines
-        return [f"{key}: {value}"]
+        return [f"{key}: {yaml_scalar(value)}"]
 
 
 # ── Skill evidence in the archive ─────────────────────────────────────────

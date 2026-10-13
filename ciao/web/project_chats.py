@@ -105,6 +105,7 @@ from ciao.context.capsule import (
     context_digest as stable_context_digest,
 )
 from ciao.entity_types import load_entity_types
+from ciao.frontmatter import split_frontmatter
 from ciao.model_tiers import is_tier
 from ciao.models import (
     THINKING_LEVELS,
@@ -1928,13 +1929,11 @@ class ProjectChatManager:
         except OSError as exc:
             logger.warning("Failed to read readme %s: %s", readme, exc)
             return fallback_name, ""
-        if not text.startswith("---"):
-            return fallback_name, ""
-        end = text.find("---", 3)
-        if end <= 0:
+        parts = split_frontmatter(text)
+        if parts is None:
             return fallback_name, ""
         try:
-            fm = yaml.safe_load(text[3:end])
+            fm = yaml.safe_load(parts[0])
         except Exception as exc:
             logger.warning("Failed to parse frontmatter in %s: %s", readme, exc)
             return fallback_name, ""
@@ -2027,12 +2026,10 @@ class ProjectChatManager:
             return None
 
         # Parse frontmatter
-        if not text.startswith("---"):
+        parts = split_frontmatter(text)
+        if parts is None:
             return None
-        end = text.find("---", 3)
-        if end <= 0:
-            return None
-        fm = self._safe_yaml_frontmatter(text[3:end], path)
+        fm = self._safe_yaml_frontmatter(parts[0], path)
         if fm is None:
             logger.warning("Failed to parse frontmatter in %s", path)
             return None
