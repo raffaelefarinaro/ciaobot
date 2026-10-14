@@ -6190,6 +6190,38 @@ a.btn-secondary {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, var(--bg));
 }
+/* Touch: the 20px glyph stays, inside a 44px hit area. */
+@media (pointer: coarse) {
+  .field-info summary {
+    width: var(--touch);
+    height: var(--touch);
+    border: 0;
+    background: none;
+    position: relative;
+    isolation: isolate;
+  }
+  .field-info[open] summary,
+  .field-info summary:hover {
+    border: 0;
+    background: none;
+  }
+  /* Doubled class: the base .field-info-panel rule comes later in the file. */
+  .field-info .field-info-panel { top: calc(100% - 6px); }
+  .field-info summary::before {
+    content: '';
+    position: absolute;
+    inset: 12px;
+    z-index: -1;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: var(--bg);
+  }
+  .field-info[open] summary::before,
+  .field-info summary:hover::before {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  }
+}
 .field-info-panel {
   position: absolute;
   z-index: 30;

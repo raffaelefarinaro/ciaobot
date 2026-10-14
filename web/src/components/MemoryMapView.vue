@@ -2124,6 +2124,13 @@ onBeforeUnmount(() => {
   text-underline-offset: 3px;
 }
 .mm-toolbar-stale strong { color: inherit; }
+@media (pointer: coarse) {
+  /* inline-block, not flex: flex items drop the space in "<strong>N</strong> unchecked". */
+  .mm-toolbar-stale {
+    display: inline-block;
+    line-height: var(--touch);
+  }
+}
 
 /* Facts unchecked inside notes, in the toolbar. Quieter than the note-level
    figure on purpose: it is the more speculative of the two (a bullet with no

@@ -4906,6 +4906,14 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   cursor: pointer;
 }
 
+@media (pointer: coarse) {
+  .chat-empty-knowledge {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--touch);
+  }
+}
+
 .chat-empty-knowledge:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
