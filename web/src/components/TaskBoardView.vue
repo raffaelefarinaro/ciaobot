@@ -27,9 +27,9 @@
  *   stays uncompletable until it is detached, so "stopped" never quietly becomes
  *   "the user may close this".
  *
- * The review loop is the rest of it: a **Ready for review** card carries one
- * **Review in chat**, because the user reads the result before closing it. The
- * chat and the editor hold **Approve Done**, which is the user's completion —
+ * The review loop is the rest of it: a **Ready to review** card's band offers
+ * **Open chat**, because the user reads the result before closing it. The card's
+ * dashed checkbox, the chat and the editor approve it, which is the user's completion —
  * not a Detach and then a Done, and not a gesture that would settle the attempt
  * as `stopped` and lose the answer. **History** reads
  * one task's attempts so a retried or stopped one is still readable, and a row
@@ -39,6 +39,7 @@
 import SkeletonLoader from './SkeletonLoader.vue'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { routeLocationKey, routerKey } from 'vue-router'
+import { DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useProjectStore } from '../stores/projects'
@@ -50,8 +51,10 @@ import {
   TASK_DUE_FILTERS,
   TASK_NO_PROJECT,
   TASK_STATUS_OPTIONS,
+  cardAgentStatus,
+  formatCardDue,
   formatCompletedAt,
-  formatTaskDue,
+  formatShortDate,
   invalidTaskRows,
   isLiveAttemptState,
   isOverdue,
@@ -840,6 +843,41 @@ function isReviewReady(task: Task): boolean {
 /** A result the user has not approved yet: the card's whole job is to send them to it. */
 function awaitsReview(task: Task): boolean {
   return isReviewReady(task) && task.status !== 'done'
+}
+
+/** The date a card's meta line shows: when a done task finished, else when an open one is due. */
+function cardDate(task: Task): string {
+  if (task.status === 'done') return formatShortDate(task.completed_at)
+  return formatCardDue(task.due, today)
+}
+
+/** The one action pinned to a card's agent band, or null when the state offers none. */
+function bandAction(task: Task): { label: string; aria: string; run: () => void } | null {
+  const status = cardAgentStatus(task)
+  if (!status) return null
+  if (status.tone === 'settled') {
+    if (!isSettledLinked(task)) return null
+    if (!chatArchived(task)) {
+      return {
+        label: 'Resume',
+        aria: `Resume the attempt on ${task.title} in its own chat`,
+        run: () => { void actOnAttempt(task, 'resume') },
+      }
+    }
+    return {
+      label: 'Continue in new chat',
+      aria: `Start a new attempt at ${task.title}`,
+      run: () => { void actOnAttempt(task, 'retry') },
+    }
+  }
+  if (!task.chat_id) return null
+  return {
+    label: 'Open chat',
+    aria: awaitsReview(task)
+      ? `Review the agent's result for ${task.title} in its chat`
+      : `Open the chat working on ${task.title}`,
+    run: () => openAttemptChat(task),
+  }
 }
 
 /** The attempts this board holds for one card, the live one first. */
@@ -1877,14 +1915,15 @@ const today = localDateKey()
                   <div class="task-card-head">
                     <!-- Done is the one gesture every card offers, so it is the
                          card's own checkbox rather than a button in a row of them.
-                         A review-ready card is approved instead, below. -->
+                         On a review-ready card it is the approval: a dashed ring. -->
                     <button
-                      v-if="task.status !== 'done' && !isReviewReady(task)"
+                      v-if="task.status !== 'done'"
                       type="button"
                       class="task-check"
+                      :class="{ 'task-check--approve': isReviewReady(task) }"
                       :disabled="busyTaskId === task.id"
-                      :aria-label="`Mark ${task.title} done`"
-                      title="Mark done"
+                      :aria-label="isReviewReady(task) ? 'Approve and mark done' : `Mark ${task.title} done`"
+                      :title="isReviewReady(task) ? 'Approve and mark done' : 'Mark done'"
                       @click.stop="markDone(task)"
                     ><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 8.5l2.5 2.5L12 5.5" /></svg></button>
                     <span v-else-if="task.status === 'done'" class="task-check task-check--done" aria-hidden="true">
@@ -1916,32 +1955,72 @@ const today = localDateKey()
                       @click.stop="openDetail(task)"
                       @keydown="onCardKeydown(task, $event)"
                     >{{ task.title }}</button>
+                    <!-- The run-managing gestures live in a menu, so the card never
+                         sets Stop or Detach beside the way to open its chat. -->
+                    <DropdownMenuRoot v-if="task.attempt_id || task.chat_id" :modal="false">
+                      <DropdownMenuTrigger as-child>
+                        <button
+                          type="button"
+                          class="task-more"
+                          :aria-label="`Actions for ${task.title}`"
+                          @click.stop
+                        >&#8943;</button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuPortal>
+                        <DropdownMenuContent
+                          class="context-menu"
+                          side="bottom"
+                          align="end"
+                          :side-offset="4"
+                          :collision-padding="8"
+                          position-strategy="fixed"
+                        >
+                          <DropdownMenuItem v-if="task.chat_id" as-child>
+                            <button type="button" :disabled="busyTaskId === task.id" @click.stop="openAttemptChat(task)">Open chat</button>
+                          </DropdownMenuItem>
+                          <template v-if="!isReviewReady(task) && isSettledLinked(task)">
+                            <DropdownMenuItem v-if="!chatArchived(task)" as-child>
+                              <button type="button" :disabled="busyTaskId === task.id" @click.stop="actOnAttempt(task, 'resume')">Resume</button>
+                            </DropdownMenuItem>
+                            <DropdownMenuItem as-child>
+                              <button type="button" :disabled="busyTaskId === task.id" @click.stop="actOnAttempt(task, 'retry')">{{ chatArchived(task) ? 'Continue in new chat' : 'Retry' }}</button>
+                            </DropdownMenuItem>
+                          </template>
+                          <template v-else-if="!isReviewReady(task) && task.live_attempt_id">
+                            <DropdownMenuItem as-child>
+                              <button type="button" :disabled="busyTaskId === task.id" @click.stop="actOnAttempt(task, 'stop')">Stop</button>
+                            </DropdownMenuItem>
+                            <DropdownMenuItem as-child>
+                              <button type="button" :disabled="busyTaskId === task.id" @click.stop="actOnAttempt(task, 'detach')">Detach</button>
+                            </DropdownMenuItem>
+                          </template>
+                        </DropdownMenuContent>
+                      </DropdownMenuPortal>
+                    </DropdownMenuRoot>
                   </div>
                   <!-- Only what differs from the default: General and For me are what
                        most cards are, and saying so on each one buries the rest. The
-                       lane heading already states the card's status. -->
+                       lane heading already states the card's status. An overdue date
+                       is red and says so in words for a screen reader. -->
                   <p
-                    v-if="(task.attempt_state && !awaitsReview(task)) || ownProject(task.project_id) || formatTaskDue(task.due)"
+                    v-if="ownProject(task.project_id) || cardDate(task)"
                     class="task-meta"
                   >
-                    <!-- A result waiting for the user needs no badge: the foot's
-                         Review in chat says it, and says what to do about it. -->
-                    <span
-                      v-if="task.attempt_state && !awaitsReview(task)"
-                      class="badge"
-                      :class="attemptBadgeClass(task)"
-                    >{{ taskAttemptLabel(task.attempt_state, task.attempt_outcome, task.attempt_detail) }}</span>
                     <span v-if="ownProject(task.project_id)" class="task-project">{{ projectName(task.project_id) }}</span>
-                    <span v-if="formatTaskDue(task.due)" class="badge" :class="isOverdue(task, today) ? 'badge--error' : 'badge--muted'">
-                      {{ isOverdue(task, today) ? 'Overdue · ' : 'Due ' }}{{ formatTaskDue(task.due) }}
-                    </span>
+                    <span v-if="task.status === 'done' && task.attempt_outcome === 'done'" class="task-done-by">Done by agent</span>
+                    <span
+                      v-if="cardDate(task)"
+                      class="task-due"
+                      :class="{ 'task-due--over': isOverdue(task, today) }"
+                      :title="isOverdue(task, today) ? 'Overdue' : undefined"
+                    ><span v-if="isOverdue(task, today)" class="visually-hidden">Overdue: </span>{{ cardDate(task) }}</span>
                   </p>
                   <!-- Where the answer is, and when it ended. Never a summary of it:
                        the board holds no copy of the agent's reply, so it names the
                        chat to read and the approval that closes the card. -->
                   <!-- The agent's own words on where it got to, or the engine's
                        note when it said nothing. Clamped: the editor has the rest. -->
-                  <p v-if="attemptNote(task)" class="task-agent-note">{{ attemptNote(task) }}</p>
+                  <p v-if="attemptNote(task) && task.status !== 'done'" class="task-agent-note">{{ attemptNote(task) }}</p>
                   <p v-if="chatArchived(task) && !isReviewReady(task)" class="task-changed">
                     The chat was archived. Continue in a new chat — it is handed what
                     this one did.
@@ -1960,69 +2039,22 @@ const today = localDateKey()
                       <span class="task-reconcile-actions">{{ note.actions }}</span>
                     </p>
                   </div>
-                  <!-- Only a delegated card has a foot: the gestures that act on its
-                       attempt. Handing a task over starts in the editor, where the
-                       preview is. -->
-                  <div v-if="task.attempt_id || task.chat_id" class="task-card-foot">
-                    <!-- The attempt's chat, when the board knows one. A button rather
-                         than a link because it goes through the project store, not a
-                         route — the same call the sidebar row makes. While a result
-                         waits for the user it is the card's one call to action: the
-                         review happens in the chat, where Approve Done lives, never
-                         from the card without reading what the agent did. -->
+                  <!-- The agent's state in words, with the one action that state offers.
+                       The rest of the run's gestures are in the card's menu. -->
+                  <div
+                    v-if="cardAgentStatus(task)"
+                    class="task-agent-band"
+                    :class="`task-agent-band--${cardAgentStatus(task)!.tone}`"
+                  >
+                    <span class="task-agent-status"><span class="task-agent-dot" aria-hidden="true" />{{ cardAgentStatus(task)!.word }}</span>
                     <button
-                      v-if="task.chat_id"
+                      v-if="bandAction(task)"
                       type="button"
-                      class="btn-chip task-chip"
-                      :class="{ 'task-chip--review': awaitsReview(task) }"
+                      class="task-agent-action"
                       :disabled="busyTaskId === task.id"
-                      :aria-label="awaitsReview(task) ? `Review the agent's result for ${task.title} in its chat` : `Open the chat working on ${task.title}`"
-                      @click.stop="openAttemptChat(task)"
-                    >{{ awaitsReview(task) ? 'Review in chat' : 'Chat' }}</button>
-                    <!-- A review-ready card is read, not managed: the turn has ended,
-                         so there is nothing to Stop, and Detach-then-Done would settle
-                         the attempt as stopped and lose the result. Approving is done
-                         from the chat or the editor, after reading the result, so
-                         such a card has only Review in chat. -->
-                    <!-- A settled attempt still holds the task, and it is the only
-                         case the server will resume. Resume continues that chat
-                         under the same attempt; Retry mints a new one. They are
-                         two labelled gestures rather than one button, because
-                         "Delegate" here would start a second attempt and quietly
-                         abandon the one that failed. -->
-                    <template v-if="!isReviewReady(task) && isSettledLinked(task)">
-                      <button
-                        v-if="!chatArchived(task)"
-                        type="button"
-                        class="btn-chip task-chip"
-                        :disabled="busyTaskId === task.id"
-                        :aria-label="`Resume the attempt on ${task.title} in its own chat`"
-                        @click.stop="actOnAttempt(task, 'resume')"
-                      >Resume</button>
-                      <button
-                        type="button"
-                        class="btn-chip task-chip"
-                        :disabled="busyTaskId === task.id"
-                        :aria-label="`Start a new attempt at ${task.title}`"
-                        @click.stop="actOnAttempt(task, 'retry')"
-                      >{{ chatArchived(task) ? 'Continue in new chat' : 'Retry' }}</button>
-                    </template>
-                    <template v-else-if="!isReviewReady(task) && task.live_attempt_id">
-                      <button
-                        type="button"
-                        class="btn-chip task-chip"
-                        :disabled="busyTaskId === task.id"
-                        :aria-label="`Stop the turn working on ${task.title}`"
-                        @click.stop="actOnAttempt(task, 'stop')"
-                      >Stop</button>
-                      <button
-                        type="button"
-                        class="btn-chip task-chip"
-                        :disabled="busyTaskId === task.id"
-                        :aria-label="`Detach ${task.title} from its attempt`"
-                        @click.stop="actOnAttempt(task, 'detach')"
-                      >Detach</button>
-                    </template>
+                      :aria-label="bandAction(task)!.aria"
+                      @click.stop="bandAction(task)!.run()"
+                    >{{ bandAction(task)!.label }} &rarr;</button>
                   </div>
                 </li>
               </ul>
@@ -2523,7 +2555,7 @@ const today = localDateKey()
                 @click="delegateFromDetail(detailTask!)"
               >{{ detailDelegateLabel }}</button>
               <!-- The one gesture that completes a reviewed result. The same call the
-                   card's Approve Done makes: the service releases the linkage and
+                   card's approve checkbox makes: the service releases the linkage and
                    closes the card together, so the attempt stays as review-ready
                    history instead of settling as stopped. -->
               <button
@@ -2997,14 +3029,14 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
-/* The agent's own words under the badge, clamped: the editor has the rest. */
+/* The agent's own words above the band, clamped: the editor has the rest. */
 .task-agent-note {
   display: -webkit-box;
   margin: 0;
   overflow: hidden;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   color: var(--fg2);
   font-size: var(--text-sm);
   line-height: 1.45;
@@ -3060,39 +3092,127 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: 0 var(--space-2);
   margin: 0;
   font-size: var(--text-sm);
-  color: var(--fg2);
+  color: var(--fg3);
 }
-
+.task-meta > * + *::before {
+  content: '\00b7';
+  margin-right: var(--space-2);
+  color: var(--border-strong);
+}
 .task-project { overflow-wrap: anywhere; }
-.task-card-foot {
+.task-due--over { color: var(--error); }
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* The agent band: a footer strip that bleeds to the card's edges. It carries the
+   agent's state on the left and the one action that state offers on the right. */
+.task-agent-band {
+  --band-tone: var(--fg2);
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: 0 calc(-1 * var(--space-3)) calc(-1 * var(--space-3));
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 var(--radius) var(--radius);
+  font-size: var(--text-sm);
+}
+.task-agent-band--running { --band-tone: color-mix(in srgb, var(--accent2) 60%, var(--fg)); }
+.task-agent-band--needs {
+  --band-tone: var(--warning);
+  background: color-mix(in srgb, var(--warning) 6%, transparent);
+}
+.task-agent-band--review {
+  --band-tone: var(--success);
+  background: color-mix(in srgb, var(--success) 6%, transparent);
+}
+.task-agent-band--settled { --band-tone: var(--error); }
+.task-agent-status {
+  display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
+  color: color-mix(in srgb, var(--band-tone), var(--fg) 25%);
 }
-.task-chip--review {
+.task-agent-band--running .task-agent-status { color: var(--fg2); }
+.task-agent-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--band-tone);
+}
+.task-agent-band--running .task-agent-dot { animation: task-agent-pulse 1.6s ease-in-out infinite; }
+@keyframes task-agent-pulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .task-agent-band--running .task-agent-dot { animation: none; }
+}
+.task-agent-action {
+  flex: none;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--accent);
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font: inherit;
   font-weight: 600;
+  cursor: pointer;
 }
-.task-chip--review:hover {
-  color: var(--accent-strong);
-  border-color: var(--accent-strong);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
+.task-agent-action:hover { text-decoration: underline; text-underline-offset: 3px; }
+.task-agent-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+.task-agent-action:disabled { cursor: progress; opacity: 0.5; }
+/* The card's menu. Out of the way until the card is hovered, focused or the menu is open. */
+.task-more {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--fg3);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
 }
+.task-card:hover .task-more,
+.task-card:focus-within .task-more,
+.task-more[data-state='open'] { opacity: 1; }
+.task-more:hover { color: var(--fg); }
+.task-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+@media (hover: none) {
+  .task-more { opacity: 1; }
+}
+.task-check--approve svg { border-color: var(--success); border-style: dashed; }
 
 /* 44px on touch: the shared rule raises .btn-chip, and the native selects and
    buttons here carry it directly so a coarse pointer never gets a 34px target. */
 @media (pointer: coarse) {
   .task-filter,
-  .task-card .btn-chip,
   .task-status-opt {
     min-height: var(--touch);
   }
+  .task-more,
+  .task-agent-action {
+    min-height: var(--touch);
+  }
+  .task-more { width: var(--touch); }
   .task-check {
     width: var(--touch);
     height: var(--touch);

@@ -578,6 +578,50 @@ export function formatTaskDue(due: unknown): string {
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
+/** The due date as a card's meta line reads it: Today, Tomorrow, otherwise the short date. */
+export function formatCardDue(due: unknown, today: string = localDateKey()): string {
+  if (!isDueDate(due)) return ''
+  if (due === today) return 'Today'
+  if (due === addDays(today, 1)) return 'Tomorrow'
+  return formatTaskDue(due)
+}
+
+/** An ISO timestamp as a short date (`Oct 31`), or `''` for none or an unreadable one. */
+export function formatShortDate(iso: string | null): string {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+export type CardAgentTone = 'running' | 'needs' | 'review' | 'settled'
+
+/**
+ * What a card's agent band says: the status word and its tone, or `null` when the
+ * card has no band (a done task, or one never delegated).
+ */
+export function cardAgentStatus(
+  task: Pick<Task, 'status' | 'attempt_state'>,
+): { word: string; tone: CardAgentTone } | null {
+  if (task.status === 'done') return null
+  switch (task.attempt_state) {
+    case 'running':
+      return { word: 'Agent working', tone: 'running' }
+    case 'needs_you':
+      return { word: 'Needs you', tone: 'needs' }
+    case 'ready_for_review':
+      return { word: 'Ready to review', tone: 'review' }
+    case 'failed':
+      return { word: 'Agent failed', tone: 'settled' }
+    case 'interrupted':
+      return { word: 'Agent interrupted', tone: 'settled' }
+    case 'stopped':
+      return { word: 'Agent stopped', tone: 'settled' }
+    default:
+      return null
+  }
+}
+
 /** The project filter's value for General: "filed under no project". */
 export const TASK_NO_PROJECT = 'no-project'
 

@@ -13,6 +13,9 @@ import {
   TASK_COLUMNS,
   TASK_DUE_FILTERS,
   TASK_NO_PROJECT,
+  cardAgentStatus,
+  formatCardDue,
+  formatShortDate,
   formatTaskDue,
   invalidTaskRows,
   isOverdue,
@@ -260,6 +263,36 @@ describe('due dates', () => {
     expect(formatTaskDue('2026-03-20')).toBe(new Date('2026-03-20T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }))
     expect(formatTaskDue('')).toBe('')
     expect(formatTaskDue('soon')).toBe('')
+  })
+
+  it('formatCardDue says Today and Tomorrow, otherwise the short date', () => {
+    expect(formatCardDue('2026-03-20', '2026-03-20')).toBe('Today')
+    expect(formatCardDue('2026-03-21', '2026-03-20')).toBe('Tomorrow')
+    expect(formatCardDue('2026-04-01', '2026-03-31')).toBe('Tomorrow')
+    expect(formatCardDue('2026-03-19', '2026-03-20')).toBe(formatTaskDue('2026-03-19'))
+    expect(formatCardDue('2026-10-31', '2026-03-20')).toBe(formatTaskDue('2026-10-31'))
+    expect(formatCardDue('', '2026-03-20')).toBe('')
+    expect(formatCardDue('soon', '2026-03-20')).toBe('')
+  })
+
+  it('formatShortDate reads a timestamp as a short date', () => {
+    expect(formatShortDate(null)).toBe('')
+    expect(formatShortDate('nope')).toBe('')
+    expect(formatShortDate('2026-03-20T12:00:00')).toBe(
+      new Date('2026-03-20T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    )
+  })
+
+  it('cardAgentStatus maps every attempt state and hides done tasks', () => {
+    const open = (attempt_state: Task['attempt_state']) => cardAgentStatus({ status: 'in_progress', attempt_state })
+    expect(open('running')).toEqual({ word: 'Agent working', tone: 'running' })
+    expect(open('needs_you')).toEqual({ word: 'Needs you', tone: 'needs' })
+    expect(open('ready_for_review')).toEqual({ word: 'Ready to review', tone: 'review' })
+    expect(open('failed')).toEqual({ word: 'Agent failed', tone: 'settled' })
+    expect(open('interrupted')).toEqual({ word: 'Agent interrupted', tone: 'settled' })
+    expect(open('stopped')).toEqual({ word: 'Agent stopped', tone: 'settled' })
+    expect(open('')).toBeNull()
+    expect(cardAgentStatus({ status: 'done', attempt_state: 'running' })).toBeNull()
   })
 
   it('treats only a dated task before today as overdue', () => {

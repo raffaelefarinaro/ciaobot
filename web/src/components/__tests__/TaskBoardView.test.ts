@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { flushPromises, mount } from '@vue/test-utils'
+import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import TaskBoardView from '../TaskBoardView.vue'
 import { useProjectStore } from '../../stores/projects'
@@ -260,7 +260,8 @@ describe('TaskBoardView', () => {
     const shown = card(wrapper, 'Ship the board')
     expect(shown.get('.task-open').text()).toBe('Ship the board')
     expect(shown.get('.task-project').text()).toBe('Website')
-    expect(shown.text()).toContain(`Due ${shortDate(2099, 3, 20)}`)
+    expect(shown.get('.task-meta').text()).toBe(`Website${shortDate(2099, 3, 20)}`)
+    expect(shown.get('.task-due').text()).toBe(shortDate(2099, 3, 20))
     // Who it is for is the Agent block's business, not a label on every card.
     expect(shown.text()).not.toContain('For the agent')
     // Review is the column a card sits in (#1069), not a badge on it.
@@ -271,6 +272,7 @@ describe('TaskBoardView', () => {
   it('marks a past due date overdue in words as well as in colour', async () => {
     const wrapper = await mountBoard([task({ due: '2000-01-01' })])
     expect(card(wrapper, 'Ship the board').text()).toContain('Overdue')
+    expect(card(wrapper, 'Ship the board').find('.task-due--over').exists()).toBe(true)
     wrapper.unmount()
   })
 
@@ -278,7 +280,7 @@ describe('TaskBoardView', () => {
     const wrapper = await mountBoard([task({ status: 'done', due: '2000-01-01' })])
     const shown = card(wrapper, 'Ship the board')
     expect(shown.text()).not.toContain('Overdue')
-    expect(shown.text()).toContain('Due ')
+    expect(shown.find('.task-due--over').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -286,8 +288,9 @@ describe('TaskBoardView', () => {
     const wrapper = await mountBoard([task()])
     const shown = card(wrapper, 'Ship the board')
     expect(shown.find('.task-meta').exists()).toBe(false)
-    // And an undelegated card has no foot: its Done is the checkbox.
-    expect(shown.find('.task-card-foot').exists()).toBe(false)
+    // And an undelegated card has no band and no menu: its Done is the checkbox.
+    expect(shown.find('.task-agent-band').exists()).toBe(false)
+    expect(shown.find('.task-more').exists()).toBe(false)
     expect(shown.find('select').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -1429,7 +1432,7 @@ describe('TaskBoardView', () => {
       due: '2099-04-01',
     })
     expect(wrapper.find('.task-sheet').exists()).toBe(false)
-    expect(card(wrapper, 'First task').text()).toContain(`Due ${shortDate(2099, 4, 1)}`)
+    expect(card(wrapper, 'First task').text()).toContain(shortDate(2099, 4, 1))
     wrapper.unmount()
   })
 
@@ -1637,9 +1640,30 @@ describe('TaskBoardView', () => {
     return wrapper
   }
 
-  /** The card chip with this exact label. */
-  function chip(wrapper: ReturnType<typeof mount>, title: string, label: string) {
-    return card(wrapper, title).findAll('.task-chip').find((c) => c.text() === label)!
+  /** The card's one band action. */
+  function bandAction(wrapper: ReturnType<typeof mount>, title: string) {
+    return card(wrapper, title).find('.task-agent-action')
+  }
+
+  /** Open the card's menu and return its items. */
+  async function menuItems(wrapper: ReturnType<typeof mount>, title: string) {
+    await card(wrapper, title).get('.task-more').trigger('click')
+    await flushPromises()
+    return [...document.body.querySelectorAll<HTMLElement>('[data-reka-menu-content] [role="menuitem"]')]
+  }
+
+  /** Close an open card menu the way a click outside does. */
+  async function closeMenu() {
+    document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }))
+    await flushPromises()
+  }
+
+  /** The card's control with this label: its band action (arrow left off) or a menu item. */
+  async function chip(wrapper: ReturnType<typeof mount>, title: string, label: string) {
+    const action = bandAction(wrapper, title)
+    if (action.exists() && action.text().replace(/\s*→$/, '') === label) return action
+    const item = (await menuItems(wrapper, title)).find((el) => el.textContent === label)!
+    return new DOMWrapper(item)
   }
 
   /**
@@ -1676,7 +1700,7 @@ describe('TaskBoardView', () => {
     await nextTick()
   }
 
-  it('draws the attempt badge for every state, coloured by what it means',
+  it('draws the agent band for every state, toned by what it means',
     async () => {
       const wrapper = await mountWithBody([
         task({ id: 'a', title: 'Never delegated' }),
@@ -1692,23 +1716,20 @@ describe('TaskBoardView', () => {
         task({ id: 'd', title: 'Dead turn', attempt_state: 'failed' }),
       ])
 
-      const badge = (title: string) => card(wrapper, title).get('.badge')
-      // In flight, waiting on the user, ready to review, and over — four states,
-      // four classes, because a paused turn and a failed one are different facts.
-      expect(badge('Wire the store').text()).toBe('Running')
-      expect(badge('Wire the store').classes()).toContain('badge--muted')
-      expect(badge('Waiting on you').text()).toBe('Needs you')
-      expect(badge('Waiting on you').classes()).toContain('badge--accent2')
-      expect(badge('Dead turn').text()).toBe('Failed')
-      expect(badge('Dead turn').classes()).toContain('badge--error')
-      // And a finished turn is a badge, never a Done the board moved on its own.
-      // Scoped to the meta row: this card is also *inconsistent* (it sits in Done
-      // while its attempt still holds it), and that finding carries its own badge.
-      expect(badge('Finished').text()).toBe('Review ready')
-      expect(card(wrapper, 'Finished').findAll('.task-meta .badge')).toHaveLength(1)
-      // A task nobody delegated has no badge at all.
-      expect(card(wrapper, 'Never delegated').findAll('.task-meta .badge'))
-        .toHaveLength(0)
+      const band = (title: string) => card(wrapper, title).get('.task-agent-band')
+      // In flight, waiting on the user, ready to review, and over: four tones,
+      // because a paused turn and a failed one are different facts.
+      expect(band('Wire the store').text()).toContain('Agent working')
+      expect(band('Wire the store').classes()).toContain('task-agent-band--running')
+      expect(band('Waiting on you').text()).toContain('Needs you')
+      expect(band('Waiting on you').classes()).toContain('task-agent-band--needs')
+      expect(band('Dead turn').text()).toContain('Agent failed')
+      expect(band('Dead turn').classes()).toContain('task-agent-band--settled')
+      // A done card has no band, even while its attempt still holds it.
+      expect(card(wrapper, 'Finished').find('.task-agent-band').exists()).toBe(false)
+      // A task nobody delegated has no band and no menu.
+      expect(card(wrapper, 'Never delegated').find('.task-agent-band').exists()).toBe(false)
+      expect(card(wrapper, 'Never delegated').find('.task-more').exists()).toBe(false)
       wrapper.unmount()
     })
 
@@ -1748,9 +1769,9 @@ describe('TaskBoardView', () => {
     // The card now carries the attempt the answer named: it is the agent's, linked
     // to the chat the turn runs in, and badged as running.
     const delegated = card(wrapper, 'Draft the runbook')
-    expect(delegated.get('.badge').text()).toBe('Running')
+    expect(delegated.get('.task-agent-band').text()).toContain('Agent working')
     // And the gesture set replaced the single Delegate control.
-    const labels = delegated.findAll('.task-chip').map((c) => c.text())
+    const labels = (await menuItems(wrapper, 'Draft the runbook')).map((el) => el.textContent)
     expect(labels).toContain('Stop')
     expect(labels).toContain('Detach')
     expect(labels).not.toContain('Delegate')
@@ -1796,15 +1817,16 @@ describe('TaskBoardView', () => {
     async () => {
       const wrapper = await mountWithBody([task({ id: 'plain', title: 'Never delegated' }), liveTask()])
 
-      const labels = (title: string) =>
-        card(wrapper, title).findAll('.task-chip').map((c) => c.text())
-      expect(labels('Wire the store')).toEqual(['Chat', 'Stop', 'Detach'])
+      expect((await menuItems(wrapper, 'Wire the store')).map((el) => el.textContent))
+        .toEqual(['Open chat', 'Stop', 'Detach'])
+      expect(bandAction(wrapper, 'Wire the store').text()).toBe('Open chat →')
+      await closeMenu()
       // A live attempt holds the task, so there is no Done to tick.
       expect(card(wrapper, 'Wire the store').find('.task-check').exists()).toBe(true)
       // A task with nothing delegated has no attempt gestures and no Chat: the
       // board only links a chat it was told about, and handing over starts in
       // the editor. Its one gesture is the Done checkbox.
-      expect(labels('Never delegated')).toEqual([])
+      expect(card(wrapper, 'Never delegated').find('.task-more').exists()).toBe(false)
       expect(card(wrapper, 'Never delegated').find('.task-check').exists()).toBe(true)
       wrapper.unmount()
     })
@@ -1827,11 +1849,9 @@ describe('TaskBoardView', () => {
     })
     const wrapper = await mountWithBody([released])
 
-    const labels = card(wrapper, 'Reviewed, then released')
-      .findAll('.task-chip').map((c) => c.text())
     // No attempt gestures, and a plain Done checkbox because there is nothing
     // left to approve.
-    expect(labels).toEqual([])
+    expect(card(wrapper, 'Reviewed, then released').find('.task-more').exists()).toBe(false)
     expect(card(wrapper, 'Reviewed, then released').find('.task-check').exists()).toBe(true)
 
     // And the editor agrees: the preview opens as a first hand-over.
@@ -1853,17 +1873,19 @@ describe('TaskBoardView', () => {
       // a plain "Delegate" here starts a *second* attempt in a new chat and
       // abandons the one that failed. Resume and Retry are the two real answers,
       // so they are two labelled controls rather than one that has to guess.
-      expect(card(wrapper, 'Broke halfway').findAll('.task-chip').map((c) => c.text()))
-        .toEqual(['Chat', 'Resume', 'Retry'])
+      expect((await menuItems(wrapper, 'Broke halfway')).map((el) => el.textContent))
+        .toEqual(['Open chat', 'Resume', 'Retry'])
+      expect(bandAction(wrapper, 'Broke halfway').text()).toBe('Resume →')
+      await closeMenu()
 
-      await chip(wrapper, 'Broke halfway', 'Resume').trigger('click')
+      await (await chip(wrapper, 'Broke halfway', 'Resume')).trigger('click')
       await flushPromises()
       expect(apiPost).toHaveBeenCalledWith(
         `/api/tasks/broke/attempt/${SETTLED_ID}/resume`,
         { workspace: 'personal' },
       )
 
-      await chip(wrapper, 'Broke halfway', 'Retry').trigger('click')
+      await (await chip(wrapper, 'Broke halfway', 'Retry')).trigger('click')
       await flushPromises()
       expect(apiPost).toHaveBeenCalledWith(
         `/api/tasks/broke/attempt/${SETTLED_ID}/retry`,
@@ -1871,6 +1893,45 @@ describe('TaskBoardView', () => {
       )
       wrapper.unmount()
     })
+
+  it('shows Done by agent on a done card the agent finished', async () => {
+    const wrapper = await mountWithBody([task({
+      id: 'fin', title: 'Shipped it', status: 'done', assignee: 'agent',
+      attempt_outcome: 'done', attempt_summary: 'All wired.', due: '2000-01-01',
+      completed_at: '2026-03-01T12:00:00+00:00',
+    })])
+    const shown = card(wrapper, 'Shipped it')
+    expect(shown.get('.task-meta').text()).toContain('Done by agent')
+    expect(shown.get('.task-meta').text()).toContain(shortDate(2026, 3, 1))
+    expect(shown.find('.task-due--over').exists()).toBe(false)
+    expect(shown.find('.task-agent-note').exists()).toBe(false)
+    expect(shown.find('.task-agent-band').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('pins one action to the agent band per state', async () => {
+    for (const state of ['running', 'needs_you', 'ready_for_review'] as const) {
+      const wrapper = await mountWithBody([liveTask({ attempt_state: state })])
+      expect(bandAction(wrapper, 'Wire the store').text(), state).toBe('Open chat →')
+      wrapper.unmount()
+    }
+    const stopped = await mountWithBody([settledTask({ attempt_state: 'stopped' })])
+    expect(bandAction(stopped, 'Broke halfway').text()).toBe('Resume →')
+    stopped.unmount()
+    const archived = await mountWithBody([settledTask({ chat_archived: true })])
+    expect(bandAction(archived, 'Broke halfway').text()).toBe('Continue in new chat →')
+    archived.unmount()
+  })
+
+  it('opens the card menu without opening the editor', async () => {
+    const wrapper = await mountWithBody([liveTask()])
+    expect((await menuItems(wrapper, 'Wire the store')).length).toBeGreaterThan(0)
+    expect(wrapper.find('.task-sheet').exists()).toBe(false)
+    expect(card(wrapper, 'Wire the store').get('.task-more').attributes('aria-label'))
+      .toBe('Actions for Wire the store')
+    await closeMenu()
+    wrapper.unmount()
+  })
 
   it('offers a live attempt its chat to read, never a resume', async () => {
     // Every live state — `running`, `needs_you`, `ready_for_review` — is refused by
@@ -1992,7 +2053,7 @@ describe('TaskBoardView', () => {
     })
     const wrapper = await mountWithBody([liveTask()])
 
-    await chip(wrapper, 'Wire the store', 'Stop').trigger('click')
+    await (await chip(wrapper, 'Wire the store', 'Stop')).trigger('click')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith(
       `/api/tasks/doing/attempt/${LIVE_ID}/stop`,
@@ -2003,7 +2064,7 @@ describe('TaskBoardView', () => {
     // Detach is a gesture on a *live* attempt, so it is read on a card that still
     // has one — a stopped attempt has nothing running to stop before releasing.
     const releasing = await mountWithBody([liveTask()])
-    await chip(releasing, 'Wire the store', 'Detach').trigger('click')
+    await (await chip(releasing, 'Wire the store', 'Detach')).trigger('click')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith(
       `/api/tasks/doing/attempt/${LIVE_ID}/detach`,
@@ -2032,19 +2093,20 @@ describe('TaskBoardView', () => {
       })
       const wrapper = await mountWithBody([liveTask()])
 
-      await chip(wrapper, 'Wire the store', 'Stop').trigger('click')
+      await (await chip(wrapper, 'Wire the store', 'Stop')).trigger('click')
       await flushPromises()
 
-      expect(card(wrapper, 'Wire the store').get('.badge').text()).toBe('Stopped')
-      expect(card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text()))
-        .toEqual(['Chat', 'Resume', 'Retry'])
+      expect(card(wrapper, 'Wire the store').get('.task-agent-band').text()).toContain('Agent stopped')
+      expect((await menuItems(wrapper, 'Wire the store')).map((el) => el.textContent))
+        .toEqual(['Open chat', 'Resume', 'Retry'])
+      await closeMenu()
       wrapper.unmount()
     })
 
   it('approves a reviewed result into Done in one gesture, and keeps the attempt',
     async () => {
-      // The review is the case the issue describes, and Approve Done is the button
-      // for it: one request, no Detach first, and the service releases the linkage
+      // The review is the case the issue describes, and the approve checkbox is the
+      // control for it: one request, no Detach first, and the service releases the linkage
       // and completes together so the attempt stays as review-ready history rather
       // than settling as `stopped` and losing the result.
       const reviewed = liveTask({
@@ -2066,19 +2128,17 @@ describe('TaskBoardView', () => {
       })
       const wrapper = await mountWithBody([reviewed])
 
-      // No Stop, no Detach and no Approve Done on a card whose turn has ended:
-      // there is nothing running to stop, and the user reads the result in the
-      // chat before approving it, so the card only points there.
+      // No Stop and no Detach on a card whose turn has ended: there is nothing
+      // running to stop. The menu only opens the chat; approving is the card's
+      // dashed checkbox, which opens the completion sheet.
       const shown = card(wrapper, 'Wire the store')
-      expect(shown.findAll('.task-chip').map((c) => c.text())).toEqual(['Review in chat'])
-      expect(shown.get('.task-chip').classes()).toContain('task-chip--review')
-      expect(shown.find('.task-meta .badge').exists()).toBe(false)
-
-      await shown.get('.task-open').trigger('click')
-      await flushPromises()
-      await nextTick()
-      await wrapper.findAll('.task-delegate-actions .btn-chip')
-        .find((c) => c.text() === 'Approve Done')!.trigger('click')
+      expect((await menuItems(wrapper, 'Wire the store')).map((el) => el.textContent)).toEqual(['Open chat'])
+      await closeMenu()
+      expect(shown.get('.task-agent-band').classes()).toContain('task-agent-band--review')
+      const approve = shown.get('.task-check')
+      expect(approve.classes()).toContain('task-check--approve')
+      expect(approve.attributes('aria-label')).toBe('Approve and mark done')
+      await approve.trigger('click')
       await flushPromises()
       await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
       await flushPromises()
@@ -2116,10 +2176,10 @@ describe('TaskBoardView', () => {
       })
       const wrapper = await mountWithBody([reviewed])
 
-      // The agent's own summary of what it did; the call to review replaces
-      // the "Agent says done" badge.
+      // The agent's own summary of what it did; the band says it is ready to review.
       const shown = card(wrapper, 'Wire the store')
-      expect(shown.find('.task-meta .badge').exists()).toBe(false)
+      expect(shown.get('.task-agent-band').text()).toContain('Ready to review')
+      expect(bandAction(wrapper, 'Wire the store').text()).toBe('Open chat →')
       expect(shown.get('.task-agent-note').text()).toBe('Wired the store; tests in store.test.ts.')
 
       await shown.get('.task-open').trigger('click')
@@ -2296,7 +2356,7 @@ describe('TaskBoardView', () => {
       attempt_state: 'needs_you', attempt_detail: 'the turn ended without a report from the agent',
     })])
     const shown = card(wrapper, 'Wire the store')
-    expect(shown.get('.badge').text()).toBe('Unfinished')
+    expect(shown.get('.task-agent-band').text()).toContain('Needs you')
     expect(shown.get('.task-agent-note').text()).toContain('without a report')
     wrapper.unmount()
   })
@@ -2310,9 +2370,11 @@ describe('TaskBoardView', () => {
       attempt_detail: 'the chat was archived', chat_archived: true,
     })])
     const shown = card(wrapper, 'Broke halfway')
-    const labels = shown.findAll('.task-chip').map((c) => c.text())
+    const labels = (await menuItems(wrapper, 'Broke halfway')).map((el) => el.textContent)
     expect(labels).not.toContain('Resume')
     expect(labels).toContain('Continue in new chat')
+    expect(bandAction(wrapper, 'Broke halfway').text()).toBe('Continue in new chat →')
+    await closeMenu()
     expect(shown.text()).toContain('The chat was archived')
     expect(shown.get('.task-agent-note').text()).toBe('Schema done; need creds.')
 
@@ -2328,7 +2390,7 @@ describe('TaskBoardView', () => {
     // says false here. The live chat list is what knows the archive happened.
     useProjectStore().chats = [{ chat_id: 'chat-7', project_id: 'p1', archived: true } as never]
     const wrapper = await mountWithBody([settledTask({ chat_archived: false })])
-    const labels = card(wrapper, 'Broke halfway').findAll('.task-chip').map((c) => c.text())
+    const labels = (await menuItems(wrapper, 'Broke halfway')).map((el) => el.textContent)
     expect(labels).not.toContain('Resume')
     expect(labels).toContain('Continue in new chat')
     wrapper.unmount()
@@ -2337,8 +2399,8 @@ describe('TaskBoardView', () => {
   it('keeps Resume while the live chat is active and the server flag is false', async () => {
     useProjectStore().chats = [{ chat_id: 'chat-7', project_id: 'p1', archived: false } as never]
     const wrapper = await mountWithBody([settledTask({ chat_archived: false })])
-    const labels = card(wrapper, 'Broke halfway').findAll('.task-chip').map((c) => c.text())
-    expect(labels).toEqual(['Chat', 'Resume', 'Retry'])
+    const labels = (await menuItems(wrapper, 'Broke halfway')).map((el) => el.textContent)
+    expect(labels).toEqual(['Open chat', 'Resume', 'Retry'])
     wrapper.unmount()
   })
 
@@ -2467,7 +2529,7 @@ describe('TaskBoardView', () => {
     // specific route would be a second path to a chat and would drift.
     useProjectStore().switchChat = switchChat
 
-    await chip(wrapper, 'Wire the store', 'Chat').trigger('click')
+    await (await chip(wrapper, 'Wire the store', 'Open chat')).trigger('click')
 
     expect(switchChat).toHaveBeenCalledWith('chat-7')
     wrapper.unmount()
