@@ -2819,6 +2819,52 @@ describe('TaskBoardView', () => {
       expect(router.currentRoute.value.path).toBe('/tasks')
       wrapper.unmount()
     })
+
+    it('opens a linked task that only the refresh returns, not the stale rows', async () => {
+      const { createMemoryHistory, createRouter } = await import('vue-router')
+      const { defineComponent } = await import('vue')
+      // The board loaded before the task existed; the store keeps those rows.
+      apiGet.mockImplementation((url: string) =>
+        Promise.resolve(url.includes('/api/tasks?') ? { workspace: 'personal', tasks: BOARD } : {}),
+      )
+      await useTaskBoardStore().reload('personal')
+
+      // The remount's refresh answers only once the test lets it, so the
+      // assertions below run while it is in flight.
+      const fresh = task({ id: 'fresh', title: 'Made since the board loaded' })
+      let answerRefresh!: (value: unknown) => void
+      const refresh = new Promise((resolve) => { answerRefresh = resolve })
+      apiGet.mockImplementation((url: string) => (
+        url.includes('/api/tasks?')
+          ? refresh
+          : Promise.resolve(detailAnswer(fresh, 'Created by an agent.'))
+      ))
+
+      const Stub = defineComponent({ render: () => null })
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [
+          { path: '/tasks', name: 'tasks', component: Stub },
+          { path: '/tasks/:taskId', name: 'task-detail', component: Stub },
+        ],
+      })
+      await router.push('/tasks/fresh')
+      const wrapper = mount(TaskBoardView, { attachTo: document.body, global: { plugins: [router] } })
+      await flushPromises()
+      await nextTick()
+
+      expect(wrapper.text()).not.toContain('The linked task is not on the personal board.')
+      expect(router.currentRoute.value.path).toBe('/tasks/fresh')
+
+      answerRefresh({ workspace: 'personal', tasks: [...BOARD, fresh] })
+      await flushPromises()
+      await nextTick()
+
+      const sheet = wrapper.get('.task-sheet')
+      expect(sheet.get<HTMLInputElement>('#task-detail-name').element.value).toBe('Made since the board loaded')
+      expect(router.currentRoute.value.path).toBe('/tasks/fresh')
+      wrapper.unmount()
+    })
   })
 })
 
