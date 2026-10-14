@@ -64,7 +64,7 @@
             ref="workspaceScopeTrigger"
             type="button"
             class="workspace-scope-trigger"
-            :data-workspace-color="colorForWorkspace(store.workspaceOptions.find(item => item.name === store.activeWorkspace))"
+            :data-workspace-color="activeWorkspaceAccent(store.workspaces, store.activeWorkspace)"
             :aria-label="`Workspace: ${workspaceLabel(store.activeWorkspace)}`"
             :aria-haspopup="canOpenWorkspaceMenu ? 'menu' : undefined"
             :aria-expanded="canOpenWorkspaceMenu ? workspaceScopeOpen : undefined"
@@ -99,7 +99,7 @@
               role="menuitem"
               class="workspace-scope-option"
               :class="{ active: workspace.name === store.activeWorkspace }"
-              :data-workspace-color="colorForWorkspace(workspace)"
+              :data-workspace-color="workspaceAccent(store.workspaces, workspace.name, store.activeWorkspace)"
               :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
               @click="selectWorkspaceScope(workspace.name)"
             >
@@ -905,7 +905,7 @@ import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace } from '../lib/automationWorkspace'
 import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
-import { colorForWorkspace } from '../lib/workspaceColors'
+import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
 import { SETTINGS_NAV } from '../lib/settingsNav'
 import { ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
@@ -1572,11 +1572,11 @@ function workspaceShortcut(name: string): string {
 
 function colorForChat(chat: { project_id: string }) {
   const project = store.projects.find(item => item.project_id === chat.project_id)
-  return colorForWorkspace(store.workspaceOptions.find(item => item.name === project?.workspace))
+  return workspaceAccent(store.workspaces, project?.workspace, store.activeWorkspace)
 }
 
 function colorForProject(workspace: string) {
-  return colorForWorkspace(store.workspaceOptions.find(item => item.name === workspace))
+  return workspaceAccent(store.workspaces, workspace, store.activeWorkspace)
 }
 
 // ── Completed (archived) projects ──────────────────────────────────────

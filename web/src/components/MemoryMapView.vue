@@ -2069,10 +2069,10 @@ onBeforeUnmount(() => {
 .mm-title-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .deg-n { color: var(--fg2); font-variant-numeric: tabular-nums; }
-.stale-age { color: var(--warning, #ff9800); white-space: nowrap; }
+.stale-age { color: var(--warning); white-space: nowrap; }
 .stale-flag {
   display: inline-flex; align-items: center; min-height: 20px; margin-left: 8px; padding: 0 6px;
-  border: 1px solid color-mix(in srgb, var(--warning, #ff9800) 45%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
   border-radius: var(--radius-xs, 4px);
   font-size: var(--text-xs); font-weight: 600;
 }

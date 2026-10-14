@@ -77,12 +77,12 @@ BRIDGE_SCRIPT = r"""(function () {
   var css = document.createElement('style')
   css.setAttribute('data-ciao-bridge-style', '')
   css.textContent =
-    'mark.' + MARK_CLASS + '{background:rgba(255,77,109,.28);color:inherit;' +
+    'mark.' + MARK_CLASS + '{background:rgba(251,146,60,.28);color:inherit;' +
     'border-radius:2px;cursor:pointer;box-decoration-break:clone;-webkit-box-decoration-break:clone}' +
-    '.' + EL_CLASS + '{outline:2px solid rgba(255,77,109,.85);outline-offset:1px;cursor:pointer}' +
+    '.' + EL_CLASS + '{outline:2px solid rgba(251,146,60,.85);outline-offset:1px;cursor:pointer}' +
     // 44px min box, not the 24px the padding alone gave: on a touch device the
     // pill is how a selection becomes a comment (AGENTS.md touch-target rule).
-    '#' + PILL_ID + '{position:absolute;z-index:2147483647;background:#ff4d6d;color:#fff;' +
+    '#' + PILL_ID + '{position:absolute;z-index:2147483647;background:#fb923c;color:#1a1a2e;' +
     'font:600 13px/1 system-ui,-apple-system,sans-serif;box-sizing:border-box;' +
     'min-height:44px;min-width:44px;padding:0 18px;border-radius:999px;' +
     'display:inline-flex;align-items:center;justify-content:center;' +

@@ -80,7 +80,7 @@ if you genuinely need an off-scale size.
 **Rule L0.3** — No hardcoded `border-radius` or spacing. Use `--radius*` and `--space-*`.
 **Rule L0.4** — Do not write a token fallback that differs from the token's real
 value. `var(--warning, #b7791f)` in `SettingsView.vue` is wrong twice over: the
-token is `#ff9800`, and the fallback can never fire.
+token is `#facc15`, and the fallback can never fire.
 
 ### L1 — Primitives (`web/src/App.vue`, the global `<style>` block)
 
@@ -180,7 +180,8 @@ survives 60 items, colour blindness, and the light theme.
 
 **Rule S3 — Semantic colour is not the accent.**
 `--success` / `--warning` / `--error` express outcome. `--accent` expresses
-workspace identity. A workspace whose accent is pink must not make errors
+workspace identity. The default accent is orange and warning is yellow so the
+two never read alike; a workspace whose accent is pink must not make errors
 invisible; never use `--accent` to mean "bad" or `--error` to mean "Work".
 
 **Rule S4 — Emoji are not icons.**

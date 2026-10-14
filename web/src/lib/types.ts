@@ -58,7 +58,7 @@ export interface WorkspaceInfo {
   // Whether the workspace's Claude chats load the claude.ai connectors. Missing → on.
   claude_ai_connectors?: boolean
   gws_profile: string
-  // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
+  // PWA accent preset: amber | pink | cyan | emerald | violet. Missing → amber (Ciao orange).
   color?: string
   // Filesystem scope for the agent and its shell. Absent or null: the workspace
   // never chose one and runs under the engine's default_agent_fs_scope.
