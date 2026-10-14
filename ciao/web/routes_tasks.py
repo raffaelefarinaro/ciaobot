@@ -63,10 +63,6 @@ _STATUS_BY_CODE = {
     # names the attempt to resume or retry.
     "chat_create_failed": 500,
     "task_launch_failed": 500,
-    # The delegated chat is finishing a turn and will not take the update yet.
-    # Nothing was sent and nothing was rebound, so it is the same conflict the
-    # stale-revision case is: re-read, then send again.
-    "task_update_busy": 409,
     "task_attempt_not_found": 404,
     # Resume against a chat that was archived or deleted: there is no
     # conversation to continue, and the way on is a retry in a new chat.
@@ -88,12 +84,6 @@ _WRITE_KEYS = ("workspace", "expected_revision", "body")
 #: note for this hand-over, quoted after the description in its own fence, so it
 #: can shape how the task is done but cannot replace the task.
 _DELEGATE_KEYS = ("workspace", "expected_revision", "project_id", "instructions")
-
-#: Body keys ``POST …/attempt/{attempt_id}/update`` may carry. Its own set rather
-#: than a reuse: an update carries the message the user approved and the revision it
-#: was made at, and nothing else. There is no key here through which a request could
-#: move the task, change its linkage or delegate it again.
-_UPDATE_KEYS = ("workspace", "expected_revision", "message")
 
 
 def _control_plane(request: Request) -> Any | None:
@@ -337,9 +327,7 @@ async def task_delegate(request: Request) -> JSONResponse:
     200 with the attempt, the chat it runs in and the task as it now stands.
     ``created: false`` means a live attempt already existed and **nothing** was
     created or sent — a double click or a race with the agent gets the attempt
-    that is already running, never a second chat. ``changed_since_delegated``
-    says the task was edited after this attempt was handed over, which is a fact
-    the reviewer has to see rather than something the route resolves.
+    that is already running, never a second chat.
 
     Deliberately not ``asyncio.to_thread``: ``start_stream`` creates an asyncio
     task and is only legal on the event loop, exactly as ``start_update_task``
@@ -383,56 +371,6 @@ async def task_delegate(request: Request) -> JSONResponse:
             project_id=str(body.get("project_id")) if body.get("project_id") else None,
             actor="user",
             instructions=instructions,
-        )
-    except ControlPlaneError as exc:
-        return _error(exc)
-    return JSONResponse({"workspace": workspace, **outcome})
-
-
-async def task_send_update(request: Request) -> JSONResponse:
-    """Send the edited task into one attempt's own chat: ``{"workspace",
-    "expected_revision", "message"}``.
-
-    200 with the rebound attempt, the task as it now stands and whether the message
-    was queued behind a turn already in flight. The rebind is the part the board
-    needs and a composer send could not do: the attempt is bound to the revision the
-    update was made at, so ``changed_since_delegated`` comes back ``false`` and the
-    control retires. A refused send rebinds nothing, which is what keeps a cleared
-    flag from ever claiming an update the agent did not receive.
-
-    Not a delegation: no chat is created, no attempt is minted, the task's linkage
-    is untouched, and the turn is attended exactly as the delegated one was — the
-    same ``start_stream`` with no ``unattended``.
-
-    Awaited, not run in a thread: it starts a turn, which is only legal on the
-    loop, exactly as ``task_delegate``'s is.
-    """
-    plane = _control_plane(request)
-    if plane is None:
-        return _unavailable()
-    body = await _body(request)
-    if isinstance(body, JSONResponse):
-        return body
-    revision = _revision(body)
-    if isinstance(revision, JSONResponse):
-        return revision
-    workspace = _workspace(request.app.state.config, body.get("workspace"))
-    if workspace is None:
-        return _workspace_required()
-    unknown = sorted(key for key in body if key not in _UPDATE_KEYS)
-    if unknown:
-        return _refusal(
-            "invalid_task_field",
-            f"Not part of a task update: {', '.join(unknown)}.",
-            400,
-        )
-    try:
-        outcome = plane.workspace_task_send_update(
-            workspace,
-            str(request.path_params.get("task_id") or ""),
-            str(request.path_params.get("attempt_id") or ""),
-            expected_revision=revision,
-            message=str(body.get("message") or ""),
         )
     except ControlPlaneError as exc:
         return _error(exc)

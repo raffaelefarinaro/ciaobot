@@ -1293,14 +1293,6 @@ export interface Task {
    */
   live_attempt_id: string
   /**
-   * The task was edited after the current attempt was handed over.
-   *
-   * The result the agent is about to produce was reached against a description
-   * the user has since changed. Nothing resolves this for the reviewer — the board
-   * says it and lets them decide.
-   */
-  changed_since_delegated: boolean
-  /**
    * The task's chat is archived. Present only when `chat_id` is set: archived
    * chats are not in the browser's active chat list, so the board reads this
    * instead of looking the chat up.
@@ -1393,7 +1385,6 @@ export interface TaskDelegateResponse {
   project_id: string
   project_origin: 'requested' | 'task' | 'general' | ''
   task: TaskDetail
-  changed_since_delegated: boolean
 }
 
 /** What an attempt gesture answers with. `resume`/`retry` add their own flags. */
@@ -1404,24 +1395,6 @@ export interface TaskAttemptActionResponse {
   task?: TaskDetail
   resumed?: boolean
   retried?: boolean
-}
-
-/**
- * What a **Send update** answers with.
- *
- * The attempt comes back rebound to the revision the update was made at, so
- * `task.changed_since_delegated` is `false` in this same answer — which is what
- * retires the control. `queued` says which of the two it was: the message was
- * accepted either way, but a queued one is still waiting behind a turn already
- * running in that chat.
- */
-export interface TaskSendUpdateResponse {
-  workspace: string
-  attempt: TaskAttempt
-  chat_id: string
-  task: TaskDetail
-  updated: boolean
-  queued: boolean
 }
 
 /**

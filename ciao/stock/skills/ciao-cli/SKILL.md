@@ -157,18 +157,9 @@ The PWA opens that task's detail on the board, in place. A short prefix is not a
 id and renders as a dead link, and a link to the task's `Workspace/Tasks/` file
 only shows its raw Markdown.
 
-Three things about the board you cannot see from a single `task get`, all of
+Two things about the board you cannot see from a single `task get`, all of
 which are the user's decision rather than yours to resolve:
 
-- **`changed_since_delegated`** in `task list` / `task get` is `true` when the
-  record has been edited since the current attempt was handed it — the result you
-  are reading was reached against an older description. It is `false` right after
-  a clean settle, because the engine rebinds the attempt to the revision its own
-  review flag leaves behind. When it is `true`, say so in your report and let the
-  user judge the result; the PWA offers them **Send update**, which puts the
-  current description into that same chat as one ordinary message. Do **not**
-  re-delegate to "fix" it: a second `task delegate` mints a new attempt in a new
-  chat and leaves the attempt under review looking abandoned.
 - **A finished turn is not a finished task.** Only a turn you ended with
   `task report … --outcome done` becomes `ready_for_review`, which means the
   result is waiting for the user. Report it, name the task, and stop — the

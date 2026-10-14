@@ -78,7 +78,7 @@ Add a durable `TaskUpdate` record in a new fenced Markdown section:
 
 Expose a revision-checked append operation through the task service, HTTP API, and `ciao task add-update`. User prose crosses the CLI through a file argument, following the existing body/resolution safety pattern.
 
-The task description remains the requested work. Adding an update therefore does not falsely mark the description as “Changed since delegated.”
+The task description remains the requested work.
 
 When a live delegated attempt exists, the UI offers two explicit actions:
 

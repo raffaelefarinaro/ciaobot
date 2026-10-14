@@ -392,7 +392,7 @@ def _task_row_with_attempt(
     *,
     include_body: bool = False,
 ) -> dict[str, Any]:
-    """One task as a board row, plus the three delegation facts it draws.
+    """One task as a board row, plus the delegation facts it draws.
 
     A free function taking the two attempt lookups separately, because the board
     reads them once for a whole workspace and the single-task path reads them for
@@ -404,18 +404,9 @@ def _task_row_with_attempt(
     states the user has to see, and a board showing only live attempts would go
     blank the moment a turn ended. ``live_attempt_id`` is non-empty only while an
     attempt actually holds the task, which is what tells the board whether stop and
-    detach are available. ``changed_since_delegated`` compares the revision the
-    attempt was handed against the record now — the attempt was rebound to the
-    revision the hand-off left behind, so only a *later* edit trips this.
-
-    An unlinked task never reports it, and that guard is not cosmetic: a
-    ``detach`` clears the linkage and *that* moves the revision, so comparing
-    unconditionally would make the gesture the user just performed read as "the
-    result was reached against an older description" on the very card that has no
-    longer delegated anything.
+    detach are available.
     """
     payload = _task_payload(document, include_body=include_body)
-    linked = document.record.attempt_id is not None
     payload["attempt_state"] = current.state if current is not None else ""
     # The agent's own word on the current attempt (#1064), and the engine's note
     # when it gave none: what the card says under its badge.
@@ -423,9 +414,6 @@ def _task_row_with_attempt(
     payload["attempt_summary"] = current.summary if current is not None else ""
     payload["attempt_detail"] = current.detail if current is not None else ""
     payload["live_attempt_id"] = live.attempt_id if live is not None else ""
-    payload["changed_since_delegated"] = bool(
-        linked and current is not None and current.task_revision != document.revision
-    )
     return payload
 
 
@@ -2769,8 +2757,8 @@ class CiaoControlPlane:
 
         The first task call for a workspace does it (#1069), so a board is never
         read in the old shape. An attempt bound to a file's old bytes follows the
-        rewrite: the migration is not an edit to the task, and leaving the binding
-        behind would read as "changed since delegated". Best effort; a file it
+        rewrite: the migration is not an edit to the task, so the binding follows it.
+        Best effort; a file it
         cannot upgrade lists as an unsupported-schema row that says why.
         """
         done: set[str] = self.__dict__.setdefault("_task_schema_checked", set())
@@ -2936,9 +2924,7 @@ class CiaoControlPlane:
         a write that leaves the task open, or on a done task with no completion
         record to reword, is refused rather than dropped.
 
-        The answer carries the attempt facts, because an edit is exactly what can
-        make a delegated task ``changed_since_delegated``: the user editing a task
-        the agent is working on is the case that flag exists for.
+        The answer carries the attempt facts, so a board can redraw the card from it.
         """
         if resolution is not None:
             if actor != "user":
@@ -3011,8 +2997,8 @@ class CiaoControlPlane:
         """Append one progress note, and optionally send it to the live attempt.
 
         A note is not an edit of the description. When the live attempt was
-        bound to the revision this write read, it follows the new revision so
-        the note does not read as "changed since delegated". A description
+        bound to the revision this write read, it follows the new revision,
+        because a note is not an edit. A description
         edit that was already pending stays pending.
 
         ``send`` delivers the note as one ordinary message in the attempt's
@@ -3593,8 +3579,7 @@ class CiaoControlPlane:
 
         The attempt is rebound to the revision the re-link left behind, for the same
         reason the review badge is followed by a rebind: the write moved the task's
-        revision, and an attempt left pointing at the older one would report "changed
-        since delegated" on a description nobody edited. Best effort, like the badge's.
+        revision, and the attempt follows the engine's own writes. Best effort, like the badge's.
 
         Best effort for the refusal itself too: it is being raised to the caller
         either way, and a second failure here must not replace the one that explains
@@ -3871,9 +3856,6 @@ class CiaoControlPlane:
                 ),
                 "created": False,
                 "project_id": document.record.project_id or "",
-                "changed_since_delegated": bool(
-                    existing.task_revision != document.revision
-                ),
             }
         record = document.record
         project, origin = self._delegation_project(workspace, project_id, record.project_id)
@@ -3936,9 +3918,6 @@ class CiaoControlPlane:
                 ),
                 "created": False,
                 "project_id": document.record.project_id or "",
-                "changed_since_delegated": bool(
-                    attempt.task_revision != document.revision
-                ),
             }
         # The chat's provenance was stamped at creation with the attempt id minted
         # above, so it names the attempt that ended up owning it — there is no
@@ -3965,11 +3944,8 @@ class CiaoControlPlane:
             )
             raise
         # The linkage write moved the task's revision, so the attempt is rebound
-        # to the revision the record now stands at. Without this the attempt would
-        # read as "changed since delegated" the instant it was made, and the flag
-        # would carry no information at all. What the hand-off changed — status,
-        # assignee, linkage — is not what that flag is about; the body and title
-        # the agent was handed are untouched by it.
+        # to the revision the record now stands at: the attempt's binding follows
+        # the engine's own writes (status, assignee, linkage), never a user edit.
         bound = self._attempt_call(
             workspace,
             lambda store: store.bind_revision(attempt.attempt_id, linked.revision),
@@ -3997,10 +3973,8 @@ class CiaoControlPlane:
         if logged is not None:
             linked, bound = logged
         return {
-            # `bound`, not `attempt`: the reply must carry the revision the record
-            # now stands at, or a caller that stored this payload would compare it
-            # against the task and read "changed since delegated" on an attempt that
-            # was made a moment ago.
+            # `bound`, not `attempt`: the reply carries the revision the record now
+            # stands at.
             **_attempt_payload(bound, self._task_with_attempt(workspace, linked)),
             "project_id": project,
             "project_origin": origin,
@@ -4060,8 +4034,8 @@ class CiaoControlPlane:
         The write is the engine's, made as ``user`` the way the review flag is,
         and it moves the task's revision. The attempt follows that revision only
         when it was bound to the one this write read: a log line is not an edit to
-        the task, but an edit the user made before it still is, and rebinding over
-        it would erase "changed since delegated". One retry on a conflict, because
+        the task, but an edit the user made before it still is, and the binding
+        never follows a user edit. One retry on a conflict, because
         the user saving the description at the same moment is the likely cause.
         """
         for _ in range(2):
@@ -4297,7 +4271,7 @@ class CiaoControlPlane:
 
         The one place the board learns that a delegated chat went on without it:
         the user answering an approval card in the composer, or typing a follow-up
-        into a chat a **Send update** was just sent in. Both start a turn the
+        into a delegated chat. Both start a turn the
         delegation's own watcher knows nothing about, and both are the same event —
         "the conversation in this delegated chat continued" — so they are answered
         by one subscription rather than one special case each.
@@ -4593,11 +4567,8 @@ class CiaoControlPlane:
           superseded would be writing to a card it no longer owns — flagging the
           new attempt's work for review, or a task nobody delegated any more.
         * **The badge write moves the task's revision, and the attempt has to
-          follow it.** ``changed_since_delegated`` compares the revision the
-          attempt was handed against the record now, so a review flag the watcher
-          wrote itself would otherwise make *every* finished turn read "changed
-          since delegated" — which is a warning that must mean the user edited the
-          task under the agent, and there is no edit here.
+          follow it.** The attempt's binding follows the engine's own writes and
+          never a user edit, and the review flag is the engine's write.
 
         Best effort by design: a write that fails here must not turn a finished
         turn into an error, and the attempt's own state already says the result is
@@ -4720,140 +4691,6 @@ class CiaoControlPlane:
         return {
             "task": self._task_with_attempt(workspace, document, include_body=True),
             "attempts": [self._with_chat_archived(attempt.to_dict()) for attempt in history],
-        }
-
-    def workspace_task_send_update(
-        self,
-        workspace: str,
-        task_id: str,
-        attempt_id: str,
-        *,
-        expected_revision: str,
-        message: str,
-    ) -> dict[str, Any]:
-        """Hand the edited task to the attempt's own chat, and rebind the attempt.
-
-        The **Send update** gesture, and the two things it owes the card afterwards.
-        Both matter, and the second is the one a composer send cannot do:
-
-        1. **One ordinary message in the attempt's own chat.** Never a second
-           delegation: that would mint a new attempt, re-quote the description from
-           scratch and leave the result waiting for review looking abandoned. Sent
-           through :meth:`_launch_turn`, so ``unattended`` is not named here either
-           and an approval card the turn raises is an ordinary Needs-you card.
-        2. **The rebind.** The attempt is re-stamped to the revision this message
-           was made at, exactly as the delegation path re-stamps it after its
-           linkage write. That is what makes ``changed_since_delegated`` return to
-           ``false`` and the button retire instead of offering the same update for
-           ever. **The order is the contract:** a send that was refused rebinds
-           nothing, because a cleared flag over an update the agent never saw is the
-           one thing this gesture must not be able to say.
-
-        ``expected_revision`` is required and checked before anything is sent. The
-        message claims to carry the task as it stands, and a description edited
-        since the preview was read is not that — so a stale board is refused with
-        the ordinary 409 and nothing goes to the agent.
-
-        Only an attempt that still holds the task may be updated. A settled one is
-        refused: continuing a turn that did not finish is ``resume`` and replacing
-        it is ``retry``, and a keystroke in a chat is neither. An attempt id sent
-        under another task's URL is ``task_attempt_not_found``, the same answer as
-        one nobody has.
-
-        **Queuing is the ordinary case, not an edge.** An edit made *under* a
-        running agent is what this gesture exists for, so a turn is usually already
-        in flight in that chat — and ``start_stream`` hands back a turn already
-        running rather than dropping the message on the floor, which would leave the
-        rebind claiming an update nobody received. So the message is queued into the
-        running turn exactly as the composer queues it, and that turn runs it as its
-        own follow-up and ends only afterwards: which is what settles the attempt
-        with the answer to the update in it. A queued follow-up needs no watcher of
-        its own; a turn this call started is attached through
-        :meth:`_watch_turn` like any other.
-
-        The message text travels with the request rather than being rebuilt here. It
-        is an ordinary attended message the user composed and was shown in full
-        before sending, so what is sent is what was approved; what this method
-        checks is the revision it was made at.
-        """
-        clean_task = str(task_id or "").strip()
-        clean_attempt = str(attempt_id or "").strip()
-        text = str(message or "").strip()
-        if not text:
-            raise ControlPlaneError("invalid_task", "An update must carry a message.")
-        document = self._task_call(workspace, lambda store: store.get(clean_task))
-        if str(expected_revision or "").strip() != document.revision:
-            raise ControlPlaneError(
-                "task_revision_conflict",
-                "the task changed since this update was planned; nothing was sent",
-                retryable=True,
-            )
-        attempt = self._attempt_call(workspace, lambda store: store.get(clean_attempt))
-        if attempt.task_id != clean_task:
-            raise ControlPlaneError(
-                "task_attempt_not_found",
-                f"no delegation attempt {clean_attempt} on task {clean_task}",
-            )
-        if not attempt.is_live:
-            raise ControlPlaneError(
-                "invalid_action",
-                f"attempt {attempt.attempt_id} is {attempt.state!r} and no longer holds "
-                "this task; resume or retry it rather than sending it an update.",
-            )
-        if document.record.attempt_id != attempt.attempt_id:
-            # The store's live set and the record's linkage disagree, so the task
-            # belongs to some other attempt now. Answered like `resume` answers it:
-            # the update is not the way to take a card back.
-            raise ControlPlaneError(
-                "task_revision_conflict",
-                "the task is linked to a different attempt now; retry it instead.",
-                retryable=True,
-            )
-        queued = bool(self.pcm.queue_message(attempt.chat_id, text))
-        started: Any = None
-        if not queued:
-            active = self.pcm.get_active_stream(attempt.chat_id)
-            stream, refusal = self._launch_turn(attempt.chat_id, text)
-            if stream is None:
-                raise ControlPlaneError(
-                    "task_launch_failed",
-                    f"the update could not be sent to the delegated chat ({refusal}); "
-                    "nothing was sent, and the task still reads as changed since delegated.",
-                    retryable=True,
-                )
-            if stream is active:
-                # `start_stream` returned the turn already running instead of
-                # starting one, which it does before it queues anything: the message
-                # went nowhere. Refusing here is what keeps a rebind from claiming an
-                # update the agent never saw.
-                raise ControlPlaneError(
-                    "task_update_busy",
-                    "the delegated chat is finishing a turn and cannot take the update "
-                    "yet; send it again once that turn has settled.",
-                    retryable=True,
-                )
-            started = stream
-        turn_revision = document.revision
-        if started is not None:
-            turn_revision = self._watch_turn(
-                workspace, attempt.attempt_id, clean_task, attempt.chat_id, started
-            ) or document.revision
-            # Starting the continuation retires the previous review badge, a
-            # revision-safe service write that the accepted update also carries.
-            document = self._task_call(workspace, lambda store: store.get(clean_task))
-        bound = self._attempt_call(
-            workspace,
-            lambda store: store.bind_revision(attempt.attempt_id, turn_revision),
-        )
-        return {
-            # `bound`, for the same reason the delegation reply carries `bound`: the
-            # answer's `changed_since_delegated` has to be the one this call just made
-            # false, not the one the row carried a moment ago.
-            **_attempt_payload(bound, self._task_with_attempt(workspace, document)),
-            "updated": True,
-            # Which of the two it was, so a caller can say what it did: the message is
-            # accepted either way, but a queued one is still waiting behind a turn.
-            "queued": queued,
         }
 
     async def workspace_task_attempt_action(

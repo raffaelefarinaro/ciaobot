@@ -54,7 +54,6 @@ function task(overrides: Partial<Task> = {}): Task {
     attempt_summary: '',
     attempt_detail: '',
     live_attempt_id: '',
-    changed_since_delegated: false,
     completed_at: null,
     has_resolution: false,
     ...overrides,
@@ -227,7 +226,6 @@ describe('taskBoard store', () => {
       chat_id: 'chat-9',
       project_id: 'p1',
       project_origin: 'task',
-      changed_since_delegated: false,
       completed_at: null,
       has_resolution: false,
       task: {
