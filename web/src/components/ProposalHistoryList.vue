@@ -514,7 +514,7 @@ const filtersHideEverything = computed(
 .ph-seg button:hover { color: var(--fg); }
 .ph-seg button.active { background: var(--bg3); color: var(--fg); }
 @media (pointer: coarse) {
-  .ph-seg button { min-height: var(--touch); }
+  .ph-seg button { min-height: var(--touch); min-width: var(--touch); }
 }
 
 .ph-empty {

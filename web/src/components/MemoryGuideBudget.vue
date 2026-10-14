@@ -267,6 +267,10 @@ async function discussGuide(): Promise<void> {
   font-size: var(--text-sm);
 }
 
+@media (pointer: coarse) {
+  .guide-budget-link { min-width: var(--touch); }
+}
+
 .guide-budget-link:hover:not(:disabled) {
   text-decoration: underline;
   text-underline-offset: 3px;

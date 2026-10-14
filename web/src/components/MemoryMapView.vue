@@ -2124,6 +2124,13 @@ onBeforeUnmount(() => {
   text-underline-offset: 3px;
 }
 .mm-toolbar-stale strong { color: inherit; }
+@media (pointer: coarse) {
+  .mm-toolbar-stale {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--touch);
+  }
+}
 
 /* Facts unchecked inside notes, in the toolbar. Quieter than the note-level
    figure on purpose: it is the more speculative of the two (a bullet with no
