@@ -1281,7 +1281,7 @@ const detailOpen = ref(false)
 /** A status write the server refused, said beside the control that made it. */
 const statusError = ref('')
 const detailEl = ref<HTMLElement | null>(null)
-const detailTitleField = ref<HTMLInputElement | null>(null)
+const detailTitleField = ref<HTMLTextAreaElement | null>(null)
 const detailSaving = ref(false)
 const detailId = ref('')
 /** The description read is in flight, or failed and wants a retry. */
@@ -1301,6 +1301,32 @@ async function editBody() {
   await nextTick()
   bodyField.value?.focus()
 }
+
+/**
+ * The rendered description is the editor's own surface: a click puts the caret
+ * in it. A link still opens, and a drag that selected text is a copy, not an edit.
+ */
+function onBodyClick(event: MouseEvent) {
+  if ((event.target as Element | null)?.closest('a')) return
+  if (window.getSelection()?.toString()) return
+  void editBody()
+}
+
+/** Leaving the field saves it and shows it rendered again, unless the save was refused. */
+async function onBodyBlur() {
+  if (await flushDetail()) editingBody.value = false
+}
+
+/**
+ * The title wraps to as many lines as it needs rather than scrolling inside a
+ * one-line box, so a long one is read whole. Enter still ends the edit.
+ */
+function fitTitle() {
+  const field = detailTitleField.value
+  if (!field) return
+  field.style.height = 'auto'
+  field.style.height = `${field.scrollHeight}px`
+}
 const detailForm = reactive({
   title: '',
   status: 'backlog' as TaskStatus,
@@ -1308,6 +1334,7 @@ const detailForm = reactive({
   project_id: '',
   body: '',
 })
+watch(() => [detailOpen.value, detailForm.title], () => { void nextTick(fitTitle) })
 
 /**
  * The detail dialog's focus and Escape handling, while a confirm is over it.
@@ -2355,59 +2382,83 @@ const today = localDateKey()
       </div>
     </div>
 
-    <!-- Detail -->
-    <div v-if="detailOpen" class="modal-backdrop" @click.self="closeDetail()">
+    <!-- Detail. Nearly the whole window: the title and description are what the
+         user came to read, so they get the width, and the fields that place the
+         task (status, project, due) sit in a side column beside them. -->
+    <div v-if="detailOpen" class="modal-backdrop task-detail-backdrop" @click.self="closeDetail()">
       <div
         ref="detailEl"
-        class="modal-sheet task-sheet"
+        class="modal-sheet task-sheet task-detail-sheet"
         role="dialog"
         aria-modal="true"
         aria-labelledby="task-detail-title"
       >
         <header class="task-sheet-head">
           <h3 id="task-detail-title">Edit task</h3>
+          <!-- No Save: every field writes itself (see the Autosave section), and
+               this line says where that stands. -->
+          <p class="task-saved" role="status" aria-live="polite">{{
+            !detailValid
+              ? 'Add a title to save.'
+              : autosaving || autosavePending
+                ? 'Saving…'
+                : savedAt
+                  ? 'Saved'
+                  : 'Changes save as you go.'
+          }}</p>
+          <button
+            type="button"
+            class="btn-small task-delete"
+            :disabled="detailSaving"
+            @click="deleteTask"
+          >Delete</button>
           <button type="button" class="btn-icon" aria-label="Close" @click="closeDetail()">×</button>
         </header>
 
-        <form class="task-form" novalidate @submit.prevent="flushDetail">
-          <div class="form-group">
-            <label for="task-detail-name">Title</label>
-            <input
+        <form class="task-form task-detail-form" novalidate @submit.prevent="flushDetail">
+          <div class="task-detail-title">
+            <label for="task-detail-name" class="sr-only">Title</label>
+            <textarea
               id="task-detail-name"
               ref="detailTitleField"
               v-model="detailForm.title"
-              type="text"
+              class="task-title-field"
+              rows="1"
               autocomplete="off"
+              placeholder="Task title"
+              @input="fitTitle"
+              @keydown.enter.prevent="detailTitleField?.blur()"
               @blur="flushDetail"
-            />
+            ></textarea>
           </div>
-          <!-- Status is a move, not a field to save: pressing one writes at once,
-               the same gesture as dragging the card. Done is the completion
-               gesture, which the store keeps as the user's own act. -->
-          <div class="form-group">
-            <span id="task-detail-status-label" class="task-field-label">Status</span>
-            <div
-              class="task-status-seg"
-              role="radiogroup"
-              aria-labelledby="task-detail-status-label"
-              @keydown="onStatusKeydown"
-            >
-              <button
-                v-for="option in TASK_STATUS_OPTIONS"
-                :key="option.status"
-                type="button"
-                role="radio"
-                class="task-status-opt"
-                :data-status="option.status"
-                :aria-checked="detailForm.status === option.status ? 'true' : 'false'"
-                :tabindex="detailForm.status === option.status ? 0 : -1"
-                :disabled="detailSaving || board.saving"
-                @click="setDetailStatus(option.status)"
-              >{{ option.label }}</button>
+
+          <aside class="task-detail-side" aria-label="Task details">
+            <!-- Status is a move, not a field to save: pressing one writes at once,
+                 the same gesture as dragging the card. Done is the completion
+                 gesture, which the store keeps as the user's own act. -->
+            <div class="form-group">
+              <span id="task-detail-status-label" class="task-field-label">Status</span>
+              <div
+                class="task-status-seg"
+                role="radiogroup"
+                aria-labelledby="task-detail-status-label"
+                @keydown="onStatusKeydown"
+              >
+                <button
+                  v-for="option in TASK_STATUS_OPTIONS"
+                  :key="option.status"
+                  type="button"
+                  role="radio"
+                  class="task-status-opt"
+                  :data-status="option.status"
+                  :aria-checked="detailForm.status === option.status ? 'true' : 'false'"
+                  :tabindex="detailForm.status === option.status ? 0 : -1"
+                  :disabled="detailSaving || board.saving"
+                  @click="setDetailStatus(option.status)"
+                >{{ option.label }}</button>
+              </div>
+              <p v-if="statusError" class="task-action-error" role="alert">{{ statusError }}</p>
             </div>
-            <p v-if="statusError" class="task-action-error" role="alert">{{ statusError }}</p>
-          </div>
-          <div class="form-grid">
             <div class="form-group">
               <label for="task-detail-project">Project</label>
               <select id="task-detail-project" v-model="detailForm.project_id">
@@ -2425,22 +2476,16 @@ const today = localDateKey()
                 type="date"
               />
             </div>
-          </div>
+          </aside>
+
+          <div class="task-detail-main">
           <!-- The description. A list row carries none, so it is read by id: the editor
                shows the prose it will write back, and while the read is in flight
                the field is absent rather than an empty box whose Save would clear
                what nobody was shown. -->
           <div class="form-group">
-            <div class="task-field-head">
-              <label v-if="bodyEditorShown" for="task-detail-body" class="task-field-label">Description</label>
-              <span v-else id="task-detail-body-label" class="task-field-label">Description</span>
-              <button
-                v-if="detailDescribed && !bodyEditorShown && descriptionState !== 'loading'"
-                type="button"
-                class="btn-chip task-chip"
-                @click="editBody"
-              >Edit</button>
-            </div>
+            <label v-if="bodyEditorShown" for="task-detail-body" class="task-field-label">Description</label>
+            <span v-else id="task-detail-body-label" class="task-field-label">Description</span>
             <p v-if="descriptionState === 'loading'" class="hint" role="status">Loading description…</p>
             <template v-else-if="detailDescribed">
               <textarea
@@ -2448,18 +2493,22 @@ const today = localDateKey()
                 id="task-detail-body"
                 ref="bodyField"
                 v-model="detailForm.body"
-                rows="8"
-                @blur="flushDetail"
+                rows="10"
+                @blur="onBodyBlur"
                 placeholder="Markdown. What done looks like, links, notes."
               ></textarea>
               <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
               <div
                 v-else
                 class="task-body markdown"
+                tabindex="0"
                 aria-labelledby="task-detail-body-label"
-                @dblclick="editBody"
+                aria-describedby="task-detail-body-how"
+                @click="onBodyClick"
+                @keydown.enter.self.prevent="editBody"
                 v-html="bodyPreview"
               ></div>
+              <span v-if="!bodyEditorShown" id="task-detail-body-how" class="sr-only">Click or press Enter to edit.</span>
             </template>
             <p v-else class="hint">
               This board could not read this task's description, so it will not
@@ -2468,51 +2517,22 @@ const today = localDateKey()
             </p>
           </div>
 
-          <section v-if="detailTask?.linked_chats.length" class="task-linked-chats" aria-labelledby="task-linked-chats-title">
-            <h4 id="task-linked-chats-title" class="task-delegate-title">Linked chats</h4>
-            <ul class="task-linked-chat-list">
-              <li v-for="chatId in detailTask.linked_chats" :key="chatId" class="task-linked-chat">
-                <button type="button" class="btn-chip task-chip" :aria-label="`Open chat ${linkedChatTitle(chatId)}`" @click="openLinkedChat(chatId)">{{ linkedChatTitle(chatId) }}</button>
-                <button type="button" class="btn-chip task-chip" :disabled="detailSaving" :aria-label="`Unlink chat ${linkedChatTitle(chatId)}`" @click="unlinkChat(chatId)">×</button>
-              </li>
-            </ul>
-            <p v-if="linkedChatsError" class="hint" role="alert">{{ linkedChatsError }}</p>
-          </section>
-
           <section class="task-progress" aria-labelledby="task-progress-title">
             <h4 id="task-progress-title" class="task-delegate-title">Activity</h4>
-            <p class="hint">Milestones and blockers. These notes are what the next resume and the completion memory pass read. They are not a copy of the chat.</p>
-            <ol v-if="detailHeld?.updates.length" class="task-completions" aria-label="Progress notes, newest first">
-              <li v-for="item in detailHeld.updates" :key="item.id" class="task-completion">
-                <span class="hint">{{ item.actor === 'agent' ? 'Agent' : 'You' }} · {{ formatCompletedAt(item.recorded_at) || 'No time recorded' }}<template v-if="item.edited_at"> · edited</template></span>
-                <template v-if="editingUpdateId === item.id">
-                  <textarea v-model="editingUpdateDraft" rows="4" :disabled="progressBusy" :aria-label="`Edit progress note from ${item.actor}`"></textarea>
-                  <div class="task-resolution-actions">
-                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy || !editingUpdateDraft.trim()" @click="saveEditedProgress">Save</button>
-                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy" @click="editingUpdateId = ''">Cancel</button>
-                  </div>
-                </template>
-                <template v-else>
-                  <p class="task-resolution-text">{{ item.text }}</p>
-                  <div class="task-resolution-actions">
-                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy || detailSaving" @click="beginEditProgress(item)">Edit</button>
-                  </div>
-                </template>
-              </li>
-            </ol>
-            <p v-else-if="detailHeld" class="hint">No progress notes yet.</p>
             <template v-if="canAddProgress">
-              <div class="form-group">
+              <div class="form-group task-note-composer">
                 <label for="task-progress-text">Add a progress note</label>
                 <textarea
                   id="task-progress-text"
                   v-model="progressDraft"
-                  rows="4"
+                  rows="3"
+                  aria-describedby="task-progress-help"
                   :disabled="progressBusy"
                   placeholder="What moved, what's blocked, what you checked."
                 ></textarea>
+                <p id="task-progress-help" class="hint">Milestones and blockers. These notes are what the next resume and the completion memory pass read. They are not a copy of the chat.</p>
               </div>
-              <div class="task-resolution-actions">
+              <div class="task-resolution-actions task-note-actions">
                 <button type="button" class="btn-chip task-chip" :disabled="progressBusy || !progressDraft.trim()" @click="saveProgress(false)">Save note</button>
                 <button
                   v-if="detailTask?.live_attempt_id"
@@ -2523,25 +2543,46 @@ const today = localDateKey()
                 >Save and send to agent</button>
               </div>
             </template>
+            <!-- A feed, newest first, under the box that adds to it: each note is a
+                 bubble that names who wrote it and when, with its links live. -->
+            <ol v-if="detailHeld?.updates.length" class="task-notes" aria-label="Progress notes, newest first">
+              <li
+                v-for="item in detailHeld.updates"
+                :key="item.id"
+                class="task-note"
+                :data-actor="item.actor === 'agent' ? 'agent' : 'user'"
+              >
+                <div class="task-note-meta">
+                  <span class="task-note-author">{{ item.actor === 'agent' ? 'Agent' : 'You' }}</span>
+                  <span class="task-note-when">{{ formatCompletedAt(item.recorded_at) || 'No time recorded' }}<template v-if="item.edited_at"> · edited</template></span>
+                  <button
+                    v-if="editingUpdateId !== item.id"
+                    type="button"
+                    class="btn-chip task-chip task-note-edit"
+                    :disabled="progressBusy || detailSaving"
+                    :aria-label="`Edit progress note from ${formatCompletedAt(item.recorded_at) || item.actor}`"
+                    @click="beginEditProgress(item)"
+                  >Edit</button>
+                </div>
+                <template v-if="editingUpdateId === item.id">
+                  <textarea v-model="editingUpdateDraft" rows="4" :disabled="progressBusy" :aria-label="`Edit progress note from ${item.actor}`"></textarea>
+                  <div class="task-resolution-actions task-note-actions">
+                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy" @click="editingUpdateId = ''">Cancel</button>
+                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy || !editingUpdateDraft.trim()" @click="saveEditedProgress">Save</button>
+                  </div>
+                </template>
+                <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
+                <div v-else class="task-note-text markdown" v-html="renderUserMarkdown(item.text)"></div>
+              </li>
+            </ol>
+            <p v-else-if="detailHeld" class="hint">No progress notes yet.</p>
             <p v-if="progressError" class="task-action-error" role="alert">{{ progressError }}</p>
           </section>
 
-          <!-- The completion record. Complete with resolution is the way to finish a
-               task and write its note in one step; a done task shows what it
-               recorded, kept apart from the description and the delegation log. -->
-          <section class="task-resolution" aria-labelledby="task-resolution-title">
-            <h4 id="task-resolution-title" class="task-delegate-title">Resolution</h4>
-            <template v-if="detailTask && detailTask.status !== 'done'">
-              <div class="task-resolution-actions">
-                <button
-                  type="button"
-                  class="btn-chip task-chip"
-                  :disabled="detailSaving || board.saving"
-                  @click="openResolution(detailTask!, 'complete')"
-                >{{ isReviewReady(detailTask) ? 'Approve…' : 'Complete…' }}</button>
-              </div>
-            </template>
-            <template v-else-if="detailTask">
+          <section v-if="detailTask?.status === 'done' || detailTask?.attempt_summary || detailHeld?.delegation_log" class="task-resolution" aria-labelledby="task-resolution-title">
+            <!-- Before Done the block holds only what the agent left, so it is named for that. -->
+            <h4 id="task-resolution-title" class="task-delegate-title">{{ detailTask?.status === 'done' ? 'Resolution' : 'Agent report' }}</h4>
+            <template v-if="detailTask?.status === 'done'">
               <p class="hint">
                 Completed{{ formatCompletedAt(detailTask.completed_at) ? ` ${formatCompletedAt(detailTask.completed_at)}` : ' (no time recorded)' }}.
               </p>
@@ -2582,7 +2623,7 @@ const today = localDateKey()
                  resolution field: the note is the user's words, the report is the
                  agent's. -->
             <div v-if="detailTask?.attempt_summary" class="task-agent-report">
-              <p class="task-field-label">Agent report</p>
+              <p v-if="detailTask?.status === 'done'" class="task-field-label">Agent report</p>
               <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
               <div class="task-history-summary markdown" aria-label="Agent report" v-html="renderUserMarkdown(detailTask.attempt_summary)"></div>
             </div>
@@ -2635,7 +2676,7 @@ const today = localDateKey()
             <div class="task-delegate-actions">
               <button
                 type="button"
-                class="btn-chip task-chip"
+                class="btn-chip task-chip task-delegate-go"
                 :disabled="detailSaving || board.saving || !detailTask"
                 @click="delegateFromDetail(detailTask!)"
               >{{ detailDelegateLabel }}</button>
@@ -2717,29 +2758,21 @@ const today = localDateKey()
             </template>
           </section>
 
+          <section v-if="detailTask?.linked_chats.length" class="task-linked-chats" aria-labelledby="task-linked-chats-title">
+            <h4 id="task-linked-chats-title" class="task-delegate-title">Linked chats</h4>
+            <ul class="task-linked-chat-list">
+              <li v-for="chatId in detailTask.linked_chats" :key="chatId" class="task-linked-chat">
+                <button type="button" class="btn-chip task-chip" :aria-label="`Open chat ${linkedChatTitle(chatId)}`" @click="openLinkedChat(chatId)">{{ linkedChatTitle(chatId) }}</button>
+                <button type="button" class="btn-chip task-chip" :disabled="detailSaving" :aria-label="`Unlink chat ${linkedChatTitle(chatId)}`" @click="unlinkChat(chatId)">×</button>
+              </li>
+            </ul>
+            <p v-if="linkedChatsError" class="hint" role="alert">{{ linkedChatsError }}</p>
+          </section>
+
           <p v-if="board.error" class="task-action-error" role="alert">
             {{ board.error }}
             <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
           </p>
-
-          <!-- No Save: every field writes itself (see the Autosave section), and
-               this line says where that stands. -->
-          <div class="form-actions">
-            <p class="task-saved" role="status" aria-live="polite">{{
-              !detailValid
-                ? 'Add a title to save.'
-                : autosaving || autosavePending
-                  ? 'Saving…'
-                  : savedAt
-                    ? 'Saved'
-                    : 'Changes save as you go.'
-            }}</p>
-            <button
-              type="button"
-              class="btn-small btn-danger task-delete"
-              :disabled="detailSaving"
-              @click="deleteTask"
-            >Delete</button>
           </div>
         </form>
       </div>
@@ -3327,14 +3360,6 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
-.task-field-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  min-height: 24px;
-}
-.task-field-head .task-chip { min-height: 26px; padding-block: 0; }
 /* Status: four segments, one pressed. */
 .task-status-seg {
   display: grid;
@@ -3376,10 +3401,8 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 @media (max-width: 420px) {
   .task-status-opt { padding-inline: 2px; font-size: var(--text-xs); }
 }
-/* The description as it reads. */
+/* The description as it reads, and the surface a click edits. */
 .task-body {
-  max-height: 18rem;
-  overflow-y: auto;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -3387,7 +3410,11 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   font-size: var(--text-sm);
   line-height: 1.6;
   overflow-wrap: anywhere;
+  cursor: text;
+  transition: border-color 120ms var(--ease);
 }
+.task-body:hover { border-color: var(--border-strong); }
+.task-body:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .task-body :deep(p),
 .task-body :deep(ul),
 .task-body :deep(ol) { margin: 0 0 0.6em; }
@@ -3437,7 +3464,6 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
    unbreakable-child trap, in a grid. */
 .task-form .form-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .task-form .hint { margin: 0; }
-.task-delete { margin-left: auto; }
 .task-preview { margin-top: var(--space-2); }
 .task-preview-facts + .task-preview,
 .task-preview-facts + .form-actions { margin-top: var(--space-2); }
@@ -3573,5 +3599,214 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   .task-resolution-sheet .btn-primary,
   .task-resolution-sheet .btn-small,
   .task-resolution-sheet .task-chip { min-height: var(--touch); }
+}
+/* ── Task editor ─────────────────────────────────────────────────────────
+   Nearly the whole window. The main column carries the title, description,
+   activity and agent; a narrow side column holds what places the task. */
+.task-detail-backdrop { padding: var(--space-5); }
+.task-detail-sheet {
+  max-width: 1120px;
+  height: 100%;
+  max-height: none;
+  overflow: hidden;
+}
+.task-detail-sheet .task-sheet-head {
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+}
+.task-detail-sheet .task-sheet-head h3 {
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.task-detail-sheet .task-sheet-head h3 { flex: none; white-space: nowrap; }
+.task-detail-sheet .task-saved {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Delete is rare and confirmed, so it stays quiet until pointed at. */
+.task-detail-sheet .task-delete {
+  border-color: transparent;
+  background: none;
+  color: var(--fg3);
+}
+.task-detail-sheet .task-delete:hover:not(:disabled),
+.task-detail-sheet .task-delete:focus-visible {
+  border-color: color-mix(in srgb, var(--error) 45%, transparent);
+  color: var(--error);
+}
+.task-detail-form {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 272px;
+  grid-template-rows: auto 1fr;
+  grid-template-areas:
+    'title side'
+    'main  side';
+  align-content: start;
+  column-gap: var(--space-6);
+  row-gap: var(--space-4);
+  padding: var(--space-5) var(--space-6) var(--space-6);
+}
+.task-detail-title { grid-area: title; min-width: 0; }
+.task-detail-main {
+  grid-area: main;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.task-detail-side {
+  grid-area: side;
+  align-self: start;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 55%, var(--bg2));
+}
+/* The title as a heading that is also its field: it wraps instead of scrolling. */
+.task-detail-form textarea.task-title-field {
+  display: block;
+  width: calc(100% + 2 * var(--space-2));
+  max-height: none;
+  margin: 0 calc(-1 * var(--space-2));
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: calc(22px * var(--font-scale, 1));
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+  resize: none;
+  overflow: hidden;
+}
+.task-title-field:hover { border-color: var(--border); }
+.task-title-field:focus { border-color: var(--accent); background: var(--bg); outline: none; }
+.task-title-field::placeholder { color: var(--fg3); }
+/* Status reads down the side column, one row per lane. */
+.task-detail-side .task-status-seg { grid-template-columns: 1fr; }
+.task-detail-side .task-status-opt {
+  min-height: 34px;
+  padding: 6px 10px;
+  text-align: left;
+}
+.task-detail-main textarea#task-detail-body { min-height: 14rem; }
+.task-detail-main .task-resolution,
+.task-detail-main .task-delegate,
+.task-detail-main .task-linked-chats {
+  padding-top: var(--space-4);
+}
+.task-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.task-progress .form-group { margin: 0; }
+.task-notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* One note, drawn as a comment: a tonal bubble, the author leading its line. The
+   agent's notes take the agent's violet so who said what reads at a glance;
+   the text says it too, so colour is never the only cue. */
+.task-note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 45%, var(--bg2));
+}
+.task-note[data-actor='agent'] {
+  border-color: color-mix(in srgb, var(--accent2) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent2) 8%, var(--bg2));
+}
+.task-note-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 28px;
+}
+.task-note-author { color: var(--fg); font-size: var(--text-sm); font-weight: 600; }
+.task-note-when { color: var(--fg3); font-size: var(--text-xs); }
+.task-note-edit {
+  margin-left: auto;
+  min-height: 26px;
+  padding-block: 0;
+  border-color: transparent;
+  background: none;
+  color: var(--fg3);
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
+}
+.task-note:hover .task-note-edit,
+.task-note:focus-within .task-note-edit,
+.task-note-edit:focus-visible { opacity: 1; }
+.task-note-edit:hover:not(:disabled) { color: var(--fg); border-color: var(--border); }
+@media (hover: none) { .task-note-edit { opacity: 1; } }
+.task-note-text {
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.task-note-text :deep(p),
+.task-note-text :deep(ul),
+.task-note-text :deep(ol) { margin: 0 0 0.5em; }
+.task-note-text :deep(ul),
+.task-note-text :deep(ol) { padding-left: 1.4em; }
+.task-note-text :deep(:last-child) { margin-bottom: 0; }
+.task-note-text :deep(a) { color: var(--accent); text-underline-offset: 2px; }
+.task-note-composer { margin: 0; }
+.task-note-actions { justify-content: flex-end; }
+.task-delegate-go { align-self: flex-start; }
+@media (max-width: 860px) {
+  .task-detail-form {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-template-areas: 'title' 'side' 'main';
+    padding: var(--space-4) var(--space-4) var(--space-5);
+  }
+  .task-detail-side {
+    position: static;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    padding: 0;
+    border: 0;
+    background: none;
+  }
+  .task-detail-side > .form-group:first-child { grid-column: 1 / -1; }
+  .task-detail-side .task-status-seg { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .task-detail-side .task-status-opt { text-align: center; padding: 4px 6px; }
+}
+@media (max-width: 600px) {
+  .task-detail-backdrop { padding: 0; }
+  .task-detail-form textarea.task-title-field { font-size: calc(19px * var(--font-scale, 1)); }
+}
+@media (pointer: coarse) {
+  .task-detail-sheet .task-delete,
+  .task-note-edit { min-height: var(--touch); }
 }
 </style>
