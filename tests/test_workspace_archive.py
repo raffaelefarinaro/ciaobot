@@ -1235,7 +1235,7 @@ def test_restore_rebuilds_settings_and_never_widens_access(tmp_path):
     assert work.allowed_mcp_servers == [], "an unreadable allowlist must deny all"
     assert work.disallowed_tools is None
     assert work.gws_profile == ""
-    assert work.color == "pink"
+    assert work.color == "amber"
     assert work.vault_root == "work/memory-vault"
 
 

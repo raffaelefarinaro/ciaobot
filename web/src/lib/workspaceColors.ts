@@ -1,8 +1,15 @@
 /** Per-workspace accent presets (Option A: accents only). */
 
-export type WorkspaceColorId = 'pink' | 'cyan' | 'amber' | 'emerald' | 'violet'
+export type WorkspaceColorId = 'amber' | 'pink' | 'cyan' | 'emerald' | 'violet'
 
-export const DEFAULT_WORKSPACE_COLOR: WorkspaceColorId = 'pink'
+/**
+ * What `#ciao-app` wears: a preset, or `neutral` while the active workspace's
+ * own colour is not known yet, so the first paint never flashes another accent.
+ */
+export type WorkspaceAccent = WorkspaceColorId | 'neutral'
+
+/** Orange, not the old pink: a pink-red primary read as an error. */
+export const DEFAULT_WORKSPACE_COLOR: WorkspaceColorId = 'amber'
 
 export interface WorkspaceColorPreset {
   id: WorkspaceColorId
@@ -12,9 +19,9 @@ export interface WorkspaceColorPreset {
 }
 
 export const WORKSPACE_COLOR_PRESETS: WorkspaceColorPreset[] = [
-  { id: 'pink', label: 'Ciao Pink', swatch: '#ff4d6d' },
+  { id: 'amber', label: 'Ciao Orange', swatch: '#fb923c' },
+  { id: 'pink', label: 'Rose Pink', swatch: '#ff4d6d' },
   { id: 'cyan', label: 'Terminal Cyan', swatch: '#38bdf8' },
-  { id: 'amber', label: 'Console Amber', swatch: '#fb923c' },
   { id: 'emerald', label: 'Emerald Mint', swatch: '#34d399' },
   { id: 'violet', label: 'Violet Iris', swatch: '#a78bfa' },
 ]
@@ -27,9 +34,50 @@ export function normalizeWorkspaceColor(raw: string | null | undefined): Workspa
   return DEFAULT_WORKSPACE_COLOR
 }
 
-/** Resolve accent id for a workspace record (or pink if unknown). */
+/** Resolve accent id for a workspace record (or the default if unknown). */
 export function colorForWorkspace(
   workspace: { name?: string; color?: string | null } | null | undefined,
 ): WorkspaceColorId {
   return normalizeWorkspaceColor(workspace?.color)
+}
+
+/** This browser's last-seen accent, so a reload paints it before the workspace list arrives. */
+const REMEMBERED_KEY = 'ciao-workspace-color'
+
+export function rememberWorkspaceColor(color: WorkspaceColorId): void {
+  try { localStorage.setItem(REMEMBERED_KEY, color) } catch { /* storage blocked: next load is neutral */ }
+}
+
+function rememberedWorkspaceColor(): WorkspaceColorId | null {
+  try {
+    const raw = localStorage.getItem(REMEMBERED_KEY)
+    return raw && PRESET_IDS.has(raw) ? (raw as WorkspaceColorId) : null
+  } catch {
+    return null
+  }
+}
+
+type WorkspaceRecord = { name: string; color?: string | null }
+
+/**
+ * One workspace's accent. Once the engine's list has arrived it decides; before
+ * that the colour is unknown, so the active workspace wears the colour this
+ * browser last showed (neutral on a first visit) and any other one is neutral.
+ */
+export function workspaceAccent(
+  workspaces: readonly WorkspaceRecord[],
+  name: string | undefined,
+  active?: string,
+): WorkspaceAccent {
+  if (workspaces.length) return colorForWorkspace(workspaces.find((item) => item.name === name))
+  if (active === undefined || name === active) return rememberedWorkspaceColor() ?? 'neutral'
+  return 'neutral'
+}
+
+/** The accent `#ciao-app` wears for the active workspace. */
+export function activeWorkspaceAccent(
+  workspaces: readonly WorkspaceRecord[],
+  active: string,
+): WorkspaceAccent {
+  return workspaceAccent(workspaces, active)
 }

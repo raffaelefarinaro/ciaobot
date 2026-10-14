@@ -183,7 +183,7 @@ import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, typ
 import { activeInsightSummary, type MemoryInsight } from '../lib/memoryInsights'
 import { formatRelative } from '../lib/relativeTime'
 import { classifyError } from '../lib/errorAttribution'
-import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
+import { DEFAULT_WORKSPACE_COLOR, colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
@@ -300,11 +300,11 @@ const lanes = computed<HomeLane[]>(() => {
   // without this sweep, they would vanish from home until a reload.
   for (const [workspace, chats] of grouped) {
     if (!chats.length || knownNames.has(workspace)) continue
-    result.push(makeLane(workspace, workspaceLabel(workspace), '—', 'pink', chats))
+    result.push(makeLane(workspace, workspaceLabel(workspace), '—', DEFAULT_WORKSPACE_COLOR, chats))
   }
 
   if (unknown.length) {
-    result.push(makeLane('unknown', '', '—', 'pink', unknown, null))
+    result.push(makeLane('unknown', '', '—', DEFAULT_WORKSPACE_COLOR, unknown, null))
   }
   return result
 })

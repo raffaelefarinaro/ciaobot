@@ -230,13 +230,13 @@ describe('CommentComposePopover workspace accent', () => {
     store.workspaces = [workspace('personal')]
     const wrapper = mountCompose({ modelValue: 'A comment' })
     await nextTick()
-    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('pink')
+    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('amber')
     wrapper.unmount()
 
     store.workspaces = [workspace('personal', 'chartreuse')]
     const second = mountCompose({ modelValue: 'Another comment' })
     await nextTick()
-    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('pink')
+    expect(composeEl()!.getAttribute('data-workspace-color')).toBe('amber')
     second.unmount()
   })
 })

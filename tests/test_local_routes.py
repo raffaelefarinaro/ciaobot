@@ -197,7 +197,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "disallowed_tools": None,
                 "allowed_mcp_servers": None,
                 "claude_ai_connectors": True,
-                "color": "pink",
+                "color": "amber",
                 "agent_fs_scope": None,
             },
             {
@@ -208,7 +208,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "disallowed_tools": [],
                 "allowed_mcp_servers": None,
                 "claude_ai_connectors": True,
-                "color": "pink",
+                "color": "amber",
                 "agent_fs_scope": None,
             },
         ],

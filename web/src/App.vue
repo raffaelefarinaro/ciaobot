@@ -38,7 +38,7 @@ import PromptDialog from './components/PromptDialog.vue'
 import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'
 import { createEngineMonitor, requestStartupStatus, type EngineState } from './lib/engineStatus'
-import { normalizeWorkspaceColor } from './lib/workspaceColors'
+import { activeWorkspaceAccent, rememberWorkspaceColor } from './lib/workspaceColors'
 import { isLoopbackPage } from './lib/loopback'
 import { useProjectStore } from './stores/projects'
 
@@ -100,11 +100,9 @@ async function retryEngine() {
   engineRetrying.value = true
   try { await engineMonitor.retry() } finally { engineRetrying.value = false }
 }
-const workspaceColor = computed(() => {
-  const active = projectStore.activeWorkspace
-  const ws = projectStore.workspaces.find((item) => item.name === active)
-  return normalizeWorkspaceColor(ws?.color)
-})
+const workspaceColor = computed(() =>
+  activeWorkspaceAccent(projectStore.workspaces, projectStore.activeWorkspace))
+watch(workspaceColor, (color) => { if (color !== 'neutral') rememberWorkspaceColor(color) }, { immediate: true })
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let startupDelayTimer: ReturnType<typeof setTimeout> | null = null
@@ -197,8 +195,8 @@ watch(shouldPollStartup, (shouldPoll) => {
   --fg2: #b4b4c4;       /* lifted from #a0a0b0 for legibility on small screens */
   --fg3: #8f90a8;
   /* Accent */
-  --accent: #ff4d6d;    /* warmer pink for contrast on dark */
-  --accent-strong: #ff2e54;
+  --accent: #fb923c;    /* Ciao orange; matches the default amber preset */
+  --accent-strong: #ea580c;
   --accent2: #6a47b8;
   /* Label colour on a filled accent surface (.btn-primary, active pills,
      accent badges). The dark-theme accents are bright, so white on them sits
@@ -210,7 +208,7 @@ watch(shouldPollStartup, (shouldPoll) => {
   --border-strong: #3a3f70;
   /* Status */
   --success: #4caf50;
-  --warning: #ff9800;
+  --warning: #facc15;   /* yellow, kept clear of the orange accent */
   --error: #f44336;
   /* Geometry */
   --radius-xs: 4px;     /* small squared tags: state chips, key badges */
@@ -271,8 +269,8 @@ watch(shouldPollStartup, (shouldPoll) => {
   --fg2: #5f607d;       /* medium-dark slate */
   --fg3: #66687f;       /* readable secondary metadata */
   /* Accent */
-  --accent: #d81b60;    /* crisp pink/crimson for white bg */
-  --accent-strong: #b00d46;
+  --accent: #c2410c;    /* deep orange, AA for white labels and text on white */
+  --accent-strong: #9a3412;
   --accent2: #512da8;   /* deep violet secondary */
   --on-accent: #ffffff; /* light accents are deep enough for white labels */
   /* Edges */
@@ -280,21 +278,31 @@ watch(shouldPollStartup, (shouldPoll) => {
   --border-strong: #b6b8cf;
   /* Status overrides for light-mode readability */
   --success: #2e7d32;
-  --warning: #ef6c00;
+  --warning: #a16207;
   --error: #c62828;
 }
 
 /* Per-workspace accent overrides (Option A: accents only).
    Applied on #ciao-app for the active workspace, and on individual
    controls (home new-chat buttons, workspace pills, chat badges) that
-   belong to another workspace. Pink is explicit so a pink-target control
-   inside a non-pink active workspace does not inherit the parent accent.
+   belong to another workspace. Every preset is explicit, the default included,
+   so a control targeting one workspace never inherits another's accent.
+   `neutral` is the app before the active workspace's colour is known: a
+   quiet grey, so the first paint does not flash a colour that then changes.
    Every pair keeps --on-accent at WCAG AA on both --accent and --accent-strong:
    dark presets hover to a shade still >= 4.5:1 against the indigo label, light
    presets are deep enough for white labels (and for accent text on white). */
 [data-workspace-color="pink"] {
   --accent: #ff4d6d;
   --accent-strong: #ff2e54;
+}
+[data-workspace-color="neutral"] {
+  --accent: #b4b4c4;
+  --accent-strong: #c8c8d6;
+}
+:root.theme-light [data-workspace-color="neutral"] {
+  --accent: #5f607d;
+  --accent-strong: #4a4b66;
 }
 [data-workspace-color="cyan"] {
   --accent: #38bdf8;
