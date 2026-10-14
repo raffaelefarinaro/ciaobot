@@ -86,7 +86,6 @@ _NOT_INSTALLER = (
     "in-app updates are only for engines installed with the Ciaobot engine installer"
 )
 _ALREADY_RUNNING = "an engine update is already in progress"
-_NOTHING_STAGED = "nothing staged; run: ciao update stage"
 
 
 def _update_read_fn(
@@ -183,11 +182,16 @@ def _engine_update_state(request: Request) -> dict[str, Any]:
         # can judge is the one to retire it.
         state["operation"] = None
         state["error"] = str(exc)
+        state["running"] = _active_update_task(request) is not None
         return state
     state["operation"] = asdict(operation) if operation is not None else None
     error = _current_update_error(request, operation)
     if error:
         state["error"] = error
+    # The record passes through the non-in-flight `staged` phase between the
+    # two halves, so the card needs the task's own liveness to know the run
+    # is not over.
+    state["running"] = _active_update_task(request) is not None
     return state
 
 
@@ -219,23 +223,16 @@ def _update_in_progress(operation: dict[str, Any] | None) -> bool:
     return _operation_phase(operation) not in _TERMINAL_PHASES
 
 
-def _update_refusal(
-    request: Request, state: dict[str, Any], *, record_blocks: bool
-) -> JSONResponse | None:
+def _update_refusal(request: Request, state: dict[str, Any]) -> JSONResponse | None:
     """The 400/409 this engine must answer with, or None when it may proceed.
 
-    Two questions are common to both halves: an engine installed any other way
-    has no install to swap, and a run already in flight has to be allowed to
-    finish rather than have a second one started behind it. The third is each
-    half's own — a new *stage* may only replace a record that reached a
-    terminal phase, while an *apply* starts precisely from a staged record, so
-    the record check there is "is there something staged", below.
+    An engine installed any other way has no install to swap, and a run already
+    in flight has to be allowed to finish rather than have a second one started
+    behind it. What the persisted record allows is the start route's own call.
     """
     if not state["can_update"]:
         return api_error(_NOT_INSTALLER, 400)
     if _active_update_task(request) is not None:
-        return api_error(_ALREADY_RUNNING, 409)
-    if record_blocks and _update_in_progress(state["operation"]):
         return api_error(_ALREADY_RUNNING, 409)
     return None
 
@@ -281,6 +278,8 @@ def _start_update_task(request: Request, fn: Callable[..., Any], *args: Any) -> 
         before = _read_operation(request)
         try:
             await asyncio.to_thread(fn, *args)
+        except _ApplyRefused as exc:
+            _park_update_error(request, exc.before, exc.error)
         except engine_update.UpdateError as exc:
             _park_update_error(request, before, exc)
 
@@ -299,17 +298,51 @@ async def update_status_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(_engine_update_state(request))
 
 
-async def update_stage_endpoint(request: Request) -> JSONResponse:
-    """Start staging a release for an installer-managed engine.
+class _ApplyRefused(engine_update.UpdateError):
+    """An apply that raised after the same job's stage moved the record.
+
+    Carries the record the apply started from, so ``_run`` parks the reason
+    against it on the event loop: parking from the worker thread would race a
+    status poll reading the two ``app.state`` fields.
+    """
+
+    def __init__(self, before: engine_update.Operation | None, error: engine_update.UpdateError):
+        super().__init__(str(error))
+        self.before = before
+        self.error = error
+
+
+def _stage_then_apply(
+    request: Request,
+    stage_fn: Callable[..., Any],
+    apply_fn: Callable[..., Any],
+    version: str | None,
+) -> None:
+    """Both halves in one background job, so a closed tab cannot strand a staged release."""
+    operation = stage_fn(version)
+    if getattr(operation, "phase", None) == "staged":
+        # Stage moved the record, so `_start_update_task`'s own `before` is stale
+        # for the apply half: an apply that refuses before writing a record would
+        # look like "the record moved" and lose its reason.
+        before_apply = _read_operation(request)
+        try:
+            apply_fn()
+        except engine_update.UpdateError as exc:
+            raise _ApplyRefused(before_apply, exc) from exc
+
+
+async def update_start_endpoint(request: Request) -> JSONResponse:
+    """Update an installer-managed engine: stage the release, then apply it.
 
     Body: optional ``{"version": "x.y.z"}``; absent or unreadable means the
-    latest release, as on the CLI. Staging downloads a wheel and builds a whole
-    environment, so it runs in the background and the card polls
-    ``/api/update/status`` for progress.
+    latest release, as on the CLI. Both halves run in one background job, so
+    closing the tab mid-download does not strand a staged release. A record
+    that is already ``staged`` (left by an older engine, or a stage whose apply
+    refused) is applied directly. The card polls ``/api/update/status``.
     """
     # The body first, and this is the load-bearing order: the guard below and
     # the task registration that follows it are the only thing standing between
-    # two clicks of "Stage" and two engines building the same release. An
+    # two clicks of "Update" and two engines building the same release. An
     # ``await`` between them opens the window the body read used to sit in —
     # a second request passes a guard whose job is not registered yet, gets its
     # own 202, and the first one registers a second job over the same record,
@@ -326,41 +359,20 @@ async def update_stage_endpoint(request: Request) -> JSONResponse:
     # every job that is already registered and the registration itself cannot
     # be interleaved with another request's guard.
     state = _engine_update_state(request)
-    refusal = _update_refusal(request, state, record_blocks=True)
+    refusal = _update_refusal(request, state)
     if refusal is not None:
         return refusal
 
     stage_fn: Callable[..., Any] = (
         getattr(request.app.state, "engine_update_stage", None) or engine_update.stage_update
     )
-    _start_update_task(request, stage_fn, version)
-    return JSONResponse({"started": True, "operation": state["operation"]}, status_code=202)
-
-
-async def update_apply_endpoint(request: Request) -> JSONResponse:
-    """Start the apply half in the background: drain, swap, restart, rollback.
-
-    The apply stops admitting new turns, waits for running ones and hands the
-    swap to a detached job, so the connection this came in on would die
-    mid-flight even if it were held open.
-    """
-    # No body to read, so the guard and the registration below are already one
-    # synchronous block — the same invariant `update_stage_endpoint` has to
-    # arrange around its body read. Keep it that way: anything awaited between
-    # them is the double-start window again.
-    state = _engine_update_state(request)
-    refusal = _update_refusal(request, state, record_blocks=False)
-    if refusal is not None:
-        return refusal
-
-    if _operation_phase(state["operation"]) != "staged":
-        # The CLI's wording, because it is the same situation: the record has to
-        # be staged again before there is anything to apply.
-        return api_error(_NOTHING_STAGED, 400)
-
     apply_fn: Callable[..., Any] = (
         getattr(request.app.state, "engine_update_apply", None) or engine_update.apply_update
     )
-    _start_update_task(request, apply_fn)
-    return JSONResponse({"started": True}, status_code=202)
-
+    if _operation_phase(state["operation"]) == "staged":
+        _start_update_task(request, apply_fn)
+    elif _update_in_progress(state["operation"]):
+        return api_error(_ALREADY_RUNNING, 409)
+    else:
+        _start_update_task(request, _stage_then_apply, request, stage_fn, apply_fn, version)
+    return JSONResponse({"started": True, "operation": state["operation"]}, status_code=202)

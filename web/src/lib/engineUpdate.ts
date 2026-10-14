@@ -96,7 +96,7 @@ const PHASE_LABELS: Record<string, string> = {
   downloading: 'Downloading the release',
   verifying: 'Checking the signed release',
   staging: 'Preparing the update',
-  staged: 'Ready to apply',
+  staged: 'Downloaded and verified',
   draining: 'Waiting for active chats to finish',
   applying: 'Applying the update',
   stopping: 'Stopping the engine',

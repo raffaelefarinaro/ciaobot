@@ -1169,6 +1169,8 @@ export interface EngineUpdateStatus {
   install_mode: string
   can_update: boolean
   operation: EngineUpdateOperation | null
+  /** The server's background update task is alive (true between the two halves too). */
+  running?: boolean
   /** A coordinator refusal that wrote no operation of its own. */
   error?: string
 }
