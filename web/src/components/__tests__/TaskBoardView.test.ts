@@ -144,6 +144,8 @@ describe('TaskBoardView', () => {
     // board is read on that day.
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-03-01T12:00:00Z'))
+    // Done is collapsed by default; most of these tests read the whole board.
+    localStorage.setItem('ciao.tasks.doneShown', '1')
     setActivePinia(createPinia())
     apiGet.mockReset()
     apiPost.mockReset()
@@ -229,6 +231,45 @@ describe('TaskBoardView', () => {
     expect(wrapper.text()).toContain('Landed last week')
     expect(wrapper.text()).toContain('Done without a stamp')
     expect(wrapper.find('.task-lane-more').exists()).toBe(false)
+  })
+
+  it('keeps Done behind a tab by default, and remembers the choice in localStorage', async () => {
+    localStorage.removeItem('ciao.tasks.doneShown')
+    const wrapper = await mountBoard()
+    expect(lanes(wrapper).map((lane) => lane.get('.task-lane-label').text()))
+      .toEqual(['To do', 'In progress', 'In review'])
+    const tab = wrapper.get('.task-done-toggle')
+    expect(tab.attributes('aria-expanded')).toBe('false')
+    expect(tab.attributes('aria-label')).toBe('Show done tasks (1)')
+    expect(tab.text()).toContain('Done')
+
+    await tab.trigger('click')
+    expect(localStorage.getItem('ciao.tasks.doneShown')).toBe('1')
+    expect(lanes(wrapper)).toHaveLength(4)
+    expect(wrapper.find('.task-done-toggle').exists()).toBe(false)
+    await wrapper.get('.task-lane-hide').trigger('click')
+    expect(localStorage.getItem('ciao.tasks.doneShown')).toBe('0')
+    expect(lanes(wrapper)).toHaveLength(3)
+    wrapper.unmount()
+
+    // A fresh mount reads the stored choice back.
+    localStorage.setItem('ciao.tasks.doneShown', '1')
+    const again = await mountBoard()
+    expect(lanes(again)).toHaveLength(4)
+    expect(again.find('.task-done-toggle').exists()).toBe(false)
+    again.unmount()
+  })
+
+  it('completes a card dropped on the collapsed Done tab through the completion gesture', async () => {
+    localStorage.removeItem('ciao.tasks.doneShown')
+    const wrapper = await mountBoard()
+    await card(wrapper, 'Wait on a key').trigger('dragstart')
+    const tab = wrapper.get('.task-done-toggle')
+    await tab.trigger('dragover')
+    expect(tab.classes()).toContain('task-done-toggle--drop')
+    await tab.trigger('drop')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+    wrapper.unmount()
   })
 
   it('reads the active workspace and draws the four columns with their counts', async () => {
