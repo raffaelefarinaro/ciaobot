@@ -6,7 +6,7 @@
         Open Ciaobot from a phone or another computer. Each device signs in with the Ciaobot
         password; these links never include it.
         <a
-          class="set-link"
+          class="settings-help-link"
           href="https://www.raffaelefarinaro.com/ciaobot/remote.html"
           target="_blank"
           rel="noopener noreferrer"

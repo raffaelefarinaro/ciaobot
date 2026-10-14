@@ -5,7 +5,7 @@
       <p class="hint">
         Ciaobot notifies you when a chat replies and the browser tab is in the background.
         <a
-          class="set-link"
+          class="settings-help-link"
           href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
           target="_blank"
           rel="noopener noreferrer"
@@ -141,6 +141,8 @@ async function togglePush() {
 }
 
 </script>
+
+<style scoped src="./settingsPanels.css"></style>
 
 <style scoped>
 /* Shared settings-card scaffolding (mirrors SettingsView.vue so the card keeps
