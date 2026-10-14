@@ -76,13 +76,13 @@
 import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
-import type { WorkspaceColorId } from '../lib/workspaceColors'
+import type { WorkspaceAccent } from '../lib/workspaceColors'
 import { backgroundRunLabel } from '../lib/backgroundRuns'
 
 const props = withDefaults(defineProps<{
   chatId: string
   density?: 'card' | 'row'
-  hue?: WorkspaceColorId
+  hue?: WorkspaceAccent
 }>(), {
   density: 'row',
 })

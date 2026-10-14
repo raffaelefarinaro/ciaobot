@@ -312,14 +312,15 @@ def _vault_evidence_score(path: Path) -> int:
     return score
 
 
-# Accent presets for the PWA. Missing/unknown values resolve to pink
-# (Ciao brand). Only accents shift; canvas tokens stay stable.
-WORKSPACE_COLOR_IDS = ("pink", "cyan", "amber", "emerald", "violet")
-DEFAULT_WORKSPACE_COLOR = "pink"
+# Accent presets for the PWA. Missing/unknown values resolve to amber (Ciao
+# orange; the old pink default read as an error). Only accents shift; canvas
+# tokens stay stable.
+WORKSPACE_COLOR_IDS = ("amber", "pink", "cyan", "emerald", "violet")
+DEFAULT_WORKSPACE_COLOR = "amber"
 
 
 def coerce_workspace_color(raw: object) -> str:
-    """Normalize a workspace accent id. Empty/missing → pink."""
+    """Normalize a workspace accent id. Empty/missing → amber."""
     if raw is None:
         return DEFAULT_WORKSPACE_COLOR
     cleaned = str(raw).strip().lower()
@@ -380,7 +381,7 @@ class WorkspaceConfig:
     # this switch existed, so a workspace that never set it is unchanged.
     claude_ai_connectors: bool = True
     gws_profile: str = ""
-    # PWA accent preset id. Defaults to Ciao pink.
+    # PWA accent preset id. Defaults to Ciao orange (amber).
     color: str = DEFAULT_WORKSPACE_COLOR
     # Filesystem scope for agent tool execution: "workspace" confines the agent
     # and its shell to the workspace; "machine" is the whole-machine escape

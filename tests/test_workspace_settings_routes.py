@@ -183,7 +183,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "allowed_mcp_servers": None,
         "claude_ai_connectors": True,
         "gws_profile": "work",
-        "color": "pink",
+        "color": "amber",
     }
 
 
@@ -219,7 +219,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "allowed_mcp_servers": None,
             "claude_ai_connectors": True,
             "gws_profile": "personal",
-            "color": "pink",
+            "color": "amber",
         },
     ]
     assert pcm.refresh_count == 3
@@ -474,12 +474,12 @@ def test_claude_ai_connectors_switch_saves_persists_and_validates(tmp_path):
 
 
 def test_workspace_color_defaults_persists_and_validates(tmp_path):
-    """Accent color defaults to pink, persists on write, and rejects unknowns."""
+    """Accent color defaults to amber, persists on write, and rejects unknowns."""
     client, config, _pcm = _client(tmp_path)
 
     listed = client.get("/api/workspaces").json()
     personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
-    assert personal["color"] == "pink"
+    assert personal["color"] == "amber"
 
     create = client.post(
         "/api/workspaces",
@@ -2017,3 +2017,14 @@ def test_workspaces_payload_carries_engine_default(tmp_path, monkeypatch, platfo
     assert listed["default_agent_fs_scope"] == expected
     personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
     assert personal["agent_fs_scope"] is None
+
+
+def test_workspace_color_saved_as_pink_stays_pink():
+    """The default moved to amber; a workspace that stored pink keeps it."""
+    from ciao.config import DEFAULT_WORKSPACE_COLOR, _workspace_from_mapping
+
+    assert DEFAULT_WORKSPACE_COLOR == "amber"
+    stored = _workspace_from_mapping({"name": "personal", "color": "pink"})
+    unset = _workspace_from_mapping({"name": "work"})
+    assert stored is not None and stored.color == "pink"
+    assert unset is not None and unset.color == "amber"

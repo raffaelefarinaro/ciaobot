@@ -366,9 +366,9 @@ defineExpose({
 }
 
 .csv-cell-wrap.is-selected {
-  outline: 2px solid var(--accent, #ff4d6d);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
-  background: color-mix(in srgb, var(--accent, #ff4d6d) 12%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .csv-cell-wrap.comment-highlight {
@@ -376,7 +376,7 @@ defineExpose({
 }
 
 .csv-cell-wrap.comment-highlight.is-selected {
-  background: color-mix(in srgb, var(--accent, #ff4d6d) 18%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .csv-cell {
@@ -405,7 +405,7 @@ defineExpose({
 }
 
 .csv-input:focus {
-  outline: 2px solid var(--accent, #ff4d6d);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
   background: var(--bg2, #1f2240);
 }
