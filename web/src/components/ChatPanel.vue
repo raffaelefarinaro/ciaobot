@@ -1357,11 +1357,12 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
 import { useModalFocus } from '../composables/useModalFocus'
+import { useArchiveChat } from '../composables/useArchiveChat'
 import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, RunningSubagent, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import { ARCHIVE_ACTION_LABEL, ARCHIVE_CONFIRM_MESSAGE } from '../lib/archiveCopy'
+import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
 import ProviderSignInHint from './ProviderSignInHint.vue'
 import TaskOriginNote from './TaskOriginNote.vue'
@@ -4478,13 +4479,10 @@ async function archiveAfterTaskDone() {
   emit('close')
 }
 
+const { archiveChatWithTaskCheck } = useArchiveChat()
 async function doArchive() {
-  if (!await askConfirm(ARCHIVE_CONFIRM_MESSAGE, {
-    title: 'Archive chat',
-    confirmLabel: 'Archive',
-  })) return
   try {
-    await store.archiveChat(chat.value.chat_id)
+    if (!await archiveChatWithTaskCheck(chat.value)) return
   } catch {
     // archiveChat already reconnected the sockets and raised an error toast.
     // Keep the pane open so the still-live chat stays reachable.

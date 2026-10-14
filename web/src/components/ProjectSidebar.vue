@@ -907,8 +907,9 @@ import { scheduleInWorkspace } from '../lib/automationWorkspace'
 import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import { SETTINGS_NAV } from '../lib/settingsNav'
-import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
+import { ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
+import { useArchiveChat } from '../composables/useArchiveChat'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
@@ -918,6 +919,7 @@ const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'sch
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
 
 const store = useProjectStore()
+const { archiveChatWithTaskCheck } = useArchiveChat()
 const taskStore = useTaskStore()
 const housekeeping = useHousekeepingStore()
 const fileViewer = useFileViewerStore()
@@ -1690,12 +1692,10 @@ async function doArchiveChat(chatId: string) {
   closeChatMenus()
   // This path never asked for confirmation, unlike the chat header's archive
   // button, so archiving from the sidebar menu was a single misclick.
-  if (!await askConfirm(ARCHIVE_CONFIRM_MESSAGE, {
-    title: 'Archive chat',
-    confirmLabel: 'Archive',
-  })) return
+  const chat = store.chats.find(c => c.chat_id === chatId)
+  if (!chat) return
   try {
-    await store.archiveChat(chatId)
+    await archiveChatWithTaskCheck(chat)
   } catch {
     // archiveChat reconnected the sockets and raised an error toast already;
     // swallow the rejection so it is not an unhandled one.
