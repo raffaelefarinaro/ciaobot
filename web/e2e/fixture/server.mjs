@@ -61,7 +61,6 @@ const TASK = {
   attempt_summary: '',
   attempt_detail: '',
   live_attempt_id: '',
-  changed_since_delegated: false,
 }
 const TASK_LINK_TRANSCRIPT = [
   { role: 'user', content: 'What is left from yesterday?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },

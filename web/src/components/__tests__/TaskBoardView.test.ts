@@ -72,7 +72,6 @@ function task(overrides: Partial<Task> = {}): Task {
     attempt_summary: '',
     attempt_detail: '',
     live_attempt_id: '',
-    changed_since_delegated: false,
     // A done fixture is finished today, as the board's own fixtures say; a test that
     // needs an undated done task passes `completed_at: null` explicitly.
     completed_at: overrides.status === 'done' ? '2026-03-01T08:00:00Z' : null,
@@ -272,6 +271,14 @@ describe('TaskBoardView', () => {
   it('marks a past due date overdue in words as well as in colour', async () => {
     const wrapper = await mountBoard([task({ due: '2000-01-01' })])
     expect(card(wrapper, 'Ship the board').text()).toContain('Overdue')
+    wrapper.unmount()
+  })
+
+  it('does not mark a done task overdue', async () => {
+    const wrapper = await mountBoard([task({ status: 'done', due: '2000-01-01' })])
+    const shown = card(wrapper, 'Ship the board')
+    expect(shown.text()).not.toContain('Overdue')
+    expect(shown.text()).toContain('Due ')
     wrapper.unmount()
   })
 
@@ -1592,7 +1599,6 @@ describe('TaskBoardView', () => {
       chat_id: attempt.chat_id,
       project_id: 'p1',
       project_origin: 'task',
-      changed_since_delegated: false,
       task: {
         ...plainTask(),
         status: 'in_progress',
@@ -1604,27 +1610,6 @@ describe('TaskBoardView', () => {
         live_attempt_id: attempt.attempt_id,
         body: '',
       },
-    }
-  }
-
-  /**
-   * The `POST …/attempt/{id}/update` answer, as the service writes it: the attempt
-   * rebound to the revision the update was made at, and the row carrying the flag
-   * that rebind just cleared.
-   */
-  function updateAnswer(edited: Task) {
-    return {
-      workspace: 'personal',
-      updated: true,
-      queued: false,
-      chat_id: edited.chat_id,
-      attempt: {
-        attempt_id: LIVE_ID, task_id: edited.id, task_revision: edited.revision,
-        chat_id: edited.chat_id, state: 'running',
-        created_at: '2026-03-02T09:00:00+00:00',
-        updated_at: '2026-03-02T09:01:00+00:00', ended_at: '', detail: '', live: true,
-      },
-      task: { ...edited, revision: NEXT_REVISION, changed_since_delegated: false },
     }
   }
 
@@ -1726,22 +1711,6 @@ describe('TaskBoardView', () => {
         .toHaveLength(0)
       wrapper.unmount()
     })
-
-  it('says the result was reached against an older description', async () => {
-    const wrapper = await mountWithBody([
-      liveTask(),
-      task({
-        id: 'b', title: 'Waiting on you', status: 'in_review',
-        changed_since_delegated: true, attempt_state: 'ready_for_review',
-        live_attempt_id: 'c'.repeat(32),
-      }),
-    ])
-
-    expect(card(wrapper, 'Waiting on you').get('.task-changed').text())
-      .toContain('Changed since delegated')
-    expect(card(wrapper, 'Wire the store').find('.task-changed').exists()).toBe(false)
-    wrapper.unmount()
-  })
 
   it('previews the resolved project, the defaults, and that the turn is attended',
     async () => {
@@ -2171,181 +2140,6 @@ describe('TaskBoardView', () => {
       })
       wrapper.unmount()
     })
-
-  it('offers Send update for an edit made under the agent, and sends it as one message',
-    async () => {
-      const edited = liveTask({
-        changed_since_delegated: true,
-        attempt_state: 'ready_for_review',
-        revision: THIRD_REVISION,
-      })
-      // The answer the server gives: the attempt rebound to the revision the
-      // update was made at, so `changed_since_delegated` comes back false and the
-      // control retires on its own.
-      apiPost.mockResolvedValue(updateAnswer(edited))
-      const sendMessage = vi.fn((_chatId: string, _text: string) => true)
-      useProjectStore().sendMessage = sendMessage as never
-      const wrapper = await mountWithBody([edited], 'Wire the store with the new owner.')
-
-      await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
-      await flushPromises()
-      await nextTick()
-
-      const sheet = wrapper.get('.task-sheet')
-      expect(sheet.text()).toContain('does not delegate again')
-      // The exact text, before it is sent: the user is putting words into a chat
-      // they may not have open.
-      expect(sheet.get('.task-update-text').text()).toContain('Wire the store with the new owner.')
-      expect(sheet.get('.btn-primary').text()).toBe('Send update')
-
-      await sheet.get('.btn-primary').trigger('click')
-      await flushPromises()
-
-      // One ordinary message into the attempt's own chat, through the board rather
-      // than the composer — the server is what rebinds the attempt, which a
-      // composer send cannot do. And the composer was not used at all.
-      expect(apiPost).toHaveBeenCalledTimes(1)
-      const [url, body] = apiPost.mock.calls[0] as [string, Record<string, string>]
-      expect(url).toBe(`/api/tasks/doing/attempt/${LIVE_ID}/update`)
-      expect(body.workspace).toBe('personal')
-      expect(body.expected_revision).toBe(THIRD_REVISION)
-      expect(body.message).toContain('Wire the store with the new owner.')
-      expect(sendMessage).not.toHaveBeenCalled()
-      wrapper.unmount()
-    })
-
-  it('retires the Send update control and says the update landed', async () => {
-    const edited = liveTask({
-      changed_since_delegated: true,
-      attempt_state: 'ready_for_review',
-      revision: THIRD_REVISION,
-    })
-    apiPost.mockResolvedValue(updateAnswer(edited))
-    const wrapper = await mountWithBody([edited], 'Wire the store with the new owner.')
-
-    await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
-    await flushPromises()
-    await nextTick()
-    await wrapper.get('.task-sheet .btn-primary').trigger('click')
-    await flushPromises()
-    await nextTick()
-
-    // The sheet is the decision, and the decision is made: it closes on the answer.
-    expect(wrapper.find('.task-sheet').exists()).toBe(false)
-    const shown = card(wrapper, 'Wire the store')
-    // The rebind cleared the flag the button reads, so the button is gone…
-    expect(shown.findAll('.task-chip').map((c) => c.text())).not.toContain('Send update')
-    expect(shown.find('.task-changed').exists()).toBe(false)
-    // …and the card says what happened, because a row that simply looks untouched
-    // cannot tell the user whether the send landed.
-    const note = shown.get('.task-update-sent')
-    expect(note.text()).toContain('Update sent')
-    expect(note.attributes('role')).toBe('status')
-    wrapper.unmount()
-  })
-
-  it('does not carry a sent confirmation to a colliding workspace task', async () => {
-    const edited = liveTask({ changed_since_delegated: true })
-    apiPost.mockResolvedValue(updateAnswer(edited))
-    const wrapper = await mountWithBody([edited])
-    await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
-    await flushPromises()
-    await wrapper.get('.task-sheet .btn-primary').trigger('click')
-    await flushPromises()
-    expect(wrapper.find('.task-update-sent').exists()).toBe(true)
-    apiGet.mockResolvedValue({ workspace: 'work', tasks: [edited] })
-    useProjectStore().activeWorkspace = 'work'
-    await flushPromises()
-    expect(card(wrapper, 'Wire the store').exists()).toBe(true)
-    expect(wrapper.find('.task-update-sent').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it.each(['success', 'refusal'])('drops a late update %s without altering a new sheet', async (result) => {
-    const edited = liveTask({ changed_since_delegated: true })
-    let resolve = (_answer: unknown) => {}
-    let reject = (_error: unknown) => {}
-    apiPost.mockImplementation(() => new Promise((yes, no) => { resolve = yes; reject = no }))
-    const wrapper = await mountWithBody([edited])
-    await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
-    await flushPromises()
-    await wrapper.get('.task-sheet .btn-primary').trigger('click')
-    expect(wrapper.get('.task-sheet .btn-primary').attributes('disabled')).toBeDefined()
-    apiGet.mockImplementation((url: string) => Promise.resolve(url.includes('/api/tasks?')
-      ? { workspace: 'work', tasks: [edited] }
-      : { workspace: 'work', task: { ...edited, body: 'Work description' } }))
-    useProjectStore().activeWorkspace = 'work'
-    await flushPromises()
-    expect(wrapper.find('.task-sheet').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('Sending…')
-    await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
-    await flushPromises()
-    expect(wrapper.get('.task-sheet .btn-primary').attributes('disabled')).toBeUndefined()
-    if (result === 'success') resolve(updateAnswer(edited))
-    else reject(new Error('Late refusal'))
-    await flushPromises()
-    expect(wrapper.get('.task-sheet').text()).toContain('Work description')
-    expect(wrapper.get('.task-sheet .btn-primary').attributes('disabled')).toBeUndefined()
-    expect(wrapper.find('.task-update-sent').exists()).toBe(false)
-    expect(wrapper.find('.task-action-error').exists()).toBe(false)
-    wrapper.unmount()
-  })
-
-  it('shows the update in flight, then keeps the control when the send is refused',
-    async () => {
-      const edited = liveTask({
-        changed_since_delegated: true,
-        attempt_state: 'ready_for_review',
-        revision: THIRD_REVISION,
-      })
-      let release = (_answer: unknown) => {}
-      const refused = Object.assign(new Error('HTTP 409'), {
-        payload: { error: { code: 'task_update_busy', message: 'that chat is busy' } },
-      })
-      apiPost.mockImplementation(
-        () => new Promise((_resolve, reject) => { release = reject }),
-      )
-      const wrapper = await mountWithBody([edited], 'Wire the store with the new owner.')
-
-      await chip(wrapper, 'Wire the store', 'Send update').trigger('click')
-      await flushPromises()
-      await nextTick()
-      await wrapper.get('.task-sheet .btn-primary').trigger('click')
-      await nextTick()
-
-      // In flight, said on the control rather than left looking like a no-op, and
-      // the confirm cannot be pressed twice.
-      expect(card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text()))
-        .toContain('Sending…')
-      expect(wrapper.get('.task-sheet .btn-primary').attributes('disabled')).toBeDefined()
-
-      release(refused)
-      await flushPromises()
-      await nextTick()
-
-      // Refused: the flag stands, the control stays, and the server's own sentence
-      // is what says why — the user can try again.
-      expect(wrapper.get('.task-sheet .task-action-error').text()).toContain('that chat is busy')
-      expect(card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text()))
-        .toContain('Send update')
-      expect(card(wrapper, 'Wire the store').find('.task-update-sent').exists()).toBe(false)
-      wrapper.unmount()
-    })
-
-  it('does not offer Send update until the edit is real', async () => {
-      // A clean settle reads `changed_since_delegated: false`, because the watcher
-    // rebinds the attempt to the revision its own review flag left behind. A card
-    // with no warning has no update to send, and a button that would re-send an
-    // unchanged description is the silent re-delegation the board rules out.
-    const wrapper = await mountWithBody([
-      liveTask({ attempt_state: 'ready_for_review' }),
-    ])
-
-    const labels = card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text())
-    expect(labels).not.toContain('Send update')
-    expect(card(wrapper, 'Wire the store').find('.task-changed').exists()).toBe(false)
-    wrapper.unmount()
-  })
 
   it('reads a task\'s attempts as history, with each one\'s chat and ending',
     async () => {

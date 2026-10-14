@@ -6648,7 +6648,7 @@ describe('delegated task signals', () => {
       assignee: 'agent', chat_id: 'c-task', attempt_id: ATTEMPT, live_attempt_id: ATTEMPT,
       created_at: '', updated_at: '', revision: 'r'.repeat(64), relative_path: 'Tasks/t1.md',
       attempt_state: 'needs_you', attempt_outcome: 'needs_input', attempt_summary: '',
-      attempt_detail: '', changed_since_delegated: false,
+      attempt_detail: '',
       ...over,
     }
   }

@@ -26,18 +26,12 @@
  * - **Stop is not detach.** Stopping ends the turn; the task keeps its linkage and
  *   stays uncompletable until it is detached, so "stopped" never quietly becomes
  *   "the user may close this".
- * - **"Changed since delegated" is the reviewer's problem.** The pane says the
- *   result was reached against an older description and decides nothing about it.
  *
  * The review loop is the rest of it: a **Ready for review** card carries one
  * **Review in chat**, because the user reads the result before closing it. The
  * chat and the editor hold **Approve Done**, which is the user's completion —
  * not a Detach and then a Done, and not a gesture that would settle the attempt
- * as `stopped` and lose the answer. **Send update** answers a mid-run edit with a
- * `chat_send`-shaped message into the attempt's own chat, never a second
- * delegation — through the board rather than the composer, because the server is
- * what rebinds the attempt to the revision the update was made at, so the flag
- * retires once the send lands and the answer settles the card. **History** reads
+ * as `stopped` and lose the answer. **History** reads
  * one task's attempts so a retried or stopped one is still readable, and a row
  * that disagrees with itself is **flagged with what disagrees and the controls
  * that resolve it** rather than silently rewritten.
@@ -56,7 +50,6 @@ import {
   TASK_DUE_FILTERS,
   TASK_NO_PROJECT,
   TASK_STATUS_OPTIONS,
-  buildTaskUpdateMessage,
   formatCompletedAt,
   formatTaskDue,
   invalidTaskRows,
@@ -197,8 +190,6 @@ watch(workspace, () => {
   // holding. `resetDelegate` closes it either way, and the late answer is dropped
   // by the store's own `drawingWorkspace` guard.
   resetDelegate()
-  updateSentTaskId.value = ''
-  updateSentWorkspace.value = ''
   load()
 })
 
@@ -488,7 +479,7 @@ function attemptBadgeClass(task: Task): string {
 // older read gets the server's 409 with the rows intact rather than delegating a
 // description that has moved on.
 
-type DelegateMode = 'delegate' | 'resume' | 'retry' | 'open_chat' | 'update'
+type DelegateMode = 'delegate' | 'resume' | 'retry' | 'open_chat'
 
 const delegateOpen = ref(false)
 const delegateEl = ref<HTMLElement | null>(null)
@@ -617,8 +608,6 @@ const delegateButtonLabel = computed(() => {
       return 'Resume'
     case 'retry':
       return 'Start a new attempt'
-    case 'update':
-      return 'Send update'
     default:
       return 'Delegate'
   }
@@ -658,9 +647,6 @@ useModalFocus(delegateEl, delegateFocusActive, {
  */
 async function openDelegate(task: Task, mode?: DelegateMode) {
   board.clearError()
-  // A sheet about to send something supersedes a note about something already
-  // sent, and the note belongs to one card rather than to the board.
-  if (updateSentTaskId.value === task.id) updateSentTaskId.value = ''
   // A retry of the body read keeps what was typed; a new sheet starts empty.
   if (delegateTaskId.value !== task.id || !delegateOpen.value) delegateInstructions.value = ''
   delegateTaskId.value = task.id
@@ -699,7 +685,6 @@ function closeDelegate() {
  */
 function resetDelegate() {
   delegateBusy.value = false
-  updateTaskId.value = ''
   delegateOpen.value = false
   delegateTaskId.value = ''
   delegateBody.value = ''
@@ -713,23 +698,17 @@ function resetDelegate() {
 }
 
 /**
- * Confirm the sheet, which is five gestures rather than one.
+ * Confirm the sheet, which is four gestures rather than one.
  *
  * `open_chat` starts nothing and opens the chat the attempt is running in — the
  * honest action for a live attempt, which cannot be resumed and must not be
- * delegated a second time. `update` sends one ordinary message into that same
- * chat carrying the task as it stands now, which is the only answer to an edit
- * made under a running turn. `resume` continues that attempt's own chat under its
+ * delegated a second time. `resume` continues that attempt's own chat under its
  * own id. `retry` is a fresh delegation, and `delegate` is the first hand-over;
  * both present the revision the description on screen was read at.
  */
 async function submitDelegate() {
   const task = delegateTask.value
   if (delegateBusy.value || !task) return
-  if (delegateMode.value === 'update') {
-    await sendTaskUpdate()
-    return
-  }
   // The revision the *previewed description* was read at, not the row's newest: a
   // body that moved while the sheet was open must be refused, not delegated.
   const revision = delegateRevision.value
@@ -776,9 +755,6 @@ async function actOnAttempt(
   const attemptId = task.live_attempt_id || task.attempt_id
   if (!attemptId || busyTaskId.value === task.id) return
   board.clearError()
-  // Any other gesture on this card supersedes the note that an update landed: what
-  // the card says now is about what was just done to it.
-  if (updateSentTaskId.value === task.id) updateSentTaskId.value = ''
   busyTaskId.value = task.id
   await board.attemptAction(workspace.value, task.id, attemptId, action)
   busyTaskId.value = ''
@@ -915,92 +891,6 @@ function titleHasLinks(task: Task): boolean {
 function attemptNote(task: Task): string {
   if (!task.attempt_state) return ''
   return task.attempt_summary || (task.attempt_state === 'running' ? '' : task.attempt_detail)
-}
-
-// ── Send update ───────────────────────────────────────────────────────────
-
-/**
- * The exact text a Send update hands to the attempt's chat.
- *
- * Shown before it is sent, not after: the user is approving a message into a
- * conversation they may not have open, and the whole reason the control exists
- * is that the description has changed underneath the agent. It is then sent as
- * approved rather than rebuilt server-side — see {@link sendTaskUpdate}.
- */
-const updateMessage = computed(() =>
-  delegateTask.value ? buildTaskUpdateMessage(delegateTask.value, delegateBody.value) : '',
-)
-
-/** The card whose update is in flight, and the one whose update has landed. */
-const updateTaskId = ref('')
-const updateSentTaskId = ref('')
-const updateSentWorkspace = ref('')
-
-/**
- * Hand the current task to the attempt's own chat, as one ordinary message.
- *
- * Through the board rather than the composer's `sendMessage`, because a composer
- * send cannot do the second half of this gesture: the server has to rebind the
- * attempt to the revision the update was made at, or `changed_since_delegated`
- * stays true and the control offers the very same update for ever. The server
- * sends the message into the attempt's own chat, queues it behind a turn already
- * running there, and attaches the settle watcher to whichever turn it caused — so
- * the answer comes back into the chat the attempt is already bound to and the
- * card follows it. No second attempt, no second chat, no new linkage.
- *
- * The revision is the one the *previewed description* was read at, exactly as
- * every other write here, so a body edited while the sheet was open is refused
- * rather than quoted from a stale read.
- *
- * Two things the card has to say, because an unchanged button after a send is a
- * button that cannot tell the user whether it worked: the chip reads *Sending…*
- * while the request is in flight, and the card carries a confirmation once it
- * landed. A refused send keeps the control and the flag, and leaves the server's
- * sentence in the sheet.
- */
-async function sendTaskUpdate() {
-  const task = delegateTask.value
-  // A description this board could not read is not "empty". Sending the framed
-  // message without it would tell the agent the description is gone, which is a
-  // fact nobody checked; the confirm is disabled above, and this is the same rule
-  // at the door.
-  if (delegateBusy.value) return
-  if (!task || !task.chat_id || delegateBodyState.value !== 'idle') {
-    resetDelegate()
-    return
-  }
-  const attemptId = task.live_attempt_id || task.attempt_id
-  // Only an attempt that still holds the task can be updated, and that is the one
-  // the card's own badge is drawn from. Without it there is nothing to rebind, so
-  // there is nothing to confirm either.
-  if (!attemptId) {
-    resetDelegate()
-    return
-  }
-  const revision = delegateRevision.value
-  if (!revision) {
-    resetDelegate()
-    return
-  }
-  board.clearError()
-  delegateBusy.value = true
-  updateTaskId.value = task.id
-  const originWorkspace = workspace.value
-  const seq = delegateSeq
-  const sent = await board.sendUpdate(
-    originWorkspace, task.id, attemptId, revision, updateMessage.value,
-  )
-  if (seq !== delegateSeq || workspace.value !== originWorkspace) return
-  delegateBusy.value = false
-  updateTaskId.value = ''
-  if (!sent) return
-  board.clearError()
-  // The row adopted the answer, so `changed_since_delegated` is already false and
-  // the control has retired. What is left to say is that it was this card's update
-  // and that it landed, which nothing on the row records.
-  updateSentTaskId.value = task.id
-  updateSentWorkspace.value = originWorkspace
-  closeDelegate()
 }
 
 // ── Create ────────────────────────────────────────────────────────────────
@@ -2046,18 +1936,6 @@ const today = localDateKey()
                       {{ isOverdue(task, today) ? 'Overdue · ' : 'Due ' }}{{ formatTaskDue(task.due) }}
                     </span>
                   </p>
-                  <p v-if="task.changed_since_delegated" class="task-changed">
-                    Changed since delegated — the result was reached against an older
-                    description.
-                  </p>
-                  <!-- What happened to the update, said once. The control retires on
-                       its own (the rebind clears the flag it reads), so without this
-                       the card would simply go back to looking untouched and the user
-                       could not tell whether the send landed. -->
-                  <p v-if="updateSentWorkspace === workspace && updateSentTaskId === task.id" class="task-update-sent" role="status">
-                    Update sent — the agent has it in the linked chat, and its answer
-                    will land here.
-                  </p>
                   <!-- Where the answer is, and when it ended. Never a summary of it:
                        the board holds no copy of the agent's reply, so it names the
                        chat to read and the approval that closes the card. -->
@@ -2101,20 +1979,6 @@ const today = localDateKey()
                       :aria-label="awaitsReview(task) ? `Review the agent's result for ${task.title} in its chat` : `Open the chat working on ${task.title}`"
                       @click.stop="openAttemptChat(task)"
                     >{{ awaitsReview(task) ? 'Review in chat' : 'Chat' }}</button>
-                    <!-- A mid-run edit. One message into the attempt's own chat,
-                         carrying the task as it stands now — the sheet shows the exact
-                         text first, and the server rebinds the attempt so the flag
-                         retires once it has landed. Never a second delegation: that
-                         would mint a new attempt and leave the one whose result is
-                         under review looking abandoned. -->
-                    <button
-                      v-if="task.changed_since_delegated && task.chat_id"
-                      type="button"
-                      class="btn-chip task-chip"
-                      :disabled="busyTaskId === task.id || updateTaskId === task.id"
-                      :aria-label="`Send the current description of ${task.title} to the chat working on it`"
-                      @click.stop="openDelegate(task, 'update')"
-                    >{{ updateTaskId === task.id ? 'Sending…' : 'Send update' }}</button>
                     <!-- A review-ready card is read, not managed: the turn has ended,
                          so there is nothing to Stop, and Detach-then-Done would settle
                          the attempt as stopped and lose the result. Approving is done
@@ -2251,9 +2115,7 @@ const today = localDateKey()
         aria-labelledby="task-delegate-title"
       >
         <header class="task-sheet-head">
-          <h3 id="task-delegate-title">{{
-            delegateMode === 'update' ? 'Send the update to the chat' : 'Hand this task to the agent'
-          }}</h3>
+          <h3 id="task-delegate-title">Hand this task to the agent</h3>
           <button type="button" class="btn-icon" aria-label="Close" @click="closeDelegate">×</button>
         </header>
 
@@ -2262,7 +2124,7 @@ const today = localDateKey()
                runs with, and — the part a board cannot imply — that the turn is
                attended. An approval card it raises is an ordinary Needs-you card in
                that chat, answered in the ordinary way. -->
-          <dl v-if="delegateMode !== 'update'" class="task-preview-facts">
+          <dl class="task-preview-facts">
             <div>
               <dt>Chat runs in</dt>
               <dd>{{ delegatePreview?.project }}</dd>
@@ -2296,20 +2158,11 @@ const today = localDateKey()
           </template>
           <template v-else>
             <p class="hint">
-              <template v-if="delegateMode === 'update'">
-                {{
-                  delegateBody.trim()
-                    ? 'The description below is what the message carries.'
-                    : 'This task has no description, so the message carries only its title and metadata.'
-                }}
-              </template>
-              <template v-else>
-                {{
-                  delegateBody.trim()
-                    ? 'The description below is quoted into the chat as the task.'
-                    : 'This task has no description; only its title and metadata are handed over.'
-                }}
-              </template>
+              {{
+                delegateBody.trim()
+                  ? 'The description below is quoted into the chat as the task.'
+                  : 'This task has no description; only its title and metadata are handed over.'
+              }}
             </p>
             <details v-if="delegateBody.trim()" class="task-preview">
               <summary>Show the description</summary>
@@ -2345,22 +2198,6 @@ const today = localDateKey()
             This starts a new attempt in a new chat. The previous attempt stays as
             history and is not re-run.
           </p>
-          <p v-else-if="delegateMode === 'update'" class="hint">
-            This sends one message into the chat this attempt is working in,
-            carrying the task as it stands now. It does not delegate again and
-            starts no new attempt — the answer comes back into the same chat.
-            Once it lands, this attempt counts as working from the description
-            you just sent, and the card stops offering the update.
-          </p>
-
-          <!-- The exact message, before it is sent. The user is putting words into a
-               conversation they may not have open, and the whole reason this
-               control exists is that the description changed underneath the agent. -->
-          <details v-if="delegateMode === 'update'" class="task-preview">
-            <summary>Show the message</summary>
-            <pre class="task-update-text">{{ updateMessage }}</pre>
-          </details>
-
           <p v-if="board.error" class="task-action-error" role="alert">
             {{ board.error }}
             <button type="button" class="btn-chip task-chip" @click="reloadBoard">Reload</button>
@@ -2370,7 +2207,7 @@ const today = localDateKey()
             <button
               type="button"
               class="btn-primary"
-              :disabled="delegateBusy || (delegateMode === 'update' && delegateBodyState !== 'idle')"
+              :disabled="delegateBusy"
               @click="submitDelegate"
             >{{ delegateButtonLabel }}</button>
             <!-- Both ways out of a settled attempt, named separately: one
@@ -2658,10 +2495,6 @@ const today = localDateKey()
                 The chat is archived; it opens read-only from the list below.
               </span>
             </p>
-            <p v-if="detailTask?.changed_since_delegated" class="task-changed">
-              Changed since delegated — the result was reached against an older
-              description.
-            </p>
             <p v-if="detailTask && isReviewReady(detailTask)" class="task-review">
               <span class="task-review-lead">The agent says this is done.</span>
               Check its summary below and the chat, then approve Done to close the
@@ -2700,13 +2533,6 @@ const today = localDateKey()
                 :disabled="detailSaving || board.saving"
                 @click="markDone(detailTask!)"
               >Approve Done</button>
-              <button
-                v-if="detailTask?.changed_since_delegated && detailTask?.chat_id"
-                type="button"
-                class="btn-chip task-chip"
-                :disabled="detailSaving || board.saving"
-                @click="openDelegate(detailTask!, 'update')"
-              >Send update</button>
               <!-- Deliberately not a second Resume/Retry pair here: this control
                    already opens the preview in the mode the row calls for, and the
                    preview names both ways out. A duplicate that opened a sheet and a
@@ -3185,8 +3011,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   white-space: pre-line;
   overflow-wrap: anywhere;
 }
-/* "Changed since delegated" is a warning about the *result*, not about the card, so
-   it reads as a caption on it rather than as one of its voices. */
+/* A caption about the card's chat (archived), not one of the card's voices. */
 .task-changed {
   margin: 0;
   padding: var(--space-1) var(--space-2);
@@ -3197,8 +3022,8 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   line-height: 1.5;
 }
 /* The review block is the card's own state, not a warning about it: it is where
-   the answer lives and what closes the card. Kept beside the changed-since
-   caption rather than inside it, because the two can both be true. */
+   the answer lives and what closes the card. Kept beside the archived-chat
+   caption rather than inside it. */
 .task-review {
   display: flex;
   flex-wrap: wrap;
@@ -3213,19 +3038,6 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 }
 .task-review-lead { font-weight: 600; color: var(--fg); }
 .task-review-when { color: var(--fg3); }
-/* "The update landed" is neither of the two above: it is about a gesture the user
-   just made, not about the result or about a disagreement. The accent rule is the
-   same one the review block uses, because that is the outcome it reports — the
-   agent now has the current description. */
-.task-update-sent {
-  margin: 0;
-  padding: var(--space-1) var(--space-2);
-  border-left: 3px solid var(--accent2);
-  background: color-mix(in srgb, var(--accent2) 8%, transparent);
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-}
 /* An inconsistency the board reports rather than repairs. Distinct from the
    warning above: this one is about the row's own fields contradicting each
    other, and each line ends with the controls that resolve it. */
@@ -3526,21 +3338,6 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   font-size: 0.88em;
 }
 .task-preview-body :deep(pre code) { padding: 0; background: none; }
-/* The exact text a Send update would put into the delegated chat. A <pre>, not
-   the Markdown renderer: it is a message to a chat, not prose the user wrote in
-   their own vault, and wrapping it is the point. */
-.task-update-text {
-  margin: var(--space-2) 0 0;
-  padding: var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
 /* Attempt history. A list of records rather than a table: the columns a table
    would give are the badge, one sentence and a chat link, and at a phone width a
    table is where that stops being readable. */

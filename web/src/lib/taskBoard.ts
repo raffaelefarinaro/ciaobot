@@ -175,7 +175,6 @@ function taskFrom(raw: Partial<Task> | null | undefined): Task {
     attempt_summary: asString(row.attempt_summary),
     attempt_detail: asString(row.attempt_detail),
     live_attempt_id: asString(row.live_attempt_id),
-    changed_since_delegated: row.changed_since_delegated === true,
     chat_archived: row.chat_archived === true,
     completed_at: row.completed_at ? asString(row.completed_at) : null,
     has_resolution: row.has_resolution === true,
@@ -325,7 +324,6 @@ export function toTaskListRow(detail: TaskDetail | Task): Task {
     attempt_summary: detail.attempt_summary,
     attempt_detail: detail.attempt_detail,
     live_attempt_id: detail.live_attempt_id,
-    changed_since_delegated: detail.changed_since_delegated,
     chat_archived: detail.chat_archived === true,
     completed_at: detail.completed_at,
     has_resolution: detail.has_resolution,
@@ -525,41 +523,6 @@ export function taskAttemptSummary(attempt: TaskAttempt): string {
   return attempt.detail ? `${head} — ${attempt.detail}` : head
 }
 
-/**
- * The message a **Send update** hands to the delegated chat.
- *
- * `chat_send`-shaped rather than a second delegation, and that is the whole
- * contract: it is one ordinary turn inside the attempt's own chat, so the answer
- * that comes back belongs to the attempt already on the card and the linkage,
- * the revision binding and the history all stay exactly as they are. Delegating
- * again instead would mint a second attempt, re-quote the description from
- * scratch and leave the first one's result looking abandoned — the silent
- * re-delegation the card's own words rule out.
- *
- * It carries the task as it stands now — title, column, project, date and the
- * current description — because the agent is holding an older one, and a message
- * that said only "this changed" would leave it to guess what.
- */
-export function buildTaskUpdateMessage(task: Task, body: string): string {
-  const facts = [
-    `Title: ${task.title}`,
-    `Column: ${taskStatusLabel(task.status)}`,
-    task.project_id ? `Project: ${task.project_id}` : '',
-    formatTaskDue(task.due) ? `Due: ${formatTaskDue(task.due)}` : '',
-  ].filter(Boolean)
-  const prose = body.trim()
-  return [
-    `The task "${task.title}" changed after you were handed it. Work from this, not`
-    + ' from the version you were given.',
-    '',
-    ...facts,
-    '',
-    prose || '(the description is now empty)',
-    '',
-    'Carry on with the same work in this chat rather than starting over.',
-  ].join('\n')
-}
-
 // ── Filters ───────────────────────────────────────────────────────────────
 
 export const TASK_DUE_FILTERS = [
@@ -602,9 +565,9 @@ function addDays(day: string, delta: number): string {
   return localDateKey(date)
 }
 
-/** True for a task dated before today. An undated task is never overdue. */
-export function isOverdue(task: Pick<Task, 'due'>, today: string = localDateKey()): boolean {
-  return isDueDate(task.due) && task.due < today
+/** True for an open task dated before today. An undated or done task is never overdue. */
+export function isOverdue(task: Pick<Task, 'due' | 'status'>, today: string = localDateKey()): boolean {
+  return task.status !== 'done' && isDueDate(task.due) && task.due < today
 }
 
 /** The due date as a card reads it, or `''` when there is none. */
