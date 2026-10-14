@@ -65,9 +65,11 @@ const tasksInReview = computed(() => taskSignals.inReview(projects.activeWorkspa
 // Automations warning, scoped to the active workspace.
 const failingAutomations = computed(() => tasks.schedules.filter(s => (
   scheduleNeedsAttention(s)
-  // A missed one-time reminder is already the install-wide `missed-schedules`
-  // notice (with Fire now) above this list.
-  && !(s.frequency === 'once' && s.missed && s.last_status !== 'error')
+  // An enabled missed one-time reminder is already the install-wide
+  // `missed-schedules` notice (with Fire now); the backend only covers enabled
+  // ones, so a disabled one that lost its chat still shows here.
+  && !(s.frequency === 'once' && s.enabled && s.missed
+    && s.last_status !== 'error' && s.last_status !== 'missing-chat')
   && scheduleInWorkspace(s, projects.activeWorkspace, projects.chats, projects.projects)
 )))
 

@@ -256,6 +256,17 @@ describe('HomeReviewSummary', () => {
       wrapper.unmount()
     })
 
+    it('shows a disabled one-time reminder whose chat is gone', () => {
+      // The backend's missed-schedules notice covers only enabled reminders.
+      const wrapper = mountWith([
+        schedule('once', 'personal', {
+          frequency: 'once', enabled: false, missed: true, last_status: 'missing-chat',
+        }),
+      ])
+      expect(wrapper.get('.home-review-title').text()).toBe('1 automation needs a look')
+      wrapper.unmount()
+    })
+
     it('names an untitled automation by its prompt', () => {
       const wrapper = mountWith([
         schedule('x', 'personal', { title: '', prompt: 'Summarise the inbox\nmore', last_status: 'error' }),

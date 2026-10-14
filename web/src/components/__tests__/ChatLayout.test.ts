@@ -197,15 +197,23 @@ describe('ChatLayout', () => {
       globalThis.ResizeObserver = originalObserver
     })
 
-    async function mountHome(paneWidth: number) {
-      globalThis.ResizeObserver = class {
-        constructor(private readonly cb: ResizeObserverCallback) {}
-        observe() {
-          this.cb([{ contentRect: { width: paneWidth } } as ResizeObserverEntry], this as unknown as ResizeObserver)
-        }
-        unobserve() {}
-        disconnect() {}
-      } as unknown as typeof ResizeObserver
+    const disconnect = vi.fn()
+
+    async function mountHome(paneWidth: number | null) {
+      disconnect.mockReset()
+      if (paneWidth === null) {
+        // jsdom has none; the pane width stays unknown and `isMobile` decides.
+        ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = undefined
+      } else {
+        globalThis.ResizeObserver = class {
+          constructor(private readonly cb: ResizeObserverCallback) {}
+          observe() {
+            this.cb([{ contentRect: { width: paneWidth } } as ResizeObserverEntry], this as unknown as ResizeObserver)
+          }
+          unobserve() {}
+          disconnect() { disconnect() }
+        } as unknown as typeof ResizeObserver
+      }
 
       const router = createRouter({
         history: createMemoryHistory(),
@@ -275,6 +283,34 @@ describe('ChatLayout', () => {
 
     it("keeps Home's alerts under the composer when the pane is narrow", async () => {
       const wrapper = await mountHome(600)
+      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(true)
+      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('puts the alerts in the rail at 941px and under the composer at 940px', async () => {
+      // `@container chat-pane (max-width: 940px)` is inclusive.
+      const edge = await mountHome(940)
+      expect(edge.find('.home-main .housekeeping').exists()).toBe(true)
+      expect(edge.find('.home-rail .housekeeping').exists()).toBe(false)
+      edge.unmount()
+
+      const over = await mountHome(941)
+      expect(over.find('.home-rail .housekeeping').exists()).toBe(true)
+      expect(over.find('.home-main .housekeeping').exists()).toBe(false)
+      over.unmount()
+    })
+
+    it('stops observing the pane on unmount', async () => {
+      const wrapper = await mountHome(1200)
+      expect(disconnect).not.toHaveBeenCalled()
+      wrapper.unmount()
+      expect(disconnect).toHaveBeenCalled()
+    })
+
+    it('falls back to the viewport width without a ResizeObserver', async () => {
+      // beforeEach sets innerWidth to 390, so `isMobile` is true.
+      const wrapper = await mountHome(null)
       expect(wrapper.find('.home-main .housekeeping').exists()).toBe(true)
       expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(false)
       wrapper.unmount()
