@@ -17,11 +17,12 @@ Apply these edits for Claude `Agent`, Codex collaboration workers and OpenCode t
 
 - Replace every `worker_done` step with: "Your final message is your report; it is returned to the primary orchestrator."
 - Implement/Fix: replace the commit step with: "Run no git commands. The primary orchestrator commits."
-- Review: do not post to GitHub. Return one verdict in the required marker/format; the primary decides whether to post it.
+- Review: remove the entire Orca-specific `AUTHORIZED` GitHub-write paragraph. Replace every instruction to post inline findings or a summary comment with: "Return your findings and exactly one verdict in the required marker/format to the primary. Do not post to GitHub." The primary must post the returned verdict with `gh pr comment` per SKILL.md §7; this is required, not optional.
 - Give the worker the exact absolute issue worktree and file scope. Do not imply it can edit shared main checkout or other worktrees.
 - Codex dispatch uses the current `spawn_agent` metadata and task name. If the primary sets a model override, it uses the exact exposed model ID and `fork_turns: "none"`; include the complete brief because no prior turns are inherited. Fix rounds use `followup_task` for an idle worker; `send_message` alone does not restart it.
 - OpenCode dispatch uses the actual task tool schema exposed by that runtime and a configured subagent. Check its exact model; an omitted subagent model inherits the primary. Do not copy Claude `Agent` or Codex collaboration syntax into an OpenCode task.
 - Claude uses `Agent`/`SendMessage` semantics. Do not assume its plugin or tool lifecycle in Codex or OpenCode.
+- For native review workers, adapt Review steps 2, 4 and 5: inspect with read-only git commands such as `git diff`, `git log` and `git show`; return inline findings and the single marker-formatted verdict to the primary; do not run `gh pr comment` or any other GitHub write. The primary posts that verdict per SKILL.md §7. Preserve the template's GitHub-posting instructions only for an Orca reviewer explicitly authorized by the Orca review workflow.
 
 ## Implement (R0, cheap model)
 

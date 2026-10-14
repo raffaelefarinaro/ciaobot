@@ -19,7 +19,7 @@ git -C ~/repos/ciaobot worktree add -b raffaelefarinaro/issue-<N>-<slug> \
   ~/repos/ciaobot/.claude/worktrees/issue-<N> origin/develop
 ```
 
-Do not use Claude `Agent(isolation: "worktree")`: it branches from `main`, which can lag `develop`. Keep one active worker per worktree. Workers do no git commands, commits, pushes, GitHub writes or Orca lifecycle commands. They return reports to the primary. Follow `references/prompts.md` for per-role instructions.
+Do not use Claude `Agent(isolation: "worktree")`: it branches from `main`, which can lag `develop`. Keep one active worker per worktree. Implement/Fix workers run no git commands. Review-only workers may use read-only `git diff`, `git log` and `git show`, but never git mutations, commits or pushes. All native workers are forbidden GitHub writes and Orca lifecycle commands. They return reports to the primary. Follow `references/prompts.md` for per-role instructions.
 
 When a worktree needs `web/`, symlink `web/node_modules` from the main checkout for checks, then remove the symlink before every commit; `.gitignore` does not exclude a symlink. Never use bare `git stash` or `stash pop`: the stash stack is shared across worktrees and sessions.
 
