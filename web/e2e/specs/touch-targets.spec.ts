@@ -142,6 +142,13 @@ async function tagTriggers(page: Page): Promise<number> {
 
 /** Resolve once the DOM has changed from `before` elements and then held still for a few frames. */
 async function settled(page: Page, before: number): Promise<boolean> {
+  // Reset the stability counter first: values left by the previous trigger
+  // could otherwise satisfy the check on the first frame, before anything opened.
+  await page.evaluate(() => {
+    const w = window as unknown as { __touchLast?: number; __touchStable?: number }
+    w.__touchLast = undefined
+    w.__touchStable = 0
+  })
   return page.waitForFunction((was) => {
     const w = window as unknown as { __touchLast?: number; __touchStable?: number }
     const now = document.getElementsByTagName('*').length
