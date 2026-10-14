@@ -190,6 +190,97 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  describe('Home alerts placement', () => {
+    const originalObserver = globalThis.ResizeObserver
+
+    afterEach(() => {
+      globalThis.ResizeObserver = originalObserver
+    })
+
+    async function mountHome(paneWidth: number) {
+      globalThis.ResizeObserver = class {
+        constructor(private readonly cb: ResizeObserverCallback) {}
+        observe() {
+          this.cb([{ contentRect: { width: paneWidth } } as ResizeObserverEntry], this as unknown as ResizeObserver)
+        }
+        unobserve() {}
+        disconnect() {}
+      } as unknown as typeof ResizeObserver
+
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/', component: EmptyStub }],
+      })
+      await router.push('/')
+      await router.isReady()
+
+      const store = useProjectStore()
+      store.projects = [{
+        project_id: 'project-1',
+        name: 'General',
+        workspace: 'personal',
+      }] as unknown as typeof store.projects
+      store.chats = []
+      store.activeChatId = null
+      store.bootstrapped = true
+      vi.spyOn(store, 'fetchAll').mockResolvedValue()
+      vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+
+      useHousekeepingStore().actions = [{
+        id: 'a',
+        kind: 'test',
+        severity: 10,
+        title: 'A condition needs you',
+        detail: 'It can be fixed.',
+        glyph: '▲',
+        workspace: 'personal',
+        run_label: '',
+        chat_label: '',
+        chat_prompt: '',
+        view_label: '',
+        blocking: false,
+        view_route: '',
+      }]
+
+      const { default: ChatLayout } = await import('../ChatLayout.vue')
+      const wrapper = mount(ChatLayout, {
+        global: {
+          plugins: [router],
+          stubs: {
+            ChatPanel: ChatPanelStub,
+            ProjectSidebar: EmptyStub,
+            ProjectView: EmptyStub,
+            SchedulePanel: EmptyStub,
+            SettingsView: EmptyStub,
+            FileViewerModal: EmptyStub,
+            PinnedFilePanel: EmptyStub,
+            PaneHeader: EmptyStub,
+            HomeRecentChats: EmptyStub,
+          },
+        },
+      })
+      await flushPromises()
+      return wrapper
+    }
+
+    it("puts Home's alerts in the rail when the pane is wide", async () => {
+      const wrapper = await mountHome(1200)
+      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(true)
+      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(false)
+      const rail = wrapper.get('.home-rail').html()
+      expect(rail.indexOf('class="housekeeping"')).toBeGreaterThan(-1)
+      expect(rail.indexOf('class="housekeeping"')).toBeLessThan(rail.indexOf('home-review-summary'))
+      wrapper.unmount()
+    })
+
+    it("keeps Home's alerts under the composer when the pane is narrow", async () => {
+      const wrapper = await mountHome(600)
+      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(true)
+      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(false)
+      wrapper.unmount()
+    })
+  })
+
   it('reports post-archive memory work in the home attention summary', async () => {
     const router = createRouter({
       history: createMemoryHistory(),

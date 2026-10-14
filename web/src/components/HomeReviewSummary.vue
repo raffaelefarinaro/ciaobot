@@ -11,7 +11,7 @@
         type="button"
         class="home-review-item"
         :class="{
-          'home-review-item--attention': item.state === 'error',
+          'home-review-item--attention': item.state === 'error' || item.attention,
           'home-review-item--stale': item.state === 'stale',
           'home-review-item--loading': item.state === 'loading',
         }"
@@ -33,8 +33,9 @@ import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskStore } from '../stores/tasks'
 import { useTaskSignalsStore } from '../stores/taskSignals'
+import type { Schedule } from '../lib/types'
 import { reviewPath } from '../stores/memoryMap'
-import { scheduleInWorkspace } from '../lib/automationWorkspace'
+import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 
 type ReviewState = 'ready' | 'loading' | 'stale' | 'error'
 type ReviewItem = {
@@ -43,6 +44,7 @@ type ReviewItem = {
   detail: string
   count: number
   state: ReviewState
+  attention: boolean
 }
 
 const router = useRouter()
@@ -58,6 +60,31 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
 
 // Tasks the agent reported done, waiting for the user's Approve on the board.
 const tasksInReview = computed(() => taskSignals.inReview(projects.activeWorkspace))
+
+// Schedules that failed, did not run, or lost their chat: the sidebar's
+// Automations warning, scoped to the active workspace.
+const failingAutomations = computed(() => tasks.schedules.filter(s => (
+  scheduleNeedsAttention(s)
+  // A missed one-time reminder is already the install-wide `missed-schedules`
+  // notice (with Fire now) above this list.
+  && !(s.frequency === 'once' && s.missed && s.last_status !== 'error')
+  && scheduleInWorkspace(s, projects.activeWorkspace, projects.chats, projects.projects)
+)))
+
+// Mirrors the backend's `_schedule_display_name`.
+function automationName(s: Schedule): string {
+  const title = (s.title || '').trim()
+  if (title) return title
+  const line = (s.prompt || '').trim().split('\n')[0].trim()
+  if (line) return line.length > 60 ? `${line.slice(0, 57)}…` : line
+  return s.schedule_id
+}
+
+function automationProblem(s: Schedule): string {
+  if (s.last_status === 'missing-chat') return 'its chat was deleted, so it is turned off.'
+  if (s.last_status === 'error') return 'the last run failed.'
+  return 'it did not run when expected.'
+}
 
 const items = computed<ReviewItem[]>(() => {
   const workspace = projects.activeWorkspace
@@ -93,28 +120,18 @@ const items = computed<ReviewItem[]>(() => {
       : retirement.loadError
   }
 
-  const active = tasks.schedules.filter(schedule => (
-    schedule.enabled && scheduleInWorkspace(
-      schedule,
-      workspace,
-      projects.chats,
-      projects.projects,
-    )
-  ))
-  const next = active
-    .filter(schedule => Boolean(schedule.next_run))
-    .sort((a, b) => String(a.next_run).localeCompare(String(b.next_run)))[0]
+  const failing = failingAutomations.value
+  const n = failing.length
   let automationState: ReviewState = 'ready'
-  let automationDetail = active.length
-    ? next
-      ? next.title
-        ? `${next.title} · next ${formatRun(String(next.next_run))}`
-        : `Next run ${formatRun(String(next.next_run))}`
-      : 'Active · next run pending'
-    : 'Up to date. No active automations belong to this workspace.'
+  let automationDetail = 'Up to date. No automation in this workspace needs a look.'
+  if (n === 1) {
+    automationDetail = `${automationName(failing[0])} · ${automationProblem(failing[0])}`
+  } else if (n > 1) {
+    automationDetail = 'Some automations failed or did not run. Open Automations to check them.'
+  }
   if (!tasks.schedulesLoaded && !tasks.scheduleLoadError) {
     automationState = 'loading'
-    automationDetail = 'Checking for active automations.'
+    automationDetail = 'Checking automations.'
   } else if (tasks.scheduleLoadError) {
     automationState = tasks.schedules.length ? 'stale' : 'error'
     automationDetail = tasks.schedules.length
@@ -131,6 +148,7 @@ const items = computed<ReviewItem[]>(() => {
         : 'The agent says these are done. Approve or send them back.',
       count: inReview.length,
       state: 'ready',
+      attention: false,
     },
     {
       key: 'memory',
@@ -140,6 +158,7 @@ const items = computed<ReviewItem[]>(() => {
       detail: proposalDetail,
       count: proposalCount,
       state: proposalState,
+      attention: false,
     },
     {
       key: 'retirement',
@@ -149,15 +168,17 @@ const items = computed<ReviewItem[]>(() => {
       detail: retirementDetail,
       count: retirementCount,
       state: retirementState,
+      attention: false,
     },
     {
       key: 'automations',
-      title: active.length && automationState !== 'loading'
-        ? plural(active.length, 'active automation')
+      title: n && automationState !== 'loading'
+        ? plural(n, 'automation needs a look', 'automations need a look')
         : 'Automations',
       detail: automationDetail,
-      count: active.length,
+      count: n,
       state: automationState,
+      attention: automationState === 'ready' && n > 0,
     },
   ]
 })
@@ -171,16 +192,6 @@ const visibleItems = computed(() => items.value.filter(
 // is the entry that opens it. A single "open the newest pass" shortcut on top
 // of that was a second way into one row out of many.
 
-function formatRun(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString(undefined, {
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
 function openItem(key: ReviewItem['key']) {
   if (key === 'tasks') {
     // One task opens its card; several open the board on the In review column.
@@ -189,7 +200,8 @@ function openItem(key: ReviewItem['key']) {
     return
   }
   if (key === 'automations') {
-    void router.push('/schedules')
+    const failing = failingAutomations.value
+    void router.push(failing.length === 1 ? `/schedules/${failing[0].schedule_id}` : '/schedules')
     return
   }
   void router.push(reviewPath(key === 'retirement' ? 'revisit' : 'suggested'))

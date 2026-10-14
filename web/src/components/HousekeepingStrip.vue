@@ -728,6 +728,11 @@ watch(
   flex-direction: column;
   margin-block: var(--space-3);
   gap: var(--space-3);
+  /* The strip is laid out in the Home rail (280px) on wide panes and in the
+     full column on narrow ones, so the window's width decides nothing: the
+     tile layout below follows the strip's own width. */
+  container-type: inline-size;
+  container-name: housekeeping;
 }
 
 .housekeeping-tile {
@@ -742,7 +747,7 @@ watch(
   align-items: start;
 }
 
-@media (min-width: 640px) {
+@container housekeeping (min-width: 600px) {
   .housekeeping-tile :deep(.home-notice-content) {
     grid-template-columns: 1fr auto;
     grid-template-areas: 'body actions';
@@ -839,6 +844,9 @@ watch(
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  /* Same reason as `.housekeeping`: the rail or the full column decides. */
+  container-type: inline-size;
+  container-name: housekeeping;
 }
 
 /* The group takes focus when a card it owns disappears (see keepFocus), and a
