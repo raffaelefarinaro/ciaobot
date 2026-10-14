@@ -190,6 +190,133 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  describe('Home alerts placement', () => {
+    const originalObserver = globalThis.ResizeObserver
+
+    afterEach(() => {
+      globalThis.ResizeObserver = originalObserver
+    })
+
+    const disconnect = vi.fn()
+
+    async function mountHome(paneWidth: number | null) {
+      disconnect.mockReset()
+      if (paneWidth === null) {
+        // jsdom has none; the pane width stays unknown and `isMobile` decides.
+        ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = undefined
+      } else {
+        globalThis.ResizeObserver = class {
+          constructor(private readonly cb: ResizeObserverCallback) {}
+          observe() {
+            this.cb([{ contentRect: { width: paneWidth } } as ResizeObserverEntry], this as unknown as ResizeObserver)
+          }
+          unobserve() {}
+          disconnect() { disconnect() }
+        } as unknown as typeof ResizeObserver
+      }
+
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/', component: EmptyStub }],
+      })
+      await router.push('/')
+      await router.isReady()
+
+      const store = useProjectStore()
+      store.projects = [{
+        project_id: 'project-1',
+        name: 'General',
+        workspace: 'personal',
+      }] as unknown as typeof store.projects
+      store.chats = []
+      store.activeChatId = null
+      store.bootstrapped = true
+      vi.spyOn(store, 'fetchAll').mockResolvedValue()
+      vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+
+      useHousekeepingStore().actions = [{
+        id: 'a',
+        kind: 'test',
+        severity: 10,
+        title: 'A condition needs you',
+        detail: 'It can be fixed.',
+        glyph: '▲',
+        workspace: 'personal',
+        run_label: '',
+        chat_label: '',
+        chat_prompt: '',
+        view_label: '',
+        blocking: false,
+        view_route: '',
+      }]
+
+      const { default: ChatLayout } = await import('../ChatLayout.vue')
+      const wrapper = mount(ChatLayout, {
+        global: {
+          plugins: [router],
+          stubs: {
+            ChatPanel: ChatPanelStub,
+            ProjectSidebar: EmptyStub,
+            ProjectView: EmptyStub,
+            SchedulePanel: EmptyStub,
+            SettingsView: EmptyStub,
+            FileViewerModal: EmptyStub,
+            PinnedFilePanel: EmptyStub,
+            PaneHeader: EmptyStub,
+            HomeRecentChats: EmptyStub,
+          },
+        },
+      })
+      await flushPromises()
+      return wrapper
+    }
+
+    it("puts Home's alerts in the rail when the pane is wide", async () => {
+      const wrapper = await mountHome(1200)
+      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(true)
+      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(false)
+      const rail = wrapper.get('.home-rail').html()
+      expect(rail.indexOf('class="housekeeping"')).toBeGreaterThan(-1)
+      expect(rail.indexOf('class="housekeeping"')).toBeLessThan(rail.indexOf('home-review-summary'))
+      wrapper.unmount()
+    })
+
+    it("keeps Home's alerts under the composer when the pane is narrow", async () => {
+      const wrapper = await mountHome(600)
+      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(true)
+      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('puts the alerts in the rail at 941px and under the composer at 940px', async () => {
+      // `@container chat-pane (max-width: 940px)` is inclusive.
+      const edge = await mountHome(940)
+      expect(edge.find('.home-main .housekeeping').exists()).toBe(true)
+      expect(edge.find('.home-rail .housekeeping').exists()).toBe(false)
+      edge.unmount()
+
+      const over = await mountHome(941)
+      expect(over.find('.home-rail .housekeeping').exists()).toBe(true)
+      expect(over.find('.home-main .housekeeping').exists()).toBe(false)
+      over.unmount()
+    })
+
+    it('stops observing the pane on unmount', async () => {
+      const wrapper = await mountHome(1200)
+      expect(disconnect).not.toHaveBeenCalled()
+      wrapper.unmount()
+      expect(disconnect).toHaveBeenCalled()
+    })
+
+    it('falls back to the viewport width without a ResizeObserver', async () => {
+      // beforeEach sets innerWidth to 390, so `isMobile` is true.
+      const wrapper = await mountHome(null)
+      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(true)
+      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(false)
+      wrapper.unmount()
+    })
+  })
+
   it('reports post-archive memory work in the home attention summary', async () => {
     const router = createRouter({
       history: createMemoryHistory(),

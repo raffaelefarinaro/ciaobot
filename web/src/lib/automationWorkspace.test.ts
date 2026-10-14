@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ChatInfo, ProjectInfo, Schedule } from './types'
-import { scheduleInWorkspace } from './automationWorkspace'
+import { scheduleInWorkspace, scheduleNeedsAttention } from './automationWorkspace'
 
 describe('automation workspace scoping', () => {
   it('keeps schedules only in their assigned workspace', () => {
@@ -31,5 +31,18 @@ describe('automation workspace scoping', () => {
     ] as ProjectInfo[]
 
     expect(scheduleInWorkspace(schedule, 'personal', chats, projects)).toBe(true)
+  })
+})
+
+describe('scheduleNeedsAttention', () => {
+  const base = { enabled: true, missed: false, last_status: 'ok' } as Schedule
+
+  it('matches the sidebar warning', () => {
+    expect(scheduleNeedsAttention({ ...base, enabled: false, last_status: 'missing-chat' })).toBe(true)
+    expect(scheduleNeedsAttention({ ...base, missed: true })).toBe(true)
+    expect(scheduleNeedsAttention({ ...base, last_status: 'error' })).toBe(true)
+    expect(scheduleNeedsAttention({ ...base, enabled: false, last_status: 'error' })).toBe(false)
+    expect(scheduleNeedsAttention({ ...base, last_status: 'skipped' })).toBe(false)
+    expect(scheduleNeedsAttention(base)).toBe(false)
   })
 })

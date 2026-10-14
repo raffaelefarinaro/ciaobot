@@ -38,7 +38,7 @@ function proposal(id: string, workspace: string): ProposalRow {
   } as ProposalRow
 }
 
-function schedule(id: string, workspace: string): Schedule {
+function schedule(id: string, workspace: string, overrides: Partial<Schedule> = {}): Schedule {
   return {
     schedule_id: id,
     title: `${workspace} briefing`,
@@ -47,6 +47,7 @@ function schedule(id: string, workspace: string): Schedule {
     enabled: true,
     workspace,
     next_run: '2026-09-25T08:00:00Z',
+    ...overrides,
   } as Schedule
 }
 
@@ -88,7 +89,7 @@ describe('HomeReviewSummary', () => {
     expect(wrapper.get('#home-review-title').text()).toBe('At a glance')
     // Up-to-date queues drop out; only what needs a look is listed.
     let titles = wrapper.findAll('.home-review-title').map(node => node.text())
-    expect(titles).toEqual(['1 memory proposal', '1 active automation'])
+    expect(titles).toEqual(['1 memory proposal'])
 
     const projects = useProjectStore()
     const proposals = useProposalsStore()
@@ -98,8 +99,8 @@ describe('HomeReviewSummary', () => {
       proposal('work-two', 'work'),
     )
     tasks.schedules.push(
-      schedule('work-one', 'work'),
-      schedule('work-two', 'work'),
+      schedule('work-one', 'work', { last_status: 'error' }),
+      schedule('work-two', 'work', { last_status: 'error' }),
     )
     projects.activeWorkspace = 'work'
     await nextTick()
@@ -107,7 +108,12 @@ describe('HomeReviewSummary', () => {
 
     titles = wrapper.findAll('.home-review-title').map(node => node.text())
     expect(titles).toContain('2 memory proposals')
-    expect(titles).toContain('2 active automations')
+    expect(titles).toContain('2 automations need a look')
+
+    projects.activeWorkspace = 'personal'
+    await nextTick()
+    titles = wrapper.findAll('.home-review-title').map(node => node.text())
+    expect(titles.some(title => /automation/.test(title))).toBe(false)
     wrapper.unmount()
   })
 
@@ -175,20 +181,99 @@ describe('HomeReviewSummary', () => {
     loading.unmount()
   })
 
-  it('renders rows with real counts and the next automation', async () => {
+  it('renders rows with real counts', () => {
     const proposals = useProposalsStore()
     proposals.rows.push(proposal('personal-two', 'personal'))
 
     const wrapper = mount(HomeReviewSummary)
     const rows = wrapper.findAll('.home-review-item')
+    expect(rows).toHaveLength(1)
     expect(rows[0].find('.home-review-title').text()).toBe('2 memory proposals')
-    expect(rows[1].find('.home-review-title').text()).toBe('1 active automation')
-    expect(rows[1].find('.home-review-detail').text()).toContain('personal briefing · next')
+    expect(wrapper.text()).not.toContain('active automation')
     expect(wrapper.find('.home-review-icon').exists()).toBe(false)
-
-    await rows[1].trigger('click')
-    expect(router.push).toHaveBeenCalledWith('/schedules')
     wrapper.unmount()
+  })
+
+  describe('automations', () => {
+    function mountWith(schedules: Schedule[]) {
+      useProposalsStore().rows = []
+      useTaskStore().schedules = schedules
+      return mount(HomeReviewSummary)
+    }
+
+    it('flags one failed automation by name and opens it', async () => {
+      const wrapper = mountWith([schedule('personal-briefing', 'personal', { last_status: 'error' })])
+      const rows = wrapper.findAll('.home-review-item')
+      expect(rows).toHaveLength(1)
+      expect(rows[0].get('.home-review-title').text()).toBe('1 automation needs a look')
+      expect(rows[0].get('.home-review-detail').text()).toBe('personal briefing · the last run failed.')
+      expect(rows[0].classes()).toContain('home-review-item--attention')
+      await rows[0].trigger('click')
+      expect(router.push).toHaveBeenCalledWith('/schedules/personal-briefing')
+      wrapper.unmount()
+    })
+
+    it('flags an automation whose chat is gone even though it is turned off', () => {
+      const wrapper = mountWith([
+        schedule('personal-briefing', 'personal', { enabled: false, last_status: 'missing-chat' }),
+      ])
+      expect(wrapper.get('.home-review-detail').text()).toBe(
+        'personal briefing · its chat was deleted, so it is turned off.',
+      )
+      wrapper.unmount()
+    })
+
+    it('says a missed run in words', () => {
+      const wrapper = mountWith([schedule('personal-briefing', 'personal', { missed: true })])
+      expect(wrapper.get('.home-review-detail').text().endsWith('it did not run when expected.')).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('groups several failures and opens the list', async () => {
+      const wrapper = mountWith([
+        schedule('a', 'personal', { last_status: 'error' }),
+        schedule('b', 'personal', { missed: true }),
+      ])
+      const row = wrapper.get('.home-review-item')
+      expect(row.get('.home-review-title').text()).toBe('2 automations need a look')
+      expect(row.get('.home-review-detail').text()).toBe(
+        'Some automations failed or did not run. Open Automations to check them.',
+      )
+      await row.trigger('click')
+      expect(router.push).toHaveBeenCalledWith('/schedules')
+      wrapper.unmount()
+    })
+
+    it('leaves healthy, disabled, other-workspace and missed one-time automations out', () => {
+      const wrapper = mountWith([
+        schedule('healthy', 'personal'),
+        schedule('off', 'personal', { enabled: false, last_status: 'error' }),
+        schedule('other', 'personal', { workspace: 'work', last_status: 'error' }),
+        schedule('once', 'personal', { frequency: 'once', missed: true }),
+      ])
+      expect(wrapper.findAll('.home-review-item')).toHaveLength(0)
+      expect(wrapper.get('.home-review-clear').text()).toBe('Nothing to review.')
+      wrapper.unmount()
+    })
+
+    it('shows a disabled one-time reminder whose chat is gone', () => {
+      // The backend's missed-schedules notice covers only enabled reminders.
+      const wrapper = mountWith([
+        schedule('once', 'personal', {
+          frequency: 'once', enabled: false, missed: true, last_status: 'missing-chat',
+        }),
+      ])
+      expect(wrapper.get('.home-review-title').text()).toBe('1 automation needs a look')
+      wrapper.unmount()
+    })
+
+    it('names an untitled automation by its prompt', () => {
+      const wrapper = mountWith([
+        schedule('x', 'personal', { title: '', prompt: 'Summarise the inbox\nmore', last_status: 'error' }),
+      ])
+      expect(wrapper.get('.home-review-detail').text().startsWith('Summarise the inbox · ')).toBe(true)
+      wrapper.unmount()
+    })
   })
 
   it('never links a memory pass from this rail', async () => {

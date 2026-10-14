@@ -903,7 +903,7 @@ import ChatSignals from './ChatSignals.vue'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
-import { scheduleInWorkspace } from '../lib/automationWorkspace'
+import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
 import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
 import { SETTINGS_NAV } from '../lib/settingsNav'
@@ -1296,14 +1296,10 @@ const isAnyChatWorking = computed(() => store.anyChatBusy)
 const hasAutomationWarning = computed(() => {
   // Scoped like `missedCountFor`, so the colour and the count describe the
   // same set as the Automations list.
-  return taskStore.schedules.some(s => {
-    if (!scheduleInWorkspace(s, store.activeWorkspace, store.chats, store.projects)) return false
-    // `missing-chat` is set at the same moment the entry is disabled (the
-    // dispatcher found neither a target chat nor a project to re-home into),
-    // so gating it on `enabled` hid the one failure that cannot fix itself.
-    if (s.last_status === 'missing-chat') return true
-    return s.enabled && (s.missed || s.last_status === 'error')
-  })
+  return taskStore.schedules.some(s => (
+    scheduleInWorkspace(s, store.activeWorkspace, store.chats, store.projects)
+    && scheduleNeedsAttention(s)
+  ))
 })
 // Destination projects for "Move to..." — same workspace as the chat,
 // excluding the chat's current project. Backend rejects cross-workspace moves.
