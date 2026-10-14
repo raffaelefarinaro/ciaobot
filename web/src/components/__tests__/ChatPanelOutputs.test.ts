@@ -347,10 +347,11 @@ describe('ChatPanel Outputs section', () => {
     await flushPromises()
 
     await wrapper.get('.work-inspector-trigger').trigger('click')
-    await wrapper.get('#work-tab-output').trigger('click')
-    const rows = wrapper.findAll('.chat-work-output')
+    await flushPromises()
+    const files = wrapper.get('#chat-work-rail').get('[aria-labelledby="chat-rail-files"]')
+    const rows = files.findAll('.rail-item')
     expect(rows).toHaveLength(2)
-    expect(new Set(rows.map(row => row.get('.chat-work-output-action').text())).size).toBe(2)
+    expect(new Set(rows.map(row => row.get('small').text().split(' · ')[0])).size).toBe(2)
   })
 
   it('opens the memory source from the pass itself, not the browser chat list', async () => {

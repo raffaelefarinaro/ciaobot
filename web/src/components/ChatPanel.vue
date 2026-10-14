@@ -86,7 +86,7 @@
       type="button"
       class="btn-icon work-inspector-trigger"
       :aria-expanded="isWidePane ? false : inspectorOpen"
-      :aria-controls="isWidePane ? 'chat-work-rail' : 'chat-work-inspector'"
+      aria-controls="chat-work-rail"
       aria-label="Show chat details"
       title="Show chat details"
       @click="toggleWorkDetails"
@@ -605,110 +605,6 @@
       </div>
     </div>
 
-    <aside
-      v-if="inspectorOpen"
-      id="chat-work-inspector"
-      ref="inspectorPanel"
-      class="chat-work-inspector"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="chat-work-inspector-title"
-    >
-      <header class="chat-work-inspector-header">
-        <h2 id="chat-work-inspector-title">Chat details</h2>
-        <button
-          ref="inspectorCloseButton"
-          type="button"
-          class="btn-icon"
-          aria-label="Close chat details"
-          title="Close"
-          @click="inspectorOpen = false"
-        ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
-      </header>
-
-      <div class="chat-work-tabs" role="tablist" aria-label="Work detail sections">
-        <button
-          v-for="(tab, index) in inspectorTabs"
-          :id="`work-tab-${tab.key}`"
-          :key="tab.key"
-          type="button"
-          role="tab"
-          :aria-selected="inspectorTab === tab.key"
-          :aria-controls="`work-panel-${tab.key}`"
-          :tabindex="inspectorTab === tab.key ? 0 : -1"
-          @click="inspectorTab = tab.key"
-          @keydown="onInspectorTabKeydown($event, index)"
-        >{{ tab.label }}</button>
-      </div>
-
-      <section
-        v-if="inspectorTab === 'context'"
-        id="work-panel-context"
-        class="chat-work-panel"
-        role="tabpanel"
-        aria-labelledby="work-tab-context"
-      >
-        <AgentContextSection
-          :project="project"
-          :context-pct="contextPct"
-          :compacting="compacting"
-          :compact-disabled="compactDisabled"
-          @open-file="openInspectorFile"
-          @compact="compactContext"
-        />
-      </section>
-
-      <section
-        v-else-if="inspectorTab === 'activity'"
-        id="work-panel-activity"
-        class="chat-work-panel"
-        role="tabpanel"
-        aria-labelledby="work-tab-activity"
-      >
-        <span class="chat-work-label">Running</span>
-        <BackgroundRunRows v-if="chatRuns.length" :chat-id="chat.chat_id" :runs="chatRuns" :now="nowTs" />
-        <div v-if="runningSubagents.length" class="rail-list">
-          <router-link
-            v-for="sub in runningSubagents"
-            :key="sub.agent_id"
-            :to="subagentPath(chat.chat_id, sub.agent_id)"
-            class="rail-item"
-          >
-            <span class="chat-rail-subagent">{{ subagentLabel(sub) }}</span>
-            <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
-          </router-link>
-        </div>
-        <p v-if="!runningSubagents.length && !chatRuns.length" class="chat-work-note">Nothing right now.</p>
-        <p class="chat-work-note">Tool steps stay collapsed in the transcript; open Activity on a turn for its full sequence.</p>
-      </section>
-
-      <section
-        v-else
-        id="work-panel-output"
-        class="chat-work-panel"
-        role="tabpanel"
-        aria-labelledby="work-tab-output"
-      >
-        <span class="chat-work-label">Files produced or changed</span>
-        <div v-if="inspectorOutputs.length" class="chat-work-output-list">
-          <button
-            v-for="output in inspectorOutputs"
-            :key="`${output.action}:${output.file_path}`"
-            type="button"
-            class="chat-work-output"
-            @click="openInspectorFile(output.file_path)"
-          >
-            <span class="chat-work-output-icon" aria-hidden="true">↗</span>
-            <span class="chat-work-output-name">{{ fileCardBasename(output.file_path) }}</span>
-            <span class="chat-work-output-action">{{ outputActionTag(output.action) }}</span>
-          </button>
-        </div>
-        <div v-else class="chat-work-empty">
-          <strong>No files yet</strong>
-          <p>Created and modified files will collect here without burying the conversation.</p>
-        </div>
-      </section>
-    </aside>
 
       <!-- Scroll-to-bottom floats inside the scroll area so it tracks the
            composer height: .chat-with-sidebar ends at the top of the input
@@ -1217,14 +1113,18 @@
     </div>
     </div>
 
-    <!-- Chat details as a rail. The same three sections the narrow-pane drawer
-         shows as tabs, stacked, because on a wide pane there is room to see
-         them together. Hidden with the header's Chat details toggle. -->
+    <!-- Chat details. One panel at every width: in place against the pane's
+         right edge when there is room, and over the chat as a drawer when
+         there is not — the same stacked sections either way, read by
+         scrolling, with one close button. -->
     <aside
-      v-if="railShown"
+      v-if="railShown || drawerShown"
       id="chat-work-rail"
       ref="railEl"
       class="chat-rail"
+      :class="{ 'chat-rail--drawer': drawerShown }"
+      :role="drawerShown ? 'dialog' : undefined"
+      :aria-modal="drawerShown ? 'true' : undefined"
       aria-labelledby="chat-work-rail-title"
     >
       <div class="chat-rail-head">
@@ -1237,7 +1137,7 @@
           aria-controls="chat-work-rail"
           aria-label="Hide chat details"
           title="Close chat details"
-          @click="hideRail"
+          @click="closeDetails"
         ><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
       </div>
       <!-- Where this chat came from, above everything else: one line naming the
@@ -1877,16 +1777,9 @@ function turnMetaText(meta: { timestamp?: string; duration_ms?: number; effectiv
 
 // The reply whose action row stays visible: the newest assistant message.
 
+/** Chat details opened as a drawer, on a pane too narrow to show it in place. */
 const inspectorOpen = ref(false)
 const inspectorTrigger = ref<HTMLButtonElement | null>(null)
-const inspectorTab = ref<'context' | 'activity' | 'output'>('context')
-const inspectorPanel = ref<HTMLElement | null>(null)
-const inspectorCloseButton = ref<HTMLButtonElement | null>(null)
-const inspectorTabs = [
-  { key: 'context' as const, label: 'Context' },
-  { key: 'activity' as const, label: 'Activity' },
-  { key: 'output' as const, label: 'Output' },
-]
 // One row per file name: the same note shows up under several spellings
 // (relative, workspace-prefixed, before and after a move), and the reader
 // thinks of it as one file.
@@ -1986,14 +1879,9 @@ function subagentLabel(sub: RunningSubagent): string {
   return (sub.description || '').trim() || shortAgentId(sub.agent_id)
 }
 
-const inspectorActive = computed(() => inspectorOpen.value)
-function openInspector() {
-  inspectorTrigger.value?.focus()
-  inspectorOpen.value = true
-}
-// On a pane wide enough for the page grid's rail (the same 940px break the
-// shared .page-grid uses), Chat details is shown in place instead of as a
-// drawer. Measured on the panel rather than the window, because the sidebar
+// On a pane wide enough for the rail beside a full reading column, Chat
+// details is shown in place; narrower, the same panel opens over the chat as
+// a drawer. Measured on the panel rather than the window, because the sidebar
 // and a pinned file both take width from this pane.
 const panelEl = ref<HTMLElement | null>(null)
 const railEl = ref<HTMLElement | null>(null)
@@ -2001,6 +1889,7 @@ const railContextEl = ref<HTMLElement | null>(null)
 const isWidePane = ref(false)
 const railOpen = ref(true)
 const railShown = computed(() => isWidePane.value && railOpen.value)
+const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
 let panelObserver: ResizeObserver | null = null
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !panelEl.value) return
@@ -2014,62 +1903,54 @@ onMounted(() => {
 onBeforeUnmount(() => { panelObserver?.disconnect() })
 
 const railHideButton = ref<HTMLButtonElement | null>(null)
-// Focus follows the toggle: it lives in the rail while the rail shows and in
-// the chat body while it does not, so each click would otherwise drop focus
-// on a button that just unmounted.
-function toggleWorkDetails() {
-  if (isWidePane.value) {
-    railOpen.value = true
-    void nextTick(() => railHideButton.value?.focus())
+const railRunningEl = ref<HTMLElement | null>(null)
+
+/**
+ * Show Chat details: in place on a wide pane, as the drawer otherwise. Focus
+ * goes to the section the caller names, or to the close button, so it never
+ * drops on a trigger that just unmounted. The drawer's focus trap places it,
+ * so the named section has to be its initial focus rather than a later move.
+ */
+type DetailsTarget = 'close' | 'running' | 'context'
+const detailsTarget = ref<DetailsTarget>('close')
+const detailsFocusEl = computed<HTMLElement | null>(() => {
+  if (detailsTarget.value === 'running') return railRunningEl.value ?? railHideButton.value
+  if (detailsTarget.value === 'context') return railContextEl.value ?? railHideButton.value
+  return railHideButton.value
+})
+function showDetails(target: DetailsTarget = 'close') {
+  detailsTarget.value = target
+  if (!isWidePane.value) {
+    // The trap hands focus back to whatever held it on open: make that the
+    // trigger, so Escape returns there and not to wherever the click came from.
+    inspectorTrigger.value?.focus()
+    inspectorOpen.value = true
     return
   }
-  openInspector()
+  railOpen.value = true
+  void nextTick(() => {
+    const el = detailsFocusEl.value
+    el?.focus()
+    if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
+  })
 }
-function hideRail() {
-  railOpen.value = false
+function closeDetails() {
+  if (isWidePane.value) railOpen.value = false
+  else inspectorOpen.value = false
   void nextTick(() => inspectorTrigger.value?.focus())
 }
-
-const railRunningEl = ref<HTMLElement | null>(null)
+function toggleWorkDetails() {
+  showDetails()
+}
+// A finished run's notice can outlive the Running section it points at.
 function openRunDetails() {
-  if (isWidePane.value) {
-    railOpen.value = true
-    // A finished run's notice can outlive the Running section it points at.
-    void nextTick(() => (railRunningEl.value ?? railHideButton.value)?.focus())
-    return
-  }
-  inspectorTab.value = 'activity'
-  openInspector()
+  showDetails('running')
 }
-
 function openProjectKnowledge() {
-  if (isWidePane.value) {
-    railOpen.value = true
-    void nextTick(() => railContextEl.value?.focus())
-    return
-  }
-  inspectorTab.value = 'context'
-  openInspector()
+  showDetails('context')
 }
-function onInspectorTabKeydown(event: KeyboardEvent, index: number) {
-  let next = index
-  if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
-    next = (index + 1) % inspectorTabs.length
-  } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
-    next = (index - 1 + inspectorTabs.length) % inspectorTabs.length
-  } else if (event.key === 'Home') {
-    next = 0
-  } else if (event.key === 'End') {
-    next = inspectorTabs.length - 1
-  } else {
-    return
-  }
-  event.preventDefault()
-  inspectorTab.value = inspectorTabs[next].key
-  void nextTick(() => document.getElementById(`work-tab-${inspectorTabs[next].key}`)?.focus())
-}
-useModalFocus(inspectorPanel, inspectorActive, {
-  initialFocus: inspectorCloseButton,
+useModalFocus(railEl, drawerShown, {
+  initialFocus: detailsFocusEl,
   onEscape: () => { inspectorOpen.value = false },
 })
 
@@ -4564,16 +4445,52 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
    whole conversation (context bar, transcript, dock, composer), so the
    transcript, the composer and the header title share one left edge; the
    rail takes --page-rail on the right when Chat details is shown in place. */
+/* The body spans the whole pane. The conversation keeps a reading measure
+   (--chat-measure, ~75 characters of body text) centred in the space beside
+   the rail, while the scroll box, the rail and the header actions reach the
+   pane's edges: a wide window is spent on room around the chat, never on
+   lines too long to read. */
+.chat-panel {
+  --chat-measure: 768px;
+  --chat-rail-w: 320px;
+  --chat-rail-gap: var(--space-6);
+  /* Wide blocks (tables, code) may grow past the measure up to this. */
+  --chat-wide: 1120px;
+}
 .chat-body {
   flex: 1;
   display: flex;
-  gap: 48px;
+  gap: var(--chat-rail-gap);
   box-sizing: border-box;
   width: 100%;
-  max-width: var(--page-max);
   min-height: 0;
-  margin: 0 auto;
-  padding-inline: calc(var(--page-gutter) + var(--safe-left)) calc(var(--page-gutter) + var(--safe-right));
+  padding-inline: calc(var(--page-gutter) + var(--safe-left)) calc(var(--space-4) + var(--safe-right));
+}
+.chat-panel:not(.chat-panel--rail) .chat-body {
+  padding-right: calc(var(--page-gutter) + var(--safe-right));
+}
+/* Every band of the conversation sits on the same centred measure. */
+.chat-column > :not(.chat-with-sidebar):not(.sr-only),
+.messages-content {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--chat-measure);
+  margin-left: auto;
+  margin-right: auto;
+}
+.messages { container-type: inline-size; }
+/* The header title starts where the reading column starts, and its actions
+   end over the rail at the pane's right edge. */
+.chat-panel :deep(.pane-header) {
+  padding-left: max(var(--page-gutter), calc((100% - var(--chat-measure)) / 2));
+  padding-right: calc(var(--page-gutter) + var(--safe-right));
+}
+.chat-panel--rail :deep(.pane-header) {
+  padding-left: max(
+    var(--page-gutter),
+    calc((100% - var(--page-gutter) - var(--space-4) - var(--chat-rail-w) - var(--chat-rail-gap) - var(--chat-measure)) / 2 + var(--page-gutter))
+  );
+  padding-right: calc(var(--space-4) + var(--safe-right));
 }
 
 /* Top right of the chat body, where the rail's heading would be. */
@@ -4626,8 +4543,8 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 
 .chat-rail {
-  flex: 0 0 var(--page-rail);
-  width: var(--page-rail);
+  flex: 0 0 var(--chat-rail-w);
+  width: var(--chat-rail-w);
   min-width: 0;
   overflow-y: auto;
   /* As tall as its content, not the pane: a short rail is a window resting
@@ -5753,9 +5670,15 @@ details[open] > .activity-summary::before {
   color: var(--accent);
   text-decoration: underline solid;
 }
+/* A wide table may run past the reading measure into the empty space on its
+   right (up to --chat-wide), so its columns stay readable instead of
+   scrolling inside a narrow box; it still scrolls once that runs out. */
 .message-content :deep(.markdown-table-scroll) {
   width: fit-content;
-  max-width: 100%;
+  max-width: min(
+    var(--chat-wide),
+    calc(100% + max(0px, (100cqw - var(--chat-measure)) / 2) - var(--space-2))
+  );
   overflow-x: auto;
   margin: 8px 0;
   border: 1px solid var(--border-strong);
@@ -7274,191 +7197,57 @@ details[open] > .activity-summary::before {
   min-width: 0;
 }
 
-.chat-work-inspector {
+/* Chat details as a drawer: the rail's own markup, over the chat on a pane
+   too narrow to hold it beside a reading column. Full height, one scroll, the
+   close button in its head; a bottom sheet on a phone. */
+.chat-rail.chat-rail--drawer {
   position: absolute;
   z-index: 55;
   top: 0;
   right: 0;
   bottom: 0;
   width: min(390px, 100%);
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid var(--border-strong);
-  background: var(--bg2);
+  /* The rail's flex-start would shrink an absolutely positioned box to its
+     content; the drawer spans the pane. */
+  align-self: stretch;
+  max-height: none;
+  margin: 0;
+  border-width: 0 0 0 1px;
+  border-color: var(--border-strong);
+  border-radius: 0;
   box-shadow: -1rem 0 3rem rgb(0 0 0 / 28%);
-  animation: chat-inspector-in 190ms var(--ease);
+  overscroll-behavior: contain;
+  animation: chat-drawer-in 190ms var(--ease);
 }
-
-@keyframes chat-inspector-in {
+.chat-rail--drawer .chat-rail-head {
+  position: sticky;
+  top: -16px;
+  z-index: 1;
+  background: var(--bg2);
+}
+@keyframes chat-drawer-in {
   from { opacity: 0; transform: translateX(18px); }
   to { opacity: 1; transform: none; }
 }
-
-.chat-work-inspector-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  border-bottom: 1px solid var(--border);
-}
-
-.chat-work-label {
-  display: block;
-  color: var(--fg2);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-weight: 650;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.chat-work-inspector-header h2 {
-  margin: var(--space-1) 0 0;
-  color: var(--fg);
-  font-size: var(--text-lg);
-  letter-spacing: -0.02em;
-}
-
-.chat-work-inspector-header .btn-icon {
-  font-size: 20px;
-}
-
-.chat-work-tabs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--border);
-}
-
-.chat-work-tabs button {
-  min-height: var(--touch);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--fg2);
-  font: inherit;
-  font-size: var(--text-sm);
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.chat-work-tabs button[aria-selected="true"] {
-  border-color: var(--border-strong);
-  background: var(--bg3);
-  color: var(--fg);
-}
-
-.chat-work-panel {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: var(--space-4);
-}
-
-.chat-work-panel h3 {
-  margin: var(--space-2) 0 0;
-  color: var(--fg);
-  font-size: var(--text-lg);
-  letter-spacing: -0.025em;
-}
-
-.chat-work-copy,
-.chat-work-note {
-  margin: var(--space-3) 0 0;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-
-.chat-work-facts,
-.chat-work-status-list {
-  margin-top: var(--space-5);
-  border-top: 1px solid var(--border);
-}
-
-.chat-work-facts > div,
-.chat-work-status-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  min-height: var(--touch);
-  padding: var(--space-2) 0;
-  border-bottom: 1px solid var(--border);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-
-.chat-work-facts strong,
-.chat-work-status-row strong {
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
-}
-
-.chat-work-status-row strong.working { color: var(--accent); }
-.chat-work-status-row strong.attention { color: var(--warning); }
-
-.chat-work-output-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-
-.chat-work-output {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: var(--touch);
-  padding: var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--fg);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.chat-work-output:hover { border-color: var(--border-strong); background: var(--bg3); }
-.chat-work-output-icon { color: var(--accent); }
-.chat-work-output-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-work-output-action { color: var(--fg2); font-family: var(--font-mono); font-size: var(--text-xs); }
-
-.chat-work-empty {
-  margin-top: var(--space-4);
-  padding: var(--space-4);
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-sm);
-  color: var(--fg2);
-}
-
-.chat-work-empty strong { color: var(--fg); }
-.chat-work-empty p { margin: var(--space-2) 0 0; line-height: 1.5; }
-
 @media (max-width: 600px) {
-  .chat-work-inspector {
+  .chat-rail.chat-rail--drawer {
     top: auto;
     left: 0;
     width: 100%;
     max-height: min(76dvh, 680px);
-    border-top: 1px solid var(--border-strong);
-    border-left: 0;
+    padding-bottom: calc(16px + var(--safe-bottom));
+    border-width: 1px 0 0;
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     box-shadow: 0 -1rem 3rem rgb(0 0 0 / 34%);
-    animation-name: chat-inspector-sheet-in;
+    animation-name: chat-drawer-sheet-in;
   }
-
-  @keyframes chat-inspector-sheet-in {
+  @keyframes chat-drawer-sheet-in {
     from { opacity: 0; transform: translateY(18px); }
     to { opacity: 1; transform: none; }
   }
 }
-
 @media (prefers-reduced-motion: reduce) {
-  .chat-work-inspector { animation: none; }
+  .chat-rail--drawer { animation: none; }
 }
 /* Inline text highlights inside message bubbles. Use :deep() because
  * highlight spans are inserted via DOM manipulation in applyHighlights()
