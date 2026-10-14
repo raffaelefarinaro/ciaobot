@@ -104,8 +104,8 @@ A delegated agent reports how far it got with `ciao task report <id> --outcome
 done|blocked|needs_input --summary-file <file.md>` (MCP `task_report`), accepted
 only from the chat that holds the task's live attempt. The report is stored on
 the attempt (`outcome`, `summary`) and decides how a cleanly ended turn settles:
-`done` is `ready_for_review` (the card reads *Agent says done*, the user still
-approves it), `blocked` and `needs_input` are `needs_you`, and a turn with no
+`done` is `ready_for_review` (the card's chat button reads *Review in chat*, the
+editor and the chat's rail read *Agent says done*, and the user still approves it), `blocked` and `needs_input` are `needs_you`, and a turn with no
 report is `needs_you` with the note "the turn ended without a report from the
 agent" (*Unfinished*). A new turn clears the outcome and keeps the summary.
 
@@ -279,8 +279,10 @@ B5 shipped the lifecycle. This is the human loop around it, and it is a **surfac
 and a contract**: no new store, no new route, and no change to the attempt store.
 Four things a card has to be able to say, and what each one is allowed to do.
 
-**Where the result is, and how it is closed.** A `ready_for_review` card names the
-linked chat and carries one **Approve Done**. It does not carry Stop — there is no
+**Where the result is, and how it is closed.** A `ready_for_review` card carries
+one accent **Review in chat** and no status badge: the user reads the result before
+closing it, so **Approve Done** lives in the chat's rail and the task editor, not on
+the card. It does not carry Stop — there is no
 turn running to stop — and it does not require a Detach first, because that is the
 workaround whose whole cost is the result: detaching a finished attempt settles it
 `stopped`. Approve Done is `POST /complete` at the revision the card was drawn at,
