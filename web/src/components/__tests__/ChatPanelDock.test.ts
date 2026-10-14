@@ -308,7 +308,7 @@ describe('ChatPanel action dock', () => {
     wrapper.unmount()
   })
 
-  it('opens Chat details on the Activity tab from the run line on a narrow pane', async () => {
+  it('opens Chat details at its Running section from the run line on a narrow pane', async () => {
     const { wrapper } = await mountPanel(s => {
       s.backgroundRuns = {
         'chat-1': [{ run_id: 'r1', label: 'Clone rizzo-flow', cmd: [], started_at: new Date().toISOString(), status: 'running', exit_code: null }],
@@ -316,8 +316,9 @@ describe('ChatPanel action dock', () => {
     })
     await wrapper.get('.run-status').trigger('click')
     await nextTick()
-    const panel = wrapper.get('#work-panel-activity')
+    const panel = wrapper.get('#chat-work-rail .chat-rail-running')
     expect(panel.text()).toContain('Running')
+    expect(document.activeElement).toBe(panel.element)
     expect(panel.findComponent({ name: 'BackgroundRunRows' }).exists()).toBe(true)
     wrapper.unmount()
   })

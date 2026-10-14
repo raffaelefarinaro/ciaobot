@@ -248,7 +248,7 @@ describe('ChatPanel aligned layout', () => {
     await reopen.trigger('click')
     expect(wrapper.find('#chat-work-rail').exists()).toBe(true)
     // The drawer is the narrow-pane form; it does not open on a wide pane.
-    expect(wrapper.find('.chat-work-inspector').exists()).toBe(false)
+    expect(wrapper.find('.chat-rail--drawer').exists()).toBe(false)
     wrapper.unmount()
   })
 
