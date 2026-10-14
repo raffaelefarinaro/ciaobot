@@ -1923,6 +1923,23 @@ describe('TaskBoardView', () => {
     archived.unmount()
   })
 
+  it('acts from the card menu without opening the editor', async () => {
+    apiPost.mockResolvedValue({
+      workspace: 'personal',
+      attempt: { ...delegateAnswer().attempt, attempt_id: LIVE_ID, chat_id: 'chat-7', state: 'stopped', live: false },
+      chat_id: 'chat-7',
+    })
+    const wrapper = await mountWithBody([liveTask()])
+    await (await chip(wrapper, 'Wire the store', 'Stop')).trigger('click')
+    await flushPromises()
+    expect(apiPost).toHaveBeenCalledWith(
+      `/api/tasks/doing/attempt/${LIVE_ID}/stop`,
+      { workspace: 'personal' },
+    )
+    expect(wrapper.find('.task-sheet').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('opens the card menu without opening the editor', async () => {
     const wrapper = await mountWithBody([liveTask()])
     expect((await menuItems(wrapper, 'Wire the store')).length).toBeGreaterThan(0)

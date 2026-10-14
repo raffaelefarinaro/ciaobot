@@ -832,7 +832,7 @@ function reconcile(task: Task): TaskReconcileNote[] {
  * Whether this card's completion gesture is an **approval**, not a plain Done.
  *
  * `live_attempt_id` is the discriminator, not the badge: an approved or detached
- * card keeps reading `ready_for_review` forever, and offering "Approve Done" on a
+ * card keeps reading `ready_for_review` forever, and offering the approve checkbox on a
  * result the user already approved would be a second completion gesture for the
  * same review.
  */
@@ -2006,7 +2006,7 @@ const today = localDateKey()
                     v-if="ownProject(task.project_id) || cardDate(task)"
                     class="task-meta"
                   >
-                    <span v-if="ownProject(task.project_id)" class="task-project">{{ projectName(task.project_id) }}</span>
+                    <span v-if="ownProject(task.project_id)" class="task-project" :title="projectName(task.project_id)">{{ projectName(task.project_id) }}</span>
                     <span v-if="task.status === 'done' && task.attempt_outcome === 'done'" class="task-done-by">Done by agent</span>
                     <span
                       v-if="cardDate(task)"
@@ -3090,20 +3090,28 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 .task-reconcile-actions { color: var(--fg3); }
 .task-meta {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
   align-items: center;
   gap: 0 var(--space-2);
   margin: 0;
   font-size: var(--text-sm);
   color: var(--fg3);
 }
+.task-meta > * { flex: none; white-space: nowrap; }
 .task-meta > * + *::before {
   content: '\00b7';
   margin-right: var(--space-2);
   color: var(--border-strong);
 }
-.task-project { overflow-wrap: anywhere; }
-.task-due--over { color: var(--error); }
+.task-meta > .task-project {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-due--over { color: color-mix(in srgb, var(--error), var(--fg) 25%); }
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -3144,6 +3152,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
+  white-space: nowrap;
   color: color-mix(in srgb, var(--band-tone), var(--fg) 25%);
 }
 .task-agent-band--running .task-agent-status { color: var(--fg2); }
