@@ -91,13 +91,13 @@ async function poll() {
   await flushPromises()
 }
 
-it('offers Stage for an installer engine with an update available', async () => {
+it('offers one Update & restart button when a release is available (click posts start)', async () => {
   const { wrapper, post } = await mountCard({ install_mode: 'installer', can_update: true, operation: null })
   try {
-    expect(buttonLabels(wrapper)).toContain('Stage update')
-    await button(wrapper, 'Stage update')!.trigger('click')
+    expect(buttonLabels(wrapper)).toContain('Update & restart')
+    await button(wrapper, 'Update & restart')!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/stage')
+    expect(post).toHaveBeenCalledWith('/api/update/start')
   } finally {
     wrapper.unmount()
   }
@@ -120,8 +120,8 @@ it('shows real progress from the persisted phase, with no invented timer', async
         'is-in_progress', 'is-pending', 'is-pending', 'is-pending',
       ])
     expect(wrapper.find('.update-progress-phase').text()).toBe('Swapping in the new version')
-    expect(buttonLabels(wrapper)).not.toContain('Stage update')
-    expect(buttonLabels(wrapper)).not.toContain('Apply update')
+    expect(buttonLabels(wrapper)).not.toContain('Update & restart')
+    expect(buttonLabels(wrapper)).not.toContain('Update & restart')
     wrapper.unmount()
   } finally {
     vi.useRealTimers()
@@ -139,7 +139,7 @@ it('shows the failure error and no success line for a rolled-back job', async ()
     expect(wrapper.text()).not.toContain('up to date')
     expect(wrapper.find('.update-progress-overlay').exists()).toBe(false)
     // A retry path, and the version the engine went back to.
-    expect(buttonLabels(wrapper)).toContain('Stage again')
+    expect(buttonLabels(wrapper)).toContain('Try again')
     expect(wrapper.text()).toContain('Back on v0.19.0')
   } finally {
     wrapper.unmount()
@@ -160,52 +160,99 @@ it('offers a retry for a record that failed without a reason to show', async () 
   }
 })
 
-it('applies a staged job and starts the restart overlay', async () => {
-  const { wrapper, post, beginRestart } = await mountCard({
-    install_mode: 'installer',
-    can_update: true,
-    operation: operation('staged'),
-  })
+it('applies a staged job through the same button and starts the restart overlay', async () => {
+  vi.useFakeTimers()
+  const { wrapper, post, beginRestart } = await mountCard([
+    { install_mode: 'installer', can_update: true, operation: operation('staged') },
+    { install_mode: 'installer', can_update: true, operation: operation('draining'), running: true },
+  ])
   try {
-    expect(buttonLabels(wrapper)).toContain('Apply update')
-    await button(wrapper, 'Apply update')!.trigger('click')
+    expect(buttonLabels(wrapper)).toContain('Update & restart')
+    await button(wrapper, 'Update & restart')!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/apply')
+    expect(post).toHaveBeenCalledWith('/api/update/start')
+    expect(beginRestart).not.toHaveBeenCalled()
+    await poll()
     // The apply drains and reboots the engine, so it needs the same overlay a
     // Settings restart uses; a second one would be a second reload loop.
     expect(beginRestart).toHaveBeenCalledWith('Updating Ciaobot… the engine will restart')
-  } finally {
     wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
   }
 })
 
-it('offers Apply alone for a staged job, because staging one is refused', async () => {
+it('offers one Update & restart button for a staged job and no stage or apply button', async () => {
   const { wrapper, post } = await mountCard({
     install_mode: 'installer',
     can_update: true,
     operation: operation('staged'),
   })
   try {
-    // `/api/update/stage` answers 409 for a non-terminal record by design, so a
-    // Re-stage button here could never succeed. Stage again is offered from the
-    // terminal failure phases, where a new record may be written.
     const labels = buttonLabels(wrapper)
-    expect(labels).toContain('Apply update')
-    expect(labels.filter(label => /stage/i.test(label))).toEqual([])
+    expect(labels).toContain('Update & restart')
+    expect(labels.filter(label => /stage|apply/i.test(label))).toEqual([])
     expect(post).not.toHaveBeenCalled()
   } finally {
     wrapper.unmount()
   }
 })
 
-it('applies a staged release behind a refusal, because stage would be refused', async () => {
+it('keeps polling through the staged phase while the job is running', async () => {
+  vi.useFakeTimers()
+  // The record passes through the non-in-flight `staged` phase between the two
+  // halves; the server says the job is still alive, so it is not the run's end.
+  const { wrapper, statusReads } = await mountCard([
+    { install_mode: 'installer', can_update: true, operation: null },
+    { install_mode: 'installer', can_update: true, operation: operation('downloading'), running: true },
+    { install_mode: 'installer', can_update: true, operation: operation('staged'), running: true },
+    { install_mode: 'installer', can_update: true, operation: operation('draining'), running: true },
+  ])
+  try {
+    await button(wrapper, 'Update & restart')!.trigger('click')
+    await flushPromises()
+    await poll()
+    await poll()
+    expect(statusReads()).toBe(3)
+    // Staged with the job running: the poll is still alive.
+    await poll()
+    expect(statusReads()).toBe(4)
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('requests the restart overlay when this run enters the applying half', async () => {
+  vi.useFakeTimers()
+  const { wrapper, beginRestart } = await mountCard([
+    { install_mode: 'installer', can_update: true, operation: null },
+    { install_mode: 'installer', can_update: true, operation: operation('staged'), running: true },
+    { install_mode: 'installer', can_update: true, operation: operation('draining'), running: true },
+    { install_mode: 'installer', can_update: true, operation: operation('swapping'), running: true },
+  ])
+  try {
+    await button(wrapper, 'Update & restart')!.trigger('click')
+    await flushPromises()
+    await poll()
+    expect(beginRestart).not.toHaveBeenCalled()
+    await poll()
+    expect(beginRestart).toHaveBeenCalledTimes(1)
+    expect(beginRestart).toHaveBeenCalledWith('Updating Ciaobot… the engine will restart')
+    await poll()
+    expect(beginRestart).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('updates a staged release behind a refusal with the same button', async () => {
   vi.useFakeTimers()
   // A refusal parked against a `staged` record is served for as long as that
   // record is unchanged, and nothing the card can do moves a `staged` record, so
-  // the reason survives every reload. `/api/update/stage` refuses a non-terminal
-  // record with a 409 by design, which makes Stage an action that could never
-  // succeed — and hiding Apply behind it leaves a downloaded, verified release
-  // stuck until somebody opens a terminal.
+  // the reason survives every reload. `/api/update/start` applies a staged record
+  // itself, so the one button is the way out of it.
   const { wrapper, post, statusReads } = await mountCard({
     install_mode: 'installer',
     can_update: true,
@@ -217,15 +264,14 @@ it('applies a staged release behind a refusal, because stage would be refused', 
     expect(wrapper.text()).toContain('another engine update is already in progress')
     // The action is the one the record allows, and it is live: the poll stopped
     // on the refusal, so nothing is holding the card busy.
-    const apply = button(wrapper, 'Apply update')
+    const apply = button(wrapper, 'Update & restart')
     expect(apply).toBeDefined()
     expect(apply!.attributes('disabled')).toBeUndefined()
-    expect(buttonLabels(wrapper).filter(label => /stage/i.test(label))).toEqual([])
+    expect(buttonLabels(wrapper).filter(label => /stage|apply/i.test(label))).toEqual([])
 
     await apply!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/apply')
-    expect(post.mock.calls.filter(call => call[0] === '/api/update/stage')).toHaveLength(0)
+    expect(post).toHaveBeenCalledWith('/api/update/start')
     // The apply is a run like any other, so it is watched to its own outcome.
     const afterApply = statusReads()
     await poll()
@@ -268,21 +314,21 @@ it('recovers from a refusal that never wrote a record', async () => {
     { install_mode: 'installer', can_update: true, operation: null, error: 'the latest release could not be resolved' },
   ])
   try {
-    await button(wrapper, 'Stage update')!.trigger('click')
+    await button(wrapper, 'Update & restart')!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/stage')
+    expect(post).toHaveBeenCalledWith('/api/update/start')
 
     await poll()
     expect(wrapper.text()).toContain('the latest release could not be resolved')
 
     // The retry is enabled, which is the whole point: the poll has stopped, so
     // nothing is holding the card busy any more.
-    const retry = button(wrapper, 'Stage update')
+    const retry = button(wrapper, 'Update & restart')
     expect(retry).toBeDefined()
     expect(retry!.attributes('disabled')).toBeUndefined()
     await retry!.trigger('click')
     await flushPromises()
-    expect(post.mock.calls.filter(call => call[0] === '/api/update/stage')).toHaveLength(2)
+    expect(post.mock.calls.filter(call => call[0] === '/api/update/start')).toHaveLength(2)
     wrapper.unmount()
   } finally {
     vi.useRealTimers()
@@ -299,7 +345,7 @@ it('moves focus into the overlay while it is up and back to the card when it set
     { install_mode: 'installer', can_update: true, operation: operation('staged') },
   ], undefined, { attach: true })
   try {
-    const stage = button(wrapper, 'Stage update')!
+    const stage = button(wrapper, 'Update & restart')!
     // A keyboard activation leaves focus on the button it activated.
     stage.element.focus()
     await stage.trigger('click')
@@ -331,7 +377,7 @@ it('moves focus into the overlay while it is up and back to the card when it set
     await poll()
     expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
     expect(body.inert).not.toBe(true)
-    const apply = button(wrapper, 'Apply update')
+    const apply = button(wrapper, 'Update & restart')
     expect(apply).toBeDefined()
     expect(document.activeElement).toBe(apply!.element)
     wrapper.unmount()
@@ -353,7 +399,7 @@ it('leaves the app usable while a run is staging', async () => {
     { install_mode: 'installer', can_update: true, operation: operation('staged') },
   ], undefined, { attach: true })
   try {
-    await button(wrapper, 'Stage update')!.trigger('click')
+    await button(wrapper, 'Update & restart')!.trigger('click')
     await flushPromises()
     expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
 
@@ -382,7 +428,7 @@ it('leaves the app usable while a run is staging', async () => {
     await poll()
     expect(statusReads()).toBeGreaterThan(reads)
     expect(wrapper.find('.engine-update-overlay').exists()).toBe(false)
-    expect(buttonLabels(wrapper)).toContain('Apply update')
+    expect(buttonLabels(wrapper)).toContain('Update & restart')
     wrapper.unmount()
   } finally {
     vi.useRealTimers()
@@ -432,7 +478,7 @@ it('keeps polling a run whose record has not landed yet', async () => {
     expect(statusReads()).toBe(1)
     await button(wrapper, 'Retry')!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/stage')
+    expect(post).toHaveBeenCalledWith('/api/update/start')
 
     // Read two: the previous run's outcome, before the coordinator's first
     // write. The poll has to still be alive afterwards.
@@ -449,7 +495,7 @@ it('keeps polling a run whose record has not landed yet', async () => {
     // Read four: the run's outcome, which ends the poll and the panel.
     await poll()
     expect(statusReads()).toBe(4)
-    expect(buttonLabels(wrapper)).toContain('Apply update')
+    expect(buttonLabels(wrapper)).toContain('Update & restart')
 
     const settled = statusReads()
     await poll()
@@ -480,10 +526,10 @@ it('does not end a new run on the refusal the previous one left parked', async (
   try {
     expect(statusReads()).toBe(1)
     // The parked reason offers the action, and the action is what starts run 2.
-    expect(buttonLabels(wrapper)).toContain('Stage update')
-    await button(wrapper, 'Stage update')!.trigger('click')
+    expect(buttonLabels(wrapper)).toContain('Update & restart')
+    await button(wrapper, 'Update & restart')!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/stage')
+    expect(post).toHaveBeenCalledWith('/api/update/start')
 
     // Read two: the same parked reason against the same unchanged record. It is
     // not this run's answer, so the poll has to still be alive afterwards.
@@ -499,7 +545,7 @@ it('does not end a new run on the refusal the previous one left parked', async (
     // the one action a staged record allows.
     await poll()
     expect(statusReads()).toBe(4)
-    expect(buttonLabels(wrapper)).toContain('Apply update')
+    expect(buttonLabels(wrapper)).toContain('Update & restart')
 
     const settled = statusReads()
     await poll()
@@ -575,7 +621,7 @@ it('returns focus to the card itself when a run leaves it nothing to click', asy
     { mode: 'installer', current_version: '0.20.0', update_available: false, latest_version: '0.20.0' },
   ], { attach: true })
   try {
-    await button(wrapper, 'Stage update')!.trigger('click')
+    await button(wrapper, 'Update & restart')!.trigger('click')
     await flushPromises()
     await poll()
     expect(document.activeElement).toBe(wrapper.get('.update-progress-content').element)
@@ -601,8 +647,8 @@ it('says up to date for an installer engine with no job and nothing newer', asyn
     // A status, not a disabled button, and nothing to click.
     expect(wrapper.text()).toContain('Up to date · 0.20.0')
     const labels = buttonLabels(wrapper)
-    expect(labels).not.toContain('Stage update')
-    expect(labels).not.toContain('Apply update')
+    expect(labels).not.toContain('Update & restart')
+    expect(labels).not.toContain('Update & restart')
   } finally {
     wrapper.unmount()
   }
@@ -649,9 +695,9 @@ it('keeps the full Updates card when an update is available', async () => {
   try {
     const card = wrapper.get('.card')
     expect(card.find('.settings-card-header .badge').exists()).toBe(false)
-    expect(card.text()).toContain('Stage a release below')
+    expect(card.text()).toContain('Updating downloads and verifies')
     expect(card.get('.engine-update-panel').text()).toContain('v0.20.0 is available')
-    expect(buttonLabels(wrapper)).toContain('Stage update')
+    expect(buttonLabels(wrapper)).toContain('Update & restart')
   } finally {
     wrapper.unmount()
   }
@@ -682,8 +728,8 @@ it('keeps the non-installer guidance', async () => {
   try {
     expect(wrapper.text()).toContain('Check the installed package version')
     const labels = buttonLabels(wrapper)
-    expect(labels).not.toContain('Stage update')
-    expect(labels).not.toContain('Apply update')
+    expect(labels).not.toContain('Update & restart')
+    expect(labels).not.toContain('Update & restart')
     expect(labels).toContain('Update to 0.20.0')
     expect(post).not.toHaveBeenCalled()
   } finally {
@@ -704,12 +750,12 @@ it('stages again when a later release follows an applied record', async () => {
     expect(wrapper.text()).not.toContain('ciaobot is up to date')
     expect(wrapper.text()).not.toContain('Up to date')
     expect(wrapper.text()).toContain('v0.21.0 is available')
-    const stage = button(wrapper, 'Stage update')
+    const stage = button(wrapper, 'Update & restart')
     expect(stage).toBeDefined()
     expect(stage!.attributes('disabled')).toBeUndefined()
     await stage!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/stage')
+    expect(post).toHaveBeenCalledWith('/api/update/start')
   } finally {
     wrapper.unmount()
   }
@@ -728,18 +774,18 @@ it('recovers from a refusal parked against an existing record', async () => {
   try {
     await button(wrapper, 'Retry')!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/update/stage')
+    expect(post).toHaveBeenCalledWith('/api/update/start')
 
     await poll()
     expect(wrapper.text()).toContain('the latest release could not be resolved')
     expect(wrapper.text()).not.toContain('the wheel could not be built')
 
-    const retry = button(wrapper, 'Stage update')
+    const retry = button(wrapper, 'Update & restart')
     expect(retry).toBeDefined()
     expect(retry!.attributes('disabled')).toBeUndefined()
     await retry!.trigger('click')
     await flushPromises()
-    expect(post.mock.calls.filter(call => call[0] === '/api/update/stage')).toHaveLength(2)
+    expect(post.mock.calls.filter(call => call[0] === '/api/update/start')).toHaveLength(2)
     wrapper.unmount()
   } finally {
     vi.useRealTimers()
@@ -754,19 +800,19 @@ it('drops the in-flight line once the record settles', async () => {
     { install_mode: 'installer', can_update: true, operation: operation('failed', { error: 'the new engine never answered' }) },
   ])
   try {
-    await button(wrapper, 'Stage update')!.trigger('click')
+    await button(wrapper, 'Update & restart')!.trigger('click')
     await flushPromises()
-    // "Staging the update…" is true while the run is in flight.
-    expect(wrapper.text()).toContain('Staging the update')
+    // "Updating. Ciaobot keeps running…" is true while the run is in flight.
+    expect(wrapper.text()).toContain('Updating. Ciaobot keeps running')
 
     await poll()
-    expect(wrapper.text()).toContain('Staging the update')
+    expect(wrapper.text()).toContain('Updating. Ciaobot keeps running')
 
     // The run stopped: the panel says why, and the in-flight line is gone rather
     // than reading as the state under a settled panel.
     await poll()
     expect(wrapper.text()).toContain('the new engine never answered')
-    expect(wrapper.text()).not.toContain('Staging the update')
+    expect(wrapper.text()).not.toContain('Updating. Ciaobot keeps running')
     wrapper.unmount()
   } finally {
     vi.useRealTimers()

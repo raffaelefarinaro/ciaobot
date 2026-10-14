@@ -141,9 +141,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
 | POST | `/api/package/update` | Return update guidance for the installed package; production engine updates go through the signed one-line installer or Settings → Home |
-| GET | `/api/update/status` | Installed-engine update job: install mode, whether it can update, and the persisted operation record; `error` carries a stage/apply that was refused before it could record one (unreachable latest release, already on that version), or a record that could not be read |
-| POST | `/api/update/stage` | Start staging a release for an installer-managed engine (background; poll status) |
-| POST | `/api/update/apply` | Apply the staged release: drain, detached swap, restart, rollback (background; poll status) |
+| GET | `/api/update/status` | Installed-engine update job: install mode, whether it can update, the persisted operation record, and `running` (the background job is alive); `error` carries a stage/apply that was refused before it could record one (unreachable latest release, already on that version), or a record that could not be read |
+| POST | `/api/update/start` | Update an installer-managed engine: stage the release, then apply it (drain, detached swap, restart, rollback) in one background job; applies an already-staged release directly (poll status) |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |

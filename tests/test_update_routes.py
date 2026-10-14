@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
+from types import SimpleNamespace
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import asdict
 
@@ -14,17 +15,12 @@ from starlette.testclient import TestClient
 
 from ciao import engine_update
 from ciao.web import auth
-from ciao.web.routes_node import (
-    update_apply_endpoint,
-    update_stage_endpoint,
-    update_status_endpoint,
-)
+from ciao.web.routes_node import update_start_endpoint, update_status_endpoint
 
 NOT_INSTALLER = (
     "in-app updates are only for engines installed with the Ciaobot engine installer"
 )
 ALREADY_RUNNING = {"error": "an engine update is already in progress"}
-NOTHING_STAGED = {"error": "nothing staged; run: ciao update stage"}
 
 
 def _op(phase: str) -> engine_update.Operation:
@@ -101,12 +97,11 @@ def runner() -> Iterator[_Runner]:
 
 
 def _app(**state: object) -> Starlette:
-    """Only the three update routes, with fakes injected on ``app.state``."""
+    """Only the update routes, with fakes injected on ``app.state``."""
     app = Starlette(
         routes=[
             Route("/api/update/status", update_status_endpoint, methods=["GET"]),
-            Route("/api/update/stage", update_stage_endpoint, methods=["POST"]),
-            Route("/api/update/apply", update_apply_endpoint, methods=["POST"]),
+            Route("/api/update/start", update_start_endpoint, methods=["POST"]),
         ]
     )
     for name, value in state.items():
@@ -205,7 +200,7 @@ def test_status_read_failure_is_fail_safe() -> None:
     assert body["can_update"] is True
 
 
-def test_stage_rejects_non_installer_mode() -> None:
+def test_start_rejects_non_installer_mode() -> None:
     calls: list[str | None] = []
     app = _app(
         engine_update_mode=lambda: "editable",
@@ -214,7 +209,7 @@ def test_stage_rejects_non_installer_mode() -> None:
     )
 
     with TestClient(app) as client:
-        resp = client.post("/api/update/stage")
+        resp = client.post("/api/update/start")
 
     # 400: an editable checkout has no receipt, so there is no install to swap
     # and no receipt to write the previous one aside to.
@@ -224,7 +219,7 @@ def test_stage_rejects_non_installer_mode() -> None:
     assert _task(app) is None
 
 
-def test_stage_starts_and_is_idempotent_while_running(runner: _Runner) -> None:
+def test_start_is_idempotent_while_running(runner: _Runner) -> None:
     app = _app(
         engine_update_mode=lambda: "installer",
         engine_update_read=lambda: None,
@@ -232,7 +227,7 @@ def test_stage_starts_and_is_idempotent_while_running(runner: _Runner) -> None:
     )
 
     with TestClient(app) as client, runner.held():
-        first = client.post("/api/update/stage")
+        first = client.post("/api/update/start")
 
         assert first.status_code == 202
         assert first.json() == {"started": True, "operation": None}
@@ -240,14 +235,14 @@ def test_stage_starts_and_is_idempotent_while_running(runner: _Runner) -> None:
         # The real stager blocks for minutes, so the second POST has to be
         # refused by the running task, not by a sleep in the test.
         runner.started()
-        second = client.post("/api/update/stage")
+        second = client.post("/api/update/start")
 
         assert second.status_code == 409
         assert second.json() == ALREADY_RUNNING
         assert runner.calls == [None]
 
 
-async def test_two_overlapping_stages_start_one_job(runner: _Runner) -> None:
+async def test_two_overlapping_starts_start_one_job(runner: _Runner) -> None:
     """Two stage requests in flight at once may only start one job.
 
     The overlap is at the ASGI level on purpose. A client whose body has not
@@ -275,11 +270,11 @@ async def test_two_overlapping_stages_start_one_job(runner: _Runner) -> None:
 
     with runner.held():
         async with _asgi_client(app) as client:
-            first = asyncio.create_task(client.post("/api/update/stage", content=slow_body()))
+            first = asyncio.create_task(client.post("/api/update/start", content=slow_body()))
             await asyncio.wait_for(parked.wait(), timeout=10)
 
             # Served while the first request is still waiting for its body.
-            second = await client.post("/api/update/stage", json={"version": "2.0.16"})
+            second = await client.post("/api/update/start", json={"version": "2.0.16"})
             await _thread_running(runner)
 
             arrive.set()
@@ -298,7 +293,7 @@ async def test_two_overlapping_stages_start_one_job(runner: _Runner) -> None:
     assert runner.calls == ["2.0.16"]
 
 
-def test_stage_passes_the_requested_version(runner: _Runner) -> None:
+def test_start_passes_the_requested_version(runner: _Runner) -> None:
     app = _app(
         engine_update_mode=lambda: "installer",
         engine_update_read=lambda: None,
@@ -306,7 +301,7 @@ def test_stage_passes_the_requested_version(runner: _Runner) -> None:
     )
 
     with TestClient(app) as client, runner.held():
-        resp = client.post("/api/update/stage", json={"version": "2.0.16"})
+        resp = client.post("/api/update/start", json={"version": "2.0.16"})
 
         assert resp.status_code == 202
         runner.started()
@@ -314,7 +309,7 @@ def test_stage_passes_the_requested_version(runner: _Runner) -> None:
     assert runner.calls == ["2.0.16"]
 
 
-def test_stage_rejects_when_record_not_terminal(runner: _Runner) -> None:
+def test_start_refuses_in_flight_record(runner: _Runner) -> None:
     app = _app(
         engine_update_mode=lambda: "installer",
         engine_update_read=lambda: _op("downloading"),
@@ -322,7 +317,7 @@ def test_stage_rejects_when_record_not_terminal(runner: _Runner) -> None:
     )
 
     with TestClient(app) as client:
-        resp = client.post("/api/update/stage")
+        resp = client.post("/api/update/start")
 
     # 409: a record still in `downloading` is a run that never reached a
     # terminal phase, and a second stager would race the first over the same
@@ -333,44 +328,117 @@ def test_stage_rejects_when_record_not_terminal(runner: _Runner) -> None:
     assert _task(app) is None
 
 
-def test_apply_requires_staged_record(runner: _Runner) -> None:
+def test_start_stages_when_nothing_is_staged(runner: _Runner) -> None:
+    applied: list[bool] = []
     for record in (None, _op("failed")):
         app = _app(
             engine_update_mode=lambda: "installer",
             engine_update_read=lambda record=record: record,
-            engine_update_apply=runner,
+            engine_update_stage=runner,
+            engine_update_apply=lambda: applied.append(True),
         )
 
         with TestClient(app) as client:
-            resp = client.post("/api/update/apply")
+            resp = client.post("/api/update/start")
+            assert resp.status_code == 202, record
 
-        # 400, with the CLI's wording: there is no staged env to swap, so the
-        # operator has to stage first.
-        assert resp.status_code == 400, record
-        assert resp.json() == NOTHING_STAGED, record
-        assert _task(app) is None, record
-
-    assert runner.calls == []
+    # The runner returns no staged record, so the chain stops after stage.
+    assert runner.calls == [None, None]
+    assert applied == []
 
 
-def test_apply_starts_when_staged(runner: _Runner) -> None:
+def test_start_applies_existing_staged_record() -> None:
+    calls: list[str] = []
+    done = threading.Event()
+
+    def apply() -> None:
+        calls.append("apply")
+        done.set()
+
     app = _app(
         engine_update_mode=lambda: "installer",
         engine_update_read=lambda: _op("staged"),
-        engine_update_apply=runner,
+        engine_update_stage=lambda version: calls.append("stage"),
+        engine_update_apply=apply,
     )
 
-    with TestClient(app) as client, runner.held():
-        resp = client.post("/api/update/apply")
-
+    with TestClient(app) as client:
+        resp = client.post("/api/update/start")
         assert resp.status_code == 202
-        assert resp.json() == {"started": True}
-        runner.started()
+        assert done.wait(timeout=10)
 
-    assert runner.calls == [None]
+    assert calls == ["apply"]
 
 
-def test_apply_rejects_non_installer_mode(runner: _Runner) -> None:
+def test_start_stages_then_applies() -> None:
+    calls: list[tuple[str, str | None]] = []
+    done = threading.Event()
+
+    def stage(version: str | None) -> SimpleNamespace:
+        calls.append(("stage", version))
+        return SimpleNamespace(phase="staged")
+
+    def apply() -> None:
+        calls.append(("apply", None))
+        done.set()
+
+    app = _app(
+        engine_update_mode=lambda: "installer",
+        engine_update_read=lambda: None,
+        engine_update_stage=stage,
+        engine_update_apply=apply,
+    )
+
+    with TestClient(app) as client:
+        resp = client.post("/api/update/start", json={"version": "2.0.16"})
+        assert resp.status_code == 202
+        assert done.wait(timeout=10)
+
+    assert calls == [("stage", "2.0.16"), ("apply", None)]
+
+
+async def test_start_does_not_apply_when_stage_fails() -> None:
+    applied: list[bool] = []
+    app = _app(
+        engine_update_mode=lambda: "installer",
+        engine_update_read=lambda: None,
+        engine_update_stage=_failing_stage("boom"),
+        engine_update_apply=lambda: applied.append(True),
+    )
+
+    async with _asgi_client(app) as client:
+        started = await client.post("/api/update/start")
+        assert started.status_code == 202
+        await _settled(app)
+        status = await client.get("/api/update/status")
+
+    assert applied == []
+    assert status.json()["error"] == "boom"
+
+
+async def test_status_reports_running(runner: _Runner) -> None:
+    app = _app(
+        engine_update_mode=lambda: "installer",
+        engine_update_read=lambda: None,
+        engine_update_stage=runner,
+    )
+
+    with runner.held():
+        async with _asgi_client(app) as client:
+            before = await client.get("/api/update/status")
+            await client.post("/api/update/start")
+            await _thread_running(runner)
+            during = await client.get("/api/update/status")
+            runner.release.set()
+            await _settled(app)
+            after = await client.get("/api/update/status")
+
+    assert before.json()["running"] is False
+    assert during.json()["running"] is True
+    assert after.json()["running"] is False
+
+
+def test_start_rejects_non_installer_mode_with_staged_record(runner: _Runner) -> None:
     app = _app(
         engine_update_mode=lambda: "bundled_app",
         engine_update_read=lambda: _op("staged"),
@@ -378,7 +446,7 @@ def test_apply_rejects_non_installer_mode(runner: _Runner) -> None:
     )
 
     with TestClient(app) as client:
-        resp = client.post("/api/update/apply")
+        resp = client.post("/api/update/start")
 
     assert resp.status_code == 400
     assert resp.json() == {"error": NOT_INSTALLER}
@@ -412,7 +480,7 @@ async def test_pre_record_failure_is_reported_through_status() -> None:
     )
 
     async with _asgi_client(app) as client:
-        started = await client.post("/api/update/stage")
+        started = await client.post("/api/update/start")
         assert started.status_code == 202
         await _settled(app)
         status = await client.get("/api/update/status")
@@ -437,7 +505,7 @@ async def test_already_current_version_is_reported_through_status() -> None:
     )
 
     async with _asgi_client(app) as client:
-        started = await client.post("/api/update/stage")
+        started = await client.post("/api/update/start")
         assert started.status_code == 202
         await _settled(app)
         status = await client.get("/api/update/status")
@@ -468,7 +536,7 @@ async def test_persisted_failure_record_wins_over_the_refusal() -> None:
     )
 
     async with _asgi_client(app) as client:
-        started = await client.post("/api/update/stage")
+        started = await client.post("/api/update/start")
         assert started.status_code == 202
         await _settled(app)
         status = await client.get("/api/update/status")
@@ -514,6 +582,6 @@ async def test_parked_refusal_is_dropped_once_the_record_moves() -> None:
 # `_PUBLIC_API` is unauthenticated from anywhere, and `_LOOPBACK_ONLY_API` exists
 # for the CLI's pre-session drain handshake, not for a browser action.
 def test_update_routes_require_a_session() -> None:
-    for path in ("/api/update/status", "/api/update/stage", "/api/update/apply"):
+    for path in ("/api/update/status", "/api/update/start"):
         assert path not in auth._PUBLIC_API, path
         assert path not in auth._LOOPBACK_ONLY_API, path
