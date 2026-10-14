@@ -1,6 +1,6 @@
 ---
 name: loop-engineering
-description: Fix Ciaobot GitHub issues end-to-end as a loop driven by Addy Osmani's agent-skills — with no argument it takes every open issue not labelled not_ready; given issue numbers, an idea or a plan, it targets that. It asks once whether to run workers as Orca sessions or as subagents in this session, and which models implement and review, then runs spec → plan → build → review → merge into develop for each issue, in parallel where the dependency graph allows. Trigger on "/loop-engineering", "fix the open issues", "work the issue backlog", "implement issue #N with orca", "ship this with a cheap model", "plan it as an issue and have opencode/haiku build it", "run the issue loop".
+description: Fix Ciaobot GitHub issues end-to-end as a loop driven by Addy Osmani's agent-skills — with no argument it takes every open issue not labelled not_ready; given issue numbers, an idea or a plan, it targets that. It asks once whether to run workers as Orca sessions or native subagents in this session, and which workflow tiers/models and review topology to use, then runs spec → plan → build → review → merge into develop for each issue, in parallel where the dependency graph allows. Trigger on "/loop-engineering", "fix the open issues", "work the issue backlog", "implement issue #N with orca", "ship this with a cheap model", "plan it as an issue and have opencode/haiku build it", "run the issue loop".
 ---
 
 # Loop engineering
@@ -30,12 +30,14 @@ References: `references/prompts.md` (worker prompts), `references/plan-template.
 
 ## 0. Addy skills: where each phase comes from
 
-Resolve the plugin once; stop and tell the user to `/plugin install agent-skills@addy-agent-skills` if it is missing:
+Resolve the local addy skill directory once before dispatch. Claude workers invoke the installed plugin by name; Codex and OpenCode workers read its skills from absolute local paths. The usual install path is discovered from Claude's plugin registry:
 
 ```bash
 ADDY=$(jq -r '.plugins["agent-skills@addy-agent-skills"][0].installPath' ~/.claude/plugins/installed_plugins.json)
 ls "$ADDY/skills" >/dev/null
 ```
+
+If the files are missing, stop and ask the user to install `agent-skills@addy-agent-skills`. `/reload-plugins` is only for a Claude session that predates the install; Codex and OpenCode need the absolute paths in their prompts, not a Claude plugin reload.
 
 | Phase | Who | Addy skill(s) |
 |---|---|---|
@@ -44,10 +46,10 @@ ls "$ADDY/skills" >/dev/null
 | Plan | you | `planning-and-task-breakdown` → the issue's numbered tasks; split oversized issues |
 | Implement / fix | worker | `incremental-implementation` + `test-driven-development`; `frontend-ui-engineering` for `web/`; `debugging-and-error-recovery` on red |
 | Review | reviewer | `code-review-and-quality` (five axes); `security-and-hardening` for auth/boundary diffs |
-| Risky-diff gate | you | `/ship`-style fan-out: `agent-skills:code-reviewer` + `agent-skills:security-auditor` + `agent-skills:test-engineer` subagents in parallel, merged by you |
+| Risky-diff gate | you | Fan out `code-reviewer`, `security-auditor` and `test-engineer` roles through the selected runtime, each following the matching addy skill, then merge their reports |
 | Commit hygiene | you | `git-workflow-and-versioning` |
 
-Inside this session and in every Claude subagent, invoke them by name as `agent-skills:<name>` (verified: a haiku subagent loads them). If the plugin was installed after this session started, they are not listed yet — ask the user to run `/reload-plugins` first; it takes effect without a restart. The reviewer personas are agent types: `agent-skills:code-reviewer`, `agent-skills:security-auditor`, `agent-skills:test-engineer`. Workers get them through `references/prompts.md` (opencode workers by absolute path under `$ADDY`, since opencode does not load Claude Code plugins). Use the skills' discipline, not their file conventions: the GitHub issue is the spec and plan — never write `SPEC.md` or `tasks/` into the repo.
+Claude workers invoke installed skills and reviewer personas by name (`agent-skills:<name>`); only a Claude session that predates plugin installation needs `/reload-plugins`. Codex and OpenCode workers receive absolute local `SKILL.md` paths and persona-specific tasks through their own native delegation tools; they do not load Claude agent types. `references/prompts.md` defines the runtime-specific prompt deltas. Use the skills' discipline, not their file conventions: the GitHub issue is the spec and plan — never write `SPEC.md` or `tasks/` into the repo.
 
 ## 1. Intake: what to work on
 
@@ -65,17 +67,17 @@ Decide the target from what the user said:
 
 Triage each target in one line: size (S/M/L), files/subsystems it touches, dependencies on other targets, and anything that is a **decision only the user can make** (those go into §2, not into a guess).
 
-## 2. Ask the user — once, in one `AskUserQuestion` call
+## 2. Ask the user — once, using the host runtime's question tool
 
-Show the triage table in the message, then ask (skip a question the user already answered in the command):
+Show the triage table, then ask only for choices the user has not already made. Use Claude's `AskUserQuestion`, Codex's current input tool, or OpenCode's `question` tool when available; if the host has no question tool, put the choices in one bundled chat question. Never ask again for a choice already stated in the request.
 
 1. **Execution mode**
-   - *Orca sessions* — one worktree and one visible terminal per worker; any opencode or Claude model; best for long batches and cheap opencode models. → `references/orca-mode.md`
-   - *This session, subagents* — `Agent` calls with Claude models only; no terminals to babysit; best for a handful of small/medium issues. → `references/subagent-mode.md`
-2. **Implementer model** — subagents: `haiku` (default for implementation-grade plans) or `sonnet` (trickier logic, larger diffs). Orca: the numbered menu in `references/models.md`, or a `claude` model.
-3. **Reviewer**
-   - *A fresh subagent / session* (recommended) — `sonnet` by default, `opus` for the strongest, running `code-review-and-quality`; you still judge every finding.
-   - *Me, in this session* — no extra session; costs orchestrator context, so best for 1–3 small issues.
+   - *Orca sessions* — one worktree and visible terminal per worker; use the provider/model the user selects. → `references/orca-mode.md`
+   - *This session, native subagents* — use the current host's native delegation tools: Claude Code `Agent`, Codex collaboration tools, or OpenCode's task tool/configured subagents. No Orca sessions. → `references/subagent-mode.md`
+2. **Implementer model** — choose the requested workflow tier and resolve its exact available model ID for that runtime in `references/models.md`. Luna/Haiku is the default for implementation-grade plans; Terra/Sonnet for harder logic; preserve an explicit model choice.
+3. **Reviewer topology**
+   - *Primary reviews implementers* — the primary orchestrator reads the diff, report and gates itself; no reviewer worker.
+   - *Fresh reviewer subagent/session* (recommended) — Terra/Sonnet by default, Sol/Opus for the strongest. The primary still judges every finding.
    - *Ship fan-out* — three parallel personas (`code-reviewer`, `security-auditor`, `test-engineer`) merged by you; slowest, for auth/boundary/release-plumbing diffs. Even when not chosen, use it automatically for those diffs (§9).
 4. **Scope confirmation** — the issue list to run (all ready targets by default), plus any batched decision questions from triage.
 
@@ -90,7 +92,7 @@ For each target, with `spec-driven-development` then `planning-and-task-breakdow
 
 The plan is written for a model that will **not** explore: exact files, functions and line anchors, the change in each task, the tests (file + name + what they assert), the verify commands, and explicit out-of-scope items. If you cannot write a task concretely, keep reading. Read `AGENTS.md`, `docs/DEVELOPMENT.md`, and `web/README.md` + `DESIGN.md` for anything under `web/`.
 
-**Delegate the investigation for a big plan.** When planning means reading many modules (a removal across subsystems, release plumbing, anything you would otherwise read 20+ files for), launch a `Plan` subagent with the plan template, the "written for a model that will not explore" rule, and the base sha; ask for tasks with text anchors, an explicit keep-list with reasons, a precondition check, and grep-based verify steps. Plan the small issues yourself meanwhile. Before publishing its plan, check its precondition and spot-check a few anchors yourself — you own the plan. (On #1303 this produced a 5-task removal plan that haiku followed exactly.)
+**Delegate the investigation for a big plan.** When planning means reading many modules (a removal across subsystems, release plumbing, anything you would otherwise read 20+ files for), delegate a read-only planning role through the selected runtime's native subagent interface with the plan template, the "written for a model that will not explore" rule, and the base sha. Ask for tasks with text anchors, an explicit keep-list with reasons, a precondition check, and grep-based verify steps. Plan small issues yourself meanwhile. Before publishing the plan, check its precondition and spot-check a few anchors yourself — you own the plan. Do not assume every runtime has a Claude agent type named `Plan`.
 
 **Split anything oversized**: more than ~8 files or two subsystems is not one loop. File children (`Part of #N`), keep a checklist comment on the parent, and plan each child against current `develop` just before it runs.
 
@@ -98,15 +100,15 @@ The plan is written for a model that will **not** explore: exact files, function
 
 - **Parallel by default.** The queue is a merge order, not a work order. Two loops run concurrently when their file sets do not overlap and neither consumes the other's *unmerged* code. Genuinely blocked → sequence it; never fake a shim. Cap 3–4 implementers at once (each runs the full suite); reviewers overlap freely.
 - **One active worker per worktree, always.** Parallelism is across issues.
-- **Orca mode:** one Run and one waiter for all loops (`references/orca-mode.md`). **Subagent mode:** launch independent implementers in one message.
+- **Orca mode:** one Run and one waiter for all loops (`references/orca-mode.md`). **Native subagent mode:** launch independent implementers through the current runtime's native delegation interface; use its own follow-up and completion semantics (`references/subagent-mode.md`).
 - **Records.** `plans/loop-state.md` has one line per active issue (worktree, branch, PR, round, status). `plans/issue-<N>/record.md` states what is *true in the code* — shipped shape, files, deviations from the plan with the ruling, gates run, follow-ups, PR and merge sha. Update it whenever you push and at merge.
 - **Finish the graph, not a wave.** Work the ready set continuously; when a child merges, start the next ready one unasked. A parent closes only when all its children merge. Issues the loop itself opens (deferred findings, split-outs) join the graph and are cleared the same way unless the user defers them. If you must stop, say exactly what is unbuilt and why.
 
 ## 5. Implement round (worker)
 
 1. Create the worktree off `origin/develop` per the mode file; confirm the base is current.
-2. Write `plans/issue-<N>/r0-implement.md` from `references/prompts.md` (Implement), with the addy skills filled in and the mode's deltas applied. Verify the file exists at that absolute path.
-3. Launch the worker per the mode file and wait for it to finish. Never relaunch on silence.
+2. Fill `references/prompts.md` (Implement) with the addy skills and runtime deltas. Keep the prompt at `plans/issue-<N>/r0-implement.md` for the record; pass it as text or by absolute path according to the selected runtime.
+3. Launch the worker per the mode file and collect its report using that runtime's completion semantics. Never relaunch on silence.
 
 ## 6. After every worker turn (you)
 

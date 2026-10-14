@@ -1,15 +1,31 @@
 # Models and providers
 
-## Which models each mode can use
+## Workflow tiers and runtime IDs
+
+These are role equivalents, not interchangeable model IDs:
+
+| Workflow tier | Claude equivalent | Codex equivalent | Use |
+|---|---|---|---|
+| Luna | Haiku | Luna-tier model | Default implementer/fixer for a concrete plan |
+| Terra | Sonnet | Terra-tier model, if exposed | Normal reviewer or harder implementation |
+| Sol | Opus | Sol-tier model | Strongest review, planning, or difficult fixes |
+
+Ask the current runtime for its exact model IDs before dispatch. In Codex, use the model IDs exposed in the current tool metadata; examples in this environment include `gpt-6.1-sol` and `gpt-6-luna`. Do not invent an ID such as `gpt-6-terra`: if the requested tier has no clearly corresponding available model, ask the user which exact available model to use. In OpenCode, use `opencode models` and the configured agent's `model`; values use `provider/model-id`. In Claude Code, preserve its actual model selection. Do not silently change a user's selected model or provider.
 
 | Mode | Implementer / fixer | Reviewer |
 |---|---|---|
-| Subagents (this session) | `haiku` (default) or `sonnet` via `Agent(model: …)` | you, or a fresh `sonnet`/`opus` subagent |
-| Orca sessions | any opencode model from the menu below, or `claude --model claude-haiku-5-5` / `claude-sonnet-5-5` | `claude --model claude-sonnet-5-5` (default) or `claude-opus-5-5`, or an OpenAI model through opencode |
+| Claude subagents | Haiku/Luna (default) or Sonnet/Terra via `Agent(model: …)` | primary, or a fresh Sonnet/Terra or Opus/Sol agent |
+| Codex subagents | Luna tier by default; exact model ID from current Codex metadata | primary, or a fresh Terra/Sonnet or Sol/Opus agent |
+| OpenCode subagents | Luna tier by default; exact available `provider/model-id` on the selected configured agent | primary, or a fresh Terra/Sonnet or Sol/Opus agent |
+| Orca sessions | Any currently available OpenCode model, or an explicitly selected Claude CLI model | any explicitly selected supported reviewer model |
 
-## opencode implementer menu
+The primary/Orca orchestrator owns the selected model policy for the whole loop. If a model fails twice in a row (no change, or gates red after its turn), offer a stronger model rather than silently switching or burning rounds.
 
-Refresh first — `opencode models | grep -E '^(ollama-cloud|opencode|openrouter)/'` — and drop any entry below that is no longer listed. Smoke-test the chosen one before the first round: `opencode run --standalone -m <model> "Reply with exactly: ok"` from a scratch dir (headless is fine for this one-liner). Default top 10 (as of 2026-09-25, opencode 2.0.16):
+## OpenCode implementer menu
+
+Refresh before selection — `opencode models` — and use only IDs it lists. The old ranked list below is historical guidance, not proof that a provider or model is available now. Smoke-test a chosen model before its first round when its provider is configured. OpenCode agents can override the model; if an agent omits `model`, its subagent inherits the invoking primary's model. Check this before dispatch so the user's requested tier is not silently changed.
+
+The previous menu (as of 2026-09-25, OpenCode 2.0.16) was:
 
 | # | Model | Notes |
 |---|---|---|
@@ -24,10 +40,10 @@ Refresh first — `opencode models | grep -E '^(ollama-cloud|opencode|openrouter
 | 9 | `opencode/nemotron-3-ultra-free` | free tier |
 | 10 | `openrouter/stealth/space-bunny-alpha` | stealth model; followed the #564 plan exactly |
 
-The same model implements and fixes for the whole loop unless the user switches it. If a model fails twice in a row (no commit, or gates red after its turn), offer the user a switch (suggest the next stronger one) rather than burning rounds.
-
 ## Provider rules
 
-- **Anthropic models always run through the Claude Code CLI or the `Agent` tool, never OpenRouter.** They bill to the subscription and always work; `openrouter/anthropic/...` dies the moment OpenRouter is out of credit.
-- **OpenAI models run through opencode on the `openai` provider** (`{"model":"openai/<id>"}` in `<wt>/opencode.json`), never `openrouter/openai/...`. That provider is the user's own auth — the fallback when Anthropic quota or OpenRouter credit is the blocker.
-- **If the requested model has no working provider, stop and ask.** Never silently substitute a different model or provider.
+- Anthropic models run through the Claude Code CLI or Claude `Agent`; never route them through OpenRouter. Native OpenCode may use an explicitly selected, available Anthropic provider/model, but never silently reroute one.
+- Native Codex uses its own exact tool model IDs. In Orca or native OpenCode mode, OpenAI models use the selected OpenAI provider (`openai/<id>`), never `openrouter/openai/...`.
+- If the requested model/provider has no working runtime, stop and ask. Do not substitute a different model, provider, or tier without permission.
+
+For OpenCode agent model and permission configuration, see [the official Agents docs](https://opencode.ai/docs/agents/).
