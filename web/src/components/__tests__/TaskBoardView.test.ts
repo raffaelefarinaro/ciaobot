@@ -2097,12 +2097,19 @@ describe('TaskBoardView', () => {
       })
       const wrapper = await mountWithBody([reviewed])
 
-      // No Stop and no Detach on a card whose turn has ended: there is nothing
-      // running to stop, and Detach-then-Done is the workaround this replaces.
-      const labels = card(wrapper, 'Wire the store').findAll('.task-chip').map((c) => c.text())
-      expect(labels).toEqual(['Chat', 'Approve Done'])
+      // No Stop, no Detach and no Approve Done on a card whose turn has ended:
+      // there is nothing running to stop, and the user reads the result in the
+      // chat before approving it, so the card only points there.
+      const shown = card(wrapper, 'Wire the store')
+      expect(shown.findAll('.task-chip').map((c) => c.text())).toEqual(['Review in chat'])
+      expect(shown.get('.task-chip').classes()).toContain('task-chip--review')
+      expect(shown.find('.task-meta .badge').exists()).toBe(false)
 
-      await chip(wrapper, 'Wire the store', 'Approve Done').trigger('click')
+      await shown.get('.task-open').trigger('click')
+      await flushPromises()
+      await nextTick()
+      await wrapper.findAll('.task-delegate-actions .btn-chip')
+        .find((c) => c.text() === 'Approve Done')!.trigger('click')
       await flushPromises()
       await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
       await flushPromises()
@@ -2140,9 +2147,10 @@ describe('TaskBoardView', () => {
       })
       const wrapper = await mountWithBody([reviewed])
 
-      // The agent's own word, and its own summary of what it did.
+      // The agent's own summary of what it did; the call to review replaces
+      // the "Agent says done" badge.
       const shown = card(wrapper, 'Wire the store')
-      expect(shown.get('.badge').text()).toBe('Agent says done')
+      expect(shown.find('.task-meta .badge').exists()).toBe(false)
       expect(shown.get('.task-agent-note').text()).toBe('Wired the store; tests in store.test.ts.')
 
       await shown.get('.task-open').trigger('click')

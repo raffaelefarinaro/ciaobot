@@ -29,8 +29,9 @@
  * - **"Changed since delegated" is the reviewer's problem.** The pane says the
  *   result was reached against an older description and decides nothing about it.
  *
- * The review loop is the rest of it: a **Ready for review** card says where the
- * result is and carries one **Approve Done**, which is the user's completion —
+ * The review loop is the rest of it: a **Ready for review** card carries one
+ * **Review in chat**, because the user reads the result before closing it. The
+ * chat and the editor hold **Approve Done**, which is the user's completion —
  * not a Detach and then a Done, and not a gesture that would settle the attempt
  * as `stopped` and lose the answer. **Send update** answers a mid-run edit with a
  * `chat_send`-shaped message into the attempt's own chat, never a second
@@ -855,6 +856,11 @@ function reconcile(task: Task): TaskReconcileNote[] {
  */
 function isReviewReady(task: Task): boolean {
   return task.attempt_state === 'ready_for_review' && Boolean(task.live_attempt_id)
+}
+
+/** A result the user has not approved yet: the card's whole job is to send them to it. */
+function awaitsReview(task: Task): boolean {
+  return isReviewReady(task) && task.status !== 'done'
 }
 
 /** The attempts this board holds for one card, the live one first. */
@@ -2019,11 +2025,13 @@ const today = localDateKey()
                        most cards are, and saying so on each one buries the rest. The
                        lane heading already states the card's status. -->
                   <p
-                    v-if="task.attempt_state || ownProject(task.project_id) || formatTaskDue(task.due)"
+                    v-if="(task.attempt_state && !awaitsReview(task)) || ownProject(task.project_id) || formatTaskDue(task.due)"
                     class="task-meta"
                   >
+                    <!-- A result waiting for the user needs no badge: the foot's
+                         Review in chat says it, and says what to do about it. -->
                     <span
-                      v-if="task.attempt_state"
+                      v-if="task.attempt_state && !awaitsReview(task)"
                       class="badge"
                       :class="attemptBadgeClass(task)"
                     >{{ taskAttemptLabel(task.attempt_state, task.attempt_outcome, task.attempt_detail) }}</span>
@@ -2074,15 +2082,19 @@ const today = localDateKey()
                   <div v-if="task.attempt_id || task.chat_id" class="task-card-foot">
                     <!-- The attempt's chat, when the board knows one. A button rather
                          than a link because it goes through the project store, not a
-                         route — the same call the sidebar row makes. -->
+                         route — the same call the sidebar row makes. While a result
+                         waits for the user it is the card's one call to action: the
+                         review happens in the chat, where Approve Done lives, never
+                         from the card without reading what the agent did. -->
                     <button
                       v-if="task.chat_id"
                       type="button"
                       class="btn-chip task-chip"
+                      :class="{ 'task-chip--review': awaitsReview(task) }"
                       :disabled="busyTaskId === task.id"
-                      :aria-label="`Open the chat working on ${task.title}`"
+                      :aria-label="awaitsReview(task) ? `Review the agent's result for ${task.title} in its chat` : `Open the chat working on ${task.title}`"
                       @click.stop="openAttemptChat(task)"
-                    >Chat</button>
+                    >{{ awaitsReview(task) ? 'Review in chat' : 'Chat' }}</button>
                     <!-- A mid-run edit. One message into the attempt's own chat,
                          carrying the task as it stands now — the sheet shows the exact
                          text first, and the server rebinds the attempt so the flag
@@ -2099,25 +2111,16 @@ const today = localDateKey()
                     >{{ updateTaskId === task.id ? 'Sending…' : 'Send update' }}</button>
                     <!-- A review-ready card is read, not managed: the turn has ended,
                          so there is nothing to Stop, and Detach-then-Done would settle
-                         the attempt as stopped and lose the result. Approve Done is
-                         the whole of it. -->
-                    <template v-if="isReviewReady(task)">
-                      <button
-                        v-if="task.status !== 'done'"
-                        type="button"
-                        class="btn-chip task-chip"
-                        :disabled="busyTaskId === task.id"
-                        :aria-label="`Approve the result of ${task.title} and mark it done`"
-                        @click.stop="markDone(task)"
-                      >Approve Done</button>
-                    </template>
+                         the attempt as stopped and lose the result. Approving is done
+                         from the chat or the editor, after reading the result, so
+                         such a card has only Review in chat. -->
                     <!-- A settled attempt still holds the task, and it is the only
                          case the server will resume. Resume continues that chat
                          under the same attempt; Retry mints a new one. They are
                          two labelled gestures rather than one button, because
                          "Delegate" here would start a second attempt and quietly
                          abandon the one that failed. -->
-                    <template v-else-if="isSettledLinked(task)">
+                    <template v-if="!isReviewReady(task) && isSettledLinked(task)">
                       <button
                         v-if="!chatArchived(task)"
                         type="button"
@@ -2134,7 +2137,7 @@ const today = localDateKey()
                         @click.stop="actOnAttempt(task, 'retry')"
                       >{{ chatArchived(task) ? 'Continue in new chat' : 'Retry' }}</button>
                     </template>
-                    <template v-else-if="task.live_attempt_id">
+                    <template v-else-if="!isReviewReady(task) && task.live_attempt_id">
                       <button
                         type="button"
                         class="btn-chip task-chip"
@@ -3251,6 +3254,17 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
+}
+.task-chip--review {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-weight: 600;
+}
+.task-chip--review:hover {
+  color: var(--accent-strong);
+  border-color: var(--accent-strong);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 /* 44px on touch: the shared rule raises .btn-chip, and the native selects and
