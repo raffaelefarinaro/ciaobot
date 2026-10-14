@@ -19,7 +19,7 @@ for (const width of [1440, 390]) {
       await page.locator('.task-open').first().focus()
       await page.keyboard.press('Enter')
       await expect(page.locator('#task-detail-name')).toBeFocused()
-      await page.locator('.task-field-head button', { hasText: 'Edit' }).click()
+      await page.locator('.task-body').click()
       const field = page.locator('#task-detail-body')
       await expect(field).toBeFocused()
       // Simulate an extreme resize; CSS must clamp both dimensions.
@@ -48,7 +48,7 @@ for (const width of [1440, 390]) {
       // 200% zoom's equivalent CSS viewport also keeps the field in the sheet.
       await page.setViewportSize({ width: Math.round(width / 2), height: 450 })
       await page.keyboard.press('Enter')
-      await page.locator('.task-field-head button', { hasText: 'Edit' }).click()
+      await page.locator('.task-body').click()
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     })
   })

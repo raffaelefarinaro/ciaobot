@@ -114,12 +114,12 @@ function card(wrapper: ReturnType<typeof mount>, title: string) {
 }
 
 /**
- * The description's editor. A described task opens rendered, so this presses
- * Edit first when the textarea is not already up.
+ * The description's editor. A described task opens rendered, so this clicks
+ * the rendered body first when the textarea is not already up.
  */
 async function bodyField(wrapper: ReturnType<typeof mount>) {
   if (!wrapper.find('#task-detail-body').exists()) {
-    await wrapper.findAll('.task-field-head .task-chip').find((c) => c.text() === 'Edit')!.trigger('click')
+    await wrapper.get('.task-body').trigger('click')
     await nextTick()
   }
   return wrapper.get<HTMLTextAreaElement>('#task-detail-body')
@@ -815,6 +815,63 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
+  it('edits the description in place: a click opens it, a link still opens, blur renders it again', async () => {
+    const wrapper = await mountBoard()
+    apiGet.mockResolvedValue(detailAnswer(task(), 'See [the spec](https://example.com/spec).\n'))
+    apiPatch.mockResolvedValue({ workspace: 'personal', task: { ...task(), revision: THIRD_REVISION, body: '' } })
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    // No separate Edit control: the rendered body is the way in.
+    expect(wrapper.findAll('.task-detail-main button').some((b) => b.text() === 'Edit')).toBe(false)
+    await wrapper.get('.task-body a').trigger('click')
+    expect(wrapper.find('#task-detail-body').exists()).toBe(false)
+    await wrapper.get('.task-body').trigger('click')
+    await nextTick()
+    const field = wrapper.get<HTMLTextAreaElement>('#task-detail-body')
+    await field.setValue('See the spec, updated.\n')
+    await field.trigger('blur')
+    await flushPromises()
+    expect(wrapper.find('#task-detail-body').exists()).toBe(false)
+    expect(wrapper.get('.task-body').text()).toBe('See the spec, updated.')
+    wrapper.unmount()
+  })
+
+  it('draws progress notes as bubbles with their links live, and names the agent\'s', async () => {
+    const wrapper = await mountBoard()
+    const note = (id: string, actor: string, text: string) => ({
+      id, actor, text, recorded_at: '2026-10-14T09:30:00Z', edited_at: null, attempt_id: '', chat_id: '',
+    })
+    const read = detailAnswer(task(), 'Ship it.\n')
+    apiGet.mockResolvedValue({ ...read, task: { ...read.task, updates: [
+      note('u2', 'agent', 'Blocked on auth.'),
+      note('u1', 'user', 'Asked about it https://example.slack.com/archives/C1/p2'),
+    ] } })
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    const notes = wrapper.findAll('.task-note')
+    expect(notes.map((n) => n.attributes('data-actor'))).toEqual(['agent', 'user'])
+    expect(notes[0]!.get('.task-note-author').text()).toBe('Agent')
+    const link = notes[1]!.get('.task-note-text a')
+    expect(link.attributes('href')).toBe('https://example.slack.com/archives/C1/p2')
+    expect(link.attributes('target')).toBe('_blank')
+    wrapper.unmount()
+  })
+
+  it('completes from Status alone: an open task carries no separate Complete action', async () => {
+    const wrapper = await mountBoard()
+    apiGet.mockResolvedValue(detailAnswer(task(), ''))
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.find('.task-resolution').exists()).toBe(false)
+    await wrapper.get('.task-status-opt[data-status="done"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.task-resolution-sheet').text()).toContain('Complete')
+    wrapper.unmount()
+  })
+
   it('edits the description without the engine\'s log, and keeps the log on save', async () => {
     const log = '<!-- ciao:task-log -->\n## Delegation log\n\n- a line <!-- attempt:x -->\n<!-- /ciao:task-log -->'
     const wrapper = await mountBoard()
@@ -1199,8 +1256,8 @@ describe('TaskBoardView', () => {
     await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
     await flushPromises()
     await nextTick()
-    const start = wrapper.findAll('.task-resolution button').find((b) => b.text() === 'Complete…')!
-    await start.trigger('click')
+    await wrapper.get('.task-status-opt[data-status="done"]').trigger('click')
+    await flushPromises()
     await nextTick()
   }
 
