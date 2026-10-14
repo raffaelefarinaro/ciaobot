@@ -564,12 +564,18 @@
 /* A section's "how this works" link. Layout only: colour and underline come
    from the global `a` rule, so it stays self-describing. Unlike `.set-link`
    it wraps (its label is a sentence, not a button) and keeps the same 44px
-   touch target every other settings control has. */
+   touch target every other settings control has. The 44px minimum is for
+   touch only: on a fine pointer a link at the end of a paragraph stays an
+   ordinary inline link, so it does not force a 44px line box. */
 .settings-help-link {
   display: inline-flex;
   align-items: center;
   min-height: var(--touch);
   font-size: var(--text-sm);
+}
+
+@media not (pointer: coarse) {
+  p > .settings-help-link:not(.set-link) { display: inline; min-height: 0; }
 }
 
 .settings-disclosure {

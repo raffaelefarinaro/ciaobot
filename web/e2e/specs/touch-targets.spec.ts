@@ -40,24 +40,29 @@ test.describe('Settings touch targets', () => {
     for (const tab of TABS) {
       await boot(page, tab, '.settings-main')
       const found = await page.evaluate((min) => {
-        const out: string[] = []
+        const bad: string[] = []
+        let total = 0
         const sel = '.settings-main :is(button, a[href], [role=button], [role=switch], select)'
         for (const el of Array.from(document.querySelectorAll(sel))) {
           const parent = el.parentElement
+          // Inline prose link (WCAG 2.5.8 exception): sits among sentence text.
           const inline = el.tagName === 'A' && parent && ['P', 'LI'].includes(parent.tagName)
             && !el.classList.contains('settings-help-link')
+            && Array.from(parent.childNodes).some((n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? '').trim() !== '')
           if (inline) continue
           const r = el.getBoundingClientRect()
           if (r.width === 0 || r.height === 0) continue
+          total += 1
           if (r.height < min - 0.5 || r.width < min - 0.5) {
             const label = (el.getAttribute('aria-label') || el.textContent || el.getAttribute('title') || '')
               .trim().replace(/\s+/g, ' ').slice(0, 60)
-            out.push(`"${label}" <${el.tagName.toLowerCase()} class="${el.className}"> ${Math.round(r.height)}×${Math.round(r.width)} (h×w)`)
+            bad.push(`"${label}" <${el.tagName.toLowerCase()} class="${el.className}"> ${Math.round(r.height)}×${Math.round(r.width)} (h×w)`)
           }
         }
-        return out
+        return { total, bad }
       }, TOUCH_MIN)
-      for (const f of found) small.push(`${tab}: ${f}`)
+      expect(found.total, `no controls measured on ${tab}`).toBeGreaterThan(0)
+      for (const f of found.bad) small.push(`${tab}: ${f}`)
     }
     expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
   })
