@@ -278,6 +278,8 @@ def _start_update_task(request: Request, fn: Callable[..., Any], *args: Any) -> 
         before = _read_operation(request)
         try:
             await asyncio.to_thread(fn, *args)
+        except _ApplyRefused as exc:
+            _park_update_error(request, exc.before, exc.error)
         except engine_update.UpdateError as exc:
             _park_update_error(request, before, exc)
 
@@ -296,6 +298,20 @@ async def update_status_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(_engine_update_state(request))
 
 
+class _ApplyRefused(engine_update.UpdateError):
+    """An apply that raised after the same job's stage moved the record.
+
+    Carries the record the apply started from, so ``_run`` parks the reason
+    against it on the event loop: parking from the worker thread would race a
+    status poll reading the two ``app.state`` fields.
+    """
+
+    def __init__(self, before: engine_update.Operation | None, error: engine_update.UpdateError):
+        super().__init__(str(error))
+        self.before = before
+        self.error = error
+
+
 def _stage_then_apply(
     request: Request,
     stage_fn: Callable[..., Any],
@@ -312,7 +328,7 @@ def _stage_then_apply(
         try:
             apply_fn()
         except engine_update.UpdateError as exc:
-            _park_update_error(request, before_apply, exc)
+            raise _ApplyRefused(before_apply, exc) from exc
 
 
 async def update_start_endpoint(request: Request) -> JSONResponse:
