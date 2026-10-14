@@ -223,6 +223,10 @@ const contextPctLabel = computed(() => {
 .agent-context-description :deep(a.file-link:hover) { text-decoration-color: currentColor; }
 .agent-context-link:hover,
 .agent-context-project:hover { text-decoration-color: currentColor; }
+@media (pointer: coarse) {
+  /* Below the base .agent-context-link rule it overrides. */
+  .agent-context-link { min-height: var(--touch); min-width: var(--touch); }
+}
 .agent-context-project {
   color: var(--fg);
   text-decoration: underline;
