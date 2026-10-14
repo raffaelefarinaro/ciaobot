@@ -167,7 +167,10 @@ function reloadBoard() {
   load()
 }
 
-onMounted(load)
+// Started in setup, not on mount: `reload` marks the read in flight before its
+// first await, so the `/tasks/<id>` watcher below (immediate) waits for the fresh
+// rows instead of judging a linked task against the previous visit's.
+load()
 // The engine announced a change (`tasks_changed`) and the app-wide signals
 // re-read: an agent reported, a turn settled, `ciao task` wrote. Re-read the
 // board too, so its columns agree with the sidebar count while it is open.
@@ -1546,13 +1549,16 @@ function syncTaskAddress(taskId: string): void {
 }
 
 watch(
-  [routeTaskId, () => board.loadedWorkspace, tasks],
+  [routeTaskId, () => board.loadedWorkspace, tasks, () => board.loading],
   async () => {
     const id = routeTaskId.value
     if (!id || board.loadedWorkspace !== workspace.value) return
     if (detailOpen.value && detailId.value === id) return
     const task = tasks.value.find(t => t.id === id)
     if (!task) {
+      // A refresh keeps the previous rows on screen; a task created since then
+      // is only missing once the fresh read has answered.
+      if (board.loading) return
       missingTaskId.value = id
       syncTaskAddress('')
       return
