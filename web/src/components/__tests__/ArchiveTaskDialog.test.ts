@@ -96,7 +96,7 @@ describe('ArchiveTaskDialog', () => {
   })
 
   it('offers Cancel, Keep task open and Complete task… naming the task', async () => {
-    const { answer: answer } = await open()
+    const { answer } = await open()
     expect(find('.confirm-title').textContent?.trim()).toBe('Archive chat')
     expect(find('.confirm-message').textContent).toContain('"Ship the board"')
     button('Keep task open')
@@ -107,7 +107,7 @@ describe('ArchiveTaskDialog', () => {
   })
 
   it('Keep task open resolves keep and calls no API', async () => {
-    const { answer: answer } = await open()
+    const { answer } = await open()
     button('Keep task open').click()
     await expect(answer).resolves.toBe('keep')
     expect(apiPost).not.toHaveBeenCalled()
@@ -125,7 +125,7 @@ describe('ArchiveTaskDialog', () => {
 
   it('Complete task… then Mark done detaches, completes with the note, reloads, and resolves marked-done', async () => {
     apiPost.mockResolvedValueOnce({ task: { revision: FRESH } })
-    const { answer: answer } = await open()
+    const { answer } = await open()
     button('Complete task…').click()
     await settle()
     expect(document.activeElement).toBe(find('#archive-task-resolution'))
@@ -143,7 +143,7 @@ describe('ArchiveTaskDialog', () => {
   })
 
   it('a task awaiting review offers Approve Done and resolves approved after one complete call', async () => {
-    const { answer: answer } = await open(task({ status: 'in_review', attempt_state: 'ready_for_review' }), true)
+    const { answer } = await open(task({ status: 'in_review', attempt_state: 'ready_for_review' }), true)
     expect(find('.confirm-message').textContent).toContain('waiting for your review')
     button('Complete task…').click()
     await settle()
@@ -159,7 +159,7 @@ describe('ArchiveTaskDialog', () => {
   })
 
   it('Complete without note sends an empty resolution', async () => {
-    const { answer: answer } = await open(task({ attempt_id: '', live_attempt_id: '' }))
+    const { answer } = await open(task({ attempt_id: '', live_attempt_id: '' }))
     button('Complete task…').click()
     await settle()
     button('Complete without note').click()
@@ -175,7 +175,7 @@ describe('ArchiveTaskDialog', () => {
   it('a 409 shows the refusal and keeps the dialog open', async () => {
     apiPost.mockReset()
     apiPost.mockRejectedValue({ status: 409 })
-    const { answer: answer } = await open(task({ attempt_id: '', live_attempt_id: '' }))
+    const { answer } = await open(task({ attempt_id: '', live_attempt_id: '' }))
     let settled = false
     void answer.then(() => { settled = true })
     button('Complete task…').click()
@@ -189,8 +189,42 @@ describe('ArchiveTaskDialog', () => {
     expect(button('Mark done').disabled).toBe(false)
   })
 
+  it('puts focus back on the note after a refused save', async () => {
+    apiPost.mockReset()
+    apiPost.mockRejectedValue({ status: 409 })
+    await open(task({ attempt_id: '', live_attempt_id: '' }))
+    button('Complete task…').click()
+    await settle()
+    await typeNote('Done')
+    button('Mark done').click()
+    await settle()
+    expect(document.activeElement).toBe(find('#archive-task-resolution'))
+  })
+
+  it('ignores Escape and Cancel while a save is in flight', async () => {
+    let release: (v: unknown) => void = () => {}
+    apiPost.mockReset()
+    apiPost.mockReturnValue(new Promise(r => { release = r }))
+    const { answer } = await open(task({ attempt_id: '', live_attempt_id: '' }))
+    let settled = false
+    void answer.then(() => { settled = true })
+    button('Complete task…').click()
+    await settle()
+    await typeNote('Done')
+    button('Mark done').click()
+    await settle()
+    find('[role="dialog"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    find<HTMLElement>('.confirm-backdrop').click()
+    button('Back').click()
+    await settle()
+    expect(settled).toBe(false)
+    expect(pendingArchiveTask.value).not.toBeNull()
+    release({})
+    await expect(answer).resolves.toBe('marked-done')
+  })
+
   it('Back returns to the choice', async () => {
-    const { answer: answer } = await open()
+    const { answer } = await open()
     button('Complete task…').click()
     await settle()
     button('Back').click()

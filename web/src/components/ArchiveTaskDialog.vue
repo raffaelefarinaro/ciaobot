@@ -16,7 +16,7 @@
             Archive chat
           </DialogTitle>
           <DialogDescription as="p" class="confirm-message">
-            <template v-if="step === 'note'">How was "{{ request?.task.title }}" completed?</template>
+            <template v-if="step === 'note'">{{ request?.awaitingReview ? 'Approving' : 'Marking' }} "{{ request?.task.title }}"{{ request?.awaitingReview ? '' : ' done' }} completes the task and archives this chat.</template>
             <template v-else-if="request?.awaitingReview">The task "{{ request.task.title }}" is waiting for your review. Approve it and archive this chat, or archive and keep the task open?</template>
             <template v-else>This chat works on the task "{{ request?.task.title }}", which is not done. Complete it and archive this chat, or archive and keep the task open?</template>
           </DialogDescription>
@@ -179,6 +179,7 @@ async function submit(withoutNote: boolean) {
   await taskSignals.reload(req.workspace)
   busy.value = false
   if (ok) req.resolve(kind === 'approve' ? 'approved' : 'marked-done')
+  else nextTick(() => noteField.value?.focus())
 }
 
 onBeforeUnmount(() => {
@@ -199,7 +200,7 @@ onBeforeUnmount(() => {
 }
 .confirm-card {
   width: 100%;
-  max-width: 26rem;
+  max-width: 30rem;
   padding: var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius);
