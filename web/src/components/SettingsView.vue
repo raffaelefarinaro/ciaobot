@@ -48,8 +48,8 @@
                   <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
                 </template>
                 <template v-else-if="packageStatus?.mode === 'installer' && engineUpdateEnabled">
-                  Installed with the Ciaobot engine installer. Stage a release below, then apply it;
-                  applying restarts Ciaobot once.
+                  Installed with the Ciaobot engine installer. Updating downloads and verifies the release
+                  while Ciaobot keeps running, then restarts it once.
                 </template>
                 <template v-else-if="packageStatus?.mode === 'installer'">
                   Installed with the Ciaobot engine installer. To update, run it again:
@@ -137,29 +137,17 @@
                 Back on v{{ engineUpdateOperation.from_version }}.
               </p>
               <div class="action-row settings-actions">
-                <!-- The action has to be the one the record allows. A `staged`
-                     record is not terminal, so `/api/update/stage` refuses it
-                     with a 409 by design (`_update_refusal`), forever: a panel
-                     that answered a refusal with Stage alone could never apply
-                     the release it had already downloaded, and the parked
-                     reason lives on the server, so a reload kept it. Apply is
-                     what a `staged` record allows; a terminal record, or no
-                     record at all, is where a new run may be started. -->
+                <!-- One action whatever the record is: `/api/update/start` applies
+                     a `staged` record itself and stages a terminal or absent one,
+                     so the panel never has to pick the half. The parked reason
+                     lives on the server, so a reload keeps it; the button is the
+                     way out of it. -->
                 <button
-                  v-if="engineUpdateStage === 'staged'"
                   class="btn-primary"
-                  @click="doEngineUpdateApply"
+                  @click="doEngineUpdate"
                   :disabled="updateActionPending || updatePolling"
                 >
-                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
-                </button>
-                <button
-                  v-else
-                  class="btn-primary"
-                  @click="doEngineUpdateStage"
-                  :disabled="updateActionPending || updatePolling"
-                >
-                  {{ updateActionPending ? 'Staging…' : (packageStatus?.update_available ? 'Stage update' : 'Try again') }}
+                  {{ updateActionPending ? 'Updating…' : (packageStatus?.update_available || engineUpdateStage === 'staged' ? 'Update & restart' : 'Try again') }}
                 </button>
               </div>
             </template>
@@ -184,19 +172,17 @@
               {{ engineUpdatePhaseText }}<template v-if="engineUpdateOperation"> · v{{ engineUpdateOperation.to_version }}</template>
             </p>
 
-            <!-- Staged is not a failure and not a second chance: `/api/update/
-                 stage` refuses a non-terminal record with a 409 by design, so
-                 the only way forward from here is Apply. Staging again is
-                 offered from the terminal failure phases, where a new record
-                 may be written. -->
+            <!-- Staged is not a failure: a release left downloaded and verified
+                 (by an older engine, or a run whose apply refused). The same
+                 button applies it. -->
             <template v-else-if="engineUpdateStage === 'staged'">
               <p class="hint hint--spaced">
                 v{{ engineUpdateOperation?.to_version || packageStatus?.latest_version }} is downloaded and verified.
-                Applying it restarts Ciaobot.
+                Updating restarts Ciaobot.
               </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateApply" :disabled="updateActionPending || updatePolling">
-                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
+                <button class="btn-primary" @click="doEngineUpdate" :disabled="updateActionPending || updatePolling">
+                  {{ updateActionPending ? 'Updating…' : 'Update & restart' }}
                 </button>
               </div>
             </template>
@@ -204,7 +190,7 @@
             <!-- Applied, and still the newest release: the record stays on disk
                  after a successful apply, so an engine that has updated once
                  would answer every later release with "up to date" and never
-                 offer a Stage again. -->
+                 offer an update again. -->
             <template v-else-if="engineUpdateStage === 'done' && !engineUpdateStaleApplied">
               <p class="hint hint--spaced">ciaobot is up to date.</p>
             </template>
@@ -215,20 +201,20 @@
                 Back on v{{ engineUpdateOperation.from_version }}.
               </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling">
-                  {{ updateActionPending ? 'Staging…' : (engineUpdateStage === 'rolled_back' ? 'Stage again' : 'Retry') }}
+                <button class="btn-primary" @click="doEngineUpdate" :disabled="updateActionPending || updatePolling">
+                  {{ updateActionPending ? 'Updating…' : (engineUpdateStage === 'rolled_back' ? 'Try again' : 'Retry') }}
                 </button>
               </div>
             </template>
 
             <template v-else-if="packageStatus?.update_available">
               <p class="hint hint--spaced">
-                v{{ packageStatus.latest_version }} is available. Staging downloads and verifies it without
-                restarting Ciaobot.
+                v{{ packageStatus.latest_version }} is available. Ciaobot keeps running while it downloads,
+                then restarts once.
               </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling">
-                  {{ updateActionPending ? 'Staging…' : 'Stage update' }}
+                <button class="btn-primary" @click="doEngineUpdate" :disabled="updateActionPending || updatePolling">
+                  {{ updateActionPending ? 'Updating…' : 'Update & restart' }}
                 </button>
               </div>
             </template>
@@ -4557,6 +4543,10 @@ let updatePollTimer: number | null = null
 // previous run's outcome and this one's, and a poll that cannot tell them apart
 // ends a run that is still going.
 let updateRunStarted = false
+// The restart overlay is requested once per run, when the record first shows
+// the applying half. The server chains both halves, so the click that started
+// the run is long past by then.
+let updateRestartRequested = false
 let updateRunSeenInFlight = false
 let updateRunStartedAt = 0
 // The refusal the card was already holding when it asked for this run. A parked
@@ -4575,7 +4565,7 @@ const engineUpdateOperation = computed(() => updateStatus.value?.operation ?? nu
 const engineUpdateStage = computed(() => updateStage(engineUpdateOperation.value))
 // `applied` is the last run's outcome, not a job: nothing ever unlinks the
 // record, so a machine that has updated once would answer every later release
-// with "up to date" and never offer a Stage again. The release page and the
+// with "up to date" and never offer an update again. The release page and the
 // installed version are read independently of it, so a newer release is
 // exactly the signal that the record is history rather than the answer.
 const engineUpdateStaleApplied = computed(
@@ -4652,6 +4642,9 @@ function reconcileUpdatePoll() {
   }
   const status = updateStatus.value
   if (!status) return
+  // The job is between its halves (the record sits on the non-in-flight
+  // `staged` phase) or before its first record: it is not over, so keep polling.
+  if (status.running) return
   // A served error is this run's own answer only if it is not the one the card
   // was already holding when it asked: a parked reason is served for as long as
   // the record it was parked against is unchanged, so the previous run's refusal
@@ -4703,6 +4696,7 @@ function beginUpdateRun() {
   updateRunStarted = true
   updateRunStartedAt = Date.now()
   updateRunSeenInFlight = false
+  updateRestartRequested = false
   updateRunErrorAtStart = updateStatus.value?.error || ''
 }
 
@@ -4720,7 +4714,7 @@ function startUpdatePoll() {
   updatePollTimer = window.setInterval(() => { void fetchUpdateStatus() }, UPDATE_POLL_MS)
 }
 
-async function doEngineUpdateStage() {
+async function doEngineUpdate() {
   // A run the coordinator already owns: the 202 has not become a record yet, so
   // the record alone cannot say the job is over. The backend refuses a second
   // run with a 409, and the button is already disabled; both say the same thing.
@@ -4728,48 +4722,36 @@ async function doEngineUpdateStage() {
   updateActionPending.value = true
   packageResult.value = ''
   try {
-    await api.post('/api/update/stage')
-    // 202: the coordinator owns the run from here and the record is its progress.
+    await api.post('/api/update/start')
+    // 202: the server owns both halves from here and the record is its progress.
     // Its first record is written only after the lock, the release lookup and
     // the removal of any previous staged environment, so the reads that follow
     // can still be serving the last run's outcome; `beginUpdateRun` is what
     // keeps the poll alive across them.
     startUpdatePoll()
     beginUpdateRun()
-    packageResult.value = 'Staging the update. Ciaobot keeps running until it is ready to apply.'
+    packageResult.value = 'Updating. Ciaobot keeps running while the release downloads, then restarts once.'
   } catch (e) {
-    // One action, one line. The 400/409 that stage and apply answer with is a
-    // reason to read, not a stream of toasts.
-    packageResult.value = `Could not stage the update: ${apiErrorMessage(e, 'unknown error')}`
+    // One action, one line. The 400/409 the route answers with is a reason to
+    // read, not a stream of toasts.
+    packageResult.value = `Could not update: ${apiErrorMessage(e, 'unknown error')}`
     await fetchUpdateStatus()
   } finally {
     updateActionPending.value = false
   }
 }
 
-async function doEngineUpdateApply() {
-  if (updatePolling.value) return
-  updateActionPending.value = true
-  packageResult.value = ''
-  try {
-    await api.post('/api/update/apply')
-    // The apply drains and reboots the engine, so the restart overlay is the
-    // one a Settings restart already uses: it covers the downtime and reloads
-    // the tab onto the new version. A drain the engine gives up on cancels it
-    // through `server_restart_cancelled`, and the card re-reads the record.
-    restartAndReload('Updating Ciaobot… the engine will restart')
-    startUpdatePoll()
-    // Same pre-record window as a stage: `apply_update` writes `draining` from
-    // its own thread, so the first read can still be serving the `staged` record.
-    beginUpdateRun()
-    packageResult.value = 'Applying the update. Ciaobot restarts once it is ready.'
-  } catch (e) {
-    packageResult.value = `Could not apply the update: ${apiErrorMessage(e, 'unknown error')}`
-    await fetchUpdateStatus()
-  } finally {
-    updateActionPending.value = false
-  }
-}
+// The apply drains and reboots the engine, so the restart overlay is the one a
+// Settings restart already uses: it covers the downtime and reloads the tab onto
+// the new version. A drain the engine gives up on cancels it through
+// `server_restart_cancelled`, and the card re-reads the record. Only a run this
+// session started asks for it, so a run begun on the CLI or another device does
+// not reload this tab.
+watch(engineUpdateStage, (stage) => {
+  if (stage !== 'applying' || !updateRunStarted || updateRestartRequested) return
+  updateRestartRequested = true
+  restartAndReload('Updating Ciaobot… the engine will restart')
+})
 
 // Poll only while a run is in flight, and only on the tab that shows the card:
 // a Settings tab left open on an idle engine must not poll forever. A run this
@@ -4844,7 +4826,7 @@ watch(engineUpdateStagingNow, async (staging) => {
 })
 
 // Focus comes back to the card when the overlay closes. What the run produced is
-// what the card now offers — Apply for a staged release, Retry for a failure —
+// what the card now offers — Update & restart for a staged release, Retry for a failure —
 // so that is where focus goes: never onto a control the record has replaced,
 // and never onto nothing at all. An `applied` record offers no control, so the
 // panel itself is the target — it carries `tabindex="-1"` and states its own
@@ -4881,7 +4863,7 @@ function reclaimEngineUpdatePanelFocus() {
 // Applied: the record says the new version is running, so the package status is
 // re-read too and its "Up to date" is the engine's own answer.
 watch(() => engineUpdateStage.value, (stage, previous) => {
-  // "Staging…"/"Applying…" describes a run that is in flight. Once the record
+  // "Updating…" describes a run that is in flight. Once the record
   // settles it is the last thing that happened rather than the state, and would
   // otherwise sit under the panel that replaced it.
   if (updateStageInFlight(previous) && !updateStageInFlight(stage)) packageResult.value = ''

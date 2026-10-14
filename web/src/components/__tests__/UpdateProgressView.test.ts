@@ -66,7 +66,7 @@ describe('with a real phase', () => {
       ['downloading the release', 'ok'],
       ['checking the signed release', 'ok'],
       ['preparing the update', 'ok'],
-      ['ready to apply', 'ok'],
+      ['downloaded and verified', 'ok'],
       ['waiting for active chats to finish', 'ok'],
       ['applying the update', 'ok'],
       ['stopping the engine', 'ok'],
