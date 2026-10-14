@@ -1274,7 +1274,7 @@ const cardDirty = computed(() => editingCard.value !== '' && editSnapshot() !== 
 
 function startCardEdit(card: Exclude<EditCard, ''>) {
   if (!schedule.value) return
-  if (card === 'engine' && schedule.value.scope !== 'system' && !inheritsChatModel.value && !store.models) {
+  if (card === 'engine' && !inheritsChatModel.value && !store.models) {
     void store.fetchModels()
   }
   const isSystem = schedule.value.scope === 'system'
@@ -1735,7 +1735,7 @@ function closeSchedule() {
 }
 .text-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 @media (pointer: coarse) {
-  .text-link { min-height: var(--touch); }
+  .text-link { min-height: var(--touch); min-width: var(--touch); }
 }
 .edit-form { display: flex; flex-direction: column; gap: var(--space-3); }
 .form-grid {

@@ -603,11 +603,6 @@ onMounted(() => {
   line-height: 1.35;
 }
 
-@media (pointer: coarse) {
-  .model-selector__item { min-height: var(--touch, 44px); }
-  .model-selector__trigger { min-height: var(--touch, 44px); }
-}
-
 .model-selector__item {
   display: flex;
   align-items: center;
@@ -634,6 +629,13 @@ onMounted(() => {
 .model-selector__item:focus {
   background: var(--bg3);
   outline: none;
+}
+
+/* Must stay below the base .model-selector__* rules it overrides. */
+@media (pointer: coarse) {
+  .model-selector__item { min-height: var(--touch, 44px); }
+  .model-selector__search { min-height: var(--touch, 44px); }
+  .model-selector__trigger { min-height: var(--touch, 44px); }
 }
 
 .ms-item--active {

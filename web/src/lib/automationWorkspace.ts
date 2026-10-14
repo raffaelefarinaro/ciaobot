@@ -32,6 +32,15 @@ export function scheduleInWorkspace(
   return workspaceForSchedule(schedule, chats, projects) === workspace
 }
 
+/** A schedule that failed, was skipped, or lost its chat: the sidebar's
+ *  Automations warning and Home's rail both read this one predicate.
+ *  `missing-chat` is not gated on `enabled`: the dispatcher disables the
+ *  entry at the same moment, and it is the one failure that cannot fix itself. */
+export function scheduleNeedsAttention(schedule: Schedule): boolean {
+  if (schedule.last_status === 'missing-chat') return true
+  return schedule.enabled && (schedule.missed || schedule.last_status === 'error')
+}
+
 /**
  * Whether this schedule is one row of a per-workspace fan-out.
  *

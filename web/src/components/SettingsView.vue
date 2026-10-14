@@ -6205,8 +6205,15 @@ a.btn-secondary {
     border: 0;
     background: none;
   }
-  /* Doubled class: the base .field-info-panel rule comes later in the file. */
-  .field-info .field-info-panel { top: calc(100% - 6px); }
+  /* The panel anchors to its label row, not to the glyph, so it opens inside the
+     viewport wherever the glyph sits. Doubled class: the base .field-info-panel
+     rule comes later in the file. */
+  .settings-label-row { position: relative; }
+  .field-info { position: static; }
+  .field-info .field-info-panel {
+    top: calc(100% - 6px);
+    width: min(360px, 100%);
+  }
   .field-info summary::before {
     content: '';
     position: absolute;
@@ -6284,6 +6291,8 @@ a.btn-secondary {
   opacity: 0.6;
   cursor: not-allowed;
 }
+/* Must stay below the base .workspace-select rule: this block is scoped after settingsPanels.css. */
+@media (pointer: coarse) { .workspace-select { min-height: var(--touch); } }
 .settings-advanced {
   padding: var(--space-2);
   border: 1px solid var(--border);

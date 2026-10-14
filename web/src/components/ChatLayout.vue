@@ -21,7 +21,7 @@
       aria-hidden="true"
       @click="sidebarCollapsed = true"
     />
-    <div class="chat-main" :class="{ 'chat-split': !!panelPath }">
+    <div ref="chatMainEl" class="chat-main" :class="{ 'chat-split': !!panelPath }">
       <!-- Split view when a file is pinned -->
       <template v-if="panelPath">
         <div
@@ -110,8 +110,10 @@
               <div class="home-workbench">
                 <div class="home-main">
                   <HomeIntake />
-                  <HomeNoticeReopen />
-                  <HousekeepingStrip />
+                  <template v-if="!homeAlertsInRail">
+                    <HomeNoticeReopen />
+                    <HousekeepingStrip />
+                  </template>
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                   <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -128,6 +130,10 @@
                   </div>
                 </div>
                 <div class="home-rail">
+                  <template v-if="homeAlertsInRail">
+                    <HomeNoticeReopen />
+                    <HousekeepingStrip />
+                  </template>
                   <HomeReviewSummary />
                 </div>
               </div>
@@ -265,8 +271,10 @@
             <div class="home-workbench">
               <div class="home-main">
                 <HomeIntake />
-                <HomeNoticeReopen />
-                <HousekeepingStrip />
+                <template v-if="!homeAlertsInRail">
+                  <HomeNoticeReopen />
+                  <HousekeepingStrip />
+                </template>
                 <HomeSetupCard />
                 <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                 <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -283,6 +291,10 @@
                 </div>
               </div>
               <div class="home-rail">
+                <template v-if="homeAlertsInRail">
+                  <HomeNoticeReopen />
+                  <HousekeepingStrip />
+                </template>
                 <HomeReviewSummary />
               </div>
             </div>
@@ -614,6 +626,18 @@ const shortcutsActive = computed(() =>
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
+
+/** Mirrors `@container chat-pane (max-width: 940px)` in the styles below: the
+ *  same element (.chat-main), the same box (content inline size), the same
+ *  threshold. Home's alerts sit in the rail only while the rail is beside the
+ *  column; stacked, they stay under the composer instead of below every chat. */
+const HOME_RAIL_MIN_PANE_PX = 940
+const chatMainEl = ref<HTMLElement | null>(null)
+const chatPaneWidth = ref<number | null>(null)
+const homeAlertsInRail = computed(() => chatPaneWidth.value === null
+  ? !isMobile.value
+  : chatPaneWidth.value > HOME_RAIL_MIN_PANE_PX)
+let chatPaneObserver: ResizeObserver | null = null
 let latestStatusSyncTimer: ReturnType<typeof setInterval> | null = null
 
 // Only for the true empty state. Every lane carries its own "+ new" and lanes
@@ -1278,6 +1302,13 @@ function onTouchEnd(e: TouchEvent) {
 }
 
 onMounted(() => {
+  if (chatMainEl.value && typeof ResizeObserver !== 'undefined') {
+    chatPaneObserver = new ResizeObserver(entries => {
+      const entry = entries[entries.length - 1]
+      if (entry) chatPaneWidth.value = entry.contentRect.width
+    })
+    chatPaneObserver.observe(chatMainEl.value)
+  }
   window.addEventListener('touchstart', onTouchStart, { passive: true })
   window.addEventListener('touchend', onTouchEnd, { passive: true })
   window.addEventListener('touchcancel', onTouchEnd, { passive: true })
@@ -1287,6 +1318,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  chatPaneObserver?.disconnect()
   stopLatestStatusSync()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
@@ -1627,7 +1659,8 @@ onBeforeUnmount(() => {
 
 /* Workbench composition (prototype A): the request column keeps the readable
    measure, and the memory pulse sits in a quiet side rail on wide panes
-   instead of stacking another full-width band under the prompt. */
+   instead of stacking another full-width band under the prompt. The rail holds
+   Home's alerts (operator notices, update tasks) above At a glance. */
 .home-workbench {
   box-sizing: border-box;
   width: 100%;
@@ -1664,7 +1697,10 @@ onBeforeUnmount(() => {
 .home-main > :deep(.update-tasks),
 .home-main > :deep(.home-setup),
 .home-main > :deep(.home-notice-reopen),
-.home-main > :deep(.home-recent) {
+.home-main > :deep(.home-recent),
+.home-rail > :deep(.housekeeping),
+.home-rail > :deep(.update-tasks),
+.home-rail > :deep(.home-notice-reopen) {
   margin-block: 0;
 }
 
@@ -1674,17 +1710,30 @@ onBeforeUnmount(() => {
   max-width: none;
 }
 
+/* Not sticky itself: a rail taller than the viewport would hide its own
+   bottom (At a glance) until the end of the page. It stretches to the row
+   height instead, and only the glance stays pinned. */
 .home-rail {
-  position: sticky;
-  top: var(--space-2);
   width: 100%;
   min-width: 0;
   margin: 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* Notices scroll away, the glance stays. */
+.home-rail > :deep(.home-review-summary) {
+  position: sticky;
+  top: var(--space-2);
 }
 
 /* Keyed to the pane, not the viewport: with the resizable sidebar open, a
    1280px window leaves the pane well under 980px, and a viewport query kept
-   the rail beside a request column too narrow for its own chips. */
+   the rail beside a request column too narrow for its own chips. The 940px
+   here and HOME_RAIL_MIN_PANE_PX in the script decide together where Home's
+   alerts live: keep them in sync. */
 @container chat-pane (max-width: 940px) {
   .home-workbench {
     grid-template-columns: minmax(0, 1fr);
@@ -1692,7 +1741,7 @@ onBeforeUnmount(() => {
     padding: var(--space-5) var(--page-gutter) var(--space-4);
   }
 
-  .home-rail {
+  .home-rail > :deep(.home-review-summary) {
     position: static;
   }
 }

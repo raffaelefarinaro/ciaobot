@@ -3213,8 +3213,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 /* 44px on touch: the shared rule raises .btn-chip, and the native selects and
    buttons here carry it directly so a coarse pointer never gets a 34px target. */
 @media (pointer: coarse) {
-  .task-filter,
-  .task-status-opt {
+  .task-filter {
     min-height: var(--touch);
   }
   .task-more,
@@ -3359,6 +3358,8 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 }
 .task-status-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .task-status-opt:disabled { cursor: progress; }
+/* Must stay below the base .task-status-opt rule it overrides. */
+@media (pointer: coarse) { .task-status-opt { min-height: var(--touch); } }
 @media (max-width: 420px) {
   .task-status-opt { padding-inline: 2px; font-size: var(--text-xs); }
 }
@@ -3651,6 +3652,8 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   padding: 6px 10px;
   text-align: left;
 }
+/* The side column's rule above outranks the generic one, so it needs its own. */
+@media (pointer: coarse) { .task-detail-side .task-status-opt { min-height: var(--touch); } }
 .task-detail-main textarea#task-detail-body { min-height: 14rem; }
 .task-detail-main .task-resolution,
 .task-detail-main .task-delegate,
