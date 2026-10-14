@@ -812,7 +812,7 @@ class ProjectChatManager:
         # that chat.
         self.clear_notifications_cb: Optional[Callable[[str], None]] = None
         # `on_turn_started(chat_id, stream)` fires once per turn a person asked
-        # for: a delegated task's answer, a Send update, an approval the user
+        # for: a delegated task's answer, an approval the user
         # answered in the composer, an ordinary message. The delegation service
         # subscribes so a turn in a delegated chat is settled by *that* turn
         # rather than only by the one it launched — the same injection point as

@@ -672,7 +672,6 @@ describe('delegated task chats on Home', () => {
       assignee: 'agent', chat_id: 'quiet', attempt_id: 'attempt-1', created_at: '', updated_at: '',
       revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: 'running',
       attempt_outcome: '', attempt_summary: '', attempt_detail: '', live_attempt_id: 'attempt-1',
-      changed_since_delegated: false,
       ...overrides,
     } as Task
   }

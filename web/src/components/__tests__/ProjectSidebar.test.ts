@@ -21,7 +21,6 @@ function delegatedTask(overrides: Partial<Task> = {}): Task {
     assignee: 'agent', chat_id: '', attempt_id: 'attempt-1', created_at: '', updated_at: '',
     revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: 'ready_for_review',
     attempt_outcome: 'done', attempt_summary: '', attempt_detail: '', live_attempt_id: 'attempt-1',
-    changed_since_delegated: false,
     ...overrides,
   } as Task
 }

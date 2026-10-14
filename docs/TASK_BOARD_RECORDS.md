@@ -83,8 +83,7 @@ rewrites every schema-1 file in place — `schema: 2`, `on_hold` → `backlog`,
 `in_progress` with `review_state: ready` → `in_review`, the `review_state` line
 dropped — touching nothing else, and leaves a file it cannot upgrade untouched
 (it lists as an unsupported-schema row). Attempts bound to a file's old bytes are
-rebound to the new revision, so the migration never reads as "changed since
-delegated". A turn the agent reported done moves its task to `in_review`; a new
+rebound to the new revision, because the migration is not an edit to the task. A turn the agent reported done moves its task to `in_review`; a new
 turn in that chat, or a detach, moves it back to `in_progress`.
 
 ### Learning from an approved task
@@ -113,8 +112,8 @@ The task's own body carries the durable record: one item per attempt inside
 `<!-- ciao:task-log -->` … `<!-- /ciao:task-log -->` at the end, written when an
 attempt starts, settles, reports, or its chat is archived. The engine rewrites
 only the item marked with its attempt id and rebinds the attempt to the new
-revision only when it was bound to the revision it read, so a log line never
-reads as "changed since delegated" and never hides an edit that does. The log is
+revision only when it was bound to the revision it read, so the binding follows
+the engine's own writes and never a user edit. The log is
 stripped from the description quoted into a delegation prompt; a new attempt is
 instead handed the last five settled attempts (outcome, summary, chat, archived
 transcript path).
@@ -168,20 +167,9 @@ the user's own completion action moves it to `Done`. The store's
 `completion_requires_user` rule is unchanged by any of this.
 
 The review badge moves the task's revision, so the watcher rebinds the attempt to
-the revision that write left behind (`bind_revision`). Without that, *every*
-finished turn would read `changed_since_delegated`, which is a warning about the
-user editing a task under the agent and would then mean nothing.
-
-**The changed-since rule.** `changed_since_delegated` compares the revision the
-attempt is bound to against the record now, and it is true only for a **real
-user edit** after the hand-over. It is `false` right after a clean settle —
-`link()` writes linkage and rebinds the attempt, and the review badge write
-rebinds it again — and it is `true` once the user changes anything the record
-holds, whether that is the description, the title or a move. It is also `false`
-for a task nothing is delegated to any more, because a `detach` clears the
-linkage and the flag is only derived for a linked task. The flag is a *fact about
-revisions*, not a judgement: nothing in the board decides whether the result is
-still good, and only the reviewer does.
+the revision that write left behind (`bind_revision`). An attempt's `task_revision`
+follows the engine's own writes (linkage, review badge, log line, migration,
+progress note) and never a user edit; it is recorded in the attempt history.
 
 **Reviewing is one gesture.** `POST /api/tasks/{id}/complete` from the user's own
 session releases the linkage and closes the card when the task's attempt is
@@ -207,7 +195,7 @@ state the turn actually ended in.
 - **An attended turn in a delegated chat that did not *start* there is not
   announced.** Re-attaching (see "Re-attaching the watcher") covers every turn
   `ProjectChatManager.start_stream` begins, which is every route to the model
-  from the composer, from **Send update** and from a retry. A follow-up turn the
+  from the composer and from a retry. A follow-up turn the
   drive loop runs *inside* a stream it already began is covered too, because the
   watcher for that stream is still waiting on it. What is not covered is a turn
   the engine runs in a delegated chat with nobody present — a schedule dispatch,
@@ -302,15 +290,6 @@ otherwise read fifty histories nobody opened. Each row keeps **its own** chat
 link: by the time a retry exists the task's own linkage names the new attempt,
 so the old attempt's chat is reachable only from here.
 
-**Send update.** An edit made under a running or finished turn trips
-`changed_since_delegated`, and the answer is one ordinary message into the
-attempt's own chat carrying the task as it stands now. It is deliberately **not**
-a second delegation: `POST /delegate` would mint a new attempt id, re-quote the
-description from scratch, re-link the card and leave the attempt whose result is
-under review looking abandoned. The preview shows the exact text before it is
-sent, and refuses to send at all when the description read failed, because "the
-description is now empty" is a fact nobody checked.
-
 **Reconciled visibly.** A row whose fields contradict each other is flagged on the
 card with what disagrees *and* the controls that resolve it, never silently
 rewritten. Five derivations, all decidable from the row the service already sends:
@@ -322,46 +301,11 @@ anything outside the row, and it is deliberately worded as what the browser can
 see — an empty chat list means the board knows nothing, and a flag on that basis
 would be a guess about every card.
 
-### Send update rebinds and re-attaches (#1047)
-
-`POST /api/tasks/{task_id}/attempt/{attempt_id}/update` is what the PWA calls, and
-it does the two things a composer send cannot. It is a route rather than a
-`sendMessage` because **neither half is a client concern**.
-
-**The rebind.** The attempt is re-stamped to the revision the update was made at
-(`bind_revision`), exactly as the delegation path re-stamps it after its linkage
-write. That is what makes `changed_since_delegated` return to `false` and the
-control retire instead of offering the same update for ever. The order is the
-contract: **a refused send rebinds nothing**, because a cleared flag over an
-update the agent never received is the one thing this gesture must not be able to
-say. `expected_revision` is required and checked before anything is sent — a
-description edited since the preview was read is not the one the message claims to
-carry — and the message text travels with the request, because it is an ordinary
-attended message the user composed and was shown in full.
-
-**The re-attach.** Whichever turn the message causes is watched by the same
-settling watcher the delegation path uses, so the agent's answer advances the card
-rather than waiting for the reviewer to notice it by hand. A turn is usually
-already in flight in that chat — that is what an edit made *under* the agent
-means — so the message is queued into it exactly as the composer queues it, and
-that turn runs it as its own follow-up and ends only afterwards; no second watcher
-is needed for that, because the stream the first watcher is holding does not end
-until the queued turn has run. `start_stream` hands back a turn already running
-rather than queueing anything, so a message that landed nowhere is refused
-(`task_update_busy`, 409) rather than rebound over.
-
-Only an attempt that still holds the task may be updated. A settled one is
-`invalid_action`: continuing a turn that did not finish is `resume` and replacing
-it is `retry`, and neither is a message into a chat. One live attempt per task is
-unchanged — the update continues the delegation rather than minting a second one,
-and no second chat is created.
-
 ### Re-attaching the watcher
 
-Both "the answer to the update does not move the card" and "answering a `needs_you`
-turn in the chat does not move the attempt" are the same event — *the
-conversation in a delegated chat went on* — so they are answered by one path
-rather than one special case each.
+Answering a `needs_you` turn in the chat and replying after a result are the same
+event — *the conversation in a delegated chat went on* — so they are answered by
+one path rather than one special case each.
 
 `ProjectChatManager.on_turn_started` is an injection point of the same shape as
 `notify_result_cb`: the manager announces that an attended turn has begun, from
@@ -380,19 +324,6 @@ Only *attended* turns are announced. A background drain or an unattended dispatc
 is the engine talking to itself in a chat, and settling a delegated attempt on
 work nobody asked for is exactly the escalation the delegation block refuses
 everywhere else.
-
-### What Send update does not do
-
-- **It is not a way to restart a failed turn.** A settled attempt stays settled;
-  continuing it is `resume` (same chat, same attempt) or `retry` (a new one), and
-  the card's own foot names both rather than borrowing the update's label. A
-  settled attempt is refused for an update outright, because rebinding one would
-  clear a flag about a turn nothing is watching.
-- **It does not change the attempt's state while the turn runs.** Re-attaching is
-  the same watcher the delegation path uses, and it moves no state: a card whose
-  attempt is `ready_for_review` keeps that badge while the answer to the update is
-  being produced, and the card's own text says the turn has ended. The state the
-  update *does* advance is the one it advances when it ends.
 
 ## API
 
@@ -539,15 +470,14 @@ The rule is keyed on the *directory pair* `Workspace/Tasks`, not on the name
   caller naming its own chat would be claiming a delegation it never made.
 - The board UI ships: #1028 for the four columns, the filters and the detail
   editor, #1033 for the delegation gestures on it, and #1040 for the review
-  surface — result review, the linked chat, attempt history, Send update and the
+  surface — result review, the linked chat, attempt history and the
   visible reconciliation of a row that disagrees with itself. There is no
   remaining surface owed by this document.
 
 ## Still open
 
-- Nothing here is finished beyond the above. The two watcher gaps recorded by
-  **#1047** — a **Send update**'s turn was not watched, and answering a delegated
-  chat in the browser did not move the attempt — are closed by the re-attach above,
+- Nothing here is finished beyond the above. The watcher gap recorded by
+  **#1047** — answering a delegated chat in the browser did not move the attempt — is closed by the re-attach above,
   and the attempt store is unchanged by it. The narrower limitation it leaves, an
   *unattended* turn in a delegated chat settling nothing, is recorded in "Known
   limitations".

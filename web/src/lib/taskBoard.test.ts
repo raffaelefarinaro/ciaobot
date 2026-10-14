@@ -67,7 +67,6 @@ function task(overrides: Partial<Task> = {}): Task {
     attempt_summary: '',
     attempt_detail: '',
     live_attempt_id: '',
-    changed_since_delegated: false,
     // A done fixture is finished today, as the board's own fixtures say; a test that
     // needs an undated done task passes `completed_at: null` explicitly.
     completed_at: overrides.status === 'done' ? '2026-03-01T08:00:00Z' : null,
@@ -267,6 +266,12 @@ describe('due dates', () => {
     expect(isOverdue(task({ due: '2026-03-01' }), '2026-03-10')).toBe(true)
     expect(isOverdue(task({ due: '2026-03-10' }), '2026-03-10')).toBe(false)
     expect(isOverdue(task({ due: '' }), '2026-03-10')).toBe(false)
+  })
+
+  it('never calls a done task overdue', () => {
+    expect(isOverdue(task({ status: 'done', due: '2026-03-01' }), '2026-03-10')).toBe(false)
+    expect(isOverdue(task({ status: 'in_review', due: '2026-03-01' }), '2026-03-10')).toBe(true)
+    expect(matchesDueFilter(task({ status: 'done', due: '2026-03-01' }), 'overdue', '2026-03-10')).toBe(false)
   })
 
   it('filters by due date, and every mode but "any" keeps the undated out', () => {
