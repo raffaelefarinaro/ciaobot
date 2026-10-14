@@ -2941,6 +2941,12 @@ const today = localDateKey()
   background: var(--bg2);
   cursor: pointer;
   min-width: 0;
+  /* The checkbox's net width in the head row (28px box with -6/-2 margins on
+     a fine pointer, 44px with -14/-10 on touch: 20px either way) plus the head
+     gap. Every text block under the title starts here; the ring's centre sits
+     at --task-check-center. Keep in sync with .task-check's size and margins. */
+  --task-text-inset: calc(20px + var(--space-2));
+  --task-check-center: 8px;
 }
 .task-card:hover { border-color: var(--border-strong); }
 .task-lanes--columns .task-card[draggable='true'] { cursor: grab; }
@@ -2949,6 +2955,8 @@ const today = localDateKey()
 /* The card's Done. A round box rather than a square one: it reads as "tick
    this off", not as a form field. The hit area is the full touch target; the
    drawn ring sits inside it. */
+/* Its margins feed --task-text-inset on .task-card; the touch block below
+   restates them for 44px. */
 .task-check {
   flex: 0 0 auto;
   display: grid;
@@ -3111,6 +3119,13 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Hanging indent: the checkbox owns the gutter, so every text block under the
+   title starts at the title's text column. Scoped to the card because the
+   editor reuses .task-reconcile and .task-review at full width; the compound
+   selector also outranks each block's own `margin: 0`. */
+.task-card :is(.task-meta, .task-agent-note, .task-changed, .task-reconcile) {
+  margin-inline-start: var(--task-text-inset);
+}
 .task-due--over { color: color-mix(in srgb, var(--error), var(--fg) 25%); }
 .visually-hidden {
   position: absolute;
@@ -3130,7 +3145,11 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-3);
+  /* The state word now starts at the text column, so a narrow lane can no
+     longer hold word and action on one line: the action drops below, still
+     right-aligned, rather than overlapping. */
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
   margin: 0 calc(-1 * var(--space-3)) calc(-1 * var(--space-3));
   padding: var(--space-1) var(--space-3);
   border-top: 1px solid var(--border);
@@ -3150,7 +3169,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 .task-agent-status {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 0;
   min-width: 0;
   white-space: nowrap;
   color: color-mix(in srgb, var(--band-tone), var(--fg) 25%);
@@ -3162,6 +3181,10 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   height: 7px;
   border-radius: 50%;
   background: var(--band-tone);
+  /* The dot sits in the checkbox's gutter, under the ring; the word starts at
+     the title's text column. The band's padding is the card's content edge. */
+  margin-inline-start: calc(var(--task-check-center) - 3.5px);
+  margin-inline-end: calc(var(--task-text-inset) - var(--task-check-center) - 3.5px);
 }
 .task-agent-band--running .task-agent-dot { animation: task-agent-pulse 1.6s ease-in-out infinite; }
 @keyframes task-agent-pulse { 50% { opacity: 0.35; } }
@@ -3170,6 +3193,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
 }
 .task-agent-action {
   flex: none;
+  margin-inline-start: auto;
   min-height: 32px;
   padding: 0;
   border: 0;
@@ -3221,6 +3245,7 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
     min-height: var(--touch);
   }
   .task-more { width: var(--touch); }
+  /* Net 20px again (44 - 14 - 10), so --task-text-inset holds. */
   .task-check {
     width: var(--touch);
     height: var(--touch);
