@@ -23,6 +23,7 @@
     <router-view />
     <InAppToast />
     <ConfirmDialog />
+    <ArchiveTaskDialog />
     <PromptDialog />
     <NewChatPicker />
   </div>
@@ -30,6 +31,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import ArchiveTaskDialog from './components/ArchiveTaskDialog.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import EngineOfflineView from './components/EngineOfflineView.vue'
 import InAppToast from './components/InAppToast.vue'

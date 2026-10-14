@@ -17,8 +17,8 @@
  * the sentence is the same in both, never two different sentences.
  */
 import { computed, ref, watch } from 'vue'
-import { api } from '../lib/api'
-import { taskApiErrorMessage, taskAttemptLabel } from '../lib/taskBoard'
+import { taskAttemptLabel } from '../lib/taskBoard'
+import { approveTask, markTaskDone, taskClosureErrorMessage } from '../lib/taskClosure'
 import type { ChatInfo, Task } from '../lib/types'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import AppIcon from './AppIcon.vue'
@@ -101,26 +101,11 @@ async function markDone(resolution: string): Promise<void> {
   approveError.value = ''
   let done = false
   try {
-    let revision = t.revision
-    const attemptId = t.live_attempt_id || t.attempt_id
-    if (attemptId) {
-      const freed = await api.post<{ task?: { revision?: string } }>(
-        `/api/tasks/${encodeURIComponent(t.id)}/attempt/${encodeURIComponent(attemptId)}/detach`,
-        { workspace },
-      )
-      revision = freed?.task?.revision || revision
-    }
-    await api.post(`/api/tasks/${encodeURIComponent(t.id)}/complete`, {
-      workspace,
-      expected_revision: revision,
-      resolution,
-    })
+    await markTaskDone(t, workspace, resolution)
     done = true
     noteOpen.value = false
   } catch (e) {
-    approveError.value = (e as { status?: number } | null)?.status === 409
-      ? 'This task changed since it was read. Check it and try again.'
-      : taskApiErrorMessage(e, 'Could not mark the task done')
+    approveError.value = taskClosureErrorMessage(e, 'mark-done')
   } finally {
     approving.value = false
   }
@@ -135,16 +120,10 @@ async function approve(resolution: string): Promise<void> {
   approving.value = true
   approveError.value = ''
   try {
-    await api.post(`/api/tasks/${encodeURIComponent(t.id)}/complete`, {
-      workspace,
-      expected_revision: t.revision,
-      resolution,
-    })
+    await approveTask(t, workspace, resolution)
     noteOpen.value = false
   } catch (e) {
-    approveError.value = (e as { status?: number } | null)?.status === 409
-      ? 'This task changed since it was read. Check it and approve again.'
-      : taskApiErrorMessage(e, 'Could not approve the task')
+    approveError.value = taskClosureErrorMessage(e, 'approve')
   } finally {
     approving.value = false
   }
