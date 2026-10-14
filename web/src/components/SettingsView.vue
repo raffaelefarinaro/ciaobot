@@ -6200,6 +6200,12 @@ a.btn-secondary {
     position: relative;
     isolation: isolate;
   }
+  .field-info[open] summary,
+  .field-info summary:hover {
+    border: 0;
+    background: none;
+  }
+  .field-info-panel { top: calc(100% - 6px); }
   .field-info summary::before {
     content: '';
     position: absolute;

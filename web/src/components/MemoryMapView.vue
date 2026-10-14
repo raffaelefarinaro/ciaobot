@@ -2125,10 +2125,10 @@ onBeforeUnmount(() => {
 }
 .mm-toolbar-stale strong { color: inherit; }
 @media (pointer: coarse) {
+  /* inline-block, not flex: flex items drop the space in "<strong>N</strong> unchecked". */
   .mm-toolbar-stale {
-    display: inline-flex;
-    align-items: center;
-    min-height: var(--touch);
+    display: inline-block;
+    line-height: var(--touch);
   }
 }
 

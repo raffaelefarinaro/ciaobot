@@ -17,16 +17,19 @@ const TABS = [
   '/settings/mcp',
 ]
 
+// Content selectors, not shell ones: a surface must have rendered its data
+// before it is measured. Automations and Import have no fixture rows, so they
+// wait on their heading.
 const MAIN_SURFACES: Array<[string, string]> = [
-  ['/', BOOTED],
-  ['/tasks', '.task-view'],
-  ['/automations', '.schedule-panel'],
-  ['/memory/review', '.memory-map'],
-  ['/memory/map', '.memory-map'],
-  ['/memory/categories', '.memory-map'],
-  ['/memory/import', '.memory-map'],
-  ['/memory/retired', '.memory-map'],
-  ['/memory/history', '.memory-map'],
+  ['/', '.home-setup-link'],
+  ['/tasks', '.task-card'],
+  ['/automations', '.schedule-panel .page-tag'],
+  ['/memory/review', '.pr-select-toggle'],
+  ['/memory/map', '.mm-toolbar-stale'],
+  ['/memory/categories', '.cat-h'],
+  ['/memory/import', '.import-title'],
+  ['/memory/retired', '.guide-budget-link'],
+  ['/memory/history', '.ph-seg'],
 ]
 
 /**
