@@ -239,6 +239,54 @@ const lanes = computed(() =>
  */
 const columnsShown = computed(() => lanes.value.length > 1)
 
+// Done is the lane nobody needs open all day, so the unfiltered board keeps it
+// behind a tab at the end of the row. The choice is remembered per browser.
+const DONE_SHOWN_KEY = 'ciao.tasks.doneShown'
+
+function readDoneShown(): boolean {
+  try {
+    return localStorage.getItem(DONE_SHOWN_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+const doneShown = ref(readDoneShown())
+watch(doneShown, (shown) => {
+  try {
+    localStorage.setItem(DONE_SHOWN_KEY, shown ? '1' : '0')
+  } catch {
+    // Storage blocked: the choice lasts for this page only.
+  }
+})
+
+const boardLanes = computed(() =>
+  columnsShown.value && !doneShown.value ? lanes.value.filter((lane) => lane.status !== 'done') : lanes.value,
+)
+const doneLane = computed(() => lanes.value.find((lane) => lane.status === 'done') ?? null)
+/** The tab's name: the badge's count (today's), and earlier ones only when there are some. */
+const doneTabLabel = computed(() => {
+  const lane = doneLane.value
+  if (!lane) return ''
+  return lane.earlierDone
+    ? `Show done tasks (${lane.tasks.length} today, ${lane.earlierDone} earlier)`
+    : `Show done tasks (${lane.tasks.length})`
+})
+
+/**
+ * Open the Done lane from its tab. The lane may sit past the board's sideways
+ * scroll, and the tab unmounts on click, so bring the lane into view and hand
+ * focus to its Hide button rather than let it fall to the page.
+ */
+async function showDone() {
+  doneShown.value = true
+  await nextTick()
+  const lane = paneEl.value?.querySelector<HTMLElement>('[data-lane="done"]')
+  const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+  lane?.scrollIntoView?.({ inline: 'nearest', block: 'nearest', behavior: reduced ? 'auto' : 'smooth' })
+  lane?.querySelector<HTMLElement>('.task-lane-hide')?.focus({ preventScroll: true })
+}
+
 /**
  * The workspace's auto-managed General project, which the board treats as the
  * same General as a task filed under no project: one name, one filter entry,
@@ -1064,6 +1112,11 @@ async function submitResolution() {
   const task = resolutionTask.value
   if (!task || resolutionBusy.value) return
   const text = resolutionDraft.value
+  // With Done collapsed the completed card leaves the view, and its focus with it:
+  // read its lane neighbour now, before the write re-renders the lane.
+  const handoff = resolutionMode.value === 'complete' && !doneShown.value && columnsShown.value
+    ? focusHandoffFor(task.id)
+    : null
   resolutionBusy.value = true
   resolutionError.value = ''
   board.clearError()
@@ -1099,17 +1152,35 @@ async function submitResolution() {
   const closeCompletedDetail = completed && detailOpen.value && detailId.value === saved.id
   if (detailOpen.value && detailId.value === saved.id) detailForm.status = saved.status
   resetResolution()
+  if (handoff !== null && !closeCompletedDetail) {
+    await nextTick()
+    const target = (handoff && paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${handoff}"] .task-open`))
+      || paneEl.value?.querySelector<HTMLElement>('.task-done-toggle')
+    target?.focus()
+  }
   if (closeCompletedDetail) {
     await closeDetail()
     if (!detailOpen.value) {
       await nextTick()
       const card = paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${saved.id}"] .task-open`)
-      const target = card ?? paneEl.value?.querySelector<HTMLElement>('.task-new')
+      // Done collapsed: the card is out of view, so its lane neighbour or the Done tab takes focus.
+      const near = handoff !== null
+        ? (handoff && paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${handoff}"] .task-open`))
+          || paneEl.value?.querySelector<HTMLElement>('.task-done-toggle')
+        : null
+      const target = card ?? near ?? paneEl.value?.querySelector<HTMLElement>('.task-new')
       target?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
       target?.focus()
     }
   }
   board.clearError()
+}
+
+/** The id of the card beside `taskId` in its lane (next, else previous), or '' when it is alone. */
+function focusHandoffFor(taskId: string): string {
+  const item = paneEl.value?.querySelector(`li[data-task-id="${taskId}"]`)
+  const neighbour = item?.nextElementSibling ?? item?.previousElementSibling
+  return neighbour?.getAttribute('data-task-id') ?? ''
 }
 
 /** Complete with an empty resolution. The blank is the user's explicit choice. */
@@ -1875,27 +1946,38 @@ const today = localDateKey()
             from the command line with <code>ciao task</code>.
           </p>
 
-          <!-- One card, one render path. The unfiltered board is four lanes side
-               by side at every width, scrolling sideways inside the board; a
-               status filter draws its one group at full width. -->
+          <!-- One card, one render path. The unfiltered board is its lanes side
+               by side at every width, scrolling sideways inside the board, with
+               Done behind a tab at the end; a status filter draws its one group
+               at full width. -->
           <div
             v-else
             class="task-lanes"
             :class="lanes.length > 1 ? 'task-lanes--columns' : 'task-lanes--list'"
           >
             <section
-              v-for="lane in lanes"
+              v-for="lane in boardLanes"
               :key="lane.status || 'all'"
               class="task-lane"
               :class="{ 'task-lane--drop': lane.status && dropStatus === lane.status }"
               :aria-label="lane.label"
+              :data-lane="lane.status || undefined"
               @dragover="onDragOver(lane.status, $event)"
               @dragleave="onDragLeave(lane.status, $event)"
               @drop.prevent="onDrop(lane.status)"
             >
               <h3 class="task-lane-head">
                 <span class="task-lane-label">{{ lane.label }}</span>
-                <span class="badge badge--muted">{{ lane.tasks.length }}</span>
+                <span class="task-lane-count">
+                  <span class="badge badge--muted">{{ lane.tasks.length }}</span>
+                  <button
+                    v-if="columnsShown && lane.status === 'done'"
+                    type="button"
+                    class="task-lane-hide"
+                    aria-label="Hide done tasks"
+                    @click="doneShown = false"
+                  >Hide</button>
+                </span>
               </h3>
               <p v-if="!lane.tasks.length" class="task-lane-empty">
                 {{ dragTask && lane.status && dragTask.status !== lane.status ? 'Drop here.' : lane.status === 'done' && lane.earlierDone ? 'Nothing done today.' : 'Nothing here.' }}
@@ -2065,6 +2147,21 @@ const today = localDateKey()
                 @click="statusFilter = 'done'"
               >{{ lane.earlierDone }} done earlier · Show all</button>
             </section>
+            <button
+              v-if="columnsShown && !doneShown && doneLane"
+              type="button"
+              class="task-done-toggle"
+              :class="{ 'task-done-toggle--drop': dropStatus === 'done' }"
+              :aria-expanded="false"
+              :aria-label="doneTabLabel"
+              @click="showDone"
+              @dragover="onDragOver('done', $event)"
+              @dragleave="onDragLeave('done', $event)"
+              @drop.prevent="onDrop('done')"
+            >
+              <span class="task-done-toggle-label">Done</span>
+              <span class="badge badge--muted">{{ doneLane.tasks.length }}</span>
+            </button>
           </div>
 
           <!-- A refused write keeps the rows it had and says the server's own
@@ -2862,15 +2959,12 @@ const today = localDateKey()
   -webkit-overflow-scrolling: touch;
   padding: var(--space-1) var(--space-1) var(--space-6);
 }
-/* Lanes share a wide pane and never get narrower than 248px; below that the
-   board scrolls sideways. On a phone-width pane one lane takes most of the
-   board, so the next one peeks in at the edge. A status filter draws its one
-   lane at full width. */
-.task-lanes > .task-lane { flex: 1 1 320px; min-width: 248px; }
+/* One lane width at every pane width (no stretching, no 85% switch): a narrow
+   pane scrolls the board sideways, a wide one leaves room after the last lane.
+   310px keeps a card's state and its action on one line. */
+.task-lanes { --task-lane-width: 310px; }
+.task-lanes--columns > .task-lane { flex: 0 0 var(--task-lane-width); width: var(--task-lane-width); min-width: 0; }
 .task-lanes--list > .task-lane { flex: 1 1 100%; min-width: 0; }
-@container chat-pane (max-width: 640px) {
-  .task-lanes--columns > .task-lane { flex: 0 0 85%; min-width: 0; }
-}
 
 .task-lane {
   display: flex;
@@ -2898,6 +2992,50 @@ const today = localDateKey()
   font-size: calc(15px * var(--font-scale));
   font-weight: 650;
   letter-spacing: -0.01em;
+}
+.task-lane-count { display: inline-flex; align-items: center; gap: var(--space-2); }
+.task-lane-hide {
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg3);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 400;
+  letter-spacing: normal;
+  cursor: pointer;
+}
+.task-lane-hide:hover { color: var(--fg); }
+.task-lane-hide:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+@media (pointer: coarse) { .task-lane-hide { min-height: var(--touch); min-width: var(--touch); } }
+/* Done, collapsed: a vertical tab that is also where a card can be dropped. */
+.task-done-toggle {
+  flex: 0 0 44px;
+  align-self: stretch;
+  min-height: 8rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg2);
+  font: inherit;
+  font-size: calc(15px * var(--font-scale));
+  font-weight: 650;
+  cursor: pointer;
+  transition: background-color 120ms ease-out, box-shadow 120ms ease-out;
+}
+.task-done-toggle-label { writing-mode: vertical-rl; }
+.task-done-toggle:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); color: var(--fg); }
+.task-done-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.task-done-toggle--drop {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 .task-lane-more {
   align-self: flex-start;

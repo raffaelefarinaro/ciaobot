@@ -144,6 +144,8 @@ describe('TaskBoardView', () => {
     // board is read on that day.
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-03-01T12:00:00Z'))
+    // Done is collapsed by default; most of these tests read the whole board.
+    localStorage.setItem('ciao.tasks.doneShown', '1')
     setActivePinia(createPinia())
     apiGet.mockReset()
     apiPost.mockReset()
@@ -229,6 +231,97 @@ describe('TaskBoardView', () => {
     expect(wrapper.text()).toContain('Landed last week')
     expect(wrapper.text()).toContain('Done without a stamp')
     expect(wrapper.find('.task-lane-more').exists()).toBe(false)
+  })
+
+  it('keeps Done behind a tab by default, and remembers the choice in localStorage', async () => {
+    localStorage.removeItem('ciao.tasks.doneShown')
+    const wrapper = await mountBoard()
+    expect(lanes(wrapper).map((lane) => lane.get('.task-lane-label').text()))
+      .toEqual(['To do', 'In progress', 'In review'])
+    const tab = wrapper.get('.task-done-toggle')
+    expect(tab.attributes('aria-expanded')).toBe('false')
+    expect(tab.attributes('aria-label')).toBe('Show done tasks (1)')  // no earlier ones: no earlier clause
+    expect(tab.text()).toContain('Done')
+
+    await tab.trigger('click')
+    await flushPromises()
+    expect(localStorage.getItem('ciao.tasks.doneShown')).toBe('1')
+    expect(lanes(wrapper)).toHaveLength(4)
+    expect(wrapper.find('.task-done-toggle').exists()).toBe(false)
+    const hide = wrapper.get('.task-lane-hide')
+    expect(hide.attributes('aria-label')).toBe('Hide done tasks')
+    expect(hide.attributes('aria-expanded')).toBeUndefined()
+    expect(hide.text()).toBe('Hide')
+    await hide.trigger('click')
+    expect(localStorage.getItem('ciao.tasks.doneShown')).toBe('0')
+    expect(lanes(wrapper)).toHaveLength(3)
+    wrapper.unmount()
+
+    // A fresh mount reads the stored choice back.
+    localStorage.setItem('ciao.tasks.doneShown', '1')
+    const again = await mountBoard()
+    expect(lanes(again)).toHaveLength(4)
+    expect(again.find('.task-done-toggle').exists()).toBe(false)
+    again.unmount()
+  })
+
+  it('moves focus to the Hide button when the Done tab opens the lane, since the tab unmounts', async () => {
+    localStorage.removeItem('ciao.tasks.doneShown')
+    const wrapper = await mountBoard()
+    await wrapper.get('.task-done-toggle').trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(document.activeElement).toBe(wrapper.get('.task-lane-hide').element)
+    expect(wrapper.get('[data-lane="done"]').attributes('aria-label')).toBe('Done')
+    wrapper.unmount()
+  })
+
+  it('counts today in the tab and names earlier done tasks only when there are some', async () => {
+    localStorage.removeItem('ciao.tasks.doneShown')
+    const earlier = task({ id: 'old', title: 'Long ago', status: 'done', completed_at: '2026-02-01T08:00:00Z' })
+    const wrapper = await mountBoard([...BOARD, earlier])
+    expect(wrapper.get('.task-done-toggle').attributes('aria-label')).toBe('Show done tasks (1 today, 1 earlier)')
+    expect(wrapper.get('.task-done-toggle .badge').text()).toBe('1')
+    wrapper.unmount()
+  })
+
+  it('keeps focus on a real element when Shift+Right completes a card into the collapsed Done', async () => {
+    localStorage.removeItem('ciao.tasks.doneShown')
+    const sibling = task({ id: 'held2', title: 'Wait on a second key', status: 'in_review' })
+    const wrapper = await mountBoard([...BOARD, sibling])
+    apiPost.mockResolvedValue({ workspace: 'personal', task: { ...task({ id: 'held', status: 'done' }), revision: NEXT_REVISION, body: '' } })
+    const open = card(wrapper, 'Wait on a key').get('.task-open')
+    ;(open.element as HTMLElement).focus()
+    await open.trigger('keydown', { key: 'ArrowRight', shiftKey: true })
+    await flushPromises()
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
+    await nextTick()
+    // Done is collapsed, so the card left the view: focus goes to its lane neighbour.
+    expect(document.activeElement).toBe(card(wrapper, 'Wait on a second key').get('.task-open').element)
+    // With nothing left in the lane it goes to the Done tab.
+    const last = card(wrapper, 'Wait on a second key').get('.task-open')
+    ;(last.element as HTMLElement).focus()
+    apiPost.mockResolvedValue({ workspace: 'personal', task: { ...task({ id: 'held2', status: 'done' }), revision: NEXT_REVISION, body: '' } })
+    await last.trigger('keydown', { key: 'ArrowRight', shiftKey: true })
+    await flushPromises()
+    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(document.activeElement).toBe(wrapper.get('.task-done-toggle').element)
+    wrapper.unmount()
+  })
+
+  it('completes a card dropped on the collapsed Done tab through the completion gesture', async () => {
+    localStorage.removeItem('ciao.tasks.doneShown')
+    const wrapper = await mountBoard()
+    await card(wrapper, 'Wait on a key').trigger('dragstart')
+    const tab = wrapper.get('.task-done-toggle')
+    await tab.trigger('dragover')
+    expect(tab.classes()).toContain('task-done-toggle--drop')
+    await tab.trigger('drop')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+    wrapper.unmount()
   })
 
   it('reads the active workspace and draws the four columns with their counts', async () => {

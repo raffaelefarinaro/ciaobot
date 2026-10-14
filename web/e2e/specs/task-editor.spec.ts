@@ -15,6 +15,8 @@ for (const width of [1440, 390]) {
           completed_at: new Date().toISOString(), resolution: '', completions: [],
         } } })
       })
+      // Done is collapsed by default; this spec follows focus to the completed card in its lane.
+      await page.addInitScript(() => localStorage.setItem('ciao.tasks.doneShown', '1'))
       await boot(page, '/tasks', '.task-lanes')
       await page.locator('.task-open').first().focus()
       await page.keyboard.press('Enter')

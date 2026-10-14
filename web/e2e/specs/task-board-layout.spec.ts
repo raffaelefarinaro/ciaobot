@@ -25,6 +25,8 @@ for (const width of [1440, 900, 390]) {
           })),
         } })
       })
+      // Done is collapsed by default; this spec reads all four lanes in one row.
+      await page.addInitScript(() => localStorage.setItem('ciao.tasks.doneShown', '1'))
       await boot(page, '/tasks', '.task-lanes')
       const lanes = page.locator('.task-lane')
       await expect(page.locator('.task-lane-label')).toHaveText(labels)
@@ -36,8 +38,9 @@ for (const width of [1440, 900, 390]) {
       }
       // One horizontal scroller holds the row, and the board scrolls it, not the page.
       await expect(page.locator('.task-lanes')).toHaveCount(1)
-      // A wide pane fits all four lanes; a narrower one scrolls them sideways.
-      expect(await page.locator('.task-lanes').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(width < 1440)
+      // Lanes are a fixed 310px, so four of them outgrow the pane at every width
+      // tested here (1440 leaves about 1036px) and the board scrolls sideways.
+      expect(await page.locator('.task-lanes').evaluate(el => el.scrollWidth > el.clientWidth)).toBe(true)
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
       await expect(page.locator('.task-card[draggable="true"]')).toHaveCount(4)
       await page.screenshot({ path: testInfo.outputPath('status-groups.png'), fullPage: true, animations: 'disabled' })

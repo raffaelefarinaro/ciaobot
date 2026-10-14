@@ -57,6 +57,8 @@ const ALIGNMENT_TASKS = [
 ]
 
 async function mockTasks(page: Page) {
+  // Done is collapsed by default; the done card is one of the shapes measured.
+  await page.addInitScript(() => localStorage.setItem('ciao.tasks.doneShown', '1'))
   await page.route(/\/api\/tasks(?:\?|$)/, route => route.fulfill({
     json: { workspace: 'alpha', tasks: ALIGNMENT_TASKS },
   }))
