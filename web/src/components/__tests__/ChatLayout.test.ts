@@ -1794,6 +1794,82 @@ describe('ChatLayout shared chat pin', () => {
     expect(wrapper.find('.chat-split').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  async function mountPinned(firstPanelBusy: boolean) {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
+    })
+    await router.push('/chat/chat-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    vi.spyOn(store, 'clearActiveChatView').mockImplementation(() => { store.activeChatId = null })
+    vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+
+    // Each mount is its own panel: only the first one holds unsaved work, as a
+    // real remount (the panel is keyed by the route's chat) starts clean.
+    let mounts = 0
+    const PanelStub = defineComponent({
+      name: 'PinnedFilePanel',
+      props: ['filePath'],
+      setup(_, { expose }) {
+        expose({ isBusyAuthoring: firstPanelBusy && mounts++ === 0 })
+        return () => h('div', { class: 'pinned-panel-stub' })
+      },
+    })
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: PanelStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    store.applyChatPinState('chat-1', { path: 'notes/draft.md', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+    expect(wrapper.find('.chat-split').exists()).toBe(true)
+    return { wrapper, store, router }
+  }
+
+  it('drops the pinned page when the chat is no longer on screen, though the route still names it', async () => {
+    const { wrapper, store } = await mountPinned(false)
+    // Archive, delete and a refresh that no longer lists the chat all clear the
+    // selection without a navigation: the screen falls back to Home, and the
+    // chat's pinned page must not stay beside it.
+    store.activeChatId = null
+    await flushPromises()
+    expect(wrapper.find('.chat-split').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('closes the pinned page on the way Home even while it holds unsaved work', async () => {
+    const { wrapper, router } = await mountPinned(true)
+    await router.push('/')
+    await flushPromises()
+    expect(wrapper.find('.chat-split').exists()).toBe(false)
+    wrapper.unmount()
+  })
 })
 
 describe('ChatLayout home arrow navigation', () => {

@@ -711,8 +711,14 @@ const activePinKey = computed(() => {
   // Tasks, Memory and the project routes read as before (they carry neither
   // param). Coming back to the chat restores that chat's pin, because the pin
   // is looked up under the chat the route names.
+  //
+  // A chat route shows that chat only while it is the one selected: archiving
+  // or deleting it, or a refresh that no longer lists it, clears the selection
+  // without a navigation, and the screen falls back to Home. The pin follows
+  // what is on screen, so Home never carries a chat's page beside it.
   if (projectIdParam.value) return projectIdParam.value
-  return (route.params.chatId as string) || ''
+  const chatId = (route.params.chatId as string) || ''
+  return chatId && store.activeChat?.chat_id === chatId ? chatId : ''
 })
 const pinnedFilePath = computed(() => {
   if (isMobile.value) return ''
