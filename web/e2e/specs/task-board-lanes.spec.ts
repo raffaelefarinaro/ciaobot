@@ -150,7 +150,7 @@ test.describe('lanes on a phone', () => {
     const tab = await toggle(page).boundingBox()
     expect(tab!.width).toBeGreaterThanOrEqual(44)
     await toggle(page).click()
-    const hide = await lane(page, 'Done').getByRole('button', { name: 'Hide' }).boundingBox()
+    const hide = await lane(page, 'Done').getByRole('button', { name: 'Hide done tasks' }).boundingBox()
     expect(hide!.height).toBeGreaterThanOrEqual(44)
     expect(hide!.width).toBeGreaterThanOrEqual(44)
   })
@@ -179,12 +179,19 @@ test.describe('Done behind a tab', () => {
     await toggle(page).click()
     await expect(lane(page, 'Done')).toBeVisible()
     await expect(page.locator('.task-lanes .task-done-toggle')).toHaveCount(0)
+    // The click scrolls the lane into view and hands focus to Hide (the tab unmounted).
+    await expect(lane(page, 'Done').getByRole('button', { name: 'Hide done tasks' })).toBeFocused()
+    await expect.poll(() => page.evaluate(() => {
+      const done = document.querySelector('[data-lane="done"]')!.getBoundingClientRect()
+      const board = document.querySelector('.task-lanes')!.getBoundingClientRect()
+      return done.left >= board.left - 1 && done.right <= board.right + 1
+    })).toBe(true)
 
     await page.reload()
     await expect(page.locator('.task-card').first()).toBeVisible()
     await expect(lane(page, 'Done')).toBeVisible()
 
-    await lane(page, 'Done').getByRole('button', { name: 'Hide' }).click()
+    await lane(page, 'Done').getByRole('button', { name: 'Hide done tasks' }).click()
     await expect(lane(page, 'Done')).toHaveCount(0)
     await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false')
   })

@@ -264,6 +264,28 @@ const boardLanes = computed(() =>
   columnsShown.value && !doneShown.value ? lanes.value.filter((lane) => lane.status !== 'done') : lanes.value,
 )
 const doneLane = computed(() => lanes.value.find((lane) => lane.status === 'done') ?? null)
+/** The tab's name: the badge's count (today's), and earlier ones only when there are some. */
+const doneTabLabel = computed(() => {
+  const lane = doneLane.value
+  if (!lane) return ''
+  return lane.earlierDone
+    ? `Show done tasks (${lane.tasks.length} today, ${lane.earlierDone} earlier)`
+    : `Show done tasks (${lane.tasks.length})`
+})
+
+/**
+ * Open the Done lane from its tab. The lane may sit past the board's sideways
+ * scroll, and the tab unmounts on click, so bring the lane into view and hand
+ * focus to its Hide button rather than let it fall to the page.
+ */
+async function showDone() {
+  doneShown.value = true
+  await nextTick()
+  const lane = paneEl.value?.querySelector<HTMLElement>('[data-lane="done"]')
+  const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+  lane?.scrollIntoView?.({ inline: 'nearest', block: 'nearest', behavior: reduced ? 'auto' : 'smooth' })
+  lane?.querySelector<HTMLElement>('.task-lane-hide')?.focus({ preventScroll: true })
+}
 
 /**
  * The workspace's auto-managed General project, which the board treats as the
@@ -1090,6 +1112,11 @@ async function submitResolution() {
   const task = resolutionTask.value
   if (!task || resolutionBusy.value) return
   const text = resolutionDraft.value
+  // With Done collapsed the completed card leaves the view, and its focus with it:
+  // read its lane neighbour now, before the write re-renders the lane.
+  const handoff = resolutionMode.value === 'complete' && !doneShown.value && columnsShown.value
+    ? focusHandoffFor(task.id)
+    : null
   resolutionBusy.value = true
   resolutionError.value = ''
   board.clearError()
@@ -1125,6 +1152,12 @@ async function submitResolution() {
   const closeCompletedDetail = completed && detailOpen.value && detailId.value === saved.id
   if (detailOpen.value && detailId.value === saved.id) detailForm.status = saved.status
   resetResolution()
+  if (handoff !== null && !closeCompletedDetail) {
+    await nextTick()
+    const target = (handoff && paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${handoff}"] .task-open`))
+      || paneEl.value?.querySelector<HTMLElement>('.task-done-toggle')
+    target?.focus()
+  }
   if (closeCompletedDetail) {
     await closeDetail()
     if (!detailOpen.value) {
@@ -1136,6 +1169,13 @@ async function submitResolution() {
     }
   }
   board.clearError()
+}
+
+/** The id of the card beside `taskId` in its lane (next, else previous), or '' when it is alone. */
+function focusHandoffFor(taskId: string): string {
+  const item = paneEl.value?.querySelector(`li[data-task-id="${taskId}"]`)
+  const neighbour = item?.nextElementSibling ?? item?.previousElementSibling
+  return neighbour?.getAttribute('data-task-id') ?? ''
 }
 
 /** Complete with an empty resolution. The blank is the user's explicit choice. */
@@ -1916,6 +1956,7 @@ const today = localDateKey()
               class="task-lane"
               :class="{ 'task-lane--drop': lane.status && dropStatus === lane.status }"
               :aria-label="lane.label"
+              :data-lane="lane.status || undefined"
               @dragover="onDragOver(lane.status, $event)"
               @dragleave="onDragLeave(lane.status, $event)"
               @drop.prevent="onDrop(lane.status)"
@@ -1928,7 +1969,7 @@ const today = localDateKey()
                     v-if="columnsShown && lane.status === 'done'"
                     type="button"
                     class="task-lane-hide"
-                    aria-expanded="true"
+                    aria-label="Hide done tasks"
                     @click="doneShown = false"
                   >Hide</button>
                 </span>
@@ -2107,8 +2148,8 @@ const today = localDateKey()
               class="task-done-toggle"
               :class="{ 'task-done-toggle--drop': dropStatus === 'done' }"
               :aria-expanded="false"
-              :aria-label="`Show done tasks (${doneLane.tasks.length + (doneLane.earlierDone || 0)})`"
-              @click="doneShown = true"
+              :aria-label="doneTabLabel"
+              @click="showDone"
               @dragover="onDragOver('done', $event)"
               @dragleave="onDragLeave('done', $event)"
               @drop.prevent="onDrop('done')"
