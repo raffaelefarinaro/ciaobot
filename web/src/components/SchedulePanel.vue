@@ -1274,7 +1274,7 @@ const cardDirty = computed(() => editingCard.value !== '' && editSnapshot() !== 
 
 function startCardEdit(card: Exclude<EditCard, ''>) {
   if (!schedule.value) return
-  if (card === 'engine' && schedule.value.scope !== 'system' && !inheritsChatModel.value && !store.models) {
+  if (card === 'engine' && !inheritsChatModel.value && !store.models) {
     void store.fetchModels()
   }
   const isSystem = schedule.value.scope === 'system'
