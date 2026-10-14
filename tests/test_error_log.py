@@ -9,7 +9,9 @@ import pytest
 
 from ciao.error_log import (
     _is_benign_sdk_write_error,
+    QUIET_AT_DEBUG,
     install_asyncio_noise_filter,
+    quiet_third_party_debug_loggers,
     resolve_log_level,
     setup_debug_logging,
     setup_error_logging,
@@ -173,3 +175,93 @@ def test_setup_debug_logging_is_idempotent(
         and h.baseFilename == str(debug_path)
     ]
     assert len(handlers) == 1
+
+
+def test_quiet_third_party_debug_loggers_pins_httpcore_and_websockets():
+    names = ("httpcore", "websockets", "httpcore.http", "websockets.server")
+    saved = {n: logging.getLogger(n).level for n in names}
+    try:
+        for n in names:
+            logging.getLogger(n).setLevel(logging.NOTSET)
+        logging.getLogger().setLevel(logging.DEBUG)
+        assert set(QUIET_AT_DEBUG) == {"httpcore", "websockets"}
+        quiet_third_party_debug_loggers()
+        assert logging.getLogger("httpcore.http").getEffectiveLevel() == logging.INFO
+        assert logging.getLogger("websockets.server").getEffectiveLevel() == logging.INFO
+    finally:
+        for n, lvl in saved.items():
+            logging.getLogger(n).setLevel(lvl)
+
+
+def test_uvicorn_config_kwargs_never_debug():
+    from types import SimpleNamespace
+
+    from ciao.main import _uvicorn_config_kwargs
+
+    cfg = SimpleNamespace(pwa_host="127.0.0.1", pwa_port=8543, log_level="debug")
+    assert _uvicorn_config_kwargs(cfg) == {
+        "host": "127.0.0.1",
+        "port": 8543,
+        "log_level": "info",
+    }
+
+
+async def test_ws_handshake_does_not_log_cookie():
+    import socket
+    from types import SimpleNamespace
+
+    import uvicorn
+    import websockets
+
+    from ciao.main import _uvicorn_config_kwargs
+
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            while True:
+                msg = await receive()
+                if msg["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                else:
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        if scope["type"] == "websocket":
+            await receive()
+            await send({"type": "websocket.accept"})
+            await send({"type": "websocket.close"})
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    cfg = SimpleNamespace(pwa_host="127.0.0.1", pwa_port=port, log_level="debug")
+    server = uvicorn.Server(uvicorn.Config(app, **_uvicorn_config_kwargs(cfg)))
+    # uvicorn sets propagate=False on its loggers, so caplog on the root never
+    # sees them; capture on uvicorn.error directly. The websockets client in
+    # this test logs its own request, so only the server side is inspected.
+    records: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Collect(logging.DEBUG)
+    task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(200):
+            if server.started:
+                break
+            await asyncio.sleep(0.01)
+        assert server.started
+        uvi_logger = logging.getLogger("uvicorn.error")
+        uvi_logger.addHandler(handler)
+        async with websockets.connect(
+            f"ws://127.0.0.1:{port}/", additional_headers={"Cookie": "ciao_session=SECRET"}
+        ):
+            pass
+    finally:
+        logging.getLogger("uvicorn.error").removeHandler(handler)
+        server.should_exit = True
+        await task
+    assert records, "expected uvicorn.error to emit something"
+    server_text = "\n".join(r.getMessage() for r in records)
+    assert "SECRET" not in server_text
+    assert "cookie:" not in server_text.lower()

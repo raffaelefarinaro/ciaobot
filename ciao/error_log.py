@@ -29,6 +29,20 @@ DEBUG_LOG_NAME = "server_debug.log"
 DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
 DEBUG_LOG_BACKUP_COUNT = 2
 
+# Third-party loggers pinned to INFO even when the log level is DEBUG.
+# httpcore: connection-pool traces that drown Ciaobot's own debug records
+# (noise only, it logs no header values). websockets: at DEBUG it logs every
+# handshake header line, including the session cookie. uvicorn already hands
+# its own logger to websockets, which main.py keeps at INFO; the pin guards
+# against a future uvicorn that stops doing so.
+QUIET_AT_DEBUG = ("httpcore", "websockets")
+
+
+def quiet_third_party_debug_loggers() -> None:
+    """Pin the QUIET_AT_DEBUG logger families to INFO."""
+    for name in QUIET_AT_DEBUG:
+        logging.getLogger(name).setLevel(logging.INFO)
+
 
 def resolve_log_level(raw: str) -> int:
     """Resolve the effective root-logger level from the log level setting.

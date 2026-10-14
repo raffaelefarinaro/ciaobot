@@ -12,7 +12,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
 from ciao.legacy_node_state import (
@@ -203,6 +203,21 @@ def guard_legacy_writers(runtime_root: Path) -> tuple[LegacyNodeState, bool]:
 # contacts it, but Apple's (web.push.apple.com, Safari and iOS PWAs) rejects a
 # `localhost` domain with 403 BadJwtToken, so the placeholder uses a real one.
 PUSH_SUBJECT = "mailto:ciaobot@users.noreply.github.com"
+
+
+def _uvicorn_config_kwargs(config: Any) -> dict[str, Any]:
+    """Bind address and log level for ``uvicorn.Config``.
+
+    uvicorn always runs at "info": it hands ``uvicorn.error`` to the websockets
+    protocol, which at DEBUG logs every handshake header, session cookie
+    included. Ciaobot's own debug records reach ``server_debug.log`` through
+    ``setup_debug_logging`` regardless.
+    """
+    return {
+        "host": config.pwa_host,
+        "port": config.pwa_port,
+        "log_level": "info",
+    }
 
 
 def _open_browser_when_ready(url: str) -> None:
@@ -442,11 +457,16 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     # At the debug log level (Settings), also capture DEBUG+ records into a
     # rotating server_debug.log so verbose runtime detail is inspectable after
     # the fact (surfaced through the debug issue report). No-op at INFO.
-    from ciao.error_log import resolve_log_level, setup_debug_logging
+    from ciao.error_log import (
+        quiet_third_party_debug_loggers,
+        resolve_log_level,
+        setup_debug_logging,
+    )
 
     log_level = resolve_log_level(config.log_level)
     logging.getLogger().setLevel(log_level)
     setup_debug_logging(config.workspace_root, level=log_level)
+    quiet_third_party_debug_loggers()
     # Keep the SDK's benign closed-transport control-task errors out of the
     # error log (asyncio would otherwise log them at ERROR). See issue #163.
     install_asyncio_noise_filter()
@@ -1220,12 +1240,7 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
 
     import uvicorn
 
-    uvi_config = uvicorn.Config(
-        app,
-        host=config.pwa_host,
-        port=config.pwa_port,
-        log_level="debug" if log_level <= logging.DEBUG else "info",
-    )
+    uvi_config = uvicorn.Config(app, **_uvicorn_config_kwargs(config))
     server = uvicorn.Server(uvi_config)
     tracker.start("server_starting")
     logger.info("Starting Ciaobot server on %s:%d", config.pwa_host, config.pwa_port)
