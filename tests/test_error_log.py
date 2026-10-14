@@ -229,9 +229,19 @@ async def test_ws_handshake_does_not_log_cookie():
             await send({"type": "websocket.accept"})
             await send({"type": "websocket.close"})
 
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
+    # Hand uvicorn the bound socket rather than a port number: closing a probe
+    # socket and rebinding its port races with anything else on the machine.
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    # uvicorn.Config runs dictConfig over the uvicorn loggers; put them back
+    # afterwards so this test leaves no global logging state behind.
+    uvi_names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    saved = {
+        name: (lg.level, list(lg.handlers), lg.propagate)
+        for name in uvi_names
+        for lg in [logging.getLogger(name)]
+    }
     cfg = SimpleNamespace(pwa_host="127.0.0.1", pwa_port=port, log_level="debug")
     server = uvicorn.Server(uvicorn.Config(app, **_uvicorn_config_kwargs(cfg)))
     # uvicorn sets propagate=False on its loggers, so caplog on the root never
@@ -244,7 +254,7 @@ async def test_ws_handshake_does_not_log_cookie():
             records.append(record)
 
     handler = _Collect(logging.DEBUG)
-    task = asyncio.create_task(server.serve())
+    task = asyncio.create_task(server.serve(sockets=[sock]))
     try:
         for _ in range(200):
             if server.started:
@@ -261,6 +271,12 @@ async def test_ws_handshake_does_not_log_cookie():
         logging.getLogger("uvicorn.error").removeHandler(handler)
         server.should_exit = True
         await task
+        sock.close()
+        for name, (level, handlers, propagate) in saved.items():
+            lg = logging.getLogger(name)
+            lg.setLevel(level)
+            lg.handlers[:] = handlers
+            lg.propagate = propagate
     assert records, "expected uvicorn.error to emit something"
     server_text = "\n".join(r.getMessage() for r in records)
     assert "SECRET" not in server_text
