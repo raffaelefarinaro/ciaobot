@@ -622,6 +622,61 @@ describe('ProjectSidebar update badge', () => {
 
     wrapper.unmount()
   })
+
+  function scheduleIn(workspace: string, patch: Record<string, unknown>) {
+    return {
+      schedule_id: `s-${workspace}-${Object.keys(patch).join('-')}`,
+      title: 'Routine',
+      prompt: 'go',
+      frequency: 'daily',
+      enabled: true,
+      scope: 'user',
+      workspace,
+      missed: false,
+      last_status: 'ok',
+      ...patch,
+    } as never
+  }
+
+  function seedWorkspaces() {
+    const store = useProjectStore()
+    store.workspaces = ['personal', 'work'].map(name => ({
+      name, vault_root: `/tmp/${name}`, default_provider: 'claude', gws_profile: '',
+    }))
+    store.activeWorkspace = 'personal'
+  }
+
+  it('does not warn on Automations for a failure in another workspace', async () => {
+    seedWorkspaces()
+    useTaskStore().schedules = [
+      scheduleIn('work', { last_status: 'error' }),
+      scheduleIn('work', { missed: true }),
+    ]
+    const wrapper = await mountSidebar()
+    await nextTick()
+    expect(wrapper.get('a[href="/schedules"]').classes()).not.toContain('nav-item--warning')
+    wrapper.unmount()
+  })
+
+  it('warns on Automations for a failure in the active workspace', async () => {
+    seedWorkspaces()
+    useTaskStore().schedules = [scheduleIn('personal', { last_status: 'error' })]
+    const wrapper = await mountSidebar()
+    await nextTick()
+    expect(wrapper.get('a[href="/schedules"]').classes()).toContain('nav-item--warning')
+    wrapper.unmount()
+  })
+
+  it('warns for a missing-chat schedule in the active workspace even when disabled', async () => {
+    seedWorkspaces()
+    useTaskStore().schedules = [
+      scheduleIn('personal', { enabled: false, last_status: 'missing-chat' }),
+    ]
+    const wrapper = await mountSidebar()
+    await nextTick()
+    expect(wrapper.get('a[href="/schedules"]').classes()).toContain('nav-item--warning')
+    wrapper.unmount()
+  })
 })
 
 describe('ProjectSidebar accessible context menus', () => {
