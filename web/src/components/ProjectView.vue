@@ -1548,7 +1548,7 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 }
 
 @media (pointer: coarse) {
-  .text-action { min-height: var(--touch); }
+  .text-action { min-height: var(--touch); min-width: var(--touch); }
 }
 
 @media (max-width: 768px) {

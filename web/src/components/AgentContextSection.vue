@@ -153,6 +153,9 @@ const contextPctLabel = computed(() => {
 .agent-context-compact { flex: none; white-space: nowrap; }
 @media (pointer: coarse) {
   .agent-context-compact { min-height: 44px; min-width: 44px; }
+  /* A flex item, so line-height gives the 44px box and the ellipsis still works
+     (inline-flex would put the text in an anonymous item that cannot truncate). */
+  a.agent-context-name { line-height: var(--touch); }
 }
 .agent-context-track {
   flex: 1;
