@@ -214,4 +214,20 @@ test.describe('Done behind a tab', () => {
     await expect(page.getByRole('dialog')).toBeVisible()
     await expect(page.getByRole('button', { name: 'Complete without note' })).toBeVisible()
   })
+
+  test('completing from the editor with Done collapsed leaves focus on the Done tab', async ({ page }) => {
+    await open(page, 'task-lanes-editor-focus')
+    const detail = { ...TASKS[0], body: '', resolution: '', completions: [], linked_chats: [] }
+    await page.route(/\/api\/tasks\/1{32}(?:\?.*)?$/, route => route.fulfill({ json: { workspace: 'alpha', task: detail } }))
+    await page.route(/\/api\/tasks\/1{32}\/complete/, route => route.fulfill({ json: { workspace: 'alpha', task: {
+      ...detail, status: 'done', revision: 'b'.repeat(64), completed_at: new Date().toISOString(),
+    } } }))
+    // The To do lane holds one card, so no neighbour is left to take focus.
+    await page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.task-open').focus()
+    await page.keyboard.press('Enter')
+    await page.getByRole('radio', { name: 'Done', exact: true }).click()
+    await page.getByRole('button', { name: 'Complete without note' }).click()
+    await expect(page.locator('#task-detail-name')).toHaveCount(0)
+    await expect(toggle(page)).toBeFocused()
+  })
 })

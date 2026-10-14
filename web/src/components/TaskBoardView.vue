@@ -1163,7 +1163,12 @@ async function submitResolution() {
     if (!detailOpen.value) {
       await nextTick()
       const card = paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${saved.id}"] .task-open`)
-      const target = card ?? paneEl.value?.querySelector<HTMLElement>('.task-new')
+      // Done collapsed: the card is out of view, so its lane neighbour or the Done tab takes focus.
+      const near = handoff !== null
+        ? (handoff && paneEl.value?.querySelector<HTMLElement>(`[data-task-id="${handoff}"] .task-open`))
+          || paneEl.value?.querySelector<HTMLElement>('.task-done-toggle')
+        : null
+      const target = card ?? near ?? paneEl.value?.querySelector<HTMLElement>('.task-new')
       target?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
       target?.focus()
     }
