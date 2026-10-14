@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import threading
-from types import SimpleNamespace
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import asdict
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -414,6 +414,37 @@ async def test_start_does_not_apply_when_stage_fails() -> None:
 
     assert applied == []
     assert status.json()["error"] == "boom"
+
+
+async def test_start_parks_apply_failure_that_wrote_no_record() -> None:
+    holder: dict[str, engine_update.Operation | None] = {"record": None}
+
+    def stage(version: str | None) -> SimpleNamespace:
+        holder["record"] = _op("staged")
+        return SimpleNamespace(phase="staged")
+
+    def apply() -> None:
+        raise engine_update.UpdateError("lock held")
+
+    app = _app(
+        engine_update_mode=lambda: "installer",
+        engine_update_read=lambda: holder["record"],
+        engine_update_stage=stage,
+        engine_update_apply=apply,
+    )
+
+    async with _asgi_client(app) as client:
+        started = await client.post("/api/update/start")
+        assert started.status_code == 202
+        await _settled(app)
+        status = await client.get("/api/update/status")
+
+    body = status.json()
+    # Apply refused before it wrote a record: the record is still the one stage
+    # left, so the reason has to ride along or the card ends on `staged` silent.
+    assert body["error"] == "lock held"
+    assert body["operation"]["phase"] == "staged"
+    assert body["running"] is False
 
 
 async def test_status_reports_running(runner: _Runner) -> None:

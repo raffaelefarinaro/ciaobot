@@ -223,23 +223,16 @@ def _update_in_progress(operation: dict[str, Any] | None) -> bool:
     return _operation_phase(operation) not in _TERMINAL_PHASES
 
 
-def _update_refusal(
-    request: Request, state: dict[str, Any], *, record_blocks: bool
-) -> JSONResponse | None:
+def _update_refusal(request: Request, state: dict[str, Any]) -> JSONResponse | None:
     """The 400/409 this engine must answer with, or None when it may proceed.
 
-    Two questions are common to both halves: an engine installed any other way
-    has no install to swap, and a run already in flight has to be allowed to
-    finish rather than have a second one started behind it. The third is each
-    half's own — a new *stage* may only replace a record that reached a
-    terminal phase, while an *apply* starts precisely from a staged record, so
-    the record check there is "is there something staged", below.
+    An engine installed any other way has no install to swap, and a run already
+    in flight has to be allowed to finish rather than have a second one started
+    behind it. What the persisted record allows is the start route's own call.
     """
     if not state["can_update"]:
         return api_error(_NOT_INSTALLER, 400)
     if _active_update_task(request) is not None:
-        return api_error(_ALREADY_RUNNING, 409)
-    if record_blocks and _update_in_progress(state["operation"]):
         return api_error(_ALREADY_RUNNING, 409)
     return None
 
@@ -304,12 +297,22 @@ async def update_status_endpoint(request: Request) -> JSONResponse:
 
 
 def _stage_then_apply(
-    stage_fn: Callable[..., Any], apply_fn: Callable[..., Any], version: str | None
+    request: Request,
+    stage_fn: Callable[..., Any],
+    apply_fn: Callable[..., Any],
+    version: str | None,
 ) -> None:
     """Both halves in one background job, so a closed tab cannot strand a staged release."""
     operation = stage_fn(version)
     if getattr(operation, "phase", None) == "staged":
-        apply_fn()
+        # Stage moved the record, so `_start_update_task`'s own `before` is stale
+        # for the apply half: an apply that refuses before writing a record would
+        # look like "the record moved" and lose its reason.
+        before_apply = _read_operation(request)
+        try:
+            apply_fn()
+        except engine_update.UpdateError as exc:
+            _park_update_error(request, before_apply, exc)
 
 
 async def update_start_endpoint(request: Request) -> JSONResponse:
@@ -340,7 +343,7 @@ async def update_start_endpoint(request: Request) -> JSONResponse:
     # every job that is already registered and the registration itself cannot
     # be interleaved with another request's guard.
     state = _engine_update_state(request)
-    refusal = _update_refusal(request, state, record_blocks=False)
+    refusal = _update_refusal(request, state)
     if refusal is not None:
         return refusal
 
@@ -355,5 +358,5 @@ async def update_start_endpoint(request: Request) -> JSONResponse:
     elif _update_in_progress(state["operation"]):
         return api_error(_ALREADY_RUNNING, 409)
     else:
-        _start_update_task(request, _stage_then_apply, stage_fn, apply_fn, version)
+        _start_update_task(request, _stage_then_apply, request, stage_fn, apply_fn, version)
     return JSONResponse({"started": True, "operation": state["operation"]}, status_code=202)
