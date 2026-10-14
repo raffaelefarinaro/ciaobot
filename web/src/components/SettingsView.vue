@@ -6205,7 +6205,8 @@ a.btn-secondary {
     border: 0;
     background: none;
   }
-  .field-info-panel { top: calc(100% - 6px); }
+  /* Doubled class: the base .field-info-panel rule comes later in the file. */
+  .field-info .field-info-panel { top: calc(100% - 6px); }
   .field-info summary::before {
     content: '';
     position: absolute;
