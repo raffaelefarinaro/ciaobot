@@ -453,7 +453,7 @@
                 Ciaobot is always password-protected — this is the password you type to open it,
                 and the one another device needs to sign in.
                 <a
-                  class="set-link"
+                  class="settings-help-link"
                   href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
                   target="_blank"
                   rel="noopener noreferrer"
@@ -592,7 +592,7 @@
                   is the chat's own model: a closed project uses its last-active chat, and a task resolution or
                   a project closed with no chats uses the workspace's default model.
                   <a
-                    class="set-link"
+                    class="settings-help-link"
                     href="https://www.raffaelefarinaro.com/ciaobot/models.html"
                     target="_blank"
                     rel="noopener noreferrer"
@@ -5058,27 +5058,6 @@ onUnmounted(stopUpdatePoll)
 @container chat-pane (max-width: 760px) {
   .settings-grid { grid-template-columns: minmax(0, 1fr); }
   .settings-rail { display: none; }
-}
-
-.settings-disclosure {
-  align-self: flex-start;
-  min-height: 32px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--accent);
-  font: inherit;
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-
-.settings-disclosure:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-@media (pointer: coarse) {
-  .settings-disclosure { min-height: var(--touch); }
 }
 /* Open-source card with the star ask still live: the pixel face sits on the
    right, out of the prose's flow. Without the nudge the card has no class and

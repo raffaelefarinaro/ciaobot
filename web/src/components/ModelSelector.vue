@@ -605,6 +605,7 @@ onMounted(() => {
 
 @media (pointer: coarse) {
   .model-selector__item { min-height: var(--touch, 44px); }
+  .model-selector__trigger { min-height: var(--touch, 44px); }
 }
 
 .model-selector__item {
