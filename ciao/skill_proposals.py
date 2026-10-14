@@ -670,6 +670,8 @@ def upsert_proposal(config: CiaoConfig, proposal: SkillProposal) -> SkillProposa
     path = proposal_path(config, proposal.workspace, proposal.skill)
     with queue_lock(path):
         existing = parse_proposal(path, proposal.workspace)
+        if existing is not None and not existing.origins and existing.lifecycle in SETTLED_LIFECYCLES:
+            _anchor_legacy_decision(config, existing)
         merged = _merge(config, existing, proposal)
         text = render_proposal(merged)
         current = ""
@@ -793,7 +795,7 @@ def _settle(
                 outcome=reason,
                 proposal_id=proposal.id,
                 learning_id=origin.learning_id if origin else "",
-                finding=origin.finding if origin else "",
+                finding=origin.finding if origin else _ordinary_finding(stored.change),
             )
         write_queue_atomically(path, render_proposal(settled))
     logger.info("Settled skill proposal %s as %s", proposal.id, lifecycle)
@@ -1552,7 +1554,16 @@ def _merge(
             existing.sources if existing else (), incoming.sources
         ),
         lifecycle=_merged_lifecycle(config, existing, incoming, origins),
-        chat_id=incoming.chat_id or (existing.chat_id if existing else ""),
+        chat_id=(
+            ""
+            if existing is not None
+            and not origins
+            and existing.lifecycle in SETTLED_LIFECYCLES
+            and _ordinary_finding(existing.change)
+            and _ordinary_finding(incoming.change or existing.change)
+            != _ordinary_finding(existing.change)
+            else incoming.chat_id or (existing.chat_id if existing else "")
+        ),
         updated_at=incoming.updated_at or _now(),
         origins=origins,
     )
@@ -1564,41 +1575,59 @@ def _merge(
     return merged
 
 
+def _ordinary_finding(change: str) -> str:
+    """Stable identity for an ordinary skill suggestion, independent of its framing."""
+    normalized = " ".join(change.split())
+    if not normalized:
+        return ""
+    return "change:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _anchor_legacy_decision(config: CiaoConfig, proposal: SkillProposal) -> None:
+    """Scope an old whole-skill decision to its readable settled change once."""
+    finding = _ordinary_finding(proposal.change)
+    if not finding:
+        return
+    decisions = Path(config.workspace_vault_root(proposal.workspace)).joinpath(
+        *_DECISIONS_REL
+    )
+    legacy = [
+        row
+        for row in read_decisions(decisions)
+        if row["text"] == decision_text(proposal.skill)
+        and not row["learning_id"]
+        and not row["finding"]
+    ]
+    if not legacy:
+        return
+    rows = read_decisions(decisions)
+    if any(
+        row["text"] == decision_text(proposal.skill)
+        and not row["learning_id"]
+        and row["finding"].startswith("change:")
+        for row in rows
+    ):
+        return
+    accepted = any(row["action"] == "accepted" for row in legacy)
+    writer = record_promotion if accepted else record_dismissal
+    writer(
+        decisions,
+        text=decision_text(proposal.skill),
+        kind="skill",
+        via="migration",
+        outcome="Anchored a legacy decision to the readable proposed change.",
+        proposal_id=proposal.id,
+        finding=finding,
+    )
+
+
 def _merged_lifecycle(
     config: CiaoConfig,
     existing: SkillProposal | None,
     incoming: SkillProposal,
     origins: Sequence[SkillOrigin],
 ) -> str:
-    """The lifecycle the merged record carries.
-
-    **A record that links learnings answers per finding, and the merged origins
-    are what it answers from.** The whole-skill decision row cannot say that: one
-    settlement of one finding writes the same ``skill:<name>`` row a settlement
-    of the record would, so reading it back would settle every sibling with it —
-    and the record would leave the queue with a finding nobody had answered still
-    on it, stranded where no review can reach it. So a record carrying origins
-    takes its lifecycle from those origins and from nothing else: all of them
-    answered closes it, and anything outstanding leaves it asking, whether what
-    is outstanding is the sibling of a decision just made or a finding this pass
-    has only just linked. A new pending origin on a settled record therefore
-    reopens it, which is what puts the finding back in front of somebody.
-
-    Without origins the decision wins wherever it is recorded: in the file, or
-    only in the sidecar for a record whose file was deleted afterwards. An
-    incoming record never reopens a settled one, because nothing in the queue's
-    vocabulary can say a decision was wrong — reopening is a change to that
-    vocabulary, not a value this writer invents. (A record whose file is gone has
-    lost its origins too, so the sidecar is all that is left of its findings, and
-    honouring it is the only reading left.)
-
-    Work in flight is protected the same way. A pass that re-derives the same
-    finding while a chat is implementing it arrives as ``pending``, and taking
-    that would drop the record out of ``implementing``/``interrupted`` under a
-    live chat: the review row would stop offering "Open chat" and the queue
-    would re-ask a question that is already being answered. A pass files
-    findings; only the accept path and the resolution move this record on.
-    """
+    """Fold origin decisions or scope ordinary decisions to their proposed change."""
     if origins:
         closed = _closed_lifecycle(origins)
         if closed:
@@ -1610,42 +1639,62 @@ def _merged_lifecycle(
         ):
             return existing.lifecycle
         return incoming.lifecycle
-    recorded = _recorded_lifecycle(config, incoming.workspace, incoming.skill)
-    if recorded:
-        return recorded
-    if existing is not None and existing.lifecycle in SETTLED_LIFECYCLES:
-        return existing.lifecycle
     if (
         existing is not None
         and existing.lifecycle in {IMPLEMENTING, INTERRUPTED}
         and incoming.lifecycle == PENDING
     ):
         return existing.lifecycle
+    finding = _ordinary_finding(incoming.change or (existing.change if existing else ""))
+    if finding:
+        recorded = _recorded_lifecycle(
+            config,
+            incoming.workspace,
+            incoming.skill,
+            finding=finding,
+            legacy_suppression=existing is None,
+        )
+        if recorded:
+            return recorded
+        if (
+            existing is not None
+            and existing.lifecycle in SETTLED_LIFECYCLES
+            and _ordinary_finding(existing.change) == finding
+        ):
+            return existing.lifecycle
+        return incoming.lifecycle
+    if existing is not None and existing.lifecycle in SETTLED_LIFECYCLES:
+        return existing.lifecycle
     return incoming.lifecycle
 
 
-def _recorded_lifecycle(config: CiaoConfig, workspace: str, skill: str) -> str:
-    """The lifecycle the decision sidecar holds for ``skill``, or ``""``.
-
-    Read through ``read_decisions`` rather than ``was_dismissed``: that helper
-    gives up when the workspace has no ``Memory-Proposals.md`` yet, which is
-    exactly the install where a skill proposal is the only thing in the queue and
-    the decision would then be invisible to the pass that must honour it.
-    """
+def _recorded_lifecycle(
+    config: CiaoConfig,
+    workspace: str,
+    skill: str,
+    *,
+    finding: str = "",
+    legacy_suppression: bool = False,
+) -> str:
+    """Return a matching ordinary decision, or a deleted-file legacy decision."""
     wanted = decision_text(skill)
-    outcomes = {
-        row["action"]
+    rows = [
+        row
         for row in read_decisions(
             Path(config.workspace_vault_root(workspace)).joinpath(*_DECISIONS_REL)
         )
-        if row["text"] == wanted
-    }
+        if row["text"] == wanted and not row["learning_id"]
+    ]
+    scoped = [row for row in rows if row["finding"].startswith("change:")]
+    matching = [row for row in scoped if finding and row["finding"] == finding]
+    if not matching and legacy_suppression and not scoped:
+        matching = [row for row in rows if not row["finding"]]
+    outcomes = {row["action"] for row in matching}
     if "accepted" in outcomes:
         return APPLIED
     if "dismissed" in outcomes:
         return DISMISSED
     return ""
-
 
 def _merge_sources(
     stored: tuple[SkillEvidence, ...], incoming: tuple[SkillEvidence, ...]
