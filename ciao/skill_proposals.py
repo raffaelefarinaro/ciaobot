@@ -658,19 +658,30 @@ def upsert_proposal(config: CiaoConfig, proposal: SkillProposal) -> SkillProposa
       unchanged re-run a true no-op rather than a rewrite that only differs by
       its clock.
 
-    A record whose skill has already been decided stays decided, whether that is
-    visible in the file or only in the decision sidecar (a file deleted by the
-    CLI still has its decision on record), and a settled record keeps
-    accumulating evidence without re-entering the queue. A record that links
-    learnings is the exception, and deliberately so: its lifecycle comes from
-    its findings (:func:`_merged_lifecycle`), so a settled one whose siblings are
-    still outstanding — or which has just been linked to a new finding — reopens
-    instead of stranding them.
+    An ordinary settled record stays decided while its proposed change is the
+    same, and a prior decision for that same change remains effective after the
+    file is replaced or deleted. A different ordinary change reopens the stable
+    per-skill record unless that change has its own decision. A legacy sidecar
+    decision with no readable queue file has unknown provenance; before its
+    first replacement is written, an unresolved marker preserves its effective
+    outcome without pretending the replacement was the original finding. A
+    readable legacy settled record is instead scoped to its own change. Records
+    that link learnings take their lifecycle from their findings
+    (:func:`_merged_lifecycle`), so a settled one whose siblings are still
+    outstanding — or which has just been linked to a new finding — reopens
+    instead of stranding them. Settled records keep collecting evidence, and
+    implementing/interrupted records keep their live chat identity.
     """
     path = proposal_path(config, proposal.workspace, proposal.skill)
     with queue_lock(path):
         existing = parse_proposal(path, proposal.workspace)
-        if existing is not None and not existing.origins and existing.lifecycle in SETTLED_LIFECYCLES:
+        if existing is None and not proposal.origins:
+            _preserve_unresolved_legacy_decision(config, proposal)
+        if (
+            existing is not None
+            and not existing.origins
+            and existing.lifecycle in SETTLED_LIFECYCLES
+        ):
             _anchor_legacy_decision(config, existing)
         merged = _merge(config, existing, proposal)
         text = render_proposal(merged)
@@ -1583,6 +1594,44 @@ def _ordinary_finding(change: str) -> str:
     return "change:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _preserve_unresolved_legacy_decision(
+    config: CiaoConfig, proposal: SkillProposal
+) -> None:
+    """Persist a missing-file legacy outcome before writing a replacement row."""
+    decisions = Path(config.workspace_vault_root(proposal.workspace)).joinpath(
+        *_DECISIONS_REL
+    )
+    rows = [
+        row
+        for row in read_decisions(decisions)
+        if row["text"] == decision_text(proposal.skill) and not row["learning_id"]
+    ]
+    if any(row["finding"] == "legacy:unresolved" for row in rows):
+        return
+    # A scoped finding proves that this skill has moved beyond a wholly unknown
+    # legacy outcome. Do not revive the old suppression in that case.
+    if any(row["finding"].startswith("change:") for row in rows):
+        return
+    legacy = [row for row in rows if not row["finding"]]
+    if not legacy:
+        return
+    accepted = any(row["action"] == "accepted" for row in legacy)
+    writer = record_promotion if accepted else record_dismissal
+    recorded = writer(
+        decisions,
+        text=decision_text(proposal.skill),
+        kind="skill",
+        via="migration",
+        outcome="The original proposed change is unknown because its queue file is missing.",
+        proposal_id=proposal.id,
+        finding="legacy:unresolved",
+    )
+    if not recorded:
+        # Do not create a replacement queue file unless the unknown legacy
+        # decision was durably represented first.
+        raise OSError("could not preserve unresolved legacy skill decision")
+
+
 def _anchor_legacy_decision(config: CiaoConfig, proposal: SkillProposal) -> None:
     """Scope an old whole-skill decision to its readable settled change once."""
     finding = _ordinary_finding(proposal.change)
@@ -1591,6 +1640,14 @@ def _anchor_legacy_decision(config: CiaoConfig, proposal: SkillProposal) -> None
     decisions = Path(config.workspace_vault_root(proposal.workspace)).joinpath(
         *_DECISIONS_REL
     )
+    rows = read_decisions(decisions)
+    if any(
+        row["text"] == decision_text(proposal.skill)
+        and not row["learning_id"]
+        and row["finding"] == "legacy:unresolved"
+        for row in rows
+    ):
+        return
     legacy = [
         row
         for row in read_decisions(decisions)
@@ -1685,6 +1742,13 @@ def _recorded_lifecycle(
         )
         if row["text"] == wanted and not row["learning_id"]
     ]
+    unresolved = [row for row in rows if row["finding"] == "legacy:unresolved"]
+    if unresolved:
+        outcomes = {row["action"] for row in unresolved}
+        if "accepted" in outcomes:
+            return APPLIED
+        if "dismissed" in outcomes:
+            return DISMISSED
     scoped = [row for row in rows if row["finding"].startswith("change:")]
     matching = [row for row in scoped if finding and row["finding"] == finding]
     if not matching and legacy_suppression and not scoped:

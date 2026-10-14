@@ -609,6 +609,61 @@ def test_legacy_settled_change_is_anchored_before_reopening(tmp_path: Path) -> N
     ).lifecycle == sp.DISMISSED
 
 
+@pytest.mark.parametrize(
+    ("legacy_action", "settled_lifecycle", "timestamp_key"),
+    [
+        ("dismissed", sp.DISMISSED, "dismissed_at"),
+        ("accepted", sp.APPLIED, "promoted_at"),
+    ],
+)
+def test_missing_file_legacy_decision_survives_successive_filings(
+    tmp_path: Path,
+    legacy_action: str,
+    settled_lifecycle: str,
+    timestamp_key: str,
+) -> None:
+    config = _config(tmp_path)
+    decisions = (
+        tmp_path / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    )
+    decisions.parent.mkdir(parents=True, exist_ok=True)
+    decisions.with_suffix(".dismissed.jsonl").write_text(
+        f'{{"{timestamp_key}":"legacy","kind":"skill","text":"skill:web-research"}}\n',
+        encoding="utf-8",
+    )
+
+    first = sp.upsert_proposal(
+        config, _proposal(change="Finding C: add a local tracker.")
+    )
+    second = sp.upsert_proposal(
+        config, _proposal(change="Finding D: add status reporting.")
+    )
+    old = sp.upsert_proposal(
+        config, _proposal(change="Finding A: add a defuddle fallback.")
+    )
+    assert first.lifecycle == settled_lifecycle
+    assert second.lifecycle == settled_lifecycle
+    assert old.lifecycle == settled_lifecycle
+
+    sp.proposal_path(config, "personal", "web-research").unlink()
+    recreated = sp.upsert_proposal(
+        config, _proposal(change="Finding D: add status reporting.")
+    )
+    later = sp.upsert_proposal(
+        config, _proposal(change="Finding E: add project documentation.")
+    )
+    assert recreated.lifecycle == settled_lifecycle
+    assert later.lifecycle == settled_lifecycle
+
+    rows = read_decisions(decisions)
+    assert sum(row["finding"] == "legacy:unresolved" for row in rows) == 1
+    assert not any(
+        row["finding"].startswith("change:") and row["via"] == "migration"
+        for row in rows
+    )
+    assert any(row["action"] == legacy_action and not row["finding"] for row in rows)
+
+
 def test_empty_change_does_not_reopen_settled_proposal(tmp_path: Path) -> None:
     config = _config(tmp_path)
     stored = sp.upsert_proposal(config, _proposal())
