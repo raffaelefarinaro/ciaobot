@@ -1294,7 +1294,10 @@ const renameValue = ref('')
 const isAnyChatWorking = computed(() => store.anyChatBusy)
 
 const hasAutomationWarning = computed(() => {
+  // Scoped like `missedCountFor`, so the colour and the count describe the
+  // same set as the Automations list.
   return taskStore.schedules.some(s => {
+    if (!scheduleInWorkspace(s, store.activeWorkspace, store.chats, store.projects)) return false
     // `missing-chat` is set at the same moment the entry is disabled (the
     // dispatcher found neither a target chat nor a project to re-home into),
     // so gating it on `enabled` hid the one failure that cannot fix itself.
