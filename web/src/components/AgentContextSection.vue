@@ -153,6 +153,9 @@ const contextPctLabel = computed(() => {
 .agent-context-compact { flex: none; white-space: nowrap; }
 @media (pointer: coarse) {
   .agent-context-compact { min-height: 44px; min-width: 44px; }
+  /* A flex item, so line-height gives the 44px box and the ellipsis still works
+     (inline-flex would put the text in an anonymous item that cannot truncate). */
+  a.agent-context-name { line-height: var(--touch); }
 }
 .agent-context-track {
   flex: 1;
@@ -220,6 +223,10 @@ const contextPctLabel = computed(() => {
 .agent-context-description :deep(a.file-link:hover) { text-decoration-color: currentColor; }
 .agent-context-link:hover,
 .agent-context-project:hover { text-decoration-color: currentColor; }
+@media (pointer: coarse) {
+  /* Below the base .agent-context-link rule it overrides. */
+  .agent-context-link { min-height: var(--touch); min-width: var(--touch); }
+}
 .agent-context-project {
   color: var(--fg);
   text-decoration: underline;

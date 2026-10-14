@@ -691,6 +691,7 @@
     justify-content: center;
   }
   .set-menu-btn { width: var(--touch); height: var(--touch); }
+  .routine-select, .routine-input { min-height: var(--touch); }
 }
 
 @container (max-width: 720px) {
