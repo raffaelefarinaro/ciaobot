@@ -83,14 +83,18 @@ class _TurnClient(_FakeServerClient):
         running: set[str] | None = None,
         shells: list[dict] | None = None,
         shell_error: Exception | None = None,
+        shell_hangs: bool = False,
     ) -> None:
         super().__init__(_sse(lines))
         self._running = running or set()
         self._shells = shells or []
         self._shell_error = shell_error
+        self._shell_hangs = shell_hangs
 
     async def get(self, path: str, *, params=None):
         if path == "/api/shell":
+            if self._shell_hangs:
+                await asyncio.Event().wait()
             if self._shell_error is not None:
                 raise self._shell_error
             return _Response({"data": self._shells})
@@ -401,6 +405,21 @@ async def test_turn_end_survives_a_failing_shell_read(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_turn_end_reconcile_cannot_hold_back_the_result(tmp_path, monkeypatch):
+    provider = OpencodeProvider(tmp_path)
+    client = _TurnClient(_PLAIN_TURN, shell_hangs=True)
+    _attach_live(provider, client, SHELL_SESSION)
+    monkeypatch.setattr(opencode_module, "_OPENCODE_RECONCILE_TIMEOUT_S", 0.05)
+
+    events = await asyncio.wait_for(
+        _run_turn(provider, monkeypatch, client, SHELL_SESSION, "ours"), 2
+    )
+
+    assert events[-1].result == "OK"
+    assert not events[-1].is_error
+
+
+@pytest.mark.asyncio
 async def test_turn_end_drops_a_finished_background_child(tmp_path, monkeypatch):
     provider = OpencodeProvider(tmp_path)
     client = _TurnClient(_PLAIN_TURN, shells=[])
@@ -533,6 +552,24 @@ async def test_drain_gives_up_on_a_lost_terminal_frame(tmp_path, monkeypatch):
     _script(monkeypatch, provider, shells=[set()], tree=[[]], active=())
 
     assert await _drain(provider) == []
+
+
+@pytest.mark.asyncio
+async def test_drain_does_not_treat_a_failed_active_read_as_stale(tmp_path, monkeypatch):
+    rest = [_event("session.execution.started", sessionID=SHELL_SESSION)]
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
+    _script(monkeypatch, provider, shells=[set()], tree=[[]])
+
+    async def broken_active(_client):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(opencode_module, "_read_active_sessions", broken_active)
+    monkeypatch.setattr(opencode_module, "_OPENCODE_DRAIN_MAX_S", 0.3)
+    started = asyncio.get_running_loop().time()
+
+    assert await _drain(provider) == []
+    # Ended by the horizon, not by stale ticks (those would end it in ~0.03s).
+    assert asyncio.get_running_loop().time() - started >= 0.25
 
 
 @pytest.mark.asyncio

@@ -181,6 +181,9 @@ _OPENCODE_RECOVERY_POLL_S = 2.5
 # same 1h horizon the background watcher uses.
 _OPENCODE_DRAIN_POLL_S = 3.0
 _OPENCODE_DRAIN_MAX_S = 3600.0
+# Budget for the turn-end background reconcile; it must never hold back the
+# turn's result (the live client has no read timeout).
+_OPENCODE_RECONCILE_TIMEOUT_S = 5.0
 _EXECUTION_TERMINAL_EVENTS = frozenset({
     "session.execution.succeeded",
     "session.execution.failed",
@@ -1769,12 +1772,17 @@ class OpencodeProvider(BaseSDKProvider):
         )
 
     @staticmethod
-    async def _active_or_empty(client: httpx.AsyncClient) -> set[str]:
-        """Running session ids, or an empty set when the read fails."""
+    async def _active_or_none(client: httpx.AsyncClient) -> set[str] | None:
+        """Running session ids, or ``None`` when the read fails."""
         try:
             return await _read_active_sessions(client)
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-            return set()
+            return None
+
+    @staticmethod
+    async def _active_or_empty(client: httpx.AsyncClient) -> set[str]:
+        """Running session ids, or an empty set when the read fails."""
+        return await OpencodeProvider._active_or_none(client) or set()
 
     async def _background_idle(self, client: httpx.AsyncClient, session_id: str) -> bool:
         """Reconcile the background sets over HTTP; True when nothing is left.
@@ -1873,7 +1881,10 @@ class OpencodeProvider(BaseSDKProvider):
                     if executing or pending_inbox:
                         # Lost frames must not hold the drain to the horizon: a
                         # state the server no longer reports as running is stale.
-                        if session_id in await self._active_or_empty(client):
+                        active_now = await self._active_or_none(client)
+                        if active_now is None:
+                            pass  # unknown: neither stale nor fresh
+                        elif session_id in active_now:
                             stale_ticks = 0
                         else:
                             stale_ticks += 1
@@ -3673,7 +3684,10 @@ class OpencodeProvider(BaseSDKProvider):
         finally:
             register_handle(None)
 
-        await self._reconcile_background()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                self._reconcile_background(), timeout=_OPENCODE_RECONCILE_TIMEOUT_S
+            )
         await self._augment_context_pct(client, self._turn_model)
 
         yield ResultEvent(
