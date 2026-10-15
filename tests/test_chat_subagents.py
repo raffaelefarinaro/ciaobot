@@ -536,11 +536,11 @@ def test_a_terse_answer_to_the_user_still_announces(reply: str) -> None:
     """The banner floor must never reach a reply the user asked for.
 
     "Yes" is a complete answer to a yes/no question. Gating the regular
-    turn-done branch on the nudge heuristic dropped its unread badge, its
+    turn-done branch on the follow-up heuristic dropped its unread badge, its
     toast, the ``last_activity_at`` bump that reorders recents, and the
     pending-retry clear, with nothing anywhere reporting a problem.
     """
-    # The nudge heuristic does reject it, which is why it must stay off this path.
+    # The follow-up heuristic does reject it, which is why it must stay off this path.
     assert ProjectChatManager._is_worth_announcing_follow_up(reply) is False
     # The regular branch's condition is plain non-empty text.
     assert bool(reply.strip()) is True
@@ -551,7 +551,7 @@ async def test_drain_between_turns_skips_publish_and_push_for_banner_only_result
 ) -> None:
     """A short banner-only ResultEvent must not trigger chat_result_ready or a push.
 
-    The synthesis-nudge parent turn can return a one-line reply like "ok" or
+    A follow-up parent turn can return a one-line reply like "ok" or
     "Synthesis complete — see trace." before the real report lands. Without the
     visibility guard, that single short string used to publish chat_result_ready
     and queue a delayed push, producing an OS-level notification whose body was
@@ -1401,7 +1401,7 @@ def _announce_spy(pcm) -> list[tuple]:
     return calls
 
 
-def test_a_parked_announce_is_released_when_no_nudge_speaks(tmp_path: Path) -> None:
+def test_a_parked_announce_is_released_when_no_follow_up_speaks(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     calls = _announce_spy(pcm)
 
@@ -1423,8 +1423,8 @@ def test_flushing_is_idempotent(tmp_path: Path) -> None:
     assert len(calls) == 1
 
 
-def test_a_landed_nudge_discards_the_parked_announce(tmp_path: Path) -> None:
-    """Otherwise the turn pushes twice: once here, once for the synthesis reply."""
+def test_a_landed_follow_up_discards_the_parked_announce(tmp_path: Path) -> None:
+    """Otherwise the turn pushes twice: once here, once for the follow-up reply."""
     pcm = _make_manager(tmp_path)
     calls = _announce_spy(pcm)
 
@@ -1441,7 +1441,7 @@ async def test_watcher_releases_the_announce_when_it_cannot_find_the_session(
     """The failure #430 was filed for.
 
     `find_parent_session_file` returning None makes the watcher return before
-    its loop ever runs, so no nudge can ever fire. The old predicate could not
+    its loop ever runs, so no follow-up can ever be awaited. The old predicate could not
     see that: it dropped the announce and the chat completed in total silence —
     no push, no unread badge, no archive proposal, and nothing logged.
     """
@@ -1459,7 +1459,7 @@ async def test_watcher_releases_the_announce_when_it_cannot_find_the_session(
 
 @pytest.mark.asyncio
 async def test_watcher_releases_the_announce_when_it_raises(tmp_path: Path) -> None:
-    """An exception is just another path where no nudge will speak."""
+    """An exception is just another path where no follow-up will speak."""
     pcm = _make_manager(tmp_path)
     calls = _announce_spy(pcm)
 
@@ -1485,7 +1485,7 @@ async def test_a_superseded_watcher_does_not_release_the_next_turns_announce(
 
     So a superseded watcher's `finally` can run *after* the next turn has
     parked its own announce. Flushing there would push a result while its
-    synthesis nudge was still pending, which is the double-push the parking is
+    follow-up turn was still pending, which is the double-push the parking is
     meant to avoid.
     """
     pcm = _make_manager(tmp_path)
@@ -1577,15 +1577,13 @@ async def test_the_drain_announces_the_synthesis_reply_and_drops_the_park(
 
 
 @pytest.mark.asyncio
-async def test_a_nudge_reply_that_errors_still_releases_the_park(
+async def test_a_follow_up_that_errors_still_releases_the_park(
     tmp_path: Path,
 ) -> None:
-    """The hole left by discarding the park at the nudge.
+    """The drain only announces a non-error, non-stub follow-up.
 
-    `nudged=True` used to mean "the drain will announce", but the drain only
-    announces a non-error, non-stub reply. An errored synthesis reply then left
-    the chat with no notification at all — the same silent completion the
-    handoff exists to remove.
+    An errored follow-up must not leave the chat with no notification at all,
+    so the drain flushes the parked announce instead.
     """
     pcm = _make_manager(tmp_path)
     calls = _announce_spy(pcm)
@@ -1754,12 +1752,12 @@ async def test_watcher_leaves_the_park_to_a_live_drain_after_seeing_work(
     watcher and be released (or discarded) by the drain.
     """
     pcm = _make_manager(tmp_path)
-    project = pcm.create_project("nudge-handoff", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="nudge-handoff-test")
-    chat.session_id = "sess-nudge-handoff"
+    project = pcm.create_project("follow-up-handoff", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="follow-up-handoff-test")
+    chat.session_id = "sess-follow-up-handoff"
     pcm._save()
 
-    session_path = tmp_path / "sess-nudge-handoff.jsonl"
+    session_path = tmp_path / "sess-follow-up-handoff.jsonl"
     records = [
         {"type": "user", "message": {"role": "user", "content": "kick off work"}},
         *_dispatch_records("toolu_h", "agent-h"),

@@ -3484,25 +3484,25 @@ describe('background agents indicator', () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
-    const chatId = 'c-nudge'
+    const chatId = 'c-follow-up'
     store.activeChatId = 'some-other-chat'
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (remaining: number, nudged?: boolean) =>
+    const fire = (remaining: number) =>
       sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining, nudged }),
+        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining }),
       })
 
     fire(1)
     expect(store.backgroundAgents[chatId]).toBe(1)
 
-    fire(0, true)
+    fire(0)
     expect(store.toasts).toHaveLength(0)
     expect(store.unread[chatId]).toBeUndefined()
 
     store.backgroundAgents[chatId] = 1
 
-    fire(0, false)
+    fire(0)
     expect(store.toasts).toHaveLength(0)
     expect(store.unread[chatId]).toBeUndefined()
   })
