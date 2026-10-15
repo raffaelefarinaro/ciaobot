@@ -3766,3 +3766,414 @@ async def test_live_mcp_status_uses_v2_contract_and_is_bounded(tmp_path, failure
             "notion": "failed", "linear": "connected", "disabled": "disabled"
         }
     assert calls == [("/api/mcp", 2.0)]
+
+
+# ── #1392 B: steering a running turn ─────────────────────────────────────
+#
+# `steer_turn.jsonl` and `steer_new_execution.jsonl` are sanitized 2.0.27
+# captures of a `delivery: "steer"` prompt joining a running execution and
+# starting a new one. Ids are shortened: `msg_ours` is the turn's prompt and
+# `msg_steer` the steered message.
+
+
+class _SteerStream(_FakeEventStream):
+    """A turn stream whose ``lines`` may hold async hooks run between frames."""
+
+    async def aiter_bytes(self):
+        for line in self._lines:
+            if callable(line):
+                await line()
+            else:
+                yield line.encode("utf-8")
+
+
+class _SteerClient(_FakeServerClient):
+    """Records prompt, steer and inbox-cancel calls."""
+
+    def __init__(self, lines, steer_failure: Exception | None = None) -> None:
+        super().__init__(lines)
+        self.posts: list[tuple[str, dict]] = []
+        self.deletes: list[str] = []
+        self.steer_failure = steer_failure
+
+    def stream(self, _method: str, _path: str) -> _SteerStream:
+        return _SteerStream(self._lines)
+
+    async def post(self, path: str, json=None, timeout=None):
+        body = dict(json or {})
+        self.posts.append((path, body))
+        if body.get("delivery") == "steer":
+            self.steer_timeout = timeout
+            if self.steer_failure is not None:
+                raise self.steer_failure
+        return await super().post(path, json=json)
+
+    async def delete(self, path: str, timeout=None):
+        self.deletes.append(path)
+
+        class _Gone:
+            status_code = 204
+            text = ""
+
+        return _Gone()
+
+
+def _steer_lines(name: str) -> list[str]:
+    return [
+        line
+        for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _steer_frames(
+    lines: list[str], hook, *, before: str | None = None, after: str | None = None
+) -> list:
+    """Frame the fixture lines, running ``hook`` before/after the first ``kind``."""
+    frames: list = []
+    placed = False
+    for line in lines:
+        kind = json.loads(line)["type"]
+        if before and kind == before and not placed:
+            frames.append(hook)
+            placed = True
+        frames.append(f"data: {line}\n\n")
+        if after and kind == after and not placed:
+            frames.append(hook)
+            placed = True
+    assert placed
+    return frames
+
+
+def _tokens(monkeypatch, *names: str) -> None:
+    from ciao.providers import opencode as module
+
+    queue = list(names)
+    monkeypatch.setattr(module.secrets, "token_hex", lambda _n: queue.pop(0))
+
+
+async def _steered_turn(provider, monkeypatch, client, session: str):
+    """Run a turn; the hook in ``client`` frames calls ``steer_turn``."""
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return session
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    provider._client = client
+    provider._session_id = session
+    request = AgentRequest(prompt="go", model="", mode="bypass", provider="opencode")
+    return [
+        event async for event in provider.run_streaming(request, lambda _handle: None)
+    ]
+
+
+def _hook(provider, results: list, text: str = "Also, say PINEAPPLE."):
+    async def steer() -> None:
+        results.append(
+            await provider.steer_turn(
+                AgentRequest(prompt=text, model="", mode="bypass", provider="opencode")
+            )
+        )
+
+    return steer
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_refused_before_own_delivery(tmp_path):
+    provider = _provider(tmp_path)
+    client = _SteerClient([])
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._turn_open = True
+    provider._owned_delivery_seen = False
+
+    request = AgentRequest(prompt="x", model="", mode="bypass", provider="opencode")
+    assert await provider.steer_turn(request) is None
+    assert client.posts == []
+    assert provider._steer_ids_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_refused_without_an_open_turn_or_after_stop(tmp_path):
+    provider = _provider(tmp_path)
+    client = _SteerClient([])
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._owned_delivery_seen = True
+    request = AgentRequest(prompt="x", model="", mode="bypass", provider="opencode")
+
+    assert await provider.steer_turn(request) is None
+    provider._turn_open = True
+    provider._stop_requested = "ses_1"
+    assert await provider.steer_turn(request) is None
+    assert client.posts == []
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_posts_steer_delivery_with_our_id(tmp_path):
+    import re
+
+    provider = _provider(tmp_path)
+    client = _SteerClient([])
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+
+    request = AgentRequest(prompt="Also PINEAPPLE", model="", mode="bypass", provider="opencode")
+    delivery_id = await provider.steer_turn(request)
+
+    (path, body), = client.posts
+    assert path == "/api/session/ses_1/prompt"
+    assert body["delivery"] == "steer"
+    assert re.fullmatch(r"msg_[0-9a-f]{24}", body["id"])
+    assert delivery_id == body["id"]
+    assert "Also PINEAPPLE" in body["text"]
+    assert provider._steer_ids_pending == {delivery_id}
+    assert client.steer_timeout is not None
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_sends_images_as_files(tmp_path):
+    from ciao.models import ImageAttachment
+
+    image = tmp_path / "red.png"
+    image.write_bytes(b"png")
+    provider = _provider(tmp_path)
+    client = _SteerClient([])
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+    request = AgentRequest(
+        prompt="what colour?", model="", mode="bypass", provider="opencode",
+        images=[ImageAttachment(path=image, mime_type="image/png", original_filename="red.png")],
+    )
+
+    assert await provider.steer_turn(request) is not None
+    (_path, body), = client.posts
+    assert body["files"] == [{"uri": image.resolve().as_uri(), "name": "red.png"}]
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_timeout_returns_none_and_cancels_the_item(tmp_path):
+    import httpx
+
+    provider = _provider(tmp_path)
+    client = _SteerClient([], steer_failure=httpx.ReadTimeout("slow"))
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+    request = AgentRequest(prompt="x", model="", mode="bypass", provider="opencode")
+
+    assert await provider.steer_turn(request) is None
+    assert provider._steer_ids_pending == set()
+    sent_id = client.posts[0][1]["id"]
+    # The request may have landed server-side: do not leave a ghost steer.
+    assert client.deletes == [f"/api/session/ses_1/inbox/{sent_id}"]
+
+
+@pytest.mark.asyncio
+async def test_steered_item_joins_running_execution(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent, SteerDeliveredEvent
+
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(
+        _steer_lines("steer_turn.jsonl"), _hook(provider, results),
+        after="session.tool.called",
+    )
+    client = _SteerClient(frames)
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, client, "ses_steer_turn")
+
+    assert results == ["msg_steer"]
+    steered = [e for e in events if isinstance(e, SteerDeliveredEvent)]
+    assert [e.delivery_id for e in steered] == ["msg_steer"]
+    final_text = next(
+        i for i, e in enumerate(events) if e.type == "text" and "PINEAPPLE" in e.text
+    )
+    assert events.index(steered[0]) < final_text
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert "PINEAPPLE" in result.result and not result.is_error
+    assert provider._steer_ids_pending == set()
+    assert provider._turn_open is False
+
+
+@pytest.mark.asyncio
+async def test_steer_after_terminal_keeps_pump_open(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent, SteerDeliveredEvent
+
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(
+        _steer_lines("steer_new_execution.jsonl"), _hook(provider, results),
+        before="session.execution.succeeded",
+    )
+    client = _SteerClient(frames)
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, client, "ses_steer_idle")
+
+    assert results == ["msg_steer"]
+    assert [e.delivery_id for e in events if isinstance(e, SteerDeliveredEvent)] == [
+        "msg_steer"
+    ]
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert "HI PINEAPPLE" in result.result and not result.is_error
+    assert result.result.startswith("HI")
+
+
+@pytest.mark.asyncio
+async def test_foreign_wake_during_steer_wait_is_not_ours(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent, SteerDeliveredEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_w", **data}})
+
+    def text(message: str, body: str) -> str:
+        return ev("session.text.ended", assistantMessageID=message, ordinal=0, text=body)
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        text("msg_a1", "FIRST "),
+        ev("session.execution.succeeded"),
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_wake"),
+        text("msg_wake_a", "BGDONE"),
+        ev("session.execution.succeeded"),
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_steer"),
+        text("msg_a2", "ANSWER"),
+        ev("session.execution.succeeded"),
+    ]
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(lines, _hook(provider, results), before="session.execution.succeeded")
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, _SteerClient(frames), "ses_w")
+
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert result.result.split() == ["FIRST", "ANSWER"]
+    assert "BGDONE" not in result.result
+    assert len([e for e in events if isinstance(e, SteerDeliveredEvent)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_clears_pending_steers(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent, SteerDeliveredEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_f", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.failed", error={"message": "boom"}),
+    ]
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(lines, _hook(provider, results), after="session.inbox.delivered")
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, _SteerClient(frames), "ses_f")
+
+    assert results == ["msg_steer"]
+    assert provider._steer_ids_pending == set()
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert result.is_error
+    assert not any(isinstance(e, SteerDeliveredEvent) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_failed_steer_post_after_terminal_does_not_hang_the_pump(tmp_path, monkeypatch):
+    """A steer whose POST fails after the terminal was skipped must not wait forever."""
+    import httpx
+
+    from ciao.models import ResultEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_h", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.succeeded"),
+        ev("session.usage.updated", cost=0, tokens={}),
+    ]
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(lines, _hook(provider, results), before="session.execution.succeeded")
+    client = _SteerClient(frames, steer_failure=httpx.ReadTimeout("slow"))
+    _tokens(monkeypatch, "ours", "steer")
+    events = await asyncio.wait_for(
+        _steered_turn(provider, monkeypatch, client, "ses_h"), timeout=5
+    )
+
+    assert results == [None]
+    assert [e for e in events if isinstance(e, ResultEvent)]
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_steers_before_interrupting(tmp_path):
+    provider = _provider(tmp_path)
+    order: list[str] = []
+
+    class Client(_SteerClient):
+        async def post(self, path, json=None, timeout=None):
+            order.append(f"POST {path}")
+
+            class _Ok:
+                status_code = 204
+                text = ""
+
+            return _Ok()
+
+        async def delete(self, path, timeout=None):
+            order.append(f"DELETE {path}")
+
+            class _Ok:
+                status_code = 204
+                text = ""
+
+            return _Ok()
+
+    provider._client = Client([])
+    provider._session_id = "ses_s"
+    provider._steer_ids_pending = {"msg_steer"}
+    provider._steer_ids_owned = {"msg_steer"}
+
+    await provider.abort_session("ses_s")
+
+    assert order == [
+        "DELETE /api/session/ses_s/inbox/msg_steer",
+        "POST /api/session/ses_s/interrupt",
+    ]
+    assert provider._steer_ids_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_stop_still_interrupts_when_the_cancel_hangs(tmp_path, monkeypatch):
+    from ciao.providers import opencode as module
+
+    monkeypatch.setattr(module, "_OPENCODE_STEER_CANCEL_TIMEOUT_S", 0.05)
+    provider = _provider(tmp_path)
+    posts: list[str] = []
+
+    class Client(_SteerClient):
+        async def post(self, path, json=None, timeout=None):
+            posts.append(path)
+
+        async def delete(self, path, timeout=None):
+            await asyncio.Event().wait()
+
+    provider._client = Client([])
+    provider._session_id = "ses_s"
+    provider._steer_ids_pending = {"msg_steer"}
+
+    await asyncio.wait_for(provider.abort_session("ses_s"), timeout=2)
+
+    assert posts == ["/api/session/ses_s/interrupt"]
