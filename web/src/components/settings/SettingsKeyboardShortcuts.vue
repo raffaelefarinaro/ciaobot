@@ -126,12 +126,13 @@ function restoreDefaults(): Promise<void> {
 .shortcut-setting-name { font-size: var(--text-sm); }
 .shortcut-send-setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; }
 .shortcut-send-setting > span { display: grid; gap: 4px; }
-.shortcut-send-setting select { min-height: 44px; max-width: 100%; }
+.shortcut-send-setting select { min-height: 44px; width: 18rem; max-width: 100%; }
 .shortcut-setting-row button { min-height: 44px; }
 @media (max-width: 680px) {
   .shortcut-setting-row { grid-template-columns: 1fr auto auto; padding: 8px 0; border-bottom: 1px solid var(--border); }
   .shortcut-setting-name { grid-column: 1 / -1; }
   .shortcut-setting-row kbd { justify-self: start; }
   .shortcut-send-setting { align-items: stretch; flex-direction: column; }
+  .shortcut-send-setting select { width: 100%; }
 }
 </style>

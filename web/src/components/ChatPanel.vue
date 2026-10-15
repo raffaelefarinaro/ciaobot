@@ -801,42 +801,41 @@
         type="button"
         class="queued-steer-all"
         :title="store.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
-        @click="store.setQueuedDelivery(chat.chat_id, steerAllIds, 'steer')"
+        @click="steerQueued($event, steerAllIds, 'steer')"
       >{{ store.isStreaming ? 'Steer all' : 'Send all now' }}</button>
       <div
         v-for="(q, i) in store.currentQueued"
         :key="q.id || i"
         class="queued-chip"
+        tabindex="-1"
         :class="{ 'is-steering': q.steering }"
         :title="queuedChipTitle(q)"
       >
-        <span v-if="q.steering" class="queued-steering" aria-live="polite">Steering…</span>
+        <!-- Persistent live region: it exists before the lock so a screen
+             reader announces the text arriving rather than a new element. -->
+        <span class="queued-steering" aria-live="polite">{{ q.steering ? 'Steering…' : '' }}</span>
         <div
-          v-else-if="store.isStreaming"
+          v-if="!q.steering && store.isStreaming && !q.waiting"
           class="queued-mode"
-          role="radiogroup"
-          aria-label="What this message will do"
+          role="group"
+          :aria-label="`What “${queuedExcerpt(q.text)}” will do`"
         >
           <button
             type="button"
-            role="radio"
             class="queued-mode-option"
-            :aria-checked="q.delivery === 'queue'"
+            :aria-pressed="q.delivery === 'queue'"
             title="Send as the next message when the reply finishes"
-            @click="q.delivery === 'queue' || store.setQueuedDelivery(chat.chat_id, [q.id], 'queue')"
+            @click="q.delivery === 'queue' || steerQueued($event, [q.id], 'queue')"
           >Queue</button>
           <button
             type="button"
-            role="radio"
             class="queued-mode-option"
-            :aria-checked="q.delivery === 'steer'"
+            :aria-pressed="q.delivery === 'steer'"
             title="Send into the running reply now"
-            @click="q.delivery === 'steer' || store.setQueuedDelivery(chat.chat_id, [q.id], 'steer')"
+            @click="q.delivery === 'steer' || steerQueued($event, [q.id], 'steer')"
           >Steer</button>
         </div>
-        <template v-else>
-          <span class="queued-label">Waiting</span>
-        </template>
+        <span v-else-if="!q.steering" class="queued-label">Waiting</span>
         <div class="queued-body">
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
@@ -852,30 +851,29 @@
           </template>
           <span v-else class="queued-text">{{ q.text }}</span>
         </div>
-        <div class="queued-actions">
+        <div v-if="!q.steering" class="queued-actions">
           <button
-            v-if="!q.steering && !store.isStreaming"
+            v-if="q.waiting || !store.isStreaming"
             type="button"
             class="queued-send-now"
-            title="Start a turn with this message now"
-            @click="store.setQueuedDelivery(chat.chat_id, [q.id], 'steer')"
-          >Send now</button>
+            :title="store.isStreaming ? 'Send this into the running reply now' : 'Start a turn with this message now'"
+            @click="steerQueued($event, [q.id], 'steer')"
+          >{{ store.isStreaming ? 'Steer' : 'Send now' }}</button>
           <button
             class="queued-action"
-            :disabled="q.steering || i === 0"
+            :disabled="i === 0"
             title="Move up"
             @click="store.reorderQueued(chat.chat_id, i, i - 1)"
           >▲</button>
           <button
             class="queued-action"
-            :disabled="q.steering || i === store.currentQueued.length - 1"
+            :disabled="i === store.currentQueued.length - 1"
             title="Move down"
             @click="store.reorderQueued(chat.chat_id, i, i + 1)"
           >▼</button>
           <button
             v-if="editingQueueId !== q.id"
             class="queued-action"
-            :disabled="q.steering"
             title="Edit"
             @click="startEditQueue(q)"
           >✎</button>
@@ -883,11 +881,13 @@
             <button class="queued-action" title="Save" @click="saveEditQueue(chat.chat_id, q.id)">✓</button>
             <button class="queued-action" title="Cancel" @click="cancelEditQueue">✕</button>
           </template>
-          <button class="queued-remove" :disabled="q.steering" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message">&times;</button>
+          <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message">&times;</button>
         </div>
       </div>
-      <p v-if="store.steerNotice[chat.chat_id]" class="queued-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
     </div>
+    <!-- Outside the queue block: the fallback reply usually empties it, and a
+         collapsed dock hides it, but the notice must still be read. -->
+    <p v-if="store.steerNotice[chat.chat_id]" class="steer-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
 
     <!-- Dock strip: one counted line for everything not expanded above, so the
          dock never grows past one card plus this. Replaces the standalone
@@ -1700,6 +1700,23 @@ const editingQueueImages = ref<string[] | undefined>(undefined)
 const steerAllIds = computed(() =>
   store.currentQueued.filter(q => q.delivery === 'queue' && !q.steering).map(q => q.id),
 )
+
+function queuedExcerpt(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > 40 ? `${flat.slice(0, 40)}…` : flat
+}
+
+// The clicked button is replaced once the chip changes state, which would drop
+// keyboard focus to the page. Hand it to the chip (or the composer when the
+// chip is gone) so the next Tab starts from a sensible place.
+function steerQueued(event: Event, ids: string[], delivery: 'queue' | 'steer') {
+  const chip = (event.currentTarget as HTMLElement | null)?.closest<HTMLElement>('.queued-chip') ?? null
+  store.setQueuedDelivery(chat.value.chat_id, ids, delivery)
+  void nextTick(() => {
+    if (chip?.isConnected) chip.focus()
+    else inputEl.value?.focus()
+  })
+}
 
 function queuedChipTitle(q: { delivery: string; steering?: boolean }): string {
   if (q.steering) return 'Handed to the running reply; waiting for it to take the message'
@@ -6681,8 +6698,13 @@ details[open] > .activity-summary::before {
   padding: 3px 8px;
   cursor: pointer;
 }
-.queued-mode-option[aria-checked="true"] { background: var(--accent); color: var(--bg); }
-.queued-mode-option:not([aria-checked="true"]):hover { background: var(--bg2); color: var(--fg); }
+.queued-mode-option[aria-pressed="true"] { background: var(--accent); color: var(--bg); }
+.queued-mode-option:not([aria-pressed="true"]):hover { background: var(--bg2); color: var(--fg); }
+.queued-steering:empty { display: none; }
+.queued-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.queued-steer-all:disabled,
+.queued-send-now:disabled { opacity: 0.4; cursor: not-allowed; }
+.queued-mode-option:focus-visible { outline-offset: -2px; }
 .queued-steering {
   font-size: 11px;
   font-weight: 600;
@@ -6690,7 +6712,8 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
 }
 .queued-chip.is-steering { opacity: 0.85; }
-.queued-notice {
+.steer-notice {
+  padding: 0 0 6px;
   margin: 0;
   font-size: 12px;
   color: var(--fg2);

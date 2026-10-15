@@ -3673,7 +3673,7 @@ describe('parked pending_queue chips', () => {
       }),
     ])
     expect(store.queuedMessages.idle).toEqual([
-      { id: 'q-1', text: 'after the error', images: ['shot.png'], delivery: 'queue', steering: false },
+      { id: 'q-1', text: 'after the error', images: ['shot.png'], delivery: 'queue', steering: false, waiting: true },
     ])
   })
 
@@ -6915,7 +6915,89 @@ describe('queue delivery: queue or steer', () => {
     expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
     expect(store.steerNotice[chatId]).toContain('finished before it could be steered')
     emit(socket, { type: 'result', text: 'done' })
-    expect(store.steerNotice[chatId]).toBeUndefined()
+    emit(socket, { type: 'user_echo', text: 'one', turn_index: 5, entry_id: 'a' })
+    // The notice outlives the reply that ended and the turn that flushed it.
+    expect(store.steerNotice[chatId]).toContain('finished before it could be steered')
+  })
+
+  it('the fallback notice clears after 8 seconds and on the next send', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
+      vi.advanceTimersByTime(7900)
+      expect(store.steerNotice[chatId]).toBeDefined()
+      vi.advanceTimersByTime(200)
+      expect(store.steerNotice[chatId]).toBeUndefined()
+
+      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
+      store.sendMessage(chatId, 'next')
+      expect(store.steerNotice[chatId]).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a Steering lock the server never answers reverts to queue after 15 seconds with a notice', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      expect(store.queuedMessages[chatId][0].steering).toBe(true)
+      vi.advanceTimersByTime(14000)
+      expect(store.queuedMessages[chatId][0].steering).toBe(true)
+      vi.advanceTimersByTime(1500)
+      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
+      expect(store.steerNotice[chatId]).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a steer answered by steer_fallback or queue_state cancels the lock timer', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
+      vi.advanceTimersByTime(16000)
+      expect(store.queuedMessages[chatId][0].steering).toBe(true)
+      expect(store.steerNotice[chatId]).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a steer-default send arms the lock timer too', async () => {
+    vi.useFakeTimers()
+    const { applyKeyboardSettings } = await import('../composables/useKeyboardSettings')
+    try {
+      const { store } = await setup()
+      applyKeyboardSettings({ mid_turn_delivery: 'steer' })
+      store.sendMessage(chatId, 'go')
+      vi.advanceTimersByTime(15500)
+      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
+    } finally {
+      applyKeyboardSettings({ mid_turn_delivery: 'queue' })
+      vi.useRealTimers()
+    }
+  })
+
+  it('marks parked entries as waiting and keeps the mark across queue_state', async () => {
+    const { store, socket } = await setup()
+    store.reconcileChatList([
+      { chat_id: chatId, project_id: 'p1', title: 'T', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, pending_queue: [{ id: 'w', text: 'held' }] } as never,
+    ])
+    expect(store.queuedMessages[chatId][0].waiting).toBe(true)
+    emit(socket, { type: 'queue_state', queue: [
+      { id: 'w', text: 'held', delivery: 'queue', steering: false },
+      { id: 'l', text: 'live', delivery: 'queue', steering: false },
+    ] })
+    expect(store.queuedMessages[chatId].map(q => !!q.waiting)).toEqual([true, false])
+    store.setQueuedDelivery(chatId, ['w'], 'steer')
+    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
   })
 
   it('steer_fallback not_running reads like finished, and stopped says it stays queued', async () => {
@@ -6947,6 +7029,7 @@ describe('queue delivery: queue or steer', () => {
     store.setQueuedDelivery(chatId, ['a'], 'steer')
     expect(frames(socket, 'queue_set_delivery')).toHaveLength(1)
     expect(store.queuedMessages[chatId][0].steering).toBe(false)
+    expect(store.queuedMessages[chatId][0].delivery).toBe('queue')
   })
 
   it('keeps waiting chips from queue_state when nothing is running', async () => {

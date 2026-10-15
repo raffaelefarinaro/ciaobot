@@ -314,7 +314,7 @@ export const useProjectStore = defineStore('projects', () => {
     no_turn: 'Nothing was running to steer into. It will be sent as the next message.',
     stopped: 'Stopped before it was steered. It stays in the queue.',
   }
-  type QueuedMessage = { id: string; text: string; images?: string[]; delivery: QueueDelivery; steering?: boolean }
+  type QueuedMessage = { id: string; text: string; images?: string[]; delivery: QueueDelivery; steering?: boolean; waiting?: boolean }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
       return crypto.randomUUID()
@@ -327,6 +327,47 @@ export const useProjectStore = defineStore('projects', () => {
   const queuedMessages = ref<Record<string, QueuedMessage[]>>({})
   // One-line dock notice per chat after a steer fell back to the queue.
   const steerNotice = ref<Record<string, string>>({})
+  // The server answers every steer with steered, steer_fallback or a
+  // queue_state; this only guards a lock the server never answers (a race, a
+  // background stream, ids that are gone), so it cannot stick forever.
+  const STEER_LOCK_TIMEOUT_MS = 15000
+  const STEER_NOTICE_MS = 8000
+  const steerLockTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const steerNoticeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  function clearSteerLockTimer(chatId: string) {
+    const t = steerLockTimers.get(chatId)
+    if (t) clearTimeout(t)
+    steerLockTimers.delete(chatId)
+  }
+  function setSteerNotice(chatId: string, text: string) {
+    steerNotice.value[chatId] = text
+    const old = steerNoticeTimers.get(chatId)
+    if (old) clearTimeout(old)
+    steerNoticeTimers.set(chatId, setTimeout(() => {
+      delete steerNotice.value[chatId]
+      steerNoticeTimers.delete(chatId)
+    }, STEER_NOTICE_MS))
+  }
+  function clearSteerNotice(chatId: string) {
+    const t = steerNoticeTimers.get(chatId)
+    if (t) clearTimeout(t)
+    steerNoticeTimers.delete(chatId)
+    delete steerNotice.value[chatId]
+  }
+  function armSteerLockTimer(chatId: string) {
+    clearSteerLockTimer(chatId)
+    steerLockTimers.set(chatId, setTimeout(() => {
+      steerLockTimers.delete(chatId)
+      let reverted = false
+      for (const q of queuedMessages.value[chatId] || []) {
+        if (!q.steering) continue
+        q.delivery = 'queue'
+        q.steering = false
+        reverted = true
+      }
+      if (reverted) setSteerNotice(chatId, 'The steer was not confirmed. It will be sent as the next message.')
+    }, STEER_LOCK_TIMEOUT_MS))
+  }
   // Pending Auto-mode permission prompts keyed by chat_id. The chat bubble
   // renders Approve/Deny buttons for each entry; clicking sends a
   // `permission_response` on the per-chat WS and waits for the provider ack.
@@ -1921,10 +1962,13 @@ export const useProjectStore = defineStore('projects', () => {
           images: entry.images?.length ? [...entry.images] : undefined,
           delivery: 'queue',
           steering: false,
+          waiting: true,
         }))
         if (isChatStreaming(chat.chat_id)) {
           const live = queuedMessages.value[chat.chat_id] || []
           const known = new Set(live.map(q => q.id))
+          const parkedIds = new Set(waiting.map(q => q.id))
+          for (const q of live) if (parkedIds.has(q.id)) q.waiting = true
           queuedMessages.value[chat.chat_id] = [...waiting.filter(q => !known.has(q.id)), ...live]
         } else {
           queuedMessages.value[chat.chat_id] = waiting
@@ -4828,6 +4872,8 @@ export const useProjectStore = defineStore('projects', () => {
       queuedMessages.value[chatId].push({
         id: queueId, text: composed, images: imageRefs, delivery, steering: delivery === 'steer',
       })
+      clearSteerNotice(chatId)
+      if (delivery === 'steer') armSteerLockTimer(chatId)
       const payload: Record<string, unknown> = { type: 'message', text: composed, mode: 'queue', delivery }
       if (imageRefs) payload.images = imageRefs
       payload.entry_id = queueId
@@ -4954,9 +5000,10 @@ export const useProjectStore = defineStore('projects', () => {
   /**
    * Switch queued entries between Queue and Steer with one frame. Steer sends
    * them now, combined in list order (the order the ids are sent in). With a
-   * turn running the chips lock as "Steering…" until the server confirms; with
-   * nothing running this is "Send now" on waiting entries, which starts a turn
-   * and removes them through `user_echo`, so nothing is locked optimistically.
+   * turn running the chips lock as "Steering…" until the server confirms (or a
+   * 15 s timer gives up); with nothing running this is "Send now" on waiting
+   * entries, which starts a turn and removes them through `user_echo`, so
+   * nothing is changed or locked optimistically.
    */
   function setQueuedDelivery(chatId: string, entryIds: string[], delivery: QueueDelivery) {
     const list = queuedMessages.value[chatId]
@@ -4965,12 +5012,20 @@ export const useProjectStore = defineStore('projects', () => {
     const wanted = new Set(entryIds)
     const chosen = list.filter(q => wanted.has(q.id) && !q.steering)
     if (!chosen.length) return
-    const running = isChatStreaming(chatId)
-    for (const entry of chosen) {
-      entry.delivery = delivery
-      if (delivery === 'steer' && running) entry.steering = true
+    // Only while a turn runs is the change optimistic. Idle, "Send now"
+    // starts a turn and the echo removes the entries; a server that does
+    // nothing leaves the chips exactly as they were.
+    if (isChatStreaming(chatId)) {
+      for (const entry of chosen) {
+        entry.delivery = delivery
+        if (delivery === 'steer') {
+          entry.steering = true
+          entry.waiting = false
+        }
+      }
+      if (delivery === 'steer') armSteerLockTimer(chatId)
     }
-    delete steerNotice.value[chatId]
+    clearSteerNotice(chatId)
     ws.send(JSON.stringify({
       type: 'queue_set_delivery',
       entry_ids: chosen.map(q => q.id),
@@ -5473,7 +5528,6 @@ export const useProjectStore = defineStore('projects', () => {
         // Queued follow-ups are drained as individual turns. Remove only the
         // entry that just started so later messages remain visible/editable.
         removeEchoedQueued(chatId, event.entry_id, trimmed)
-        delete steerNotice.value[chatId]
         // The server received and started the send: drop the recovery copy.
         acknowledgeSend(chatId, trimmed)
         const turnIndex = event.turn_index
@@ -5589,6 +5643,8 @@ export const useProjectStore = defineStore('projects', () => {
         // Authoritative queue order from the backend (e.g. after a reorder/edit
         // from another client, or on reconnect). Rebuild local chips to match.
         const incoming = event.queue || []
+        clearSteerLockTimer(chatId)
+        const waitingIds = new Set((queuedMessages.value[chatId] || []).filter(q => q.waiting).map(q => q.id))
         if (!incoming.length) {
           delete queuedMessages.value[chatId]
           break
@@ -5599,6 +5655,7 @@ export const useProjectStore = defineStore('projects', () => {
           images: q.images?.length ? q.images : undefined,
           delivery: q.delivery === 'steer' ? 'steer' : 'queue',
           steering: Boolean(q.steering),
+          waiting: waitingIds.has(q.id) && !q.steering,
         }))
         break
       }
@@ -5607,6 +5664,7 @@ export const useProjectStore = defineStore('projects', () => {
         // The provider took the steer: the entries leave the queue and the
         // message is its own user turn. Replays dedup by turn_index.
         _commitStreamingTextToTimeline(chatId)
+        clearSteerLockTimer(chatId)
         removeQueuedByIds(chatId, event.entry_ids)
         const trimmed = (event.text || '').trim()
         if (!trimmed) break
@@ -5635,8 +5693,10 @@ export const useProjectStore = defineStore('projects', () => {
           if (!ids.has(q.id)) continue
           q.delivery = 'queue'
           q.steering = false
+          q.waiting = false
         }
-        steerNotice.value[chatId] = STEER_FALLBACK_NOTICE[event.reason] || STEER_FALLBACK_NOTICE.not_running
+        clearSteerLockTimer(chatId)
+        setSteerNotice(chatId, STEER_FALLBACK_NOTICE[event.reason] || STEER_FALLBACK_NOTICE.not_running)
         break
       }
 
@@ -5877,7 +5937,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
 
       case 'result': {
-        delete steerNotice.value[chatId]
+        clearSteerLockTimer(chatId)
         // Final flush before the result event is materialized: lock any
         // trailing thinking/text deltas into the timeline so they render
         // in the correct order.

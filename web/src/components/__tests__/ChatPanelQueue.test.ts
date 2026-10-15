@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { flushPromises, RouterLinkStub, shallowMount } from '@vue/test-utils'
 import { api } from '../../lib/api'
 import type { ChatInfo, ProjectInfo } from '../../lib/types'
@@ -165,19 +165,20 @@ describe('ChatPanel queued messages', () => {
   })
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
-  it('renders Queue/Steer radios with aria-checked', async () => {
+  it('renders a Queue/Steer button group with aria-pressed and a labelled excerpt', async () => {
     const { wrapper } = await mountPanel((store) => {
       store.streaming['chat-1'] = true
       queue(store, [{ id: 'a', text: 'one' }, { id: 'b', text: 'two', delivery: 'steer' }])
     })
     const groups = wrapper.findAll('.queued-mode')
     expect(groups).toHaveLength(2)
-    expect(groups[0].attributes('role')).toBe('radiogroup')
-    const first = groups[0].findAll('[role="radio"]')
+    expect(groups[0].attributes('role')).toBe('group')
+    expect(groups[0].attributes('aria-label')).toContain('one')
+    const first = groups[0].findAll('button')
     expect(first.map(r => r.text())).toEqual(['Queue', 'Steer'])
-    expect(first.map(r => r.attributes('aria-checked'))).toEqual(['true', 'false'])
-    const second = groups[1].findAll('[role="radio"]')
-    expect(second.map(r => r.attributes('aria-checked'))).toEqual(['false', 'true'])
+    expect(first.map(r => r.attributes('aria-pressed'))).toEqual(['true', 'false'])
+    const second = groups[1].findAll('button')
+    expect(second.map(r => r.attributes('aria-pressed'))).toEqual(['false', 'true'])
     wrapper.unmount()
   })
 
@@ -187,7 +188,7 @@ describe('ChatPanel queued messages', () => {
       queue(s, [{ id: 'a', text: 'one' }])
     })
     openSocket(store)
-    await wrapper.findAll('.queued-mode [role="radio"]')[1].trigger('click')
+    await wrapper.findAll('.queued-mode button')[1].trigger('click')
     expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_set_delivery', entry_ids: ['a'], delivery: 'steer' })
     wrapper.unmount()
   })
@@ -198,7 +199,7 @@ describe('ChatPanel queued messages', () => {
       queue(s, [{ id: 'a', text: 'look', images: ['shot.png'] }])
     })
     openSocket(store)
-    const steer = wrapper.findAll('.queued-mode [role="radio"]')[1]
+    const steer = wrapper.findAll('.queued-mode button')[1]
     expect(steer.attributes('disabled')).toBeUndefined()
     await steer.trigger('click')
     expect(JSON.parse(send.mock.calls[0][0])).toMatchObject({ entry_ids: ['a'], delivery: 'steer' })
@@ -241,7 +242,7 @@ describe('ChatPanel queued messages', () => {
     wrapper.unmount()
   })
 
-  it('in-flight chip shows Steering… and disables edit, reorder, remove and the mode control', async () => {
+  it('in-flight chip shows Steering… and hides the edit, reorder, remove and mode controls', async () => {
     const { wrapper } = await mountPanel((s) => {
       s.streaming['chat-1'] = true
       queue(s, [{ id: 'a', text: 'one', delivery: 'steer', steering: true }])
@@ -249,21 +250,73 @@ describe('ChatPanel queued messages', () => {
     const status = wrapper.get('.queued-steering')
     expect(status.text()).toContain('Steering')
     expect(status.attributes('aria-live')).toBe('polite')
-    for (const b of wrapper.findAll('.queued-action, .queued-remove, .queued-mode [role="radio"]')) {
-      expect(b.attributes('disabled')).toBeDefined()
-    }
+    // The locked row is gone rather than shown disabled.
+    expect(wrapper.find('.queued-actions').exists()).toBe(false)
+    expect(wrapper.find('.queued-mode').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('shows the fallback notice as a status line', async () => {
+  it('shows the fallback notice as a status line outside the queue block', async () => {
     const { wrapper } = await mountPanel((s) => {
       s.streaming['chat-1'] = true
       queue(s, [{ id: 'a', text: 'one' }])
       s.steerNotice['chat-1'] = 'The reply finished before it could be steered. It will be sent as the next message.'
     })
-    const notice = wrapper.get('.queued-notice')
+    const notice = wrapper.get('.steer-notice')
     expect(notice.attributes('role')).toBe('status')
     expect(notice.text()).toContain('finished before it could be steered')
+    expect(wrapper.find('.queued-messages .steer-notice').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows the notice with no chips left', async () => {
+    const { wrapper } = await mountPanel((s) => {
+      s.steerNotice['chat-1'] = 'Stopped before it was steered. It stays in the queue.'
+    })
+    expect(wrapper.find('.queued-messages').exists()).toBe(false)
+    expect(wrapper.get('.steer-notice').text()).toContain('Stopped')
+    wrapper.unmount()
+  })
+
+  it('a waiting chip during a running turn reads Waiting with a Steer button, not Queue/Steer', async () => {
+    const { wrapper, store } = await mountPanel((s) => {
+      s.streaming['chat-1'] = true
+      queue(s, [{ id: 'w', text: 'held', waiting: true }, { id: 'l', text: 'live' }])
+    })
+    const chips = wrapper.findAll('.queued-chip')
+    expect(chips[0].find('.queued-mode').exists()).toBe(false)
+    expect(chips[0].get('.queued-label').text()).toBe('Waiting')
+    const steer = chips[0].get('.queued-send-now')
+    expect(steer.text()).toBe('Steer')
+    expect(chips[1].find('.queued-mode').exists()).toBe(true)
+    openSocket(store)
+    await steer.trigger('click')
+    expect(JSON.parse(send.mock.calls[0][0])).toEqual({ type: 'queue_set_delivery', entry_ids: ['w'], delivery: 'steer' })
+    wrapper.unmount()
+  })
+
+  it('moves focus to the chip when the focused Steer button is replaced', async () => {
+    const { wrapper, store } = await mountPanel((s) => {
+      s.streaming['chat-1'] = true
+      queue(s, [{ id: 'a', text: 'one' }])
+    })
+    openSocket(store)
+    const steer = wrapper.findAll('.queued-mode button')[1]
+    ;(steer.element as HTMLElement).focus()
+    await steer.trigger('click')
+    await nextTick()
+    expect(document.activeElement).toBe(wrapper.get('.queued-chip').element)
+    wrapper.unmount()
+  })
+
+  it('keeps one persistent aria-live region per chip', async () => {
+    const { wrapper } = await mountPanel((s) => {
+      s.streaming['chat-1'] = true
+      queue(s, [{ id: 'a', text: 'one' }])
+    })
+    const live = wrapper.get('.queued-steering')
+    expect(live.attributes('aria-live')).toBe('polite')
+    expect(live.text()).toBe('')
     wrapper.unmount()
   })
 
