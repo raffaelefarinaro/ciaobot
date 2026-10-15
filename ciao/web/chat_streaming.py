@@ -945,7 +945,11 @@ class ChatStreaming:
                     remaining = stream.pending
                     if next_pending is not None:
                         remaining = [next_pending, *remaining]
-                    stream.publish({"type": "queue_state", "queue": public_queue(remaining)})
+                    waiting = stream.waiting() if stream.waiting is not None else []
+                    stream.publish({
+                        "type": "queue_state",
+                        "queue": public_queue([*waiting, *remaining]),
+                    })
                 # A user Stop holds the whole queue: what is queued is parked
                 # on the chat with its chips, not run. (The task board's Stop
                 # and Detach, #1103, are the same rule.)

@@ -5586,17 +5586,36 @@ class ProjectChatManager:
         if delivery not in QUEUE_DELIVERIES:
             return False
         stream = self._broker.get(chat_id)
+        chat = self._chats.get(chat_id)
+        wanted = set(entry_ids)
         if stream is not None and not stream.background:
-            if not stream.set_delivery(entry_ids, delivery):
+            # Waiting (parked) entries can be named too: "queue" leaves them
+            # waiting; "steer" hands them to this running turn, where they are
+            # ordinary live entries (they flush as the next turn if the steer
+            # falls back).
+            waiting = [
+                e for e in (chat.pending_queue if chat is not None else [])
+                if e.get("id") in wanted
+            ]
+            waiting_ids = {e.get("id") for e in waiting}
+            live_ids = [i for i in entry_ids if i not in waiting_ids]
+            changed = bool(live_ids) and stream.set_delivery(live_ids, delivery)
+            if waiting and delivery == "steer" and chat is not None:
+                moved = {id(e) for e in waiting}
+                chat.pending_queue = [e for e in chat.pending_queue if id(e) not in moved]
+                stream.adopt_waiting(waiting, "steer")
+                self._save()
+                changed = True
+            elif waiting:
+                changed = True
+            if not changed:
                 return False
             stream.publish_pending()
             if delivery == "steer":
                 await self.steer_queue(chat_id)
             return True
-        chat = self._chats.get(chat_id)
         if chat is None:
             return False
-        wanted = set(entry_ids)
         selected = [e for e in chat.pending_queue if e.get("id") in wanted]
         if not selected:
             return False
@@ -5609,13 +5628,13 @@ class ProjectChatManager:
             t for t in (str(e.get("text", "")).strip() for e in selected) if t
         )
         image_refs = [str(ref) for e in selected for ref in (e.get("images") or [])]
-        if not text and not image_refs:
-            return False
         images = [
             attachment
             for attachment in (self.resolve_image_ref(ref) for ref in image_refs)
             if attachment
         ]
+        if not text and not images:
+            return False  # nothing to send (images gone): entries stay waiting
         sent_ids = {id(e) for e in selected}
         chat.pending_queue = [e for e in chat.pending_queue if id(e) not in sent_ids]
         self._save()
@@ -5702,7 +5721,9 @@ class ProjectChatManager:
                 self._fallback_steers(chat_id, stream, "not_running")
                 raise
             except Exception:  # noqa: BLE001 - a steer failure is a fallback, not a crash
-                # Includes the dispatch timeout. The message stays queued.
+                # Includes the dispatch timeout. The message stays queued. A
+                # wedged CLI could still deliver the cancelled steer after the
+                # timeout, so a rare duplicate is possible.
                 logger.warning(
                     "steer_turn failed for chat %s", chat_id, exc_info=True
                 )
@@ -5718,8 +5739,9 @@ class ProjectChatManager:
             if steer_id in stream.early_steer_deliveries:
                 stream.early_steer_deliveries.discard(steer_id)
                 self.on_steer_delivered(chat_id, stream, steer_id)
-            else:
-                stream.publish_pending()
+            # Otherwise nothing visible changed since the "steering" publish
+            # before the await (only the internal delivery id), so no second
+            # queue_state.
 
     def _fallback_steers(self, chat_id: str, stream: "ChatStream", reason: str) -> None:
         """Revert steer-mode entries to queue mode and say so.
@@ -6549,6 +6571,13 @@ class ProjectChatManager:
             raise ValueError(
                 "Answer the open question before sending another message."
             )
+        if chat_meta is not None:
+            # Waiting (parked) messages stay waiting: a new send never flushes
+            # them. They leave only through send-now, edit, remove or reorder,
+            # and stay visible on every stream, compactions included.
+            stream.waiting = lambda: chat_meta.pending_queue
+            if chat_meta.pending_queue:
+                stream.publish_pending()
         if chat_meta is not None and not compact:
             try:
                 self._memory_pass.on_turn_started(chat_meta)
@@ -6566,9 +6595,6 @@ class ProjectChatManager:
             # Waiting (parked) messages stay waiting: a new send never flushes
             # them. They leave only through send-now, edit, remove or reorder,
             # and stay visible on this stream.
-            stream.waiting = lambda: chat_meta.pending_queue
-            if chat_meta.pending_queue:
-                stream.publish_pending()
             turn_index = chat_meta.user_turn_count
             chat_meta.user_turn_count = turn_index + 1
             if image_refs:

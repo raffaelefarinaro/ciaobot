@@ -1273,12 +1273,21 @@ def test_park_pending_for_retry_publishes_the_parked_queue(tmp_path: Path) -> No
         {
             "type": "queue_state",
             "queue": [
-                {"id": "q-1", "text": "and then summarise it", "images": ["shot.png"]},
+                {
+                    "id": "q-1",
+                    "text": "and then summarise it",
+                    "images": ["shot.png"],
+                    "delivery": "queue",
+                    "steering": False,
+                },
             ],
         }
     ]
     public = pcm._chats[chat.chat_id].to_dict()["pending_queue"]
-    assert public == states[0]["queue"]
+    assert public == [
+        {k: v for k, v in e.items() if k not in ("delivery", "steering")}
+        for e in states[0]["queue"]
+    ]
     assert public is not pcm._chats[chat.chat_id].pending_queue
     assert public[0] is not pcm._chats[chat.chat_id].pending_queue[0]
 
@@ -2011,3 +2020,141 @@ async def test_parking_appends_to_the_waiting_queue(tmp_path: Path) -> None:
     await pcm.stop_chat(chat.chat_id)
     await asyncio.wait_for(consumer, timeout=5.0)
     assert [e["id"] for e in pcm.get_chat(chat.chat_id).pending_queue] == ["w1", "q-new"]
+
+
+# ── Review round 2 fixes (#1392 A2, round 3) ─────────────────────────────
+
+
+async def test_queue_delivery_on_waiting_entries_while_a_turn_runs(tmp_path: Path) -> None:
+    provider = _SteerProvider()
+    pcm, chat, stream, release, turn_calls, captured, consumer = (
+        await _start_blocked_turn(tmp_path, provider)
+    )
+    waiting = pcm.get_chat(chat.chat_id)
+    waiting.pending_queue = [
+        {"id": "w1", "text": "wait one", "images": []},
+        {"id": "w2", "text": "wait two", "images": []},
+    ]
+    # "queue" on a waiting entry is a no-op that succeeds.
+    assert await pcm.set_queue_delivery(chat.chat_id, ["w1"], "queue") is True
+    assert [e["id"] for e in waiting.pending_queue] == ["w1", "w2"]
+    assert provider.requests == []
+
+    # "steer" moves it into the live stream and dispatches it.
+    assert await pcm.set_queue_delivery(chat.chat_id, ["w1"], "steer") is True
+    assert [e["id"] for e in waiting.pending_queue] == ["w2"]
+    assert [r.prompt for r in provider.requests] == ["wait one"]
+    assert [(e["id"], e["delivery"], e["steer_id"] != "") for e in stream.pending] == [
+        ("w1", "steer", True)
+    ]
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+
+async def test_steer_on_a_waiting_entry_that_falls_back_runs_as_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    provider = _SteerProvider(delivery_id=None)
+    pcm, chat, stream, release, turn_calls, captured, consumer = (
+        await _start_blocked_turn(tmp_path, provider)
+    )
+    pcm.get_chat(chat.chat_id).pending_queue = [
+        {"id": "w1", "text": "wait one", "images": ["x.png"]},
+    ]
+    stream.enqueue("live", [], entry_id="q-live")
+    assert await pcm.set_queue_delivery(chat.chat_id, ["w1", "q-live"], "steer") is True
+    # Mixed ids: both were handed over together, then fell back to queue mode.
+    assert [r.prompt for r in provider.requests] == ["wait one\n\nlive"]
+    assert pcm.get_chat(chat.chat_id).pending_queue == []
+    assert [(e["id"], e["delivery"]) for e in stream.pending] == [
+        ("w1", "queue"),
+        ("q-live", "queue"),
+    ]
+    assert stream.pending[0]["images"] == ["x.png"]
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+    assert turn_calls[1] == "wait one"
+
+
+async def test_blank_skip_queue_state_keeps_waiting_chips(tmp_path: Path) -> None:
+    provider = _SteerProvider()
+    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
+        tmp_path, provider
+    )
+    pcm.get_chat(chat.chat_id).pending_queue = [{"id": "w1", "text": "wait", "images": []}]
+    stream.enqueue("", [], entry_id="q-blank")
+    stream.enqueue("real", [], entry_id="q-real")
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+    blank_state = [
+        q for q in _queue_states(captured) if "q-real" in [e["id"] for e in q]
+    ]
+    assert blank_state
+    assert [e["id"] for e in blank_state[0]] == ["w1", "q-real"]
+
+
+async def test_compaction_stream_shows_the_waiting_queue(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-compact-waiting", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="compact-waiting")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield _result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    chat.pending_queue = [{"id": "w1", "text": "wait", "images": []}]
+    stream = pcm.start_stream(chat.chat_id, "/compact", compact=True)
+    assert stream.waiting is not None
+    assert [e["id"] for e in stream.waiting()] == ["w1"]
+    await _wait_for(lambda: stream.done)
+    assert [e["id"] for e in chat.pending_queue] == ["w1"]
+
+
+async def test_send_now_with_nothing_resolvable_leaves_entries_waiting(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q4-send-nothing", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="send-nothing")
+    chat.pending_queue = [
+        {"id": "p1", "text": "   ", "images": ["gone.png"]},
+        {"id": "p2", "text": "", "images": []},
+    ]
+    assert await pcm.set_queue_delivery(chat.chat_id, ["p1", "p2"], "steer") is False
+    assert pcm.get_active_stream(chat.chat_id) is None
+    assert [e["id"] for e in chat.pending_queue] == ["p1", "p2"]
+
+
+async def test_parked_queue_state_has_the_live_entry_shape(tmp_path: Path) -> None:
+    stream = ChatStream("prompt")
+    stream.publish_queue_state([{"id": "p1", "text": "t", "images": ["a.png"]}])
+    assert [e for e in stream.buffered_events() if e["type"] == "queue_state"] == [
+        {
+            "type": "queue_state",
+            "queue": [
+                {
+                    "id": "p1",
+                    "text": "t",
+                    "images": ["a.png"],
+                    "delivery": "queue",
+                    "steering": False,
+                }
+            ],
+        }
+    ]
+
+
+async def test_one_steer_dispatch_publishes_one_steering_queue_state(
+    tmp_path: Path,
+) -> None:
+    provider = _SteerProvider()
+    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
+        tmp_path, provider
+    )
+    pcm.queue_message(chat.chat_id, "a", entry_id="q-a", delivery="steer")
+    await pcm.steer_queue(chat.chat_id)
+    await _wait_for(lambda: any(q and q[0]["steering"] for q in _queue_states(captured)))
+    steering = [q for q in _queue_states(captured) if q and q[0]["steering"]]
+    assert len(steering) == 1
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)

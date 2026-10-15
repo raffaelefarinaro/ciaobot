@@ -739,6 +739,23 @@ class ChatStream:
     def _is_steering(self, entry_id: str) -> bool:
         return any(p.get("id") == entry_id and p.get("steer_id") for p in self._pending)
 
+    def adopt_waiting(self, entries: list[dict], delivery: str) -> None:
+        """Take waiting (parked) entries into this live queue, ahead of its own.
+
+        They were queued earlier, so list order puts them first.
+        """
+        adopted = [
+            {
+                "id": entry.get("id", ""),
+                "text": entry.get("text", ""),
+                "images": list(entry.get("images") or []),
+                "delivery": delivery,
+                "steer_id": "",
+            }
+            for entry in entries
+        ]
+        self._pending = [*adopted, *self._pending]
+
     def set_delivery(self, entry_ids: list[str], delivery: str) -> bool:
         """Switch entries between ``"queue"`` and ``"steer"``.
 
@@ -874,7 +891,7 @@ class ChatStream:
         """
         if self._done or not queue:
             return
-        self.publish({"type": "queue_state", "queue": list(queue)})
+        self.publish({"type": "queue_state", "queue": public_queue(queue)})
 
     def publish_live(self, payload: dict) -> None:
         """Fan out an ephemeral control event without adding it to replay."""
