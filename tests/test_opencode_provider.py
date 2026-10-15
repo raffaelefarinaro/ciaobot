@@ -2805,7 +2805,7 @@ def test_credential_count_reads_the_v2_json_listing(monkeypatch):
 
     monkeypatch.setattr("subprocess.run", fake_run)
     assert mod._credential_count("/bin/opencode", timeout=1.0) == 2
-    assert calls == [["/bin/opencode", "auth", "list", "--format", "json"]]
+    assert calls == [["/bin/opencode", "auth", "list", "--format", "json", "--standalone"]]
 
     monkeypatch.setattr(
         "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="[]", returncode=0)
@@ -2816,7 +2816,6 @@ def test_credential_count_reads_the_v2_json_listing(monkeypatch):
 def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
     """Settings lists what the opencode CLI brings; the V2 server's list routes
     are the source, minus built-in and failed plugins."""
-    import json as _json
     from types import SimpleNamespace
 
     import ciao.providers.opencode as mod
@@ -2831,41 +2830,44 @@ def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
         "/api/mcp": [{"name": "github"}],
     }
 
+    run_calls = []
+
     def fake_run(cmd, *a, **k):
-        if cmd[1:3] == ["api", "GET"]:
-            return SimpleNamespace(stdout=_json.dumps({"data": routes[cmd[3]]}), returncode=0)
+        run_calls.append(cmd)
         if cmd[1] == "--version":
             return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
         return SimpleNamespace(stdout="[]", returncode=0)
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        mod,
+        "_fetch_inventory_rows",
+        lambda binary, **_k: (routes["/api/skill"], routes["/api/plugin"], routes["/api/mcp"]),
+    )
 
     status = mod.opencode_login_status()
 
     assert status["skills"] == ["pdf", "review"]
     assert status["bundled_skills"] == ["opencode"]
     assert status["mcps"] == ["github"]
+    assert not any(len(cmd) > 1 and cmd[1] == "api" for cmd in run_calls)
 
 
 def test_status_leaves_out_lists_the_server_could_not_report(monkeypatch):
     """A failed list route must not read as "nothing installed"."""
-    import json as _json
     from types import SimpleNamespace
 
     import ciao.providers.opencode as mod
 
     def fake_run(cmd, *a, **k):
-        if cmd[1:4] == ["api", "GET", "/api/skill"]:
-            return SimpleNamespace(stdout="", returncode=1)
-        if cmd[1:3] == ["api", "GET"]:
-            return SimpleNamespace(stdout=_json.dumps({"data": []}), returncode=0)
         if cmd[1] == "--version":
             return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
         return SimpleNamespace(stdout="[]", returncode=0)
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", lambda binary, **_k: (None, [], []))
 
     status = mod.opencode_login_status()
 
@@ -2873,6 +2875,146 @@ def test_status_leaves_out_lists_the_server_could_not_report(monkeypatch):
     assert "skills" not in status
     assert "bundled_skills" not in status
     assert status["mcps"] == []
+
+
+def _inventory_client(handler):
+    import httpx
+
+    return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://t")
+
+
+def test_inventory_waits_until_plugins_load(monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    import httpx
+
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_INVENTORY_POLL", 0)
+    seen: list[httpx.Request] = []
+    plugin_calls = 0
+    builtin = {"id": "opencode", "path": "/builtin/opencode.md"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal plugin_calls
+        seen.append(request)
+        if request.url.path == "/api/plugin":
+            plugin_calls += 1
+            if plugin_calls <= 2:
+                return httpx.Response(200, json={"data": []})
+            return httpx.Response(200, json={"data": [
+                {"id": "opencode.x", "source": {"type": "builtin"}, "state": {"status": "active"}}
+            ]})
+        if request.url.path == "/api/skill":
+            if plugin_calls <= 2:
+                return httpx.Response(200, json={"data": [builtin, {"id": "opencode2"}]})
+            return httpx.Response(200, json={"data": [builtin, {"id": "pdf"}]})
+        return httpx.Response(200, json={"data": [{"name": "github"}]})
+
+    with _inventory_client(handler) as client:
+        skills, plugins, mcps = mod._read_loaded_inventory(
+            client, SimpleNamespace(poll=lambda: None),
+            deadline=time.monotonic() + 5, location="/home/x",
+        )
+
+    assert any(row["id"] == "pdf" for row in skills)
+    assert len(plugins) == 1
+    assert mcps == [{"name": "github"}]
+    assert all(r.url.params["location[directory]"] == "/home/x" for r in seen)
+    assert sum(1 for r in seen if r.url.path == "/api/plugin") == 3
+
+
+def test_inventory_is_unknown_when_the_server_never_loads(monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    import httpx
+
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_INVENTORY_POLL", 0.01)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": []})
+
+    with _inventory_client(handler) as client:
+        rows = mod._read_loaded_inventory(
+            client, SimpleNamespace(poll=lambda: None),
+            deadline=time.monotonic() + 0.05, location="/home/x",
+        )
+
+    assert rows == (None, None, None)
+
+
+def test_inventory_is_unknown_when_the_server_exits():
+    import time
+    from types import SimpleNamespace
+
+    import httpx
+
+    import ciao.providers.opencode as mod
+
+    called = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    with _inventory_client(handler) as client:
+        rows = mod._read_loaded_inventory(
+            client, SimpleNamespace(poll=lambda: 1),
+            deadline=time.monotonic() + 5, location="/home/x",
+        )
+
+    assert rows == (None, None, None)
+    assert called == []
+
+
+def test_inventory_spawns_a_private_server_in_home_not_the_service(monkeypatch):
+    import subprocess
+
+    import ciao.providers.opencode as mod
+
+    recorded = []
+
+    def fake_popen(argv, **kwargs):
+        recorded.append((argv, kwargs))
+        raise OSError("no spawn in tests")
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    assert mod._fetch_inventory_rows("/bin/opencode") == (None, None, None)
+
+    argv, kwargs = recorded[0]
+    assert argv[:2] == ["/bin/opencode", "serve"]
+    assert "--port" in argv
+    assert argv[-2:] == ["--hostname", "127.0.0.1"]
+    assert "api" not in argv
+    assert "--service" not in argv
+    assert kwargs["cwd"] == str(Path.home())
+    assert "OPENCODE_SERVER_PASSWORD" in kwargs["env"]
+
+
+def test_login_status_without_inventory_starts_no_server(monkeypatch):
+    from types import SimpleNamespace
+
+    import ciao.providers.opencode as mod
+
+    def no_server(*_a, **_k):
+        raise AssertionError("inventory=False must not start a server")
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.0.27\n", returncode=0)
+    )
+    monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 1)
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", no_server)
+
+    status = mod.opencode_login_status(inventory=False)
+
+    assert status["ok"] is True
+    assert "skills" not in status
 
 
 def test_credential_count_is_unknown_when_the_cli_fails(monkeypatch):

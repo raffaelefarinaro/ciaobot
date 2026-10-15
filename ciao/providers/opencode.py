@@ -42,10 +42,13 @@ from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
+
+if TYPE_CHECKING:
+    import subprocess
 
 from ciao.core_prompt import system_prompt_payload
 from ciao.models import (
@@ -132,6 +135,10 @@ _MODEL_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 # this once per `_EMPTY_MODEL_CACHE_TTL`.
 _CATALOG_WARMUP_TIMEOUT = 5.0
 _CATALOG_WARMUP_POLL = 0.25
+# Budget for the Settings inventory read: spawn a private server, wait for
+# it to finish loading, read three routes. Measured ~0.4s on 2.0.27.
+_INVENTORY_TIMEOUT = 15.0
+_INVENTORY_POLL = 0.1
 
 # Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
 # `opencode serve`. A chat with a live provider attached reuses that server
@@ -234,6 +241,27 @@ async def _stop_server(process: asyncio.subprocess.Process, tree: ProcessTree) -
                 # treat it as cleanly gone rather than surfacing a spurious
                 # task exception.
                 pass
+    finally:
+        tree.close()
+
+
+def _stop_server_sync(process: subprocess.Popen[bytes], tree: ProcessTree) -> None:
+    """Blocking twin of `_stop_server`, same order: ask, wait, then kill."""
+    import subprocess
+
+    try:
+        if process.poll() is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                tree.kill_descendants()
+            return
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            tree.terminate()
+        try:
+            process.wait(timeout=_SHUTDOWN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError, FileNotFoundError, PermissionError, OSError):
+                tree.kill()
+                process.wait()
     finally:
         tree.close()
 
@@ -3778,12 +3806,16 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
 
     `~/.local/share/opencode/auth.json` is deliberately not read: parsing a
     provider's cached credential file to determine identity is out of bounds.
+
+    `--standalone` runs a private server for this one call; without it the CLI
+    reads (or starts) the shared background service, which can be an older
+    opencode than the installed one.
     """
     import subprocess
 
     try:
         listed = subprocess.run(
-            [binary, "auth", "list", "--format", "json"],
+            [binary, "auth", "list", "--format", "json", "--standalone"],
             capture_output=True, text=True, encoding="utf-8", timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
@@ -3799,7 +3831,7 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
         )
     try:
         listed = subprocess.run(
-            [binary, "auth", "list"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
+            [binary, "auth", "list", "--standalone"], capture_output=True, text=True, encoding="utf-8", timeout=timeout
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -3807,25 +3839,94 @@ def _credential_count(binary: str, *, timeout: float) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _server_list(binary: str, path: str, *, timeout: float) -> list[dict[str, Any]] | None:
-    """`data` rows of a V2 list route, fetched through `opencode api`.
+_InventoryRows = tuple[
+    list[dict[str, Any]] | None, list[dict[str, Any]] | None, list[dict[str, Any]] | None
+]
+_NO_INVENTORY: _InventoryRows = (None, None, None)
 
-    Run from the home directory so the result is the global configuration,
-    not whatever project the engine happens to be started in. ``None`` when
-    the route could not be read, so a failure never passes for "none".
+
+def _read_loaded_inventory(
+    client: httpx.Client, process: Any, *, deadline: float, location: str
+) -> _InventoryRows:
+    """Skill, plugin and MCP rows of a private server once it has loaded.
+
+    A fresh server answers before it has loaded: first nothing, then only the
+    two built-in skills, then everything at once with `plugin.updated` last
+    (2.0.27). Built-in plugins always exist, so a non-empty plugin list is the
+    load-complete signal; an empty list or partial skills must not be shown as
+    the inventory. All-None means unknown (never loaded, exited, or unreadable).
     """
+    params = {"location[directory]": location}
+
+    def rows(path: str) -> list[dict[str, Any]] | None:
+        try:
+            response = client.get(path, params=params, timeout=2.0)
+            data = _data(response.json())
+        except (httpx.HTTPError, ValueError):
+            return None
+        if response.status_code != 200 or not isinstance(data, list):
+            return None
+        return [row for row in data if isinstance(row, dict)]
+
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return _NO_INVENTORY
+        try:
+            response = client.get("/api/plugin", params=params, timeout=2.0)
+        except httpx.HTTPError:
+            time.sleep(_INVENTORY_POLL)
+            continue
+        if response.status_code in (401, 404):
+            return _NO_INVENTORY
+        if response.status_code == 200:
+            try:
+                data = _data(response.json())
+            except ValueError:
+                return _NO_INVENTORY
+            if isinstance(data, list) and data:
+                plugin_rows = [row for row in data if isinstance(row, dict)]
+                return rows("/api/skill"), plugin_rows, rows("/api/mcp")
+        time.sleep(_INVENTORY_POLL)
+    return _NO_INVENTORY
+
+
+def _fetch_inventory_rows(binary: str, *, timeout: float = _INVENTORY_TIMEOUT) -> _InventoryRows:
+    """Spawn a private `opencode serve` in home, read the inventory, stop it."""
     import subprocess
 
+    port = _free_port()
+    password = secrets.token_urlsafe(24)
+    home = Path.home()
     try:
-        result = subprocess.run(
-            [binary, "api", "GET", path],
-            capture_output=True, text=True, encoding="utf-8", timeout=timeout, cwd=str(Path.home()),
+        process = subprocess.Popen(
+            [binary, "serve", "--port", str(port), "--hostname", "127.0.0.1"],
+            cwd=str(home),
+            env={**os.environ, "OPENCODE_SERVER_PASSWORD": password},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **tree_spawn_options(dies_with_engine=True),
         )
-        payload = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
-        return None
-    rows = payload.get("data") if isinstance(payload, dict) else None
-    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else None
+    except OSError:
+        return _NO_INVENTORY
+    try:
+        tree = ProcessTree(process.pid, dies_with_engine=True)
+    except OSError:
+        # A server that cannot be stopped as a tree would leak; do not run it.
+        process.kill()
+        process.wait()
+        return _NO_INVENTORY
+    try:
+        with httpx.Client(
+            base_url=f"http://127.0.0.1:{port}",
+            auth=("opencode", password),
+            timeout=httpx.Timeout(_REQUEST_TIMEOUT),
+        ) as client:
+            return _read_loaded_inventory(
+                client, process, deadline=time.monotonic() + timeout, location=str(home)
+            )
+    finally:
+        _stop_server_sync(process, tree)
 
 
 def _row_names(rows: list[dict[str, Any]]) -> list[str]:
@@ -3846,16 +3947,18 @@ class _Inventory:
     mcps: list[str] | None
 
 
-def _opencode_inventory(binary: str, *, timeout: float) -> _Inventory:
+def _opencode_inventory(binary: str) -> _Inventory:
     """Skills and plugins, the skills opencode ships, and MCP servers.
 
     A skill whose path is under ``/builtin/`` ships with opencode. Built-in
     plugins are opencode internals, and a plugin that failed to load (a
     duplicate ID, say) brings nothing, so both are left out.
+
+    Read from a private `opencode serve` in the home directory that Ciaobot
+    starts and stops, never through `opencode api`, which goes to the shared
+    background service.
     """
-    skill_rows = _server_list(binary, "/api/skill", timeout=timeout)
-    plugin_rows = _server_list(binary, "/api/plugin", timeout=timeout)
-    mcp_rows = _server_list(binary, "/api/mcp", timeout=timeout)
+    skill_rows, plugin_rows, mcp_rows = _fetch_inventory_rows(binary)
     skills = bundled = None
     if skill_rows is not None and plugin_rows is not None:
         bundled = _row_names([
@@ -3872,7 +3975,7 @@ def _opencode_inventory(binary: str, *, timeout: float) -> _Inventory:
     return _Inventory(skills=skills, bundled_skills=bundled, mcps=mcps)
 
 
-def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
+def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> dict[str, Any]:
     """Bounded, credential-free opencode install/auth status for Settings."""
     import subprocess
 
@@ -3942,7 +4045,7 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
     else:
         detail = "no credentials — free models only"
         auth = "free"
-    inventory = _opencode_inventory(binary, timeout=timeout)
+    found = _opencode_inventory(binary) if inventory else _Inventory(None, None, None)
     return _provider(
         name="opencode",
         ok=True,
@@ -3950,9 +4053,9 @@ def opencode_login_status(*, timeout: float = 5.0) -> dict[str, Any]:
         command="opencode auth login",
         detail=detail,
         version=version or "unknown",
-        skills=inventory.skills,
-        bundled_skills=inventory.bundled_skills,
-        mcps=inventory.mcps,
+        skills=found.skills,
+        bundled_skills=found.bundled_skills,
+        mcps=found.mcps,
     )
 
 

@@ -170,7 +170,7 @@ def test_reading_asks_the_cli_for_that_session_by_id(monkeypatch: pytest.MonkeyP
     session = read_opencode_session("ses_7a1b2c3d4e5f60718293a4b5c6d7e8f9")
 
     assert calls == [
-        ("session", "export", "ses_7a1b2c3d4e5f60718293a4b5c6d7e8f9"),
+        ("session", "export", "ses_7a1b2c3d4e5f60718293a4b5c6d7e8f9", "--standalone"),
     ]
     assert [message.role for message in session.messages] == [
         ROLE_USER,
@@ -650,6 +650,7 @@ def test_discovery_lists_metadata_only_and_states_the_max_count(
             str(DISCOVERY_MAX_COUNT),
             "--format",
             "json",
+            "--standalone",
         ),
     ]
     assert [(ref.provider, ref.source_id, ref.project_hint, ref.path) for ref in refs] == [

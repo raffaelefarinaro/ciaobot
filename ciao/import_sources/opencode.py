@@ -60,7 +60,7 @@ same field and read as what it is.
 
 **The read is bounded, and every failure is a refusal, never a guess.** The
 runner passes ``timeout`` to :func:`subprocess.run` with ``capture_output=True``,
-mirroring ``ciao.providers.opencode._server_list``; stdout larger than
+mirroring ``ciao.providers.opencode._credential_count``; stdout larger than
 :data:`~ciao.import_sources.contract.MAX_SESSION_BYTES` is never parsed at all.
 An export is one JSON object, so a cut payload has no whole-message boundary to
 stop on and a half-recovered conversation presented as whole is exactly the
@@ -148,7 +148,7 @@ logger = logging.getLogger(__name__)
 DISCOVERY_MAX_COUNT = 100
 
 #: How long one bounded ``opencode`` call may take, in seconds. Both commands
-#: resolve (or start) a server connection, so they are slower than a local file
+#: start a private server (``--standalone``), so they are slower than a local file
 #: read and slower than ``--version``, which only has to run the binary.
 EXPORT_TIMEOUT_SECONDS = 60.0
 DISCOVERY_TIMEOUT_SECONDS = 60.0
@@ -252,6 +252,7 @@ def discover_opencode_sessions(
             str(DISCOVERY_MAX_COUNT),
             "--format",
             "json",
+            "--standalone",
         ],
         DISCOVERY_TIMEOUT_SECONDS,
         cwd=str(directory),
@@ -343,7 +344,11 @@ def read_opencode_session(
             # `--sanitize` is deliberately never passed: it replaces the prose
             # with `[redacted:<kind>:<id>]` placeholders, and an import of
             # placeholders is not an import.
-            ["session", "export", requested],
+            # `--standalone` is passed: through the shared background service
+            # (or any `--server`) the CLI cuts off exports above ~300 KB and
+            # still exits 0 (2.0.27), and that service can be an older opencode
+            # than the installed one.
+            ["session", "export", requested, "--standalone"],
             EXPORT_TIMEOUT_SECONDS,
         )
     except SourceError as exc:
@@ -523,7 +528,7 @@ def _run_opencode_json(
 ) -> Any:
     """Run ``opencode <args>`` once, bounded, and return its stdout parsed as JSON.
 
-    The shape mirrors ``ciao.providers.opencode._server_list``: one
+    The shape mirrors ``ciao.providers.opencode._credential_count``: one
     :func:`subprocess.run` with ``capture_output=True``, an explicit encoding and
     a ``timeout``, and no shell. Everything that can go wrong becomes a
     :class:`SourceError` naming which of the things happened — a missing binary,
