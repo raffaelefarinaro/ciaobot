@@ -178,6 +178,7 @@ describe('ChatPanel turn footer placement', () => {
     const bubbles = wrapper.findAll('.message-wrap.assistant')
     expect(bubbles.length).toBe(1)
     expect(bubbles[0].text()).toContain('The language allocation is already correct.')
+    expect(bubbles[0].text()).not.toContain('Here is the corrected language allocation')
 
     const footer = bubbles[0].find('.message-meta')
     expect(footer.exists()).toBe(true)

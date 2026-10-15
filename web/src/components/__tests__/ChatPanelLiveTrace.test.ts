@@ -209,7 +209,9 @@ describe('ChatPanel live trace', () => {
     await flushPromises()
 
     const messagesEl = wrapper.get('.messages').element
-    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 0 })
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 600 })
     messagesEl.dispatchEvent(new Event('scroll'))
     await flushPromises()
 
@@ -222,5 +224,183 @@ describe('ChatPanel live trace', () => {
     messagesEl.dispatchEvent(new Event('scroll'))
     await flushPromises()
     expect(wrapper.get('.trace-block').classes()).not.toContain('open')
+  })
+
+  async function streamingPanel(releaseOpenPin = true) {
+    const ctx = await mountPanel()
+    ctx.store.messages['chat-1'] = turnMessages().slice(0, 1)
+    ctx.store.streaming['chat-1'] = true
+    await flushPromises()
+    const messagesEl = ctx.wrapper.get('.messages').element
+    // End the open-time pin-to-bottom window so only turn-end logic moves the view.
+    if (releaseOpenPin) messagesEl.dispatchEvent(new Event('wheel'))
+    return { ...ctx, messagesEl }
+  }
+
+  async function finishTurn(store: ReturnType<typeof useProjectStore>) {
+    store.messages['chat-1'] = turnMessages()
+    store.streaming['chat-1'] = false
+    await flushPromises()
+  }
+
+  // Resolve the turn-end history reload the way the real one lands: loading
+  // flips on, then off, after the turn has already ended.
+  async function reloadHistory(store: ReturnType<typeof useProjectStore>) {
+    let release: (v: unknown) => void = () => {}
+    ;(api.get as unknown as ReturnType<typeof vi.fn>).mockImplementation((path: string) => {
+      if (path.includes('/messages')) return new Promise(r => { release = r })
+      if (path === '/api/models') return Promise.resolve(MODELS_RESPONSE)
+      if (path.startsWith('/api/commands')) return Promise.resolve({ commands: [], skills: [] })
+      return Promise.resolve([])
+    })
+    const p = store.loadMessages('chat-1')
+    await flushPromises()
+    release([])
+    await p
+    await flushPromises()
+    await new Promise(r => setTimeout(r, 60))
+    await flushPromises()
+  }
+
+  // The reply starts 5300px into the transcript, so its on-screen top moves
+  // with the transcript's scrollTop (800px below the top at scrollTop 4500).
+  function stubReplyGeometry(messagesEl: Element) {
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.matches('.message.assistant') ? 1000 : 0
+    })
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const top = this.matches('.message.assistant') ? 5300 - (messagesEl as HTMLElement).scrollTop : 0
+      return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON() {} } as DOMRect
+    })
+  }
+
+  it('lands on the start of a tall reply even when the history reload settles after', async () => {
+    const { wrapper, store, messagesEl } = await streamingPanel()
+    stubReplyGeometry(messagesEl)
+    stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+
+    await finishTurn(store)
+    await reloadHistory(store)
+
+    expect((messagesEl as HTMLElement).scrollTop).toBe(4500 + 800 - 16)
+    expect(wrapper.get('.trace-block').classes()).not.toContain('open')
+  })
+
+  it('lands on a tall reply even while the chat-open bottom pin is still running', async () => {
+    const { store, messagesEl } = await streamingPanel(false)
+    stubReplyGeometry(messagesEl)
+    stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })
+
+    await finishTurn(store)
+    await reloadHistory(store)
+
+    expect((messagesEl as HTMLElement).scrollTop).not.toBe(5000)
+  })
+
+  it('keeps a reading hold in place through the history reload', async () => {
+    const { wrapper, store, messagesEl } = await streamingPanel()
+    stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 1000 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+
+    await finishTurn(store)
+    await reloadHistory(store)
+
+    expect((messagesEl as HTMLElement).scrollTop).toBe(1000)
+    expect(wrapper.get('.trace-block').classes()).toContain('open')
+  })
+
+  it('does not collapse a trace the user closed then reopened until they scroll away and back', async () => {
+    const { wrapper, store, messagesEl } = await streamingPanel()
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    const summary = wrapper.get('.trace-block.live .trace-summary')
+    await summary.trigger('click')
+    await summary.trigger('click')
+
+    await finishTurn(store)
+    expect(wrapper.get('.trace-block').classes()).toContain('open')
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    expect(wrapper.get('.trace-block').classes()).toContain('open')
+
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 600 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    expect(wrapper.get('.trace-block').classes()).toContain('open')
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    expect(wrapper.get('.trace-block').classes()).not.toContain('open')
+  })
+
+  it('does not hold the trace for a scroll event caused by the transcript growing', async () => {
+    const { wrapper, store, messagesEl } = await streamingPanel()
+    stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    // Content grows under a stationary viewport: not at the bottom, but the
+    // user did not scroll up.
+    stubMetrics(messagesEl, { scrollHeight: 2600, clientHeight: 500, scrollTop: 1500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+
+    store.messages['chat-1'] = turnMessages()
+    store.streaming['chat-1'] = false
+    stubMetrics(messagesEl, { scrollHeight: 2600, clientHeight: 500, scrollTop: 2100 })
+    await flushPromises()
+    expect(wrapper.get('.trace-block').classes()).not.toContain('open')
+  })
+
+  it('holds the trace after an upward scroll inside the live trace body', async () => {
+    const { wrapper, store } = await streamingPanel()
+    store.streamingText['chat-1'] = 'working on it'
+    await flushPromises()
+    const body = wrapper.get('.trace-block.live .trace-body').element
+    stubMetrics(body, { scrollHeight: 900, clientHeight: 300, scrollTop: 600 })
+    body.dispatchEvent(new Event('scroll'))
+    stubMetrics(body, { scrollHeight: 900, clientHeight: 300, scrollTop: 100 })
+    body.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+
+    await finishTurn(store)
+    expect(wrapper.get('.trace-block').classes()).toContain('open')
+  })
+
+  it('ignores a growth-only scroll inside the live trace body', async () => {
+    const { wrapper, store } = await streamingPanel()
+    store.streamingText['chat-1'] = 'working on it'
+    await flushPromises()
+    const body = wrapper.get('.trace-block.live .trace-body').element
+    stubMetrics(body, { scrollHeight: 900, clientHeight: 300, scrollTop: 600 })
+    body.dispatchEvent(new Event('scroll'))
+    stubMetrics(body, { scrollHeight: 1200, clientHeight: 300, scrollTop: 600 })
+    body.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+
+    await finishTurn(store)
+    expect(wrapper.get('.trace-block').classes()).not.toContain('open')
+  })
+
+  it('lands on the bottom, not an earlier turn reply, when the new turn has no reply', async () => {
+    const { store, messagesEl } = await streamingPanel()
+    stubReplyGeometry(messagesEl)
+    stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+    // Earlier turn with a (tall) reply, then a new turn that only ran tools.
+    store.messages['chat-1'] = [
+      ...turnMessages(),
+      { role: 'user', content: 'again', timestamp: '2026-08-30T13:30:00Z', turn_index: 1 },
+      { role: 'system', content: '· read b.md', timestamp: '2026-08-30T13:30:02Z', tool_name: '_activity' },
+    ]
+    store.streaming['chat-1'] = false
+    await flushPromises()
+    await new Promise(r => setTimeout(r, 60))
+    expect((messagesEl as HTMLElement).scrollTop).toBe(5000)
   })
 })

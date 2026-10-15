@@ -1996,6 +1996,14 @@ const liveTraceBodyEl = ref<HTMLElement>()
 // Render index of a finished trace held open for a reader; it collapses when
 // they return to the bottom.
 const pendingCollapseIdx = ref<number | null>(null)
+// Armed once the reader has actually moved away from the bottom while the
+// finished trace is held open; only then does returning to the bottom collapse it.
+const pendingCollapseArmed = ref(false)
+// What the turn end decided, kept until the turn-end history reload settles
+// (its pin-to-bottom would otherwise undo the landing or the hold).
+let turnEndMode: 'hold' | 'land' | null = null
+let lastScrollTop = 0
+let lastBodyScrollTop = 0
 const copiedMessageKey = ref<string | null>(null)
 const forkLoadingKey = ref<string | null>(null)
 const commentComposeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
@@ -2150,13 +2158,23 @@ function resetLiveTraceState() {
   liveTraceReading.value = false
   liveBodyAtBottom.value = true
   pendingCollapseIdx.value = null
+  pendingCollapseArmed.value = false
+  turnEndMode = null
+  lastBodyScrollTop = 0
 }
 
 function onLiveBodyScroll() {
   const el = liveTraceBodyEl.value
   if (!el) return
-  liveBodyAtBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= 4
-  if (!liveBodyAtBottom.value) liveTraceReading.value = true
+  // Only upward movement means the reader left the tail; content growth also
+  // fires scroll events and must not latch.
+  if (el.scrollHeight - el.scrollTop - el.clientHeight <= 4) {
+    liveBodyAtBottom.value = true
+  } else if (el.scrollTop < lastBodyScrollTop - 1) {
+    liveBodyAtBottom.value = false
+    liveTraceReading.value = true
+  }
+  lastBodyScrollTop = el.scrollTop
 }
 
 // Click on an expanded activity/thinking bubble body collapses it, unless the
@@ -2196,12 +2214,19 @@ function checkScroll() {
   if (!el) return
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
-  if (store.isStreaming && !isNearBottom.value) liveTraceReading.value = true
+  const movedUp = el.scrollTop < lastScrollTop - 1
+  lastScrollTop = el.scrollTop
+  if (store.isStreaming && movedUp && !isNearBottom.value) liveTraceReading.value = true
   const collapseIdx = pendingCollapseIdx.value
-  if (collapseIdx !== null && !store.isStreaming && isNearBottom.value) {
-    openTraces.value = { ...openTraces.value, [collapseIdx]: false }
-    pendingCollapseIdx.value = null
-    nextTick(landOnReply)
+  if (collapseIdx !== null && !store.isStreaming) {
+    if (!isNearBottom.value) {
+      pendingCollapseArmed.value = true
+    } else if (pendingCollapseArmed.value) {
+      openTraces.value = { ...openTraces.value, [collapseIdx]: false }
+      pendingCollapseIdx.value = null
+      pendingCollapseArmed.value = false
+      nextTick(landOnReply)
+    }
   }
   onChatScrollReanchor()
   // Paginated history: near the top of a windowed timeline, pull the older
@@ -2237,8 +2262,14 @@ function expandLazyStep(step: { i?: number }): void {
 function landOnReply() {
   const el = messagesEl.value
   if (!el) return
-  const replies = el.querySelectorAll<HTMLElement>('[data-msg-role="assistant"]')
+  // Only a reply that follows the last user message belongs to this turn.
+  const users = el.querySelectorAll<HTMLElement>('[data-msg-role="user"]')
+  const lastUserEl = users.length ? users[users.length - 1] : null
+  const replies = Array.from(el.querySelectorAll<HTMLElement>('[data-msg-role="assistant"]'))
+    .filter(r => !lastUserEl || Boolean(lastUserEl.compareDocumentPosition(r) & Node.DOCUMENT_POSITION_FOLLOWING))
   const reply = replies.length ? replies[replies.length - 1] : null
+  // A deliberate landing wins over the chat-open bottom pin.
+  releasePin()
   if (!reply) {
     scrollToBottom()
   } else if (reply.offsetHeight > el.clientHeight - 32) {
@@ -3785,9 +3816,7 @@ const renderData = computed<{
     const traceSubs = takeForegroundSubs(currentTurnIndex)
     // Non-final text lives in the one trace; only the final reply is a bubble.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
-      part.kind === 'assistant'
-        ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
-        : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
+      withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
     // Foreground subagents and (when there's no answer bubble) file outputs
     // belong to the one Activity trace that sits right before the reply. Reuse
@@ -3960,16 +3989,44 @@ watch(() => store.activeChatId, () => {
 // arrives, and it happens after the switch above has already scrolled. Pin
 // again from there so the reveal itself lands at the bottom.
 watch(blockingHistoryLoad, (loading, wasLoading) => {
-  if (!loading && wasLoading) nextTick(() => pinToBottom())
+  if (loading || !wasLoading) return
+  // The turn-end reload settling must re-apply the turn end, not pin to the
+  // bottom over it.
+  if (turnEndMode) {
+    const mode = turnEndMode
+    turnEndMode = null
+    nextTick(() => settleTurnEnd(mode))
+    return
+  }
+  nextTick(() => pinToBottom())
 })
 
-// Auto-scroll only when the user is already near the bottom.
-// Use direct scrollTop assignment instead of scrollIntoView — the latter
-// can stop short of the absolute bottom with smooth scrolling, especially
-// inside flex containers where the anchor is a zero-height child.
 watch(() => store.isStreaming, (streaming) => {
   if (streaming) resetLiveTraceState()
 })
+
+// Hold the finished turn's trace open (idempotent: safe to run again after the
+// history reload re-renders the turn).
+function holdTraceOpen() {
+  let lastUser = -1
+  let traceIdx = -1
+  renderItems.value.forEach((item, idx) => {
+    if (item.kind === 'user') lastUser = idx
+  })
+  renderItems.value.forEach((item, idx) => {
+    if (item.kind === 'trace' && idx > lastUser) traceIdx = idx
+  })
+  if (traceIdx < 0) return
+  checkScroll()
+  openTraces.value = { ...openTraces.value, [traceIdx]: true }
+  pendingCollapseIdx.value = traceIdx
+  if (!isNearBottom.value) pendingCollapseArmed.value = true
+}
+
+function settleTurnEnd(mode = turnEndMode) {
+  if (mode === 'hold') holdTraceOpen()
+  else if (mode === 'land') landOnReply()
+}
 
 // Keep the live trace body on its newest step unless the user scrolled up in it.
 watch(
@@ -3982,6 +4039,10 @@ watch(
   },
 )
 
+// Auto-scroll only when the user is already near the bottom.
+// Use direct scrollTop assignment instead of scrollIntoView — the latter
+// can stop short of the absolute bottom with smooth scrolling, especially
+// inside flex containers where the anchor is a zero-height child.
 let prevStreaming = store.isStreaming
 watch(
   () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length, store.isStreaming],
@@ -3993,24 +4054,13 @@ watch(
       if (liveTraceReading.value || (liveTraceTouched.value && liveTraceOpen.value)) {
         // The reader keeps their place: hold the finished trace open until
         // they come back to the bottom.
-        nextTick(() => {
-          let lastUser = -1
-          let traceIdx = -1
-          renderItems.value.forEach((item, idx) => {
-            if (item.kind === 'user') lastUser = idx
-          })
-          renderItems.value.forEach((item, idx) => {
-            if (item.kind === 'trace' && idx > lastUser) traceIdx = idx
-          })
-          if (traceIdx < 0) return
-          openTraces.value = { ...openTraces.value, [traceIdx]: true }
-          pendingCollapseIdx.value = traceIdx
-          checkScroll()
-        })
+        turnEndMode = 'hold'
+        nextTick(() => settleTurnEnd())
         return
       }
       if (isNearBottom.value) {
-        nextTick(() => landOnReply())
+        turnEndMode = 'land'
+        nextTick(() => settleTurnEnd())
         return
       }
     }

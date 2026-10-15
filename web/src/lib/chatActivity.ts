@@ -205,11 +205,8 @@ export function formatTokenUsage(usage?: Record<string, unknown>): string {
   return parts.join(' / ')
 }
 
-/** One ordered piece of a rendered turn: either an Activity trace (grouped
- *  tool calls / thinking / commentary) or a standalone assistant answer bubble. */
-export type TurnPart =
-  | { kind: 'trace'; steps: ChatMessage[] }
-  | { kind: 'assistant'; msg: ChatMessage }
+/** The Activity trace of a rendered turn: every step except the final reply. */
+export type TurnPart = { kind: 'trace'; steps: ChatMessage[] }
 
 /** Assistant prose step (not an Activity marker). Ignores `phase` so Claude
  *  mid-turn narration can still be found before we classify it. */
