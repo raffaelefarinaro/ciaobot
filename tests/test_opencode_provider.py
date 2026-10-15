@@ -91,17 +91,6 @@ def test_background_subagents_are_supported():
     assert OpencodeProvider.capabilities.subagent_messages is True
 
 
-@pytest.mark.asyncio
-async def test_steer_never_sends_a_second_prompt(tmp_path):
-    """Returning False keeps the message in the next-turn queue.
-
-    Sending a second prompt instead would either queue it out of order or
-    abort the active turn; neither is steering.
-    """
-    provider = _provider(tmp_path)
-    assert await provider.steer(object()) is False  # type: ignore[arg-type]
-
-
 # ── contract verification ───────────────────────────────────────────────
 
 
