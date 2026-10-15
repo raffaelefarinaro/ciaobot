@@ -74,3 +74,38 @@ def test_user_turn_steered_survives_save_and_reload(tmp_path: Path) -> None:
     reloaded = pcm.get_chat(chat.chat_id)
     assert reloaded is not None
     assert reloaded.user_turn_steered == {"2": True}
+
+
+@pytest.mark.asyncio
+async def test_steered_row_has_no_unattended_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The steered index inherits the guard flag but is not a scheduled bubble."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Steer unattended", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="steer-unattended-history")
+    chat.session_id = "sess-steer-un"
+    chat.user_turn_unattended = {"0": True, "1": True}
+    chat.user_turn_steered = {"1": True}
+    fake_sdk = SimpleNamespace(
+        get_session_messages=lambda session_id, directory: [
+            _Msg("user", "scheduled tick"),
+            _Msg("assistant", "working"),
+            _Msg("user", "steered words"),
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    users = [r for r in json.loads(response.body) if r["role"] == "user"]
+    assert users[0]["unattended"] is True
+    assert users[1]["steered"] is True
+    assert "unattended" not in users[1]
+
+    def user(text: str) -> dict:
+        return {"info": {"role": "user"}, "parts": [{"type": "text", "text": text}]}
+
+    rows = _render_opencode_thread({"info": {}, "messages": [user("a"), user("b")]}, chat)
+    oc_users = [r for r in rows if r["role"] == "user"]
+    assert oc_users[0]["unattended"] is True
+    assert "unattended" not in oc_users[1]

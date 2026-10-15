@@ -243,7 +243,7 @@ class _RecordingPcm:
         stream.queued.append(text)
         return True
 
-    async def stop_chat(self, chat_id, *, park_queue=False):
+    async def stop_chat(self, chat_id):
         """The manager's Stop, which is ``async`` — as the real one is.
 
         The flag is set only *inside* the coroutine, so a caller that built one and
@@ -252,7 +252,7 @@ class _RecordingPcm:
         the provider turn keeps running while the attempt is recorded ``stopped``
         over it, and a synchronous fake cannot see that at all.
         """
-        self.calls.append(("stop_chat", (chat_id,), {"park_queue": park_queue}))
+        self.calls.append(("stop_chat", (chat_id,), {}))
         self.stop_awaited += 1
         return True
 
@@ -1737,7 +1737,7 @@ async def test_a_detach_parks_the_chat_queue(tmp_path: Path) -> None:
 
     ``_attempt_detach`` stops a running attempt and settles it ``stopped``; a
     follow-up that ran afterwards would have the same orphaned-result problem
-    as a board Stop (#1103). So the detach's Stop must pass ``park_queue=True``.
+    as a board Stop (#1103). So the detach's Stop must be a real Stop.
     """
     plane, pcm = _world(tmp_path)
     task = _create(plane, title="Detach parks")
@@ -1747,7 +1747,7 @@ async def test_a_detach_parks_the_chat_queue(tmp_path: Path) -> None:
     await _end_turns(pcm)
 
     assert [call for call in pcm.calls if call[0] == "stop_chat"] == [
-        ("stop_chat", ("chat-1",), {"park_queue": True})
+        ("stop_chat", ("chat-1",), {})
     ]
 
 
@@ -1769,7 +1769,7 @@ async def test_a_stop_awaits_the_chat_managers_stop(tmp_path: Path) -> None:
 
     assert pcm.stop_awaited == 1
     assert [call for call in pcm.calls if call[0] == "stop_chat"] == [
-        ("stop_chat", ("chat-1",), {"park_queue": True})
+        ("stop_chat", ("chat-1",), {})
     ]
 
 

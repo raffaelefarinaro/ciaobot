@@ -234,3 +234,33 @@ def test_queue_set_delivery_frame_rejects_malformed_input() -> None:
         for frame in frames:
             ws.send_text(frame)
     assert calls == []
+
+
+def test_queue_set_delivery_send_now_during_restart_drain_answers_server_restarting() -> None:
+    from ciao.web.project_chats import RestartDrainingError
+
+    calls: list = []
+    app = _steer_app(calls, None)
+
+    async def draining(chat_id, entry_ids, delivery):
+        raise RestartDrainingError()
+
+    app.state.project_chat_manager.set_queue_delivery = draining
+    client = signed_in(TestClient(app))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"queue_set_delivery","entry_ids":["e1"],"delivery":"steer"}')
+        assert ws.receive_json()["type"] == "server_restarting"
+
+
+def test_queue_set_delivery_failure_is_an_error_frame_not_a_crash() -> None:
+    calls: list = []
+    app = _steer_app(calls, None)
+
+    async def boom(chat_id, entry_ids, delivery):
+        raise ValueError("This chat has been archived.")
+
+    app.state.project_chat_manager.set_queue_delivery = boom
+    client = signed_in(TestClient(app))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"queue_set_delivery","entry_ids":["e1"],"delivery":"steer"}')
+        assert ws.receive_json() == {"type": "error", "message": "This chat has been archived."}

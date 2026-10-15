@@ -349,7 +349,23 @@ async def ws_chat(websocket: WebSocket) -> None:
                     )
                     and delivery_value in QUEUE_DELIVERIES
                 ):
-                    await pcm.set_queue_delivery(chat_id, raw_ids, delivery_value)
+                    try:
+                        await pcm.set_queue_delivery(chat_id, raw_ids, delivery_value)
+                    except RestartDrainingError as exc:
+                        # "Send now" can start a turn; same answer as a message.
+                        try:
+                            await websocket.send_json({
+                                "type": "server_restarting",
+                                "message": str(exc),
+                            })
+                        except (WebSocketDisconnect, RuntimeError):
+                            break
+                    except Exception as exc:
+                        logger.exception("queue_set_delivery failed for %s", chat_id)
+                        try:
+                            await websocket.send_json({"type": "error", "message": str(exc)})
+                        except (WebSocketDisconnect, RuntimeError):
+                            break
                 continue
 
             if msg_type == "message":

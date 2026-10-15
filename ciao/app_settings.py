@@ -281,11 +281,13 @@ def _parse_settings(raw: object) -> AppSettings:
             key: value for key, value in shortcuts.items()
             if isinstance(key, str) and isinstance(value, str)
         } or None
-    if settings.keyboard_send_mode not in {"", "modifier", "enter"}:
+    # A hand-edited file can hold any JSON type; membership tests on a list or
+    # dict would raise TypeError, so anything not a known string is the default.
+    if not isinstance(settings.keyboard_send_mode, str) or settings.keyboard_send_mode not in {
+        "", "modifier", "enter"
+    }:
         settings.keyboard_send_mode = ""
-    if settings.mid_turn_delivery not in {"", "queue", "steer"}:
-        settings.mid_turn_delivery = ""
-    elif settings.mid_turn_delivery == "queue":
+    if settings.mid_turn_delivery != "steer":
         settings.mid_turn_delivery = ""
     # A hand-edited file must not hand uvicorn or the root logger garbage.
     if settings.pwa_host and not _valid_host(settings.pwa_host):
@@ -437,12 +439,12 @@ class AppSettingsStore:
                 updated.keyboard_shortcuts = cleaned or None
                 continue
             if key == "keyboard_send_mode":
-                if value not in {"modifier", "enter"}:
+                if not isinstance(value, str) or value not in {"modifier", "enter"}:
                     raise ValueError("keyboard_send_mode must be modifier or enter")
                 updated.keyboard_send_mode = "enter" if value == "enter" else ""
                 continue
             if key == "mid_turn_delivery":
-                if value not in {"queue", "steer"}:
+                if not isinstance(value, str) or value not in {"queue", "steer"}:
                     raise ValueError("mid_turn_delivery must be queue or steer")
                 updated.mid_turn_delivery = "steer" if value == "steer" else ""
                 continue

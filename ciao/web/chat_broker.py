@@ -14,7 +14,7 @@ import re
 import shlex
 import uuid
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from ciao.models import (
     AssistantTextDelta,
@@ -603,8 +603,16 @@ class ChatStream:
         # Delivery ids confirmed before ``steer_queue`` recorded them on the
         # entries (the echo can beat ``steer_turn``'s return).
         "early_steer_deliveries",
+        # True only while ``steer_turn`` is being awaited: a delivery id that
+        # arrives then may belong to the dispatch in flight.
+        "steer_inflight",
+        # The user-turn index of the turn now running, so a steer delivered
+        # into it can inherit its unattended flag.
+        "running_turn_index",
+        # Returns the chat's waiting (parked) entries, which stay visible in
+        # this stream's ``queue_state`` but are never flushed by it.
+        "waiting",
         "user_stopped",
-        "park_on_stop",
         "background",
         # The asyncio.Task currently iterating this stream's turn events.
         # Set by the drive loop before awaiting the turn; cleared when the
@@ -640,15 +648,15 @@ class ChatStream:
         self._pending_id_seq = 0
         self.steered_turn_indexes: list[int] = []
         self.early_steer_deliveries: set[str] = set()
-        # Set by `stop_chat()` when the user hits the Stop button. The drive
-        # loop reads this to decide whether to still flush queued messages
-        # after an interrupted turn (a user stop is intentional, not an
-        # error, so queued follow-ups should still go out).
+        self.steer_inflight: bool = False
+        self.running_turn_index: int | None = None
+        self.waiting: Callable[[], list[dict]] | None = None
+        # Set by `stop_chat()` when the user hits the Stop button. Stop holds
+        # the whole queue: the drive loop parks every queued message on the
+        # chat (chips stay) instead of flushing it, so nothing is sent after
+        # the user said stop. A queued message goes out only when the user
+        # sends it (Steer / Send now) or sends a new message.
         self.user_stopped: bool = False
-        # Set with `user_stopped` by a task-board Stop or Detach (#1103): the
-        # drive loop parks the queued follow-ups on the chat instead of
-        # running them, so a stopped delegated task stops working.
-        self.park_on_stop: bool = False
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
         # queued user messages — a user send while one is active
@@ -759,6 +767,20 @@ class ChatStream:
             and (str(entry.get("text", "")).strip() or entry.get("images"))
         ]
 
+    def revert_blank_steers(self) -> list[str]:
+        """Revert steer-mode entries with nothing to send; return their ids."""
+        reverted: list[str] = []
+        for entry in self._pending:
+            if (
+                entry.get("delivery") == "steer"
+                and not entry.get("steer_id")
+                and not str(entry.get("text", "")).strip()
+                and not entry.get("images")
+            ):
+                entry["delivery"] = "queue"
+                reverted.append(str(entry.get("id", "")))
+        return reverted
+
     def mark_steering(self, entry_ids: list[str], steer_id: str) -> None:
         """Record that ``entry_ids`` were handed to the provider as ``steer_id``."""
         wanted = set(entry_ids)
@@ -801,8 +823,13 @@ class ChatStream:
         return list(self._pending)
 
     def pending_public(self) -> list[dict]:
-        """``pending`` in the ``queue_state`` wire shape (see ``public_queue``)."""
-        return public_queue(self._pending)
+        """The whole visible queue in the ``queue_state`` wire shape.
+
+        Waiting entries first (they were queued earlier), then this stream's own
+        queue. See ``public_queue``.
+        """
+        waiting = self.waiting() if self.waiting is not None else []
+        return public_queue([*waiting, *self._pending])
 
     def publish_pending(self) -> None:
         """Publish the live queue, empty included, so a client clears its chips."""
