@@ -17,7 +17,7 @@ from ciao.provider_service import ProviderService
 from ciao.providers import opencode as opencode_module
 from ciao.providers.opencode import OpencodeProvider
 from ciao.web.chat_broker import ChatStream
-from ciao.web.chat_streaming import ChatStreaming, ChatStreamingHost
+from ciao.web.chat_streaming import ChatStreaming
 from tests.test_chat_streaming_boundary import _DriveHost
 from tests.test_chat_subagents import _make_manager
 from tests.test_opencode_background_wake import (
