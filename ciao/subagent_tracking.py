@@ -109,25 +109,6 @@ def is_synthesis_nudge(text: str) -> bool:
     return _collapse_whitespace(text).endswith(_SYNTHESIS_PROMPT_COLLAPSED)
 
 
-# Markdown punctuation that can trail a question mark ("**...?**", "(...?)").
-_QUESTION_TAIL_CHARS = "*_`~)]}>\"' \t"
-
-
-def ends_with_user_question(text: str) -> bool:
-    """True when the last prose line of ``text`` reads as a question.
-
-    The synthesis nudge is held back in that case: the parent ended its turn
-    by asking the user something, and injecting the nudge answers on their
-    behalf and buries the question.
-    """
-    for line in reversed(text.strip().splitlines()):
-        stripped = line.strip().rstrip(_QUESTION_TAIL_CHARS)
-        if not stripped:
-            continue
-        return stripped.endswith("?")
-    return False
-
-
 @dataclass
 class SubagentInfo:
     """One subagent dispatched by the parent session."""
@@ -157,44 +138,10 @@ class SubagentInfo:
 
 
 @dataclass
-class _NotificationWindow:
-    """One CLI prompt window, which may carry several task completions."""
-
-    state: str
-    task_ids: list[str]
-    agent_ids: list[str]
-
-
-@dataclass
 class SessionSubagentState:
     """Aggregate subagent state parsed from a parent session JSONL."""
 
     subagents: dict[str, SubagentInfo] = field(default_factory=dict)
-    # Last assistant message that carried prose. The synthesis nudge is held
-    # back when it ends in a question to the user.
-    last_assistant_text: str = ""
-    # True when a completed task-notification has been enqueued but not yet
-    # processed by the CLI (no assistant turn has followed it). The synthesis
-    # nudge must not be steered in that window: the two prompts cross on the
-    # transport and the run can end with the notification never synthesized
-    # (the 2026-08-30 daily-log failure: the CLI recorded the final
-    # notification as a prompt, the read task was cancelled, and the run
-    # archived on an interim "Waiting on X" message).
-    notification_pending: bool = False
-    # True when the most recent completion notification was followed by an
-    # assistant record carrying prose: the CLI resumed the parent on its own and
-    # the parent has already written about the result, so the synthesis nudge
-    # would only produce a redundant "that was the report above" turn.
-    notification_answered: bool = False
-    # 0-based index of the latest countable user turn (aligned with
-    # SubagentInfo.turn_index), or None before the first one.
-    latest_turn_index: int | None = None
-
-    @property
-    def awaiting_user_answer(self) -> bool:
-        """True when the parent's last word was a question to the user."""
-        return ends_with_user_question(self.last_assistant_text)
-
     @property
     def running_background(self) -> int:
         return sum(
@@ -202,17 +149,6 @@ class SessionSubagentState:
             for info in self.subagents.values()
             if info.is_async and info.status == "running" and info.kind == "agent"
         )
-
-    @property
-    def background_dispatched_in_latest_turn(self) -> bool:
-        """True when the latest user turn launched a background agent or CLI task."""
-        if self.latest_turn_index is None:
-            return False
-        return any(
-            info.is_async and info.turn_index == self.latest_turn_index
-            for info in self.subagents.values()
-        )
-
 
 def find_parent_session_file(
     session_id: str,
@@ -473,65 +409,6 @@ def _normalize_agent_id(agent_id: str) -> str:
     return agent_id.removeprefix("agent-")
 
 
-def _notification_identities(
-    state: SessionSubagentState, content: str
-) -> list[tuple[str, str]]:
-    """Return every task identity in the leading notification run."""
-    identities: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for raw_id, _status in envelope_notification_task_statuses(content):
-        task_id = _normalize_agent_id(raw_id)
-        if not task_id or task_id in seen:
-            continue
-        seen.add(task_id)
-        info = state.subagents.get(task_id)
-        identities.append((task_id, info.kind if info is not None else "agent"))
-    return identities
-
-
-def _register_notification_agents(
-    state: SessionSubagentState,
-    identities: list[tuple[str, str]],
-    agent_notification_answers: dict[str, bool],
-    current_agent_ids: set[str],
-    carry_agent_ids: list[str],
-) -> None:
-    """Register every agent covered by a notification for later credit."""
-    for agent_id, kind in identities:
-        if kind != "agent" or not agent_id:
-            continue
-        agent_notification_answers[agent_id] = False
-        if agent_id in carry_agent_ids:
-            carry_agent_ids.remove(agent_id)
-        info = state.subagents.get(agent_id)
-        if info is None or info.is_async:
-            current_agent_ids.add(agent_id)
-
-
-def _notification_window_matches(
-    window: _NotificationWindow, task_ids: list[str]
-) -> bool:
-    return set(window.task_ids) == set(task_ids)
-
-
-def _merge_notification_window(
-    window: _NotificationWindow, task_ids: list[str], agent_ids: list[str]
-) -> None:
-    window.task_ids = list(dict.fromkeys([*window.task_ids, *task_ids]))
-    window.agent_ids = list(dict.fromkeys([*window.agent_ids, *agent_ids]))
-
-
-def _make_notification_window(
-    state: SessionSubagentState, content: str, window_state: str
-) -> tuple[list[tuple[str, str]], _NotificationWindow]:
-    identities = _notification_identities(state, content)
-    task_ids = [task_id for task_id, _kind in identities]
-    agent_ids = [
-        task_id for task_id, kind in identities if kind == "agent"
-    ]
-    return identities, _NotificationWindow(window_state, task_ids, agent_ids)
-
-
 def parse_session_subagents(path: Path) -> SessionSubagentState:
     """Parse subagent dispatch/completion state out of a session JSONL."""
     state = SessionSubagentState()
@@ -539,15 +416,6 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
     # when the tool_result record lands.
     dispatch_inputs: dict[str, dict[str, str]] = {}
     user_idx = 0
-    # The CLI's prompt queue, in order. None is an ordinary prompt; a
-    # _NotificationWindow is a completion notification still being processed.
-    queue: list[_NotificationWindow | None] = []
-    # A combined notification can cover several agents; keep answer state per
-    # agent so one terminal response can credit the whole cohort.
-    agent_notification_answers: dict[str, bool] = {}
-    latest_agent_turn: int | None = None
-    current_agent_ids: set[str] = set()
-    carry_agent_ids: list[str] = []
 
     try:
         fh = path.open(encoding="utf-8")
@@ -569,91 +437,21 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
             rtype = record.get("type")
 
             if rtype == "queue-operation":
-                # A completion notification can be enqueued and later removed
-                # without ever becoming a user record (e.g. the process exits
-                # first), so the enqueue itself must count as completion.
-                if record.get("operation") == "dequeue":
-                    # The CLI took the next prompt off the queue. Only a
-                    # notification at the front of the queue opens a
-                    # synthesis-nudge window; dequeuing an ordinary prompt
-                    # that was queued ahead of a notification must not claim
-                    # that notification (the two prompts would cross on the
-                    # transport the same way). A dequeued notification stays
-                    # pending until an assistant reply closes it.
-                    if queue:
-                        front = queue.pop(0)
-                        if (
-                            isinstance(front, _NotificationWindow)
-                            and front.state == "queued"
-                        ):
-                            front.state = "dequeued"
-                            queue.append(front)
-                    continue
-                else:
+                if record.get("operation") != "dequeue":
                     content = record.get("content")
-                    normalized_content = (
+                    normalized = (
                         strip_injected_context(content)
                         if isinstance(content, str)
                         else ""
                     )
-                    fields = (
-                        _notification_fields(normalized_content)
-                        if normalized_content
-                        else None
-                    )
-                    if fields is not None:
-                        _apply_notification(state, normalized_content)
-                        identities, window = _make_notification_window(
-                            state, normalized_content, "queued"
-                        )
-                        queue.append(window)
-                        _register_notification_agents(
-                            state,
-                            identities,
-                            agent_notification_answers,
-                            current_agent_ids,
-                            carry_agent_ids,
-                        )
-                    else:
-                        queue.append(None)
+                    if normalized and _notification_fields(normalized) is not None:
+                        # An enqueued completion counts as completion (the
+                        # process can exit before it becomes a user record).
+                        _apply_notification(state, normalized)
                 continue
 
             if rtype == "assistant":
-                closed_window: _NotificationWindow | None = None
-                for index, entry in enumerate(queue):
-                    if (
-                        isinstance(entry, _NotificationWindow)
-                        and entry.state in ("dequeued", "surfaced")
-                    ):
-                        closed_window = entry
-                        queue.pop(index)
-                        break
                 message = record.get("message")
-                assistant_text = _text_content(message)
-                terminal_prose = bool(assistant_text.strip()) and _is_final_answer_record(
-                    record
-                )
-                if assistant_text.strip():
-                    state.last_assistant_text = assistant_text
-                if closed_window is not None:
-                    if closed_window.agent_ids:
-                        if terminal_prose:
-                            for carry_id in [
-                                *carry_agent_ids,
-                                *closed_window.agent_ids,
-                            ]:
-                                agent_notification_answers[carry_id] = True
-                            carry_agent_ids.clear()
-                        else:
-                            for agent_id in closed_window.agent_ids:
-                                if agent_id not in carry_agent_ids:
-                                    carry_agent_ids.append(agent_id)
-                elif terminal_prose and carry_agent_ids and not any(
-                    isinstance(entry, _NotificationWindow) for entry in queue
-                ):
-                    for carry_id in carry_agent_ids:
-                        agent_notification_answers[carry_id] = True
-                    carry_agent_ids.clear()
                 blocks = message.get("content") if isinstance(message, dict) else None
                 if not isinstance(blocks, list):
                     continue
@@ -722,19 +520,6 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     status=status,
                     turn_index=turn_index,
                 )
-                if is_async:
-                    if not current_agent_ids or turn_index != latest_agent_turn:
-                        current_agent_ids = {
-                            info.agent_id
-                            for info in state.subagents.values()
-                            if info.is_async
-                            and info.kind == "agent"
-                            and info.status == "running"
-                        }
-                        latest_agent_turn = turn_index
-                    current_agent_ids.add(agent_id)
-                else:
-                    current_agent_ids.discard(agent_id)
                 continue
 
             if isinstance(tool_use_result, dict) and tool_use_result.get("taskId"):
@@ -765,7 +550,6 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                     kind="task",
                     command=str(dispatched.get("command") or ""),
                 )
-                current_agent_ids.discard(task_id)
                 continue
 
             content = _text_content(message)
@@ -792,60 +576,12 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                         state.subagents[wake_id] = info
                     info.status = "lost"
                     info.raw_status = "lost"
-            fields = _notification_fields(normalized_content)
-            if fields is not None:
+            if _notification_fields(normalized_content) is not None:
                 _apply_notification(state, normalized_content)
-                identities, window = _make_notification_window(
-                    state, normalized_content, "surfaced"
-                )
-                task_ids = window.task_ids
-                agent_ids = window.agent_ids
-                _register_notification_agents(
-                    state,
-                    identities,
-                    agent_notification_answers,
-                    current_agent_ids,
-                    carry_agent_ids,
-                )
-                matched_index: int | None = None
-                for index, entry in enumerate(queue):
-                    if (
-                        isinstance(entry, _NotificationWindow)
-                        and entry.state == "dequeued"
-                        and _notification_window_matches(entry, task_ids)
-                    ):
-                        matched_index = index
-                        break
-                if matched_index is None:
-                    # Older queue records can omit the ids that are present in
-                    # the user record. Keep the previous oldest-dequeued
-                    # fallback, but merge every identity so one response still
-                    # credits the complete combined notification.
-                    for index, entry in enumerate(queue):
-                        if (
-                            isinstance(entry, _NotificationWindow)
-                            and entry.state == "dequeued"
-                        ):
-                            matched_index = index
-                            break
-                if matched_index is not None:
-                    matched = queue[matched_index]
-                    if isinstance(matched, _NotificationWindow):
-                        matched.state = "surfaced"
-                        _merge_notification_window(matched, task_ids, agent_ids)
-                else:
-                    queue.append(window)
                 continue
             if _is_countable_user_turn(normalized_content, record):
                 user_idx += 1
-                carry_agent_ids.clear()
 
-    state.notification_answered = bool(current_agent_ids) and all(
-        agent_notification_answers.get(agent_id) is True
-        for agent_id in current_agent_ids
-    )
-    state.notification_pending = any(entry is not None for entry in queue)
-    state.latest_turn_index = user_idx - 1 if user_idx > 0 else None
     return state
 
 

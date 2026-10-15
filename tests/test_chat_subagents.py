@@ -1577,15 +1577,13 @@ async def test_the_drain_announces_the_synthesis_reply_and_drops_the_park(
 
 
 @pytest.mark.asyncio
-async def test_a_nudge_reply_that_errors_still_releases_the_park(
+async def test_a_follow_up_that_errors_still_releases_the_park(
     tmp_path: Path,
 ) -> None:
-    """The hole left by discarding the park at the nudge.
+    """The drain only announces a non-error, non-stub follow-up.
 
-    `nudged=True` used to mean "the drain will announce", but the drain only
-    announces a non-error, non-stub reply. An errored synthesis reply then left
-    the chat with no notification at all — the same silent completion the
-    handoff exists to remove.
+    An errored follow-up must not leave the chat with no notification at all,
+    so the drain flushes the parked announce instead.
     """
     pcm = _make_manager(tmp_path)
     calls = _announce_spy(pcm)

@@ -365,14 +365,12 @@ def test_shell_output_quoting_a_notification_never_completes_an_agent(
 
     The tracker identified a completion by searching the record's body, so
     the agent's own transcript being printed into the chat reported it
-    "failed" — and opened a synthesis-nudge window for a completion that
-    never happened, which is the window steering into kills the run.
+    "failed".
     """
     state = subagent_tracking.parse_session_subagents(
         _session(tmp_path, [_DISPATCH, _DISPATCH_RESULT, _user(SHELL_OUTPUT)])
     )
     assert state.subagents["aaa"].status == "running"
-    assert state.notification_pending is False
 
 
 def test_a_real_notification_still_completes_its_agent(tmp_path) -> None:
