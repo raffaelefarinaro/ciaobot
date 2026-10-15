@@ -285,3 +285,25 @@ def test_steer_attachment_counts_as_a_user_turn(tmp_path: Path) -> None:
 
     assert state.subagents["first"].turn_index == 0
     assert state.subagents["second"].turn_index == 1
+
+
+def test_late_steer_user_record_and_attachment_each_count_once(tmp_path: Path) -> None:
+    """The late steer shape (a CLI follow-up turn) is a plain user record."""
+    session = tmp_path / "sess-late.jsonl"
+    _write(session, [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        {
+            "type": "attachment",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "mid-turn steer",
+                "commandMode": "prompt",
+            },
+        },
+        {"type": "user", "message": {"role": "user", "content": "late steer"}},
+        *_dispatch("toolu_1", "after", background=True, description="After both"),
+    ])
+
+    state = subagent_tracking.parse_session_subagents(session)
+
+    assert state.subagents["after"].turn_index == 2
