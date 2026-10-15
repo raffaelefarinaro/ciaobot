@@ -1145,6 +1145,41 @@ def compose_system(developer_instructions: str, runtime: str) -> str:
     )
 
 
+async def _frames_until(
+    source: AsyncGenerator[Any, None] | Any,
+    wake: asyncio.Event,
+    should_stop: Callable[[], bool],
+) -> AsyncGenerator[Any, None]:
+    """Yield frames from ``source``; end early when ``wake`` fires and ``should_stop``.
+
+    Lets the pump stop waiting for an event that will never come, such as the
+    next execution of a steer that was refused after our terminal was skipped.
+    """
+    iterator = source.__aiter__()
+    pending: asyncio.Future[Any] | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(iterator.__anext__())
+            waiter = asyncio.ensure_future(wake.wait())
+            await asyncio.wait({pending, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            waiter.cancel()
+            if pending.done():
+                frame_task, pending = pending, None
+                try:
+                    frame = frame_task.result()
+                except StopAsyncIteration:
+                    return
+                yield frame
+                continue
+            wake.clear()
+            if should_stop():
+                return
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+
+
 class OpencodeActiveHandle(ActiveHandle):
     """Stops the in-flight turn by interrupting its V2 session."""
 
@@ -1533,6 +1568,10 @@ class OpencodeProvider(BaseSDKProvider):
         self._owned_delivery_seen = False
         self._steer_ids_pending: set[str] = set()
         self._steer_ids_owned: set[str] = set()
+        self._steer_ids_delivered: set[str] = set()
+        # Set whenever `_steer_ids_pending` empties, so a pump that skipped its
+        # terminal for a steer that was then refused stops waiting.
+        self._steer_pending_emptied = asyncio.Event()
         self._usage: dict[str, str] = {}
         # ``session.usage.updated`` is a cumulative session snapshot, while
         # ``session.step.ended`` describes the latest model call. Keep the
@@ -1575,6 +1614,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._owned_delivery_seen = False
         self._steer_ids_pending.clear()
         self._steer_ids_owned.clear()
+        self._steer_ids_delivered.clear()
         self._usage = {}
         self._context_usage = {}
         self._cost = None
@@ -2277,6 +2317,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._owned_delivery_seen = False
         self._steer_ids_pending.clear()
         self._steer_ids_owned.clear()
+        self._steer_ids_delivered.clear()
 
         if self._client is not None:
             await self._client.aclose()
@@ -2501,12 +2542,39 @@ class OpencodeProvider(BaseSDKProvider):
                 exc_info=True,
             )
 
+    def _discard_pending_steer(self, inbox_id: str) -> None:
+        self._steer_ids_pending.discard(inbox_id)
+        if not self._steer_ids_pending:
+            self._steer_pending_emptied.set()
+
+    async def _cancel_pending_steers(
+        self, client: httpx.AsyncClient, session_id: str
+    ) -> None:
+        """Cancel every undelivered steer in the inbox (bounded, concurrent)."""
+        undelivered = sorted(self._steer_ids_pending)
+        self._steer_ids_pending.clear()
+        self._steer_pending_emptied.set()
+        if not undelivered:
+            return
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        self._cancel_inbox_item(client, session_id, inbox_id)
+                        for inbox_id in undelivered
+                    )
+                ),
+                timeout=_OPENCODE_STEER_CANCEL_TIMEOUT_S,
+            )
+
     async def steer_turn(self, request: AgentRequest) -> str | None:
         """Steer the running foreground turn with ``delivery: "steer"``.
 
         Returns the inbox id the pump will see delivered, or None when the turn
         cannot take it now: no open turn, our own prompt not yet delivered (a
         steer would join a foreign wake execution), a Stop, or a failed post.
+        Whether the message ran is decided from our own delivered/pending
+        tracking, never from the cancel call's answer.
         """
         client, session_id = self._client, self._session_id
         if (
@@ -2520,54 +2588,48 @@ class OpencodeProvider(BaseSDKProvider):
         delivery_id = f"msg_{secrets.token_hex(12)}"
         # Before the await: the pump may see our terminal while the post is in
         # flight, and must then keep listening for this id.
+        self._steer_pending_emptied.clear()
         self._steer_ids_pending.add(delivery_id)
         self._steer_ids_owned.add(delivery_id)
         body = {**self._prompt_body(request), "id": delivery_id, "delivery": "steer"}
         admitted: object = None
-        landed = False
         try:
             response = await client.post(
                 f"/api/session/{session_id}/prompt",
                 json=body,
                 timeout=_OPENCODE_STEER_POST_TIMEOUT_S,
             )
-            if response.status_code < 400:
-                landed = True
-                admitted = _data(response.json())
+            if response.status_code >= 400:
+                self._discard_pending_steer(delivery_id)
+                return None
+            admitted = _data(response.json())
         except (httpx.HTTPError, ValueError, TypeError):
-            landed = True
+            admitted = None
+        if delivery_id in self._steer_ids_delivered:
+            # It already ran, whatever the reply looked like.
+            return delivery_id
         if (
-            not isinstance(admitted, Mapping)
-            or str(admitted.get("id") or "") != delivery_id
+            isinstance(admitted, Mapping)
+            and str(admitted.get("id") or "") == delivery_id
+            and delivery_id in self._steer_ids_pending
+            and self._stop_requested != session_id
         ):
-            self._steer_ids_pending.discard(delivery_id)
-            self._steer_ids_owned.discard(delivery_id)
-            if landed:
-                # The server may have accepted it before the reply was lost;
-                # the host re-queues the message, so do not let this copy run.
-                await self._cancel_inbox_item(client, session_id, delivery_id)
-            return None
-        return delivery_id
+            return delivery_id
+        # Refused, lost reply, or the turn ended/stopped while the post was in
+        # flight: the server may still hold the item, and the host re-queues
+        # the message, so do not let this copy run.
+        self._discard_pending_steer(delivery_id)
+        await self._cancel_inbox_item(client, session_id, delivery_id)
+        return None
 
     async def abort_session(self, session_id: str) -> None:
         client = self._client
         if client is None or not session_id:
             return
         # Stop wins: a steer still in the inbox would run after the interrupt.
-        # Cancel it first (the host re-queues undelivered steers).
-        undelivered = sorted(self._steer_ids_pending)
-        self._steer_ids_pending.clear()
-        if undelivered:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        *(
-                            self._cancel_inbox_item(client, session_id, inbox_id)
-                            for inbox_id in undelivered
-                        )
-                    ),
-                    timeout=_OPENCODE_STEER_CANCEL_TIMEOUT_S,
-                )
+        # Cancel it first (the host re-queues undelivered steers). This can
+        # delay the interrupt by up to _OPENCODE_STEER_CANCEL_TIMEOUT_S.
+        await self._cancel_pending_steers(client, session_id)
         try:
             await client.post(f"/api/session/{session_id}/interrupt")
         except asyncio.CancelledError:
@@ -3688,18 +3750,19 @@ class OpencodeProvider(BaseSDKProvider):
                         saw_output = True
                         yield converted
                 decoder = SSEDecoder()
-                async for sse in decoder.aiter_bytes(stream.aiter_bytes()):
+                async for sse in _frames_until(
+                    decoder.aiter_bytes(stream.aiter_bytes()),
+                    self._steer_pending_emptied,
+                    lambda: skipped_terminal and not self._steer_ids_pending,
+                ):
                     if self._stop_requested == session_id:
                         # The user stopped the turn and the abort has been
                         # issued: end locally now. Waiting for the server's
                         # `session.execution.*` can drag through SSE reconnects and
                         # the poll backstop, leaving Stop feeling dead.
+                        self._turn_open = False
                         terminal_seen = True
                         return
-                    if skipped_terminal and not self._steer_ids_pending:
-                        # The steer we waited for was refused or cancelled.
-                        terminal_seen = True
-                        break
                     try:
                         event = sse.json()
                     except ValueError:
@@ -3725,7 +3788,8 @@ class OpencodeProvider(BaseSDKProvider):
                             self._owned_delivery_seen = True
                             foreign_execution = False
                             if inbox_id in self._steer_ids_pending:
-                                self._steer_ids_pending.discard(inbox_id)
+                                self._steer_ids_delivered.add(inbox_id)
+                                self._discard_pending_steer(inbox_id)
                                 skipped_terminal = False
                                 yield SteerDeliveredEvent(
                                     type="steer_delivered", delivery_id=inbox_id
@@ -3743,12 +3807,12 @@ class OpencodeProvider(BaseSDKProvider):
                         continue
                     if kind == "session.execution.failed":
                         error = error or error_text(props.get("error"))
-                        self._steer_ids_pending.clear()
+                        self._turn_open = False
                         terminal_seen = True
                         break
                     if kind == "session.execution.interrupted":
                         error = error or "OpenCode execution was interrupted"
-                        self._steer_ids_pending.clear()
+                        self._turn_open = False
                         terminal_seen = True
                         break
                     if kind == "session.execution.succeeded":
@@ -3757,6 +3821,7 @@ class OpencodeProvider(BaseSDKProvider):
                             self._owned_delivery_seen = False
                             skipped_terminal = True
                             continue
+                        self._turn_open = False
                         terminal_seen = True
                         break
 
@@ -3799,10 +3864,11 @@ class OpencodeProvider(BaseSDKProvider):
                 reconnects += 1
                 await asyncio.sleep(0.5 * reconnects)
 
-            # No steer can join this turn any more; whatever is still pending
-            # is reported undelivered and the host re-queues it.
+            # No steer can join this turn any more. One still pending is
+            # cancelled on the server; the host re-queues it, so leaving it
+            # would run it twice.
             self._turn_open = False
-            self._steer_ids_pending.clear()
+            await self._cancel_pending_steers(client, session_id)
             degraded_final = False
             if (
                 not terminal_seen

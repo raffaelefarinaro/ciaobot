@@ -4177,3 +4177,178 @@ async def test_stop_still_interrupts_when_the_cancel_hangs(tmp_path, monkeypatch
     await asyncio.wait_for(provider.abort_session("ses_s"), timeout=2)
 
     assert posts == ["/api/session/ses_s/interrupt"]
+
+
+# ── #1392 B review round 1: lifecycle edges ──────────────────────────────
+
+
+class _HeldSteerClient(_SteerClient):
+    """A steer POST that stays in flight until ``release`` is set."""
+
+    def __init__(self, lines) -> None:
+        super().__init__(lines)
+        self.release = asyncio.Event()
+        self.posted = asyncio.Event()
+
+    async def post(self, path: str, json=None, timeout=None):
+        if (json or {}).get("delivery") == "steer":
+            self.posts.append((path, dict(json)))
+            self.posted.set()
+            await self.release.wait()
+            return await _FakeServerClient.post(self, path, json=json)
+        return await super().post(path, json=json, timeout=timeout)
+
+
+def _steer_request(text: str = "steer me") -> AgentRequest:
+    return AgentRequest(prompt=text, model="", mode="bypass", provider="opencode")
+
+
+@pytest.mark.asyncio
+async def test_steer_in_flight_when_stop_is_pressed_is_cancelled(tmp_path):
+    provider = _provider(tmp_path)
+    client = _HeldSteerClient([])
+    provider._client = client
+    provider._session_id = "ses_s"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+
+    task = asyncio.create_task(provider.steer_turn(_steer_request()))
+    await asyncio.wait_for(client.posted.wait(), 2)
+    provider._stop_requested = "ses_s"
+    await provider.abort_session("ses_s")
+    client.release.set()
+
+    assert await task is None
+    sent = client.posts[0][1]["id"]
+    # Once before the interrupt, and again for a POST that landed after it.
+    assert client.deletes == [f"/api/session/ses_s/inbox/{sent}"] * 2
+
+
+@pytest.mark.asyncio
+async def test_steer_in_flight_when_the_turn_ends_is_cancelled(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_e", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.failed", error={"message": "boom"}),
+    ]
+    provider = _provider(tmp_path)
+    tasks: list = []
+
+    async def start_steer() -> None:
+        tasks.append(asyncio.create_task(provider.steer_turn(_steer_request())))
+        await asyncio.wait_for(client.posted.wait(), 2)
+
+    client = _HeldSteerClient(
+        _steer_frames(lines, start_steer, after="session.inbox.delivered")
+    )
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, client, "ses_e")
+    assert [e for e in events if isinstance(e, ResultEvent)]
+    assert provider._turn_open is False
+    client.release.set()
+
+    assert await tasks[0] is None
+    # The turn-end cancel, then the one for the POST that landed afterwards.
+    assert client.deletes == ["/api/session/ses_e/inbox/msg_steer"] * 2
+
+
+@pytest.mark.asyncio
+async def test_refused_steer_does_not_leave_the_pump_waiting(tmp_path, monkeypatch):
+    """The terminal was skipped for an in-flight steer that then fails.
+
+    No further SSE event arrives, and the pump must still end.
+    """
+    import httpx
+
+    from ciao.models import ResultEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_q", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.succeeded"),
+    ]
+    provider = _provider(tmp_path)
+    tasks: list = []
+
+    async def start_steer() -> None:
+        tasks.append(asyncio.create_task(provider.steer_turn(_steer_request())))
+        await asyncio.wait_for(client.posted.wait(), 2)
+
+    async def fail_the_post_then_idle() -> None:
+        client.release.set()
+        await asyncio.Event().wait()
+
+    class Client(_HeldSteerClient):
+        async def post(self, path, json=None, timeout=None):
+            if (json or {}).get("delivery") == "steer":
+                self.posted.set()
+                await self.release.wait()
+                raise httpx.ReadTimeout("slow")
+            return await super().post(path, json=json, timeout=timeout)
+
+    frames = _steer_frames(lines, start_steer, before="session.execution.succeeded")
+    frames.append(fail_the_post_then_idle)
+    client = Client(frames)
+    _tokens(monkeypatch, "ours", "steer")
+    events = await asyncio.wait_for(
+        _steered_turn(provider, monkeypatch, client, "ses_q"), timeout=5
+    )
+
+    assert await tasks[0] is None
+    assert [e for e in events if isinstance(e, ResultEvent)]
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_cancels_the_pending_steer_on_the_server(tmp_path, monkeypatch):
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_x", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.failed", error={"message": "boom"}),
+    ]
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(lines, _hook(provider, results), after="session.inbox.delivered")
+    client = _SteerClient(frames)
+    _tokens(monkeypatch, "ours", "steer")
+    await _steered_turn(provider, monkeypatch, client, "ses_x")
+
+    assert results == ["msg_steer"]
+    assert client.deletes == ["/api/session/ses_x/inbox/msg_steer"]
+    assert provider._steer_ids_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_post_failure_after_delivery_returns_the_id(tmp_path):
+    import httpx
+
+    provider = _provider(tmp_path)
+
+    class Client(_SteerClient):
+        async def post(self, path, json=None, timeout=None):
+            # The reply is lost, but the execution already delivered the item.
+            sent = (json or {})["id"]
+            provider._steer_ids_pending.discard(sent)
+            provider._steer_ids_delivered.add(sent)
+            raise httpx.ReadTimeout("slow")
+
+    client = Client([])
+    provider._client = client
+    provider._session_id = "ses_a"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+
+    delivery_id = await provider.steer_turn(_steer_request())
+
+    assert delivery_id is not None and delivery_id.startswith("msg_")
+    assert client.deletes == []
