@@ -82,7 +82,8 @@ def is_opencode_available() -> bool:
     try:
         from ciao.providers.opencode import opencode_login_status
 
-        ok = bool(opencode_login_status().get("ok"))
+        # Only `ok` is needed; the inventory starts a server.
+        ok = bool(opencode_login_status(inventory=False).get("ok"))
     except Exception:  # noqa: BLE001 — availability probe must never crash the panel
         ok = False
     _OPENCODE_AVAILABLE_CACHE = (now, ok)
