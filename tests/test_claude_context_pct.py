@@ -10,7 +10,13 @@ call ahead of the chat model.
 from __future__ import annotations
 
 import pytest
-from claude_agent_sdk import AssistantMessage, CLIConnectionError, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    CLIConnectionError,
+    ResultMessage,
+    TextBlock,
+    UserMessage,
+)
 
 from ciao.models import ResultEvent
 from ciao.providers.claude import ClaudeProvider
@@ -296,10 +302,11 @@ async def test_streaming_turn_tracks_the_main_agents_last_call(tmp_path, monkeyp
         async def connect(self, _payload):
             return None
 
-        async def query(self, _payload):
-            return None
+        async def query(self, payload):
+            self.prompt_uuid = [i async for i in payload][-1]["uuid"]
 
         async def receive_response(self):
+            yield UserMessage(content="go", uuid=self.prompt_uuid)
             yield _last_call(cache_read=13880, cache_creation=0)
             # A Task subagent's call in its own, smaller context.
             sub = _last_call(cache_read=5000, cache_creation=0)
@@ -323,7 +330,6 @@ async def test_streaming_turn_tracks_the_main_agents_last_call(tmp_path, monkeyp
     from ciao.models import AgentRequest
 
     monkeypatch.setattr(provider, "_ensure_connected", fake_ensure)
-    monkeypatch.setattr(provider, "_prompt_payload", lambda _req: None)
     request = AgentRequest(prompt="go", model="opus", mode="normal")
     events = [e async for e in provider.run_streaming(request, lambda _handle: None)]
     results = [e for e in events if isinstance(e, ResultEvent)]

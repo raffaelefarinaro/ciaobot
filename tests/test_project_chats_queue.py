@@ -2158,3 +2158,117 @@ async def test_one_steer_dispatch_publishes_one_steering_queue_state(
     assert len(steering) == 1
     release.set()
     await asyncio.wait_for(consumer, timeout=5.0)
+
+
+# ── A prompt the provider cancelled before it ran (#1406) ────────────────
+
+
+async def test_cancelled_prompt_waits_in_the_queue_instead_of_being_lost(
+    tmp_path: Path,
+) -> None:
+    from ciao.models import PromptCancelledEvent
+
+    provider = _SteerProvider()
+    pcm, chat, stream, release, turn_calls, captured, consumer = (
+        await _start_blocked_turn(
+            tmp_path, provider, events=(PromptCancelledEvent(type="prompt_cancelled"),)
+        )
+    )
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The stopped prompt is a waiting entry now, not a new turn.
+    assert turn_calls == ["initial"]
+    waiting = pcm.get_chat(chat.chat_id).pending_queue
+    assert [(e["text"], e["images"]) for e in waiting] == [("initial", [])]
+    assert waiting[0]["id"]
+    assert [e["text"] for e in _queue_states(captured)[-1]] == ["initial"]
+    # The provider event itself is host bookkeeping; the client gets the
+    # stream's own prompt_cancelled message instead.
+    assert [e["type"] for e in captured if e.get("type") == "prompt_cancelled"] == [
+        "prompt_cancelled"
+    ]
+
+
+async def test_cancelled_prompt_rolls_back_the_turn_bookkeeping(tmp_path: Path) -> None:
+    from ciao.models import PromptCancelledEvent
+
+    provider = _SteerProvider()
+    pcm, chat, stream, release, turn_calls, captured, consumer = (
+        await _start_blocked_turn(
+            tmp_path, provider, events=(PromptCancelledEvent(type="prompt_cancelled"),)
+        )
+    )
+    meta = pcm.get_chat(chat.chat_id)
+    assert meta.user_turn_count == 1
+    meta.user_turn_images["0"] = ["shot.png"]
+    meta.user_turn_unattended["0"] = True
+    meta.user_turn_steered["0"] = True
+    meta.context_digest = "capsule-digest"
+    meta.context_session_id = "sess-steer"
+    assert "0" in meta.user_turn_timings
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    assert meta.user_turn_count == 0
+    for key_map in (
+        meta.user_turn_timings,
+        meta.user_turn_images,
+        meta.user_turn_unattended,
+        meta.user_turn_steered,
+    ):
+        assert "0" not in key_map
+    assert (chat.chat_id, 0) not in pcm._streaming._turn_perf_started
+    # The capsule was not delivered, so the resend must carry it again.
+    assert meta.context_digest == ""
+    types = [e.get("type") for e in captured]
+    assert types.index("prompt_cancelled") > types.index("user_echo")
+    cancelled = [e for e in captured if e.get("type") == "prompt_cancelled"]
+    assert cancelled == [{"type": "prompt_cancelled", "turn_index": 0}]
+
+
+async def test_resend_after_a_cancelled_prompt_reuses_the_turn_index(
+    tmp_path: Path,
+) -> None:
+    from ciao.models import PromptCancelledEvent
+
+    provider = _SteerProvider()
+    pcm, chat, stream, release, turn_calls, captured, consumer = (
+        await _start_blocked_turn(
+            tmp_path, provider, events=(PromptCancelledEvent(type="prompt_cancelled"),)
+        )
+    )
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    again: list[dict] = []
+    second = pcm.start_stream(chat.chat_id, "again")
+
+    async def consume() -> None:
+        async for ev in second.subscribe():
+            again.append(ev)
+
+    await asyncio.wait_for(consume(), timeout=5.0)
+    echoes = [e for e in again if e.get("type") == "user_echo"]
+    assert echoes[0]["turn_index"] == 0
+    assert pcm.get_chat(chat.chat_id).user_turn_count == 1
+
+
+async def test_cancelled_prompt_skips_the_rollback_when_a_later_turn_exists(
+    tmp_path: Path,
+) -> None:
+    provider = _SteerProvider()
+    pcm, chat, stream, release, _calls, captured, consumer = await _start_blocked_turn(
+        tmp_path, provider
+    )
+    meta = pcm.get_chat(chat.chat_id)
+    meta.user_turn_count = 3  # a steer was delivered after the cancelled turn
+    pcm.on_prompt_cancelled(chat.chat_id, stream, "initial", None, 0)
+    assert meta.user_turn_count == 3
+    assert [e["text"] for e in meta.pending_queue] == ["initial"]
+    assert [
+        e for e in stream.buffered_events() if e.get("type") == "prompt_cancelled"
+    ] == [{"type": "prompt_cancelled", "turn_index": 0}]
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
