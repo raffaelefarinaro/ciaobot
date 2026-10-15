@@ -28,6 +28,18 @@ def claude_provider(tmp_path: Path) -> ClaudeProvider:
     return ClaudeProvider(tmp_path)
 
 
+async def _sent_uuid(payload) -> str:
+    """Drain a prompt payload and return the uuid the turn tagged it with."""
+    items = [item async for item in payload]
+    return items[-1]["uuid"]
+
+
+def _prompt_echo(prompt_uuid: str):
+    from claude_agent_sdk import UserMessage
+
+    return UserMessage(content="go", uuid=prompt_uuid)
+
+
 def test_build_prompt_summarizes_images(tmp_path: Path) -> None:
     request = AgentRequest(
         prompt="Inspect this.",
@@ -801,11 +813,12 @@ async def test_prompt_payload_is_async_iterable_without_images(
     from collections.abc import AsyncIterable
 
     request = AgentRequest(prompt="hello", model="sonnet", mode="normal")
-    payload = claude_provider._prompt_payload(request)
+    payload = claude_provider._prompt_payload(request, "prompt-1")
     assert isinstance(payload, AsyncIterable)
 
     messages = [msg async for msg in payload]
     assert len(messages) == 1
+    assert messages[0]["uuid"] == "prompt-1"
     assert messages[0]["message"]["content"] == "hello"
 
 
@@ -864,10 +877,11 @@ async def test_claude_run_streaming_surfaces_error_when_no_result(
         async def connect(self, _payload):
             return None
 
-        async def query(self, _payload):
-            return None
+        async def query(self, payload):
+            self.prompt_uuid = await _sent_uuid(payload)
 
         async def receive_response(self):
+            yield _prompt_echo(self.prompt_uuid)
             # One tool call, then the stream closes with NO ResultMessage —
             # exactly what a mid-turn subprocess kill looks like.
             yield AssistantMessage(
@@ -888,7 +902,6 @@ async def test_claude_run_streaming_surfaces_error_when_no_result(
         return fake
 
     monkeypatch.setattr(claude_provider, "_ensure_connected", fake_ensure)
-    monkeypatch.setattr(claude_provider, "_prompt_payload", lambda _req: None)
 
     request = AgentRequest(prompt="continue", model="opus", mode="normal")
     events = [
@@ -927,10 +940,11 @@ async def test_claude_run_streaming_recovers_from_oversized_message(
         async def connect(self, _payload):
             return None
 
-        async def query(self, _payload):
-            return None
+        async def query(self, payload):
+            self.prompt_uuid = await _sent_uuid(payload)
 
         async def receive_response(self):
+            yield _prompt_echo(self.prompt_uuid)
             # One tool call streams fine, then the reader raises the SDK's
             # fatal decode error — exactly the shape observed in #137.
             yield AssistantMessage(
@@ -958,7 +972,6 @@ async def test_claude_run_streaming_recovers_from_oversized_message(
         return fake
 
     monkeypatch.setattr(claude_provider, "_ensure_connected", fake_ensure)
-    monkeypatch.setattr(claude_provider, "_prompt_payload", lambda _req: None)
 
     request = AgentRequest(prompt="do a big thing", model="opus", mode="normal")
     # Must not raise — the fatal reader error becomes a recoverable result.
@@ -1055,8 +1068,11 @@ async def test_claude_compact_sends_only_the_slash_command(
         compact=True,
         stable_context_prefix="capsule",
     )
-    messages = [message async for message in claude_provider._prompt_payload(request)]
+    messages = [
+        message async for message in claude_provider._prompt_payload(request, "prompt-1")
+    ]
     assert [message["message"]["content"] for message in messages] == ["/compact"]
+    assert [message["uuid"] for message in messages] == ["prompt-1"]
 
 
 @pytest.mark.parametrize("mode", ["normal", "plan"])
@@ -1949,6 +1965,7 @@ class _SteerFakeClient:
         self.calls = 0
         self.control_requests: list[dict] = []
         self.plain_interrupts = 0
+        self.echo_prompt = True
         client = self
 
         class _Query:
@@ -1969,6 +1986,8 @@ class _SteerFakeClient:
 
     async def receive_response(self):
         self.calls += 1
+        if self.echo_prompt and self.calls == 1:
+            yield _prompt_echo(self.prompt_uuid)
         if not self.rounds:
             await asyncio.sleep(3600)
         round_ = self.rounds.pop(0)
@@ -1988,6 +2007,10 @@ class _SteerFakeClient:
     def steer_uuid(self) -> str:
         return self.queries[-1]["uuid"]
 
+    @property
+    def prompt_uuid(self) -> str:
+        return self.queries[0]["uuid"]
+
 
 def _wire_steer_provider(provider: ClaudeProvider, monkeypatch, fake) -> None:
     async def fake_ensure(_request):
@@ -1997,7 +2020,6 @@ def _wire_steer_provider(provider: ClaudeProvider, monkeypatch, fake) -> None:
         return fake
 
     monkeypatch.setattr(provider, "_ensure_connected", fake_ensure)
-    monkeypatch.setattr(provider, "_prompt_payload", lambda _req: None)
 
 
 @pytest.mark.asyncio
@@ -2246,7 +2268,7 @@ async def test_claude_steer_with_images_builds_image_blocks(
         AgentRequest(prompt="go", model="haiku", mode="normal"), lambda _h: None
     ):
         pass
-    assert len(fake.queries) == 1
+    assert len(fake.queries) == 2  # the prompt, then the steer
 
 
 @pytest.mark.asyncio
@@ -2517,3 +2539,383 @@ async def test_claude_grace_timeout_warns_when_cancel_not_confirmed(
         await _run_steer_turn(claude_provider)
 
     assert "not cancelled" in caplog.text.lower()
+
+
+# --- #1406: attribute a turn's output by its own prompt's replay echo ---
+
+
+def _follow_up_result(text: str, *, is_error: bool = False, origin: dict | None = None):
+    from claude_agent_sdk import ResultMessage
+
+    return ResultMessage(
+        subtype="error_during_execution" if is_error else "success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=is_error,
+        num_turns=1,
+        session_id="sess-steer",
+        result=text,
+        origin=origin if origin is not None else {"kind": "task-notification"},
+    )
+
+
+def _marker_names(events) -> list[str]:
+    from ciao.models import ToolUseEvent
+
+    return [e.tool_name for e in events if isinstance(e, ToolUseEvent)]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_skips_a_follow_up_that_ran_before_its_prompt(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    from ciao.models import ResultEvent
+
+    async def follow_up(_client):
+        yield _steer_text("follow-up")
+        yield _follow_up_result("background done")
+
+    async def ours(client):
+        yield _prompt_echo(client.prompt_uuid)
+        yield _steer_text("mine")
+        yield _steer_result("ANSWER")
+
+    fake = _SteerFakeClient([follow_up, ours])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert [r.result for r in results] == ["ANSWER"]
+    assert results[0].origin == ""
+    assert _marker_names(events) == ["mine"]
+    assert fake.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_ends_on_the_result_after_its_echo_whatever_its_origin(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    """The CLI can fold a queued prompt into a running follow-up turn."""
+    from ciao.models import ResultEvent
+
+    async def merged(client):
+        yield _steer_text("follow-up")
+        yield _prompt_echo(client.prompt_uuid)
+        yield _steer_text("mine")
+        yield _follow_up_result("ANSWER")
+
+    fake = _SteerFakeClient([merged])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert [r.result for r in results] == ["ANSWER"]
+    assert results[0].origin == ""
+    assert _marker_names(events) == ["mine"]
+    assert fake.calls == 1
+
+
+@pytest.mark.parametrize(
+    "stale_is_error", [False, True], ids=["orphan_steer_ran", "stopped_follow_up"]
+)
+@pytest.mark.asyncio
+async def test_claude_turn_skips_a_stale_result_left_in_the_cli(
+    claude_provider: ClaudeProvider, monkeypatch, stale_is_error: bool,
+) -> None:
+    """A steer whose cancel failed, or a turn a Stop left queued, runs unread
+    while the CLI stays alive (#1402); its result must not end the next turn."""
+    from claude_agent_sdk import UserMessage
+
+    from ciao.models import ResultEvent
+
+    async def stale(_client):
+        yield UserMessage(content="old steer", uuid="orphan-steer")
+        yield _steer_text("stale")
+        yield _follow_up_result("STALE", is_error=stale_is_error, origin={"kind": "human"})
+
+    async def ours(client):
+        yield _prompt_echo(client.prompt_uuid)
+        yield _steer_result("THIRD")
+
+    fake = _SteerFakeClient([stale, ours])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+
+    assert [e.result for e in events if isinstance(e, ResultEvent)] == ["THIRD"]
+    assert _marker_names(events) == []
+
+
+@pytest.mark.asyncio
+async def test_claude_stop_before_the_echo_cancels_the_queued_prompt(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    from ciao.models import ResultEvent
+
+    stopped = asyncio.Event()
+    in_follow_up = asyncio.Event()
+
+    async def follow_up(_client):
+        yield _steer_text("follow-up")
+        in_follow_up.set()
+        await stopped.wait()
+        yield _follow_up_result("", is_error=True)
+
+    fake = _SteerFakeClient([follow_up])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    handles: list = []
+    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    await asyncio.wait_for(in_follow_up.wait(), 2)
+
+    await handles[0].stop()
+    stopped.set()
+    events = await asyncio.wait_for(turn, 2)
+
+    assert fake.control_requests == [{"subtype": "interrupt", "cancel_queued": True}]
+    assert fake.plain_interrupts == 0
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert [(r.result, r.is_error) for r in results] == [("", True)]
+    assert _marker_names(events) == []
+
+
+@pytest.mark.asyncio
+async def test_claude_stop_wakes_a_turn_waiting_for_its_echo(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    from ciao.models import ResultEvent
+
+    async def follow_up(_client):
+        yield _follow_up_result("background done")
+
+    fake = _SteerFakeClient([follow_up])  # the prompt never runs
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    handles: list = []
+    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    while fake.calls < 2:
+        await asyncio.sleep(0.01)
+
+    await handles[0].stop()
+    events = await asyncio.wait_for(turn, 2)
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert [(r.result, r.is_error) for r in results] == [("", True)]
+
+
+@pytest.mark.asyncio
+async def test_claude_stop_after_the_echo_keeps_the_plain_interrupt(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    echoed = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def ours(client):
+        yield _prompt_echo(client.prompt_uuid)
+        yield _steer_text("mine")
+        echoed.set()
+        await stopped.wait()
+        yield _follow_up_result("", is_error=True, origin={"kind": "human"})
+
+    fake = _SteerFakeClient([ours])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    handles: list = []
+    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    await asyncio.wait_for(echoed.wait(), 2)
+
+    await handles[0].stop()
+    stopped.set()
+    await asyncio.wait_for(turn, 2)
+
+    assert fake.plain_interrupts == 1
+    assert fake.control_requests == []
+
+
+@pytest.mark.asyncio
+async def test_claude_compaction_status_before_the_echo_is_shown(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    """A /compact prompt is echoed only after the compaction it ran."""
+    from claude_agent_sdk import SystemMessage
+
+    from ciao.models import ResultEvent, SystemStatusEvent
+
+    async def compact(client):
+        yield SystemMessage(subtype="status", data={"status": "compacting"})
+        yield SystemMessage(
+            subtype="compact_boundary",
+            data={"compact_metadata": {"pre_tokens": 50000, "post_tokens": 4000}},
+        )
+        yield _prompt_echo(client.prompt_uuid)
+        yield _steer_result("")
+
+    fake = _SteerFakeClient([compact])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+
+    assert [e.status for e in events if isinstance(e, SystemStatusEvent)] == [
+        "compacting",
+        "Compacted context: 50,000 → 4,000 tokens",
+    ]
+    assert len([e for e in events if isinstance(e, ResultEvent)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_pre_echo_init_still_records_bundled_skills(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    from claude_agent_sdk import SystemMessage
+
+    seen: list[dict] = []
+
+    async def spy(_client, init):
+        seen.append(init)
+
+    monkeypatch.setattr(claude_provider, "_record_bundled_skills", spy)
+
+    async def ours(client):
+        yield SystemMessage(subtype="init", data={"skills": ["a"]})
+        yield _prompt_echo(client.prompt_uuid)
+        yield _steer_result("ok")
+
+    fake = _SteerFakeClient([ours])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+
+    assert seen == [{"skills": ["a"]}]
+
+
+@pytest.mark.asyncio
+async def test_claude_follow_up_text_does_not_flag_our_result_as_a_drop(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    """The connection-drop banner check reads only this turn's own text."""
+    from claude_agent_sdk.types import StreamEvent as SDKStreamEvent
+
+    from ciao.models import ResultEvent
+
+    async def merged(client):
+        yield SDKStreamEvent(
+            uuid="e1",
+            session_id="sess-steer",
+            event={
+                "type": "content_block_delta",
+                "delta": {
+                    "type": "text_delta",
+                    "text": "API Error: Connection closed mid-response.",
+                },
+            },
+            parent_tool_use_id=None,
+        )
+        yield _prompt_echo(client.prompt_uuid)
+        yield _steer_result("ok")
+
+    fake = _SteerFakeClient([merged])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    events = await asyncio.wait_for(_run_steer_turn(claude_provider), 5)
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert [(r.result, r.is_error) for r in results] == [("ok", False)]
+
+
+@pytest.mark.asyncio
+async def test_claude_stop_before_the_echo_reports_the_cancelled_prompt(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    """The host puts the cancelled prompt back in the waiting queue (#1406)."""
+    from ciao.models import PromptCancelledEvent
+
+    stopped = asyncio.Event()
+    in_follow_up = asyncio.Event()
+
+    async def follow_up(_client):
+        yield _steer_text("follow-up")
+        in_follow_up.set()
+        await stopped.wait()
+        yield _follow_up_result("", is_error=True)
+
+    fake = _SteerFakeClient([follow_up])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    handles: list = []
+    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    await asyncio.wait_for(in_follow_up.wait(), 2)
+
+    await handles[0].stop()
+    stopped.set()
+    events = await asyncio.wait_for(turn, 2)
+
+    assert len([e for e in events if isinstance(e, PromptCancelledEvent)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_stop_after_the_echo_reports_no_cancelled_prompt(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    from ciao.models import PromptCancelledEvent
+
+    echoed = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def ours(client):
+        yield _prompt_echo(client.prompt_uuid)
+        echoed.set()
+        await stopped.wait()
+        yield _follow_up_result("", is_error=True, origin={"kind": "human"})
+
+    fake = _SteerFakeClient([ours])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    handles: list = []
+    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    await asyncio.wait_for(echoed.wait(), 2)
+
+    await handles[0].stop()
+    stopped.set()
+    events = await asyncio.wait_for(turn, 2)
+
+    assert not [e for e in events if isinstance(e, PromptCancelledEvent)]
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_death_after_the_echo_on_stop_keeps_the_interrupted_error(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    """Our prompt was echoed, so an empty stopped result would hide a CLI death."""
+    from ciao.models import PromptCancelledEvent, ResultEvent
+    from ciao.providers.claude import _TURN_INTERRUPTED_MESSAGE
+
+    echoed = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def ours(client):
+        yield _prompt_echo(client.prompt_uuid)
+        echoed.set()
+        await stopped.wait()  # the stream then closes with no result
+
+    fake = _SteerFakeClient([ours])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    handles: list = []
+    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    await asyncio.wait_for(echoed.wait(), 2)
+
+    await handles[0].stop()
+    stopped.set()
+    events = await asyncio.wait_for(turn, 2)
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert [(r.result, r.is_error) for r in results] == [(_TURN_INTERRUPTED_MESSAGE, True)]
+    assert not [e for e in events if isinstance(e, PromptCancelledEvent)]

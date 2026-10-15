@@ -5766,6 +5766,52 @@ class ProjectChatManager:
         })
         stream.publish_pending()
 
+    def on_prompt_cancelled(
+        self,
+        chat_id: str,
+        stream: "ChatStream",
+        prompt: str,
+        images: list[ImageAttachment] | None,
+        turn_index: int | None,
+    ) -> None:
+        """Stop cancelled a prompt the provider had not run: keep it waiting.
+
+        The turn's own prompt (not the provider's capsule-prefixed one) joins
+        the chat's waiting queue like a message parked by Stop, so the user
+        resends it with the chip's Send now or Steer. The turn never ran, so
+        its index and per-turn records are rolled back: the resend takes the
+        same index and later history rows do not shift.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return
+        if turn_index is not None:
+            if chat.user_turn_count == turn_index + 1:
+                chat.user_turn_count = turn_index
+                key = str(turn_index)
+                chat.user_turn_timings.pop(key, None)
+                chat.user_turn_images.pop(key, None)
+                chat.user_turn_unattended.pop(key, None)
+                chat.user_turn_steered.pop(key, None)
+                self._streaming.discard_turn_perf(chat_id, turn_index)
+            else:
+                logger.warning(
+                    "Chat %s cancelled turn %d but a later turn exists "
+                    "(count=%d); keeping its history indexes",
+                    chat_id, turn_index, chat.user_turn_count,
+                )
+            stream.publish({"type": "prompt_cancelled", "turn_index": turn_index})
+        # The capsule rode on the prompt that never ran; the resend carries it.
+        chat.context_digest = ""
+        entry = {
+            "id": f"q-{uuid.uuid4().hex[:12]}",
+            "text": prompt,
+            "images": self._image_refs(images),
+        }
+        chat.pending_queue = [*chat.pending_queue, entry]
+        self._save()
+        stream.publish_queue_state(chat.pending_queue)
+
     def on_steer_delivered(
         self, chat_id: str, stream: "ChatStream", steer_id: str
     ) -> None:

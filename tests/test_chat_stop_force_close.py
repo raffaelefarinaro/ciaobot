@@ -1483,3 +1483,84 @@ async def test_a_board_stop_in_the_pre_task_window_parks_the_queue(
     ]
 
     consumer.cancel()
+
+
+async def test_cancelled_prompt_is_not_recorded_as_a_transcript_turn(
+    tmp_path: Path,
+) -> None:
+    """Stop cancelled the queued prompt (#1406): nothing ran, so no turn is filed."""
+    from ciao.models import PromptCancelledEvent
+
+    pcm = attach_stub_mcp(_make_manager(tmp_path))
+    project = pcm.create_project("cancelled-transcript", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="cancelled", provider="claude")
+    release = asyncio.Event()
+    release.set()
+
+    def script(request):
+        del request
+
+        async def gen():
+            yield PromptCancelledEvent(type="prompt_cancelled")
+            yield ResultEvent(
+                type="result",
+                result="",
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+            )
+
+        return gen()
+
+    pcm._providers[chat.chat_id] = _RealPathProviderService(chat, script, release)
+
+    [event async for event in pcm.stream_chat(chat.chat_id, "hello")]
+
+    ctx = ChatContext.for_web(chat.chat_id)
+    stored = pcm._transcripts._load_current(ctx, "claude")
+    assert not (stored or {}).get("turns")
+
+
+async def test_cancelled_prompt_context_marker_is_reset_after_the_stopped_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``drive_stream`` commits the marker as the stopped result passes, after
+    the cancel handler ran, so the drive loop must clear it again (#1406)."""
+    from ciao.models import PromptCancelledEvent
+
+    def commit(chat, request, session_id):
+        chat.context_digest = "d"
+        return True
+
+    monkeypatch.setattr(ProjectChatManager, "_commit_context_marker", staticmethod(commit))
+    release = asyncio.Event()
+    release.set()
+
+    def script(request):
+        del request
+
+        async def gen():
+            yield PromptCancelledEvent(type="prompt_cancelled")
+            yield ResultEvent(
+                type="result",
+                result="",
+                session_id="sess-native",
+                is_error=True,
+                effective_model="opus",
+            )
+
+        return gen()
+
+    pcm, chat, stream, consumer, _captured = await _start_real_path_stream(
+        tmp_path,
+        provider="claude",
+        user_text="hello",
+        release=release,
+        script=script,
+        project_name="cancelled-marker",
+        title="cancelled-marker",
+    )
+    await _wait_for(lambda: stream.done)
+
+    assert pcm._chats[chat.chat_id].context_digest == ""
+    consumer.cancel()
