@@ -385,3 +385,36 @@ async def test_disconnect_reports_whether_the_provider_is_gone(
     assert ok.disconnected
     bad = _FailingProvider()
     assert await manager._disconnect_provider(chat_id, bad) is False  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_an_idle_drain_does_not_hold_its_provider(tmp_path: Path) -> None:
+    """A Claude drain lives as long as its CLI, so an idle one is not work (#1402)."""
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    provider = _attach(manager, chat_id, idle_for=manager._provider_idle_timeout + 1)
+    drain = asyncio.ensure_future(asyncio.sleep(3600))
+    manager._streaming._between_turn_drains[chat_id] = drain  # type: ignore[assignment]
+
+    assert await manager.reap_idle_providers() == [chat_id]
+    assert provider.disconnected
+    await asyncio.sleep(0)
+    assert drain.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_a_drain_with_outstanding_background_work_holds_its_provider(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    provider = _attach(manager, chat_id, idle_for=manager._provider_idle_timeout * 10)
+    provider.background_work_outstanding = True  # type: ignore[attr-defined]
+    drain = asyncio.ensure_future(asyncio.sleep(3600))
+    manager._streaming._between_turn_drains[chat_id] = drain  # type: ignore[assignment]
+
+    try:
+        assert await manager.reap_idle_providers(force=True) == []
+        assert not provider.disconnected
+    finally:
+        drain.cancel()

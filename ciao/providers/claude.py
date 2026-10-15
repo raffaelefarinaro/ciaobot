@@ -119,6 +119,10 @@ _CLAUDE_OP_ERRORS = (ClaudeSDKError, CLIConnectionError, ProcessError)
 _STEER_ECHO_GRACE_S = 30.0
 # Bound on cancelling the orphaned steers after that grace expires.
 _STEER_CANCEL_TIMEOUT_S = 5.0
+# Bound on the CLI's context-usage control request. The first call on a fresh
+# CLI measured 0.7-27.8 s and later calls <= 0.44 s (#1402), so the bound only
+# ever costs the first turn its exact figure; the local estimate covers it.
+_CONTEXT_USAGE_TIMEOUT_S = 3.0
 
 
 class _SteerEchoTimeout(Exception):
@@ -203,6 +207,33 @@ def _is_oversized_message_error(exc: BaseException) -> bool:
     size' / 'Failed to decode JSON' error, which otherwise kills the stream."""
     msg = str(exc)
     return "buffer size" in msg or "Failed to decode JSON" in msg
+
+
+def _cli_process_exited(client: object) -> bool:
+    """True once the SDK client's CLI subprocess has exited.
+
+    Reads the SDK's private transport; a client without one (tests) counts
+    as alive.
+    """
+    transport = getattr(client, "_transport", None)
+    process = getattr(transport, "_process", None)
+    return process is not None and getattr(process, "returncode", None) is not None
+
+
+_GUIDE_FILES = ("CLAUDE.md", "AGENTS.md")
+
+
+def _guide_fingerprint(root: Path) -> tuple[tuple[int, int] | None, ...]:
+    """(mtime_ns, size) of each native guide file in ``root``; None when absent."""
+    marks: list[tuple[int, int] | None] = []
+    for name in _GUIDE_FILES:
+        try:
+            st = (root / name).stat()
+        except OSError:
+            marks.append(None)
+            continue
+        marks.append((st.st_mtime_ns, st.st_size))
+    return tuple(marks)
 
 
 def get_bundled_claude_path() -> str | None:
@@ -553,6 +584,8 @@ class ClaudeProvider(BaseSDKProvider):
         self._mcp_token = ""
         # Filesystem scope and roots the live CLI process was started with.
         self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
+        # Spawn-only options the live CLI process was started with.
+        self._spawn_key: tuple[object, ...] = ()
 
     def _stderr_handler(self, line: str) -> None:
         _route_cli_stderr(line)
@@ -599,6 +632,23 @@ class ClaudeProvider(BaseSDKProvider):
             chat,
         )
 
+    def _spawn_key_for(self, request: AgentRequest) -> tuple[object, ...]:
+        """Options fixed when the CLI starts that have no in-place setter.
+
+        CIAO_MODEL is left out: a model change is applied with set_model.
+        The guide fingerprint makes a guide or memory edit reach the model,
+        as it did when every turn started a fresh CLI.
+        """
+        env = tuple(sorted(
+            (k, v) for k, v in (request.extra_env or {}).items() if k != "CIAO_MODEL"
+        ))
+        return (
+            request.thinking_level,
+            tuple(request.disallowed_tools or ()),
+            env,
+            _guide_fingerprint(Path(self.workspace_root)),
+        )
+
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
         requested_model = request.model
         # Whether a client object existed before this turn. Used to tell a
@@ -606,6 +656,10 @@ class ClaudeProvider(BaseSDKProvider):
         had_client = self._client is not None
         # Why the live client is being replaced; empty while it is reused.
         reconnect_reason = ""
+        if self._client is not None and self._connected and _cli_process_exited(self._client):
+            # The CLI exited between turns; writing to it would fail.
+            reconnect_reason = "dead_process"
+            await self.disconnect()
         if (
             self._client is not None
             and self._connected
@@ -624,6 +678,13 @@ class ClaudeProvider(BaseSDKProvider):
         if (
             self._client is not None
             and self._connected
+            and self._spawn_key_for(request) != self._spawn_key
+        ):
+            reconnect_reason = "spawn_options"
+            await self.disconnect()
+        if (
+            self._client is not None
+            and self._connected
             and request.resume_session
             and request.resume_session != self._session_id
         ):
@@ -635,16 +696,16 @@ class ClaudeProvider(BaseSDKProvider):
                 try:
                     await self._client.set_model(requested_model)
                     self._current_model = requested_model
-                except _CLAUDE_OP_ERRORS:
-                    logger.warning("Claude set_model failed; reconnecting")
+                except Exception as exc:  # noqa: BLE001 - control-request errors are bare Exception
+                    logger.warning("Claude set_model failed (%s); reconnecting", exc)
                     reconnect_reason = "model_change"
                     await self.disconnect()
             if self._client is not None and self._connected and request.mode != self._current_mode:
                 try:
                     await self._client.set_permission_mode(_sdk_permission_mode(request.mode))
                     self._current_mode = request.mode
-                except _CLAUDE_OP_ERRORS:
-                    logger.warning("Claude set_permission_mode failed; reconnecting")
+                except Exception as exc:  # noqa: BLE001 - control-request errors are bare Exception
+                    logger.warning("Claude set_permission_mode failed (%s); reconnecting", exc)
                     reconnect_reason = "mode_change"
                     await self.disconnect()
         if self._client is not None and self._connected:
@@ -800,6 +861,7 @@ class ClaudeProvider(BaseSDKProvider):
 
         self._client = ClaudeSDKClient(options=options)
         self._mcp_token = provider_reuse_key(request)
+        self._spawn_key = self._spawn_key_for(request)
         self._remember_settings(request)
         return self._client
 
@@ -816,9 +878,10 @@ class ClaudeProvider(BaseSDKProvider):
         return session_id
 
     def _prompt_payload(self, request: AgentRequest):
-        # Always stream: SDK's can_use_tool gate requires an AsyncIterable
-        # prompt at connect() time (claude_agent_sdk>=0.1.63). A plain
-        # string raises "can_use_tool callback requires streaming mode".
+        # An async iterable of message dicts: ``query()`` writes the content
+        # blocks and uuid fields per message, which a plain string cannot
+        # carry (images, steer uuids). It is sent with ``query()``, never
+        # passed to ``connect()`` (#1402).
         if request.compact:
             # The SDK compacts only for the bare command: a context capsule
             # or any other text before it turns it into a normal reply.
@@ -869,6 +932,21 @@ class ClaudeProvider(BaseSDKProvider):
         self._session_id = None
         self._pending_quota = {}
         self._mcp_token = ""
+        self._spawn_key = ()
+        self._reset_settings()
+
+    def _forget_dead_cli(self) -> None:
+        """Clear client state after the CLI process died.
+
+        disconnect() minus the awaited client call: the drain consumer calls
+        this from inside its own task, where awaiting disconnect() deadlocks.
+        """
+        self._client = None
+        self._connected = False
+        self._session_id = None
+        self._pending_quota = {}
+        self._mcp_token = ""
+        self._spawn_key = ()
         self._reset_settings()
 
     @property
@@ -896,6 +974,10 @@ class ClaudeProvider(BaseSDKProvider):
         next. This generator keeps the pipe drained and hands the events to
         the caller for live display; `ResultEvent.origin` marks the follow-up
         results.
+
+        The CLI stays alive between turns (#1402), so this generator normally
+        runs until cancelled. It ends by itself only when the CLI exits, and
+        then clears the client state so the next turn reconnects.
 
         The caller owns the lifecycle: it MUST cancel this generator before
         starting a new turn (``receive_response`` and this iterator consume
@@ -929,12 +1011,7 @@ class ClaudeProvider(BaseSDKProvider):
                 # rebuilds the client on the next turn, exactly as after a
                 # disconnect(); leaving _connected True would make
                 # cli_connected lie to the CLI-task watcher.
-                self._client = None
-                self._connected = False
-                self._session_id = None
-                self._pending_quota = {}
-                self._mcp_token = ""
-                self._reset_settings()
+                self._forget_dead_cli()
             except _CLAUDE_OP_ERRORS:
                 # Other typed SDK errors (e.g. MessageParseError) are not
                 # transport death; end the drain, keep the client usable.
@@ -947,6 +1024,12 @@ class ClaudeProvider(BaseSDKProvider):
                 # un-retrieved exception (which asyncio logs noisily as
                 # "Task exception was never retrieved").
                 logger.debug("Between-turns drain ended on unhandled SDK result", exc_info=True)
+            else:
+                # A normal end of receive_messages() is the transport hitting
+                # EOF. The CLI stays alive between turns, so only a dead CLI
+                # produces it.
+                logger.info("Claude CLI exited between turns; next turn reconnects")
+                self._forget_dead_cli()
             finally:
                 merged.put_nowait(_DONE)
 
@@ -978,8 +1061,9 @@ class ClaudeProvider(BaseSDKProvider):
         register_handle: Callable[[ActiveHandle | None], None],
     ) -> AsyncGenerator[StreamEvent, None]:
         # Pre-stream connect/query failures (e.g. "ProcessTransport is not
-        # ready for writing" when a prior client died but wasn't reaped yet)
-        # are transient and safe to retry: no events were yielded, the
+        # ready for writing" when the CLI exits in the instant after
+        # _ensure_connected checked it) are rare, because _ensure_connected
+        # detects an exited CLI first. They are safe to retry once: no events were yielded, the
         # session_id on the chat is preserved, and _ensure_connected will
         # build a fresh client on the retry because _connected was just
         # reset in _run_streaming_once's except block.
@@ -997,12 +1081,9 @@ class ClaudeProvider(BaseSDKProvider):
                 return
             except CLIConnectionError as exc:
                 if not events_yielded and attempt == 0:
-                    # Transient stdin race: the prior client's ProcessTransport
-                    # hasn't fully released the write fd when the new one tries
-                    # to attach. The retry always succeeds (no events were
-                    # yielded, fresh client is built in _ensure_connected).
-                    # Log at debug so the stderr log doesn't accumulate
-                    # ~15 warnings/day per chat.
+                    # The CLI died between the liveness check and the write.
+                    # The retry builds a fresh client in _ensure_connected
+                    # (no events were yielded). Logged at debug.
                     logger.debug(
                         "Claude pre-stream connection failed (%s); auto-retrying once",
                         exc,
@@ -1084,10 +1165,12 @@ class ClaudeProvider(BaseSDKProvider):
             """Drive connect/query then fan SDK events into ``merged``."""
             try:
                 if not self._connected:
-                    await asyncio.wait_for(client.connect(payload), timeout=120)
+                    # No prompt: the SDK then never starts stream_input, which
+                    # closes stdin once the run goes idle and makes the CLI
+                    # exit (#1402).
+                    await asyncio.wait_for(client.connect(), timeout=120)
                     self._connected = True
-                else:
-                    await asyncio.wait_for(client.query(payload), timeout=120)
+                await asyncio.wait_for(client.query(payload), timeout=120)
 
                 pending_result: ResultEvent | None = None
                 last_result_msg: ResultMessage | None = None
@@ -1337,7 +1420,15 @@ class ClaudeProvider(BaseSDKProvider):
         omits it rather than showing a wrong value.
         """
         try:
-            usage = await client.get_context_usage()
+            usage = await asyncio.wait_for(
+                client.get_context_usage(), timeout=_CONTEXT_USAGE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            usage = None
+            logger.debug(
+                "get_context_usage exceeded %.0fs; using the local estimate",
+                _CONTEXT_USAGE_TIMEOUT_S,
+            )
         except _CLAUDE_OP_ERRORS:
             usage = None  # fall through to local estimate
             logger.debug("get_context_usage failed; trying local estimate")

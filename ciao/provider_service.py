@@ -162,6 +162,13 @@ class ProviderService:
             return False
         return bool(getattr(self._provider, "cli_connected", True))
 
+    @property
+    def background_work_outstanding(self) -> bool:
+        """True while the provider itself tracks background work its drain still owes."""
+        if self._provider is None:
+            return False
+        return bool(getattr(self._provider, "background_work_outstanding", False))
+
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield between-turns provider events (see ClaudeProvider.drain_events)."""
         if self._provider is None:
