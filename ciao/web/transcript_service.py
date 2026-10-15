@@ -745,6 +745,8 @@ def _render_opencode_thread(
                     entry["sent_at"] = timing["sent_at"]
                 if chat.user_turn_unattended.get(str(user_idx)):
                     entry["unattended"] = True
+                if chat.user_turn_steered.get(str(user_idx)):
+                    entry["steered"] = True
             result.append(entry)
             user_idx += 1
             continue
@@ -1376,6 +1378,8 @@ async def _assemble_chat_messages(
             # flag has to come from our own per-turn record.
             if chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
                 entry["unattended"] = True
+            if chat.user_turn_steered.get(str(user_idx)) or chat.user_turn_steered.get(user_idx):
+                entry["steered"] = True
             user_idx += 1
         result.append(entry)
     # Stitch the durable transcript's per-turn metadata (token usage with the

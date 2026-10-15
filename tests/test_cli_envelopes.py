@@ -190,6 +190,7 @@ def _chat() -> SimpleNamespace:
         turn_index_base=0,
         user_turn_timings={},
         user_turn_unattended={},
+        user_turn_steered={},
     )
 
 

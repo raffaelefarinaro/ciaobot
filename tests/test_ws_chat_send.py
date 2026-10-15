@@ -91,7 +91,9 @@ def test_ws_message_queues_image_only_follow_up() -> None:
     def resolve_image_ref(ref: str) -> SimpleNamespace:
         return SimpleNamespace(original_filename=ref)
 
-    def queue_message(chat_id: str, text: str, images=None, entry_id=None) -> bool:
+    def queue_message(
+        chat_id: str, text: str, images=None, entry_id=None, delivery="queue"
+    ) -> bool:
         queued.append((text, [img.original_filename for img in images or []]))
         return True
 
@@ -163,3 +165,72 @@ async def test_attach_streams_ends_when_keepalive_send_fails(monkeypatch) -> Non
     await asyncio.wait_for(
         routes_chat._attach_streams(_DeadWebSocket(), pcm, "chat-1"), 2
     )
+
+
+def _steer_app(calls: list, stream: ChatStream | None) -> Starlette:
+    async def steer_queue(chat_id: str) -> None:
+        calls.append(("steer_queue", chat_id))
+
+    async def set_queue_delivery(chat_id: str, entry_ids, delivery) -> bool:
+        calls.append(("set_queue_delivery", chat_id, entry_ids, delivery))
+        return True
+
+    def queue_message(chat_id, text, images=None, entry_id=None, delivery="queue") -> bool:
+        calls.append(("queue_message", text, entry_id, delivery))
+        return True
+
+    manager = SimpleNamespace(
+        get_chat=lambda _cid: SimpleNamespace(archived=False),
+        get_active_stream=lambda _cid: stream,
+        resolve_image_ref=lambda ref: None,
+        queue_message=queue_message,
+        steer_queue=steer_queue,
+        set_queue_delivery=set_queue_delivery,
+        start_stream=lambda *_a, **_k: None,
+    )
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = manager
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+    return app
+
+
+def test_ws_message_with_steer_delivery_steers() -> None:
+    calls: list = []
+    client = signed_in(TestClient(_steer_app(calls, ChatStream("chat-1"))))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"message","text":"x","delivery":"steer","entry_id":"e1"}')
+        ws.send_text('{"type":"message","text":"y","entry_id":"e2"}')
+        ws.send_text('{"type":"message","text":"z","delivery":"bogus","entry_id":"e3"}')
+    assert calls == [
+        ("queue_message", "x", "e1", "steer"),
+        ("steer_queue", "chat-1"),
+        ("queue_message", "y", "e2", "queue"),
+        ("queue_message", "z", "e3", "queue"),
+    ]
+
+
+def test_queue_set_delivery_frame() -> None:
+    calls: list = []
+    client = signed_in(TestClient(_steer_app(calls, None)))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"queue_set_delivery","entry_ids":["e1"],"delivery":"steer"}')
+    assert calls == [("set_queue_delivery", "chat-1", ["e1"], "steer")]
+
+
+def test_queue_set_delivery_frame_rejects_malformed_input() -> None:
+    calls: list = []
+    client = signed_in(TestClient(_steer_app(calls, None)))
+    frames = [
+        '{"type":"queue_set_delivery","entry_ids":"e1","delivery":"steer"}',
+        '{"type":"queue_set_delivery","entry_ids":[1,{"a":1}],"delivery":"steer"}',
+        '{"type":"queue_set_delivery","entry_ids":["e1"],"delivery":"sometimes"}',
+        '{"type":"queue_set_delivery","entry_ids":[],"delivery":"steer"}',
+        '{"type":"queue_set_delivery","entry_ids":["' + "x" * 300 + '"],"delivery":"steer"}',
+        '{"type":"queue_set_delivery","entry_ids":' + str(["e"] * 500).replace("'", '"') + ',"delivery":"steer"}',
+        '{"type":"queue_set_delivery","delivery":"steer"}',
+    ]
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        for frame in frames:
+            ws.send_text(frame)
+    assert calls == []

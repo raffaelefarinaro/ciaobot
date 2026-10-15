@@ -146,6 +146,8 @@ from ciao.transcripts import (
 )
 from ciao.web import chat_service
 from ciao.web.chat_broker import (
+    QUEUE_DELIVERIES,
+    STEER_DISPATCHING,
     ChatStream,
     ChatStreamBroker,
     EventsHub,
@@ -447,6 +449,10 @@ class ChatInfo:
     # while replying to its own recurring prompt). Absent key = interactive turn, so
     # pre-feature chats degrade to today's behaviour.
     user_turn_unattended: dict = field(default_factory=dict)
+    # Map of user-turn index (as str) → True for turns steered into a running
+    # turn (#1392). The provider transcripts do not say so, so history reads
+    # this back to mark the bubble. Absent key = an ordinary turn.
+    user_turn_steered: dict = field(default_factory=dict)
     # Relative workspace path to the archived markdown transcript.
     # Set when archive_chat() succeeds; cleared on new_session().
     archive_path: str = ""
@@ -728,6 +734,9 @@ class ProjectChatManager:
             "chats": {},
         }
         self._providers: dict[str, ProviderService] = {}
+        # One lock per chat serializes steer dispatches so entries that become
+        # steers while one is in flight are combined into the next.
+        self._steer_locks: dict[str, asyncio.Lock] = {}
         # Monotonic stamp of the last time each chat's provider was handed
         # out, plus the single sweep task that reclaims the idle ones. See
         # `_PROVIDER_IDLE_TIMEOUT_SECONDS` for why this exists; the task is
@@ -943,6 +952,7 @@ class ProjectChatManager:
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
+                user_turn_steered=dict(cd.get("user_turn_steered", {})),
                 archive_path=cd.get("archive_path", ""),
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
                 retry_prompt=cd.get("retry_prompt", ""),
@@ -1053,6 +1063,7 @@ class ProjectChatManager:
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
                     "user_turn_unattended": c.user_turn_unattended,
+                    "user_turn_steered": c.user_turn_steered,
                     "archive_path": c.archive_path,
                     "retry_status": c.retry_status,
                     "retry_prompt": c.retry_prompt,
@@ -5522,8 +5533,12 @@ class ProjectChatManager:
         text: str,
         images: list[ImageAttachment] | None = None,
         entry_id: str | None = None,
+        delivery: str = "queue",
     ) -> bool:
         """Append a user message to the active stream's pending queue.
+
+        ``delivery="steer"`` marks it for injection into the running turn; the
+        caller then awaits ``steer_queue`` to dispatch it.
 
         Returns True if queued, False if there's no active stream (caller
         should fall through to `start_stream`).
@@ -5541,14 +5556,180 @@ class ProjectChatManager:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
             if ref:
                 image_refs.append(str(ref))
-        resolved_id = stream.enqueue(text, image_refs, entry_id=entry_id)
+        if delivery not in QUEUE_DELIVERIES:
+            delivery = "queue"
+        resolved_id = stream.enqueue(text, image_refs, entry_id=entry_id, delivery=delivery)
         stream.publish({
             "type": "queued",
             "id": resolved_id,
             "text": text,
             "images": image_refs,
+            "delivery": delivery,
         })
         return True
+
+    async def set_queue_delivery(
+        self, chat_id: str, entry_ids: list[str], delivery: str
+    ) -> bool:
+        """Switch queued entries between next-turn and steer delivery.
+
+        Switching to ``"steer"`` dispatches immediately, combined with every
+        other steer-mode entry not yet dispatched (see ``steer_queue``).
+        Returns False for an unknown delivery, or when no named entry exists
+        or is still switchable (a dispatched steer is locked).
+        """
+        if delivery not in QUEUE_DELIVERIES:
+            return False
+        stream = self._broker.get(chat_id)
+        if stream is not None and not stream.background:
+            if not stream.set_delivery(entry_ids, delivery):
+                return False
+            stream.publish_pending()
+            if delivery == "steer":
+                await self.steer_queue(chat_id)
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return False
+        wanted = set(entry_ids)
+        changed = False
+        for entry in chat.pending_queue:
+            if entry.get("id") in wanted:
+                entry["delivery"] = delivery
+                changed = True
+        if changed:
+            self._save()
+        return changed
+
+    async def steer_queue(self, chat_id: str) -> None:
+        """Hand every undispatched steer-mode entry to the running turn.
+
+        The entries go out as one message (texts joined with a blank line, all
+        images, in list order). They stay in the queue, locked and marked
+        ``steering``, until the provider confirms delivery
+        (``on_steer_delivered``). Whatever cannot be steered reverts to queue
+        mode with a ``steer_fallback`` notice. Dispatches are serialized per
+        chat, so a steer arriving mid-dispatch joins the next one.
+        """
+        lock = self._steer_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            stream = self._broker.get(chat_id)
+            provider = self._providers.get(chat_id)
+            chat = self._chats.get(chat_id)
+            if (
+                stream is None
+                or stream.background
+                or not stream.accepting_queue
+                or provider is None
+                or chat is None
+            ):
+                if stream is not None:
+                    self._fallback_steers(chat_id, stream, "no_turn")
+                return
+            entries = stream.steer_candidates()
+            if not entries:
+                return
+            entry_ids = [str(e["id"]) for e in entries]
+            text = "\n\n".join(
+                t for t in (str(e["text"]).strip() for e in entries) if t
+            )
+            images: list[ImageAttachment] = []
+            for entry in entries:
+                for ref in entry.get("images") or []:
+                    attachment = self.resolve_image_ref(ref)
+                    if attachment:
+                        images.append(attachment)
+            fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
+            # No prompt prefix or context capsule: the running turn has them.
+            request = AgentRequest(
+                prompt=text,
+                model=self._runtime_model_for_chat(chat),
+                provider=chat.provider,
+                mode=self._effective_mode_for_chat(chat),
+                resume_session=chat.session_id or None,
+                images=images,
+                extra_env=self._build_extra_env(chat),
+                disallowed_tools=self.disallowed_tools_for_chat(chat),
+                agent_fs_scope=fs_scope,
+                agent_roots=fs_roots,
+                thinking_level=self._thinking_level_for_chat(chat),
+            )
+            # Lock the chips before the await: an edit or remove landing while
+            # the provider call is in flight would change what was sent.
+            stream.mark_steering(entry_ids, STEER_DISPATCHING)
+            stream.publish_pending()
+            try:
+                steer_id = await provider.steer_turn(request)
+            except BaseException:
+                self._fallback_steers(chat_id, stream, "not_running")
+                raise
+            if not steer_id:
+                self._fallback_steers(chat_id, stream, "not_running")
+                return
+            if not stream.confirm_steering(steer_id):
+                # Stop or the turn's end reverted them while we awaited.
+                return
+            if steer_id in stream.early_steer_deliveries:
+                stream.early_steer_deliveries.discard(steer_id)
+                self.on_steer_delivered(chat_id, stream, steer_id)
+            else:
+                stream.publish_pending()
+
+    def _fallback_steers(self, chat_id: str, stream: "ChatStream", reason: str) -> None:
+        """Revert steer-mode entries to queue mode and say so.
+
+        Used when a steer cannot be dispatched and when the turn ends with one
+        still undelivered. The entries stay in the list, so they flush as the
+        next turn (or park) through the usual path. With nothing to revert
+        there is nothing to publish.
+        """
+        entry_ids = stream.revert_steers()
+        if not entry_ids:
+            return
+        stream.publish({
+            "type": "steer_fallback",
+            "entry_ids": entry_ids,
+            "reason": reason,
+        })
+        stream.publish_pending()
+
+    def on_steer_delivered(
+        self, chat_id: str, stream: "ChatStream", steer_id: str
+    ) -> None:
+        """A dispatched steer reached the running turn: it is now a user turn."""
+        entries = stream.take_steered(steer_id)
+        if not entries:
+            # The echo beat ``steer_queue``'s bookkeeping; it claims this id.
+            stream.early_steer_deliveries.add(steer_id)
+            return
+        text = "\n\n".join(
+            t for t in (str(e.get("text", "")).strip() for e in entries) if t
+        )
+        images = [str(ref) for e in entries for ref in (e.get("images") or [])]
+        chat = self._chats.get(chat_id)
+        turn_index = -1
+        sent_at = chat_service._now_iso()
+        if chat is not None:
+            turn_index = chat.user_turn_count
+            chat.user_turn_count = turn_index + 1
+            if images:
+                chat.user_turn_images[str(turn_index)] = images
+            chat.user_turn_timings[str(turn_index)] = {"sent_at": sent_at}
+            chat.user_turn_steered[str(turn_index)] = True
+            chat.last_activity_at = sent_at
+            chat.last_read_at = sent_at  # user sending = implicitly read
+            self._save()
+            stream.steered_turn_indexes.append(turn_index)
+        stream.publish({
+            "type": "steered",
+            "entry_ids": [str(e["id"]) for e in entries],
+            "text": text,
+            "images": images,
+            "turn_index": turn_index,
+            "sent_at": sent_at,
+            "delivery_id": steer_id,
+        })
+        stream.publish_pending()
 
     def reorder_queue(
         self,
@@ -5569,7 +5750,7 @@ class ProjectChatManager:
         if stream is not None and not stream.background:
             if not stream.reorder_pending(entry_id, before_id):
                 return False
-            stream.publish({"type": "queue_state", "queue": stream.pending})
+            stream.publish_pending()
             return True
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -5602,7 +5783,7 @@ class ProjectChatManager:
         if stream is not None and not stream.background:
             if not stream.edit_pending(entry_id, text, image_refs):
                 return False
-            stream.publish({"type": "queue_state", "queue": stream.pending})
+            stream.publish_pending()
             return True
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -5618,7 +5799,7 @@ class ProjectChatManager:
         if stream is not None and not stream.background:
             if not stream.remove_pending(entry_id):
                 return False
-            stream.publish({"type": "queue_state", "queue": stream.pending})
+            stream.publish_pending()
             return True
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -5827,6 +6008,7 @@ class ProjectChatManager:
         alive across the retry window rather than losing them when the errored
         stream's ``finish()``/``clear()`` runs.
         """
+        self._fallback_steers(chat_id, stream, "finished")
         parked = stream.drain_pending()
         if not parked:
             return
@@ -6326,6 +6508,8 @@ class ProjectChatManager:
                     # with neither text nor images does not (#1112).
                     if not text.strip() and not parked_refs:
                         continue
+                    # A parked steer wish is not carried into a new turn: the
+                    # entry flushes as a follow-up like any other parked one.
                     stream.enqueue(
                         text,
                         parked_refs,
@@ -7450,6 +7634,9 @@ class ProjectChatManager:
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
+            # Stop wins over a steer the provider has not delivered: the
+            # provider drops it, so the entries go back to the queue.
+            self._fallback_steers(chat_id, stream, "stopped")
             if park_queue and not stream.background:
                 stream.park_on_stop = True
             if stream.background:

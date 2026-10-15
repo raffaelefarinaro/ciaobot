@@ -32,6 +32,7 @@ from ciao.models import (
     ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
+    SteerDeliveredEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -53,6 +54,7 @@ from ciao.web.chat_broker import (
     EventsHub,
     apply_file_touches_to_payload,
     event_to_json,
+    public_queue,
 )
 from ciao.web.file_snapshots import SnapshotStore
 
@@ -105,6 +107,14 @@ class ChatStreamingHost(Protocol):
     def _save(self, *, reason: str = ...) -> None: ...
 
     def _get_provider(self, chat_id: str) -> ProviderService: ...
+
+    def _fallback_steers(
+        self, chat_id: str, stream: ChatStream, reason: str
+    ) -> None: ...
+
+    def on_steer_delivered(
+        self, chat_id: str, stream: ChatStream, steer_id: str
+    ) -> None: ...
 
     @staticmethod
     def _native_question_request_id(question_json: str) -> str: ...
@@ -422,6 +432,7 @@ class ChatStreaming:
         try:
             while True:
                 turn_assistant_text = ""
+                stream.steered_turn_indexes.clear()
                 turn_steps = TextStepJoiner()
                 turn_result_published = False
                 question_paused = False
@@ -444,6 +455,11 @@ class ChatStreaming:
                         unattended=run_unattended,
                         compact=run_compact,
                     ):
+                        if isinstance(event, SteerDeliveredEvent):
+                            self._host.on_steer_delivered(
+                                chat_id, stream, event.delivery_id
+                            )
+                            continue
                         payload = event_to_json(event)
                         if payload and isinstance(
                             event,
@@ -485,6 +501,15 @@ class ChatStreaming:
                                 rec["completed_at"] = completed_at
                                 if duration_ms is not None:
                                     rec["duration_ms"] = duration_ms
+                                # Steers delivered into this turn finish with it.
+                                for steered_index in stream.steered_turn_indexes:
+                                    steered_rec = cm.user_turn_timings.setdefault(
+                                        str(steered_index), {}
+                                    )
+                                    steered_rec["completed_at"] = completed_at
+                                    if duration_ms is not None:
+                                        steered_rec["duration_ms"] = duration_ms
+                                stream.steered_turn_indexes.clear()
                                 sent_at_rec = rec.get("sent_at", "")
                                 self._host._save()
                             else:
@@ -870,6 +895,7 @@ class ChatStreaming:
                                 had_progress=had_provider_progress,
                                 reason=error_msg,
                             )
+                        self._host._fallback_steers(chat_id, stream, "finished")
                         parked = stream.drain_pending()
                         if parked:
                             cm_park = self._host._chats.get(chat_id)
@@ -885,6 +911,7 @@ class ChatStreaming:
                     last_assistant_text = turn_assistant_text
 
                 if question_paused:
+                    self._host._fallback_steers(chat_id, stream, "finished")
                     parked = stream.drain_pending()
                     if parked:
                         cm_park = self._host._chats.get(chat_id)
@@ -894,6 +921,9 @@ class ChatStreaming:
                             stream.publish_queue_state(cm_park.pending_queue)
                     break
 
+                # A steer the provider never confirmed goes back to the queue
+                # and flushes (or parks) below like any other entry.
+                self._host._fallback_steers(chat_id, stream, "finished")
                 next_pending = stream.drain_one()
                 skipped_blank = False
                 while next_pending is not None and not (
@@ -914,7 +944,7 @@ class ChatStreaming:
                     remaining = stream.pending
                     if next_pending is not None:
                         remaining = [next_pending, *remaining]
-                    stream.publish({"type": "queue_state", "queue": remaining})
+                    stream.publish({"type": "queue_state", "queue": public_queue(remaining)})
                 # A task-board Stop or Detach ends the delegated work: what
                 # is queued is parked on the chat, not run (#1103).
                 park_rest = stream.user_stopped and stream.park_on_stop

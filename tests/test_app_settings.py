@@ -426,3 +426,24 @@ def test_read_app_settings_writes_nothing(tmp_path):
     assert settings.pwa_host == "127.0.0.1"
     assert path.read_text() == before
     assert read_app_settings(tmp_path / "missing.json") == AppSettings()
+
+
+def test_mid_turn_delivery_roundtrip_and_validation(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.settings.mid_turn_delivery == ""
+
+    store.update({"mid_turn_delivery": "steer"})
+    assert AppSettingsStore(path).settings.mid_turn_delivery == "steer"
+
+    store.update({"mid_turn_delivery": "queue"})
+    assert AppSettingsStore(path).settings.mid_turn_delivery == ""
+
+    with pytest.raises(ValueError, match="mid_turn_delivery must be queue or steer"):
+        store.update({"mid_turn_delivery": "sometimes"})
+
+
+def test_mid_turn_delivery_garbage_on_disk_loads_as_queue(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"mid_turn_delivery": "sometimes"}))
+    assert AppSettingsStore(path).settings.mid_turn_delivery == ""
