@@ -261,7 +261,7 @@ def test_the_sweep_is_not_started_without_a_running_loop(tmp_path: Path) -> None
 async def test_a_parked_message_queue_does_not_pin_the_provider(
     tmp_path: Path,
 ) -> None:
-    """`pending_queue` is chat state, re-seeded by the next `start_stream`.
+    """`pending_queue` is chat state: it waits on the chat, no provider needed.
 
     Treating it as busy would pin the provider forever for a chat that parked
     messages and was never reopened — the leak this sweep exists to close.

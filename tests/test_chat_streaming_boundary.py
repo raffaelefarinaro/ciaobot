@@ -140,6 +140,12 @@ class _DriveHost:
         self.detached_names: list[str] = []
         self.drain_awaits: list[str] = []
 
+    def _fallback_steers(self, chat_id: str, stream: object, reason: str) -> None:
+        del chat_id, stream, reason
+
+    def on_steer_delivered(self, chat_id: str, stream: object, steer_id: str) -> None:
+        del chat_id, stream, steer_id
+
     def _save(self, *, reason: str = "registry_mutation") -> None:
         del reason
         self.saves += 1

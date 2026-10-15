@@ -78,10 +78,10 @@ def _fake_provider_service(acked: asyncio.Event, disconnects: list[int]):
     return _FakeProviderService()
 
 
-async def test_stop_force_closes_a_hung_turn_and_flushes_queue(
+async def test_stop_force_closes_a_hung_turn_and_parks_queue(
     tmp_path: Path,
 ) -> None:
-    """Provider never ends the turn: force close + synthetic result + flush."""
+    """Provider never ends the turn: force close + synthetic result + park."""
     pcm = _make_manager(tmp_path)
     # Keep the grace window tiny so the test is fast.
     pcm._STOP_GRACE_S = 0.05
@@ -131,30 +131,20 @@ async def test_stop_force_closes_a_hung_turn_and_flushes_queue(
     stopped = await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=2.0)
     assert stopped is True
 
-    # Force closed fast (well under any human-perceivable "not instant"), then
-    # wait for the queued follow-up to publish its own result.
-    await _wait_for(
-        lambda: len([
-            event for event in captured if event.get("type") == "result"
-        ]) == 2
-    )
-    await _wait_for(
-        lambda: len([e for e in captured if e.get("type") == "result"]) >= 2
-    )
+    # Force closed fast (well under any human-perceivable "not instant").
+    await _wait_for(lambda: stream.done)
+    await _wait_for(lambda: any(e.get("type") == "result" for e in captured))
     results = [e for e in captured if e.get("type") == "result"]
-    # Synthetic stop result, then the flushed follow-up's own result.
-    assert len(results) == 2
+    # Only the synthetic stop result: Stop holds the whole queue.
+    assert len(results) == 1
     assert results[0].get("stopped") is True
     assert results[0].get("is_error") is False
     assert results[0].get("text") == "partial answer"
-    assert "stopped" not in results[1]
-    assert results[1].get("text") == "post-stop answer"
     # Claude escalation dropped the wedged client.
     assert disconnects == [1]
-    # The queued follow-up still flushes as its own turn.
-    await _wait_for(lambda: len(turn_calls) == 2)
-    await _wait_for(lambda: stream.done)
-    assert turn_calls == ["initial", "follow-up"]
+    # The queued follow-up was parked on the chat, not run.
+    assert turn_calls == ["initial"]
+    assert [e["text"] for e in pcm._chats[chat.chat_id].pending_queue] == ["follow-up"]
 
     consumer.cancel()
     first_turn_blocked.set()
@@ -165,9 +155,9 @@ async def test_a_board_stop_parks_the_queue_instead_of_running_it(
 ) -> None:
     """A board Stop ends the delegated work: the queued follow-up is parked.
 
-    ``park_queue=True`` moves the stream's queued follow-ups onto the chat
-    before the turn ends, so the drive loop runs no next turn and the parked
-    message survives (re-seeded by the next user turn) rather than running
+    Stop moves the stream's queued follow-ups onto the chat before the turn
+    ends, so the drive loop runs no next turn and the parked message waits
+    rather than running
     over an attempt the board has already settled ``stopped`` (#1103).
     """
     pcm = _make_manager(tmp_path)
@@ -215,7 +205,7 @@ async def test_a_board_stop_parks_the_queue_instead_of_running_it(
     assert pcm.queue_message(chat.chat_id, "follow-up") is True
 
     stopped = await asyncio.wait_for(
-        pcm.stop_chat(chat.chat_id, park_queue=True), timeout=2.0
+        pcm.stop_chat(chat.chat_id), timeout=2.0
     )
     assert stopped is True
 
@@ -290,7 +280,7 @@ async def test_a_message_queued_during_a_board_stop_is_parked_too(
     )
     assert pcm.queue_message(chat.chat_id, "follow-up") is True
 
-    stop_task = asyncio.create_task(pcm.stop_chat(chat.chat_id, park_queue=True))
+    stop_task = asyncio.create_task(pcm.stop_chat(chat.chat_id))
     await asyncio.sleep(0.01)
     assert pcm.queue_message(chat.chat_id, "late") is True
     stopped = await asyncio.wait_for(stop_task, timeout=2.0)
@@ -1057,10 +1047,10 @@ async def test_stop_with_sdk_error_diagnostic_persists_streamed_partial(
     consumer.cancel()
 
 
-async def test_stop_followup_does_not_inherit_stopped_state(
+async def test_stop_parks_the_followup_instead_of_running_it(
     tmp_path: Path,
 ) -> None:
-    """After a stopped turn, the queued follow-up is a normal success."""
+    """After a stopped turn, the queued follow-up waits as a chip."""
     release = asyncio.Event()
 
     def script(request):
@@ -1107,17 +1097,14 @@ async def test_stop_followup_does_not_inherit_stopped_state(
     assert pcm.queue_message(chat.chat_id, "follow-up") is True
 
     assert await asyncio.wait_for(pcm.stop_chat(chat.chat_id), timeout=3.0) is True
-    await _wait_for(
-        lambda: len([e for e in captured if e.get("type") == "result"]) == 2
-    )
     await _wait_for(lambda: stream.done)
+    await _wait_for(lambda: any(e.get("type") == "result" for e in captured))
 
     results = [e for e in captured if e.get("type") == "result"]
+    # Stop holds the whole queue: one stopped result, no follow-up turn.
+    assert len(results) == 1
     assert results[0].get("stopped") is True
-    assert "stopped" not in results[1]
-    assert results[1].get("is_error") is False
-    assert results[1].get("text") == "follow-up answer"
-    assert pcm._chats[chat.chat_id].last_response_status == "success"
+    assert [e["text"] for e in pcm._chats[chat.chat_id].pending_queue] == ["follow-up"]
     consumer.cancel()
 
 
@@ -1432,8 +1419,7 @@ async def test_a_board_stop_in_the_pre_task_window_parks_the_queue(
 ) -> None:
     """A board Stop landing before the turn task exists must park the queue.
 
-    ``park_queue=True`` sets both ``user_stopped`` and ``park_on_stop``. The
-    pre-task guard used to consume ``user_stopped`` before the bottom-of-loop
+    Stop sets ``user_stopped``. The pre-task guard used to consume ``user_stopped`` before the bottom-of-loop
     ``park_rest`` read it, so the first queued follow-up ran as a normal turn
     instead of being parked (#1103). The guard must publish the stopped result
     but leave the flag for the loop to honour the park.
@@ -1482,7 +1468,7 @@ async def test_a_board_stop_in_the_pre_task_window_parks_the_queue(
     assert stream.turn_task is None
     assert pcm.queue_message(chat.chat_id, "follow-up") is True
     stopped = await asyncio.wait_for(
-        pcm.stop_chat(chat.chat_id, park_queue=True), timeout=2.0
+        pcm.stop_chat(chat.chat_id), timeout=2.0
     )
     assert stopped is True
 

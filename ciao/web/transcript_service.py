@@ -743,7 +743,12 @@ def _render_opencode_thread(
                 timing = chat.user_turn_timings.get(str(user_idx)) or {}
                 if timing.get("sent_at"):
                     entry["sent_at"] = timing["sent_at"]
-                if chat.user_turn_unattended.get(str(user_idx)):
+                if chat.user_turn_steered.get(str(user_idx)):
+                    # A steered index inherits the running turn's unattended
+                    # flag for the control plane's guards; the bubble is still
+                    # something the person typed.
+                    entry["steered"] = True
+                elif chat.user_turn_unattended.get(str(user_idx)):
                     entry["unattended"] = True
             result.append(entry)
             user_idx += 1
@@ -1374,7 +1379,9 @@ async def _assemble_chat_messages(
                 entry["sent_at"] = timing["sent_at"]
             # Loop/schedule ticks are user turns in the session file too, so the
             # flag has to come from our own per-turn record.
-            if chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
+            if chat.user_turn_steered.get(str(user_idx)) or chat.user_turn_steered.get(user_idx):
+                entry["steered"] = True
+            elif chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
                 entry["unattended"] = True
             user_idx += 1
         result.append(entry)
