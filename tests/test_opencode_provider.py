@@ -4297,13 +4297,24 @@ async def test_refused_steer_does_not_leave_the_pump_waiting(tmp_path, monkeypat
     frames = _steer_frames(lines, start_steer, before="session.execution.succeeded")
     frames.append(fail_the_post_then_idle)
     client = Client(frames)
+    opened = 0
+    plain_stream = client.stream
+
+    def counting_stream(method: str, path: str):
+        nonlocal opened
+        opened += 1
+        return plain_stream(method, path)
+
+    client.stream = counting_stream  # type: ignore[method-assign]
     _tokens(monkeypatch, "ours", "steer")
     events = await asyncio.wait_for(
         _steered_turn(provider, monkeypatch, client, "ses_q"), timeout=5
     )
 
     assert await tasks[0] is None
-    assert [e for e in events if isinstance(e, ResultEvent)]
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert opened == 1
+    assert not result.is_error and not result.fallback_final
 
 
 @pytest.mark.asyncio
@@ -4352,3 +4363,28 @@ async def test_ambiguous_post_failure_after_delivery_returns_the_id(tmp_path):
 
     assert delivery_id is not None and delivery_id.startswith("msg_")
     assert client.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_frames_until_cancel_leaves_no_pending_tasks():
+    from ciao.providers.opencode import _frames_until
+
+    async def never():
+        await asyncio.Event().wait()
+        yield b""
+
+    wake = asyncio.Event()
+    before = asyncio.all_tasks()
+
+    async def consume() -> None:
+        async for _frame in _frames_until(never(), wake, lambda: False):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert asyncio.all_tasks() - before == set()

@@ -20,9 +20,10 @@ upgrade message.
 Capability note: ``steer_turn`` posts a message with ``delivery: "steer"``,
 which OpenCode delivers into the running execution at its next step boundary
 (or starts one of its own when the execution just ended); its delivery is
-attributed by inbox id. When background work finishes, OpenCode runs a follow-up execution by itself; ``drain_events``
-streams it between turns. Everything else Ciaobot needs — fork, interrupt,
-permissions, forms, and background subagents as child sessions — is native.
+attributed by inbox id. When background work finishes, OpenCode runs a
+follow-up execution by itself; ``drain_events`` streams it between turns.
+Everything else Ciaobot needs — fork, interrupt, permissions, forms, and
+background subagents as child sessions — is native.
 """
 
 from __future__ import annotations
@@ -1146,24 +1147,25 @@ def compose_system(developer_instructions: str, runtime: str) -> str:
 
 
 async def _frames_until(
-    source: AsyncGenerator[Any, None] | Any,
+    source: Any,
     wake: asyncio.Event,
     should_stop: Callable[[], bool],
 ) -> AsyncGenerator[Any, None]:
-    """Yield frames from ``source``; end early when ``wake`` fires and ``should_stop``.
+    """Yield frames from ``source``; end early once ``wake`` fires and ``should_stop``.
 
     Lets the pump stop waiting for an event that will never come, such as the
     next execution of a steer that was refused after our terminal was skipped.
     """
     iterator = source.__aiter__()
     pending: asyncio.Future[Any] | None = None
+    waiter: asyncio.Future[Any] = asyncio.ensure_future(wake.wait())
     try:
         while True:
             if pending is None:
                 pending = asyncio.ensure_future(iterator.__anext__())
-            waiter = asyncio.ensure_future(wake.wait())
+            if waiter.done():
+                waiter = asyncio.ensure_future(wake.wait())
             await asyncio.wait({pending, waiter}, return_when=asyncio.FIRST_COMPLETED)
-            waiter.cancel()
             if pending.done():
                 frame_task, pending = pending, None
                 try:
@@ -1176,8 +1178,10 @@ async def _frames_until(
             if should_stop():
                 return
     finally:
-        if pending is not None and not pending.done():
-            pending.cancel()
+        tasks = [task for task in (pending, waiter) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class OpencodeActiveHandle(ActiveHandle):
@@ -3698,7 +3702,10 @@ class OpencodeProvider(BaseSDKProvider):
                 foreign_execution = False
             elif not prompt_attempted:
                 foreign_execution = session_id in await self._active_or_empty(client)
-            async with client.stream("GET", "/api/event") as stream:
+            async with (
+                client.stream("GET", "/api/event") as stream,
+                contextlib.AsyncExitStack() as closing,
+            ):
                 stream.raise_for_status()
                 # Subscribe before prompting: opencode starts emitting as soon
                 # as the prompt is accepted, and a late subscriber loses the
@@ -3750,11 +3757,18 @@ class OpencodeProvider(BaseSDKProvider):
                         saw_output = True
                         yield converted
                 decoder = SSEDecoder()
-                async for sse in _frames_until(
-                    decoder.aiter_bytes(stream.aiter_bytes()),
-                    self._steer_pending_emptied,
-                    lambda: skipped_terminal and not self._steer_ids_pending,
-                ):
+                # Closed before the stream, so an early exit never leaves a
+                # read task behind on a closed connection.
+                frames = await closing.enter_async_context(
+                    contextlib.aclosing(
+                        _frames_until(
+                            decoder.aiter_bytes(stream.aiter_bytes()),
+                            self._steer_pending_emptied,
+                            lambda: skipped_terminal and not self._steer_ids_pending,
+                        )
+                    )
+                )
+                async for sse in frames:
                     if self._stop_requested == session_id:
                         # The user stopped the turn and the abort has been
                         # issued: end locally now. Waiting for the server's
@@ -3828,6 +3842,11 @@ class OpencodeProvider(BaseSDKProvider):
                     for converted in self._event_to_stream(event):
                         saw_output = saw_output or converted.type in {"text", "tool_use"}
                         yield converted
+                if skipped_terminal and not self._steer_ids_pending:
+                    # The steer we waited for was refused or cancelled: the
+                    # skipped terminal was the turn's real end.
+                    self._turn_open = False
+                    terminal_seen = True
 
         # The SSE subscription can drop mid-turn (network blip, server hiccup)
         # before `session.execution.*` arrives. Rather than failing the whole turn,
