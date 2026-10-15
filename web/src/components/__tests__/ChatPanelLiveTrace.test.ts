@@ -313,6 +313,45 @@ describe('ChatPanel live trace', () => {
     expect((messagesEl as HTMLElement).scrollTop).toBe(5000)
   })
 
+  it('pins to the bottom of an idle chat when switching away from a streaming one', async () => {
+    const { wrapper, store, messagesEl } = await streamingPanel()
+    stubReplyGeometry(messagesEl)
+    store.chats = [...store.chats, { ...store.chats[0], chat_id: 'chat-2', title: 'chat-2' }]
+    store.messages['chat-2'] = turnMessages()
+    stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+
+    store.activeChatId = 'chat-2'
+    await flushPromises()
+    await new Promise(r => setTimeout(r, 60))
+
+    expect((messagesEl as HTMLElement).scrollTop).toBe(5000)
+    expect(wrapper.findAll('.trace-block.open').length).toBe(0)
+  })
+
+  it('follows the live trace tail again after the user closed and reopened it', async () => {
+    const { wrapper, store } = await streamingPanel()
+    store.streamingText['chat-1'] = 'working on it'
+    await flushPromises()
+    const first = wrapper.get('.trace-block.live .trace-body').element
+    stubMetrics(first, { scrollHeight: 900, clientHeight: 300, scrollTop: 600 })
+    first.dispatchEvent(new Event('scroll'))
+    stubMetrics(first, { scrollHeight: 900, clientHeight: 300, scrollTop: 100 })
+    first.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+
+    const summary = wrapper.get('.trace-block.live .trace-summary')
+    await summary.trigger('click')
+    await summary.trigger('click')
+    const body = wrapper.get('.trace-block.live .trace-body').element
+    stubMetrics(body, { scrollHeight: 900, clientHeight: 300, scrollTop: 0 })
+    store.streamingText['chat-1'] = 'working on it, more'
+    await flushPromises()
+
+    expect((body as HTMLElement).scrollTop).toBe(900)
+  })
+
   it('keeps a reading hold in place through the turn-end background reload', async () => {
     const { wrapper, store, messagesEl } = await streamingPanel()
     stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })

@@ -2147,6 +2147,11 @@ function toggleOutputs(i: number) {
 function toggleLiveTrace() {
   liveTraceTouched.value = true
   liveTraceOpen.value = !liveTraceOpen.value
+  if (liveTraceOpen.value) {
+    // The body remounts, so it follows its tail again from the top.
+    liveBodyAtBottom.value = true
+    lastBodyScrollTop = 0
+  }
 }
 
 function resetLiveTraceState() {
@@ -3993,8 +3998,7 @@ watch(() => store.isStreaming, (streaming) => {
   if (streaming) resetLiveTraceState()
 })
 
-// Hold the finished turn's trace open (idempotent: safe to run again after the
-// history reload re-renders the turn).
+// Hold the finished turn's trace open until the reader returns to the bottom.
 function holdTraceOpen() {
   let lastUser = -1
   let traceIdx = -1
@@ -4027,12 +4031,15 @@ watch(
 // can stop short of the absolute bottom with smooth scrolling, especially
 // inside flex containers where the anchor is a zero-height child.
 let prevStreaming = store.isStreaming
+let prevStreamingChatId = store.activeChatId
 watch(
   () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length, store.isStreaming],
   () => {
     const streaming = store.isStreaming
-    const justFinished = prevStreaming && !streaming
+    // A chat switch also flips isStreaming; that is not a turn end.
+    const justFinished = prevStreaming && !streaming && prevStreamingChatId === store.activeChatId
     prevStreaming = streaming
+    prevStreamingChatId = store.activeChatId
     if (justFinished) {
       if (liveTraceReading.value || (liveTraceTouched.value && liveTraceOpen.value)) {
         // The reader keeps their place: hold the finished trace open until
