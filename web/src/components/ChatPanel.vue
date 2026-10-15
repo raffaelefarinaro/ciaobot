@@ -1999,9 +1999,6 @@ const pendingCollapseIdx = ref<number | null>(null)
 // Armed once the reader has actually moved away from the bottom while the
 // finished trace is held open; only then does returning to the bottom collapse it.
 const pendingCollapseArmed = ref(false)
-// What the turn end decided, kept until the turn-end history reload settles
-// (its pin-to-bottom would otherwise undo the landing or the hold).
-let turnEndMode: 'hold' | 'land' | null = null
 let lastScrollTop = 0
 let lastBodyScrollTop = 0
 const copiedMessageKey = ref<string | null>(null)
@@ -2159,7 +2156,6 @@ function resetLiveTraceState() {
   liveBodyAtBottom.value = true
   pendingCollapseIdx.value = null
   pendingCollapseArmed.value = false
-  turnEndMode = null
   lastBodyScrollTop = 0
 }
 
@@ -3978,6 +3974,7 @@ watch(() => store.activeChatId, () => {
   dockExpanded.value = false
   nextTick(() => {
     if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+    lastScrollTop = messagesEl.value?.scrollTop ?? 0
     // Hold the bottom while the incoming transcript's height settles, rather
     // than measuring it once against whatever was on screen at this instant
     // (usually the loading skeleton).
@@ -3989,16 +3986,7 @@ watch(() => store.activeChatId, () => {
 // arrives, and it happens after the switch above has already scrolled. Pin
 // again from there so the reveal itself lands at the bottom.
 watch(blockingHistoryLoad, (loading, wasLoading) => {
-  if (loading || !wasLoading) return
-  // The turn-end reload settling must re-apply the turn end, not pin to the
-  // bottom over it.
-  if (turnEndMode) {
-    const mode = turnEndMode
-    turnEndMode = null
-    nextTick(() => settleTurnEnd(mode))
-    return
-  }
-  nextTick(() => pinToBottom())
+  if (!loading && wasLoading) nextTick(() => pinToBottom())
 })
 
 watch(() => store.isStreaming, (streaming) => {
@@ -4021,11 +4009,6 @@ function holdTraceOpen() {
   openTraces.value = { ...openTraces.value, [traceIdx]: true }
   pendingCollapseIdx.value = traceIdx
   if (!isNearBottom.value) pendingCollapseArmed.value = true
-}
-
-function settleTurnEnd(mode = turnEndMode) {
-  if (mode === 'hold') holdTraceOpen()
-  else if (mode === 'land') landOnReply()
 }
 
 // Keep the live trace body on its newest step unless the user scrolled up in it.
@@ -4054,13 +4037,11 @@ watch(
       if (liveTraceReading.value || (liveTraceTouched.value && liveTraceOpen.value)) {
         // The reader keeps their place: hold the finished trace open until
         // they come back to the bottom.
-        turnEndMode = 'hold'
-        nextTick(() => settleTurnEnd())
+        nextTick(holdTraceOpen)
         return
       }
       if (isNearBottom.value) {
-        turnEndMode = 'land'
-        nextTick(() => settleTurnEnd())
+        nextTick(landOnReply)
         return
       }
     }

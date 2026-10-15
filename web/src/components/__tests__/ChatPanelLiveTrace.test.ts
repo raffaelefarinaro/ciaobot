@@ -245,7 +245,7 @@ describe('ChatPanel live trace', () => {
 
   // Resolve the turn-end history reload the way the real one lands: loading
   // flips on, then off, after the turn has already ended.
-  async function reloadHistory(store: ReturnType<typeof useProjectStore>) {
+  async function reloadHistory(store: ReturnType<typeof useProjectStore>, background = false) {
     let release: (v: unknown) => void = () => {}
     ;(api.get as unknown as ReturnType<typeof vi.fn>).mockImplementation((path: string) => {
       if (path.includes('/messages')) return new Promise(r => { release = r })
@@ -253,7 +253,7 @@ describe('ChatPanel live trace', () => {
       if (path.startsWith('/api/commands')) return Promise.resolve({ commands: [], skills: [] })
       return Promise.resolve([])
     })
-    const p = store.loadMessages('chat-1')
+    const p = store.loadMessages('chat-1', background ? { background: true } : undefined)
     await flushPromises()
     release([])
     await p
@@ -274,7 +274,7 @@ describe('ChatPanel live trace', () => {
     })
   }
 
-  it('lands on the start of a tall reply even when the history reload settles after', async () => {
+  it('lands on the start of a tall reply when the turn-end background reload settles after', async () => {
     const { wrapper, store, messagesEl } = await streamingPanel()
     stubReplyGeometry(messagesEl)
     stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })
@@ -282,7 +282,7 @@ describe('ChatPanel live trace', () => {
     await flushPromises()
 
     await finishTurn(store)
-    await reloadHistory(store)
+    await reloadHistory(store, true)
 
     expect((messagesEl as HTMLElement).scrollTop).toBe(4500 + 800 - 16)
     expect(wrapper.get('.trace-block').classes()).not.toContain('open')
@@ -294,12 +294,26 @@ describe('ChatPanel live trace', () => {
     stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })
 
     await finishTurn(store)
-    await reloadHistory(store)
+    await reloadHistory(store, true)
 
     expect((messagesEl as HTMLElement).scrollTop).not.toBe(5000)
   })
 
-  it('keeps a reading hold in place through the history reload', async () => {
+  it('pins to the bottom when a foreground history load settles after a finished turn', async () => {
+    const { store, messagesEl } = await streamingPanel()
+    stubReplyGeometry(messagesEl)
+    stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })
+    messagesEl.dispatchEvent(new Event('scroll'))
+    await flushPromises()
+
+    await finishTurn(store)
+    expect((messagesEl as HTMLElement).scrollTop).toBe(4500 + 800 - 16)
+    await reloadHistory(store)
+
+    expect((messagesEl as HTMLElement).scrollTop).toBe(5000)
+  })
+
+  it('keeps a reading hold in place through the turn-end background reload', async () => {
     const { wrapper, store, messagesEl } = await streamingPanel()
     stubMetrics(messagesEl, { scrollHeight: 5000, clientHeight: 500, scrollTop: 4500 })
     messagesEl.dispatchEvent(new Event('scroll'))
@@ -308,7 +322,7 @@ describe('ChatPanel live trace', () => {
     await flushPromises()
 
     await finishTurn(store)
-    await reloadHistory(store)
+    await reloadHistory(store, true)
 
     expect((messagesEl as HTMLElement).scrollTop).toBe(1000)
     expect(wrapper.get('.trace-block').classes()).toContain('open')
