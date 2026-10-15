@@ -651,6 +651,30 @@ def test_claude_convert_result_message(
     assert result.is_error is False
 
 
+def test_claude_result_carries_the_follow_up_origin(
+    claude_provider: ClaudeProvider,
+) -> None:
+    from claude_agent_sdk import ResultMessage
+
+    def convert(origin: dict[str, str] | None) -> str:
+        msg = ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="s",
+            origin=origin,
+        )
+        return claude_provider._convert_message(msg)[0].origin
+
+    assert convert({"kind": "task-notification", "producer": "session-task"}) == (
+        "task-notification"
+    )
+    assert convert(None) == ""
+    assert convert({"kind": "human"}) == ""
+
+
 def test_claude_error_result_gets_host_annotation(
     claude_provider: ClaudeProvider,
 ) -> None:

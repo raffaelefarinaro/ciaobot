@@ -1,10 +1,11 @@
 """Background-subagent completion watching, lifted out of ProjectChatManager.
 
 A turn that dispatches background ``Agent`` calls ends immediately; the agents
-outlive it and the CLI does not resume the parent when they finish. Something
-has to keep looking, publish the falling count, poke the parent for a
-consolidated report once the last one lands, and wake a chat whose CLI-owned
-tasks (Monitor, background Bash) died with their CLI. That is this module.
+outlive it. While the CLI stays connected it runs a follow-up turn by itself
+for each completion, and the between-turns drain streams that turn (#1394).
+This module keeps looking at the session file to publish the falling count,
+releases a parked announce when no follow-up will come, and wakes a chat whose
+CLI-owned tasks (Monitor, background Bash) died with their CLI.
 
 Ownership boundary — the three pieces of state this owns, and nothing else
 mutates:
@@ -22,15 +23,14 @@ mutates:
 
 Everything else it needs is the host's, reached through
 :class:`SubagentWatcherHost`: the chat registry and config, the event hub, the
-parked-announce machinery, the synthesis nudge (which is built from provider
-and drain state the manager owns) and wake delivery. The protocol is the whole
+parked-announce machinery, the drain state the manager owns and wake delivery. The protocol is the whole
 list, so what this collaborator asks of the manager is readable without
 reading the manager — and a test can drive the watcher against a stub host
 instead of building a ProjectChatManager.
 
 The manager keeps thin delegating methods under the old names: they are the
-seams the suite patches (``_cli_owner_alive``,
-``_nudge_synthesis_after_subagents``, ``_watch_subagent_completion_inner``),
+seams the suite patches (``_cli_owner_alive`` and
+``_watch_subagent_completion_inner``),
 and the watcher calls them back through the host so a patch on the manager is
 still the patch this code sees.
 """
@@ -42,7 +42,7 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ciao import subagent_tracking
 from ciao.providers.opencode import (
@@ -56,21 +56,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.web.project_chats import ChatInfo
 
 logger = logging.getLogger(__name__)
-
-# Why the synthesis nudge did or did not go out. The caller has to tell
-# "nothing will ever announce for this turn" (release the parked announce)
-# apart from "a user turn took over" (say nothing — that turn announces for
-# itself, and pushing here would deliver the interim non-answer mid-turn).
-#
-# It lives with the watcher rather than with the nudge: the nudge is the
-# manager's (it is assembled from provider and drain state), but the watcher
-# is the only caller and these outcomes are exactly the contract it needs back.
-# ``project_chats`` re-exports them.
-NudgeOutcome = Literal["sent", "reported", "superseded", "declined"]
-NUDGE_SENT: NudgeOutcome = "sent"
-NUDGE_REPORTED: NudgeOutcome = "reported"
-NUDGE_SUPERSEDED: NudgeOutcome = "superseded"
-NUDGE_DECLINED: NudgeOutcome = "declined"
 
 # The orphaned-CLI-task startup sweep only wakes chats active within this
 # window: the first upgrade after the sweep shipped must not wake every chat
@@ -104,22 +89,11 @@ class SubagentWatcherHost(Protocol):
 
     def _agent_root_for_chat(self, chat_id: str) -> Path: ...
 
-    def _parked_announce_token(self, chat_id: str) -> int | None: ...
+    def _flush_result_announce(self, chat_id: str) -> bool: ...
 
-    def _flush_result_announce(
-        self, chat_id: str, token: int | None = ...
-    ) -> bool: ...
-
-    def _arm_parked_announce_deadline(self, chat_id: str, token: int) -> None: ...
+    def _has_live_drain(self, chat_id: str) -> bool: ...
 
     def _cli_owner_alive(self, chat_id: str) -> bool: ...
-
-    def _is_interim_subagent_text(self, text: str) -> bool: ...
-
-    async def _nudge_synthesis_after_subagents(
-        self, chat_id: str, awaiting_user_answer: bool = ...,
-        already_reported: bool = ...,
-    ) -> NudgeOutcome: ...
 
     def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int) -> str: ...
 
@@ -128,7 +102,7 @@ class SubagentWatcherHost(Protocol):
     ) -> None: ...
 
     async def _watch_subagent_completion_inner(
-        self, chat_id: str, project_id: str, handed_to_drain: list[bool]
+        self, chat_id: str, project_id: str, saw_work: list[bool]
     ) -> None: ...
 
 
@@ -186,6 +160,28 @@ class SubagentWatchers:
             if not task.done()
         }
 
+    def current_count(self, chat_id: str) -> int:
+        """Running background agents for *chat_id*, read from the session file now.
+
+        The drain asks this when a follow-up result lands: the CLI writes the
+        completion into the JSONL before it runs the follow-up turn, so a fresh
+        read says whether this was the last one, where the published count can
+        lag a poll behind. Chats without a Claude session file report the last
+        published count.
+        """
+        chat = self._host._chats.get(chat_id)
+        if chat is None or not chat.session_id or chat.provider != "claude":
+            return self.running_count(chat_id)
+        path = subagent_tracking.find_parent_session_file(
+            chat.session_id,
+            self._host._config.workspace_root,
+            agent_root=self._host._agent_root_for_chat(chat_id),
+        )
+        if path is None:
+            return 0
+        state = subagent_tracking.parse_session_subagents(path)
+        return subagent_tracking.running_background_agents(path, state)
+
     # ── the watcher itself (moved verbatim from ProjectChatManager) ──────
 
     def start(self, chat_id: str, project_id: str) -> None:
@@ -196,14 +192,13 @@ class SubagentWatchers:
         task = asyncio.create_task(self._host._watch_subagent_completion(chat_id, project_id))
         self._pending_subagent_watchers[chat_id] = task
 
-    def publish_count(self, chat_id: str, project_id: str, count: int, nudged: bool = False) -> None:
+    def publish_count(self, chat_id: str, project_id: str, count: int) -> None:
         self._background_agents_last[chat_id] = count
         self._host._events.publish({
             "type": "chat_subagents_ready",
             "chat_id": chat_id,
             "project_id": project_id,
             "remaining": count,
-            "nudged": nudged,
         })
 
     async def watch(self, chat_id: str, project_id: str) -> None:
@@ -221,58 +216,33 @@ class SubagentWatchers:
         with nothing left in the parent file to ever bring it down. Recheck on
         every tick, not just when the parent file grows, for the same reason.
 
-        Emits ``chat_subagents_ready`` whenever the running count changes and
-        schedules a delayed push when the last one completes.
+        Emits ``chat_subagents_ready`` whenever the running count changes.
         """
-        # Every `return` below is a path where no nudge will ever fire, so the
-        # parked announce has to go out or the chat completes in silence. The
-        # finally is the backstop for all of them, including an exception.
-        #
-        # Guarded on still being the registered watcher: `_start_subagent_watcher`
-        # cancels and replaces the previous one, and cancellation is delivered
-        # asynchronously, so a superseded watcher's finally can run *after* the
-        # next turn has parked its own announce. Flushing there would push a
-        # result while its synthesis nudge was still pending. The chat's newest
-        # watcher is the only one entitled to release the chat's parked entry;
-        # the superseded turn's entry was already overwritten by that park.
-        # A box rather than a return value: the handoff has to survive the
-        # inner watcher raising *after* the nudge landed (a publish callback
-        # that throws, a bad JSONL line on the next tick). A lost return value
-        # would send this finally down the flush path while the drain is still
-        # going to announce the synthesis reply — two pushes for one turn.
-        handed_to_drain: list[bool] = []
+        # A watcher that saw background work leaves the park to a live drain:
+        # each finished task brings a native follow-up turn, and the drain
+        # announces the one that lands at count zero. Every other exit releases
+        # it here. Guarded on still being the registered watcher, because
+        # `start` cancels and replaces asynchronously.
+        saw_work: list[bool] = []
         try:
             await self._host._watch_subagent_completion_inner(
-                chat_id, project_id, handed_to_drain
+                chat_id, project_id, saw_work
             )
         finally:
-            # A non-empty box means a nudge landed and the between-turns
-            # drain now owns the release — it is the only code that learns
-            # whether a synthesis reply actually arrived and was worth
-            # announcing. Flushing here would push the interim non-answer
-            # alongside it.
-            #
-            # A live foreground turn owns it for the same reason: the nudge
-            # returning NUDGE_SUPERSEDED breaks the loop straight into this
-            # `finally`, so without the check the very flush that path
-            # declines to do happens here a moment later — the "I'll report
-            # back once the agents finish" push landing mid-turn. That turn's
-            # own turn-done handling discards this entry and announces for
-            # itself, so nothing is lost by staying quiet.
-            if not handed_to_drain:
-                current = self._pending_subagent_watchers.get(chat_id)
-                if current is None or current is asyncio.current_task():
+            current = self._pending_subagent_watchers.get(chat_id)
+            if current is None or current is asyncio.current_task():
+                if not (saw_work and self._host._has_live_drain(chat_id)):
                     self._host._flush_result_announce(chat_id)
 
     async def watch_inner(
-        self, chat_id: str, project_id: str, handed_to_drain: list[bool]
+        self, chat_id: str, project_id: str, saw_work: list[bool]
     ) -> None:
-        """Appends to ``handed_to_drain`` once the drain owns the parked announce."""
+        """Appends to ``saw_work`` once it sees background agents or CLI tasks running."""
         chat = self._host._chats.get(chat_id)
         if chat is None or not chat.session_id:
             return
         if chat.provider == "opencode":
-            # opencode has no nudge path, so nothing can take the park from us.
+            # opencode has no follow-up drain yet (#1391).
             await self._watch_opencode(chat_id, project_id)
             return
         # This watcher looks the file up exactly once; a miss here is final
@@ -289,37 +259,6 @@ class SubagentWatchers:
 
         last_count = -1
         last_size = -1
-        # Pending-notification handling. The completion watcher delays the
-        # synthesis nudge while the CLI is still processing a
-        # <task-notification>: steering into that exact window is the race
-        # that killed the 2026-08-30 daily-log run (the two prompts crossed
-        # on the transport, the SDK read task was cancelled, and the run
-        # ended on an interim message with the agents' data never
-        # synthesized). The hold is bounded at two ticks (~6s): a CLI that
-        # died before answering — the other half of that same failure —
-        # must not leave the chat parked on the interim message until the
-        # deadline, and steer() queues on the persistent client, so firing
-        # after the grace still lands after whatever turn the CLI is
-        # running instead of interleaving with it. "Nudged" is reported to
-        # clients only once, with the zero-count publish it belongs to.
-        held_ticks = 0
-        nudged = False
-        # One attempt per watcher, outcome regardless. Every exit path but the
-        # CLI-task one breaks right after the nudge, so a *failed* nudge got a
-        # retry only there — and that retry was harmful twice over: the failed
-        # attempt already flushed the parked interim announce, so a later
-        # success handed the drain a turn that would announce again (two pushes
-        # for one turn, the interim non-answer among them), and while the nudge
-        # kept failing — a parent that ended on a question never stops failing —
-        # every 3s tick re-ran `last_activity_at = now` + `_save()` and another
-        # steer attempt for the watcher's full hour.
-        nudge_attempted = False
-        # Only a chat that actually had background work gets the synthesis
-        # nudge: one this watcher saw running, or one the latest turn launched
-        # (an agent that already finished before the turn ended still needs its
-        # report). A plain turn — including a stopped one — has nothing to
-        # synthesize (#1290).
-        saw_running = False
         task_wake_sent = False
         cli_gone_ticks = 0
         state: subagent_tracking.SessionSubagentState | None = None
@@ -336,15 +275,14 @@ class SubagentWatchers:
                     last_size = size
                     state = subagent_tracking.parse_session_subagents(path)
                 count = subagent_tracking.running_background_agents(path, state)
-                if count > 0:
-                    saw_running = True
-                pending = state.notification_pending
+                tasks = subagent_tracking.running_tasks(state)
+                if (count > 0 or tasks) and not saw_work:
+                    saw_work.append(True)
                 # CLI-owned tasks (Monitor / background Bash): when the CLI
                 # subprocess that owns them is gone, their completion will
                 # never be delivered. Two consecutive disconnected ticks give
                 # a normal between-turns reconnect time to come back before
                 # the wake fires.
-                tasks = subagent_tracking.running_tasks(state)
                 if tasks and not task_wake_sent:
                     if not self.unwoken_tasks(chat_id, tasks):
                         # Already woken this process; a wake whose turn never
@@ -356,79 +294,13 @@ class SubagentWatchers:
                         if cli_gone_ticks >= 2:
                             self.wake_for_dead_cli_tasks(chat, project_id, tasks)
                             task_wake_sent = True
-                if pending:
-                    held_ticks += 1
-                else:
-                    # A closed window must not spend its grace on the next
-                    # one: an earlier notification leaves held_ticks at
-                    # whatever it climbed to, and without the reset a later
-                    # notification would inherit "grace expired" on its first
-                    # tick and steer into the CLI's processing window — the
-                    # exact prompt-crossing race the hold exists to prevent.
-                    held_ticks = 0
-                grace_expired = pending and held_ticks > 2
-                ready_to_nudge = (
-                    count == 0
-                    and not nudge_attempted
-                    and (saw_running or state.background_dispatched_in_latest_turn)
-                    and (not pending or grace_expired)
-                )
-                if count != last_count or ready_to_nudge:
-                    if ready_to_nudge:
+                if count != last_count:
+                    if count == 0 and last_count > 0:
                         chat_now = self._host._chats.get(chat_id)
                         if chat_now is not None:
                             chat_now.last_activity_at = chat_service._now_iso()
                             self._host._save()
-                        # Poke the parent to synthesize a final report. The
-                        # CLI won't auto-continue the turn on its own, so
-                        # without this the chat sits on the interim
-                        # "I'll report back" message forever. The
-                        # unprocessed-notification hold above decides *when*:
-                        # not inside the CLI's own window (the race that
-                        # killed the 2026-08-30 daily-log run), or, if the
-                        # window never closes, after the bounded grace. When
-                        # the nudge lands on the live client the between-turns
-                        # drain publishes the reply (and its own push); we
-                        # only fall back to a bare push if the nudge could
-                        # not be delivered. We intentionally do NOT send a
-                        # separate generic "Background agents finished" push
-                        # — it stacked a second, content-free notification
-                        # on top of the chat's own result push (user
-                        # feedback). The in-app subagent count below still
-                        # updates the UI.
-                        # The question hold stays absolute (inside the
-                        # nudge call); only the notification hold above
-                        # carries the bounded grace.
-                        nudge_attempted = True
-                        already_reported = (
-                            state.notification_answered
-                            and not state.notification_pending
-                            and not self._host._is_interim_subagent_text(
-                                state.last_assistant_text
-                            )
-                        )
-                        outcome = await self._host._nudge_synthesis_after_subagents(
-                            chat_id,
-                            awaiting_user_answer=state.awaiting_user_answer,
-                            already_reported=already_reported,
-                        )
-                        nudged = outcome == NUDGE_SENT
-                        if outcome in (NUDGE_SENT, NUDGE_REPORTED):
-                            handed_to_drain.append(True)
-                            parked_token = self._host._parked_announce_token(chat_id)
-                            if parked_token is not None:
-                                self._host._arm_parked_announce_deadline(
-                                    chat_id, parked_token
-                                )
-                        elif outcome == NUDGE_DECLINED:
-                            current = self._pending_subagent_watchers.get(chat_id)
-                            if current is None or current is asyncio.current_task():
-                                self._host._flush_result_announce(
-                                    chat_id,
-                                    self._host._parked_announce_token(chat_id),
-                                )
-                    if count != last_count or (ready_to_nudge and nudged):
-                        self.publish_count(chat_id, project_id, count, nudged=nudged)
+                    self.publish_count(chat_id, project_id, count)
                     last_count = count
                 # Keep the watcher alive while tracked CLI tasks are still
                 # running and their wake has not gone out: once the owning
@@ -448,7 +320,7 @@ class SubagentWatchers:
                         break
                     await asyncio.sleep(3)
                     continue
-                if count == 0 and (not pending or nudged or grace_expired):
+                if count == 0:
                     break
                 await asyncio.sleep(3)
         finally:
@@ -508,7 +380,7 @@ class SubagentWatchers:
                         # No separate "Background agents finished" push — the
                         # chat's own result notification covers it; the extra
                         # generic ping was redundant (user feedback).
-                    self.publish_count(chat_id, project_id, count, nudged=False)
+                    self.publish_count(chat_id, project_id, count)
                     last_count = count
                 if not had_subagents or count == 0:
                     break

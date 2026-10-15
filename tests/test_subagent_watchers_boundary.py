@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from ciao.subagent_tracking import SubagentInfo
-from ciao.web.subagent_watchers import NUDGE_DECLINED, SubagentWatchers
+from ciao.web.subagent_watchers import SubagentWatchers
 
 
 class _StubHost:
@@ -41,27 +41,15 @@ class _StubHost:
     def _agent_root_for_chat(self, chat_id: str) -> Path:
         return Path("/tmp")
 
-    def _parked_announce_token(self, chat_id: str) -> int | None:
-        return None
-
-    def _flush_result_announce(self, chat_id: str, token: int | None = None) -> bool:
+    def _flush_result_announce(self, chat_id: str) -> bool:
         self.flushed.append(chat_id)
         return True
 
-    def _arm_parked_announce_deadline(self, chat_id: str, token: int) -> None:
-        raise AssertionError("no park in these tests")
+    def _has_live_drain(self, chat_id: str) -> bool:
+        return False
 
     def _cli_owner_alive(self, chat_id: str) -> bool:
         return False
-
-    def _is_interim_subagent_text(self, text: str) -> bool:
-        return False
-
-    async def _nudge_synthesis_after_subagents(
-        self, chat_id: str, awaiting_user_answer: bool = False,
-        already_reported: bool = False,
-    ):
-        return NUDGE_DECLINED
 
     def _deliver_wake(self, parent, prompt: str, *, count: int) -> str:
         self.wakes.append((parent.chat_id, count))
@@ -71,9 +59,9 @@ class _StubHost:
         await self.watchers.watch(chat_id, project_id)
 
     async def _watch_subagent_completion_inner(
-        self, chat_id: str, project_id: str, handed_to_drain: list[bool]
+        self, chat_id: str, project_id: str, saw_work: list[bool]
     ) -> None:
-        await self.watchers.watch_inner(chat_id, project_id, handed_to_drain)
+        await self.watchers.watch_inner(chat_id, project_id, saw_work)
 
 
 def _host() -> _StubHost:
@@ -93,7 +81,6 @@ def test_publishing_a_count_needs_no_manager() -> None:
         "chat_id": "chat-1",
         "project_id": "proj-1",
         "remaining": 2,
-        "nudged": False,
     }]
     assert watchers.running_counts() == {"chat-1": 2}
     assert watchers.running_count("chat-1") == 2

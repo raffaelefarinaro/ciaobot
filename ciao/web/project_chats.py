@@ -164,14 +164,7 @@ from ciao.web.document_conversion import (
     is_natively_readable,
 )
 from ciao.web.file_snapshots import SnapshotStore
-from ciao.web.subagent_watchers import (
-    NUDGE_DECLINED,
-    NUDGE_REPORTED,
-    NUDGE_SENT,
-    NUDGE_SUPERSEDED,
-    NudgeOutcome,
-    SubagentWatchers,
-)
+from ciao.web.subagent_watchers import SubagentWatchers
 
 logger = logging.getLogger(__name__)
 
@@ -196,30 +189,12 @@ _RETRY_CONNECTION_INTERVAL_SECONDS = 30
 # How often the retry loop checks whether its fired retry stream has ended.
 _RETRY_STREAM_POLL_SECONDS = 5
 _RETRY_STATUSES = {"pending", "stopped", ""}
-# Shortest synthesis-nudge reply that still earns an unread badge and a push.
+# Shortest follow-up-turn reply that still earns an unread badge and a push.
 # Anything shorter is the model's own bookkeeping ("ok", "done."). Applies only
-# to the nudge drain, never to a reply the user asked for: see
-# ProjectChatManager._is_worth_announcing_nudge_reply.
-_NUDGE_ANNOUNCE_MIN_CHARS = 4
+# to the follow-up drain, never to a reply the user asked for: see
+# ProjectChatManager._is_worth_announcing_follow_up.
+_FOLLOW_UP_ANNOUNCE_MIN_CHARS = 4
 
-# How long a result announce may stay parked once the synthesis nudge has been
-# delivered and the between-turns drain owns it. The drain releases the entry on
-# every way its event stream can end; this covers the one way it cannot see — a
-# CLI that is alive and simply never answers (issue #437).
-#
-# The trade-off runs both ways and neither end is free: too short and a
-# genuinely slow synthesis turn gets the interim "I'll report back" push moments
-# before its own real one; too long and a notification the user needed arrives
-# after it stopped being useful. Five minutes is well past any synthesis turn
-# observed in practice (they follow subagents that have already finished, so the
-# parent only has to write a report) while still being inside the window where
-# someone might act on the result.
-_PARKED_ANNOUNCE_DEADLINE_SECONDS = 300.0
-
-# The synthesis nudge's outcome vocabulary is defined with its only caller,
-# ciao/web/subagent_watchers.py, and re-exported here: the nudge itself stays
-# in this class (it is assembled from provider and drain state this class
-# owns), and importers of these names do not move.
 # Patterns an unattended parent emits while still waiting on its background
 # subagents. A run that ended on one of these never synthesized its agents'
 # results — the follow-up turn died before producing a report — so the run is
@@ -259,16 +234,6 @@ _MAX_QUOTA_RETRIES = 6
 _TERMINAL_QUOTA_RETRY_INTERVAL_SECONDS = 24 * 60 * 60
 _MAX_TERMINAL_QUOTA_RETRIES = 7
 
-# Injected into the parent turn when its background subagents all finish. The
-# CLI does not auto-continue a parent turn after a background `Agent` dispatch
-# completes (see ciao/system_prompt.md), so without this nudge the chat stays
-# stuck on the interim "I'll report back when they finish" message. The nudge
-# is delivered on the persistent client so the already-running between-turns
-# drain captures and publishes the synthesis turn like a normal reply. The text
-# is owned by ciao/subagent_tracking.py, which also has to recognize it (the
-# /messages renderer collapses it into a system line rather than showing a user
-# bubble nobody typed).
-_SUBAGENT_SYNTHESIS_NUDGE = subagent_tracking.SUBAGENT_SYNTHESIS_NUDGE
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
 # batch of scripts that finishes together should produce one wake turn, not N.
@@ -855,19 +820,9 @@ class ProjectChatManager:
         # workspace's Memory project. Inert while ciao.web.memory_pass's
         # MEMORY_PASS_CHATS is False; see that module for the lifecycle.
         self._memory_pass = MemoryPassCoordinator(self)
-        # Result announces parked while the synthesis nudge decides whether it
-        # will speak instead. See `_park_result_announce`. chat_id ->
-        # (token, project_id, title, snippet).
-        self._parked_result_announce: dict[str, tuple[int, str, str, str]] = {}
-        # Monotonic id per park, so a late releaser (the deadline task, a
-        # superseded watcher) can prove the entry it is about to act on is
-        # still the one it parked.
-        self._parked_announce_seq = 0
-        # Per-chat deadline task armed once the drain owns a parked announce.
-        # Held so the drain going away (a new user turn, delete, archive) can
-        # cancel it: the deadline's whole premise is "the drain still owns this
-        # and will never release it", and that premise dies with the drain.
-        self._parked_announce_deadlines: dict[str, asyncio.Task] = {}
+        # Result announce held for the chat's follow-up turn (see
+        # `_park_result_announce`). chat_id -> (project_id, title, snippet).
+        self._parked_result_announce: dict[str, tuple[str, str, str]] = {}
         # Finished background command runs waiting to wake the chat that
         # started them, keyed by chat id. Held for
         # _BACKGROUND_WAKE_WINDOW_SECONDS so a batch of scripts that finishes
@@ -6157,11 +6112,11 @@ class ProjectChatManager:
         return flat
 
     @staticmethod
-    def _is_worth_announcing_nudge_reply(text: str) -> bool:
-        """True when a synthesis-nudge reply is worth an unread badge and a push.
+    def _is_worth_announcing_follow_up(text: str) -> bool:
+        """True when a follow-up-turn reply is worth an unread badge and a push.
 
         Only for ``_drain_between_turns``. That path is not a user question: the
-        completion watcher asked for the turn, so a stub reply ("ok", "done.")
+        CLI ran the turn by itself when background work finished, so a stub reply ("ok", "done.")
         is the model's own bookkeeping and an OS toast carrying it is noise.
         Below the floor the in-app UI stays the sole signal (subagent count drop
         plus Activity row), matching the 2026-07-30 watcher-exit fix.
@@ -6174,7 +6129,7 @@ class ProjectChatManager:
         regular path gates on non-empty text only.
         """
         flat = " ".join((text or "").strip().splitlines()).strip()
-        return len(flat) >= _NUDGE_ANNOUNCE_MIN_CHARS
+        return len(flat) >= _FOLLOW_UP_ANNOUNCE_MIN_CHARS
 
     @staticmethod
     def _is_interim_subagent_text(text: str) -> bool:
@@ -6187,11 +6142,14 @@ class ProjectChatManager:
         :meth:`dispatch_schedule` to keep such a run visible instead of
         auto-archiving a stub (the 2026-08-30 daily-log failure), and by the
         turn-done branch to decide whether to PARK the result announce for the
-        synthesis nudge.
+        follow-up turn.
 
         The patterns are deliberately broad ("waiting on ..."), which is safe
-        for parking (a false positive only defers the announce to the watcher,
-        which always releases it) but not for suppressing: a caller that drops
+        for parking: parking now holds the announce until the follow-up at
+        count zero. A false positive only defers the announce: the watcher
+        releases it when it saw no background work or no drain is live, and the
+        drain releases it at count zero or when it ends. It is not safe for
+        suppressing: a caller that drops
         anything on the strength of this must be certain something else will
         fire in its place. Nothing does that any more — see
         :meth:`_park_result_announce`.
@@ -6640,67 +6598,33 @@ class ProjectChatManager:
     # ── the result announce, and who owns it ─────────────────────────────
     #
     # A turn that ends on "I'll report back once the agents finish" is not a
-    # result, so announcing it pushes a non-answer. The synthesis nudge will
-    # produce the real reply and that reply carries its own announce — but the
-    # nudge has many reasons to stand down (no parent session file, no live
-    # provider, no between-turns drain, a non-background stream, steer missing
-    # or refusing, the parent ending on a question for the user, an exception).
-    #
-    # This used to be handled by *predicting* those reasons at the turn-done
-    # site and dropping the announce when the prediction said the nudge would
-    # fire. Every reason the predicate did not know about became a chat that
-    # completed in silence — no push, no unread badge, no archive proposal —
-    # and nothing errored, so it was invisible. Instead: park the announce, and
-    # let exactly one owner release it. The watcher flushes it on every exit
-    # path it has; a successful nudge discards it, because the reply it
-    # produces announces for itself.
+    # result, so it is parked rather than announced. The CLI runs a follow-up
+    # turn per finished task, and the between-turns drain streams it. While
+    # agents still run, a follow-up replaces the parked entry; the result that
+    # lands at background count zero announces once and discards the park. The
+    # watcher releases the park when it saw no background work or no drain is
+    # live; the drain releases it when it ends uncancelled; Stop releases it.
 
     def _park_result_announce(
         self, chat_id: str, project_id: str, title: str, snippet: str
-    ) -> int:
-        """Hold this turn's announce until the nudge decides whether to speak.
+    ) -> None:
+        """Hold this announce for the chat's follow-up turn; a later park replaces it."""
+        self._parked_result_announce[chat_id] = (project_id, title, snippet)
 
-        Returns a token identifying THIS park. Anything that releases an entry
-        later — the deadline below, a watcher's finally — passes it back, so a
-        late owner can never act on a newer turn's entry that happens to sit in
-        the same per-chat slot.
-        """
-        self._parked_announce_seq += 1
-        token = self._parked_announce_seq
-        self._parked_result_announce[chat_id] = (token, project_id, title, snippet)
-        return token
+    def _discard_result_announce(self, chat_id: str) -> None:
+        """A newer result announced in its place; drop the held one."""
+        self._parked_result_announce.pop(chat_id, None)
 
-    def _parked_announce_token(self, chat_id: str) -> int | None:
-        parked = self._parked_result_announce.get(chat_id)
-        return None if parked is None else parked[0]
-
-    def _take_parked_announce(
-        self, chat_id: str, token: int | None
-    ) -> tuple[int, str, str, str] | None:
-        """Pop the parked entry when *token* still identifies it."""
-        parked = self._parked_result_announce.get(chat_id)
-        if parked is None:
-            return None
-        if token is not None and parked[0] != token:
-            return None
-        return self._parked_result_announce.pop(chat_id)
-
-    def _discard_result_announce(self, chat_id: str, token: int | None = None) -> None:
-        """The nudge's reply announced instead; drop this entry."""
-        self._take_parked_announce(chat_id, token)
-
-    def _flush_result_announce(self, chat_id: str, token: int | None = None) -> bool:
+    def _flush_result_announce(self, chat_id: str) -> bool:
         """Announce a parked result. Returns True when one was actually announced.
 
         Idempotent by construction — the entry is popped — so it is safe to
         call from a `finally` that may run after an explicit flush.
 
         Refuses while a foreground turn owns the chat, and that check lives
-        HERE rather than at the call sites. There are five of them — the
-        watcher's `finally`, its in-loop decline branch, the drain, the
-        deadline, and Stop — and each was fixed for this separately, one
-        review round at a time, because a stale park pushed mid-turn looks
-        different from each. A live turn always discards this entry at its
+        HERE rather than at the call sites. There are three of them — the
+        watcher's `finally`, the drain (a result at count zero, or its end) and
+        Stop — and a stale park pushed mid-turn looks different from each. A live turn always discards this entry at its
         turn-done and announces its own result in its place, so the entry is
         deliberately left there for it rather than popped. (A turn that ends
         in an error or with no text announces nothing, but the user who sent
@@ -6709,10 +6633,10 @@ class ProjectChatManager:
         """
         if self._foreground_turn_active(chat_id):
             return False
-        parked = self._take_parked_announce(chat_id, token)
+        parked = self._parked_result_announce.pop(chat_id, None)
         if parked is None:
             return False
-        _token, project_id, title, snippet = parked
+        project_id, title, snippet = parked
         self._announce_result_ready(chat_id, project_id, title, snippet)
         self._spawn_detached(
             self._maybe_archive_proposal_helper(chat_id),
@@ -6734,75 +6658,11 @@ class ProjectChatManager:
         stream = self._broker.get(chat_id)
         return stream is not None and not stream.background
 
-    def _arm_parked_announce_deadline(self, chat_id: str, token: int) -> None:
-        """Release a handed-off announce if the synthesis reply never arrives.
-
-        The drain owns the parked entry once a nudge lands, and releases it on
-        every way `drain_events()` can END. But a CLI that is alive and simply
-        never answers the nudge ends it in no way at all: the drain stays
-        suspended on the queue until the next user turn cancels it, and that
-        path deliberately does not flush (the new turn supersedes the interim
-        announce). Without a deadline the chat sits on "I'll report back once
-        the agents finish" with no push, no unread badge and no archive
-        proposal until the user happens to open it (issue #437).
-
-        Token-scoped, so a fire that lands after the drain announced, after a
-        later turn parked its own entry, or after anything else released this
-        one is a no-op.
-
-        Also cancelled outright when the drain it is backstopping goes away
-        (`_cancel_between_turns_drain` / `_await_between_turns_drain`). A token
-        alone is not enough there: a new user turn cancels the drain but does
-        not clear the park until *its own* turn ends, so a turn that outruns
-        the deadline would otherwise let this fire mid-turn and push the very
-        "I'll report back once the agents finish" non-answer the drain's
-        cancelled path refuses to send.
-        """
-        self._cancel_parked_announce_deadline(chat_id)
-        self._parked_announce_deadlines[chat_id] = self._spawn_detached(
-            self._release_parked_announce_after_deadline(chat_id, token),
-            f"parked-announce-deadline-{chat_id}",
-        )
-
-    def _cancel_parked_announce_deadline(self, chat_id: str) -> None:
-        """Drop the deadline armed for this chat, if any."""
-        task = self._parked_announce_deadlines.pop(chat_id, None)
-        if task is not None and not task.done():
-            task.cancel()
-
-    async def _release_parked_announce_after_deadline(
-        self, chat_id: str, token: int
-    ) -> None:
-        try:
-            await asyncio.sleep(_PARKED_ANNOUNCE_DEADLINE_SECONDS)
-        finally:
-            # Deregister before announcing so a release path that cancels the
-            # deadline cannot cancel the very task that is running it.
-            if self._parked_announce_deadlines.get(chat_id) is asyncio.current_task():
-                self._parked_announce_deadlines.pop(chat_id, None)
-        # Cancelling the deadline alongside the drain is the primary defence
-        # against firing mid-turn, but it is not airtight: `start_stream` only
-        # cancels the drain when a background stream was already registered
-        # (most drains sit idle and register none), so on that path the cancel
-        # waits for the turn task's own `_await_between_turns_drain`. A fire in
-        # that window would push the interim non-answer into a live turn.
-        #
-        # No guard needed here: `_flush_result_announce` refuses during a live
-        # turn, leaving the entry parked for that turn to discard, and returns
-        # False — so the log line below stays honest without one.
-        if self._flush_result_announce(chat_id, token):
-            logger.info(
-                "Synthesis reply for chat %s did not arrive within %ss; "
-                "announcing the interim result instead",
-                chat_id,
-                _PARKED_ANNOUNCE_DEADLINE_SECONDS,
-            )
-
     # ── background subagent watching ─────────────────────────────────────
     # Owned by ciao/web/subagent_watchers.py. What stays here is the
     # coordination the watcher asks for through SubagentWatcherHost: the
-    # synthesis nudge (assembled from provider and drain state this class
-    # owns), the CLI-liveness question, and wake delivery. The rest are thin
+    # drain-liveness and fresh-count questions, the CLI-liveness question, and
+    # wake delivery. The rest are thin
     # delegates kept under their old names — they are the seams the suite
     # patches, and the watcher calls them back through the host so a patch
     # here is the patch it sees.
@@ -6836,17 +6696,17 @@ class ProjectChatManager:
         self._subagents.start(chat_id, project_id)
 
     def _publish_subagent_count(
-        self, chat_id: str, project_id: str, count: int, nudged: bool = False
+        self, chat_id: str, project_id: str, count: int
     ) -> None:
-        self._subagents.publish_count(chat_id, project_id, count, nudged=nudged)
+        self._subagents.publish_count(chat_id, project_id, count)
 
     async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
         await self._subagents.watch(chat_id, project_id)
 
     async def _watch_subagent_completion_inner(
-        self, chat_id: str, project_id: str, handed_to_drain: list[bool]
+        self, chat_id: str, project_id: str, saw_work: list[bool]
     ) -> None:
-        await self._subagents.watch_inner(chat_id, project_id, handed_to_drain)
+        await self._subagents.watch_inner(chat_id, project_id, saw_work)
 
     def _unwoken_tasks(
         self, chat_id: str, tasks: list[SubagentInfo]
@@ -6867,96 +6727,13 @@ class ProjectChatManager:
         return SubagentWatchers.build_cli_task_wake_prompt(tasks)
 
 
-    async def _nudge_synthesis_after_subagents(
-        self, chat_id: str, awaiting_user_answer: bool = False,
-        already_reported: bool = False,
-    ) -> NudgeOutcome:
-        """Ask the parent to post a final report once its subagents finish.
+    def _has_live_drain(self, chat_id: str) -> bool:
+        """True while a between-turns drain is consuming this chat's follow-up turns."""
+        return self._streaming.has_live_drain(chat_id)
 
-        A background ``Agent`` dispatch ends the parent turn immediately and
-        the CLI does not resume it when the subagent completes, so the chat
-        would otherwise stay on the interim "I'll report back" message. We
-        inject a synthesis prompt on the persistent client; the between-turns
-        drain (started alongside this watcher) consumes the resulting turn and
-        publishes it like any normal reply. Returns ``sent`` when the nudge
-        reached a live client, ``reported`` when the drain already owns a
-        completed report, and a declined/superseded outcome otherwise.
-
-        ``awaiting_user_answer`` holds the nudge back when the parent ended its
-        turn by asking the user a question: answering it is the user's move,
-        and nudging would both bury the question and answer on their behalf.
-        (A still-unprocessed completion notification is a second hold reason,
-        but it carries its own bounded grace in the watcher, so the watcher
-        passes the question signal only.) The question stays the last thing
-        in the transcript; the finished agents are still surfaced by the
-        ``chat_subagents_ready`` count dropping to zero and by the subagent
-        panel refresh it triggers.
-
-        ``already_reported`` hands the parked announce to the drain without
-        injecting another prompt when the CLI resumed the parent itself and
-        the parent already wrote its report.
-        """
-        provider = self._providers.get(chat_id)
-        if provider is None or not provider.can_drain:
-            return NUDGE_DECLINED
-        # A user send since the turn ended cancels the drain; don't inject into
-        # a live user turn or a chat with no drain to capture the reply.
-        #
-        # SUPERSEDED, not declined: this is a user turn taking the chat over,
-        # and it will announce its own result and clear the park when it ends.
-        # Releasing the parked announce here would push "I'll report back once
-        # the agents finish" into the middle of that turn.
-        drain = self._streaming.drain_for(chat_id)
-        if drain is None or drain.done():
-            return NUDGE_SUPERSEDED
-        if self._foreground_turn_active(chat_id):
-            return NUDGE_SUPERSEDED
-        chat = self._chats.get(chat_id)
-        if chat is None:
-            return NUDGE_DECLINED
-        if already_reported:
-            return NUDGE_REPORTED
-        if awaiting_user_answer:
-            return NUDGE_DECLINED
-        prefix = self._build_prompt_prefix(chat)
-        full_prompt = (
-            prefix + _SUBAGENT_SYNTHESIS_NUDGE
-            if prefix
-            else _SUBAGENT_SYNTHESIS_NUDGE
-        )
-        fs_scope, fs_roots = self._agent_fs_scope_for_chat(chat)
-        request = AgentRequest(
-            prompt=full_prompt,
-            model=self._runtime_model_for_chat(chat),
-            provider=chat.provider,
-            mode=self._effective_mode_for_chat(chat),
-            resume_session=chat.session_id or None,
-            images=[],
-            extra_env=self._build_extra_env(chat),
-            disallowed_tools=self.disallowed_tools_for_chat(chat),
-            agent_fs_scope=fs_scope,
-            agent_roots=fs_roots,
-            thinking_level=self._thinking_level_for_chat(chat),
-        )
-        try:
-            # Prefer the ProviderService wrapper when available (restored in
-            # ciao/provider_service.py for the internal synthesis nudge), but
-            # also support a raw provider impl (as used in
-            # tests/test_chat_subagents.py's FakeProvider) and the direct
-            # ``provider.provider`` path suggested in #306.
-            steer = getattr(provider, "steer", None)
-            if not callable(steer):
-                impl = getattr(provider, "provider", None)
-                if impl is not None:
-                    steer = getattr(impl, "steer", None)
-            if not callable(steer):
-                return NUDGE_DECLINED
-            return NUDGE_SENT if await steer(request) else NUDGE_DECLINED
-        except Exception:  # noqa: BLE001 — a failed nudge must not kill the watcher
-            logger.exception(
-                "Subagent synthesis nudge failed for chat %s", chat_id
-            )
-            return NUDGE_DECLINED
+    def _background_count_now(self, chat_id: str) -> int:
+        """Running background agents for *chat_id*, read now, not from the last poll."""
+        return self._subagents.current_count(chat_id)
 
     def _cli_owner_alive(self, chat_id: str) -> bool:
         """True while the chat's CLI subprocess (if any) is still connected.
@@ -6978,9 +6755,8 @@ class ProjectChatManager:
         in-flight stream when the chat is mid-turn (so we never interrupt the
         user), and returns False when the chat is idle. start_stream then
         handles the idle case, including a cold chat whose provider session
-        died in a restart — the reason the subagent synthesis nudge's
-        steer-only approach is not enough here, since a script can finish hours
-        after the turn that launched it.
+        died in a restart, since a script can finish hours after the turn that
+        launched it.
         """
         if self.queue_message(parent.chat_id, prompt):
             delivery = "queued"
@@ -7657,10 +7433,8 @@ class ProjectChatManager:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream).
                 await self._await_between_turns_drain(chat_id)
-                # The drain's cancelled path leaves the park to "the next
-                # turn", and the deadline that used to backstop it was just
-                # cancelled with the drain — but Stop starts no next turn, so
-                # nobody is left to release it. Flush here or the chat keeps
+                # The drain's cancelled path leaves the park to the next
+                # turn, but Stop starts none, so nobody is left to release it. Flush here or the chat keeps
                 # its interim message with no unread badge, no push and no
                 # archive proposal (issue #437).
                 #
@@ -7965,7 +7739,7 @@ class ProjectChatManager:
         )
 
     def _discard_schedule_drain_result(self, chat_id: str) -> None:
-        """Drop a stale synthesis result before a scheduled run waits.
+        """Drop a stale follow-up result before a scheduled run waits.
 
         The schedule collaborator calls this manager seam instead of reaching
         into ``ChatStreaming`` directly, keeping the streaming owner explicit

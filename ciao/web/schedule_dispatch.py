@@ -700,7 +700,7 @@ class ScheduleDispatcher:
         # result — not an interim "dispatched, will report later" message. If
         # they don't settle in time, mark the run pending so it stays visible.
         if chat_service._schedule_run_clean(outcome):
-            # Drop any stale synthesis result before waiting so we only pick up
+            # Drop any stale follow-up result before waiting so we only pick up
             # the turn that runs when *these* subagents finish. The drain that
             # captures it was started by start_stream's completion handler.
             self._host._discard_schedule_drain_result(target_id)
@@ -708,7 +708,7 @@ class ScheduleDispatcher:
             if not settled:
                 outcome.subagents_pending = True
             elif had_async and chat_state is not None and chat_state.provider == "claude":
-                # Background subagents finished: the CLI runs a synthesis turn
+                # Background subagents finished: the CLI runs a follow-up turn
                 # whose result the between-turns drain records. Feed that real
                 # summary to the archive classifier instead of the interim
                 # parent message. Bounded; exits as soon as the result lands.
@@ -727,11 +727,10 @@ class ScheduleDispatcher:
                 if not outcome.is_error and self._host._is_interim_subagent_text(
                     outcome.final_text
                 ):
-                    # The synthesis turn never happened (or the CLI died
-                    # before writing one — the 2026-08-30 daily-log run: the
-                    # nudge and the final task-notification crossed, the SDK
-                    # read task was cancelled, and the run "ended" on an
-                    # interim message). The parent's data is un-synthesized
+                    # The follow-up turn the CLI runs when the agents finish
+                    # never happened, or the CLI died before writing one (the
+                    # 2026-08-30 daily-log run "ended" on an interim message).
+                    # The parent's data is un-synthesized
                     # and whatever work was supposed to follow — writing the
                     # log, committing — never ran. The run is not done: keep
                     # the chat visible instead of archiving a stub.

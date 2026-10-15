@@ -333,6 +333,10 @@ class ResultEvent(StreamEvent):
     # unanswered. The result is then published over a live card, so a watcher
     # reading it must not treat the attempt as finished work (#1111).
     recovered_with_pending: bool = False
+    # Kind of input that started this turn, as the provider reports it: "" for
+    # Ciaobot's own prompt, "task-notification" for a follow-up turn the CLI ran
+    # on its own after background work finished (#1394).
+    origin: str = ""
 
 
 @dataclass(slots=True)
