@@ -121,7 +121,11 @@ from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.claude import get_session_info
-from ciao.providers.opencode import OpencodeProvider, QuestionResponseResult
+from ciao.providers.opencode import (
+    _OPENCODE_DRAIN_MAX_S,
+    OpencodeProvider,
+    QuestionResponseResult,
+)
 from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,
@@ -4232,9 +4236,20 @@ class ProjectChatManager:
         # not work. Claude's background agents are counted by active_chat_ids,
         # a drain streaming a follow-up holds a broker stream, and opencode
         # reports its own outstanding work.
-        provider = self._providers.get(chat_id)
-        if self._streaming.has_live_drain(chat_id) and bool(
-            getattr(provider, "background_work_outstanding", False)
+        service = self._providers.get(chat_id)
+        if (
+            service is not None
+            and self._streaming.has_live_drain(chat_id)
+            and service.background_work_outstanding
+        ):
+            return True
+        if (
+            service is not None
+            and service.background_work_outstanding
+            # Same horizon as the drain: a server whose drain ended with work
+            # still outstanding stays up while its events are recent, then
+            # falls back to the idle timeout.
+            and service.background_activity_age < _OPENCODE_DRAIN_MAX_S
         ):
             return True
         for tasks in (self._retry_tasks, self._background_wake_tasks):
@@ -7441,6 +7456,18 @@ class ProjectChatManager:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream).
                 await self._await_between_turns_drain(chat_id)
+                # OpenCode's follow-up execution runs in the server, not in the
+                # drain: ending the drain alone would leave it running (#1391).
+                service = self._providers.get(chat_id)
+                live = service.provider if service is not None else None
+                if isinstance(live, OpencodeProvider) and live.current_session_id:
+                    try:
+                        await asyncio.wait_for(
+                            live.abort_session(live.current_session_id),
+                            timeout=self._STOP_GRACE_S,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
                 # The drain's cancelled path leaves the park to the next
                 # turn, but Stop starts none, so nobody is left to release it. Flush here or the chat keeps
                 # its interim message with no unread badge, no push and no

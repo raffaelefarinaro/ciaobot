@@ -240,6 +240,8 @@ class _DrainingProvider:
 
     can_drain = True
 
+    background_work_outstanding = False
+
     def __init__(self, events: list[StreamEvent]) -> None:
         self._events = events
 

@@ -1064,13 +1064,12 @@ class ChatStreaming:
                 and capabilities_for(chat_for_watcher.provider).background_subagents
             ):
                 self._host._start_subagent_watcher(chat_id, project_id)
-                if chat_for_watcher.provider == "claude":
-                    self._host._start_between_turns_drain(chat_id, project_id)
-                    # A Claude chat with a live drain gets a native follow-up
-                    # turn when its background work finishes; an interim
-                    # "I'll report back" announce is parked for it and
-                    # released at count zero (see `drain_between_turns`).
-                    follow_up_expected = True
+                self._host._start_between_turns_drain(chat_id, project_id)
+                # A chat with a live drain gets a native follow-up turn when
+                # its background work finishes; an interim "I'll report back"
+                # announce is parked for it and released at count zero (see
+                # `drain_between_turns`).
+                follow_up_expected = True
             self._host._discard_result_announce(chat_id)
             if not had_error and last_assistant_text.strip():
                 snippet = self._host._result_snippet(last_assistant_text)
@@ -1691,6 +1690,10 @@ class ChatStreaming:
                         else ""
                     )
                     close_stream(is_error, last_error)
+                    if provider_service.background_work_outstanding:
+                        # The wake launched more background work; the watcher
+                        # that counted the first batch has already exited.
+                        self._host._start_subagent_watcher(chat_id, project_id)
                     chat_now = self._host._chats.get(chat_id)
                     if (
                         not is_error

@@ -10,6 +10,7 @@ or a recent turn is never reclaimed.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from pathlib import Path
 
@@ -23,6 +24,9 @@ from ciao.web.project_chats import ProjectChatManager
 
 class _StubProvider:
     """Stands in for ProviderService; records that it was torn down."""
+
+    background_work_outstanding = False
+    background_activity_age = math.inf
 
     def __init__(self) -> None:
         self.disconnected = False

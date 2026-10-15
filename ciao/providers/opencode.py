@@ -1508,6 +1508,9 @@ class OpencodeProvider(BaseSDKProvider):
         self._background_shells: set[str] = set()
         self._background_children: set[str] = set()
         self._background_changed = asyncio.Event()
+        # Monotonic time of the last event seen from the server; the idle
+        # reaper bounds its "work outstanding" protection with it.
+        self._last_activity = time.monotonic()
         # Per-turn stream state, reset by `_reset_turn_state`.
         self._emitted: dict[str, int] = {}
         # `assistantMessageID:ordinal` -> reasoning/text. V2 uses separate
@@ -1622,6 +1625,16 @@ class OpencodeProvider(BaseSDKProvider):
         """True while this chat's session has background shells or subagents running."""
         return bool(self._background_shells or self._background_children)
 
+    @property
+    def background_count(self) -> int:
+        """Background shells plus subagents tracked for this chat's session."""
+        return len(self._background_shells) + len(self._background_children)
+
+    @property
+    def seconds_since_activity(self) -> float:
+        """Seconds since the server last sent this provider an event."""
+        return time.monotonic() - self._last_activity
+
     def _track_background_event(self, event: Mapping[str, Any], session_id: str) -> None:
         """Update the background sets from one SSE event (any session).
 
@@ -1629,6 +1642,7 @@ class OpencodeProvider(BaseSDKProvider):
         ``sessionID``, and a child's ``session.created`` and terminal events
         carry the child's id.
         """
+        self._last_activity = time.monotonic()
         kind = str(event.get("type") or "")
         data = event.get("data")
         props: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
