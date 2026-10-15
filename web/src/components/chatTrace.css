@@ -128,6 +128,12 @@
   border-left: 1px solid var(--border);
 }
 
+.trace-block.live .trace-body {
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .trace-step {
   position: relative;
   display: flex;
@@ -166,6 +172,8 @@
      path or hash shrink the min-content width instead of widening the row. */
   overflow-wrap: anywhere;
 }
+
+.trace-step--note > .trace-text { color: var(--fg); }
 
 .thinking-block {
   min-width: 0;

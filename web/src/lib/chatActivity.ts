@@ -224,16 +224,6 @@ function isAssistantTextStep(
   )
 }
 
-/** True when a buffered step is substantive assistant answer text that should
- *  render as its own bubble — not an Activity marker (`_activity`/`_thinking`/
- *  `_filecard`, all emitted with role `system`) and not provider `commentary`
- *  narration (which stays folded into the reasoning trace). */
-export function isAnswerBubble(
-  m: Pick<ChatMessage, 'role' | 'tool_name' | 'phase'>,
-): boolean {
-  return isAssistantTextStep(m) && m.phase !== 'commentary'
-}
-
 /**
  * Heuristic for Claude mid-turn progress narration (some providers stamp
  * `phase: commentary`). Validated against real Ciao multi-text turns:
@@ -293,51 +283,18 @@ export function findFinalAnswerIndex(
   return fallback
 }
 
-/** True when this assistant text should render as its own bubble (given it is
- *  not the turn-final index, which the caller always keeps). */
-function shouldRenderAnswerBubble(
-  m: Pick<ChatMessage, 'role' | 'tool_name' | 'phase' | 'content'>,
-): boolean {
-  if (!isAssistantTextStep(m)) return false
-  if (m.phase === 'commentary') return false
-  if (m.phase === 'final_answer') return true
-  return !isProgressCommentary(m.content || '')
-}
-
-/** Split one turn's buffered steps into ordered parts, EXCLUDING the final
- *  answer bubble at `finalIdx` (the caller appends that itself, with the
- *  turn's outputs/subagents attached).
+/** Split one turn's buffered steps into display parts, EXCLUDING the final
+ *  reply at `finalIdx` (the caller appends that itself, with the turn's
+ *  outputs/subagents attached).
  *
- *  Substantive assistant text renders as its own message bubble. Claude
- *  progress narration (`Now let me…`, short status lines) and
- *  `phase: commentary` fold into the Activity trace with the tool/thinking
- *  steps between them. Bookkeeping tool calls after the final answer
- *  (`buffer` indices past `finalIdx`) fold into the trace that precedes the
- *  reply, never a dangling block below it.
- *
- *  Pass `finalIdx < 0` when the turn produced no answer bubble (in progress /
- *  interrupted / tools only): every step then groups into traces. */
+ *  Only the final reply is a bubble: every other step (mid-turn text,
+ *  thinking, tool calls, file cards, and bookkeeping after the reply) forms
+ *  the one Activity trace shown before it, in buffer order. Returns `[]` when
+ *  there are no such steps. Pass `finalIdx < 0` when the turn produced no
+ *  reply (in progress / interrupted / tools only): every step is then trace. */
 export function buildTurnParts(buffer: ChatMessage[], finalIdx: number): TurnPart[] {
-  const parts: TurnPart[] = []
-  let steps: ChatMessage[] = []
-  const flush = () => {
-    if (steps.length) {
-      parts.push({ kind: 'trace', steps })
-      steps = []
-    }
-  }
-  for (let k = 0; k < buffer.length; k++) {
-    if (k === finalIdx) continue
-    const m = buffer[k]
-    if (shouldRenderAnswerBubble(m)) {
-      flush()
-      parts.push({ kind: 'assistant', msg: m })
-    } else {
-      steps.push(m)
-    }
-  }
-  flush()
-  return parts
+  const steps = buffer.filter((_, k) => k !== finalIdx)
+  return steps.length ? [{ kind: 'trace', steps }] : []
 }
 
 export function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript[]): string {
