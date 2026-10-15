@@ -1388,6 +1388,7 @@ async def test_an_unchanged_root_set_reuses_the_claude_client(
         agent_fs_scope="workspace",
         agent_roots=(agent_root,),
     )
+    provider._spawn_key = provider._spawn_key_for(request)
 
     assert await provider._ensure_connected(request) is live
     assert stopped == []
@@ -1709,6 +1710,210 @@ async def test_claude_turn_logs_reconnect_reason_on_model_change(
     assert _claude_turn_log(caplog) == ["claude turn: client=new reason=model_change chat=c2"]
 
 
+class _ReuseFakeClient:
+    """Fake SDK client for ``_ensure_connected`` reuse decisions."""
+
+    instances: list["_ReuseFakeClient"] = []
+
+    def __init__(self, options=None):
+        self.options = options
+        self._transport = SimpleNamespace(_process=SimpleNamespace(returncode=None))
+        self.mode_error: Exception | None = None
+        _ReuseFakeClient.instances.append(self)
+
+    async def set_model(self, model):
+        return None
+
+    async def set_permission_mode(self, mode):
+        if self.mode_error is not None:
+            raise self.mode_error
+
+    async def disconnect(self):
+        return None
+
+
+def _reuse_provider(tmp_path: Path, monkeypatch) -> ClaudeProvider:
+    _ReuseFakeClient.instances = []
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", _ReuseFakeClient)
+    return ClaudeProvider(tmp_path)
+
+
+def _reuse_request(**overrides) -> AgentRequest:
+    extra_env = {"CIAO_CHAT_ID": "chat-1", **overrides.pop("extra_env", {})}
+    fields = {"prompt": "t", "model": "sonnet", "mode": "normal", "extra_env": extra_env}
+    fields.update(overrides)
+    return AgentRequest(**fields)
+
+
+@pytest.mark.asyncio
+async def test_claude_exited_cli_reconnects_with_reason_dead_process(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    provider = _reuse_provider(tmp_path, monkeypatch)
+    request = _reuse_request()
+
+    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
+        await provider._ensure_connected(request)
+        provider._connected = True
+        _ReuseFakeClient.instances[0]._transport._process.returncode = 0
+        await provider._ensure_connected(request)
+
+    assert len(_ReuseFakeClient.instances) == 2
+    assert _claude_turn_log(caplog)[-1] == "claude turn: client=new reason=dead_process chat=chat-1"
+
+
+@pytest.mark.asyncio
+async def test_claude_live_cli_refusing_bypass_reconnects(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    provider = _reuse_provider(tmp_path, monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
+        await provider._ensure_connected(_reuse_request(mode="normal"))
+        provider._connected = True
+        _ReuseFakeClient.instances[0].mode_error = Exception(
+            "Cannot set permission mode to bypassPermissions because the session was "
+            "not launched with --dangerously-skip-permissions"
+        )
+        await provider._ensure_connected(_reuse_request(mode="bypass"))
+
+    assert len(_ReuseFakeClient.instances) == 2
+    assert _claude_turn_log(caplog)[-1] == "claude turn: client=new reason=mode_change chat=chat-1"
+
+
+@pytest.mark.asyncio
+async def test_claude_thinking_level_change_rebuilds_client(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    provider = _reuse_provider(tmp_path, monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
+        await provider._ensure_connected(_reuse_request(thinking_level=""))
+        provider._connected = True
+        await provider._ensure_connected(_reuse_request(thinking_level="high"))
+
+    assert len(_ReuseFakeClient.instances) == 2
+    assert _claude_turn_log(caplog)[-1] == "claude turn: client=new reason=spawn_options chat=chat-1"
+
+
+@pytest.mark.asyncio
+async def test_claude_extra_env_change_rebuilds_client(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    provider = _reuse_provider(tmp_path, monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
+        await provider._ensure_connected(_reuse_request())
+        provider._connected = True
+        await provider._ensure_connected(
+            _reuse_request(extra_env={"ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
+        )
+
+    assert len(_ReuseFakeClient.instances) == 2
+    assert _claude_turn_log(caplog)[-1] == "claude turn: client=new reason=spawn_options chat=chat-1"
+
+
+@pytest.mark.asyncio
+async def test_claude_model_env_alone_does_not_rebuild_client(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    provider = _reuse_provider(tmp_path, monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
+        await provider._ensure_connected(
+            _reuse_request(model="sonnet", extra_env={"CIAO_MODEL": "sonnet"})
+        )
+        provider._connected = True
+        await provider._ensure_connected(
+            _reuse_request(model="opus", extra_env={"CIAO_MODEL": "opus"})
+        )
+
+    assert len(_ReuseFakeClient.instances) == 1
+    assert _claude_turn_log(caplog)[-1] == "claude turn: client=reused reason=none chat=chat-1"
+
+
+@pytest.mark.asyncio
+async def test_claude_guide_edit_rebuilds_client(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    provider = _reuse_provider(tmp_path, monkeypatch)
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("a")
+
+    with caplog.at_level(logging.INFO, logger="ciao.providers.claude"):
+        await provider._ensure_connected(_reuse_request())
+        provider._connected = True
+        guide.write_text("bb")
+        await provider._ensure_connected(_reuse_request())
+
+    assert len(_ReuseFakeClient.instances) == 2
+    assert _claude_turn_log(caplog)[-1] == "claude turn: client=new reason=spawn_options chat=chat-1"
+
+
+@pytest.mark.asyncio
+async def test_drain_marks_cli_disconnected_when_stream_ends(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """EOF on the transport is the CLI exiting, so the flag must flip."""
+
+    class EndedClient:
+        async def receive_messages(self):
+            return
+            yield  # pragma: no cover
+
+    claude_provider._client = EndedClient()
+    claude_provider._connected = True
+    claude_provider._spawn_key = ("stale",)
+
+    async for _ in claude_provider.drain_events():
+        pass
+
+    assert claude_provider.cli_connected is False
+    assert claude_provider._client is None
+    assert claude_provider._spawn_key == ()
+
+
+@pytest.mark.asyncio
+async def test_old_drain_stream_ending_after_reconnect_keeps_the_new_client(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """A stale drain must not wipe the client a reconnect just installed."""
+    release = asyncio.Event()
+
+    class OldClient:
+        async def receive_messages(self):
+            await release.wait()
+            return
+            yield  # pragma: no cover
+
+        async def disconnect(self):
+            return None
+
+    new_client = object()
+    claude_provider._client = OldClient()
+    claude_provider._connected = True
+
+    drain = asyncio.ensure_future(_collect(claude_provider.drain_events()))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    # Reconnect while the old consumer is still alive.
+    claude_provider._client = new_client  # type: ignore[assignment]
+    claude_provider._connected = True
+    claude_provider._spawn_key = ("fresh",)
+    release.set()
+    await drain
+
+    assert claude_provider._client is new_client
+    assert claude_provider._connected is True
+    assert claude_provider._spawn_key == ("fresh",)
+
+
+async def _collect(gen) -> list:
+    return [item async for item in gen]
+
+
 def _steer_result(text: str):
     from claude_agent_sdk import ResultMessage
 
@@ -1793,6 +1998,42 @@ def _wire_steer_provider(provider: ClaudeProvider, monkeypatch, fake) -> None:
 
     monkeypatch.setattr(provider, "_ensure_connected", fake_ensure)
     monkeypatch.setattr(provider, "_prompt_payload", lambda _req: None)
+
+
+@pytest.mark.asyncio
+async def test_claude_first_turn_connects_without_prompt_then_queries(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    """No prompt at connect keeps the SDK from closing stdin at idle (#1402)."""
+    connects: list[tuple] = []
+
+    class FirstTurnClient(_SteerFakeClient):
+        async def connect(self, *args):
+            connects.append(args)
+
+    async def round_one(_client):
+        yield _steer_result("ok")
+
+    fake = FirstTurnClient([round_one])
+
+    async def fake_ensure(_request):
+        claude_provider._client = fake
+        claude_provider._session_id = "sess-steer"
+        return fake
+
+    monkeypatch.setattr(claude_provider, "_ensure_connected", fake_ensure)
+    assert claude_provider._connected is False
+
+    _ = [
+        e
+        async for e in claude_provider.run_streaming(
+            AgentRequest(prompt="hi", model="haiku", mode="normal"), lambda _h: None
+        )
+    ]
+
+    assert connects == [()]
+    assert [q["message"]["content"] for q in fake.queries] == ["hi"]
+    assert claude_provider._connected is True
 
 
 @pytest.mark.asyncio
