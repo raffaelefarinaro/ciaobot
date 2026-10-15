@@ -286,6 +286,18 @@ published, so nobody can take that path. What stays is the engine side —
 `install-engine.sh --migrate` still does the hand-over for a machine that has
 not run `ciao desktop uninstall` yet.
 
+### Workspace re-root schedule paths
+
+`ciao workspace-reroot --apply` rewrites only explicit install-relative paths
+in user schedule prompts that match paths moved by that migration. The receipt
+records changed prompt fields so `--undo` can restore them while preserving
+later run metadata and unrelated schedules; if a recorded prompt was edited or
+its schedule disappeared, undo refuses before changing the filesystem. This
+rewrite applies to future migrations only. An install that already has a
+migrated receipt is not rewritten at startup; correct an existing prompt through
+the PWA or CLI schedule controls. Do not hand-edit `.runtime/schedules.json`
+while the server is running, because the live schedule store may be writing it.
+
 ## Branching and releases
 
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.

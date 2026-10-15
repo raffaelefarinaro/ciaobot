@@ -370,6 +370,255 @@ def test_apply_then_undo_restores_a_byte_identical_tree(tmp_path: Path) -> None:
     assert after == before
 
 
+def _schedule_store(runtime: Path, schedules: list[dict]) -> Path:
+    path = runtime / "schedules.json"
+    path.write_text(
+        json.dumps({"schema": 1, "unknown_store_key": {"keep": True}, "schedules": schedules}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_apply_rewrites_schedule_prompt_paths_from_moves(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _schedule_store(
+        runtime,
+        [
+            {
+                "schedule_id": "user-one",
+                "prompt": "Read memory-vault/personal/People/Peter.md and memory-vault/work/People/Peter.md",
+                "scope": "user",
+                "enabled": True,
+                "last_run": "2026-10-01T00:00:00Z",
+                "unknown_row_key": [1, 2],
+            },
+            {
+                "schedule_id": "system-one",
+                "prompt": "Read memory-vault/personal/People/Peter.md",
+                "scope": "system",
+                "enabled": True,
+            },
+            {
+                "schedule_id": "promoted",
+                "prompt": "Check memory-vault/Logs/Chats/chat-1/session.md and memory-vault/Templates/person.md",
+                "scope": "user",
+            },
+        ],
+    )
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "migrated", result.get("refusals")
+    saved = json.loads(store.read_text(encoding="utf-8"))
+    assert saved["unknown_store_key"] == {"keep": True}
+    assert saved["schedules"] == [
+        {
+            "schedule_id": "user-one",
+            "prompt": "Read personal/memory-vault/People/Peter.md and work/memory-vault/People/Peter.md",
+            "scope": "user",
+            "enabled": True,
+            "last_run": "2026-10-01T00:00:00Z",
+            "unknown_row_key": [1, 2],
+        },
+        {
+            "schedule_id": "system-one",
+            "prompt": "Read memory-vault/personal/People/Peter.md",
+            "scope": "system",
+            "enabled": True,
+        },
+        {
+            "schedule_id": "promoted",
+            "prompt": "Check Logs/Chats/chat-1/session.md and templates-src/person.md",
+            "scope": "user",
+        },
+    ]
+    assert result["schedule_prompt_rewrites"] == [
+        {
+            "schedule_id": "user-one",
+            "before": "Read memory-vault/personal/People/Peter.md and memory-vault/work/People/Peter.md",
+            "after": "Read personal/memory-vault/People/Peter.md and work/memory-vault/People/Peter.md",
+        },
+        {
+            "schedule_id": "promoted",
+            "before": "Check memory-vault/Logs/Chats/chat-1/session.md and memory-vault/Templates/person.md",
+            "after": "Check Logs/Chats/chat-1/session.md and templates-src/person.md",
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("memory-vault/personal", "personal/memory-vault"),
+        ("Read memory-vault/personal.", "Read personal/memory-vault."),
+        ("memory-vault/personal/People/Peter.md", "personal/memory-vault/People/Peter.md"),
+        ("`memory-vault/personal/People/Peter.md`,", "`personal/memory-vault/People/Peter.md`,"),
+        ('("memory-vault/personal")', '("personal/memory-vault")'),
+        ("memory-vault/personalized/file.md", "memory-vault/personalized/file.md"),
+        ("memory-vault/work.backup/file.md", "memory-vault/work.backup/file.md"),
+        ("memory-vault/personal/memory-vault/People/Peter.md", "personal/memory-vault/memory-vault/People/Peter.md"),
+        ("personal/memory-vault/People/Peter.md", "personal/memory-vault/People/Peter.md"),
+        ("prefixmemory-vault/personal/People/Peter.md", "prefixmemory-vault/personal/People/Peter.md"),
+        ("memory-vault/Logs/memory-vault/work", "Logs/memory-vault/work"),
+        ("/srv/ciao/memory-vault/personal/People/Peter.md", "/srv/ciao/memory-vault/personal/People/Peter.md"),
+        ("https://example.test/memory-vault/personal/People/Peter.md", "https://example.test/memory-vault/personal/People/Peter.md"),
+        ("prefix:memory-vault/personal/People/Peter.md", "prefix:memory-vault/personal/People/Peter.md"),
+        (r"C:\memory-vault/personal/People/Peter.md", r"C:\memory-vault/personal/People/Peter.md"),
+        ("ordinary memory-vault reference", "ordinary memory-vault reference"),
+    ],
+)
+def test_schedule_prompt_rewrite_respects_path_boundaries(
+    tmp_path: Path, prompt: str, expected: str
+) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _schedule_store(runtime, [{"schedule_id": "boundary", "prompt": prompt}])
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "migrated", result.get("refusals")
+    saved = json.loads(store.read_text(encoding="utf-8"))
+    assert saved["schedules"][0]["prompt"] == expected
+
+
+def test_schedule_prompt_rewrite_uses_custom_vault_leaf(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    custom_vault = install / "private-vault"
+    _git(install, "mv", "memory-vault", "private-vault")
+    _git(install, "commit", "-m", "use custom vault leaf")
+    store = _schedule_store(
+        runtime,
+        [{"schedule_id": "custom", "prompt": "private-vault/work/People/Peter.md"}],
+    )
+
+    result = apply(install, custom_vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "migrated", result.get("refusals")
+    saved = json.loads(store.read_text(encoding="utf-8"))
+    assert saved["schedules"][0]["prompt"] == "work/private-vault/People/Peter.md"
+
+
+def test_apply_schedule_prompt_rewrite_missing_store_is_noop(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "migrated", result.get("refusals")
+    assert not (runtime / "schedules.json").exists()
+    assert result.get("schedule_prompt_rewrites", []) == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"{not json\n",
+        b'{"schema": 1}\n',
+        b'{"schedules": {}}\n',
+        b'{"schedules": [{"schedule_id": "target", "prompt": 4}]}\n',
+        b'{"schedules": [{"schedule_id": "target", "prompt": "memory-vault/work"}, {"schedule_id": "target", "prompt": "unchanged"}]}\n',
+    ],
+)
+def test_apply_refuses_malformed_schedule_store(tmp_path: Path, raw: bytes) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = runtime / "schedules.json"
+    store.write_bytes(raw)
+
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "refused"
+    assert any("schedule" in reason.lower() for reason in result["refusals"])
+    assert store.read_bytes() == raw
+    assert (install / "memory-vault" / "personal").is_dir()
+    assert not (install / "personal" / "memory-vault").exists()
+
+
+def test_apply_restores_schedule_bytes_on_later_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _schedule_store(runtime, [{"schedule_id": "target", "prompt": "memory-vault/work"}])
+    original = store.read_bytes()
+
+    def fail_after_schedule_write(*args, **kwargs):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(workspace_reroot, "write_skills_triage", fail_after_schedule_write)
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+
+    assert result["status"] == "refused"
+    assert store.read_bytes() == original
+    assert (install / "memory-vault" / "work").is_dir()
+    assert not (install / "work" / "memory-vault").exists()
+    refusal = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    assert refusal["status"] == "refused"
+
+
+def test_undo_restores_schedule_prompts_preserving_runtime_updates(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _schedule_store(
+        runtime,
+        [
+            {"schedule_id": "target", "prompt": "memory-vault/work", "last_run": "before"},
+        ],
+    )
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert result["status"] == "migrated", result.get("refusals")
+    payload = json.loads(store.read_text(encoding="utf-8"))
+    payload["schedules"][0]["last_run"] = "after"
+    payload["schedules"].append({"schedule_id": "new", "prompt": "new schedule"})
+    store.write_text(json.dumps(payload), encoding="utf-8")
+
+    undone = undo(install, runtime)
+
+    assert undone["status"] == "undone", undone
+    restored = json.loads(store.read_text(encoding="utf-8"))
+    assert restored["schedules"] == [
+        {"schedule_id": "target", "prompt": "memory-vault/work", "last_run": "after"},
+        {"schedule_id": "new", "prompt": "new schedule"},
+    ]
+
+
+@pytest.mark.parametrize("mutation", ["changed", "deleted", "duplicate"])
+def test_undo_refuses_changed_or_missing_schedule_prompt_before_mutation(
+    tmp_path: Path, mutation: str
+) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _schedule_store(runtime, [{"schedule_id": "target", "prompt": "memory-vault/work"}])
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert result["status"] == "migrated", result.get("refusals")
+    payload = json.loads(store.read_text(encoding="utf-8"))
+    if mutation == "changed":
+        payload["schedules"][0]["prompt"] = "operator edit"
+    elif mutation == "deleted":
+        payload["schedules"] = []
+    else:
+        payload["schedules"].append(dict(payload["schedules"][0]))
+    store.write_text(json.dumps(payload), encoding="utf-8")
+    before = _tree_hashes(install)
+    receipt_before = receipt_path(runtime).read_bytes()
+
+    undone = undo(install, runtime)
+
+    assert undone["status"] == "refused"
+    assert _tree_hashes(install) == before
+    assert receipt_path(runtime).read_bytes() == receipt_before
+
+
+def test_undo_without_schedule_prompt_records_preserves_store(tmp_path: Path) -> None:
+    install, vault, runtime = _git_install(tmp_path)
+    store = _schedule_store(runtime, [{"schedule_id": "untouched", "prompt": "memory-vault prose"}])
+    result = apply(install, vault, ["personal", "work"], runtime, primary="personal")
+    assert result["status"] == "migrated", result.get("refusals")
+    receipt = json.loads(receipt_path(runtime).read_text(encoding="utf-8"))
+    receipt.pop("schedule_prompt_rewrites", None)
+    receipt_path(runtime).write_text(json.dumps(receipt), encoding="utf-8")
+    before = store.read_bytes()
+
+    undone = undo(install, runtime)
+
+    assert undone["status"] == "undone", undone
+    assert store.read_bytes() == before
+
+
 def test_apply_preserves_history_so_git_log_follow_works(tmp_path: Path) -> None:
     install, vault, runtime = _git_install(tmp_path)
 

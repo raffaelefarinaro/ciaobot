@@ -578,6 +578,10 @@ def apply(
     # the unwind can restore it; if the rewrite itself is what failed, the file
     # was never touched (it writes atomically) and None is exactly right.
     registry_before: list[dict[str, Any]] | None = None
+    schedule_path = _schedule_store_path(runtime_root)
+    schedule_before: bytes | None = None
+    schedule_captured = False
+    schedule_rewrites: list[dict[str, str]] = []
     # Hoisted beside it: what this run CREATED, which the unwind removes too -
     # leftovers inside a destination root would leave it non-empty and make
     # every retry refuse forever.
@@ -630,6 +634,17 @@ def apply(
         registry_before, registry_after = _rewrite_registry(runtime_root, result)
         payload["registry_before"] = registry_before
         payload["registry_after"] = registry_after
+
+        # Prompts can carry explicit paths to the files moved above. Validate
+        # and prepare the raw store before writing it so malformed runtime state
+        # refuses within this same migration transaction.
+        schedule_path, schedule_before, schedule_store, schedule_rewrites = (
+            _prepare_schedule_prompt_rewrites(runtime_root, result.moves)
+        )
+        schedule_captured = True
+        if schedule_rewrites and schedule_store is not None:
+            _write_schedule_store(schedule_path, schedule_store)
+        payload["schedule_prompt_rewrites"] = schedule_rewrites
 
         vault_destinations = {m.workspace: m.destination for m in result.moves if m.workspace}
         primary_vault = vault_destinations.get(primary, "")
@@ -728,6 +743,14 @@ def apply(
                     "while the vaults are back under the shared root, so repair "
                     "it by hand before starting the app"
                 )
+        if schedule_captured:
+            try:
+                _restore_schedule_bytes(schedule_path, schedule_before)
+            except Exception as restore_exc:  # noqa: BLE001 - surfaced, never swallowed
+                refusals.append(
+                    "the schedule store could not be restored either "
+                    f"({restore_exc}); restore its pre-migration bytes before starting the app"
+                )
         # A failed receipt write can leave half a file at the path; nothing
         # short of a completed migration may sit there gating the next start.
         stray = receipt_path(runtime_root)
@@ -802,6 +825,13 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     receipt = read_receipt(runtime_root)
     if receipt is None:
         return {"status": "nothing_to_undo", "reason": "no migrated receipt"}
+
+    try:
+        schedule_restore = _prepare_schedule_prompt_restore(
+            runtime_root, receipt.get("schedule_prompt_rewrites")
+        )
+    except (OSError, ValueError) as exc:
+        return {"status": "refused", "reason": str(exc)}
 
     # Before ANY mutation: a directory the migration created may have gained
     # descendants since, or had its seeded contents edited or removed, and
@@ -921,6 +951,18 @@ def undo(install_root: Path, runtime_root: Path) -> dict[str, Any]:
     before = receipt.get("registry_before")
     if before is not None:
         _write_registry(runtime_root, before)
+
+    if schedule_restore is not None:
+        schedule_path, restored_store = schedule_restore
+        try:
+            _write_schedule_store(schedule_path, restored_store)
+        except OSError as exc:
+            return {
+                "status": "failed",
+                "reason": f"could not restore schedule prompts; migration receipt retained: {exc}",
+                "reversed": reversed_moves,
+                "already_reversed": already,
+            }
 
     cleared = clear_stranded_sessions(
         runtime_root, list((receipt.get("stranded_sessions") or {}).get("flagged") or [])
@@ -1132,6 +1174,143 @@ def _rewrite_registry(
             entry["vault_root"] = destination
     _write_registry(runtime_root, entries)
     return before, entries
+
+
+def _schedule_store_path(runtime_root: Path) -> Path:
+    return Path(runtime_root) / "schedules.json"
+
+
+def _rewrite_prompt_paths(prompt: str, moves: list[Move]) -> str:
+    """Rewrite explicit install-relative move sources in one simultaneous pass."""
+    replacements = {move.source: move.destination for move in moves}
+    if not replacements:
+        return prompt
+    alternatives = sorted(replacements, key=len, reverse=True)
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9_~./:\\-])(?:"
+        + "|".join(re.escape(source) for source in alternatives)
+        + r")(?![A-Za-z0-9_~\\-])(?!\.(?=[A-Za-z0-9_~/-]))"
+    )
+    return pattern.sub(lambda match: replacements[match.group(0)], prompt)
+
+
+def _read_schedule_store(runtime_root: Path) -> tuple[Path, bytes | None, dict[str, Any] | None]:
+    """Read and validate the raw schedule object without dropping unknown fields."""
+    path = _schedule_store_path(runtime_root)
+    if not path.exists():
+        return path, None, None
+    try:
+        original = path.read_bytes()
+        store = json.loads(original)
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        raise ValueError(f"could not read schedule store {path}: {exc}") from exc
+    if not isinstance(store, dict) or not isinstance(store.get("schedules"), list):
+        raise ValueError(f"schedule store {path} must be an object with a schedules list")
+    for row in store["schedules"]:
+        if not isinstance(row, dict):
+            raise ValueError(f"schedule store {path} contains a non-object schedule row")
+        if row.get("scope") == "system":
+            continue
+        if not isinstance(row.get("schedule_id"), str) or not row["schedule_id"]:
+            raise ValueError(f"schedule store {path} contains a user row without a string schedule_id")
+        if not isinstance(row.get("prompt"), str):
+            raise ValueError(
+                f"schedule store {path} contains user schedule {row['schedule_id']!r} without a string prompt"
+            )
+    return path, original, store
+
+
+def _write_schedule_store(path: Path, store: dict[str, Any]) -> None:
+    """Atomically save a raw schedule object while preserving unknown fields."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(store, indent=2) + "\n", encoding="utf-8", newline="")
+    tmp.replace(path)
+
+
+def _restore_schedule_bytes(path: Path, original: bytes | None) -> None:
+    if original is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".restore.tmp")
+        tmp.write_bytes(original)
+        tmp.replace(path)
+
+
+def _prepare_schedule_prompt_rewrites(
+    runtime_root: Path, moves: list[Move]
+) -> tuple[Path, bytes | None, dict[str, Any] | None, list[dict[str, str]]]:
+    path, original, store = _read_schedule_store(runtime_root)
+    if store is None:
+        return path, original, None, []
+    rewrites: list[dict[str, str]] = []
+    all_id_counts: dict[str, int] = {}
+    for row in store["schedules"]:
+        schedule_id = row.get("schedule_id")
+        if isinstance(schedule_id, str):
+            all_id_counts[schedule_id] = all_id_counts.get(schedule_id, 0) + 1
+    changed_ids: set[str] = set()
+    for row in store["schedules"]:
+        if row.get("scope") == "system":
+            continue
+        schedule_id = row["schedule_id"]
+        before = row["prompt"]
+        after = _rewrite_prompt_paths(before, moves)
+        if before != after:
+            changed_ids.add(schedule_id)
+            rewrites.append({"schedule_id": schedule_id, "before": before, "after": after})
+            row["prompt"] = after
+    duplicate_ids = [schedule_id for schedule_id in changed_ids if all_id_counts[schedule_id] != 1]
+    if duplicate_ids:
+        raise ValueError(
+            "schedule store has duplicate schedule_id values for prompts being rewritten: "
+            + ", ".join(sorted(duplicate_ids))
+        )
+    return path, original, store, rewrites
+
+
+def _prepare_schedule_prompt_restore(
+    runtime_root: Path, records: Any
+) -> tuple[Path, dict[str, Any]] | None:
+    if not records:
+        return None
+    if not isinstance(records, list):
+        raise ValueError("migration receipt has invalid schedule prompt rewrite records")
+    path, _original, store = _read_schedule_store(runtime_root)
+    if store is None:
+        raise ValueError("schedule store is missing; restore it before undoing the migration")
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    for row in store["schedules"]:
+        schedule_id = row.get("schedule_id")
+        if isinstance(schedule_id, str):
+            by_id.setdefault(schedule_id, []).append(row)
+    for record in records:
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("schedule_id"), str)
+            or not isinstance(record.get("before"), str)
+            or not isinstance(record.get("after"), str)
+        ):
+            raise ValueError("migration receipt has invalid schedule prompt rewrite records")
+        rows = by_id.get(record["schedule_id"], [])
+        if len(rows) != 1:
+            raise ValueError(
+                f"schedule {record['schedule_id']!r} is missing or duplicated; repair the schedule store before undo"
+            )
+        if rows[0].get("prompt") != record["after"]:
+            raise ValueError(
+                f"schedule {record['schedule_id']!r} prompt changed after migration; restore it to the recorded text before undo"
+            )
+    restored = json.loads(json.dumps(store))
+    restored_by_id = {
+        row["schedule_id"]: row
+        for row in restored["schedules"]
+        if isinstance(row.get("schedule_id"), str)
+    }
+    for record in records:
+        restored_by_id[record["schedule_id"]]["prompt"] = record["before"]
+    return path, restored
 
 
 # -- P10.4: splitting the shared guide --------------------------------------
