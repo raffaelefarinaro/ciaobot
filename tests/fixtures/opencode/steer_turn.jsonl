@@ -1,0 +1,21 @@
+{"id":"evt_steer_00","type":"server.connected","data":{}}
+{"id":"evt_steer_01","type":"session.inbox.enqueued","data":{"inboxID":"msg_ours","sessionID":"ses_steer_turn","item":{"type":"user","payload":{"text":"Run `sleep 20 && echo A` with the shell tool (foreground, not background), then tell me the output."},"delivery":"queue"}}}
+{"id":"evt_steer_02","type":"session.execution.started","data":{"sessionID":"ses_steer_turn"}}
+{"id":"evt_steer_03","type":"session.inbox.delivered","data":{"sessionID":"ses_steer_turn","inboxID":"msg_ours"}}
+{"id":"evt_steer_04","type":"session.usage.updated","data":{"sessionID":"ses_steer_turn","cost":0,"tokens":{"input":539,"output":17,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_steer_05","type":"session.step.started","data":{"sessionID":"ses_steer_turn","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_steer_a1","started":1792053609993}}
+{"id":"evt_steer_06","type":"session.tool.input.started","data":{"sessionID":"ses_steer_turn","assistantMessageID":"msg_steer_a1","id":"call_258f79022764442d8f9b298c1ee53f4f","name":"shell"}}
+{"id":"evt_steer_07","type":"session.tool.input.ended","data":{"sessionID":"ses_steer_turn","assistantMessageID":"msg_steer_a1","id":"call_258f79022764442d8f9b298c1ee53f4f","text":"{\"command\":\"sleep 20 && echo A\",\"timeout\":30000}"}}
+{"id":"evt_steer_08","type":"session.tool.called","data":{"sessionID":"ses_steer_turn","assistantMessageID":"msg_steer_a1","id":"call_258f79022764442d8f9b298c1ee53f4f","input":{"command":"sleep 20 && echo A","timeout":30000},"executed":false,"state":{"itemId":"fc_0015bd8f681cd06e016ad0916c26b88191b1254c3d38e57118"}}}
+{"id":"evt_steer_09","type":"session.tool.progress","data":{"sessionID":"ses_steer_turn","assistantMessageID":"msg_steer_a1","id":"call_258f79022764442d8f9b298c1ee53f4f","metadata":{"shellID":"sh_13eb80f4d001DGsOFXzb30vFAm"}}}
+{"id":"evt_steer_10","type":"session.inbox.enqueued","data":{"inboxID":"msg_steer","sessionID":"ses_steer_turn","item":{"type":"user","payload":{"text":"Also, end your reply with the word PINEAPPLE."},"delivery":"steer"}}}
+{"id":"evt_steer_11","type":"session.tool.success","data":{"sessionID":"ses_steer_turn","assistantMessageID":"msg_steer_a1","id":"call_258f79022764442d8f9b298c1ee53f4f","content":[{"type":"text","text":"A\n"}],"metadata":{"status":"completed","truncated":false,"exit":0},"executed":false}}
+{"id":"evt_steer_12","type":"session.step.ended","data":{"sessionID":"ses_steer_turn","assistantMessageID":"msg_steer_a1","finish":"tool-calls","providerState":{"responseId":"resp_0015bd8f681cd06e016ad0916b6bf48191bfff5c2c8ac67601","serviceTier":"default"},"cost":0,"tokens":{"input":8978,"output":27,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_steer_13","type":"session.usage.updated","data":{"sessionID":"ses_steer_turn","cost":0,"tokens":{"input":9517,"output":44,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_steer_14","type":"session.inbox.delivered","data":{"sessionID":"ses_steer_turn","inboxID":"msg_steer"}}
+{"id":"evt_steer_15","type":"session.step.started","data":{"sessionID":"ses_steer_turn","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_steer_a2","started":1792053632396}}
+{"id":"evt_steer_16","type":"session.text.started","data":{"sessionID":"ses_steer_turn","assistantMessageID":"msg_steer_a2","ordinal":0}}
+{"id":"evt_steer_17","type":"session.text.ended","data":{"sessionID":"ses_steer_turn","assistantMessageID":"msg_steer_a2","ordinal":0,"text":"PINEAPPLE","state":{"itemId":"msg_0015bd8f681cd06e016ad09181a16081918e1c36d4e37dc346","phase":"final_answer"}}}
+{"id":"evt_steer_18","type":"session.step.ended","data":{"sessionID":"ses_steer_turn","assistantMessageID":"msg_steer_a2","finish":"stop","providerState":{"responseId":"resp_0015bd8f681cd06e016ad09180c7388191a2ff154d5d0ff08e","serviceTier":"default"},"cost":0,"tokens":{"input":329,"output":7,"reasoning":0,"cache":{"read":8704,"write":0}}}}
+{"id":"evt_steer_19","type":"session.usage.updated","data":{"sessionID":"ses_steer_turn","cost":0,"tokens":{"input":9846,"output":51,"reasoning":0,"cache":{"read":8704,"write":0}}}}
+{"id":"evt_steer_20","type":"session.execution.succeeded","data":{"sessionID":"ses_steer_turn"}}

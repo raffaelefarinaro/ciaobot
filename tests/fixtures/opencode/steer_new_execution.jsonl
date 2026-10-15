@@ -1,0 +1,20 @@
+{"id":"evt_idle_00","type":"server.connected","data":{}}
+{"id":"evt_idle_01","type":"session.inbox.enqueued","data":{"inboxID":"msg_ours","sessionID":"ses_steer_idle","item":{"type":"user","payload":{"text":"Reply with the single word HI."},"delivery":"queue"}}}
+{"id":"evt_idle_02","type":"session.execution.started","data":{"sessionID":"ses_steer_idle"}}
+{"id":"evt_idle_03","type":"session.inbox.delivered","data":{"sessionID":"ses_steer_idle","inboxID":"msg_ours"}}
+{"id":"evt_idle_04","type":"session.usage.updated","data":{"sessionID":"ses_steer_idle","cost":0,"tokens":{"input":521,"output":7,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_idle_05","type":"session.step.started","data":{"sessionID":"ses_steer_idle","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_idle_a1","started":1792053748607}}
+{"id":"evt_idle_06","type":"session.text.started","data":{"sessionID":"ses_steer_idle","assistantMessageID":"msg_idle_a1","ordinal":0}}
+{"id":"evt_idle_07","type":"session.text.ended","data":{"sessionID":"ses_steer_idle","assistantMessageID":"msg_idle_a1","ordinal":0,"text":"HI","state":{"itemId":"msg_0b9cd495775422d8016ad091f6fc988191a000c732374e2516","phase":"final_answer"}}}
+{"id":"evt_idle_08","type":"session.step.ended","data":{"sessionID":"ses_steer_idle","assistantMessageID":"msg_idle_a1","finish":"stop","providerState":{"responseId":"resp_0b9cd495775422d8016ad091f5759c819191a406a9fd262d5f","serviceTier":"default"},"cost":0,"tokens":{"input":7424,"output":5,"reasoning":0,"cache":{"read":1536,"write":0}}}}
+{"id":"evt_idle_09","type":"session.usage.updated","data":{"sessionID":"ses_steer_idle","cost":0,"tokens":{"input":7945,"output":12,"reasoning":0,"cache":{"read":1536,"write":0}}}}
+{"id":"evt_idle_10","type":"session.execution.succeeded","data":{"sessionID":"ses_steer_idle"}}
+{"id":"evt_idle_11","type":"session.inbox.enqueued","data":{"inboxID":"msg_steer","sessionID":"ses_steer_idle","item":{"type":"user","payload":{"text":"Also, end your reply with the word PINEAPPLE."},"delivery":"steer"}}}
+{"id":"evt_idle_12","type":"session.execution.started","data":{"sessionID":"ses_steer_idle"}}
+{"id":"evt_idle_13","type":"session.inbox.delivered","data":{"sessionID":"ses_steer_idle","inboxID":"msg_steer"}}
+{"id":"evt_idle_14","type":"session.step.started","data":{"sessionID":"ses_steer_idle","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_idle_a2","started":1792053756594}}
+{"id":"evt_idle_15","type":"session.text.started","data":{"sessionID":"ses_steer_idle","assistantMessageID":"msg_idle_a2","ordinal":0}}
+{"id":"evt_idle_16","type":"session.text.ended","data":{"sessionID":"ses_steer_idle","assistantMessageID":"msg_idle_a2","ordinal":0,"text":"HI PINEAPPLE","state":{"itemId":"msg_0b9cd495775422d8016ad091fe426081919aeb1c640eb44820","phase":"final_answer"}}}
+{"id":"evt_idle_17","type":"session.step.ended","data":{"sessionID":"ses_steer_idle","assistantMessageID":"msg_idle_a2","finish":"stop","providerState":{"responseId":"resp_0b9cd495775422d8016ad091fcffd48191b9df50fe043dba6d","serviceTier":"default"},"cost":0,"tokens":{"input":279,"output":8,"reasoning":0,"cache":{"read":8704,"write":0}}}}
+{"id":"evt_idle_18","type":"session.usage.updated","data":{"sessionID":"ses_steer_idle","cost":0,"tokens":{"input":8224,"output":20,"reasoning":0,"cache":{"read":10240,"write":0}}}}
+{"id":"evt_idle_19","type":"session.execution.succeeded","data":{"sessionID":"ses_steer_idle"}}
