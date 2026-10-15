@@ -147,6 +147,13 @@ class ProviderService:
         async for event in provider.run_streaming(request, self._register_handle):
             yield event
 
+    async def steer_turn(self, request: AgentRequest) -> str | None:
+        """Inject a user message into the live foreground turn; None = cannot."""
+        if self._provider is None:
+            return None
+        delivery_id: str | None = await self._provider.steer_turn(request)
+        return delivery_id
+
     @property
     def can_drain(self) -> bool:
         """True when the provider has a live client to drain between turns."""

@@ -310,6 +310,13 @@ class TokenUsageEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class SteerDeliveredEvent(StreamEvent):
+    """A message sent with ``steer_turn`` reached the running turn."""
+
+    delivery_id: str = ""
+
+
+@dataclass(slots=True)
 class ResultEvent(StreamEvent):
     """Terminal stream event."""
 

@@ -491,6 +491,22 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
                         }
                 continue
 
+            if rtype == "attachment":
+                # A message steered into a running turn is recorded as a
+                # queued_command attachment, not a user record. It is still a
+                # user turn the transcript renders.
+                attachment = record.get("attachment")
+                if (
+                    isinstance(attachment, dict)
+                    and attachment.get("type") == "queued_command"
+                    and attachment.get("commandMode") == "prompt"
+                    and _is_countable_user_turn(
+                        _text_content({"content": attachment.get("prompt")})
+                    )
+                ):
+                    user_idx += 1
+                continue
+
             if rtype != "user":
                 continue
 
