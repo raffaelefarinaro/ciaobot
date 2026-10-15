@@ -1186,12 +1186,26 @@ def _rewrite_prompt_paths(prompt: str, moves: list[Move]) -> str:
     if not replacements:
         return prompt
     alternatives = sorted(replacements, key=len, reverse=True)
+    left_separator = r"[\s()\[\]{}<>,;!?='\"`]"
+    right_separator = r"[\s()\[\]{}<>,;:!?\"'`]"
     pattern = re.compile(
-        r"(?<![A-Za-z0-9_~./:\\-])(?:"
+        r"(?P<url>(?<!\w)[A-Za-z][A-Za-z0-9+.-]*://[^\s<>\"'`]+)|"
+        + r"(?P<path>(?:(?<=^)|(?<="
+        + left_separator
+        + r"))(?:"
         + "|".join(re.escape(source) for source in alternatives)
-        + r")(?![A-Za-z0-9_~\\-])(?!\.(?=[A-Za-z0-9_~/-]))"
+        + r")(?=/|$|"
+        + right_separator
+        + r"|\.(?=$|"
+        + right_separator
+        + r")))"
     )
-    return pattern.sub(lambda match: replacements[match.group(0)], prompt)
+    return pattern.sub(
+        lambda match: match.group("url")
+        if match.group("url") is not None
+        else replacements[match.group("path")],
+        prompt,
+    )
 
 
 def _read_schedule_store(runtime_root: Path) -> tuple[Path, bytes | None, dict[str, Any] | None]:
