@@ -31,8 +31,8 @@ from ciao.models import (
     ModelCapabilityQuestionEvent,
     ModelChangedEvent,
     PermissionRequestEvent,
-    ResultEvent,
     PromptCancelledEvent,
+    ResultEvent,
     SteerDeliveredEvent,
     StreamEvent,
     SystemStatusEvent,
@@ -123,6 +123,7 @@ class ChatStreamingHost(Protocol):
         stream: ChatStream,
         prompt: str,
         images: list[ImageAttachment] | None,
+        turn_index: int | None,
     ) -> None: ...
 
     @staticmethod
@@ -458,6 +459,10 @@ class ChatStreaming:
                     nonlocal question_paused, had_error, last_error_text
                     nonlocal had_provider_progress, turn_result_published
                     nonlocal last_assistant_text
+                    # Set once Stop cancelled this turn's prompt: the turn's
+                    # bookkeeping was rolled back, so its result must not
+                    # recreate any of it.
+                    prompt_cancelled = False
                     async for event in self._host.stream_chat(
                         chat_id,
                         run_prompt,
@@ -467,8 +472,9 @@ class ChatStreaming:
                     ):
                         if isinstance(event, PromptCancelledEvent):
                             self._host.on_prompt_cancelled(
-                                chat_id, stream, run_prompt, run_images
+                                chat_id, stream, run_prompt, run_images, run_turn_index
                             )
+                            prompt_cancelled = True
                             continue
                         if isinstance(event, SteerDeliveredEvent):
                             self._host.on_steer_delivered(
@@ -500,6 +506,7 @@ class ChatStreaming:
                             payload
                             and isinstance(event, ResultEvent)
                             and run_turn_index is not None
+                            and not prompt_cancelled
                         ):
                             completed_at = chat_service._now_iso()
                             started_perf = self.take_turn_perf(chat_id, run_turn_index)
@@ -534,6 +541,13 @@ class ChatStreaming:
                                 payload["sent_at"] = sent_at_rec
                             if duration_ms is not None:
                                 payload["duration_ms"] = duration_ms
+                        if prompt_cancelled and isinstance(event, ResultEvent):
+                            # The stream just committed this turn's context
+                            # marker for a prompt that never ran.
+                            cancelled_chat = self._host._chats.get(chat_id)
+                            if cancelled_chat is not None:
+                                cancelled_chat.context_digest = ""
+                                self._host._save()
                         if payload:
                             stream.publish(payload)
                             if isinstance(event, ResultEvent):

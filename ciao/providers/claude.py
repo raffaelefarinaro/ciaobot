@@ -1393,13 +1393,13 @@ class ClaudeProvider(BaseSDKProvider):
                         if not _is_connection_drop_text(pending_result.result):
                             pending_result.result = _CONNECTION_DROP_MESSAGE
                     merged.put_nowait(pending_result)
-                elif self._stop_event.is_set():
+                elif self._stop_event.is_set() and not prompt_echoed.is_set():
                     # Stopped before our prompt ran: nothing of this turn was
                     # shown. An empty error result is what the host turns
                     # into a stopped turn. Stop cancelled the queued prompt, so
                     # the host keeps it for the user to resend (a compaction is
                     # a command, not a message).
-                    if not prompt_echoed.is_set() and not request.compact:
+                    if not request.compact:
                         merged.put_nowait(PromptCancelledEvent(type="prompt_cancelled"))
                     merged.put_nowait(ResultEvent(
                         type="result", result="", session_id=self._session_id,

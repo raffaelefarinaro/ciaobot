@@ -2887,3 +2887,35 @@ async def test_claude_stop_after_the_echo_reports_no_cancelled_prompt(
     events = await asyncio.wait_for(turn, 2)
 
     assert not [e for e in events if isinstance(e, PromptCancelledEvent)]
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_death_after_the_echo_on_stop_keeps_the_interrupted_error(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    """Our prompt was echoed, so an empty stopped result would hide a CLI death."""
+    from ciao.models import PromptCancelledEvent, ResultEvent
+    from ciao.providers.claude import _TURN_INTERRUPTED_MESSAGE
+
+    echoed = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def ours(client):
+        yield _prompt_echo(client.prompt_uuid)
+        echoed.set()
+        await stopped.wait()  # the stream then closes with no result
+
+    fake = _SteerFakeClient([ours])
+    fake.echo_prompt = False
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    handles: list = []
+    turn = asyncio.create_task(_run_steer_turn(claude_provider, handles))
+    await asyncio.wait_for(echoed.wait(), 2)
+
+    await handles[0].stop()
+    stopped.set()
+    events = await asyncio.wait_for(turn, 2)
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert [(r.result, r.is_error) for r in results] == [(_TURN_INTERRUPTED_MESSAGE, True)]
+    assert not [e for e in events if isinstance(e, PromptCancelledEvent)]
