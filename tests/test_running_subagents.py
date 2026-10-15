@@ -249,3 +249,39 @@ def test_running_agents_drops_an_agent_whose_transcript_went_idle(
     os.utime(agent_path, (old, old))
 
     assert subagent_tracking.running_agents(parent, state) == []
+
+
+def test_steer_attachment_counts_as_a_user_turn(tmp_path: Path) -> None:
+    """A mid-turn steer is a ``queued_command`` attachment, not a user record.
+
+    It is still a user turn the transcript renders, so an agent dispatched
+    after it must be attributed to the turn after the steer, and the
+    queue-operation ``remove`` the CLI writes beside it adds nothing.
+    """
+    session = tmp_path / "sess-steer.jsonl"
+    _write(session, [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        *_dispatch("toolu_1", "first", background=True, description="Before the steer"),
+        {"type": "queue-operation", "operation": "enqueue", "content": "also this"},
+        {
+            "type": "attachment",
+            "attachment": {
+                "type": "queued_command",
+                "prompt": "also this",
+                "source_uuid": "steer-1",
+                "commandMode": "prompt",
+            },
+        },
+        {
+            "type": "queue-operation",
+            "operation": "remove",
+            "reason": "absorbed_mid_turn",
+            "commandUuid": "steer-1",
+        },
+        *_dispatch("toolu_2", "second", background=True, description="After the steer"),
+    ])
+
+    state = subagent_tracking.parse_session_subagents(session)
+
+    assert state.subagents["first"].turn_index == 0
+    assert state.subagents["second"].turn_index == 1

@@ -79,6 +79,7 @@ set and nothing else.
 |---|---|---|
 | `disconnect()` | Session reset, delete, idle reap, stop escalation. | The process is leaked. On `BaseProvider` the default is a no-op. |
 | `ActiveHandle.stop()` | The Stop button. | Registered from `run_streaming`. |
+| `steer_turn(request)` | A user steer during a live turn: returns a delivery id and emits `SteerDeliveredEvent` once the model consumed it. | Falls back to the next-turn queue. On `BaseProvider` the default returns `None`. |
 | `current_session_id` | Permission and question replies. | The reply cannot find the live session. |
 | `send_permission_response` / `permission_gate` | The approval card. | The card cannot be answered. Claude uses `PermissionGate`; OpenCode posts to the session. |
 | `send_question_response` | A native question card. | Same, for questions. |

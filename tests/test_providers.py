@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sys
@@ -1706,3 +1707,280 @@ async def test_claude_turn_logs_reconnect_reason_on_model_change(
 
     assert len(constructed) == 2
     assert _claude_turn_log(caplog) == ["claude turn: client=new reason=model_change chat=c2"]
+
+
+def _steer_result(text: str):
+    from claude_agent_sdk import ResultMessage
+
+    return ResultMessage(
+        subtype="success",
+        duration_ms=1,
+        duration_api_ms=1,
+        is_error=False,
+        num_turns=1,
+        session_id="sess-steer",
+        result=text,
+    )
+
+
+def _steer_text(text: str):
+    # Text reaches the host as partial stream events; a tool-use message is the
+    # simplest ordered marker the converter turns into an event.
+    from claude_agent_sdk import AssistantMessage, ToolUseBlock
+
+    return AssistantMessage(
+        content=[ToolUseBlock(id=f"t-{text}", name=text, input={})],
+        model="haiku",
+        session_id="sess-steer",
+    )
+
+
+class _SteerFakeClient:
+    """Fake SDK client that records the steer's streamed user message."""
+
+    def __init__(self, rounds) -> None:
+        self.rounds = list(rounds)
+        self.queries: list[dict] = []
+        self.calls = 0
+
+    async def connect(self, _payload):
+        return None
+
+    async def query(self, payload):
+        if payload is None or not hasattr(payload, "__aiter__"):
+            return None
+        async for item in payload:
+            self.queries.append(item)
+
+    async def receive_response(self):
+        self.calls += 1
+        if not self.rounds:
+            await asyncio.sleep(3600)
+        round_ = self.rounds.pop(0)
+        async for msg in round_(self):
+            yield msg
+
+    async def disconnect(self):
+        return None
+
+    async def get_context_usage(self):
+        return {}
+
+    @property
+    def steer_uuid(self) -> str:
+        return self.queries[-1]["uuid"]
+
+
+def _wire_steer_provider(provider: ClaudeProvider, monkeypatch, fake) -> None:
+    async def fake_ensure(_request):
+        provider._connected = True
+        provider._client = fake
+        provider._session_id = "sess-steer"
+        return fake
+
+    monkeypatch.setattr(provider, "_ensure_connected", fake_ensure)
+    monkeypatch.setattr(provider, "_prompt_payload", lambda _req: None)
+
+
+@pytest.mark.asyncio
+async def test_claude_steer_turn_refuses_without_open_turn(
+    claude_provider: ClaudeProvider,
+) -> None:
+    fake = _SteerFakeClient([])
+    claude_provider._client = fake
+    claude_provider._connected = True
+
+    request = AgentRequest(prompt="more", model="haiku", mode="normal")
+    assert await claude_provider.steer_turn(request) is None
+    assert fake.queries == []
+
+
+@pytest.mark.asyncio
+async def test_claude_steer_echo_mid_turn_emits_delivered_and_one_result(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    from claude_agent_sdk import UserMessage
+
+    from ciao.models import ResultEvent, SteerDeliveredEvent, ToolUseEvent
+
+    steer_request = AgentRequest(prompt="x", model="haiku", mode="normal")
+    delivery: dict[str, str | None] = {}
+
+    async def round_one(client):
+        yield _steer_text("working")
+        delivery["id"] = await claude_provider.steer_turn(steer_request)
+        yield UserMessage(content=[], uuid="not-ours")  # ignored: unknown uuid
+        yield UserMessage(
+            content=[{"type": "text", "text": "x"}], uuid=client.steer_uuid
+        )
+        yield _steer_text("done PINEAPPLE")
+        yield _steer_result("done PINEAPPLE")
+
+    fake = _SteerFakeClient([round_one])
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    events = [
+        e
+        async for e in claude_provider.run_streaming(
+            AgentRequest(prompt="go", model="haiku", mode="normal"), lambda _h: None
+        )
+    ]
+
+    delivered = [e for e in events if isinstance(e, SteerDeliveredEvent)]
+    assert [e.delivery_id for e in delivered] == [delivery["id"]]
+    assert delivered[0].type == "steer_delivered"
+    assert len([e for e in events if isinstance(e, ResultEvent)]) == 1
+    markers = [i for i, e in enumerate(events) if isinstance(e, ToolUseEvent)]
+    assert [events[i].tool_name for i in markers] == ["working", "done PINEAPPLE"]
+    assert markers[0] < events.index(delivered[0]) < markers[1]
+    assert fake.calls == 1
+    assert claude_provider._turn_open is False
+    assert claude_provider._steers_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_claude_steer_echo_after_result_keeps_turn_open(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    from claude_agent_sdk import UserMessage
+
+    from ciao.models import ResultEvent, SteerDeliveredEvent, ToolUseEvent
+
+    steer_request = AgentRequest(prompt="x", model="haiku", mode="normal")
+
+    async def round_one(_client):
+        yield _steer_text("first")
+        await claude_provider.steer_turn(steer_request)
+        yield _steer_result("a")
+
+    async def round_two(client):
+        yield UserMessage(content="x", uuid=client.steer_uuid)
+        yield _steer_text("second")
+        yield _steer_result("b")
+
+    fake = _SteerFakeClient([round_one, round_two])
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    events = [
+        e
+        async for e in claude_provider.run_streaming(
+            AgentRequest(prompt="go", model="haiku", mode="normal"), lambda _h: None
+        )
+    ]
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(results) == 1
+    assert results[0].result == "b"
+    assert len([e for e in events if isinstance(e, SteerDeliveredEvent)]) == 1
+    assert [e.tool_name for e in events if isinstance(e, ToolUseEvent)] == ["first", "second"]
+    assert fake.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_claude_steer_grace_timeout_ends_turn(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    from ciao.models import ResultEvent, SteerDeliveredEvent
+
+    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 0.05)
+    steer_request = AgentRequest(prompt="x", model="haiku", mode="normal")
+
+    async def round_one(_client):
+        yield _steer_text("first")
+        await claude_provider.steer_turn(steer_request)
+        yield _steer_result("a")
+
+    fake = _SteerFakeClient([round_one])  # the second receive_response never yields
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    events = [
+        e
+        async for e in claude_provider.run_streaming(
+            AgentRequest(prompt="go", model="haiku", mode="normal"), lambda _h: None
+        )
+    ]
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(results) == 1
+    assert results[0].result == "a"
+    assert not [e for e in events if isinstance(e, SteerDeliveredEvent)]
+    assert claude_provider._steers_pending == set()
+    assert claude_provider._turn_open is False
+
+
+@pytest.mark.asyncio
+async def test_claude_stop_clears_pending_steers(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    from ciao.providers.claude import SDKHandle
+
+    interrupted: list[set[str]] = []
+
+    class Client:
+        async def interrupt(self):
+            interrupted.append(set(claude_provider._steers_pending))
+
+    claude_provider._steers_pending.add("s1")
+    await SDKHandle(
+        client=Client(), pending_steers=claude_provider._steers_pending
+    ).stop()
+    assert interrupted == [set()]
+    assert claude_provider._steers_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_claude_steer_with_images_builds_image_blocks(
+    claude_provider: ClaudeProvider, monkeypatch, tmp_path: Path,
+) -> None:
+    image = tmp_path / "dot.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    steer_request = AgentRequest(
+        prompt="what colour is this?",
+        model="haiku",
+        mode="normal",
+        images=[
+            ImageAttachment(path=image, mime_type="image/png", original_filename="dot.png")
+        ],
+    )
+
+    async def round_one(client):
+        delivery_id = await claude_provider.steer_turn(steer_request)
+        assert delivery_id == client.steer_uuid
+        sent = client.queries[-1]
+        assert sent["type"] == "user"
+        content = sent["message"]["content"]
+        assert content[0]["type"] == "text"
+        assert "what colour is this?" in content[0]["text"]
+        assert [block["type"] for block in content[1:]] == ["image"]
+        assert content[1]["source"]["media_type"] == "image/png"
+        claude_provider._steers_pending.clear()
+        yield _steer_result("ok")
+
+    fake = _SteerFakeClient([round_one])
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+    async for _event in claude_provider.run_streaming(
+        AgentRequest(prompt="go", model="haiku", mode="normal"), lambda _h: None
+    ):
+        pass
+    assert len(fake.queries) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_options_enable_user_message_replay(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+
+    await provider._ensure_connected(
+        AgentRequest(prompt="test", model="sonnet", mode="auto", provider="claude")
+    )
+
+    assert "replay-user-messages" in captured["options"].extra_args

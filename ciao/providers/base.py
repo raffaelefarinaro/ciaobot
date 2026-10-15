@@ -102,11 +102,16 @@ def build_claude_message_stream(
     request: AgentRequest,
     *,
     session_id: str = "default",
+    uuid: str = "",
 ) -> AsyncIterable[dict[str, Any]]:
-    """Build a one-message async stream for Claude structured input."""
+    """Build a one-message async stream for Claude structured input.
+
+    ``uuid`` tags the message so the CLI's user-message replay echoes it back
+    unchanged (the delivery signal for ``steer_turn``).
+    """
 
     async def _stream() -> AsyncGenerator[dict[str, Any], None]:
-        yield {
+        message: dict[str, Any] = {
             "type": "user",
             "message": {
                 "role": "user",
@@ -115,6 +120,9 @@ def build_claude_message_stream(
             "parent_tool_use_id": None,
             "session_id": session_id,
         }
+        if uuid:
+            message["uuid"] = uuid
+        yield message
 
     return _stream()
 
@@ -220,6 +228,13 @@ class BaseProvider(ABC):
         coroutine that *returns* a generator instead.
         """
         ...
+
+    async def steer_turn(self, request: AgentRequest) -> str | None:
+        """Inject a user message into the running foreground turn.
+
+        Returns a delivery id, or None when the provider cannot steer now.
+        """
+        return None
 
     async def disconnect(self) -> None:
         """Discard any provider-side connection state."""
