@@ -808,12 +808,11 @@
         :key="q.id || i"
         class="queued-chip"
         tabindex="-1"
+        :data-queue-id="q.id"
         :class="{ 'is-steering': q.steering }"
         :title="queuedChipTitle(q)"
       >
-        <!-- Persistent live region: it exists before the lock so a screen
-             reader announces the text arriving rather than a new element. -->
-        <span class="queued-steering" aria-live="polite">{{ q.steering ? 'Steering…' : '' }}</span>
+        <span class="queued-steering">{{ q.steering ? 'Steering…' : '' }}</span>
         <div
           v-if="!q.steering && store.isStreaming && !q.waiting"
           class="queued-mode"
@@ -885,6 +884,10 @@
         </div>
       </div>
     </div>
+    <!-- One live region for the whole queue, always mounted: a chip that
+         appears already in the Steering state is announced by this text
+         changing, not by a new element. -->
+    <span class="queue-live sr-only" aria-live="polite">{{ steeringAnnouncement }}</span>
     <!-- Outside the queue block: the fallback reply usually empties it, and a
          collapsed dock hides it, but the notice must still be read. -->
     <p v-if="store.steerNotice[chat.chat_id]" class="steer-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
@@ -1699,6 +1702,24 @@ const editingQueueImages = ref<string[] | undefined>(undefined)
 // in list order.
 const steerAllIds = computed(() =>
   store.currentQueued.filter(q => q.delivery === 'queue' && !q.steering).map(q => q.id),
+)
+
+const steeringAnnouncement = computed(() => {
+  const n = store.currentQueued.filter(q => q.steering).length
+  return n ? `Steering ${n} ${n === 1 ? 'message' : 'messages'}` : ''
+})
+
+// When the chip that holds focus leaves the queue (it was steered, sent or
+// removed), focus would fall to <body>. Hand it to the composer instead.
+watch(
+  () => store.currentQueued.map(q => q.id),
+  (ids) => {
+    const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.queued-chip')
+    const id = held?.dataset.queueId
+    if (!id || ids.includes(id)) return
+    void nextTick(() => inputEl.value?.focus())
+  },
+  { flush: 'pre' },
 )
 
 function queuedExcerpt(text: string): string {
@@ -6704,7 +6725,12 @@ details[open] > .activity-summary::before {
 .queued-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .queued-steer-all:disabled,
 .queued-send-now:disabled { opacity: 0.4; cursor: not-allowed; }
-.queued-mode-option:focus-visible { outline-offset: -2px; }
+/* Inset and in --fg: the pressed option is filled with --accent, so an accent
+   ring would vanish on it, and an outer ring is clipped by the group. */
+.queued-mode-option:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: -2px;
+}
 .queued-steering {
   font-size: 11px;
   font-weight: 600;
@@ -6720,7 +6746,6 @@ details[open] > .activity-summary::before {
 }
 .queued-steer-all:focus-visible,
 .queued-send-now:focus-visible,
-.queued-mode-option:focus-visible,
 .queued-action:focus-visible,
 .queued-remove:focus-visible {
   outline: 2px solid var(--accent);

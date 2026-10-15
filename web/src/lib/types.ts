@@ -506,10 +506,10 @@ export type WsEvent =
   // A steer reached the running turn: the entries leave the queue and the
   // message becomes its own user turn.
   | { type: 'steered'; entry_ids: string[]; text: string; images?: string[]; turn_index?: number; sent_at?: string; delivery_id?: string }
-  // A steer could not be delivered; the entries are back in the queue.
   // Stop cancelled a prompt before the provider picked it up: its user turn
   // never happened. The prompt comes back as a waiting queue entry.
   | { type: 'prompt_cancelled'; turn_index: number }
+  // A steer could not be delivered; the entries are back in the queue.
   | { type: 'steer_fallback'; entry_ids: string[]; reason: SteerFallbackReason }
   | { type: 'error'; message: string }
   | { type: 'auth_required'; message?: string }

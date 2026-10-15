@@ -309,9 +309,9 @@ export const useProjectStore = defineStore('projects', () => {
   // `delivery` is what the message will do; `steering` means it was handed to
   // the running turn and is locked until the provider confirms delivery.
   const STEER_FALLBACK_NOTICE: Record<SteerFallbackReason, string> = {
-    finished: 'The reply finished before it could be steered. It will be sent as the next message.',
-    not_running: 'Nothing was running to steer into. It will be sent as the next message.',
-    no_turn: 'Nothing was running to steer into. It will be sent as the next message.',
+    finished: 'Steering missed the reply, so it was queued instead.',
+    not_running: 'Nothing was running to steer into, so it was queued instead.',
+    no_turn: 'Nothing was running to steer into, so it was queued instead.',
     stopped: 'Stopped before it was steered. It stays in the queue.',
   }
   type QueuedMessage = { id: string; text: string; images?: string[]; delivery: QueueDelivery; steering?: boolean; waiting?: boolean }
@@ -335,28 +335,25 @@ export const useProjectStore = defineStore('projects', () => {
   const steerLockTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const steerNoticeTimers = new Map<string, ReturnType<typeof setTimeout>>()
   function clearSteerLockTimer(chatId: string) {
-    const t = steerLockTimers.get(chatId)
-    if (t) clearTimeout(t)
+    cancelTimer(steerLockTimers.get(chatId))
     steerLockTimers.delete(chatId)
   }
   function setSteerNotice(chatId: string, text: string) {
     steerNotice.value[chatId] = text
-    const old = steerNoticeTimers.get(chatId)
-    if (old) clearTimeout(old)
-    steerNoticeTimers.set(chatId, setTimeout(() => {
+    cancelTimer(steerNoticeTimers.get(chatId))
+    steerNoticeTimers.set(chatId, scheduleTimer(() => {
       delete steerNotice.value[chatId]
       steerNoticeTimers.delete(chatId)
     }, STEER_NOTICE_MS))
   }
   function clearSteerNotice(chatId: string) {
-    const t = steerNoticeTimers.get(chatId)
-    if (t) clearTimeout(t)
+    cancelTimer(steerNoticeTimers.get(chatId))
     steerNoticeTimers.delete(chatId)
     delete steerNotice.value[chatId]
   }
   function armSteerLockTimer(chatId: string) {
     clearSteerLockTimer(chatId)
-    steerLockTimers.set(chatId, setTimeout(() => {
+    steerLockTimers.set(chatId, scheduleTimer(() => {
       steerLockTimers.delete(chatId)
       let reverted = false
       for (const q of queuedMessages.value[chatId] || []) {
@@ -365,7 +362,7 @@ export const useProjectStore = defineStore('projects', () => {
         q.steering = false
         reverted = true
       }
-      if (reverted) setSteerNotice(chatId, 'The steer was not confirmed. It will be sent as the next message.')
+      if (reverted) setSteerNotice(chatId, 'The steer was not confirmed, so it was queued instead.')
     }, STEER_LOCK_TIMEOUT_MS))
   }
   // Pending Auto-mode permission prompts keyed by chat_id. The chat bubble
@@ -4563,6 +4560,8 @@ export const useProjectStore = defineStore('projects', () => {
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
         if (streamingText.value[msg.chat_id]) delete streamingText.value[msg.chat_id]
         delete streamingTextPhase.value[msg.chat_id]
+        clearSteerLockTimer(msg.chat_id)
+        clearSteerNotice(msg.chat_id)
         if (queuedMessages.value[msg.chat_id]) delete queuedMessages.value[msg.chat_id]
         if (unread.value[msg.chat_id]) {
           delete unread.value[msg.chat_id]
@@ -5034,6 +5033,8 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function clearQueued(chatId: string) {
+    clearSteerLockTimer(chatId)
+    clearSteerNotice(chatId)
     delete queuedMessages.value[chatId]
   }
 

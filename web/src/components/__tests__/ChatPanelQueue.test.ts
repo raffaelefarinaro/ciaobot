@@ -249,7 +249,6 @@ describe('ChatPanel queued messages', () => {
     })
     const status = wrapper.get('.queued-steering')
     expect(status.text()).toContain('Steering')
-    expect(status.attributes('aria-live')).toBe('polite')
     // The locked row is gone rather than shown disabled.
     expect(wrapper.find('.queued-actions').exists()).toBe(false)
     expect(wrapper.find('.queued-mode').exists()).toBe(false)
@@ -260,11 +259,11 @@ describe('ChatPanel queued messages', () => {
     const { wrapper } = await mountPanel((s) => {
       s.streaming['chat-1'] = true
       queue(s, [{ id: 'a', text: 'one' }])
-      s.steerNotice['chat-1'] = 'The reply finished before it could be steered. It will be sent as the next message.'
+      s.steerNotice['chat-1'] = 'The reply Steering missed the reply. It will be sent as the next message.'
     })
     const notice = wrapper.get('.steer-notice')
     expect(notice.attributes('role')).toBe('status')
-    expect(notice.text()).toContain('finished before it could be steered')
+    expect(notice.text()).toContain('Steering missed the reply')
     expect(wrapper.find('.queued-messages .steer-notice').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -309,14 +308,35 @@ describe('ChatPanel queued messages', () => {
     wrapper.unmount()
   })
 
-  it('keeps one persistent aria-live region per chip', async () => {
-    const { wrapper } = await mountPanel((s) => {
+  it('announces steering through one persistent live region in the queue container', async () => {
+    const { wrapper, store } = await mountPanel((s) => {
+      s.streaming['chat-1'] = true
+    })
+    // The region exists before any chip does, so a later change is announced.
+    const live = wrapper.get('.queue-live')
+    expect(live.attributes('aria-live')).toBe('polite')
+    expect(live.text()).toBe('')
+    queue(store, [
+      { id: 'a', text: 'one', delivery: 'steer', steering: true },
+      { id: 'b', text: 'two', delivery: 'steer', steering: true },
+    ])
+    await nextTick()
+    expect(wrapper.get('.queue-live').text()).toBe('Steering 2 messages')
+    expect(wrapper.findAll('.queued-chip [aria-live]')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('re-focuses the composer when the focused chip unmounts', async () => {
+    const { wrapper, store } = await mountPanel((s) => {
       s.streaming['chat-1'] = true
       queue(s, [{ id: 'a', text: 'one' }])
     })
-    const live = wrapper.get('.queued-steering')
-    expect(live.attributes('aria-live')).toBe('polite')
-    expect(live.text()).toBe('')
+    ;(wrapper.get('.queued-chip').element as HTMLElement).focus()
+    expect(document.activeElement).toBe(wrapper.get('.queued-chip').element)
+    store.queuedMessages['chat-1'] = []
+    await nextTick()
+    await nextTick()
+    expect(document.activeElement).toBe(wrapper.get('.chat-input').element)
     wrapper.unmount()
   })
 

@@ -6913,11 +6913,11 @@ describe('queue delivery: queue or steer', () => {
     emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
     emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
     expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
-    expect(store.steerNotice[chatId]).toContain('finished before it could be steered')
+    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
     emit(socket, { type: 'result', text: 'done' })
     emit(socket, { type: 'user_echo', text: 'one', turn_index: 5, entry_id: 'a' })
     // The notice outlives the reply that ended and the turn that flushed it.
-    expect(store.steerNotice[chatId]).toContain('finished before it could be steered')
+    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
   })
 
   it('the fallback notice clears after 8 seconds and on the next send', async () => {
@@ -6950,6 +6950,39 @@ describe('queue delivery: queue or steer', () => {
       vi.advanceTimersByTime(1500)
       expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
       expect(store.steerNotice[chatId]).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a disposed store never reverts a pending steer lock or fires the notice timer', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      store.$dispose()
+      vi.advanceTimersByTime(20000)
+      expect(store.queuedMessages[chatId][0].steering).toBe(true)
+      expect(store.steerNotice[chatId]).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clearQueued cancels the lock and notice timers', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      expect(store.steerNotice[chatId]).toBeUndefined()
+      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
+      expect(store.steerNotice[chatId]).toBeDefined()
+      store.clearQueued(chatId)
+      expect(store.steerNotice[chatId]).toBeUndefined()
     } finally {
       vi.useRealTimers()
     }
