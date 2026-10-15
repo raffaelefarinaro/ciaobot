@@ -142,6 +142,7 @@ class SessionSubagentState:
     """Aggregate subagent state parsed from a parent session JSONL."""
 
     subagents: dict[str, SubagentInfo] = field(default_factory=dict)
+
     @property
     def running_background(self) -> int:
         return sum(
@@ -149,6 +150,7 @@ class SessionSubagentState:
             for info in self.subagents.values()
             if info.is_async and info.status == "running" and info.kind == "agent"
         )
+
 
 def find_parent_session_file(
     session_id: str,
