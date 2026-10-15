@@ -30,7 +30,7 @@ import json
 import sys
 import uuid
 import warnings
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
@@ -50,6 +50,7 @@ from claude_agent_sdk import (
     StreamEvent as SDKStreamEvent,
     SystemMessage,
     ToolUseBlock,
+    UserMessage,
     get_session_info,
 )
 from claude_agent_sdk.types import PermissionMode, SandboxSettings, SystemPromptPreset
@@ -67,6 +68,7 @@ from ciao.models import (
     BridgeMode,
     PermissionRequestEvent,
     ResultEvent,
+    SteerDeliveredEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -111,6 +113,16 @@ warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 # for a name the package keeps out of __all__ only buys an ImportError on the
 # next SDK bump.
 _CLAUDE_OP_ERRORS = (ClaudeSDKError, CLIConnectionError, ProcessError)
+
+# How long a finished CLI turn waits for the replay echo of a steer that is
+# still pending before the Ciaobot turn ends anyway (see ``steer_turn``).
+_STEER_ECHO_GRACE_S = 30.0
+# Bound on cancelling the orphaned steers after that grace expires.
+_STEER_CANCEL_TIMEOUT_S = 5.0
+
+
+class _SteerEchoTimeout(Exception):
+    """The grace wait for a follow-up round expired (private to the turn loop)."""
 
 # Shown when a turn's ``receive_response()`` ends without a terminal
 # ResultMessage. That is never a normal end-of-turn: the CLI subprocess
@@ -378,8 +390,41 @@ class SDKHandle(ActiveHandle):
     """Handle wrapping a live SDK client for interruption."""
 
     client: ClaudeSDKClient
+    # The provider's pending-steer set, cleared before interrupting so the
+    # post-interrupt ResultMessage ends the turn instead of awaiting echoes.
+    pending_steers: set[str] = field(default_factory=set)
+    # Set by ``stop()``: closes the provider's steer gate and wakes the grace
+    # wait for a follow-up round. Shared with the provider like the set above.
+    stopped: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def stop(self) -> None:
+        self.stopped.set()
+        had_steers = bool(self.pending_steers)
+        self.pending_steers.clear()
+        if had_steers:
+            # Stop wins over a steer that is still queued: without
+            # cancel_queued the CLI runs it as a new turn after the
+            # interrupt. The SDK has no public wrapper, so this uses the
+            # private control request. It depends on the bundled CLI's
+            # ``interrupt_cancel_queued_v1`` capability (the SDK pins the
+            # CLI, so there is no capability fallback).
+            try:
+                reply = await self.client._query._send_control_request(  # type: ignore[union-attr]
+                    {"subtype": "interrupt", "cancel_queued": True}
+                )
+            except Exception:  # noqa: BLE001 - fall through to a plain interrupt
+                logger.warning(
+                    "Claude cancel-queued interrupt failed; falling back to a plain "
+                    "interrupt",
+                    exc_info=True,
+                )
+            else:
+                still_queued = reply.get("still_queued") if isinstance(reply, dict) else None
+                if still_queued:
+                    logger.warning(
+                        "Claude Stop left steers queued in the CLI: %s", still_queued
+                    )
+                return
         try:
             await self.client.interrupt()
         except Exception:  # noqa: BLE001 — best-effort: a hung CLI or a
@@ -387,6 +432,59 @@ class SDKHandle(ActiveHandle):
             # client while this ack is still pending) must never surface as
             # an un-retrieved task exception.
             logger.debug("Claude interrupt failed; client is likely already idle")
+
+
+async def _receive_round(
+    client: ClaudeSDKClient,
+    first_timeout: float | None,
+    stopped: asyncio.Event | None = None,
+) -> AsyncGenerator[Any, None]:
+    """Yield one ``receive_response()`` round.
+
+    ``first_timeout`` bounds the wait for the round's first message only, so a
+    follow-up turn that never starts cannot hang the Ciaobot turn. It raises
+    ``_SteerEchoTimeout`` on expiry. A set ``stopped`` event ends the wait at
+    once with an empty round.
+    """
+    rounds = client.receive_response().__aiter__()
+    try:
+        try:
+            if first_timeout is None:
+                first = await rounds.__anext__()
+            else:
+                first_task = asyncio.ensure_future(rounds.__anext__())
+                stop_task = asyncio.ensure_future((stopped or asyncio.Event()).wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {first_task, stop_task},
+                        timeout=first_timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                finally:
+                    stop_task.cancel()
+                    if not first_task.done():
+                        first_task.cancel()
+                if first_task not in done:
+                    try:
+                        await first_task
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
+                    if stopped is not None and stopped.is_set():
+                        return
+                    raise _SteerEchoTimeout
+                first = first_task.result()
+        except StopAsyncIteration:
+            return
+        yield first
+        async for msg in rounds:
+            yield msg
+    finally:
+        aclose = getattr(rounds, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:  # noqa: BLE001 - best-effort close of a cancelled read
+                pass
 
 
 class ClaudeProvider(BaseSDKProvider):
@@ -413,6 +511,15 @@ class ClaudeProvider(BaseSDKProvider):
         super().__init__(workspace_root, config=config)
         self._client: ClaudeSDKClient | None = None
         self._connected = False
+        # True while a foreground turn is open, so ``steer_turn`` can refuse
+        # once it has ended. ``_steers_pending`` holds the uuids of steers sent
+        # but not yet echoed back by the CLI; it is cleared in place, never
+        # rebound, because ``SDKHandle`` shares the set.
+        self._turn_open = False
+        self._steers_pending: set[str] = set()
+        # Replaced per turn and shared with that turn's ``SDKHandle``; a set
+        # event closes the steer gate (Stop wins over a steer).
+        self._stop_event = asyncio.Event()
         self._session_id: str | None = None
         self._pending_quota: dict[str, str] = {}
         # Running token counters for the in-flight turn, fed by partial
@@ -649,6 +756,10 @@ class ClaudeProvider(BaseSDKProvider):
             # flips ``_fork_resume_next`` when the CLI refuses to resume a
             # session held by a background agent, so the retry can fork.
             stderr=self._stderr_handler,
+            # Echo each consumed user message back with the uuid we sent: the
+            # delivery signal for ``steer_turn`` (the CLI emits it when the
+            # model actually reads the message).
+            extra_args={"replay-user-messages": None},
         )
         if request.thinking_level:
             # SDK-native effort knob (low/medium/high/xhigh/max). Unset keeps
@@ -716,6 +827,35 @@ class ClaudeProvider(BaseSDKProvider):
             )
         return build_claude_message_stream(request)
 
+    async def steer_turn(self, request: AgentRequest) -> str | None:
+        """Inject a user message into the running foreground turn.
+
+        Returns the delivery id (the uuid the CLI echoes once the model has
+        consumed the message), or None when no foreground turn is open. Images
+        ride along as the same content blocks a normal prompt carries.
+        """
+        if (
+            self._client is None
+            or not self._connected
+            or not self._turn_open
+            or self._stop_event.is_set()
+        ):
+            return None
+        delivery_id = str(uuid.uuid4())
+        # Recorded before the await: the turn loop may read the echo before
+        # ``query()`` returns.
+        self._steers_pending.add(delivery_id)
+        try:
+            await self._client.query(build_claude_message_stream(request, uuid=delivery_id))
+        except BaseException as exc:
+            # Cancelled or failed sends must not leave a uuid the turn would
+            # wait the full grace period for.
+            self._steers_pending.discard(delivery_id)
+            if isinstance(exc, _CLAUDE_OP_ERRORS):
+                return None
+            raise
+        return delivery_id
+
     async def disconnect(self) -> None:
         if self._client is not None:
             try:
@@ -724,6 +864,8 @@ class ClaudeProvider(BaseSDKProvider):
                 logger.debug("Claude disconnect failed; dropping client anyway")
             self._client = None
         self._connected = False
+        self._turn_open = False
+        self._steers_pending.clear()
         self._session_id = None
         self._pending_quota = {}
         self._mcp_token = ""
@@ -920,7 +1062,12 @@ class ClaudeProvider(BaseSDKProvider):
 
         # Register handle *before* connect/query so /stop can interrupt a
         # hanging SDK call — otherwise the bot locks up with "No active run".
-        register_handle(SDKHandle(client=client))
+        self._stop_event = asyncio.Event()
+        register_handle(SDKHandle(
+            client=client,
+            pending_steers=self._steers_pending,
+            stopped=self._stop_event,
+        ))
 
         # Merge queue: both the SDK consumer task AND the permission gate
         # push here. One producer per source keeps the yield order causal
@@ -949,25 +1096,107 @@ class ClaudeProvider(BaseSDKProvider):
                 # context % must measure. ResultMessage.usage sums every call
                 # in the turn and overstates it on tool-heavy turns.
                 last_main_msg: AssistantMessage | None = None
-                async for msg in client.receive_response():
-                    if isinstance(msg, ResultMessage):
-                        last_result_msg = msg
-                    elif (
-                        isinstance(msg, AssistantMessage)
-                        and msg.parent_tool_use_id is None
-                        and self._call_context_tokens(msg.usage) > 0
-                    ):
-                        # Zero-usage messages are synthetic (API error or
-                        # connection-drop notices, model "<synthetic>"); keep
-                        # the last real call rather than clobbering it.
-                        last_main_msg = msg
-                    elif isinstance(msg, SystemMessage) and msg.subtype == "init":
-                        await self._record_bundled_skills(client, msg.data or {})
-                    for event in self._convert_message(msg):
-                        if isinstance(event, ResultEvent):
-                            pending_result = event
-                        else:
-                            merged.put_nowait(event)
+                if not request.compact:
+                    self._turn_open = True
+                first_timeout: float | None = None
+                while True:
+                    got_message = False
+                    try:
+                        async for msg in _receive_round(
+                            client, first_timeout, self._stop_event
+                        ):
+                            got_message = True
+                            if (
+                                isinstance(msg, UserMessage)
+                                and msg.uuid in self._steers_pending
+                            ):
+                                self._steers_pending.discard(msg.uuid)
+                                merged.put_nowait(SteerDeliveredEvent(
+                                    type="steer_delivered", delivery_id=msg.uuid or "",
+                                ))
+                                continue
+                            if isinstance(msg, ResultMessage):
+                                last_result_msg = msg
+                            elif (
+                                isinstance(msg, AssistantMessage)
+                                and msg.parent_tool_use_id is None
+                                and self._call_context_tokens(msg.usage) > 0
+                            ):
+                                # Zero-usage messages are synthetic (API error or
+                                # connection-drop notices, model "<synthetic>"); keep
+                                # the last real call rather than clobbering it.
+                                last_main_msg = msg
+                            elif isinstance(msg, SystemMessage) and msg.subtype == "init":
+                                await self._record_bundled_skills(client, msg.data or {})
+                            for event in self._convert_message(msg):
+                                if isinstance(event, ResultEvent):
+                                    pending_result = event
+                                else:
+                                    merged.put_nowait(event)
+                    except _SteerEchoTimeout:
+                        logger.warning(
+                            "Claude steer echo not seen within %.0fs for session %s; "
+                            "ending the turn",
+                            _STEER_ECHO_GRACE_S,
+                            self._session_id,
+                        )
+                        # Close the steer gate first: no steer may be written
+                        # while the cancels below are awaited.
+                        self._turn_open = False
+                        # The steer is still queued in the CLI; cancel it so it
+                        # cannot run later as an orphan turn the host also
+                        # re-queues. Requires the bundled CLI's
+                        # ``cancel_async_message`` control request. Bounded so
+                        # a hung CLI cannot hold the turn open.
+                        orphans = list(self._steers_pending)
+
+                        async def _cancel_orphans() -> None:
+                            for orphan in orphans:
+                                try:
+                                    reply = await client._query._send_control_request(  # type: ignore[union-attr]
+                                        {
+                                            "subtype": "cancel_async_message",
+                                            "message_uuid": orphan,
+                                        }
+                                    )
+                                except Exception:  # noqa: BLE001 - best effort
+                                    logger.warning(
+                                        "Could not cancel queued steer %s",
+                                        orphan,
+                                        exc_info=True,
+                                    )
+                                    continue
+                                if not (isinstance(reply, dict) and reply.get("cancelled") is True):
+                                    logger.warning(
+                                        "Queued steer %s was not cancelled: %s",
+                                        orphan,
+                                        reply,
+                                    )
+
+                        try:
+                            await asyncio.wait_for(
+                                _cancel_orphans(), timeout=_STEER_CANCEL_TIMEOUT_S
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Timed out cancelling queued steers %s", orphans
+                            )
+                        self._steers_pending.clear()
+                    if not got_message:
+                        # The CLI stream has ended (or Stop woke the wait):
+                        # later rounds would return at once, so stop waiting
+                        # for echoes that can no longer arrive.
+                        self._steers_pending.clear()
+                    if not self._steers_pending:
+                        # Closed in the same step that decides to end, before
+                        # the post-result awaits, so no steer is written with
+                        # nothing left reading.
+                        self._turn_open = False
+                        break
+                    # The CLI runs a steer that lands as the turn finishes as a
+                    # separate follow-up turn (a second ResultMessage). Keep
+                    # reading so it stays inside this one Ciaobot turn.
+                    first_timeout = _STEER_ECHO_GRACE_S
 
                 if pending_result is not None:
                     pending_result.effective_model = self._turn_effective_model(
@@ -1019,6 +1248,8 @@ class ClaudeProvider(BaseSDKProvider):
                         is_error=True,
                     ))
             finally:
+                self._turn_open = False
+                self._steers_pending.clear()
                 merged.put_nowait(_DONE)
 
         consumer = asyncio.create_task(consume_sdk())
