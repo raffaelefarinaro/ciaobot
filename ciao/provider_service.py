@@ -131,7 +131,14 @@ class ProviderService:
                 # Native guide content is loaded when the provider process or
                 # session starts. Reconnect before resuming so the current
                 # turn cannot keep a just-expired fact in its native snapshot.
-                if self._provider is not None:
+                if self._provider is not None and self.background_work_outstanding:
+                    # Reconnecting would kill background shells/subagents the
+                    # provider process still owns (#1391); the pruned guide
+                    # loads on the next reconnect instead.
+                    logger.info(
+                        "Deferring the memory-prune reconnect: background work is running"
+                    )
+                elif self._provider is not None:
                     await self.disconnect()
         except Exception:  # noqa: BLE001 - memory hygiene must not block a turn
             logger.warning("Could not prune expired workspace memory", exc_info=True)
@@ -145,6 +152,14 @@ class ProviderService:
         return bool(self._provider is not None and getattr(self._provider, "can_drain", False))
 
     @property
+    def background_work_outstanding(self) -> bool:
+        """True while the provider reports background work its process owns."""
+        return bool(
+            self._provider is not None
+            and getattr(self._provider, "background_work_outstanding", False)
+        )
+
+    @property
     def cli_connected(self) -> bool:
         """True while the provider's persistent CLI subprocess is alive.
 
@@ -156,7 +171,7 @@ class ProviderService:
         return bool(getattr(self._provider, "cli_connected", True))
 
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
-        """Yield between-turns provider events (see ClaudeProvider.drain_events)."""
+        """Yield between-turns provider events (see ClaudeProvider.drain_events / OpencodeProvider.drain_events)."""
         if self._provider is None:
             return
         drain = getattr(self._provider, "drain_events", None)

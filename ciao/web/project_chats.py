@@ -7433,6 +7433,18 @@ class ProjectChatManager:
                 # No active handle exists between turns; stopping means
                 # ending the drain (its cleanup finishes the stream).
                 await self._await_between_turns_drain(chat_id)
+                # OpenCode's follow-up execution runs in the server, not in the
+                # drain: ending the drain alone would leave it running (#1391).
+                service = self._providers.get(chat_id)
+                live = service.provider if service is not None else None
+                if isinstance(live, OpencodeProvider) and live.current_session_id:
+                    try:
+                        await asyncio.wait_for(
+                            live.abort_session(live.current_session_id),
+                            timeout=self._STOP_GRACE_S,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
                 # The drain's cancelled path leaves the park to the next
                 # turn, but Stop starts none, so nobody is left to release it. Flush here or the chat keeps
                 # its interim message with no unread badge, no push and no
