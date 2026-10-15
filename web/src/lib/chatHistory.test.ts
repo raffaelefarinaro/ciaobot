@@ -186,6 +186,11 @@ describe('toChatMessage', () => {
     expect(out.unattended).toBeUndefined()
   })
 
+  test('carries the steered marker for a user row sent into a running turn', () => {
+    expect(toChatMessage({ role: 'user', content: 'q', steered: true }).steered).toBe(true)
+    expect(toChatMessage({ role: 'user', content: 'q' }).steered).toBeUndefined()
+  })
+
   test('carries the fields the footer and dedup depend on', () => {
     const out = toChatMessage({
       role: 'user', content: 'q', sent_at: 'T', turn_index: 4, unattended: true,

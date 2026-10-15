@@ -11,7 +11,7 @@ import {
   restartMessageForDisplay,
 } from '../lib/serverRestart'
 import { errorMessage } from '../lib/errorMessage'
-import { applyKeyboardSettings } from '../composables/useKeyboardSettings'
+import { applyKeyboardSettings, useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft, type OrphanDraft } from '../lib/chatDrafts'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
@@ -30,6 +30,8 @@ import type {
   BackgroundRunSummary,
   SubagentTranscript,
   WsEvent,
+  QueueDelivery,
+  SteerFallbackReason,
   EventsWsMessage,
   InAppToast,
   PackageStatus,
@@ -304,7 +306,15 @@ export const useProjectStore = defineStore('projects', () => {
   // signal on the per-chat socket when a send is rejected mid-drain).
   const serverRestarting = ref(false)
   const serverRestartMessage = ref('')
-  type QueuedMessage = { id: string; text: string; images?: string[] }
+  // `delivery` is what the message will do; `steering` means it was handed to
+  // the running turn and is locked until the provider confirms delivery.
+  const STEER_FALLBACK_NOTICE: Record<SteerFallbackReason, string> = {
+    finished: 'The reply finished before it could be steered. It will be sent as the next message.',
+    not_running: 'Nothing was running to steer into. It will be sent as the next message.',
+    no_turn: 'Nothing was running to steer into. It will be sent as the next message.',
+    stopped: 'Stopped before it was steered. It stays in the queue.',
+  }
+  type QueuedMessage = { id: string; text: string; images?: string[]; delivery: QueueDelivery; steering?: boolean }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
       return crypto.randomUUID()
@@ -315,6 +325,8 @@ export const useProjectStore = defineStore('projects', () => {
   // streaming). Cleared when the server echoes them back as a user_echo at
   // flush time, or on result when the queue ends up empty.
   const queuedMessages = ref<Record<string, QueuedMessage[]>>({})
+  // One-line dock notice per chat after a steer fell back to the queue.
+  const steerNotice = ref<Record<string, string>>({})
   // Pending Auto-mode permission prompts keyed by chat_id. The chat bubble
   // renders Approve/Deny buttons for each entry; clicking sends a
   // `permission_response` on the per-chat WS and waits for the provider ack.
@@ -1890,23 +1902,33 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   /**
-   * Parked follow-ups live on the chat record once the stream that queued them
-   * has torn down. A non-empty `pending_queue` replaces that chat's chips. An
-   * empty one on an idle chat drops chips that came from a parked list (a
-   * remove on another client). An empty one while the chat is streaming must
-   * not: `start_stream` clears `pending_queue` when it re-seeds the live queue,
-   * and those chips arrive on `queue_state`.
+   * Parked (waiting) follow-ups live on the chat record once the stream that
+   * queued them has torn down, and only an explicit action takes them off it
+   * (Send now, edit, remove, reorder). On an idle chat a non-empty
+   * `pending_queue` replaces that chat's chips and an empty one drops them (a
+   * remove on another client). While the chat is streaming `queue_state` is
+   * authoritative and lists the waiting entries first, so the parked ones are
+   * only added when missing and an empty list changes nothing.
    */
   function hydrateParkedQueues(nextChats: ChatInfo[]) {
     for (const chat of nextChats) {
       const parked = chat.pending_queue
       if (!Array.isArray(parked)) continue
       if (parked.length) {
-        queuedMessages.value[chat.chat_id] = parked.map(entry => ({
+        const waiting: QueuedMessage[] = parked.map(entry => ({
           id: entry.id || makeQueuedId(),
           text: (entry.text || '').trim(),
           images: entry.images?.length ? [...entry.images] : undefined,
+          delivery: 'queue',
+          steering: false,
         }))
+        if (isChatStreaming(chat.chat_id)) {
+          const live = queuedMessages.value[chat.chat_id] || []
+          const known = new Set(live.map(q => q.id))
+          queuedMessages.value[chat.chat_id] = [...waiting.filter(q => !known.has(q.id)), ...live]
+        } else {
+          queuedMessages.value[chat.chat_id] = waiting
+        }
         continue
       }
       if (isChatStreaming(chat.chat_id)) continue
@@ -4164,10 +4186,11 @@ export const useProjectStore = defineStore('projects', () => {
   function handleEventsMessage(msg: EventsWsMessage) {
     switch (msg.type) {
       case 'snapshot': {
-        if (msg.keyboard_shortcuts || msg.keyboard_send_mode) {
+        if (msg.keyboard_shortcuts || msg.keyboard_send_mode || msg.mid_turn_delivery) {
           applyKeyboardSettings({
             keyboard_shortcuts: msg.keyboard_shortcuts,
             keyboard_send_mode: msg.keyboard_send_mode,
+            mid_turn_delivery: msg.mid_turn_delivery,
             revision: msg.keyboard_revision,
           })
         }
@@ -4799,8 +4822,13 @@ export const useProjectStore = defineStore('projects', () => {
       }
       if (!queuedMessages.value[chatId]) queuedMessages.value[chatId] = []
       const queueId = makeQueuedId()
-      queuedMessages.value[chatId].push({ id: queueId, text: composed, images: imageRefs })
-      const payload: Record<string, unknown> = { type: 'message', text: composed, mode: 'queue' }
+      // The Settings default decides whether a mid-turn message waits for the
+      // next turn or is steered into the running one. Images steer too.
+      const delivery: QueueDelivery = useKeyboardSettings().settings.value.mid_turn_delivery
+      queuedMessages.value[chatId].push({
+        id: queueId, text: composed, images: imageRefs, delivery, steering: delivery === 'steer',
+      })
+      const payload: Record<string, unknown> = { type: 'message', text: composed, mode: 'queue', delivery }
       if (imageRefs) payload.images = imageRefs
       payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
@@ -4862,6 +4890,15 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  function removeQueuedByIds(chatId: string, entryIds: string[] | undefined) {
+    const list = queuedMessages.value[chatId]
+    if (!list || !entryIds?.length) return
+    const gone = new Set(entryIds)
+    const remaining = list.filter(q => !gone.has(q.id))
+    if (remaining.length) queuedMessages.value[chatId] = remaining
+    else delete queuedMessages.value[chatId]
+  }
+
   function removeQueuedById(chatId: string, entryId: string) {
     const list = queuedMessages.value[chatId]
     if (!list) return
@@ -4912,6 +4949,33 @@ export const useProjectStore = defineStore('projects', () => {
       ws.send(JSON.stringify({ type: 'queue_edit', entry_id: entryId, text, images }))
     }
     return true
+  }
+
+  /**
+   * Switch queued entries between Queue and Steer with one frame. Steer sends
+   * them now, combined in list order (the order the ids are sent in). With a
+   * turn running the chips lock as "Steering…" until the server confirms; with
+   * nothing running this is "Send now" on waiting entries, which starts a turn
+   * and removes them through `user_echo`, so nothing is locked optimistically.
+   */
+  function setQueuedDelivery(chatId: string, entryIds: string[], delivery: QueueDelivery) {
+    const list = queuedMessages.value[chatId]
+    const ws = sockets.value[chatId]
+    if (!list?.length || ws?.readyState !== WebSocket.OPEN) return
+    const wanted = new Set(entryIds)
+    const chosen = list.filter(q => wanted.has(q.id) && !q.steering)
+    if (!chosen.length) return
+    const running = isChatStreaming(chatId)
+    for (const entry of chosen) {
+      entry.delivery = delivery
+      if (delivery === 'steer' && running) entry.steering = true
+    }
+    delete steerNotice.value[chatId]
+    ws.send(JSON.stringify({
+      type: 'queue_set_delivery',
+      entry_ids: chosen.map(q => q.id),
+      delivery,
+    }))
   }
 
   function clearQueued(chatId: string) {
@@ -5409,6 +5473,7 @@ export const useProjectStore = defineStore('projects', () => {
         // Queued follow-ups are drained as individual turns. Remove only the
         // entry that just started so later messages remain visible/editable.
         removeEchoedQueued(chatId, event.entry_id, trimmed)
+        delete steerNotice.value[chatId]
         // The server received and started the send: drop the recovery copy.
         acknowledgeSend(chatId, trimmed)
         const turnIndex = event.turn_index
@@ -5504,6 +5569,7 @@ export const useProjectStore = defineStore('projects', () => {
           if (existing) {
             existing.text = trimmed
             existing.images = event.images?.length ? event.images : undefined
+            if (event.delivery) existing.delivery = event.delivery
           }
           break
         }
@@ -5512,6 +5578,8 @@ export const useProjectStore = defineStore('projects', () => {
           id: entryId || makeQueuedId(),
           text: trimmed,
           images: event.images?.length ? event.images : undefined,
+          delivery: event.delivery === 'steer' ? 'steer' : 'queue',
+          steering: false,
         })
         queuedMessages.value[chatId] = list
         break
@@ -5529,7 +5597,46 @@ export const useProjectStore = defineStore('projects', () => {
           id: q.id || makeQueuedId(),
           text: (q.text || '').trim(),
           images: q.images?.length ? q.images : undefined,
+          delivery: q.delivery === 'steer' ? 'steer' : 'queue',
+          steering: Boolean(q.steering),
         }))
+        break
+      }
+
+      case 'steered': {
+        // The provider took the steer: the entries leave the queue and the
+        // message is its own user turn. Replays dedup by turn_index.
+        _commitStreamingTextToTimeline(chatId)
+        removeQueuedByIds(chatId, event.entry_ids)
+        const trimmed = (event.text || '').trim()
+        if (!trimmed) break
+        const turnIndex = event.turn_index
+        if (turnIndex != null && msgs.some(m => m.role === 'user' && m.turn_index === turnIndex)) break
+        const last = msgs[msgs.length - 1]
+        if (turnIndex == null && last && last.role === 'user' && last.content === trimmed) break
+        msgs.push({
+          role: 'user',
+          content: trimmed,
+          timestamp: event.sent_at || new Date().toISOString(),
+          images: event.images?.length ? event.images : undefined,
+          turn_index: turnIndex,
+          steered: true,
+        })
+        messages.value[chatId] = normalizeMessages([...msgs])
+        persistMessages()
+        break
+      }
+
+      case 'steer_fallback': {
+        // A steer could not be delivered: the entries are plain queued
+        // messages again. Say so, because nothing else on screen changed.
+        const ids = new Set(event.entry_ids || [])
+        for (const q of queuedMessages.value[chatId] || []) {
+          if (!ids.has(q.id)) continue
+          q.delivery = 'queue'
+          q.steering = false
+        }
+        steerNotice.value[chatId] = STEER_FALLBACK_NOTICE[event.reason] || STEER_FALLBACK_NOTICE.not_running
         break
       }
 
@@ -5770,6 +5877,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
 
       case 'result': {
+        delete steerNotice.value[chatId]
         // Final flush before the result event is materialized: lock any
         // trailing thinking/text deltas into the timeline so they render
         // in the correct order.
@@ -6059,7 +6167,7 @@ export const useProjectStore = defineStore('projects', () => {
   return {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
-    streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
+    streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, steerNotice,
     projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage,
     // Computed
@@ -6071,6 +6179,7 @@ export const useProjectStore = defineStore('projects', () => {
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
     // Actions
+    setQueuedDelivery,
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace,
     archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
     workspaceRegistryRevision, refreshWorkspaceRegistry,

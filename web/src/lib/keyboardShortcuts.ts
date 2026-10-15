@@ -1,9 +1,11 @@
 export type ShortcutId = 'newChat' | 'archiveChat' | 'toggleSidebar' | 'modelPicker' | 'fontIncrease' | 'fontDecrease' | 'closeChat' | `workspace${1|2|3|4|5|6|7|8|9}`
 export type SendMode = 'modifier' | 'enter'
+export type MidTurnDelivery = 'queue' | 'steer'
 
 export interface KeyboardSettings {
   keyboard_shortcuts: Record<string, string>
   keyboard_send_mode: SendMode
+  mid_turn_delivery: MidTurnDelivery
   revision: string
 }
 

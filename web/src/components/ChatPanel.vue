@@ -225,6 +225,12 @@
               <!-- An automation's tick, not something the reader typed.
                    Without this the two are indistinguishable in the
                    transcript. -->
+              <div v-if="item.msg.steered" class="message-meta">
+                <span
+                  class="steered-mark"
+                  title="Sent into the running reply"
+                >steered</span>
+              </div>
               <div v-if="item.msg.unattended" class="message-meta">
                 <span
                   class="unattended-mark"
@@ -790,13 +796,47 @@
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
+      <button
+        v-if="steerAllIds.length >= 2"
+        type="button"
+        class="queued-steer-all"
+        :title="store.isStreaming ? 'Send these into the running reply as one message' : 'Send these now as one message'"
+        @click="store.setQueuedDelivery(chat.chat_id, steerAllIds, 'steer')"
+      >{{ store.isStreaming ? 'Steer all' : 'Send all now' }}</button>
       <div
         v-for="(q, i) in store.currentQueued"
         :key="q.id || i"
         class="queued-chip"
-        title="Will be sent when current response finishes"
+        :class="{ 'is-steering': q.steering }"
+        :title="queuedChipTitle(q)"
       >
-        <span class="queued-label">Queued</span>
+        <span v-if="q.steering" class="queued-steering" aria-live="polite">Steering…</span>
+        <div
+          v-else-if="store.isStreaming"
+          class="queued-mode"
+          role="radiogroup"
+          aria-label="What this message will do"
+        >
+          <button
+            type="button"
+            role="radio"
+            class="queued-mode-option"
+            :aria-checked="q.delivery === 'queue'"
+            title="Send as the next message when the reply finishes"
+            @click="q.delivery === 'queue' || store.setQueuedDelivery(chat.chat_id, [q.id], 'queue')"
+          >Queue</button>
+          <button
+            type="button"
+            role="radio"
+            class="queued-mode-option"
+            :aria-checked="q.delivery === 'steer'"
+            title="Send into the running reply now"
+            @click="q.delivery === 'steer' || store.setQueuedDelivery(chat.chat_id, [q.id], 'steer')"
+          >Steer</button>
+        </div>
+        <template v-else>
+          <span class="queued-label">Waiting</span>
+        </template>
         <div class="queued-body">
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
@@ -814,20 +854,28 @@
         </div>
         <div class="queued-actions">
           <button
+            v-if="!q.steering && !store.isStreaming"
+            type="button"
+            class="queued-send-now"
+            title="Start a turn with this message now"
+            @click="store.setQueuedDelivery(chat.chat_id, [q.id], 'steer')"
+          >Send now</button>
+          <button
             class="queued-action"
-            :disabled="i === 0"
+            :disabled="q.steering || i === 0"
             title="Move up"
             @click="store.reorderQueued(chat.chat_id, i, i - 1)"
           >▲</button>
           <button
             class="queued-action"
-            :disabled="i === store.currentQueued.length - 1"
+            :disabled="q.steering || i === store.currentQueued.length - 1"
             title="Move down"
             @click="store.reorderQueued(chat.chat_id, i, i + 1)"
           >▼</button>
           <button
             v-if="editingQueueId !== q.id"
             class="queued-action"
+            :disabled="q.steering"
             title="Edit"
             @click="startEditQueue(q)"
           >✎</button>
@@ -835,9 +883,10 @@
             <button class="queued-action" title="Save" @click="saveEditQueue(chat.chat_id, q.id)">✓</button>
             <button class="queued-action" title="Cancel" @click="cancelEditQueue">✕</button>
           </template>
-          <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove">&times;</button>
+          <button class="queued-remove" :disabled="q.steering" @click="store.removeQueued(chat.chat_id, i)" title="Remove" aria-label="Remove queued message">&times;</button>
         </div>
       </div>
+      <p v-if="store.steerNotice[chat.chat_id]" class="queued-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
     </div>
 
     <!-- Dock strip: one counted line for everything not expanded above, so the
@@ -1645,6 +1694,20 @@ const editingQueueText = ref('')
 // The edit UI only edits text, so hold the entry's images and re-send them on
 // save — otherwise the backend clears attachments it resolves from an empty list.
 const editingQueueImages = ref<string[] | undefined>(undefined)
+
+// Entries that "Steer all" combines: queue-mode ones not already handed over,
+// in list order.
+const steerAllIds = computed(() =>
+  store.currentQueued.filter(q => q.delivery === 'queue' && !q.steering).map(q => q.id),
+)
+
+function queuedChipTitle(q: { delivery: string; steering?: boolean }): string {
+  if (q.steering) return 'Handed to the running reply; waiting for it to take the message'
+  if (!store.isStreaming) return 'Held until you send it, edit it or remove it'
+  return q.delivery === 'steer'
+    ? 'Will be sent into the running reply'
+    : 'Will be sent when current response finishes'
+}
 
 function startEditQueue(entry: { id: string; text: string; images?: string[] }) {
   editingQueueId.value = entry.id
@@ -5884,6 +5947,15 @@ details[open] > .activity-summary::before {
   text-align: right;
 }
 
+/* Marks a request sent into the running reply. Same treatment as the
+   automation mark: a property of the message, not part of the timestamp. */
+.steered-mark {
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-right: 6px;
+}
+
 /* Marks a turn fired by an automation. Accent-coloured so it reads as a
    property of the message, not as part of the timestamp next to it. */
 .unattended-mark {
@@ -6577,6 +6649,71 @@ details[open] > .activity-summary::before {
 }
 
 /* Queued message chips */
+.queued-steer-all,
+.queued-send-now {
+  align-self: flex-start;
+  background: var(--bg3);
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.queued-steer-all:hover,
+.queued-send-now:hover { background: var(--bg2); }
+.queued-mode {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.queued-mode-option {
+  background: none;
+  border: none;
+  color: var(--fg2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.queued-mode-option[aria-checked="true"] { background: var(--accent); color: var(--bg); }
+.queued-mode-option:not([aria-checked="true"]):hover { background: var(--bg2); color: var(--fg); }
+.queued-steering {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.queued-chip.is-steering { opacity: 0.85; }
+.queued-notice {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg2);
+}
+.queued-steer-all:focus-visible,
+.queued-send-now:focus-visible,
+.queued-mode-option:focus-visible,
+.queued-action:focus-visible,
+.queued-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.queued-remove:disabled { opacity: 0.3; cursor: not-allowed; }
+@media (pointer: coarse) {
+  .queued-steer-all,
+  .queued-send-now,
+  .queued-mode-option,
+  .queued-action,
+  .queued-remove {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
 .queued-messages {
   display: flex;
   flex-direction: column;
@@ -6586,6 +6723,7 @@ details[open] > .activity-summary::before {
 }
 .queued-chip {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
@@ -6603,7 +6741,7 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
 }
 .queued-body {
-  flex: 1;
+  flex: 1 1 140px;
   min-width: 0;
   display: flex;
   flex-direction: column;

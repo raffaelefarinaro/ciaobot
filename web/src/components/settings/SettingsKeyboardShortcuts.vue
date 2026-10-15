@@ -25,6 +25,16 @@
         <option value="enter">Enter (Shift+Enter for a newline)</option>
       </select>
     </label>
+    <label class="shortcut-send-setting">
+      <span>
+        <span class="shortcut-setting-name">While a reply is running, new messages</span>
+        <span class="hint">Steer sends it into the running reply; Queue sends it when the reply finishes.</span>
+      </span>
+      <select :value="settings.mid_turn_delivery" :disabled="pending" @change="setMidTurnDelivery">
+        <option value="queue">Queue for the next turn</option>
+        <option value="steer">Steer the running reply</option>
+      </select>
+    </label>
     <p class="hint">Comment and file edit fields continue to save with Cmd/Ctrl+Enter.</p>
     <button class="settings-disclosure" type="button" :disabled="pending" @click="restoreDefaults">Restore all defaults</button>
     <p v-if="captureError || error" class="action-result" role="alert">{{ captureError || error }}</p>
@@ -97,8 +107,13 @@ function setSendMode(event: Event): void {
   if (mode === 'modifier' || mode === 'enter') void update({ keyboard_send_mode: mode })
 }
 
+function setMidTurnDelivery(event: Event): void {
+  const delivery = (event.target as HTMLSelectElement).value
+  if (delivery === 'queue' || delivery === 'steer') void update({ mid_turn_delivery: delivery })
+}
+
 function restoreDefaults(): Promise<void> {
-  return update({ keyboard_shortcuts: {}, keyboard_send_mode: 'modifier' })
+  return update({ keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'queue' })
 }
 </script>
 
