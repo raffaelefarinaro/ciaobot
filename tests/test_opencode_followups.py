@@ -101,7 +101,10 @@ async def test_drain_between_turns_streams_an_opencode_wake(tmp_path, monkeypatc
     provider._background_shells = {"sh_bgshell"}
     _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()], tree=[[]])
     pcm._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
-        provider=provider, can_drain=True, drain_events=provider.drain_events
+        provider=provider,
+        can_drain=True,
+        drain_events=provider.drain_events,
+        background_work_outstanding=False,
     )
     published = _capture_publish(pcm)
 
@@ -126,7 +129,7 @@ async def _watch(pcm, project, chat, provider, monkeypatch, shells):
     monkeypatch.setattr(provider, "wait_background_change", wait)
     published = _capture_publish(pcm)
     await asyncio.wait_for(
-        pcm._subagents._watch_opencode(chat.chat_id, project.project_id), 5
+        pcm._subagents._watch_opencode(chat.chat_id, project.project_id, []), 5
     )
     return published, wait
 
@@ -244,3 +247,133 @@ async def test_stop_on_a_background_opencode_stream_interrupts_the_wake(tmp_path
     assert await pcm.stop_chat(chat.chat_id) is True
 
     abort.assert_awaited_once_with(chat.session_id)
+
+
+# ── review round 1 ───────────────────────────────────────────────────────
+
+
+def _announce_spy(pcm) -> list[tuple]:
+    from tests.test_chat_subagents import _announce_spy as spy
+
+    return spy(pcm)
+
+
+@pytest.mark.asyncio
+async def test_opencode_watcher_keeps_a_parked_announce_for_the_live_drain(
+    tmp_path, monkeypatch
+):
+    pcm, project, chat = _opencode_chat(tmp_path)
+    calls = _announce_spy(pcm)
+    provider = _live_provider(tmp_path, chat.session_id)
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
+    monkeypatch.setattr(provider, "read_live_collab_tree", AsyncMock(return_value=[]))
+    monkeypatch.setattr(provider, "refresh_background_shells", AsyncMock(side_effect=[1, 0]))
+    monkeypatch.setattr(provider, "wait_background_change", AsyncMock())
+    pcm._park_result_announce(chat.chat_id, project.project_id, "T", "interim")
+    drain = asyncio.ensure_future(asyncio.Event().wait())
+    pcm._between_turn_drains[chat.chat_id] = drain  # type: ignore[assignment]
+    try:
+        await asyncio.wait_for(
+            pcm._watch_subagent_completion(chat.chat_id, project.project_id), 5
+        )
+    finally:
+        drain.cancel()
+
+    assert calls == []
+    assert chat.chat_id in pcm._parked_result_announce
+
+
+@pytest.mark.asyncio
+async def test_opencode_interim_turn_then_wake_announces_once(tmp_path, monkeypatch):
+    pcm, project, chat = _opencode_chat(tmp_path)
+    calls = _announce_spy(pcm)
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()], tree=[[]])
+    pcm._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
+        provider=provider,
+        can_drain=True,
+        drain_events=provider.drain_events,
+        background_work_outstanding=False,
+    )
+    pcm._park_result_announce(chat.chat_id, project.project_id, "T", "interim")
+
+    await asyncio.wait_for(pcm._drain_between_turns(chat.chat_id, project.project_id), 5)
+
+    assert len(calls) == 1
+    assert calls[0][3] == "BGDONE"
+
+
+def test_background_count_now_reads_the_live_opencode_provider(tmp_path):
+    pcm, _project, chat = _opencode_chat(tmp_path)
+    provider = _live_provider(tmp_path, chat.session_id)
+    provider._background_shells = {"a"}
+    provider._background_children = {"b", "c"}
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
+    pcm._subagents._background_agents_last[chat.chat_id] = 0  # stale published count
+
+    assert pcm._background_count_now(chat.chat_id) == 3
+
+
+@pytest.mark.asyncio
+async def test_reaper_keeps_a_server_with_outstanding_work_until_the_horizon(tmp_path):
+    pcm, _project, chat = _opencode_chat(tmp_path)
+    provider = _live_provider(tmp_path, chat.session_id)
+    provider._background_shells = {"sh"}
+    disconnected: list[bool] = []
+
+    async def disconnect() -> None:
+        disconnected.append(True)
+
+    service = ProviderService(
+        CiaoConfig(
+            pwa_auth_token="t",
+            workspace_root=tmp_path,
+            state_path=tmp_path / "state.json",
+            media_root=tmp_path / "media",
+        ),
+        provider="opencode",
+    )
+    service._provider = provider  # type: ignore[assignment]
+    service.disconnect = disconnect  # type: ignore[method-assign]
+    pcm._providers[chat.chat_id] = service  # type: ignore[assignment]
+    pcm._provider_last_used[chat.chat_id] = time.monotonic() - 10**6
+
+    # No drain is live (its SSE closed), but work is outstanding and recent.
+    assert await pcm.reap_idle_providers(force=True) == []
+    assert disconnected == []
+
+    # Past the 1 h horizon with no provider activity the server is reclaimed.
+    provider._last_activity = time.monotonic() - opencode_module._OPENCODE_DRAIN_MAX_S - 1
+    pcm._provider_last_used[chat.chat_id] = time.monotonic() - 10**6
+    assert await pcm.reap_idle_providers(force=True) == [chat.chat_id]
+    assert disconnected == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_that_leaves_background_work_restarts_the_watcher(tmp_path):
+    host = _RecordingDriveHost([], tmp_path)
+    started: list[tuple[str, str]] = []
+    host._start_subagent_watcher = lambda c, p: started.append((c, p))  # type: ignore[method-assign]
+    host._providers = {"chat-1": _FakeDrainService(outstanding=True)}  # type: ignore[assignment]
+    host._background_count_now = lambda _c: 1  # type: ignore[attr-defined]
+    host._last_drain = None
+    streaming = ChatStreaming(host)  # type: ignore[arg-type]
+
+    await streaming.drain_between_turns("chat-1", "project-1")
+
+    assert started == [("chat-1", "project-1")]
+
+
+class _FakeDrainService:
+    def __init__(self, outstanding: bool) -> None:
+        self.background_work_outstanding = outstanding
+
+    async def drain_events(self):
+        yield ResultEvent(
+            type="result",
+            result="BGDONE",
+            session_id="s",
+            origin="task-notification",
+        )

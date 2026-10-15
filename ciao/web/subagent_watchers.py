@@ -170,6 +170,14 @@ class SubagentWatchers:
         published count.
         """
         chat = self._host._chats.get(chat_id)
+        if chat is not None and chat.provider == "opencode":
+            service = self._host._providers.get(chat_id)
+            live = service.provider if service is not None else None
+            if isinstance(live, OpencodeProvider) and live.has_live_server:
+                # The provider tracks shells and children from the event
+                # stream, so this is fresher than the published count.
+                return live.background_count
+            return self.running_count(chat_id)
         if chat is None or not chat.session_id or chat.provider != "claude":
             return self.running_count(chat_id)
         path = subagent_tracking.find_parent_session_file(
@@ -242,8 +250,7 @@ class SubagentWatchers:
         if chat is None or not chat.session_id:
             return
         if chat.provider == "opencode":
-            # opencode has no follow-up drain yet (#1391).
-            await self._watch_opencode(chat_id, project_id)
+            await self._watch_opencode(chat_id, project_id, saw_work)
             return
         # This watcher looks the file up exactly once; a miss here is final
         # (the loop below would never run), so force the cross-cwd fallback
@@ -343,7 +350,7 @@ class SubagentWatchers:
             # here would make the next tick republish a duplicate event.
 
     async def _watch_opencode(
-        self, chat_id: str, project_id: str
+        self, chat_id: str, project_id: str, saw_work: list[bool]
     ) -> None:
         """Poll the opencode session tree and its background shells while background work runs."""
         last_count = -1
@@ -381,6 +388,9 @@ class SubagentWatchers:
                     shells = 0
                 children, had_subagents = opencode_collab_tree_counts(tree)
                 count = children + shells
+                if count > 0 and not saw_work:
+                    # Tells `watch` a live drain owns the parked announce.
+                    saw_work.append(True)
                 if count != last_count:
                     if count == 0 and last_count > 0:
                         chat.last_activity_at = chat_service._now_iso()

@@ -121,7 +121,11 @@ from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
 from ciao.providers.claude import get_session_info
-from ciao.providers.opencode import OpencodeProvider, QuestionResponseResult
+from ciao.providers.opencode import (
+    _OPENCODE_DRAIN_MAX_S,
+    OpencodeProvider,
+    QuestionResponseResult,
+)
 from ciao.rate_limits import RateLimitStore, default_store_path
 from ciao.schedules import (
     ScheduleEntry,
@@ -4228,6 +4232,17 @@ class ProjectChatManager:
         if chat_id in active:
             return True
         if self._streaming.has_live_drain(chat_id):
+            return True
+        service = self._providers.get(chat_id)
+        if (
+            service is not None
+            and getattr(service, "background_work_outstanding", False)
+            # Same horizon as the drain: a server whose drain ended with work
+            # still outstanding stays up while its events are recent, then
+            # falls back to the idle timeout.
+            and getattr(service, "background_activity_age", float("inf"))
+            < _OPENCODE_DRAIN_MAX_S
+        ):
             return True
         for tasks in (self._retry_tasks, self._background_wake_tasks):
             task = tasks.get(chat_id)

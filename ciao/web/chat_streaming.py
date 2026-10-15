@@ -1690,6 +1690,10 @@ class ChatStreaming:
                         else ""
                     )
                     close_stream(is_error, last_error)
+                    if getattr(provider_service, "background_work_outstanding", False):
+                        # The wake launched more background work; the watcher
+                        # that counted the first batch has already exited.
+                        self._host._start_subagent_watcher(chat_id, project_id)
                     chat_now = self._host._chats.get(chat_id)
                     if (
                         not is_error

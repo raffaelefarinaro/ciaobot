@@ -133,8 +133,9 @@ class ProviderService:
                 # turn cannot keep a just-expired fact in its native snapshot.
                 if self._provider is not None and self.background_work_outstanding:
                     # Reconnecting would kill background shells/subagents the
-                    # provider process still owns (#1391); the pruned guide
-                    # loads on the next reconnect instead.
+                    # provider process still owns (#1391). The pruned guide
+                    # loads at the next reconnect, which an idle reconnect or
+                    # reap may reach before the next turn.
                     logger.info(
                         "Deferring the memory-prune reconnect: background work is running"
                     )
@@ -158,6 +159,12 @@ class ProviderService:
             self._provider is not None
             and getattr(self._provider, "background_work_outstanding", False)
         )
+
+    @property
+    def background_activity_age(self) -> float:
+        """Seconds since the provider last saw server activity (inf if unknown)."""
+        age = getattr(self._provider, "seconds_since_activity", None)
+        return float(age) if isinstance(age, (int, float)) else float("inf")
 
     @property
     def cli_connected(self) -> bool:
