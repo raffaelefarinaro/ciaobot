@@ -2266,5 +2266,9 @@ async def test_cancelled_prompt_skips_the_rollback_when_a_later_turn_exists(
     pcm.on_prompt_cancelled(chat.chat_id, stream, "initial", None, 0)
     assert meta.user_turn_count == 3
     assert [e["text"] for e in meta.pending_queue] == ["initial"]
+    assert [
+        e for e in stream.buffered_events() if e.get("type") == "prompt_cancelled"
+    ] == [{"type": "prompt_cancelled", "turn_index": 0}]
     release.set()
     await asyncio.wait_for(consumer, timeout=5.0)
+

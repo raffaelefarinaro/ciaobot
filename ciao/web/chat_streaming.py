@@ -1620,8 +1620,12 @@ class ChatStreaming:
             ctx = ChatContext.for_web(chat_id)
             # A compaction is not a user exchange: it has no user turn to file
             # in the durable transcript, only the provider session's own
-            # compaction boundary.
-            if not request.compact:
+            # compaction boundary. A prompt Stop cancelled before it ran is not
+            # an exchange either: it waits in the queue and is filed when resent.
+            prompt_cancelled = any(
+                isinstance(e, PromptCancelledEvent) for e in outcome.events
+            )
+            if not request.compact and not prompt_cancelled:
                 self._host._transcripts.record_turn(
                     request,
                     ctx=ctx,
