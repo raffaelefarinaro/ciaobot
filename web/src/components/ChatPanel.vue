@@ -466,8 +466,10 @@
         </button>
         <div
           v-if="liveTraceOpen && (store.currentTimeline.length || store.currentStreamingText || store.currentStreamingThinking || liveSubagents.length)"
+          ref="liveTraceBodyEl"
           class="trace-body"
           @click="onLiveTraceBodyClick"
+          @scroll.passive="onLiveBodyScroll"
         >
           <template v-for="(entry, j) in store.currentTimeline" :key="j">
             <div v-if="entry.kind === 'tool'" class="trace-step trace-step--tool">
@@ -1983,7 +1985,22 @@ const openTraces = ref<Record<number, boolean>>({})
 // a reference, not part of the reply, and a turn that touched many files used
 // to push the answer off screen behind a wall of pills.
 const openOutputs = ref<Record<number, boolean>>({})
-const liveTraceOpen = ref(false)
+// The live trace opens at every turn start; a user who closes it keeps it
+// closed for that turn. `Reading` means they scrolled away from the tail
+// (transcript or trace body), so the finished trace must not move under them.
+const liveTraceOpen = ref(true)
+const liveTraceTouched = ref(false)
+const liveTraceReading = ref(false)
+const liveBodyAtBottom = ref(true)
+const liveTraceBodyEl = ref<HTMLElement>()
+// Render index of a finished trace held open for a reader; it collapses when
+// they return to the bottom.
+const pendingCollapseIdx = ref<number | null>(null)
+// Armed once the reader has actually moved away from the bottom while the
+// finished trace is held open; only then does returning to the bottom collapse it.
+const pendingCollapseArmed = ref(false)
+let lastScrollTop = 0
+let lastBodyScrollTop = 0
 const copiedMessageKey = ref<string | null>(null)
 const forkLoadingKey = ref<string | null>(null)
 const commentComposeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
@@ -2128,7 +2145,37 @@ function toggleOutputs(i: number) {
 }
 
 function toggleLiveTrace() {
+  liveTraceTouched.value = true
   liveTraceOpen.value = !liveTraceOpen.value
+  if (liveTraceOpen.value) {
+    // The body remounts, so it follows its tail again from the top.
+    liveBodyAtBottom.value = true
+    lastBodyScrollTop = 0
+  }
+}
+
+function resetLiveTraceState() {
+  liveTraceOpen.value = true
+  liveTraceTouched.value = false
+  liveTraceReading.value = false
+  liveBodyAtBottom.value = true
+  pendingCollapseIdx.value = null
+  pendingCollapseArmed.value = false
+  lastBodyScrollTop = 0
+}
+
+function onLiveBodyScroll() {
+  const el = liveTraceBodyEl.value
+  if (!el) return
+  // Only upward movement means the reader left the tail; content growth also
+  // fires scroll events and must not latch.
+  if (el.scrollHeight - el.scrollTop - el.clientHeight <= 4) {
+    liveBodyAtBottom.value = true
+  } else if (el.scrollTop < lastBodyScrollTop - 1) {
+    liveBodyAtBottom.value = false
+    liveTraceReading.value = true
+  }
+  lastBodyScrollTop = el.scrollTop
 }
 
 // Click on an expanded activity/thinking bubble body collapses it, unless the
@@ -2159,6 +2206,7 @@ function onLiveTraceBodyClick(e: MouseEvent): void {
   if (isInteractiveTraceChild(e.target)) return
   if (window.getSelection()?.toString()) return
   if (!liveTraceOpen.value) return
+  liveTraceTouched.value = true
   liveTraceOpen.value = false
 }
 
@@ -2167,6 +2215,20 @@ function checkScroll() {
   if (!el) return
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
+  const movedUp = el.scrollTop < lastScrollTop - 1
+  lastScrollTop = el.scrollTop
+  if (store.isStreaming && movedUp && !isNearBottom.value) liveTraceReading.value = true
+  const collapseIdx = pendingCollapseIdx.value
+  if (collapseIdx !== null && !store.isStreaming) {
+    if (!isNearBottom.value) {
+      pendingCollapseArmed.value = true
+    } else if (pendingCollapseArmed.value) {
+      openTraces.value = { ...openTraces.value, [collapseIdx]: false }
+      pendingCollapseIdx.value = null
+      pendingCollapseArmed.value = false
+      nextTick(landOnReply)
+    }
+  }
   onChatScrollReanchor()
   // Paginated history: near the top of a windowed timeline, pull the older
   // page in. The store's loadingOlder flag debounces repeat fires.
@@ -2194,6 +2256,30 @@ function expandLazyStep(step: { i?: number }): void {
   const chatId = store.activeChatId
   if (!chatId || typeof step.i !== 'number') return
   void store.expandMessagePart(chatId, step.i)
+}
+
+// Land the viewport on the start of the reply when it is taller than the
+// viewport, otherwise at the bottom. Direct scrollTop assignments only.
+function landOnReply() {
+  const el = messagesEl.value
+  if (!el) return
+  // Only a reply that follows the last user message belongs to this turn.
+  const users = el.querySelectorAll<HTMLElement>('[data-msg-role="user"]')
+  const lastUserEl = users.length ? users[users.length - 1] : null
+  const replies = Array.from(el.querySelectorAll<HTMLElement>('[data-msg-role="assistant"]'))
+    .filter(r => !lastUserEl || Boolean(lastUserEl.compareDocumentPosition(r) & Node.DOCUMENT_POSITION_FOLLOWING))
+  const reply = replies.length ? replies[replies.length - 1] : null
+  // A deliberate landing wins over the chat-open bottom pin.
+  releasePin()
+  if (!reply) {
+    scrollToBottom()
+  } else if (reply.offsetHeight > el.clientHeight - 32) {
+    const delta = reply.getBoundingClientRect().top - el.getBoundingClientRect().top
+    el.scrollTop = el.scrollTop + delta - 16
+  } else {
+    scrollToBottom()
+  }
+  checkScroll()
 }
 
 function scrollToBottom() {
@@ -3729,16 +3815,9 @@ const renderData = computed<{
     }
 
     const traceSubs = takeForegroundSubs(currentTurnIndex)
-    // Substantive assistant text that appears BEFORE the final answer used to
-    // be swallowed into the Activity trace (rendered italic, indistinguishable
-    // from reasoning). Split the turn so each such block renders as its own
-    // bubble, interleaved with the tool/thinking groups that ran between them,
-    // in the order the model produced them. The final answer is appended below
-    // with the turn's outputs attached.
+    // Non-final text lives in the one trace; only the final reply is a bubble.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
-      part.kind === 'assistant'
-        ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
-        : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
+      withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
     // Foreground subagents and (when there's no answer bubble) file outputs
     // belong to the one Activity trace that sits right before the reply. Reuse
@@ -3894,11 +3973,13 @@ watch(
 // Force-scroll to bottom when switching to a different chat.
 watch(() => store.activeChatId, () => {
   isNearBottom.value = true
+  resetLiveTraceState()
   // The dock disclosure is per-chat state; carrying it across a switch meant a
   // chat you never expanded opened with its dock already open.
   dockExpanded.value = false
   nextTick(() => {
     if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+    lastScrollTop = messagesEl.value?.scrollTop ?? 0
     // Hold the bottom while the incoming transcript's height settles, rather
     // than measuring it once against whatever was on screen at this instant
     // (usually the loading skeleton).
@@ -3913,13 +3994,64 @@ watch(blockingHistoryLoad, (loading, wasLoading) => {
   if (!loading && wasLoading) nextTick(() => pinToBottom())
 })
 
+watch(() => store.isStreaming, (streaming) => {
+  if (streaming) resetLiveTraceState()
+})
+
+// Hold the finished turn's trace open until the reader returns to the bottom.
+function holdTraceOpen() {
+  let lastUser = -1
+  let traceIdx = -1
+  renderItems.value.forEach((item, idx) => {
+    if (item.kind === 'user') lastUser = idx
+  })
+  renderItems.value.forEach((item, idx) => {
+    if (item.kind === 'trace' && idx > lastUser) traceIdx = idx
+  })
+  if (traceIdx < 0) return
+  checkScroll()
+  openTraces.value = { ...openTraces.value, [traceIdx]: true }
+  pendingCollapseIdx.value = traceIdx
+  if (!isNearBottom.value) pendingCollapseArmed.value = true
+}
+
+// Keep the live trace body on its newest step unless the user scrolled up in it.
+watch(
+  () => [store.currentTimeline.length, store.currentStreamingText, store.currentStreamingThinking],
+  () => {
+    nextTick(() => {
+      const body = liveTraceBodyEl.value
+      if (body && liveBodyAtBottom.value) body.scrollTop = body.scrollHeight
+    })
+  },
+)
+
 // Auto-scroll only when the user is already near the bottom.
 // Use direct scrollTop assignment instead of scrollIntoView — the latter
 // can stop short of the absolute bottom with smooth scrolling, especially
 // inside flex containers where the anchor is a zero-height child.
+let prevStreaming = store.isStreaming
+let prevStreamingChatId = store.activeChatId
 watch(
   () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length, store.isStreaming],
   () => {
+    const streaming = store.isStreaming
+    // A chat switch also flips isStreaming; that is not a turn end.
+    const justFinished = prevStreaming && !streaming && prevStreamingChatId === store.activeChatId
+    prevStreaming = streaming
+    prevStreamingChatId = store.activeChatId
+    if (justFinished) {
+      if (liveTraceReading.value || (liveTraceTouched.value && liveTraceOpen.value)) {
+        // The reader keeps their place: hold the finished trace open until
+        // they come back to the bottom.
+        nextTick(holdTraceOpen)
+        return
+      }
+      if (isNearBottom.value) {
+        nextTick(landOnReply)
+        return
+      }
+    }
     nextTick(() => {
       stickToBottomIfNeeded()
       checkScroll()
