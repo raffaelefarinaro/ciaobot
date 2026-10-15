@@ -32,6 +32,7 @@ from ciao.models import (
     ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
+    PromptCancelledEvent,
     SteerDeliveredEvent,
     StreamEvent,
     SystemStatusEvent,
@@ -114,6 +115,14 @@ class ChatStreamingHost(Protocol):
 
     def on_steer_delivered(
         self, chat_id: str, stream: ChatStream, steer_id: str
+    ) -> None: ...
+
+    def on_prompt_cancelled(
+        self,
+        chat_id: str,
+        stream: ChatStream,
+        prompt: str,
+        images: list[ImageAttachment] | None,
     ) -> None: ...
 
     @staticmethod
@@ -456,6 +465,11 @@ class ChatStreaming:
                         unattended=run_unattended,
                         compact=run_compact,
                     ):
+                        if isinstance(event, PromptCancelledEvent):
+                            self._host.on_prompt_cancelled(
+                                chat_id, stream, run_prompt, run_images
+                            )
+                            continue
                         if isinstance(event, SteerDeliveredEvent):
                             self._host.on_steer_delivered(
                                 chat_id, stream, event.delivery_id

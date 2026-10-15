@@ -67,6 +67,7 @@ from ciao.models import (
     AssistantTextDelta,
     BridgeMode,
     PermissionRequestEvent,
+    PromptCancelledEvent,
     ResultEvent,
     SteerDeliveredEvent,
     StreamEvent,
@@ -424,6 +425,12 @@ def _fallback_model_for(primary: str) -> str | None:
     return None
 
 
+def _set_event() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
 @dataclass(slots=True)
 class SDKHandle(ActiveHandle):
     """Handle wrapping a live SDK client for interruption."""
@@ -435,12 +442,15 @@ class SDKHandle(ActiveHandle):
     # Set by ``stop()``: closes the provider's steer gate and wakes the grace
     # wait for a follow-up round. Shared with the provider like the set above.
     stopped: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set once the CLI echoed the turn's own prompt. Unset means the prompt is
+    # still queued behind another CLI turn, so Stop must cancel it too.
+    prompt_echoed: asyncio.Event = field(default_factory=_set_event)
 
     async def stop(self) -> None:
         self.stopped.set()
-        had_steers = bool(self.pending_steers)
+        had_queued = bool(self.pending_steers) or not self.prompt_echoed.is_set()
         self.pending_steers.clear()
-        if had_steers:
+        if had_queued:
             # Stop wins over a steer that is still queued: without
             # cancel_queued the CLI runs it as a new turn after the
             # interrupt. The SDK has no public wrapper, so this uses the
@@ -488,7 +498,7 @@ async def _receive_round(
     rounds = client.receive_response().__aiter__()
     try:
         try:
-            if first_timeout is None:
+            if first_timeout is None and stopped is None:
                 first = await rounds.__anext__()
             else:
                 first_task = asyncio.ensure_future(rounds.__anext__())
@@ -888,7 +898,7 @@ class ClaudeProvider(BaseSDKProvider):
             return None
         return session_id
 
-    def _prompt_payload(self, request: AgentRequest):
+    def _prompt_payload(self, request: AgentRequest, prompt_uuid: str):
         # An async iterable of message dicts: ``query()`` writes the content
         # blocks and uuid fields per message, which a plain string cannot
         # carry (images, steer uuids). It is sent with ``query()``, never
@@ -897,9 +907,9 @@ class ClaudeProvider(BaseSDKProvider):
             # The SDK compacts only for the bare command: a context capsule
             # or any other text before it turns it into a normal reply.
             return build_claude_message_stream(
-                replace(request, prompt=COMPACT_COMMAND, images=[])
+                replace(request, prompt=COMPACT_COMMAND, images=[]), uuid=prompt_uuid
             )
-        return build_claude_message_stream(request)
+        return build_claude_message_stream(request, uuid=prompt_uuid)
 
     async def steer_turn(self, request: AgentRequest) -> str | None:
         """Inject a user message into the running foreground turn.
@@ -1159,7 +1169,9 @@ class ClaudeProvider(BaseSDKProvider):
         register_handle: Callable[[ActiveHandle | None], None],
     ) -> AsyncGenerator[StreamEvent, None]:
         client = await self._ensure_connected(request)
-        payload = self._prompt_payload(request)
+        prompt_uuid = str(uuid.uuid4())
+        payload = self._prompt_payload(request, prompt_uuid)
+        prompt_echoed = asyncio.Event()
 
         # Fresh turn: zero the live token counters so the running total we
         # emit over the wire starts from this turn, not the previous one.
@@ -1175,6 +1187,7 @@ class ClaudeProvider(BaseSDKProvider):
             client=client,
             pending_steers=self._steers_pending,
             stopped=self._stop_event,
+            prompt_echoed=prompt_echoed,
         ))
 
         # Merge queue: both the SDK consumer task AND the permission gate
@@ -1209,13 +1222,46 @@ class ClaudeProvider(BaseSDKProvider):
                 if not request.compact:
                     self._turn_open = True
                 first_timeout: float | None = None
+                # The first round is a plain read; later rounds can be woken by Stop.
+                wake: asyncio.Event | None = None
                 while True:
                     got_message = False
                     try:
-                        async for msg in _receive_round(
-                            client, first_timeout, self._stop_event
-                        ):
+                        async for msg in _receive_round(client, first_timeout, wake):
                             got_message = True
+                            if isinstance(msg, UserMessage) and msg.uuid == prompt_uuid:
+                                prompt_echoed.set()
+                                # Output from here on is this turn's: drop whatever
+                                # a preceding CLI turn added to the live counters.
+                                self._turn_input_tokens = 0
+                                self._turn_output_committed = 0
+                                self._cur_msg_output = 0
+                                self._turn_text_tail = ""
+                                continue
+                            if not prompt_echoed.is_set():
+                                # A CLI turn that ran before ours: a background
+                                # follow-up, or one left by a failed orphan cancel or
+                                # a Stop. It is not this turn's output (#1406).
+                                if isinstance(msg, SystemMessage) and msg.subtype == "init":
+                                    await self._record_bundled_skills(client, msg.data or {})
+                                elif (
+                                    isinstance(msg, SystemMessage)
+                                    and msg.subtype in ("status", "compact_boundary")
+                                ):
+                                    # Session-wide status: a /compact prompt is
+                                    # echoed only after the compaction it ran.
+                                    for event in self._convert_message(msg):
+                                        merged.put_nowait(event)
+                                elif isinstance(msg, RateLimitEvent):
+                                    self._convert_message(msg)
+                                elif isinstance(msg, ResultMessage):
+                                    logger.info(
+                                        "Claude turn skipped a result that preceded its "
+                                        "prompt (origin=%s) for session %s",
+                                        (getattr(msg, "origin", None) or {}).get("kind"),
+                                        self._session_id,
+                                    )
+                                continue
                             if (
                                 isinstance(msg, UserMessage)
                                 and msg.uuid in self._steers_pending
@@ -1240,6 +1286,9 @@ class ClaudeProvider(BaseSDKProvider):
                                 await self._record_bundled_skills(client, msg.data or {})
                             for event in self._convert_message(msg):
                                 if isinstance(event, ResultEvent):
+                                    # Our prompt ran inside this CLI turn, so it is
+                                    # ours even when a follow-up started it.
+                                    event.origin = ""
                                     pending_result = event
                                 else:
                                     merged.put_nowait(event)
@@ -1297,6 +1346,10 @@ class ClaudeProvider(BaseSDKProvider):
                         # later rounds would return at once, so stop waiting
                         # for echoes that can no longer arrive.
                         self._steers_pending.clear()
+                    elif not prompt_echoed.is_set() and not self._stop_event.is_set():
+                        # That round was another CLI turn; ours is still queued.
+                        wake = self._stop_event
+                        continue
                     if not self._steers_pending:
                         # Closed in the same step that decides to end, before
                         # the post-result awaits, so no steer is written with
@@ -1307,6 +1360,7 @@ class ClaudeProvider(BaseSDKProvider):
                     # separate follow-up turn (a second ResultMessage). Keep
                     # reading so it stays inside this one Ciaobot turn.
                     first_timeout = _STEER_ECHO_GRACE_S
+                    wake = self._stop_event
 
                 if pending_result is not None:
                     pending_result.effective_model = self._turn_effective_model(
@@ -1339,6 +1393,18 @@ class ClaudeProvider(BaseSDKProvider):
                         if not _is_connection_drop_text(pending_result.result):
                             pending_result.result = _CONNECTION_DROP_MESSAGE
                     merged.put_nowait(pending_result)
+                elif self._stop_event.is_set():
+                    # Stopped before our prompt ran: nothing of this turn was
+                    # shown. An empty error result is what the host turns
+                    # into a stopped turn. Stop cancelled the queued prompt, so
+                    # the host keeps it for the user to resend (a compaction is
+                    # a command, not a message).
+                    if not prompt_echoed.is_set() and not request.compact:
+                        merged.put_nowait(PromptCancelledEvent(type="prompt_cancelled"))
+                    merged.put_nowait(ResultEvent(
+                        type="result", result="", session_id=self._session_id,
+                        is_error=True,
+                    ))
                 else:
                     # receive_response() completed *normally* but never yielded
                     # a terminal ResultMessage — the stream closed mid-turn.

@@ -2158,3 +2158,30 @@ async def test_one_steer_dispatch_publishes_one_steering_queue_state(
     assert len(steering) == 1
     release.set()
     await asyncio.wait_for(consumer, timeout=5.0)
+
+
+# ── A prompt the provider cancelled before it ran (#1406) ────────────────
+
+
+async def test_cancelled_prompt_waits_in_the_queue_instead_of_being_lost(
+    tmp_path: Path,
+) -> None:
+    from ciao.models import PromptCancelledEvent
+
+    provider = _SteerProvider()
+    pcm, chat, stream, release, turn_calls, captured, consumer = (
+        await _start_blocked_turn(
+            tmp_path, provider, events=(PromptCancelledEvent(type="prompt_cancelled"),)
+        )
+    )
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The stopped prompt is a waiting entry now, not a new turn.
+    assert turn_calls == ["initial"]
+    waiting = pcm.get_chat(chat.chat_id).pending_queue
+    assert [(e["text"], e["images"]) for e in waiting] == [("initial", [])]
+    assert waiting[0]["id"]
+    assert [e["text"] for e in _queue_states(captured)[-1]] == ["initial"]
+    # The event is host bookkeeping: it never reaches the client.
+    assert not [e for e in captured if e.get("type") == "prompt_cancelled"]

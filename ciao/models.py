@@ -317,6 +317,15 @@ class SteerDeliveredEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class PromptCancelledEvent(StreamEvent):
+    """Stop cancelled the turn's prompt before the provider ran it.
+
+    Host bookkeeping: the drive loop puts the turn's prompt back in the
+    chat's waiting queue so the user can resend it.
+    """
+
+
+@dataclass(slots=True)
 class ResultEvent(StreamEvent):
     """Terminal stream event."""
 

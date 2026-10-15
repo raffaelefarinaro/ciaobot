@@ -5765,6 +5765,31 @@ class ProjectChatManager:
         })
         stream.publish_pending()
 
+    def on_prompt_cancelled(
+        self,
+        chat_id: str,
+        stream: "ChatStream",
+        prompt: str,
+        images: list[ImageAttachment] | None,
+    ) -> None:
+        """Stop cancelled a prompt the provider had not run: keep it waiting.
+
+        The turn's own prompt (not the provider's capsule-prefixed one) joins
+        the chat's waiting queue like a message parked by Stop, so the user
+        resends it with the chip's Send now or Steer.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return
+        entry = {
+            "id": f"q-{uuid.uuid4().hex[:12]}",
+            "text": prompt,
+            "images": self._image_refs(images),
+        }
+        chat.pending_queue = [*chat.pending_queue, entry]
+        self._save()
+        stream.publish_queue_state(chat.pending_queue)
+
     def on_steer_delivered(
         self, chat_id: str, stream: "ChatStream", steer_id: str
     ) -> None:

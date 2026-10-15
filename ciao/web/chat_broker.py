@@ -22,6 +22,7 @@ from ciao.models import (
     ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
+    PromptCancelledEvent,
     SteerDeliveredEvent,
     StreamEvent,
     SystemStatusEvent,
@@ -495,6 +496,10 @@ def apply_file_touches_to_payload(
 
 def event_to_json(event: StreamEvent) -> dict | None:
     """Convert a StreamEvent into the JSON payload sent to WS clients."""
+    if isinstance(event, PromptCancelledEvent):
+        # Host bookkeeping only: the drive loop parks the prompt in the
+        # chat's waiting queue.
+        return None
     if isinstance(event, SteerDeliveredEvent):
         # Host bookkeeping only: the drive loop turns it into a ``steered``
         # event once the queue entries are matched to it.

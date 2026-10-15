@@ -146,6 +146,11 @@ class _DriveHost:
     def on_steer_delivered(self, chat_id: str, stream: object, steer_id: str) -> None:
         del chat_id, stream, steer_id
 
+    def on_prompt_cancelled(
+        self, chat_id: str, stream: object, prompt: str, images: object
+    ) -> None:
+        del chat_id, stream, prompt, images
+
     def _save(self, *, reason: str = "registry_mutation") -> None:
         del reason
         self.saves += 1
