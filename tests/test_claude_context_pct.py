@@ -254,6 +254,20 @@ async def test_unexpected_get_context_usage_error_falls_back_to_estimate() -> No
 
 
 @pytest.mark.asyncio
+async def test_slow_get_context_usage_is_bounded(monkeypatch) -> None:
+    """The first call on a fresh CLI took up to 27.8 s; it must not hold the result."""
+    import asyncio
+
+    class _Slow:
+        async def get_context_usage(self):
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr("ciao.providers.claude._CONTEXT_USAGE_TIMEOUT_S", 0.05)
+    event = await asyncio.wait_for(_augment(_Slow(), _result(), _last_call()), 2)
+    assert event.usage["context_pct"] == "2.3%"
+
+
+@pytest.mark.asyncio
 async def test_cli_percentage_is_preferred_over_the_estimate() -> None:
     response = {"totalTokens": 22848, "maxTokens": 1000000, "rawMaxTokens": 1000000, "percentage": 2}
     event = await _augment(_Client(response), _result(), _last_call(cache_read=500000))

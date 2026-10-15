@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -176,7 +177,13 @@ async def test_idle_reaper_keeps_an_opencode_server_with_a_live_drain(tmp_path):
     async def disconnect() -> None:
         disconnected.append(True)
 
-    service = SimpleNamespace(disconnect=disconnect)
+    # An OpenCode drain exists only while background work is outstanding; an
+    # activity age past the horizon isolates the live-drain rule.
+    service = SimpleNamespace(
+        disconnect=disconnect,
+        background_work_outstanding=True,
+        background_activity_age=math.inf,
+    )
     pcm._providers[chat.chat_id] = service  # type: ignore[assignment]
     pcm._provider_last_used[chat.chat_id] = time.monotonic() - 10**6
     drain = asyncio.ensure_future(asyncio.Event().wait())

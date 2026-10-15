@@ -248,16 +248,17 @@ _BACKGROUND_WAKE_TAIL_LINES = 50
 # ── Idle provider reaping ────────────────────────────────────────────────
 # `self._providers` is keyed by chat id and, before this, was only ever
 # emptied by a lifecycle event (session reset, handover, archive, delete).
-# That is fine for Claude, whose provider is an in-process SDK client, but
-# opencode runs **one `opencode serve` process per chat** — see the module
+# Claude keeps one CLI process per chat alive between turns (#1402), so this
+# timeout also bounds how long an idle Claude CLI lives. opencode runs
+# **one `opencode serve` process per chat** — see the module
 # docstring in ciao/providers/opencode.py for why the control plane's per-chat
 # MCP token forces that. Without a reaper, a day of touching chats leaves a
 # server process, a port, an SSE stream and a stderr reader alive for every
 # one of them until the app restarts.
 #
 # A provider is only reclaimed when the chat has been quiet for the timeout
-# AND has no work in flight (`active_chat_ids`, a between-turns drain, a retry
-# loop or a pending background wake). Reclaiming is cheap to undo: the chat's
+# AND has no work in flight (`active_chat_ids`, a between-turns drain with
+# outstanding background work, a retry loop or a pending background wake). Reclaiming is cheap to undo: the chat's
 # `session_id` is persisted, so the next turn reconnects and resumes rather
 # than starting a new conversation — the same path a token rotation already
 # takes (ciao/providers/opencode.py::_ensure_server,
@@ -4231,9 +4232,17 @@ class ProjectChatManager:
         """
         if chat_id in active:
             return True
-        if self._streaming.has_live_drain(chat_id):
-            return True
+        # A Claude drain lives as long as its CLI (#1402), so an idle drain is
+        # not work. Claude's background agents are counted by active_chat_ids,
+        # a drain streaming a follow-up holds a broker stream, and opencode
+        # reports its own outstanding work.
         service = self._providers.get(chat_id)
+        if (
+            service is not None
+            and self._streaming.has_live_drain(chat_id)
+            and service.background_work_outstanding
+        ):
+            return True
         if (
             service is not None
             and service.background_work_outstanding

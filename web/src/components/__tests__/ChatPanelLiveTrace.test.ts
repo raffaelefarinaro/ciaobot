@@ -209,6 +209,9 @@ describe('ChatPanel live trace', () => {
     await flushPromises()
 
     const messagesEl = wrapper.get('.messages').element
+    // End the open-time pin-to-bottom window (a rAF loop that re-pins for 700ms
+    // after mount) so it cannot overwrite the scroll positions stubbed below.
+    messagesEl.dispatchEvent(new Event('wheel'))
     stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
     messagesEl.dispatchEvent(new Event('scroll'))
     stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 600 })
