@@ -1,0 +1,411 @@
+"""OpenCode 2 runs follow-up executions of its own after background work (#1391).
+
+The two fixtures are sanitized 2.0.27 captures: a background shell and a
+background subagent that finish after the foreground turn ended. They pin which
+execution a foreground turn owns and what `drain_events` streams afterwards.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from ciao.models import AgentRequest, PermissionRequestEvent, ResultEvent
+from ciao.providers import opencode as opencode_module
+from ciao.providers.opencode import OpencodeProvider, _read_running_shells
+from tests.test_opencode_provider import _FakeEventStream, _FakeServerClient
+
+FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
+SHELL_SESSION = "ses_bgshell_parent"
+SUB_SESSION = "ses_bgsub_parent"
+
+
+def _fixture_lines(name: str) -> list[str]:
+    return [
+        line
+        for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _split(lines: list[str], session: str) -> tuple[list[str], list[str]]:
+    """Split after the first `session.execution.succeeded` of ``session`` (inclusive)."""
+    for index, line in enumerate(lines):
+        event = json.loads(line)
+        if (
+            event["type"] == "session.execution.succeeded"
+            and event["data"].get("sessionID") == session
+        ):
+            return lines[: index + 1], lines[index + 1 :]
+    raise AssertionError("fixture has no terminal event")
+
+
+def _sse(lines: list[str]) -> list[str]:
+    return [f"data: {line}\n\n" for line in lines]
+
+
+class _HeldOpenStream(_FakeEventStream):
+    """Yields its frames, then stays open like a live SSE connection."""
+
+    def __init__(self, lines: list[str]) -> None:
+        super().__init__(_sse(lines))
+        self._never = asyncio.Event()
+
+    async def aiter_bytes(self):
+        async for chunk in super().aiter_bytes():
+            yield chunk
+        await self._never.wait()
+
+
+class _Response:
+    status_code = 200
+    text = ""
+
+    def __init__(self, payload: object) -> None:
+        self._payload = payload
+
+    def json(self) -> object:
+        return self._payload
+
+
+class _TurnClient(_FakeServerClient):
+    """A turn client whose `/api/session/active` reports ``running``."""
+
+    def __init__(self, lines: list[str], running: set[str] | None = None) -> None:
+        super().__init__(_sse(lines))
+        self._running = running or set()
+
+    async def get(self, path: str, *, params=None):
+        if path == "/api/session/active":
+            return _Response(
+                {"data": {sid: {"type": "running"} for sid in self._running}}
+            )
+        return await super().get(path, params=params)
+
+
+class _DrainClient:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    def stream(self, _method: str, _path: str) -> _HeldOpenStream:
+        return _HeldOpenStream(self._lines)
+
+
+def _event(kind: str, **data: object) -> str:
+    return json.dumps({"id": f"evt_{kind}", "type": kind, "data": data})
+
+
+def _text(session: str, message: str, text: str) -> str:
+    return _event(
+        "session.text.ended",
+        sessionID=session, assistantMessageID=message, ordinal=0, text=text,
+    )
+
+
+async def _run_turn(
+    provider: OpencodeProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    client: _TurnClient,
+    session: str,
+    token: str,
+) -> list:
+    monkeypatch.setattr(opencode_module.secrets, "token_hex", lambda _n: token)
+
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return session
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    request = AgentRequest(prompt="hi", model="", mode="default", provider="opencode")
+    return [
+        event
+        async for event in provider.run_streaming(request, lambda _handle: None)
+    ]
+
+
+def _texts(events: list) -> str:
+    return "".join(e.text for e in events if e.type == "text")
+
+
+def _drain_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: str, rest: list[str]
+) -> OpencodeProvider:
+    provider = OpencodeProvider(tmp_path)
+    provider._client = _DrainClient(rest)  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+    provider._session_id = session
+    monkeypatch.setattr(opencode_module, "_OPENCODE_DRAIN_POLL_S", 0.01)
+    return provider
+
+
+def _script(monkeypatch, provider, *, shells, tree, active=()):
+    """Scripted reads: each list is consumed in order, the last value repeats."""
+    def stepper(values):
+        remaining = list(values)
+
+        async def _next(*_args):
+            return remaining.pop(0) if len(remaining) > 1 else remaining[0]
+
+        return _next
+
+    shell_read = stepper(shells)
+    tree_read = stepper(tree)
+    active_read = stepper([set(active)])
+    monkeypatch.setattr(opencode_module, "_read_running_shells", shell_read)
+    monkeypatch.setattr(opencode_module, "_read_active_sessions", active_read)
+    monkeypatch.setattr(provider, "read_live_collab_tree", tree_read)
+
+
+async def _drain(provider: OpencodeProvider) -> list:
+    async def collect() -> list:
+        return [event async for event in provider.drain_events()]
+
+    return await asyncio.wait_for(collect(), 2)
+
+
+# ── foreground turns ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_background_shell_turn_ends_at_its_own_execution(tmp_path, monkeypatch):
+    foreground, _ = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    provider = OpencodeProvider(tmp_path)
+
+    events = await _run_turn(
+        provider, monkeypatch, _TurnClient(foreground), SHELL_SESSION, "bgshell_prompt"
+    )
+
+    result = events[-1]
+    assert isinstance(result, ResultEvent)
+    assert not result.is_error
+    assert result.result == "STARTED"
+    assert provider._background_shells == {"sh_bgshell"}
+    assert provider.background_work_outstanding
+
+
+@pytest.mark.asyncio
+async def test_background_subagent_turn_tracks_the_child(tmp_path, monkeypatch):
+    foreground, _ = _split(_fixture_lines("background_subagent_wake.jsonl"), SUB_SESSION)
+    provider = OpencodeProvider(tmp_path)
+
+    events = await _run_turn(
+        provider, monkeypatch, _TurnClient(foreground), SUB_SESSION, "bgsub_prompt"
+    )
+
+    assert events[-1].result == "LAUNCHED"
+    assert provider._background_children == {"ses_bgsub_child"}
+
+
+@pytest.mark.asyncio
+async def test_wake_running_when_the_user_prompts_is_skipped(tmp_path, monkeypatch):
+    lines = [
+        _text(SHELL_SESSION, "msg_wake", "BGDONE"),
+        _event("session.execution.succeeded", sessionID=SHELL_SESSION),
+        _event("session.execution.started", sessionID=SHELL_SESSION),
+        _event("session.inbox.delivered", sessionID=SHELL_SESSION, inboxID="msg_ours"),
+        _text(SHELL_SESSION, "msg_answer", "ANSWER"),
+        _event("session.execution.succeeded", sessionID=SHELL_SESSION),
+    ]
+    events = await _run_turn(
+        OpencodeProvider(tmp_path), monkeypatch,
+        _TurnClient(lines, running={SHELL_SESSION}), SHELL_SESSION, "ours",
+    )
+
+    assert events[-1].result == "ANSWER"
+    assert "BGDONE" not in _texts(events)
+
+
+@pytest.mark.asyncio
+async def test_wake_delivered_before_our_prompt_is_not_attributed(tmp_path, monkeypatch):
+    lines = [
+        _event("session.inbox.enqueued", sessionID=SHELL_SESSION, inboxID="msg_ours",
+               item={"type": "user", "payload": {"text": "hi"}, "delivery": "queue"}),
+        _event("session.inbox.enqueued", sessionID=SHELL_SESSION, inboxID="msg_wake",
+               item={"type": "synthetic", "payload": {"text": "<shell/>"}, "delivery": "steer"}),
+        _event("session.execution.started", sessionID=SHELL_SESSION),
+        _event("session.inbox.delivered", sessionID=SHELL_SESSION, inboxID="msg_wake"),
+        _text(SHELL_SESSION, "msg_wake_a", "BGDONE"),
+        _event("session.execution.succeeded", sessionID=SHELL_SESSION),
+        _event("session.execution.started", sessionID=SHELL_SESSION),
+        _event("session.inbox.delivered", sessionID=SHELL_SESSION, inboxID="msg_ours"),
+        _text(SHELL_SESSION, "msg_answer", "ANSWER"),
+        _event("session.execution.succeeded", sessionID=SHELL_SESSION),
+    ]
+    events = await _run_turn(
+        OpencodeProvider(tmp_path), monkeypatch, _TurnClient(lines), SHELL_SESSION, "ours"
+    )
+
+    assert events[-1].result == "ANSWER"
+    assert "BGDONE" not in _texts(events)
+
+
+@pytest.mark.asyncio
+async def test_synthetic_steered_into_our_execution_stays_ours(tmp_path, monkeypatch):
+    lines = [
+        _event("session.execution.started", sessionID=SHELL_SESSION),
+        _event("session.inbox.delivered", sessionID=SHELL_SESSION, inboxID="msg_ours"),
+        _event("session.inbox.delivered", sessionID=SHELL_SESSION, inboxID="msg_wake"),
+        _text(SHELL_SESSION, "msg_both", "BOTH"),
+        _event("session.execution.succeeded", sessionID=SHELL_SESSION),
+    ]
+    events = await _run_turn(
+        OpencodeProvider(tmp_path), monkeypatch, _TurnClient(lines), SHELL_SESSION, "ours"
+    )
+
+    assert events[-1].result == "BOTH"
+
+
+@pytest.mark.asyncio
+async def test_permission_from_a_foreign_execution_still_surfaces(tmp_path, monkeypatch):
+    lines = [
+        _event(
+            "permission.asked",
+            id="per_wake", sessionID=SHELL_SESSION, action="shell",
+            resources=["ls"], metadata={"command": "ls"},
+            source={"type": "tool", "messageID": "msg_w", "id": "call_w"},
+        ),
+        _event("session.inbox.delivered", sessionID=SHELL_SESSION, inboxID="msg_ours"),
+        _text(SHELL_SESSION, "msg_answer", "ANSWER"),
+        _event("session.execution.succeeded", sessionID=SHELL_SESSION),
+    ]
+    events = await _run_turn(
+        OpencodeProvider(tmp_path), monkeypatch,
+        _TurnClient(lines, running={SHELL_SESSION}), SHELL_SESSION, "ours",
+    )
+
+    assert any(isinstance(event, PermissionRequestEvent) for event in events)
+    assert events[-1].result == "ANSWER"
+
+
+# ── can_drain ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_can_drain_needs_a_live_server_and_background_work(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    provider._client = SimpleNamespace(aclose=_noop)  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+    provider._session_id = "ses_x"
+    assert provider.can_drain is False
+
+    provider._background_shells = {"sh"}
+    assert provider.can_drain is True
+
+    await provider.disconnect()
+    assert provider.can_drain is False
+
+
+async def _noop() -> None:
+    return None
+
+
+# ── drain_events ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_drain_streams_a_background_shell_wake(tmp_path, monkeypatch):
+    _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
+    provider._background_shells = {"sh_bgshell"}
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()], tree=[[]])
+
+    events = await _drain(provider)
+
+    assert _texts(events) == "BGDONE"
+    results = [event for event in events if isinstance(event, ResultEvent)]
+    assert len(results) == 1
+    assert results[0].result == "BGDONE"
+    assert results[0].session_id == SHELL_SESSION
+    assert results[0].is_error is False
+    assert provider.background_work_outstanding is False
+
+
+@pytest.mark.asyncio
+async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
+    _, rest = _split(_fixture_lines("background_subagent_wake.jsonl"), SUB_SESSION)
+    provider = _drain_provider(tmp_path, monkeypatch, SUB_SESSION, rest)
+    provider._background_children = {"ses_bgsub_child"}
+    _script(
+        monkeypatch, provider,
+        shells=[set()],
+        tree=[[{"active": True}], [{"active": False}]],
+    )
+
+    events = await _drain(provider)
+
+    assert _texts(events) == "SUBDONE"
+    results = [event for event in events if isinstance(event, ResultEvent)]
+    assert [r.result for r in results] == ["SUBDONE"]
+    assert provider._background_children == set()
+
+
+@pytest.mark.asyncio
+async def test_drain_returns_when_nothing_is_outstanding(tmp_path, monkeypatch):
+    provider = _drain_provider(
+        tmp_path, monkeypatch, SHELL_SESSION, [_event("server.connected")]
+    )
+    _script(monkeypatch, provider, shells=[set()], tree=[[]])
+
+    assert await _drain(provider) == []
+
+
+@pytest.mark.asyncio
+async def test_drain_stops_at_the_horizon(tmp_path, monkeypatch):
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, [])
+    monkeypatch.setattr(opencode_module, "_OPENCODE_DRAIN_MAX_S", 0.05)
+    _script(monkeypatch, provider, shells=[{"sh"}], tree=[[]])
+
+    assert await _drain(provider) == []
+
+
+@pytest.mark.asyncio
+async def test_drain_reports_a_failed_wake(tmp_path, monkeypatch):
+    rest = [
+        _event("session.execution.started", sessionID=SHELL_SESSION),
+        _event(
+            "session.execution.failed",
+            sessionID=SHELL_SESSION, error={"type": "x", "message": "boom"},
+        ),
+    ]
+    provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
+    _script(monkeypatch, provider, shells=[set()], tree=[[]])
+
+    events = await _drain(provider)
+
+    result = events[-1]
+    assert isinstance(result, ResultEvent)
+    assert result.is_error
+    assert result.result == "boom"
+
+
+# ── helpers ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_read_running_shells_filters_by_session_and_status():
+    rows = [
+        {"id": "sh_other", "status": "running", "metadata": {"sessionID": "ses_other"}},
+        {"id": "sh_done", "status": "exited", "metadata": {"sessionID": "ses_a"}},
+        {"id": "sh_live", "status": "running", "metadata": {"sessionID": "ses_a"}},
+    ]
+
+    class _Client:
+        async def get(self, path: str):
+            assert path == "/api/shell"
+            return _Response({"data": rows})
+
+    assert await _read_running_shells(_Client(), "ses_a") == {"sh_live"}  # type: ignore[arg-type]
+
+
+def test_shell_and_subagent_fixtures_carry_no_private_paths():
+    for name in ("background_shell_wake.jsonl", "background_subagent_wake.jsonl"):
+        raw = (FIXTURES / name).read_text(encoding="utf-8")
+        for needle in ("raffaelefarinaro", "claude-501", "OPENCODE_SERVER_PASSWORD", "Bearer "):
+            assert needle not in raw
