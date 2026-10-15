@@ -389,9 +389,26 @@ class SDKHandle(ActiveHandle):
     pending_steers: set[str] = field(default_factory=set)
 
     async def stop(self) -> None:
+        had_steers = bool(self.pending_steers)
         self.pending_steers.clear()
         try:
-            await self.client.interrupt()
+            if had_steers:
+                # Stop wins over a steer that is still queued: without
+                # cancel_queued the CLI runs it as a new turn after the
+                # interrupt. The SDK has no public wrapper, so this uses the
+                # private control request. It depends on the bundled CLI's
+                # ``interrupt_cancel_queued_v1`` capability (the SDK pins the
+                # CLI, so there is no fallback path).
+                reply = await self.client._query._send_control_request(  # type: ignore[union-attr]
+                    {"subtype": "interrupt", "cancel_queued": True}
+                )
+                still_queued = reply.get("still_queued") if isinstance(reply, dict) else None
+                if still_queued:
+                    logger.warning(
+                        "Claude Stop left steers queued in the CLI: %s", still_queued
+                    )
+            else:
+                await self.client.interrupt()
         except Exception:  # noqa: BLE001 — best-effort: a hung CLI or a
             # transport torn down under us (stop escalation disconnects the
             # client while this ack is still pending) must never surface as

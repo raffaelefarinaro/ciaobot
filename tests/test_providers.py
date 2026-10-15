@@ -1908,24 +1908,54 @@ async def test_claude_steer_grace_timeout_ends_turn(
     assert claude_provider._turn_open is False
 
 
+class _StopFakeClient:
+    def __init__(self, cancelled=None, still_queued=None) -> None:
+        self.control_requests: list[dict] = []
+        self.plain_interrupts = 0
+        self.reply = {"cancelled": cancelled or [], "still_queued": still_queued or []}
+        client = self
+
+        class _Query:
+            async def _send_control_request(self, request, timeout=60.0):
+                client.control_requests.append(request)
+                return client.reply
+
+        self._query = _Query()
+
+    async def interrupt(self):
+        self.plain_interrupts += 1
+
+
 @pytest.mark.asyncio
-async def test_claude_stop_clears_pending_steers(
-    claude_provider: ClaudeProvider, monkeypatch,
+async def test_claude_stop_cancels_queued_steers(
+    claude_provider: ClaudeProvider, caplog,
 ) -> None:
     from ciao.providers.claude import SDKHandle
 
-    interrupted: list[set[str]] = []
-
-    class Client:
-        async def interrupt(self):
-            interrupted.append(set(claude_provider._steers_pending))
-
     claude_provider._steers_pending.add("s1")
-    await SDKHandle(
-        client=Client(), pending_steers=claude_provider._steers_pending
-    ).stop()
-    assert interrupted == [set()]
+    client = _StopFakeClient(still_queued=["s1"])
+    with caplog.at_level(logging.WARNING):
+        await SDKHandle(
+            client=client, pending_steers=claude_provider._steers_pending
+        ).stop()
+
+    assert client.control_requests == [{"subtype": "interrupt", "cancel_queued": True}]
+    assert client.plain_interrupts == 0
     assert claude_provider._steers_pending == set()
+    assert "s1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_claude_stop_without_steers_uses_plain_interrupt(
+    claude_provider: ClaudeProvider,
+) -> None:
+    from ciao.providers.claude import SDKHandle
+
+    client = _StopFakeClient()
+    await SDKHandle(client=client, pending_steers=claude_provider._steers_pending).stop()
+
+    assert client.plain_interrupts == 1
+    assert client.control_requests == []
 
 
 @pytest.mark.asyncio
