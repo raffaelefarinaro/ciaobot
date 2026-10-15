@@ -71,7 +71,7 @@ set and nothing else.
 | `PermissionRequestEvent` | The CLI is waiting on an approval card. |
 | `TokenUsageEvent` | Live counts. The terminal `ResultEvent.usage` is still the authoritative total. |
 | `ModelChangedEvent` | The effective model changed mid-turn. |
-| `ResultEvent` | Every turn ends on one. Carry `session_id`, `effective_model`, `is_error`, `stopped` (a user Stop is not an error), `usage`, and `quota` when the CLI has it. `recovered_with_pending` means a permission or question card is still unanswered. |
+| `ResultEvent` | Every turn ends on one. Carry `session_id`, `effective_model`, `is_error`, `stopped` (a user Stop is not an error), `usage`, and `quota` when the CLI has it. `recovered_with_pending` means a permission or question card is still unanswered. Set `origin` to a non-empty kind (Claude: `task-notification`) on a result the provider produced without a prompt from Ciaobot, so the host drain can tell a follow-up turn apart. |
 
 ### Methods the chat manager already calls
 
@@ -80,7 +80,6 @@ set and nothing else.
 | `disconnect()` | Session reset, delete, idle reap, stop escalation. | The process is leaked. On `BaseProvider` the default is a no-op. |
 | `ActiveHandle.stop()` | The Stop button. | Registered from `run_streaming`. |
 | `current_session_id` | Permission and question replies. | The reply cannot find the live session. |
-| `steer(request)` | A message sent while a turn is running. | The message waits for the next turn. |
 | `send_permission_response` / `permission_gate` | The approval card. | The card cannot be answered. Claude uses `PermissionGate`; OpenCode posts to the session. |
 | `send_question_response` | A native question card. | Same, for questions. |
 | `can_drain` / `drain_events` | Claude, between turns, so a background agent can wake the parent. | No between-turns drain. OpenCode reports `can_drain` false. |

@@ -267,7 +267,7 @@ async def _wait_for_chat_drain(
     """Wait until chat work stays idle across consecutive observations.
 
     The stable-idle window closes the handoff race between a parent stream
-    ending and its background-subagent watcher or synthesis stream starting.
+    ending and its background-subagent watcher or its follow-up turn starting.
     ``begin_restart_drain`` prevents unrelated new turns from extending the
     wait after a restart has already been requested.
     """

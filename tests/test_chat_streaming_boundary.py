@@ -186,7 +186,7 @@ class _DriveHost:
         return text[:limit]
 
     @staticmethod
-    def _is_worth_announcing_nudge_reply(text: str) -> bool:
+    def _is_worth_announcing_follow_up(text: str) -> bool:
         return len(text) >= 4
 
     @staticmethod
