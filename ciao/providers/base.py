@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import math
 import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, AsyncIterable, Callable
@@ -238,6 +239,16 @@ class BaseProvider(ABC):
 
     async def disconnect(self) -> None:
         """Discard any provider-side connection state."""
+
+    @property
+    def background_work_outstanding(self) -> bool:
+        """True while background work this provider's process owns is running."""
+        return False
+
+    @property
+    def seconds_since_activity(self) -> float:
+        """Seconds since the provider last heard from its server."""
+        return math.inf
 
 
 class BaseSDKProvider(BaseProvider):

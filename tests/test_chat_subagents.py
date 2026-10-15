@@ -566,6 +566,7 @@ async def test_drain_between_turns_skips_publish_and_push_for_banner_only_result
 
     class _FakeProvider:
         can_drain = True
+        background_work_outstanding = False
 
         async def drain_events(self):
             from ciao.models import ResultEvent
@@ -605,6 +606,7 @@ async def test_drain_between_turns_publishes_and_pushes_for_real_reply(
 
     class _FakeProvider:
         can_drain = True
+        background_work_outstanding = False
 
         async def drain_events(self):
             from ciao.models import ResultEvent
@@ -1543,6 +1545,8 @@ class _FakeProvider:
 
     can_drain = True
 
+    background_work_outstanding = False
+
     def __init__(self, events: list) -> None:
         self._events = events
 
@@ -1690,6 +1694,7 @@ async def test_a_follow_up_while_agents_still_run_replaces_the_park(
 
     class _OneThenBlock:
         can_drain = True
+        background_work_outstanding = False
 
         async def drain_events(self):
             yield _result_event("Agent A reported: the parser is fine.")
@@ -1722,6 +1727,7 @@ async def test_a_cancelled_drain_leaves_the_park_to_the_next_turn(
 
     class _Blocking:
         can_drain = True
+        background_work_outstanding = False
 
         async def drain_events(self):
             await asyncio.sleep(3600)
@@ -1789,6 +1795,7 @@ async def test_watcher_leaves_the_park_to_a_live_drain_after_seeing_work(
 
     class FakeProvider:
         can_drain = True
+        background_work_outstanding = False
 
     pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
     running_drain = asyncio.get_running_loop().create_future()
@@ -1965,6 +1972,7 @@ async def test_a_live_user_turn_keeps_the_watchers_finally_quiet(
 
     class FakeProvider:
         can_drain = True
+        background_work_outstanding = False
 
         async def steer(self, request) -> bool:  # pragma: no cover
             raise AssertionError("must not steer into a live user turn")
@@ -2026,6 +2034,7 @@ async def test_a_watcher_with_no_turn_to_supersede_it_still_releases(
 
     class FakeProvider:
         can_drain = True
+        background_work_outstanding = False
 
         async def steer(self, request) -> bool:  # pragma: no cover
             raise AssertionError("no drain to capture the reply")

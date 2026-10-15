@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 import logging
+import math
 from pathlib import Path
 
 from ciao import provider_registry
@@ -162,16 +163,14 @@ class ProviderService:
     @property
     def background_work_outstanding(self) -> bool:
         """True while the provider reports background work its process owns."""
-        return bool(
-            self._provider is not None
-            and getattr(self._provider, "background_work_outstanding", False)
-        )
+        return self._provider is not None and self._provider.background_work_outstanding
 
     @property
     def background_activity_age(self) -> float:
         """Seconds since the provider last saw server activity (inf if unknown)."""
-        age = getattr(self._provider, "seconds_since_activity", None)
-        return float(age) if isinstance(age, (int, float)) else float("inf")
+        if self._provider is None:
+            return math.inf
+        return self._provider.seconds_since_activity
 
     @property
     def cli_connected(self) -> bool:

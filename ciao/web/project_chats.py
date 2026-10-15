@@ -4236,12 +4236,11 @@ class ProjectChatManager:
         service = self._providers.get(chat_id)
         if (
             service is not None
-            and getattr(service, "background_work_outstanding", False)
+            and service.background_work_outstanding
             # Same horizon as the drain: a server whose drain ended with work
             # still outstanding stays up while its events are recent, then
             # falls back to the idle timeout.
-            and getattr(service, "background_activity_age", float("inf"))
-            < _OPENCODE_DRAIN_MAX_S
+            and service.background_activity_age < _OPENCODE_DRAIN_MAX_S
         ):
             return True
         for tasks in (self._retry_tasks, self._background_wake_tasks):
