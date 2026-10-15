@@ -729,28 +729,6 @@ class ClaudeProvider(BaseSDKProvider):
         self._mcp_token = ""
         self._reset_settings()
 
-    async def steer(self, request: AgentRequest) -> bool:
-        """Inject a follow-up user message into the currently-active turn.
-
-        Returns True if the message was pushed to the live SDK client, False
-        if there's no active client (caller should fall back to queuing).
-
-        The caller owns the lifecycle of the drive loop consuming
-        ``receive_response()`` — this method just writes to the transport.
-        The SDK's ``query()`` is not mutually exclusive with a pending
-        ``receive_response()`` iterator, so the new message lands as an
-        additional user turn the CLI processes in-line.
-        """
-        if self._client is None or not self._connected:
-            return False
-        try:
-            payload = self._prompt_payload(request)
-            await self._client.query(payload)
-            return True
-        except _CLAUDE_OP_ERRORS:
-            logger.warning("Claude steer query failed; caller should fall back to queue")
-            return False
-
     @property
     def can_drain(self) -> bool:
         """True when a connected client exists to drain between turns."""
@@ -764,16 +742,18 @@ class ClaudeProvider(BaseSDKProvider):
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
         """Yield SDK events arriving *between* turns until cancelled.
 
-        Background subagents outlive the parent turn: when one completes, the
-        CLI injects a task-notification, and a fresh parent turn follows —
-        run by the CLI on its own (CLI-version dependent, observed not to
-        happen reliably) or requested via ``steer()`` by the completion
-        watcher's synthesis nudge. Its messages land on stdout with nobody
-        consuming them. Left unread they
-        sit in the transport buffer and the stale ResultMessage would
-        terminate the *next* ``receive_response()`` immediately, bleeding one
-        turn's output into the next. This generator keeps the pipe drained
-        and hands the events to the caller for live display.
+        While the client is connected and idle, a finished background `Agent`
+        or background Bash makes the CLI start a follow-up turn by itself: a
+        task notification, then a fresh assistant turn that ends in a
+        `ResultMessage` whose `origin` kind is `task-notification`. There is
+        one such turn per completion, sometimes preceded by an empty `turns=0`
+        result (verified 2026-10-15 on the CLI bundled with SDK 0.2.165,
+        #1394). No prompt is sent for it. Left unread, those messages sit in
+        the transport buffer, and the stale `ResultMessage` would end the next
+        `receive_response()` immediately, bleeding one turn's output into the
+        next. This generator keeps the pipe drained and hands the events to
+        the caller for live display; `ResultEvent.origin` marks the follow-up
+        results.
 
         The caller owns the lifecycle: it MUST cancel this generator before
         starting a new turn (``receive_response`` and this iterator consume
@@ -1332,6 +1312,9 @@ class ClaudeProvider(BaseSDKProvider):
                 )
             if msg.is_error:
                 result_text = _annotate_connection_host(result_text, self._api_host)
+            raw_origin = getattr(msg, "origin", None)
+            kind = raw_origin.get("kind") if isinstance(raw_origin, dict) else None
+            origin = kind if isinstance(kind, str) and kind != "human" else ""
             return [
                 ResultEvent(
                     type="result",
@@ -1342,6 +1325,7 @@ class ClaudeProvider(BaseSDKProvider):
                     usage=usage,
                     quota=quota,
                     cost_usd=msg.total_cost_usd,
+                    origin=origin,
                 )
             ]
 

@@ -192,7 +192,7 @@ class ChatStreamingHost(Protocol):
     def _result_snippet(text: str, limit: int = 280) -> str: ...
 
     @staticmethod
-    def _is_worth_announcing_nudge_reply(text: str) -> bool: ...
+    def _is_worth_announcing_follow_up(text: str) -> bool: ...
 
     @staticmethod
     def _is_interim_subagent_text(text: str) -> bool: ...
@@ -201,7 +201,7 @@ class ChatStreamingHost(Protocol):
 
     def _park_result_announce(
         self, chat_id: str, project_id: str, title: str, snippet: str
-    ) -> int: ...
+    ) -> None: ...
 
     def _announce_result_ready(
         self, chat_id: str, project_id: str, title: str, snippet: str
@@ -211,15 +211,11 @@ class ChatStreamingHost(Protocol):
 
     async def _memory_pass_turn_finished(self, chat_id: str) -> bool: ...
 
-    def _discard_result_announce(
-        self, chat_id: str, token: int | None = None
-    ) -> None: ...
+    def _discard_result_announce(self, chat_id: str) -> None: ...
 
-    def _flush_result_announce(
-        self, chat_id: str, token: int | None = None
-    ) -> bool: ...
+    def _flush_result_announce(self, chat_id: str) -> bool: ...
 
-    def _cancel_parked_announce_deadline(self, chat_id: str) -> None: ...
+    def _background_count_now(self, chat_id: str) -> int: ...
 
     def _spawn_detached(
         self, coro: Coroutine[object, object, object], name: str
@@ -305,9 +301,6 @@ class ChatStreaming:
     def has_live_drain(self, chat_id: str) -> bool:
         task = self._between_turn_drains.get(chat_id)
         return task is not None and not task.done()
-
-    def drain_for(self, chat_id: str) -> asyncio.Task[None] | None:
-        return self._between_turn_drains.get(chat_id)
 
     def discard_drain_result(self, chat_id: str) -> None:
         self._last_drain_result.pop(chat_id, None)
@@ -1064,7 +1057,7 @@ class ChatStreaming:
                 }
             )
             chat_for_watcher = self._host._chats.get(chat_id)
-            nudge_can_reannounce = False
+            follow_up_expected = False
             if (
                 chat_for_watcher is not None
                 and chat_for_watcher.session_id
@@ -1073,7 +1066,11 @@ class ChatStreaming:
                 self._host._start_subagent_watcher(chat_id, project_id)
                 if chat_for_watcher.provider == "claude":
                     self._host._start_between_turns_drain(chat_id, project_id)
-                    nudge_can_reannounce = True
+                    # A Claude chat with a live drain gets a native follow-up
+                    # turn when its background work finishes; an interim
+                    # "I'll report back" announce is parked for it and
+                    # released at count zero (see `drain_between_turns`).
+                    follow_up_expected = True
             self._host._discard_result_announce(chat_id)
             if not had_error and last_assistant_text.strip():
                 snippet = self._host._result_snippet(last_assistant_text)
@@ -1085,7 +1082,7 @@ class ChatStreaming:
                     chat_now.last_snippet = snippet
                     self._host._save()
                 title = chat_now.title if chat_now else "Ciaobot"
-                interim = nudge_can_reannounce and self._host._is_interim_subagent_text(
+                interim = follow_up_expected and self._host._is_interim_subagent_text(
                     last_assistant_text
                 )
                 if interim:
@@ -1597,14 +1594,12 @@ class ChatStreaming:
 
     def cancel_between_turns_drain(self, chat_id: str) -> None:
         """Fire-and-forget cancel; pair with await_between_turns_drain."""
-        self._host._cancel_parked_announce_deadline(chat_id)
         task = self._between_turn_drains.get(chat_id)
         if task is not None and not task.done():
             task.cancel()
 
     async def await_between_turns_drain(self, chat_id: str) -> None:
         """Wait until this chat's drain has fully unwound."""
-        self._host._cancel_parked_announce_deadline(chat_id)
         task = self._between_turn_drains.pop(chat_id, None)
         if task is None:
             return
@@ -1652,6 +1647,18 @@ class ChatStreaming:
 
         try:
             async for event in provider_service.drain_events():
+                if (
+                    isinstance(event, ResultEvent)
+                    and event.origin
+                    and stream is None
+                    and not event.is_error
+                    and not (event.result or "").strip()
+                ):
+                    # The CLI's empty bookkeeping result (turns=0) for a
+                    # notification it already folded into a turn: no events,
+                    # nothing to show, record or announce (#1394).
+                    logger.debug("Skipped an empty follow-up result for chat %s", chat_id)
+                    continue
                 payload = event_to_json(event)
                 if payload is None:
                     continue
@@ -1675,7 +1682,9 @@ class ChatStreaming:
                 if isinstance(event, ResultEvent):
                     text = event.result or ""
                     is_error = bool(event.is_error)
-                    self._last_drain_result[chat_id] = (text, is_error)
+                    settled = self._host._background_count_now(chat_id) == 0
+                    if settled:
+                        self._last_drain_result[chat_id] = (text, is_error)
                     last_error = (
                         self._host._result_snippet(text or "The turn failed.")
                         if is_error
@@ -1686,7 +1695,7 @@ class ChatStreaming:
                     if (
                         not is_error
                         and text
-                        and self._host._is_worth_announcing_nudge_reply(text)
+                        and self._host._is_worth_announcing_follow_up(text)
                     ):
                         snippet = self._host._result_snippet(text)
                         if chat_now is not None:
@@ -1699,33 +1708,45 @@ class ChatStreaming:
                             chat_now.last_error = ""
                             self._host._save()
                         title = chat_now.title if chat_now else "Ciaobot"
-                        self._host._discard_result_announce(chat_id)
-                        self._host._announce_result_ready(
-                            chat_id, project_id, title, snippet
-                        )
-                        self._host._spawn_detached(
-                            self._host._maybe_archive_proposal_helper(chat_id),
-                            f"archive-proposal-helper-{chat_id}",
-                        )
-                    elif chat_now is not None:
-                        # Not worth announcing is a notification decision, not
-                        # an outcome one: the result still ended a turn, so its
-                        # status is persisted here exactly as the turn-done path
-                        # persists it. Without this an errored drain leaves the
-                        # chat reading as the clean success that preceded it, and
-                        # a memory pass waiting on this result archives an error.
-                        chat_now.last_response = text[
-                            -chat_service._PROVIDER_HANDOVER_MAX_CHARS :
-                        ]
-                        chat_now.last_response_status = (
-                            "error"
-                            if is_error
-                            else "success"
-                            if text.strip()
-                            else "empty"
-                        )
-                        chat_now.last_error = last_error
-                        self._host._save()
+                        if settled:
+                            self._host._discard_result_announce(chat_id)
+                            self._host._announce_result_ready(
+                                chat_id, project_id, title, snippet
+                            )
+                            self._host._spawn_detached(
+                                self._host._maybe_archive_proposal_helper(chat_id),
+                                f"archive-proposal-helper-{chat_id}",
+                            )
+                        else:
+                            # Agents still running: this follow-up replaces the
+                            # parked announce; the one that lands at zero
+                            # announces once.
+                            self._host._park_result_announce(
+                                chat_id, project_id, title, snippet
+                            )
+                    else:
+                        if chat_now is not None:
+                            # Not worth announcing is a notification decision,
+                            # not an outcome one: the result still ended a turn,
+                            # so its status is persisted here exactly as the
+                            # turn-done path persists it. Without this an
+                            # errored drain leaves the chat reading as the clean
+                            # success that preceded it, and a memory pass
+                            # waiting on this result archives an error.
+                            chat_now.last_response = text[
+                                -chat_service._PROVIDER_HANDOVER_MAX_CHARS :
+                            ]
+                            chat_now.last_response_status = (
+                                "error"
+                                if is_error
+                                else "success"
+                                if text.strip()
+                                else "empty"
+                            )
+                            chat_now.last_error = last_error
+                            self._host._save()
+                        if settled:
+                            self._host._flush_result_announce(chat_id)
                     # A pass that was waiting on background work ends here, and
                     # ends once per terminal result whatever that result was.
                     self._host._spawn_detached(
@@ -1745,7 +1766,7 @@ class ChatStreaming:
     async def wait_for_drain_result(
         self, chat_id: str, *, timeout_s: float = 180.0
     ) -> tuple[str, bool] | None:
-        """Wait for the drain's next recorded synthesis result."""
+        """Wait for the drain's next follow-up result recorded at background count zero."""
         deadline = time.perf_counter() + timeout_s
         while time.perf_counter() < deadline:
             result = self._last_drain_result.get(chat_id)

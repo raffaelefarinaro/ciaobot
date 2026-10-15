@@ -67,14 +67,11 @@ FINISHED_AGENT_IDLE_SECONDS = 60.0
 _TAIL_WINDOW_BYTES = 65536
 
 
-# Prompt the server injects into the parent turn when its background subagents
-# all finish, so the chat doesn't sit on the interim "I'll report back" message
-# forever (delivered by
-# ``ProjectChatManager._nudge_synthesis_after_subagents``). It lives here
-# because three call sites need the same string: the sender, the /messages
-# renderer that collapses it into a system line instead of a user bubble, and
-# the turn counter below — it is machine-generated, so it must not advance
-# `turn_index` any more than the CLI's own synthetic user records do.
+# Prompt Ciaobot used to inject when background agents finished. It is no
+# longer sent (#1394: the CLI now runs a follow-up turn itself). It is kept
+# because session files recorded before then contain it: the /messages
+# renderer collapses it into a status line and the turn counter below skips
+# it, so existing chats keep their `turn_index`.
 SUBAGENT_SYNTHESIS_NUDGE = (
     "The background agent(s) you dispatched have now finished. Review their "
     "results (read their transcripts or output as needed) and post your "
@@ -87,8 +84,8 @@ SUBAGENT_SYNTHESIS_NUDGE = (
 # CLI (``ProjectChatManager._build_cli_task_wake_prompt``). The prompt lands in
 # the parent JSONL as the user record it was sent as; recognising it here lets
 # the parser mark those tasks ``lost`` so the watcher (and the startup sweep)
-# never wake for them twice. Kept beside SUBAGENT_SYNTHESIS_NUDGE for the same
-# reason: the sender and the parser need the same string.
+# never wake for them twice. Kept here for the same reason as the legacy prompt
+# above: the sender and the parser need the same string.
 CLI_TASK_WAKE_PREFIX = "[Ciaobot] Lost CLI tasks:"
 _CLI_TASK_WAKE_ID_RE = re.compile(r"\(task ([A-Za-z0-9_-]+)\)")
 
@@ -99,17 +96,17 @@ def _collapse_whitespace(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip()
 
 
-_NUDGE_COLLAPSED = _collapse_whitespace(SUBAGENT_SYNTHESIS_NUDGE)
+_SYNTHESIS_PROMPT_COLLAPSED = _collapse_whitespace(SUBAGENT_SYNTHESIS_NUDGE)
 
 
 def is_synthesis_nudge(text: str) -> bool:
-    """True when ``text`` is the injected subagent-synthesis nudge.
+    """True when ``text`` is the legacy subagent-synthesis prompt (no longer sent).
 
     Matches on the tail: the nudge is sent with the chat's context prefix
     attached, and the /messages prefix stripper only removes the shapes it
     recognizes.
     """
-    return _collapse_whitespace(text).endswith(_NUDGE_COLLAPSED)
+    return _collapse_whitespace(text).endswith(_SYNTHESIS_PROMPT_COLLAPSED)
 
 
 # Markdown punctuation that can trail a question mark ("**...?**", "(...?)").
