@@ -106,8 +106,10 @@ Ciaobot reads provider configuration and live chat status without editing
 `opencode.json` or launching a server from Settings. Keep existing MCP entries
 in the provider configuration. See the [OpenCode V2 MCP documentation](https://opencode.ai/v2/docs/mcp-servers/).
 
-Ciaobot sends V2 text/file prompts with queued delivery, so a message produced
-during an active turn remains a later turn instead of steering the current one.
+Ciaobot sends V2 text/file prompts with queued delivery. A message the user
+steers into a running turn is sent with `delivery: "steer"` (images as files) and
+joins that turn at its next step boundary; delivery is attributed by inbox id, and
+Stop cancels a steer still waiting in the inbox.
 V2 has no stable per-prompt system field, so compact core/runtime context rides
 in the text behind markers that transcript replay and session handovers strip.
 The provider normalizes V2's flat message records once at the HTTP boundary;
