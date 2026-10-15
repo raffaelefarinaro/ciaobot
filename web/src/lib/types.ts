@@ -230,10 +230,11 @@ export interface ChatInfo {
   // chat receiving the live WS stream. Cleared by the server on answer or
   // turn end.
   pending_permission?: string
-  // Follow-ups parked when a turn ended without flushing them (error, question
-  // pause, native question, retry, task-board stop). Each entry is
-  // {id, text, images}. Empty once the next turn re-seeds the live queue, so
-  // an empty list during a live turn is not "no chips".
+  // Follow-ups parked when a turn ended without flushing them (Stop, error,
+  // question pause, native question, retry, task-board stop). Each entry is
+  // {id, text, images}. Parked entries are never re-seeded by a later send:
+  // they leave only through Send now, edit, remove or reorder, so the list
+  // is the chat's waiting chips.
   pending_queue?: Array<{ id: string; text: string; images?: string[] }>
   retry?: ChatRetryInfo | null
   forked_from_chat_id?: string
@@ -330,6 +331,8 @@ export interface ChatMessage {
   // typed. Drives the ↻ marker on the bubble, so a self-driven turn is not
   // mistaken for something the reader sent. Only present on user messages.
   unattended?: boolean
+  // Sent into the running turn instead of starting its own (steered).
+  steered?: boolean
   // Monotonic per-chat user-turn index. Server-assigned; used to dedup
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
@@ -413,6 +416,11 @@ export interface RunningSubagentsResponse {
 
 // ── WebSocket events ────────────────────────────────────────────────────
 
+// What a queued message will do: wait for the next turn, or be handed to the
+// running one through the provider's native steering.
+export type QueueDelivery = 'queue' | 'steer'
+export type SteerFallbackReason = 'no_turn' | 'not_running' | 'finished' | 'stopped'
+
 export type WsEvent =
   // parent_tool_use_id is set when the event came from inside a Task
   // subagent. Its value is the parent's tool_use_id for the Task dispatch,
@@ -493,8 +501,16 @@ export type WsEvent =
       retryable?: boolean;
     }
   | { type: 'question_resolved'; request_id: string; session_id?: string }
-  | { type: 'queued'; id?: string; text: string; images?: string[] }
-  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
+  | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean }
+  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[]; delivery?: QueueDelivery; steering?: boolean; waiting?: boolean }> }
+  // A steer reached the running turn: the entries leave the queue and the
+  // message becomes its own user turn.
+  | { type: 'steered'; entry_ids: string[]; text: string; images?: string[]; turn_index?: number; sent_at?: string; delivery_id?: string }
+  // Stop cancelled a prompt before the provider picked it up: its user turn
+  // never happened. The prompt comes back as a waiting queue entry.
+  | { type: 'prompt_cancelled'; turn_index: number }
+  // A steer could not be delivered; the entries are back in the queue.
+  | { type: 'steer_fallback'; entry_ids: string[]; reason: SteerFallbackReason }
   | { type: 'error'; message: string }
   | { type: 'auth_required'; message?: string }
   // Server is draining for restart; client should show RestartNotice, not
@@ -508,8 +524,8 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; keyboard_revision?: string }
-  | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; revision: string }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string }
+  | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }

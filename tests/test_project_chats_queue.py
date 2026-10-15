@@ -1279,13 +1279,14 @@ def test_park_pending_for_retry_publishes_the_parked_queue(tmp_path: Path) -> No
                     "images": ["shot.png"],
                     "delivery": "queue",
                     "steering": False,
+                    "waiting": True,
                 },
             ],
         }
     ]
     public = pcm._chats[chat.chat_id].to_dict()["pending_queue"]
     assert public == [
-        {k: v for k, v in e.items() if k not in ("delivery", "steering")}
+        {k: v for k, v in e.items() if k not in ("delivery", "steering", "waiting")}
         for e in states[0]["queue"]
     ]
     assert public is not pcm._chats[chat.chat_id].pending_queue
@@ -1431,9 +1432,28 @@ def test_pending_public_hides_steer_id_and_flags_steering() -> None:
     stream.mark_steering(["a"], "d1")
     stream.enqueue("b", entry_id="b")
     assert stream.pending_public() == [
-        {"id": "a", "text": "a", "images": [], "delivery": "steer", "steering": True},
-        {"id": "b", "text": "b", "images": [], "delivery": "queue", "steering": False},
+        {"id": "a", "text": "a", "images": [], "delivery": "steer", "steering": True, "waiting": False},
+        {"id": "b", "text": "b", "images": [], "delivery": "queue", "steering": False, "waiting": False},
     ]
+
+
+def test_queue_state_marks_waiting_entries_and_live_entries() -> None:
+    """The server says which chips are parked; the client does not infer it."""
+    stream = ChatStream("chat-1")
+    stream.waiting = lambda: [{"id": "w", "text": "held"}]
+    stream.enqueue("live", entry_id="l")
+    queue = stream.pending_public()
+    assert [(e["id"], e["waiting"]) for e in queue] == [("w", True), ("l", False)]
+    stream.publish_pending()
+    last = [e for e in stream.buffered_events() if e["type"] == "queue_state"][-1]
+    assert [(e["id"], e["waiting"]) for e in last["queue"]] == [("w", True), ("l", False)]
+
+
+def test_a_parked_queue_state_marks_every_entry_waiting() -> None:
+    stream = ChatStream("chat-1")
+    stream.publish_queue_state([{"id": "p1", "text": "t"}, {"id": "p2", "text": "u"}])
+    last = [e for e in stream.buffered_events() if e["type"] == "queue_state"][-1]
+    assert [e["waiting"] for e in last["queue"]] == [True, True]
 
 
 async def test_steer_queue_combines_in_list_order(tmp_path: Path) -> None:
@@ -2138,6 +2158,7 @@ async def test_parked_queue_state_has_the_live_entry_shape(tmp_path: Path) -> No
                     "images": ["a.png"],
                     "delivery": "queue",
                     "steering": False,
+                    "waiting": True,
                 }
             ],
         }
