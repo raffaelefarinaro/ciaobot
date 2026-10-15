@@ -220,11 +220,19 @@ def _cli_process_exited(client: object) -> bool:
     return process is not None and getattr(process, "returncode", None) is not None
 
 
+# Deliberate limit: only CLAUDE.md and AGENTS.md in the workspace root are
+# watched. CLAUDE.local.md, .claude/CLAUDE.md, rules and @imports reach the
+# agent at the next natural reconnect.
 _GUIDE_FILES = ("CLAUDE.md", "AGENTS.md")
 
 
 def _guide_fingerprint(root: Path) -> tuple[tuple[int, int] | None, ...]:
-    """(mtime_ns, size) of each native guide file in ``root``; None when absent."""
+    """(mtime_ns, size) of each native guide file in ``root``; None when absent.
+
+    Only ``CLAUDE.md`` and ``AGENTS.md`` in the workspace root are watched.
+    ``CLAUDE.local.md``, ``.claude/CLAUDE.md``, rules and ``@imports`` reach
+    the agent at the next natural reconnect.
+    """
     marks: list[tuple[int, int] | None] = []
     for name in _GUIDE_FILES:
         try:
@@ -586,6 +594,8 @@ class ClaudeProvider(BaseSDKProvider):
         self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
         # Spawn-only options the live CLI process was started with.
         self._spawn_key: tuple[object, ...] = ()
+        # Fire-and-forget closes of dead clients, held so they are not collected.
+        self._closing_tasks: set[asyncio.Future[None]] = set()
 
     def _stderr_handler(self, line: str) -> None:
         _route_cli_stderr(line)
@@ -696,7 +706,7 @@ class ClaudeProvider(BaseSDKProvider):
                 try:
                     await self._client.set_model(requested_model)
                     self._current_model = requested_model
-                except Exception as exc:  # noqa: BLE001 - control-request errors are bare Exception
+                except (*_CLAUDE_OP_ERRORS, asyncio.TimeoutError) as exc:
                     logger.warning("Claude set_model failed (%s); reconnecting", exc)
                     reconnect_reason = "model_change"
                     await self.disconnect()
@@ -706,6 +716,7 @@ class ClaudeProvider(BaseSDKProvider):
                     self._current_mode = request.mode
                 except Exception as exc:  # noqa: BLE001 - control-request errors are bare Exception
                     logger.warning("Claude set_permission_mode failed (%s); reconnecting", exc)
+                    logger.debug("set_permission_mode failure detail", exc_info=True)
                     reconnect_reason = "mode_change"
                     await self.disconnect()
         if self._client is not None and self._connected:
@@ -935,12 +946,21 @@ class ClaudeProvider(BaseSDKProvider):
         self._spawn_key = ()
         self._reset_settings()
 
-    def _forget_dead_cli(self) -> None:
-        """Clear client state after the CLI process died.
+    def _forget_dead_cli(self, client: object) -> None:
+        """Clear client state after ``client``'s CLI process died.
 
         disconnect() minus the awaited client call: the drain consumer calls
         this from inside its own task, where awaiting disconnect() deadlocks.
+        The dead client is closed in a separate task so its transport and
+        query tasks are released. Does nothing when ``client`` is no longer
+        the live one: a reconnect already replaced it, and its state must
+        survive a stale drain ending late.
         """
+        if self._client is not client:
+            return
+        task = asyncio.ensure_future(self._close_dead_client(client))
+        self._closing_tasks.add(task)
+        task.add_done_callback(self._closing_tasks.discard)
         self._client = None
         self._connected = False
         self._session_id = None
@@ -948,6 +968,13 @@ class ClaudeProvider(BaseSDKProvider):
         self._mcp_token = ""
         self._spawn_key = ()
         self._reset_settings()
+
+    @staticmethod
+    async def _close_dead_client(client: object) -> None:
+        try:
+            await client.disconnect()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - best-effort cleanup of a dead CLI
+            logger.debug("Closing the dead Claude client failed", exc_info=True)
 
     @property
     def can_drain(self) -> bool:
@@ -1011,7 +1038,7 @@ class ClaudeProvider(BaseSDKProvider):
                 # rebuilds the client on the next turn, exactly as after a
                 # disconnect(); leaving _connected True would make
                 # cli_connected lie to the CLI-task watcher.
-                self._forget_dead_cli()
+                self._forget_dead_cli(client)
             except _CLAUDE_OP_ERRORS:
                 # Other typed SDK errors (e.g. MessageParseError) are not
                 # transport death; end the drain, keep the client usable.
@@ -1029,7 +1056,7 @@ class ClaudeProvider(BaseSDKProvider):
                 # EOF. The CLI stays alive between turns, so only a dead CLI
                 # produces it.
                 logger.info("Claude CLI exited between turns; next turn reconnects")
-                self._forget_dead_cli()
+                self._forget_dead_cli(client)
             finally:
                 merged.put_nowait(_DONE)
 
@@ -1418,6 +1445,10 @@ class ClaudeProvider(BaseSDKProvider):
         chat model's window (see :meth:`_estimate_context_pct`). When neither
         yields a trustworthy number, ``context_pct`` is left off: the footer
         omits it rather than showing a wrong value.
+
+        The request is bounded to ``_CONTEXT_USAGE_TIMEOUT_S``: the first turn
+        after any reconnect can take up to 3 s here and then shows the
+        estimated percentage.
         """
         try:
             usage = await asyncio.wait_for(

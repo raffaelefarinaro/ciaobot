@@ -1874,6 +1874,46 @@ async def test_drain_marks_cli_disconnected_when_stream_ends(
     assert claude_provider._spawn_key == ()
 
 
+@pytest.mark.asyncio
+async def test_old_drain_stream_ending_after_reconnect_keeps_the_new_client(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """A stale drain must not wipe the client a reconnect just installed."""
+    release = asyncio.Event()
+
+    class OldClient:
+        async def receive_messages(self):
+            await release.wait()
+            return
+            yield  # pragma: no cover
+
+        async def disconnect(self):
+            return None
+
+    new_client = object()
+    claude_provider._client = OldClient()
+    claude_provider._connected = True
+
+    drain = asyncio.ensure_future(_collect(claude_provider.drain_events()))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    # Reconnect while the old consumer is still alive.
+    claude_provider._client = new_client  # type: ignore[assignment]
+    claude_provider._connected = True
+    claude_provider._spawn_key = ("fresh",)
+    release.set()
+    await drain
+
+    assert claude_provider._client is new_client
+    assert claude_provider._connected is True
+    assert claude_provider._spawn_key == ("fresh",)
+
+
+async def _collect(gen) -> list:
+    return [item async for item in gen]
+
+
 def _steer_result(text: str):
     from claude_agent_sdk import ResultMessage
 
