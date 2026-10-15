@@ -5669,19 +5669,22 @@ async def settings_routines(request: Request) -> JSONResponse:
 
 
 async def settings_keyboard(request: Request) -> JSONResponse:
-    """Read or update keyboard preferences shared by this engine's clients."""
+    """Read or update keyboard and composer preferences shared by this engine's clients."""
     app_settings = request.app.state.app_settings
     if app_settings is None:
         return JSONResponse({"error": "settings store unavailable"}, status_code=503)
     def payload() -> dict[str, Any]:
         keyboard_shortcuts = app_settings.settings.keyboard_shortcuts or {}
         keyboard_send_mode = app_settings.settings.keyboard_send_mode or "modifier"
+        mid_turn_delivery = app_settings.settings.mid_turn_delivery or "queue"
         revision_source = json.dumps(
-            [keyboard_shortcuts, keyboard_send_mode], sort_keys=True, separators=(",", ":")
+            [keyboard_shortcuts, keyboard_send_mode, mid_turn_delivery],
+            sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
         return {
             "keyboard_shortcuts": keyboard_shortcuts,
             "keyboard_send_mode": keyboard_send_mode,
+            "mid_turn_delivery": mid_turn_delivery,
             "revision": hashlib.sha256(revision_source).hexdigest(),
         }
     if request.method == "PATCH":

@@ -14,7 +14,7 @@ import re
 import shlex
 import uuid
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from ciao.models import (
     AssistantTextDelta,
@@ -22,6 +22,7 @@ from ciao.models import (
     ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
+    SteerDeliveredEvent,
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
@@ -78,6 +79,44 @@ def remove_pending_list(items: list[dict], entry_id: str) -> bool:
             items.pop(i)
             return True
     return False
+
+
+QUEUE_DELIVERIES = frozenset({"queue", "steer"})
+# ``steer_id`` of an entry handed to ``steer_turn`` whose delivery id is not
+# known yet. It locks the entry (no edit, remove or re-dispatch) meanwhile.
+STEER_DISPATCHING = "dispatching"
+
+
+def _flushed_entry(entry: dict) -> dict:
+    """A drained entry as it flushes or parks: delivery state is queue-only.
+
+    Anything leaving the live queue is a plain follow-up. In-flight steer state
+    never outlives the live queue (``_fallback_steers`` reverts it first).
+    """
+    return {
+        "id": entry.get("id", ""),
+        "text": entry.get("text", ""),
+        "images": list(entry.get("images") or []),
+    }
+
+
+def public_queue(entries: list[dict]) -> list[dict]:
+    """The ``queue_state`` shape of queue entries: no internal steer id.
+
+    ``steering`` is true while an entry has been handed to the provider and is
+    waiting for its delivery confirmation. Parked entries (persisted on the
+    chat) never carry a steer id and may predate the ``delivery`` field.
+    """
+    return [
+        {
+            "id": entry.get("id", ""),
+            "text": entry.get("text", ""),
+            "images": list(entry.get("images") or []),
+            "delivery": entry.get("delivery") or "queue",
+            "steering": bool(entry.get("steer_id")),
+        }
+        for entry in entries
+    ]
 
 
 # Heartbeat cadence for an idle stream subscription. A background tool (e.g. a
@@ -456,6 +495,10 @@ def apply_file_touches_to_payload(
 
 def event_to_json(event: StreamEvent) -> dict | None:
     """Convert a StreamEvent into the JSON payload sent to WS clients."""
+    if isinstance(event, SteerDeliveredEvent):
+        # Host bookkeeping only: the drive loop turns it into a ``steered``
+        # event once the queue entries are matched to it.
+        return None
     if isinstance(event, AssistantTextDelta):
         payload: dict = {"type": "text_delta", "text": event.text}
         if event.parent_tool_use_id:
@@ -554,8 +597,22 @@ class ChatStream:
         "prompt_text",
         "_pending",
         "_pending_id_seq",
+        # Turn indexes of steers delivered into this turn; the drive loop
+        # stamps them with the turn's completion time at the ResultEvent.
+        "steered_turn_indexes",
+        # Delivery ids confirmed before ``steer_queue`` recorded them on the
+        # entries (the echo can beat ``steer_turn``'s return).
+        "early_steer_deliveries",
+        # True only while ``steer_turn`` is being awaited: a delivery id that
+        # arrives then may belong to the dispatch in flight.
+        "steer_inflight",
+        # The user-turn index of the turn now running, so a steer delivered
+        # into it can inherit its unattended flag.
+        "running_turn_index",
+        # Returns the chat's waiting (parked) entries, which stay visible in
+        # this stream's ``queue_state`` but are never flushed by it.
+        "waiting",
         "user_stopped",
-        "park_on_stop",
         "background",
         # The asyncio.Task currently iterating this stream's turn events.
         # Set by the drive loop before awaiting the turn; cleared when the
@@ -589,15 +646,17 @@ class ChatStream:
         # are ref strings (resolved back to ImageAttachments at flush time).
         self._pending: list[dict] = []
         self._pending_id_seq = 0
-        # Set by `stop_chat()` when the user hits the Stop button. The drive
-        # loop reads this to decide whether to still flush queued messages
-        # after an interrupted turn (a user stop is intentional, not an
-        # error, so queued follow-ups should still go out).
+        self.steered_turn_indexes: list[int] = []
+        self.early_steer_deliveries: set[str] = set()
+        self.steer_inflight: bool = False
+        self.running_turn_index: int | None = None
+        self.waiting: Callable[[], list[dict]] | None = None
+        # Set by `stop_chat()` when the user hits the Stop button. Stop holds
+        # the whole queue: the drive loop parks every queued message on the
+        # chat (chips stay) instead of flushing it, so nothing is sent after
+        # the user said stop. A queued message goes out only when the user
+        # sends it (Steer / Send now) or sends a new message.
         self.user_stopped: bool = False
-        # Set with `user_stopped` by a task-board Stop or Detach (#1103): the
-        # drive loop parks the queued follow-ups on the chat instead of
-        # running them, so a stopped delegated task stops working.
-        self.park_on_stop: bool = False
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
         # queued user messages — a user send while one is active
@@ -620,27 +679,38 @@ class ChatStream:
         text: str,
         images: list[str] | None = None,
         entry_id: str | None = None,
+        delivery: str = "queue",
     ) -> str:
         """Queue a user message to flush after this stream finishes.
 
         Returns the queue entry id. If ``entry_id`` is supplied by the client,
         use it so the frontend and backend can reference the same item for
         reorder/edit/remove. Otherwise generate one.
+
+        ``delivery`` is ``"queue"`` (a follow-up turn) or ``"steer"`` (handed
+        to the running turn by ``ProjectChatManager.steer_queue``).
+        ``steer_id`` stays empty until that dispatch.
         """
         self._pending_id_seq += 1
         resolved_id = entry_id or f"q-{self._pending_id_seq}-{uuid.uuid4().hex[:8]}"
-        self._pending.append({"id": resolved_id, "text": text, "images": list(images or [])})
+        self._pending.append({
+            "id": resolved_id,
+            "text": text,
+            "images": list(images or []),
+            "delivery": delivery,
+            "steer_id": "",
+        })
         return resolved_id
 
     def drain_one(self) -> dict | None:
         """Return and remove the next queued message, or None if empty."""
         if not self._pending:
             return None
-        return self._pending.pop(0)
+        return _flushed_entry(self._pending.pop(0))
 
     def drain_pending(self) -> list[dict]:
         """Return and clear any queued messages. Kept for compatibility."""
-        out = list(self._pending)
+        out = [_flushed_entry(entry) for entry in self._pending]
         self._pending.clear()
         return out
 
@@ -652,17 +722,135 @@ class ChatStream:
         return reorder_pending_list(self._pending, entry_id, before_id)
 
     def edit_pending(self, entry_id: str, text: str, images: list[str] | None = None) -> bool:
-        """Update text and images of the queued entry with ``entry_id``."""
+        """Update text and images of the queued entry with ``entry_id``.
+
+        Refused for an entry already handed to the provider as a steer.
+        """
+        if self._is_steering(entry_id):
+            return False
         return edit_pending_list(self._pending, entry_id, text, images)
 
     def remove_pending(self, entry_id: str) -> bool:
-        """Remove the queued entry with ``entry_id``."""
+        """Remove the queued entry with ``entry_id`` (not one in flight)."""
+        if self._is_steering(entry_id):
+            return False
         return remove_pending_list(self._pending, entry_id)
+
+    def _is_steering(self, entry_id: str) -> bool:
+        return any(p.get("id") == entry_id and p.get("steer_id") for p in self._pending)
+
+    def adopt_waiting(self, entries: list[dict], delivery: str) -> None:
+        """Take waiting (parked) entries into this live queue, ahead of its own.
+
+        They were queued earlier, so list order puts them first.
+        """
+        adopted = [
+            {
+                "id": entry.get("id", ""),
+                "text": entry.get("text", ""),
+                "images": list(entry.get("images") or []),
+                "delivery": delivery,
+                "steer_id": "",
+            }
+            for entry in entries
+        ]
+        self._pending = [*adopted, *self._pending]
+
+    def set_delivery(self, entry_ids: list[str], delivery: str) -> bool:
+        """Switch entries between ``"queue"`` and ``"steer"``.
+
+        An entry already handed to the provider is locked: it is skipped (and
+        never moved back to ``"queue"``). Returns True if any named entry
+        exists and is not locked.
+        """
+        wanted = set(entry_ids)
+        changed = False
+        for entry in self._pending:
+            if entry.get("id") in wanted and not entry.get("steer_id"):
+                entry["delivery"] = delivery
+                changed = True
+        return changed
+
+    def steer_candidates(self) -> list[dict]:
+        """Steer-mode entries not yet handed to the provider, in list order.
+
+        An entry with neither text nor images has nothing to send.
+        """
+        return [
+            dict(entry)
+            for entry in self._pending
+            if entry.get("delivery") == "steer"
+            and not entry.get("steer_id")
+            and (str(entry.get("text", "")).strip() or entry.get("images"))
+        ]
+
+    def revert_blank_steers(self) -> list[str]:
+        """Revert steer-mode entries with nothing to send; return their ids."""
+        reverted: list[str] = []
+        for entry in self._pending:
+            if (
+                entry.get("delivery") == "steer"
+                and not entry.get("steer_id")
+                and not str(entry.get("text", "")).strip()
+                and not entry.get("images")
+            ):
+                entry["delivery"] = "queue"
+                reverted.append(str(entry.get("id", "")))
+        return reverted
+
+    def mark_steering(self, entry_ids: list[str], steer_id: str) -> None:
+        """Record that ``entry_ids`` were handed to the provider as ``steer_id``."""
+        wanted = set(entry_ids)
+        for entry in self._pending:
+            if entry.get("id") in wanted:
+                entry["steer_id"] = steer_id
+
+    def confirm_steering(self, steer_id: str) -> bool:
+        """Swap the dispatch placeholder for the provider's delivery id.
+
+        False when no entry is still waiting on it (a Stop or turn end already
+        reverted them), so the caller does not resurrect them.
+        """
+        confirmed = False
+        for entry in self._pending:
+            if entry.get("steer_id") == STEER_DISPATCHING:
+                entry["steer_id"] = steer_id
+                confirmed = True
+        return confirmed
+
+    def take_steered(self, steer_id: str) -> list[dict]:
+        """Remove and return the entries dispatched as ``steer_id``."""
+        taken = [p for p in self._pending if p.get("steer_id") == steer_id]
+        self._pending = [p for p in self._pending if p.get("steer_id") != steer_id]
+        return taken
+
+    def revert_steers(self) -> list[str]:
+        """Put every steer-mode entry back in queue mode; return their ids."""
+        reverted: list[str] = []
+        for entry in self._pending:
+            if entry.get("delivery") == "steer":
+                entry["delivery"] = "queue"
+                entry["steer_id"] = ""
+                reverted.append(str(entry.get("id", "")))
+        return reverted
 
     @property
     def pending(self) -> list[dict]:
         """Read-only snapshot of queued messages in order."""
         return list(self._pending)
+
+    def pending_public(self) -> list[dict]:
+        """The whole visible queue in the ``queue_state`` wire shape.
+
+        Waiting entries first (they were queued earlier), then this stream's own
+        queue. See ``public_queue``.
+        """
+        waiting = self.waiting() if self.waiting is not None else []
+        return public_queue([*waiting, *self._pending])
+
+    def publish_pending(self) -> None:
+        """Publish the live queue, empty included, so a client clears its chips."""
+        self.publish({"type": "queue_state", "queue": self.pending_public()})
 
     @property
     def has_pending(self) -> bool:
@@ -703,7 +891,7 @@ class ChatStream:
         """
         if self._done or not queue:
             return
-        self.publish({"type": "queue_state", "queue": list(queue)})
+        self.publish({"type": "queue_state", "queue": public_queue(queue)})
 
     def publish_live(self, payload: dict) -> None:
         """Fan out an ephemeral control event without adding it to replay."""
