@@ -5634,6 +5634,7 @@ export const useProjectStore = defineStore('projects', () => {
           images: event.images?.length ? event.images : undefined,
           delivery: event.delivery === 'steer' ? 'steer' : 'queue',
           steering: false,
+          waiting: Boolean(event.waiting),
         })
         queuedMessages.value[chatId] = list
         break
@@ -5644,7 +5645,6 @@ export const useProjectStore = defineStore('projects', () => {
         // from another client, or on reconnect). Rebuild local chips to match.
         const incoming = event.queue || []
         clearSteerLockTimer(chatId)
-        const waitingIds = new Set((queuedMessages.value[chatId] || []).filter(q => q.waiting).map(q => q.id))
         if (!incoming.length) {
           delete queuedMessages.value[chatId]
           break
@@ -5655,7 +5655,7 @@ export const useProjectStore = defineStore('projects', () => {
           images: q.images?.length ? q.images : undefined,
           delivery: q.delivery === 'steer' ? 'steer' : 'queue',
           steering: Boolean(q.steering),
-          waiting: waitingIds.has(q.id) && !q.steering,
+          waiting: Boolean(q.waiting) && !q.steering,
         }))
         break
       }
@@ -5682,6 +5682,21 @@ export const useProjectStore = defineStore('projects', () => {
         })
         messages.value[chatId] = normalizeMessages([...msgs])
         persistMessages()
+        break
+      }
+
+      case 'prompt_cancelled': {
+        // The turn never started: drop its optimistic bubble and any partial.
+        // The prompt returns as a waiting chip through queue_state.
+        const kept = msgs.filter(m => !(m.role === 'user' && m.turn_index === event.turn_index))
+        if (kept.length !== msgs.length) {
+          messages.value[chatId] = normalizeMessages(kept)
+          persistMessages()
+        }
+        streamingText.value[chatId] = ''
+        streamingThinking.value[chatId] = ''
+        streamingTimeline.value[chatId] = []
+        delete streamingTextPhase.value[chatId]
         break
       }
 

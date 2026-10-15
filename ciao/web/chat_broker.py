@@ -100,12 +100,14 @@ def _flushed_entry(entry: dict) -> dict:
     }
 
 
-def public_queue(entries: list[dict]) -> list[dict]:
+def public_queue(entries: list[dict], waiting: list[dict] | None = None) -> list[dict]:
     """The ``queue_state`` shape of queue entries: no internal steer id.
 
     ``steering`` is true while an entry has been handed to the provider and is
-    waiting for its delivery confirmation. Parked entries (persisted on the
-    chat) never carry a steer id and may predate the ``delivery`` field.
+    waiting for its delivery confirmation. ``waiting`` entries are parked on the
+    chat (Stop, an error, a question pause): they come first and carry
+    ``waiting: true``, so a client never has to infer which chips are held.
+    Parked entries never carry a steer id and may predate the ``delivery`` field.
     """
     return [
         {
@@ -114,8 +116,10 @@ def public_queue(entries: list[dict]) -> list[dict]:
             "images": list(entry.get("images") or []),
             "delivery": entry.get("delivery") or "queue",
             "steering": bool(entry.get("steer_id")),
+            "waiting": is_waiting,
         }
-        for entry in entries
+        for is_waiting, group in ((True, waiting or []), (False, entries))
+        for entry in group
     ]
 
 
@@ -846,7 +850,7 @@ class ChatStream:
         queue. See ``public_queue``.
         """
         waiting = self.waiting() if self.waiting is not None else []
-        return public_queue([*waiting, *self._pending])
+        return public_queue(self._pending, waiting)
 
     def publish_pending(self) -> None:
         """Publish the live queue, empty included, so a client clears its chips."""
@@ -891,7 +895,7 @@ class ChatStream:
         """
         if self._done or not queue:
             return
-        self.publish({"type": "queue_state", "queue": public_queue(queue)})
+        self.publish({"type": "queue_state", "queue": public_queue([], queue)})
 
     def publish_live(self, payload: dict) -> None:
         """Fan out an ephemeral control event without adding it to replay."""

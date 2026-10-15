@@ -5570,6 +5570,7 @@ class ProjectChatManager:
             "text": text,
             "images": image_refs,
             "delivery": delivery,
+            "waiting": False,
         })
         return True
 

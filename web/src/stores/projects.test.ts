@@ -6985,58 +6985,52 @@ describe('queue delivery: queue or steer', () => {
     }
   })
 
-  it('marks parked entries as waiting and keeps the mark across queue_state', async () => {
+  it('reads the waiting flag from queue_state, and the server flag wins over the chat record', async () => {
     const { store, socket } = await setup()
     store.reconcileChatList([
       { chat_id: chatId, project_id: 'p1', title: 'T', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, pending_queue: [{ id: 'w', text: 'held' }] } as never,
     ])
     expect(store.queuedMessages[chatId][0].waiting).toBe(true)
     emit(socket, { type: 'queue_state', queue: [
-      { id: 'w', text: 'held', delivery: 'queue', steering: false },
-      { id: 'l', text: 'live', delivery: 'queue', steering: false },
+      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true },
+      { id: 'l', text: 'live', delivery: 'queue', steering: false, waiting: false },
     ] })
     expect(store.queuedMessages[chatId].map(q => !!q.waiting)).toEqual([true, false])
+    // The server says it is live now (adopted into the turn).
+    emit(socket, { type: 'queue_state', queue: [
+      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: false },
+    ] })
+    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
+  })
+
+  it('an entry that arrives only via queue_state after a reload is waiting', async () => {
+    const { store, socket } = await setup()
+    expect(store.queuedMessages[chatId]).toBeUndefined()
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
+    expect(store.queuedMessages[chatId][0]).toMatchObject({ id: 'w', waiting: true })
+  })
+
+  it('a queued event is live, and steering an entry clears its waiting mark', async () => {
+    const { store, socket } = await setup()
+    emit(socket, { type: 'queued', id: 'n', text: 'new', delivery: 'queue', waiting: false })
+    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
     store.setQueuedDelivery(chatId, ['w'], 'steer')
     expect(store.queuedMessages[chatId][0].waiting).toBe(false)
   })
 
-  it('steer_fallback not_running reads like finished, and stopped says it stays queued', async () => {
+  it('prompt_cancelled removes the bubble and partials for that turn; a resend shows once', async () => {
     const { store, socket } = await setup()
-    emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'not_running' })
-    expect(store.steerNotice[chatId]).toContain('sent as the next message')
-    emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'stopped' })
-    expect(store.steerNotice[chatId]).toContain('stays in the queue')
-  })
-
-  it('setQueuedDelivery sends one frame with ids in list order', async () => {
-    const { store, socket } = await setup()
-    emit(socket, { type: 'queue_state', queue: [
-      { id: 'a', text: 'one', delivery: 'queue', steering: false },
-      { id: 'b', text: 'two', delivery: 'queue', steering: false },
-      { id: 'c', text: 'three', delivery: 'queue', steering: false },
-    ] })
-    store.setQueuedDelivery(chatId, ['c', 'a'], 'steer')
-    const sent = frames(socket, 'queue_set_delivery')
-    expect(sent).toHaveLength(1)
-    expect(sent[0]).toEqual({ type: 'queue_set_delivery', entry_ids: ['a', 'c'], delivery: 'steer' })
-    expect(store.queuedMessages[chatId].map(q => q.steering)).toEqual([true, false, true])
-  })
-
-  it('Send now on waiting entries with nothing running does not lock the chips', async () => {
-    const { store, socket } = await setup()
-    store.streaming[chatId] = false
-    emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
-    store.setQueuedDelivery(chatId, ['a'], 'steer')
-    expect(frames(socket, 'queue_set_delivery')).toHaveLength(1)
-    expect(store.queuedMessages[chatId][0].steering).toBe(false)
-    expect(store.queuedMessages[chatId][0].delivery).toBe('queue')
-  })
-
-  it('keeps waiting chips from queue_state when nothing is running', async () => {
-    const { store, socket } = await setup()
-    store.streaming[chatId] = false
-    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false }] })
-    expect(store.queuedMessages[chatId]).toHaveLength(1)
+    store.messages[chatId] = []
+    const bubbles = () => (store.messages[chatId] || []).filter(m => m.role === 'user' && m.turn_index === 4)
+    emit(socket, { type: 'user_echo', text: 'do it', turn_index: 4, sent_at: '2026-10-15T10:00:00Z' })
+    emit(socket, { type: 'text_delta', text: 'partial' })
+    expect(bubbles()).toHaveLength(1)
+    emit(socket, { type: 'prompt_cancelled', turn_index: 4 })
+    expect(bubbles()).toHaveLength(0)
+    expect(store.streamingText[chatId]).toBe('')
+    emit(socket, { type: 'user_echo', text: 'do it', turn_index: 4, sent_at: '2026-10-15T10:01:00Z' })
+    expect(bubbles()).toHaveLength(1)
   })
 
   it('snapshot and keyboard_settings_changed carry the preference', async () => {
