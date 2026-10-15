@@ -117,6 +117,8 @@ _CLAUDE_OP_ERRORS = (ClaudeSDKError, CLIConnectionError, ProcessError)
 # How long a finished CLI turn waits for the replay echo of a steer that is
 # still pending before the Ciaobot turn ends anyway (see ``steer_turn``).
 _STEER_ECHO_GRACE_S = 30.0
+# Bound on cancelling the orphaned steers after that grace expires.
+_STEER_CANCEL_TIMEOUT_S = 5.0
 
 
 class _SteerEchoTimeout(Exception):
@@ -1138,19 +1140,47 @@ class ClaudeProvider(BaseSDKProvider):
                             _STEER_ECHO_GRACE_S,
                             self._session_id,
                         )
+                        # Close the steer gate first: no steer may be written
+                        # while the cancels below are awaited.
+                        self._turn_open = False
                         # The steer is still queued in the CLI; cancel it so it
                         # cannot run later as an orphan turn the host also
                         # re-queues. Requires the bundled CLI's
-                        # ``cancel_async_message`` control request.
-                        for orphan in list(self._steers_pending):
-                            try:
-                                await client._query._send_control_request(  # type: ignore[union-attr]
-                                    {"subtype": "cancel_async_message", "message_uuid": orphan}
-                                )
-                            except Exception:  # noqa: BLE001 - best effort
-                                logger.warning(
-                                    "Could not cancel queued steer %s", orphan, exc_info=True
-                                )
+                        # ``cancel_async_message`` control request. Bounded so
+                        # a hung CLI cannot hold the turn open.
+                        orphans = list(self._steers_pending)
+
+                        async def _cancel_orphans() -> None:
+                            for orphan in orphans:
+                                try:
+                                    reply = await client._query._send_control_request(  # type: ignore[union-attr]
+                                        {
+                                            "subtype": "cancel_async_message",
+                                            "message_uuid": orphan,
+                                        }
+                                    )
+                                except Exception:  # noqa: BLE001 - best effort
+                                    logger.warning(
+                                        "Could not cancel queued steer %s",
+                                        orphan,
+                                        exc_info=True,
+                                    )
+                                    continue
+                                if not (isinstance(reply, dict) and reply.get("cancelled") is True):
+                                    logger.warning(
+                                        "Queued steer %s was not cancelled: %s",
+                                        orphan,
+                                        reply,
+                                    )
+
+                        try:
+                            await asyncio.wait_for(
+                                _cancel_orphans(), timeout=_STEER_CANCEL_TIMEOUT_S
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "Timed out cancelling queued steers %s", orphans
+                            )
                         self._steers_pending.clear()
                     if not got_message:
                         # The CLI stream has ended (or Stop woke the wait):

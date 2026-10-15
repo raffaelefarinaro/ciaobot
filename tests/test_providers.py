@@ -2195,3 +2195,84 @@ async def test_claude_steer_grace_timeout_cancels_the_queued_steer(
         {"subtype": "cancel_async_message", "message_uuid": ids[0]}
     ]
     assert claude_provider._steers_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_claude_grace_timeout_closes_steer_gate_before_cancelling(
+    claude_provider: ClaudeProvider, monkeypatch,
+) -> None:
+    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 0.05)
+    late: list[str | None] = []
+
+    async def round_one(_client):
+        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
+        yield _steer_result("a")
+
+    fake = _SteerFakeClient([round_one])
+
+    async def cancel(request, timeout=60.0):
+        late.append(await claude_provider.steer_turn(
+            AgentRequest(prompt="late", model="haiku", mode="normal")
+        ))
+        return {"cancelled": True}
+
+    fake._query._send_control_request = cancel
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    await _run_steer_turn(claude_provider)
+
+    assert late == [None]
+    assert claude_provider._steers_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_claude_grace_timeout_cancel_is_bounded(
+    claude_provider: ClaudeProvider, monkeypatch, caplog,
+) -> None:
+    from ciao.models import ResultEvent
+
+    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 0.05)
+    monkeypatch.setattr("ciao.providers.claude._STEER_CANCEL_TIMEOUT_S", 0.05)
+
+    async def round_one(_client):
+        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
+        yield _steer_result("a")
+
+    fake = _SteerFakeClient([round_one])
+
+    async def hang(request, timeout=60.0):
+        await asyncio.sleep(3600)
+
+    fake._query._send_control_request = hang
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    with caplog.at_level(logging.WARNING):
+        events = await asyncio.wait_for(_run_steer_turn(claude_provider), 3)
+
+    assert len([e for e in events if isinstance(e, ResultEvent)]) == 1
+    assert "cancel" in caplog.text.lower()
+    assert claude_provider._steers_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_claude_grace_timeout_warns_when_cancel_not_confirmed(
+    claude_provider: ClaudeProvider, monkeypatch, caplog,
+) -> None:
+    monkeypatch.setattr("ciao.providers.claude._STEER_ECHO_GRACE_S", 0.05)
+
+    async def round_one(_client):
+        await claude_provider.steer_turn(AgentRequest(prompt="x", model="haiku", mode="normal"))
+        yield _steer_result("a")
+
+    fake = _SteerFakeClient([round_one])
+
+    async def not_cancelled(request, timeout=60.0):
+        return {"cancelled": False}
+
+    fake._query._send_control_request = not_cancelled
+    _wire_steer_provider(claude_provider, monkeypatch, fake)
+
+    with caplog.at_level(logging.WARNING):
+        await _run_steer_turn(claude_provider)
+
+    assert "not cancelled" in caplog.text.lower()
