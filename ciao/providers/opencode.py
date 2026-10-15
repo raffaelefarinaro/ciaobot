@@ -1682,6 +1682,23 @@ class OpencodeProvider(BaseSDKProvider):
             self._background_changed.set()
         return len(self._background_shells)
 
+    async def _reconcile_background(self) -> None:
+        """Re-read background shells and subagents at the end of a turn.
+
+        A read error leaves the sets as they are and never fails the turn.
+        """
+        if not self.has_live_server or not self._session_id:
+            return
+        await self.refresh_background_shells()
+        try:
+            tree = await self.read_live_collab_tree()
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
+            return
+        running, _ = opencode_collab_tree_counts(tree)
+        if running == 0 and self._background_children:
+            self._background_children.clear()
+            self._background_changed.set()
+
     async def wait_background_change(self, timeout: float) -> None:
         """Wait up to ``timeout`` for a tracked change, then clear the flag."""
         try:
@@ -1838,6 +1855,7 @@ class OpencodeProvider(BaseSDKProvider):
             pending_inbox: set[str] = set()
             error = ""
             idle_ticks = 0
+            stale_ticks = 0
             deadline = time.monotonic() + _OPENCODE_DRAIN_MAX_S
             next_check = time.monotonic() + _OPENCODE_DRAIN_POLL_S
             while time.monotonic() < deadline:
@@ -1852,6 +1870,17 @@ class OpencodeProvider(BaseSDKProvider):
                         return
                 if time.monotonic() >= next_check:
                     next_check = time.monotonic() + _OPENCODE_DRAIN_POLL_S
+                    if executing or pending_inbox:
+                        # Lost frames must not hold the drain to the horizon: a
+                        # state the server no longer reports as running is stale.
+                        if session_id in await self._active_or_empty(client):
+                            stale_ticks = 0
+                        else:
+                            stale_ticks += 1
+                            if stale_ticks >= 2:
+                                executing = False
+                                pending_inbox.clear()
+                                stale_ticks = 0
                     if executing or pending_inbox:
                         idle_ticks = 0
                     elif await self._background_idle(client, session_id):
@@ -3467,7 +3496,11 @@ class OpencodeProvider(BaseSDKProvider):
             nonlocal prompt_attempted, prompt_accepted, prompt_rejected
             nonlocal prompt_receipt_error, error, saw_output, terminal_seen
             nonlocal foreign_execution, owned_delivery
-            if not prompt_attempted or foreign_execution:
+            if prompt_accepted:
+                # A reconnect: our prompt is already in. Whatever was running at
+                # the first attempt has long finished or been handled.
+                foreign_execution = False
+            elif not prompt_attempted:
                 foreign_execution = session_id in await self._active_or_empty(client)
             async with client.stream("GET", "/api/event") as stream:
                 stream.raise_for_status()
@@ -3640,6 +3673,7 @@ class OpencodeProvider(BaseSDKProvider):
         finally:
             register_handle(None)
 
+        await self._reconcile_background()
         await self._augment_context_pct(client, self._turn_model)
 
         yield ResultEvent(

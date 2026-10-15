@@ -83,7 +83,7 @@ set and nothing else.
 | `steer(request)` | A message sent while a turn is running. | The message waits for the next turn. |
 | `send_permission_response` / `permission_gate` | The approval card. | The card cannot be answered. Claude uses `PermissionGate`; OpenCode posts to the session. |
 | `send_question_response` | A native question card. | Same, for questions. |
-| `can_drain` / `drain_events` | Claude, between turns, so a background agent can wake the parent. | No between-turns drain. OpenCode reports `can_drain` false. |
+| `can_drain` / `drain_events` | Claude, between turns, so a background agent can wake the parent. | OpenCode reports `can_drain` true only while a live server has background shells or subagents outstanding. |
 | `read_thread` / `delete_thread` | OpenCode titles and session reclaim. Claude uses its own JSONL helpers instead. | See the skip list below. |
 
 Declare `capabilities = ProviderCapabilities(...)` honestly.
