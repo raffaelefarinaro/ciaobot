@@ -18,9 +18,10 @@ from ``/api/info``; V1 and unknown server shapes fail closed with an explicit
 upgrade message.
 
 Capability note: OpenCode has no method that injects a message into a running
-turn; Ciaobot keeps a mid-turn message in the next-turn queue. Everything else
-Ciaobot needs — fork, interrupt, permissions, forms, and background subagents
-as child sessions — is native.
+turn; a mid-turn message stays in the next-turn queue. When background work
+finishes, OpenCode runs a follow-up execution by itself; ``drain_events``
+streams it between turns. Everything else Ciaobot needs — fork, interrupt,
+permissions, forms, and background subagents as child sessions — is native.
 """
 
 from __future__ import annotations
@@ -91,6 +92,7 @@ REQUIRED_PATHS: frozenset[str] = frozenset({
     "/api/event",
     "/api/session",
     "/api/session/active",
+    "/api/shell",
     "/api/session/{sessionID}",
     "/api/session/{sessionID}/agent",
     "/api/session/{sessionID}/compact",
@@ -175,6 +177,24 @@ _REQUEST_TIMEOUT = 30.0
 _OPENCODE_SSE_RECONNECTS = 3
 _OPENCODE_RECOVERY_WINDOW_S = 60.0
 _OPENCODE_RECOVERY_POLL_S = 2.5
+# Between-turns follow-up drain (#1391): poll cadence for the idle check and the
+# same 1h horizon the background watcher uses.
+_OPENCODE_DRAIN_POLL_S = 3.0
+_OPENCODE_DRAIN_MAX_S = 3600.0
+# Budget for the turn-end background reconcile; it must never hold back the
+# turn's result (the live client has no read timeout).
+_OPENCODE_RECONCILE_TIMEOUT_S = 5.0
+_EXECUTION_TERMINAL_EVENTS = frozenset({
+    "session.execution.succeeded",
+    "session.execution.failed",
+    "session.execution.interrupted",
+})
+# Session-scoped requests that must surface even during an execution the
+# pump does not own: a wake blocked on approval would otherwise deadlock the
+# queued user prompt behind it.
+_SESSION_REQUEST_EVENTS = frozenset({
+    "permission.asked", "form.created", "form.replied", "form.cancelled",
+})
 
 
 def _opencode_messages_signature(messages: list[Any]) -> str:
@@ -1060,6 +1080,29 @@ async def _read_active_sessions(client: httpx.AsyncClient) -> set[str]:
     }
 
 
+async def _read_running_shells(client: httpx.AsyncClient, session_id: str) -> set[str]:
+    """IDs of shells still running for ``session_id`` (``GET /api/shell``)."""
+    response = await client.get("/api/shell")
+    raise_for_status = getattr(response, "raise_for_status", None)
+    if callable(raise_for_status):
+        raise_for_status()
+    rows = _data(response.json())
+    if not isinstance(rows, list):
+        raise ValueError("OpenCode shell list response is malformed")
+    running: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("status") != "running":
+            continue
+        metadata = row.get("metadata")
+        if (
+            isinstance(metadata, Mapping)
+            and str(metadata.get("sessionID") or "") == session_id
+            and row.get("id")
+        ):
+            running.add(str(row["id"]))
+    return running
+
+
 def _v2_part_key(props: Mapping[str, Any], kind: str = "") -> str:
     return (
         f"{props.get('assistantMessageID') or ''}:{kind}:"
@@ -1459,6 +1502,12 @@ class OpencodeProvider(BaseSDKProvider):
         self._mcp_token: str = ""
         # Filesystem scope and roots the live server was started with.
         self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
+        # Background work of this chat's session. It outlives a turn, so it is
+        # not part of `_reset_turn_state`; only `disconnect` and the HTTP
+        # reconciles replace it wholesale (#1391).
+        self._background_shells: set[str] = set()
+        self._background_children: set[str] = set()
+        self._background_changed = asyncio.Event()
         # Per-turn stream state, reset by `_reset_turn_state`.
         self._emitted: dict[str, int] = {}
         # `assistantMessageID:ordinal` -> reasoning/text. V2 uses separate
@@ -1568,6 +1617,99 @@ class OpencodeProvider(BaseSDKProvider):
             and self._process.returncode is None
         )
 
+    @property
+    def background_work_outstanding(self) -> bool:
+        """True while this chat's session has background shells or subagents running."""
+        return bool(self._background_shells or self._background_children)
+
+    def _track_background_event(self, event: Mapping[str, Any], session_id: str) -> None:
+        """Update the background sets from one SSE event (any session).
+
+        Runs before the session filter: ``shell.*`` events carry no top-level
+        ``sessionID``, and a child's ``session.created`` and terminal events
+        carry the child's id.
+        """
+        kind = str(event.get("type") or "")
+        data = event.get("data")
+        props: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
+        changed = False
+        if kind == "shell.created":
+            info = props.get("info")
+            metadata = info.get("metadata") if isinstance(info, Mapping) else None
+            if (
+                isinstance(info, Mapping)
+                and info.get("id")
+                and isinstance(metadata, Mapping)
+                and str(metadata.get("sessionID") or "") == session_id
+                and str(info["id"]) not in self._background_shells
+            ):
+                self._background_shells.add(str(info["id"]))
+                changed = True
+        elif kind == "shell.exited":
+            shell_id = str(props.get("id") or "")
+            if shell_id in self._background_shells:
+                self._background_shells.discard(shell_id)
+                changed = True
+        elif kind == "session.created":
+            child_id = str(props.get("sessionID") or "")
+            if (
+                child_id
+                and str(props.get("parentID") or "") == session_id
+                and child_id not in self._background_children
+            ):
+                self._background_children.add(child_id)
+                changed = True
+        elif kind in _EXECUTION_TERMINAL_EVENTS:
+            child_id = str(props.get("sessionID") or "")
+            if child_id in self._background_children:
+                self._background_children.discard(child_id)
+                changed = True
+        if changed:
+            self._background_changed.set()
+
+    async def refresh_background_shells(self) -> int:
+        """Reconcile ``_background_shells`` with ``GET /api/shell``; return the count.
+
+        Without a live server or session, or when the read fails, the set is
+        left unchanged.
+        """
+        client, session_id = self._client, self._session_id
+        if client is None or not session_id or not self.has_live_server:
+            return len(self._background_shells)
+        try:
+            shells = await _read_running_shells(client, session_id)
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            return len(self._background_shells)
+        if shells != self._background_shells:
+            self._background_shells = shells
+            self._background_changed.set()
+        return len(self._background_shells)
+
+    async def _reconcile_background(self) -> None:
+        """Re-read background shells and subagents at the end of a turn.
+
+        A read error leaves the sets as they are and never fails the turn.
+        """
+        if not self.has_live_server or not self._session_id:
+            return
+        await self.refresh_background_shells()
+        try:
+            tree = await self.read_live_collab_tree()
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
+            return
+        running, _ = opencode_collab_tree_counts(tree)
+        if running == 0 and self._background_children:
+            self._background_children.clear()
+            self._background_changed.set()
+
+    async def wait_background_change(self, timeout: float) -> None:
+        """Wait up to ``timeout`` for a tracked change, then clear the flag."""
+        try:
+            await asyncio.wait_for(self._background_changed.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+        self._background_changed.clear()
+
     async def read_live_collab_tree(self) -> list[dict[str, Any]]:
         """``read_collab_tree`` read over this chat's already-running server.
 
@@ -1622,8 +1764,179 @@ class OpencodeProvider(BaseSDKProvider):
 
     @property
     def can_drain(self) -> bool:
-        """opencode has no between-turns event source to drain."""
-        return False
+        """True while the live server still owes this session a follow-up turn."""
+        return (
+            self.has_live_server
+            and bool(self._session_id)
+            and self.background_work_outstanding
+        )
+
+    @staticmethod
+    async def _active_or_none(client: httpx.AsyncClient) -> set[str] | None:
+        """Running session ids, or ``None`` when the read fails."""
+        try:
+            return await _read_active_sessions(client)
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
+            return None
+
+    @staticmethod
+    async def _active_or_empty(client: httpx.AsyncClient) -> set[str]:
+        """Running session ids, or an empty set when the read fails."""
+        return await OpencodeProvider._active_or_none(client) or set()
+
+    async def _background_idle(self, client: httpx.AsyncClient, session_id: str) -> bool:
+        """Reconcile the background sets over HTTP; True when nothing is left.
+
+        A failed read counts as idle, so a broken server cannot keep a drain
+        alive until the horizon.
+        """
+        try:
+            shells = await _read_running_shells(client, session_id)
+            tree = await self.read_live_collab_tree()
+            active = await _read_active_sessions(client)
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
+            return True
+        self._background_shells = shells
+        running_children, _ = opencode_collab_tree_counts(tree)
+        if running_children == 0:
+            self._background_children.clear()
+        return not shells and running_children == 0 and session_id not in active
+
+    def _wake_result(self, session_id: str, error: str) -> ResultEvent:
+        """Terminal event of one follow-up execution."""
+        return ResultEvent(
+            type="result",
+            result=error or self._answer_text(),
+            session_id=session_id,
+            is_error=bool(error),
+            effective_model=self._effective_model,
+            usage=self._usage,
+            cost_usd=self._cost,
+            origin="task-notification",
+        )
+
+    async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
+        """Yield OpenCode's own follow-up executions between turns (#1391).
+
+        OpenCode 2 wakes the parent session when a background shell or subagent
+        finishes: a synthetic inbox item, then a new execution. Each such
+        execution is streamed like a turn and ends with one ResultEvent.
+        Returns once no background work, queued wake or running execution
+        remains for two consecutive polls, at the 1h horizon, or when the event
+        stream closes. The caller cancels it before starting a user turn.
+        """
+        client, session_id = self._client, self._session_id
+        if client is None or not session_id or not self.has_live_server:
+            return
+        queue: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue()
+        subscribed = asyncio.Event()
+
+        async def consume() -> None:
+            try:
+                async with client.stream("GET", "/api/event") as stream:
+                    stream.raise_for_status()
+                    subscribed.set()
+                    decoder = SSEDecoder()
+                    async for sse in decoder.aiter_bytes(stream.aiter_bytes()):
+                        try:
+                            event = sse.json()
+                        except ValueError:
+                            continue
+                        if isinstance(event, Mapping):
+                            queue.put_nowait(event)
+            except httpx.HTTPError:
+                logger.debug("OpenCode follow-up drain stream ended", exc_info=True)
+            finally:
+                subscribed.set()
+                queue.put_nowait(None)
+
+        consumer = asyncio.create_task(consume())
+        try:
+            await subscribed.wait()
+            # Subscribed first, then reconcile: a wake that started in the gap
+            # after the foreground turn is attached mid-execution (text.ended
+            # carries the full text, so the reply is still complete).
+            await self._background_idle(client, session_id)
+            executing = session_id in await self._active_or_empty(client)
+            if executing:
+                self._reset_turn_state()
+            pending_inbox: set[str] = set()
+            error = ""
+            idle_ticks = 0
+            stale_ticks = 0
+            deadline = time.monotonic() + _OPENCODE_DRAIN_MAX_S
+            next_check = time.monotonic() + _OPENCODE_DRAIN_POLL_S
+            while time.monotonic() < deadline:
+                timeout = max(0.0, next_check - time.monotonic())
+                event: Mapping[str, Any] | None
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    event = {}
+                else:
+                    if event is None:
+                        return
+                if time.monotonic() >= next_check:
+                    next_check = time.monotonic() + _OPENCODE_DRAIN_POLL_S
+                    if executing or pending_inbox:
+                        # Lost frames must not hold the drain to the horizon: a
+                        # state the server no longer reports as running is stale.
+                        active_now = await self._active_or_none(client)
+                        if active_now is None:
+                            pass  # unknown: neither stale nor fresh
+                        elif session_id in active_now:
+                            stale_ticks = 0
+                        else:
+                            stale_ticks += 1
+                            if stale_ticks >= 2:
+                                executing = False
+                                pending_inbox.clear()
+                                stale_ticks = 0
+                    if executing or pending_inbox:
+                        idle_ticks = 0
+                    elif await self._background_idle(client, session_id):
+                        idle_ticks += 1
+                        if idle_ticks >= 2:
+                            return
+                    else:
+                        idle_ticks = 0
+                if not event:
+                    continue
+                self._track_background_event(event, session_id)
+                data = event.get("data")
+                props: Mapping[str, Any] = data if isinstance(data, Mapping) else {}
+                event_session = str(props.get("sessionID") or "")
+                form = props.get("form")
+                if not event_session and isinstance(form, Mapping):
+                    event_session = str(form.get("sessionID") or "")
+                if event_session and event_session != session_id:
+                    continue
+                kind = str(event.get("type") or "")
+                if kind == "session.inbox.enqueued":
+                    pending_inbox.add(str(props.get("inboxID") or ""))
+                    continue
+                if kind == "session.inbox.delivered":
+                    pending_inbox.discard(str(props.get("inboxID") or ""))
+                    continue
+                if kind == "session.execution.started":
+                    executing, error = True, ""
+                    self._reset_turn_state()
+                    continue
+                if kind in _EXECUTION_TERMINAL_EVENTS:
+                    if kind == "session.execution.failed":
+                        error = error_text(props.get("error"))
+                    elif kind == "session.execution.interrupted":
+                        error = "OpenCode execution was interrupted"
+                    executing, idle_ticks = False, 0
+                    yield self._wake_result(session_id, error)
+                    continue
+                if executing or kind in _SESSION_REQUEST_EVENTS:
+                    for converted in self._event_to_stream(event):
+                        yield converted
+        finally:
+            consumer.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await consumer
 
     def _chat_system_instructions(self) -> str:
         """Return the compact core for normal chats, never bounded memory."""
@@ -1686,6 +1999,14 @@ class OpencodeProvider(BaseSDKProvider):
                 and (request.agent_fs_scope, request.agent_roots) == self._fs_scope_key
             ):
                 return self._client
+            if self._process.returncode is None and self.background_work_outstanding:
+                logger.warning(
+                    "Restarting the OpenCode server for %s (agent token or filesystem scope "
+                    "changed) stops %d background shell(s) and %d background subagent(s)",
+                    self.workspace_root,
+                    len(self._background_shells),
+                    len(self._background_children),
+                )
             await self.disconnect()
 
         binary = resolve_opencode_binary(request.extra_env)
@@ -1916,6 +2237,9 @@ class OpencodeProvider(BaseSDKProvider):
         self._question_requests.clear()
         self._tool_calls.clear()
         self._settled_tool_ids.clear()
+        self._background_shells.clear()
+        self._background_children.clear()
+        self._background_changed.set()
 
         if self._client is not None:
             await self._client.aclose()
@@ -2238,16 +2562,6 @@ class OpencodeProvider(BaseSDKProvider):
         if files:
             body["files"] = files
         return body
-
-    async def steer(self, request: AgentRequest) -> bool:
-        """Always False: opencode cannot inject into a running turn.
-
-        Returning False (rather than sending a second prompt) is deliberate —
-        a second prompt would be queued or would abort the active turn, and
-        neither is what steering means. The caller keeps the message for the
-        next turn instead.
-        """
-        return False
 
     # ------------------------------------------------------------ permissions
 
@@ -3166,6 +3480,11 @@ class OpencodeProvider(BaseSDKProvider):
 
         error: str = ""
         saw_output = False
+        # OpenCode runs follow-up executions of its own after background work
+        # (#1391). `foreign_execution` is True while one such execution that is
+        # not ours is running; `owned_delivery` once our own prompt was delivered.
+        foreign_execution = False
+        owned_delivery = False
 
         # The SSE subscription can drop mid-turn (network blip, server hiccup)
         # before `session.execution.*` arrives. Rather than failing the whole turn,
@@ -3187,12 +3506,25 @@ class OpencodeProvider(BaseSDKProvider):
             """One SSE subscription, pumped until idle or premature close."""
             nonlocal prompt_attempted, prompt_accepted, prompt_rejected
             nonlocal prompt_receipt_error, error, saw_output, terminal_seen
+            nonlocal foreign_execution, owned_delivery
+            if prompt_accepted:
+                # A reconnect: our prompt is already in. Whatever was running at
+                # the first attempt has long finished or been handled.
+                foreign_execution = False
+            elif not prompt_attempted:
+                foreign_execution = session_id in await self._active_or_empty(client)
             async with client.stream("GET", "/api/event") as stream:
                 stream.raise_for_status()
                 # Subscribe before prompting: opencode starts emitting as soon
                 # as the prompt is accepted, and a late subscriber loses the
                 # opening deltas.
                 if not prompt_accepted:
+                    if not prompt_attempted:
+                        # After subscribing, before prompting: a wake running
+                        # now is not ours.
+                        foreign_execution = foreign_execution or (
+                            session_id in await self._active_or_empty(client)
+                        )
                     prompt_attempted = True
                     response = await client.post(
                         f"/api/session/{session_id}/prompt", json=body
@@ -3248,6 +3580,7 @@ class OpencodeProvider(BaseSDKProvider):
                         continue
                     props = event.get("data")
                     props = props if isinstance(props, Mapping) else {}
+                    self._track_background_event(event, session_id)
                     event_session = str(props.get("sessionID") or "")
                     if not event_session:
                         form = props.get("form")
@@ -3257,6 +3590,21 @@ class OpencodeProvider(BaseSDKProvider):
                         continue
 
                     kind = str(event.get("type") or "")
+                    if kind == "session.inbox.delivered":
+                        if str(props.get("inboxID") or "") == message_id:
+                            owned_delivery = True
+                            foreign_execution = False
+                        elif not owned_delivery:
+                            foreign_execution = True
+                        continue
+                    if foreign_execution:
+                        if kind in _EXECUTION_TERMINAL_EVENTS:
+                            foreign_execution = False
+                        elif kind in _SESSION_REQUEST_EVENTS:
+                            for converted in self._event_to_stream(event):
+                                saw_output = True
+                                yield converted
+                        continue
                     if kind == "session.execution.failed":
                         error = error or error_text(props.get("error"))
                         terminal_seen = True
@@ -3336,6 +3684,10 @@ class OpencodeProvider(BaseSDKProvider):
         finally:
             register_handle(None)
 
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                self._reconcile_background(), timeout=_OPENCODE_RECONCILE_TIMEOUT_S
+            )
         await self._augment_context_pct(client, self._turn_model)
 
         yield ResultEvent(
