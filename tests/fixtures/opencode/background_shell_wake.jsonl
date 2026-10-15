@@ -1,0 +1,26 @@
+{"id":"evt_bgshell_00","type":"server.connected","data":{}}
+{"id":"evt_bgshell_01","type":"session.inbox.enqueued","data":{"inboxID":"msg_bgshell_prompt","sessionID":"ses_bgshell_parent","item":{"type":"user","payload":{"text":"Run a command in the background, then reply STARTED."},"delivery":"queue"}}}
+{"id":"evt_bgshell_02","type":"session.execution.started","data":{"sessionID":"ses_bgshell_parent"}}
+{"id":"evt_bgshell_03","type":"session.inbox.delivered","data":{"sessionID":"ses_bgshell_parent","inboxID":"msg_bgshell_prompt"}}
+{"id":"evt_bgshell_04","type":"session.step.started","data":{"sessionID":"ses_bgshell_parent","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_bgshell_a1"}}
+{"id":"evt_bgshell_05","type":"session.tool.input.started","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a1","id":"call_bgshell","name":"shell"}}
+{"id":"evt_bgshell_06","type":"session.tool.called","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a1","id":"call_bgshell","input":{"command":"sleep 20 && echo BGDONE","background":true},"executed":false}}
+{"id":"evt_bgshell_07","type":"shell.created","data":{"info":{"id":"sh_bgshell","status":"running","command":"sleep 20 && echo BGDONE","cwd":"/workspace","shell":"/bin/zsh","file":"/workspace/.shell/sh_bgshell.out","metadata":{"sessionID":"ses_bgshell_parent"},"time":{"started":1792051410528}}}}
+{"id":"evt_bgshell_08","type":"session.tool.progress","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a1","id":"call_bgshell","metadata":{"shellID":"sh_bgshell"}}}
+{"id":"evt_bgshell_09","type":"session.tool.success","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a1","id":"call_bgshell","content":[{"type":"text","text":"Command moved to the background (shell ID: sh_bgshell)."}],"metadata":{"status":"running","truncated":false,"shellID":"sh_bgshell"},"executed":false}}
+{"id":"evt_bgshell_10","type":"session.step.ended","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a1","finish":"tool-calls","cost":0,"tokens":{"input":7468,"output":28,"reasoning":0,"cache":{"read":1536,"write":0}}}}
+{"id":"evt_bgshell_11","type":"session.step.started","data":{"sessionID":"ses_bgshell_parent","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_bgshell_a2"}}
+{"id":"evt_bgshell_12","type":"session.text.started","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a2","ordinal":0}}
+{"id":"evt_bgshell_13","type":"session.text.ended","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a2","ordinal":0,"text":"STARTED"}}
+{"id":"evt_bgshell_14","type":"session.step.ended","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a2","finish":"stop","cost":0,"tokens":{"input":9833,"output":6,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_bgshell_15","type":"session.execution.succeeded","data":{"sessionID":"ses_bgshell_parent"}}
+{"id":"evt_bgshell_16","type":"shell.exited","data":{"id":"sh_bgshell","exit":0,"status":"exited"}}
+{"id":"evt_bgshell_17","type":"session.inbox.enqueued","data":{"inboxID":"msg_bgshell_wake","sessionID":"ses_bgshell_parent","item":{"type":"synthetic","payload":{"text":"<shell id=\"sh_bgshell\" state=\"completed\" command=\"sleep 20 && echo BGDONE\">\nBGDONE\n\n</shell>","description":"sleep 20 && echo BGDONE","metadata":{"source":"shell","shellID":"sh_bgshell","jobID":"sh_bgshell","state":"completed","truncated":false,"exit":0}},"delivery":"steer"}}}
+{"id":"evt_bgshell_18","type":"session.execution.started","data":{"sessionID":"ses_bgshell_parent"}}
+{"id":"evt_bgshell_19","type":"session.inbox.delivered","data":{"sessionID":"ses_bgshell_parent","inboxID":"msg_bgshell_wake"}}
+{"id":"evt_bgshell_20","type":"session.step.started","data":{"sessionID":"ses_bgshell_parent","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_bgshell_a3"}}
+{"id":"evt_bgshell_21","type":"session.text.started","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a3","ordinal":0}}
+{"id":"evt_bgshell_22","type":"session.text.ended","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a3","ordinal":0,"text":"BGDONE"}}
+{"id":"evt_bgshell_23","type":"session.step.ended","data":{"sessionID":"ses_bgshell_parent","assistantMessageID":"msg_bgshell_a3","finish":"stop","cost":0,"tokens":{"input":7675,"output":6,"reasoning":0,"cache":{"read":10240,"write":0}}}}
+{"id":"evt_bgshell_24","type":"session.usage.updated","data":{"sessionID":"ses_bgshell_parent","cost":0,"tokens":{"input":17915,"output":47,"reasoning":0,"cache":{"read":10240,"write":0}}}}
+{"id":"evt_bgshell_25","type":"session.execution.succeeded","data":{"sessionID":"ses_bgshell_parent"}}

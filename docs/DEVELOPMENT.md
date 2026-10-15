@@ -1759,7 +1759,7 @@ sockets, and retries them on reconnect; a timeout makes the card retryable but
 does not discard the queued frame. Backend state is cleared only after a typed
 V2 success or an authoritative stale result. Resolution events are ephemeral
 for attached tabs, while the persisted chat snapshot reconciles tabs that were
-disconnected.
+disconnected. `background_shell_wake.jsonl` and `background_subagent_wake.jsonl` pin OpenCode's own follow-up executions after background work (#1391): inbox delivery ids decide which execution a turn owns, and `drain_events` streams the rest.
 
 ## DAG-style schedules (maintainers)
 
