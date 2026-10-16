@@ -5468,6 +5468,11 @@ export const useProjectStore = defineStore('projects', () => {
         last.failed = flags.slice(0, start).concat(added.map(() => false))
         return
       }
+      // A repeated id-less frame — the permission line re-announcing the same
+      // request — is the same line, not a new one (the pre-#1416 behaviour).
+      // Id-bearing calls are never deduped this way: two identical calls are two
+      // calls (#1416 review round 2).
+      if (lastId === undefined && added.join('\n') === lastOwned) return
       last.content = last.content + '\n' + added.join('\n')
       last.tool_use_ids = ids.concat(added.map(() => toolUseId))
       last.failed = flags.concat(added.map(() => false))

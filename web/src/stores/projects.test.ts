@@ -576,6 +576,39 @@ describe('per-chat WS auto-reconnect', () => {
     expect(tool.failed).toEqual([false])
   })
 
+  test('an identical permission line is not duplicated', () => {
+    const store = useProjectStore()
+    const chatId = 'c-permission-line-dedupe'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'permission_request', request_id: 'r1', tool_name: 'Bash', message: 'approval required' })
+    send({ type: 'permission_request', request_id: 'r2', tool_name: 'Bash', message: 'approval required' })
+    let tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(1)
+    expect(tool.tool_use_ids).toEqual([undefined])
+    expect(tool.failed).toEqual([false])
+
+    send({ type: 'permission_request', request_id: 'r3', tool_name: 'Bash', message: 'short' })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+
+    send({ type: 'permission_request', request_id: 'r4', tool_name: 'Bash', message: 'a much longer approval required message' })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.content).toContain('a much longer approval required message')
+    expect(tool.tool_use_ids).toEqual([undefined, undefined])
+    expect(tool.failed).toEqual([false, false])
+  })
+
   test('does not reconnect after an intentional disconnect', async () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
