@@ -13,7 +13,7 @@
  *   GET  /__fixture__/ws-count                       sockets opened so far
  *   POST /__fixture__/transcript                     give this session a chat history
  *   POST /__fixture__/update-tasks                   give this session update tasks
- *   POST /__fixture__/tool-frame                     hand a chat a synthetic tool call
+ *   POST /__fixture__/chat-frame                     speak on a chat's own socket
  */
 import http from 'node:http'
 import fs from 'node:fs'
@@ -157,7 +157,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingToolFrames: new Map(), connections: 0, transcript: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null }
     sessions.set(id, state)
   }
   return state
@@ -429,28 +429,25 @@ const server = http.createServer(async (req, res) => {
       state.updateTasks = true
       return sendJson(res, { ok: true, tasks: UPDATE_TASKS.length })
     }
-    if (pathname === '/__fixture__/tool-frame') {
-      // Hand a chat a synthetic tool call over its own socket. `backgroundable`
-      // is the flag the composer's Move to background chip keys on (#1413): the
-      // real broker attaches it only to an OpenCode foreground shell/subagent
-      // call, and nothing else in the fixture produces a tool frame at all.
-      // Delivered to the sockets already open for that chat, or held for the
-      // one that connects next, so a spec can opt in before navigating.
+    if (pathname === '/__fixture__/chat-frame') {
+      // Speak on a chat's own socket. The fixture is otherwise silent there,
+      // and #1413's move chip needs the frames a broker would send for an
+      // OpenCode foreground shell: a `tool_use` carrying `backgroundable`, then
+      // the `tool_result` and `result` that end it. Frames are just delivered,
+      // in order — what they mean is the spec's business. Held for the socket
+      // that opens next when none is up yet, so a spec may opt in before it
+      // navigates.
       const body = await readBody(req)
       const chatId = String(body?.chat_id || '')
-      if (!chatId) return sendJson(res, { error: 'chat_id is required' }, 400)
-      const frame = {
-        type: 'tool_use',
-        tool_use_id: String(body?.tool_use_id || 'toolu_e2e_move'),
-        tool_name: String(body?.tool_name || 'Bash'),
-        tool_input: JSON.stringify({ command: 'sleep 300 && echo done' }),
-        ...(body?.backgroundable === false ? {} : { backgroundable: true }),
+      const frames = Array.isArray(body?.frames) ? body.frames : []
+      if (!chatId || !frames.length) {
+        return sendJson(res, { error: 'chat_id and a non-empty frames array are required' }, 400)
       }
       const open = state.chatSockets.get(chatId)
       if (open?.size) {
-        for (const ws of open) ws.send(frame)
+        for (const ws of open) for (const frame of frames) ws.send(frame)
       } else {
-        state.pendingToolFrames.set(chatId, [...(state.pendingToolFrames.get(chatId) || []), frame])
+        state.pendingChatFrames.set(chatId, [...(state.pendingChatFrames.get(chatId) || []), ...frames])
       }
       return sendJson(res, { ok: true, delivered: open?.size || 0 })
     }
@@ -486,16 +483,16 @@ server.on('upgrade', (req, socket) => {
   const ws = acceptUpgrade(req, socket, pathname)
   if (!ws) return
   if (pathname !== '/ws/events') {
-    // Per-chat sockets: quiet, except for a synthetic tool frame a spec asked
-    // for. Holding them in the session state lets a spec deliver a call to the
-    // socket that opens after the request (see /__fixture__/tool-frame).
+    // Per-chat sockets: quiet, except for the frames a spec asked for. Holding
+    // them in the session state lets a spec deliver a call to the socket that
+    // opens after the request (see /__fixture__/chat-frame).
     const chatId = decodeURIComponent(pathname.replace('/ws/chat/', ''))
     const state = sessionOf(req)
     if (!state.chatSockets.has(chatId)) state.chatSockets.set(chatId, new Set())
     state.chatSockets.get(chatId).add(ws)
     socket.on('close', () => state.chatSockets.get(chatId)?.delete(ws))
-    for (const frame of state.pendingToolFrames.get(chatId) || []) ws.send(frame)
-    state.pendingToolFrames.delete(chatId)
+    for (const frame of state.pendingChatFrames.get(chatId) || []) ws.send(frame)
+    state.pendingChatFrames.delete(chatId)
     return
   }
   const state = sessionOf(req)
