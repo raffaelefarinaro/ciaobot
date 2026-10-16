@@ -1091,7 +1091,13 @@
             @focus="handleInputFocus"
             @click="refreshComposerPickers"
           ></textarea>
-          <div class="input-actions composer-bar">
+          <div
+            class="input-actions composer-bar"
+            ref="composerBarEl"
+            tabindex="-1"
+            role="group"
+            aria-label="Message composer"
+          >
             <!-- The model picker's trigger lives in the composer, where the next
                  message is written, as on Home. The selector itself (thinking
                  levels, Option+M) is unchanged; it opens upward from here. -->
@@ -1149,6 +1155,19 @@
             </label>
             <span class="composer-spacer"></span>
             <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
+            <button
+              v-if="showMoveToBackground"
+              ref="moveBtnEl"
+              type="button"
+              class="composer-chip composer-move-bg"
+              :disabled="movingToBackground"
+              aria-label="Move to background"
+              title="Move the running command or subagent to the background. The reply ends now and the result arrives when it finishes."
+              @click="moveToBackground"
+            >
+              <span class="composer-move-bg-long">Move to background</span>
+              <span class="composer-move-bg-short" aria-hidden="true">Background</span>
+            </button>
             <!-- While streaming: empty composer → stop; any draft → queue. -->
             <button
               class="send-btn"
@@ -1327,6 +1346,7 @@ import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { canOfferMoveToBackground } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
@@ -1517,6 +1537,45 @@ const canSend = computed(() =>
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
 const showStopAction = computed(() => store.isStreaming && !canSend.value)
+const moveBtnEl = ref<HTMLButtonElement | null>(null)
+const composerBarEl = ref<HTMLElement | null>(null)
+const movingToBackground = ref(false)
+const showMoveToBackground = computed(() =>
+  store.isStreaming && canOfferMoveToBackground(store.activeBackgroundableCalls, nowTs.value),
+)
+async function moveToBackground() {
+  if (movingToBackground.value || !chat.value) return
+  const chipEl = moveBtnEl.value
+  const hadFocus = document.activeElement === chipEl
+  movingToBackground.value = true
+  try {
+    await store.moveChatToBackground(chat.value.chat_id)
+  } finally {
+    movingToBackground.value = false
+  }
+  // The chip goes away the moment the turn ends, so focus has to be handed
+  // somewhere that is still there — but only when it is still ours. While the
+  // request was out the user may have moved focus, most likely into the
+  // textarea to write the next message; taking it back would interrupt them and
+  // could turn their next Enter into a control they did not choose (#1413
+  // review round 2).
+  if (hadFocus) {
+    const active = document.activeElement as HTMLElement | null
+    const stillOurs = active === chipEl || active === document.body
+    if (stillOurs) {
+      // Never the send/stop button. It is a single element in three states —
+      // enabled Stop while the turn runs, enabled Send once a draft exists,
+      // disabled Send with an empty draft — and the move we just asked for ends
+      // the turn, so it can be disabled a moment after we focus it; a disabled
+      // control cannot hold focus and it falls to <body> (rounds 1 and 3). The
+      // bar is the one target here that is always focusable and never raises
+      // the on-screen keyboard, which is why the textarea is not used below
+      // COMPOSER_FOCUS_MIN_WIDTH.
+      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+      else composerBarEl.value?.focus()
+    }
+  }
+}
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
   if (store.isStreaming) return 'Queue message (sends when current turn finishes)'
@@ -6516,6 +6575,9 @@ details[open] > .activity-summary::before {
   border-top: 1px solid var(--border);
 }
 
+.composer-bar:focus { outline: none; }
+.composer-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .composer-spacer { flex: 1; }
 
 .composer-kbd {
@@ -6586,6 +6648,11 @@ details[open] > .activity-summary::before {
   white-space: nowrap;
 }
 
+.composer-move-bg { flex: none; margin-right: 6px; }
+.composer-move-bg:disabled { opacity: 0.6; cursor: progress; }
+.composer-move-bg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-move-bg-short { display: none; }
+
 .composer-model-dot {
   width: 7px;
   height: 7px;
@@ -6597,6 +6664,7 @@ details[open] > .activity-summary::before {
 /* Touch layouts keep full 44px targets for every composer control. */
 @media (pointer: coarse), (max-width: 700px) {
   .composer-chip { min-height: var(--touch); }
+  .composer-move-bg { min-width: var(--touch); }
   .image-btn,
   .send-btn { width: var(--touch); height: var(--touch); }
 }
@@ -6605,6 +6673,8 @@ details[open] > .activity-summary::before {
   .chat-input { font-size: max(16px, calc(16px * var(--font-scale))); }
   .composer-kbd { display: none; }
   .composer-chip-label { max-width: 16ch; }
+  .composer-move-bg-long { display: none; }
+  .composer-move-bg-short { display: inline; }
 }
 
 @media (prefers-reduced-motion: reduce) {
