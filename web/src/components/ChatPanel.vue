@@ -1164,7 +1164,6 @@
             </button>
             <!-- While streaming: empty composer → stop; any draft → queue. -->
             <button
-              ref="sendBtnEl"
               class="send-btn"
               :class="{ 'is-stop': showStopAction }"
               :disabled="!showStopAction && !canSend"
@@ -1533,7 +1532,6 @@ const canSend = computed(() =>
 // button queues/sends the draft.
 const showStopAction = computed(() => store.isStreaming && !canSend.value)
 const moveBtnEl = ref<HTMLButtonElement | null>(null)
-const sendBtnEl = ref<HTMLButtonElement | null>(null)
 const composerBarEl = ref<HTMLElement | null>(null)
 const movingToBackground = ref(false)
 const showMoveToBackground = computed(() =>
@@ -1559,12 +1557,16 @@ async function moveToBackground() {
     const active = document.activeElement as HTMLElement | null
     const stillOurs = active === chipEl || active === document.body
     if (stillOurs) {
+      // Never the send/stop button. It is a single element in three states —
+      // enabled Stop while the turn runs, enabled Send once a draft exists,
+      // disabled Send with an empty draft — and the move we just asked for ends
+      // the turn, so it can be disabled a moment after we focus it; a disabled
+      // control cannot hold focus and it falls to <body> (rounds 1 and 3). The
+      // bar is the one target here that is always focusable and never raises
+      // the on-screen keyboard, which is why the textarea is not used below
+      // COMPOSER_FOCUS_MIN_WIDTH.
       if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
-      else {
-        const sendButton = sendBtnEl.value
-        if (sendButton && !sendButton.disabled) sendButton.focus()
-        else composerBarEl.value?.focus()
-      }
+      else composerBarEl.value?.focus()
     }
   }
 }
