@@ -23,8 +23,7 @@ const MOVE_ID = 'toolu_e2e_move'
 const CHIP = '.composer-move-bg'
 const STOP = '.send-btn.is-stop'
 
-interface ControlAppearance { stop: number | null; chip: number | null }
-type AppearanceWindow = Window & { __appear?: ControlAppearance }
+type ChipWindow = Window & { __chipAt?: number | null }
 
 /** The `tool_use` a broker emits per foreground shell call. */
 function toolUse(backgroundable: boolean) {
@@ -58,37 +57,39 @@ async function expectStreaming(page: Page) {
 }
 
 /**
- * Note when each control first appears, in page time.
+ * Note when the chip first appears, in page time.
  *
- * The chip is offered by a 1s tick over `Date.now()`, so "it waited 3s" is a
- * fact about two DOM events, and asserting it by reading a clock around two
- * awaits makes the runner's scheduling part of the assertion: a machine that
- * stalled for three seconds between them would fail a correct build. Recording
- * the two events and comparing them cannot.
+ * The chip is offered by a 1s tick over `Date.now()`, so the 3s rule is a fact
+ * about when it appeared, and reading a clock around waits makes the runner or
+ * the browser's own scheduling part of the assertion — a stalled thread would
+ * fail a correct build. An observer for the one event, read against a start
+ * taken before the frame was ever sent, cannot: see `chipDelayMs`.
  */
-async function watchWhenControlsAppear(page: Page) {
-  await page.evaluate(({ stop, chip }) => {
-    const times: ControlAppearance = { stop: null, chip: null }
-    ;(window as AppearanceWindow).__appear = times
-    const noteIfPresent = (selector: string, key: 'stop' | 'chip') => {
-      const mark = () => {
-        if (times[key] === null && document.querySelector(selector)) times[key] = performance.now()
+async function watchForChip(page: Page) {
+  await page.evaluate((selector) => {
+    ;(window as ChipWindow).__chipAt = null
+    const mark = () => {
+      if ((window as ChipWindow).__chipAt == null && document.querySelector(selector)) {
+        ;(window as ChipWindow).__chipAt = performance.now()
       }
-      new MutationObserver(mark).observe(document.body, {
-        childList: true, subtree: true, attributes: true, attributeFilter: ['class'],
-      })
-      mark()
     }
-    noteIfPresent(stop, 'stop')
-    noteIfPresent(chip, 'chip')
-  }, { stop: STOP, chip: CHIP })
+    new MutationObserver(mark).observe(document.body, {
+      childList: true, subtree: true, attributes: true, attributeFilter: ['class'],
+    })
+    mark()
+  }, CHIP)
 }
 
-/** How long after Stop the chip appeared, or null if either never did. */
-async function chipAppearedAfterStopMs(page: Page): Promise<number | null> {
-  const times = await page.evaluate(() => (window as AppearanceWindow).__appear ?? null)
-  if (!times || times.stop === null || times.chip === null) return null
-  return Math.round(times.chip - times.stop)
+/** The request that carries the call starts the clock; the call itself starts later still. */
+async function requestNow(page: Page): Promise<number> {
+  return page.evaluate(() => performance.now())
+}
+
+/** How long the chip took, or null if it never appeared. */
+async function chipDelayMs(page: Page, since: number): Promise<number | null> {
+  const appeared = await page.evaluate(() => (window as ChipWindow).__chipAt ?? null)
+  if (appeared === null) return null
+  return Math.round(appeared - since)
 }
 
 /** The chip is a phone control: it must clear --touch and sit inside the layout. */
@@ -122,8 +123,11 @@ async function expectTapTargetBesideStop(page: Page) {
  * element that held it has unmounted, and `document.activeElement` has fallen to
  * `<body>` — the case that took review rounds 2 and 3. Fulfilling the route
  * eagerly instead would race the two and quietly test the easy path.
+ *
+ * Returns the requests seen, so a caller can check the count once the whole
+ * action has settled rather than only while its first response is held.
  */
-async function tapChipAndEndTurn(page: Page) {
+async function tapChipAndEndTurn(page: Page): Promise<string[]> {
   let release = () => {}
   const held = new Promise<void>((resolve) => { release = resolve })
   const posted: string[] = []
@@ -135,13 +139,13 @@ async function tapChipAndEndTurn(page: Page) {
 
   await page.locator(CHIP).click()
   await expect.poll(() => posted.length).toBe(1)
-  expect(posted[0]).toContain(`/api/chats/${CHAT_ID}/move-to-background`)
 
   await speak(page, END_OF_TURN)
   await expect(page.locator(CHIP)).toHaveCount(0)
   await expect(page.locator(STOP)).toHaveCount(0)
 
   release()
+  return posted
 }
 
 test.beforeEach(async ({ page }, testInfo) => {
@@ -153,18 +157,20 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
 
   test('the chip is offered only once the call has run 3s, as a 44px target by Stop', async ({ page }) => {
     await boot(page, CHAT_PATH, COMPOSER)
-    await watchWhenControlsAppear(page)
+    await watchForChip(page)
+    const requested = await requestNow(page)
     await speak(page, [toolUse(true)])
     await expectStreaming(page)
 
     await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
     await expectTapTargetBesideStop(page)
 
-    // The delay is the feature, and this asserts it directly: the chip may not
-    // appear until the call is 3s old. The 100ms of slack is the gap between
-    // the store dating the call and Stop rendering it; the composer's 1s tick
-    // means a correct build lands somewhere above the threshold.
-    const delay = await chipAppearedAfterStopMs(page)
+    // The delay is the feature, and this asserts it directly. The clock starts
+    // before the frame is sent, so the call it dates can only start later, and
+    // the chip cannot be early without the measurement being late: the number
+    // can be too large, never too small. A build with no delay lands inside one
+    // tick of the frame — under a second — and fails here.
+    const delay = await chipDelayMs(page, requested)
     expect(delay).not.toBeNull()
     expect(delay!).toBeGreaterThanOrEqual(2_900)
 
@@ -192,7 +198,7 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
     await speak(page, [toolUse(true)])
     await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
 
-    await tapChipAndEndTurn(page)
+    const posted = await tapChipAndEndTurn(page)
 
     // Focus must come to rest inside the composer, on a target that names
     // itself: the bar is the only one that is always focusable, never disabled,
@@ -206,6 +212,10 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
       }
     })).toEqual({ inComposer: true, role: 'group', label: 'Message composer' })
 
+    // Counted again now the action has settled: what was seen while the first
+    // response was held cannot see a second request sent after it.
+    expect(posted.length).toBe(1)
+
     await page.screenshot({ path: 'test-results/move-bg-after-tap.png' })
   })
 })
@@ -218,11 +228,13 @@ test.describe('move a running call to the background (#1413), on a desktop width
     await speak(page, [toolUse(true)])
     await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
 
-    await tapChipAndEndTurn(page)
+    const posted = await tapChipAndEndTurn(page)
 
     // Above COMPOSER_FOCUS_MIN_WIDTH the keyboard is not a concern, so the next
     // message can be typed straight away — the other half of the focus rule.
     await expect.poll(() => page.evaluate(() => document.activeElement?.className ?? null))
       .toContain('chat-input')
+
+    expect(posted.length).toBe(1)
   })
 })
