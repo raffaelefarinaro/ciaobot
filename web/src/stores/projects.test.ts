@@ -1659,6 +1659,49 @@ describe('result frames and unread state', () => {
   })
 })
 
+describe('move to background', () => {
+  test('tracks backgroundable calls from tool_use frames and clears them on result', () => {
+    const store = useProjectStore()
+    const chatId = 'c-backgroundable'
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const frame = (data: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(data) })
+    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true })
+    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
+    frame({ type: 'tool_result', tool_use_id: 'c1' })
+    expect(store.backgroundableCalls[chatId]).toEqual({})
+    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c2', backgroundable: true })
+    frame({ type: 'result', text: 'done', is_error: false, effective_model: 'opus', usage: {}, session_id: 's1' })
+    expect(store.backgroundableCalls[chatId]).toBeUndefined()
+  })
+
+  test('a file-touching shell call is still tracked', () => {
+    const store = useProjectStore()
+    const chatId = 'c-backgroundable-file'
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({ data: JSON.stringify({
+      type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true,
+      file_touch: { file_path: 'out.txt', action: 'created' },
+    }) })
+    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
+  })
+
+  test('moveChatToBackground posts and toasts when nothing moved', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ moved: false })
+    expect(await store.moveChatToBackground('c')).toBe(false)
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c/move-to-background', {})
+    expect(store.toasts.at(-1)?.title).toBe('Nothing to move')
+    apiPost.mockResolvedValueOnce({ moved: true })
+    const toastCount = store.toasts.length
+    expect(await store.moveChatToBackground('c')).toBe(true)
+    expect(store.toasts).toHaveLength(toastCount)
+    apiPost.mockRejectedValueOnce(new Error('offline'))
+    expect(await store.moveChatToBackground('c')).toBe(false)
+    expect(store.toasts.at(-1)?.title).toBe('Could not move to background')
+  })
+})
+
 describe('ephemeral status events', () => {
   test('does not render Claude requesting status as a system message', () => {
     apiGet.mockResolvedValue([])

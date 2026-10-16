@@ -1149,8 +1149,22 @@
             </label>
             <span class="composer-spacer"></span>
             <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
+            <button
+              v-if="showMoveToBackground"
+              ref="moveBtnEl"
+              type="button"
+              class="composer-chip composer-move-bg"
+              :disabled="movingToBackground"
+              aria-label="Move to background"
+              title="Move the running command or subagent to the background. The reply ends now and the result arrives when it finishes."
+              @click="moveToBackground"
+            >
+              <span class="composer-move-bg-long">Move to background</span>
+              <span class="composer-move-bg-short" aria-hidden="true">Background</span>
+            </button>
             <!-- While streaming: empty composer → stop; any draft → queue. -->
             <button
+              ref="sendBtnEl"
               class="send-btn"
               :class="{ 'is-stop': showStopAction }"
               :disabled="!showStopAction && !canSend"
@@ -1327,6 +1341,7 @@ import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { canOfferMoveToBackground } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
@@ -1517,6 +1532,26 @@ const canSend = computed(() =>
 // Empty composer while a turn is in flight → stop; otherwise the same
 // button queues/sends the draft.
 const showStopAction = computed(() => store.isStreaming && !canSend.value)
+const moveBtnEl = ref<HTMLButtonElement | null>(null)
+const sendBtnEl = ref<HTMLButtonElement | null>(null)
+const movingToBackground = ref(false)
+const showMoveToBackground = computed(() =>
+  store.isStreaming && canOfferMoveToBackground(store.activeBackgroundableCalls, nowTs.value),
+)
+async function moveToBackground() {
+  if (movingToBackground.value || !chat.value) return
+  const hadFocus = document.activeElement === moveBtnEl.value
+  movingToBackground.value = true
+  try {
+    await store.moveChatToBackground(chat.value.chat_id)
+  } finally {
+    movingToBackground.value = false
+  }
+  if (hadFocus) {
+    if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+    else sendBtnEl.value?.focus()
+  }
+}
 const primaryActionTitle = computed(() => {
   if (showStopAction.value) return 'Stop'
   if (store.isStreaming) return 'Queue message (sends when current turn finishes)'
@@ -6586,6 +6621,11 @@ details[open] > .activity-summary::before {
   white-space: nowrap;
 }
 
+.composer-move-bg { flex: none; margin-right: 6px; }
+.composer-move-bg:disabled { opacity: 0.6; cursor: progress; }
+.composer-move-bg:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.composer-move-bg-short { display: none; }
+
 .composer-model-dot {
   width: 7px;
   height: 7px;
@@ -6597,6 +6637,7 @@ details[open] > .activity-summary::before {
 /* Touch layouts keep full 44px targets for every composer control. */
 @media (pointer: coarse), (max-width: 700px) {
   .composer-chip { min-height: var(--touch); }
+  .composer-move-bg { min-width: var(--touch); }
   .image-btn,
   .send-btn { width: var(--touch); height: var(--touch); }
 }
@@ -6605,6 +6646,8 @@ details[open] > .activity-summary::before {
   .chat-input { font-size: max(16px, calc(16px * var(--font-scale))); }
   .composer-kbd { display: none; }
   .composer-chip-label { max-width: 16ch; }
+  .composer-move-bg-long { display: none; }
+  .composer-move-bg-short { display: inline; }
 }
 
 @media (prefers-reduced-motion: reduce) {

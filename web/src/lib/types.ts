@@ -440,6 +440,9 @@ export type WsEvent =
       parent_tool_use_id?: string;
       request_id?: string;
       session_id?: string;
+      // Set when the provider can move this running call to the background
+      // (OpenCode shell/subagent; POST /api/chats/{id}/move-to-background).
+      backgroundable?: boolean;
       // Set by the backend when the tool mutates a file on disk. The PWA
       // renders this as a standalone inline preview card instead of folding
       // it into the generic _activity row. Path may be workspace-relative
@@ -806,6 +809,8 @@ export interface ModelsResponse {
   // model_reasoning_levels.
   thinking_levels?: Record<string, string[]>
 }
+
+export interface MoveToBackgroundResponse { moved: boolean }
 
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
 // model overrides (Settings → Models tab).

@@ -12,6 +12,7 @@ import {
   restartMessageForDisplay,
 } from '../lib/serverRestart'
 import { errorMessage } from '../lib/errorMessage'
+import { nextBackgroundableCalls, type BackgroundableCalls } from '../lib/moveToBackground'
 import { applyKeyboardSettings, useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft, type OrphanDraft } from '../lib/chatDrafts'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
@@ -27,6 +28,7 @@ import type {
   ChatMessage,
   RunningSubagent,
   RunningSubagentsResponse,
+  MoveToBackgroundResponse,
   BackgroundRunLog,
   BackgroundRunSummary,
   SubagentTranscript,
@@ -1010,6 +1012,10 @@ export const useProjectStore = defineStore('projects', () => {
 
   const activeBackgroundRuns = computed<BackgroundRunSummary[]>(() =>
     backgroundRuns.value[activeChatId.value || ''] || []
+  )
+  const backgroundableCalls = ref<Record<string, BackgroundableCalls>>({})
+  const activeBackgroundableCalls = computed<BackgroundableCalls>(() =>
+    backgroundableCalls.value[activeChatId.value || ''] || {}
   )
 
   // Paused while the read-only subagent view is open for this chat: that
@@ -2105,6 +2111,7 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function clearStreamingState(chatId: string) {
+    delete backgroundableCalls.value[chatId]
     streaming.value[chatId] = false
     streamingText.value[chatId] = ''
     streamingThinking.value[chatId] = ''
@@ -5055,6 +5062,20 @@ export const useProjectStore = defineStore('projects', () => {
     void api.post(`/api/chats/${chatId}/stop`, {})
   }
 
+  // OpenCode's Ctrl+B (#1413). Resolves true when something moved.
+  async function moveChatToBackground(chatId: string): Promise<boolean> {
+    try {
+      const r = await api.post<MoveToBackgroundResponse>(`/api/chats/${chatId}/move-to-background`, {})
+      if (!r.moved) {
+        pushToast({ chat_id: chatId, title: 'Nothing to move', body: 'No shell command or subagent is running in the foreground.' })
+      }
+      return r.moved
+    } catch (e) {
+      pushErrorToast('Could not move to background', errorMessage(e))
+      return false
+    }
+  }
+
   // Compact requests in flight, per chat. The Compact button reads this while
   // the POST is out; once the server's stream starts, its own status events
   // and streaming state take over.
@@ -5776,6 +5797,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
 
       case 'tool_use': {
+        backgroundableCalls.value[chatId] = nextBackgroundableCalls(backgroundableCalls.value[chatId], event, Date.now())
         // AskUserQuestion is rendered as an interactive picker above the
         // composer, not as a trace line. The headless CLI auto-cancels the
         // call with empty answers; the user's next message implicitly
@@ -5872,6 +5894,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       case 'tool_result': {
+        backgroundableCalls.value[chatId] = nextBackgroundableCalls(backgroundableCalls.value[chatId], event, Date.now())
         // A call's completion arrives as its own frame. Mark the line the call
         // already painted; never push a second one (#1416). A success needs no
         // mark, so only `is_error` does anything. Claude sends no such frame.
@@ -6014,6 +6037,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
 
       case 'result': {
+        delete backgroundableCalls.value[chatId]
         clearSteerLockTimer(chatId)
         // Final flush before the result event is materialized: lock any
         // trailing thinking/text deltas into the timeline so they render
@@ -6166,6 +6190,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       case 'error': {
+        delete backgroundableCalls.value[chatId]
         if (isRestartDrainMessage(event.message)) {
           undoOptimisticSend(chatId)
           beginServerRestart(event.message)
@@ -6304,12 +6329,12 @@ export const useProjectStore = defineStore('projects', () => {
   return {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
-    streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, steerNotice,
+    streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, activeBackgroundableCalls, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
@@ -6327,7 +6352,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
-    sendMessage, stopChat, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,
