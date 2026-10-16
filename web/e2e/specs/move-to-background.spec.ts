@@ -261,63 +261,85 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
     await expect(page.locator('.chat-input')).toHaveValue('next message')
   })
 
-  test('a call that ends while the move is out does not steal a draft either', async ({ page }) => {
-    await boot(page, CHAT_PATH, COMPOSER)
+  /** The class of whatever holds focus, which is what the log and the guard read. */
+  const focusedClass = (page: Page) => page.evaluate(() => document.activeElement?.className ?? null)
 
-    // The chip is unmounted by the time this restore runs, so the chip cannot
-    // witness it: record every focus change instead and assert the composer bar
-    // never took one. Recording starts before the tap, so focus from the boot is
-    // not in the log.
-    await page.evaluate(() => {
-      const w = window as unknown as { __focusLog: string[] }
-      w.__focusLog = []
-      document.addEventListener('focusin', (e) => {
-        w.__focusLog.push((e.target as HTMLElement).className || 'body')
-      }, true)
+  // Where the user might have moved focus while the move request was out. One is
+  // outside the composer bar, one is inside it: the guard hands focus back when
+  // it is still the chip's, and must not read "inside the composer" as "mine".
+  const MOVED_FOCUS = [
+    {
+      what: 'the draft the user is writing',
+      focused: 'chat-input',
+      move: (page: Page) => page.locator('.chat-input').fill('next message'),
+    },
+    {
+      what: 'a control the user moved to',
+      focused: 'model-picker-summary',
+      move: (page: Page) => page.locator('.model-picker-summary').focus(),
+    },
+  ]
+
+  for (const target of MOVED_FOCUS) {
+    test(`a call that ends while the move is out does not steal ${target.what}`, async ({ page }) => {
+      await boot(page, CHAT_PATH, COMPOSER)
+
+      // The chip is unmounted by the time this restore runs, so the chip cannot
+      // witness it: record every focus change instead and assert the bar never
+      // took one. Recording starts before the tap, so focus from the boot is not
+      // in the log, and a control inside the bar logs its own class, not the
+      // bar's.
+      await page.evaluate(() => {
+        const w = window as unknown as { __focusLog: string[] }
+        w.__focusLog = []
+        document.addEventListener('focusin', (e) => {
+          w.__focusLog.push((e.target as HTMLElement).className || 'body')
+        }, true)
+      })
+
+      await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', true)])
+      await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
+
+      // Hold the move open, tap the chip to arm the restore, then move focus
+      // somewhere of the user's own choosing. The command finishes on its own
+      // while the request is still out, so the chip is retracted before the
+      // response comes back.
+      let release = () => {}
+      const held = new Promise<void>((resolve) => { release = resolve })
+      const posted: string[] = []
+      await page.route('**/api/chats/*/move-to-background', async (route) => {
+        posted.push(route.request().url())
+        await held
+        // The call had already ended, so there was nothing left to move. The
+        // guard does not turn on the result, only on where focus is.
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ moved: false }) })
+      })
+
+      await page.locator(CHIP).focus()
+      await expect.poll(() => focusedClass(page)).toContain('composer-move-bg')
+      await page.locator(CHIP).click()
+      await expect.poll(() => posted.length).toBe(1)
+      await expect(page.locator(CHIP)).toBeDisabled()
+
+      await target.move(page)
+      expect(await focusedClass(page)).toContain(target.focused)
+
+      await speak(page, END_OF_TURN)
+      await expect(page.locator(CHIP)).toHaveCount(0)
+      await expect(page.locator(STOP)).toHaveCount(0)
+      release()
+
+      // "Nothing to move" is the app's own word that the move call has returned,
+      // and the restore runs in the continuation after it. The toast's DOM is
+      // only observable from a later task, once the whole microtask drain that
+      // ran the restore has finished, so this is a signal rather than a settle.
+      await expect(page.locator('.toast-title', { hasText: 'Nothing to move' })).toBeVisible()
+
+      const focusLog = await page.evaluate(() => (window as unknown as { __focusLog: string[] }).__focusLog)
+      expect(focusLog.filter((c) => c.includes('composer-bar'))).toEqual([])
+      expect(await focusedClass(page)).toContain(target.focused)
     })
-
-    await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', true)])
-    await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
-
-    // Hold the move open, tap the chip to arm the restore, then start writing
-    // the next message. The command finishes on its own while the request is
-    // still out, so the chip is retracted before the response comes back.
-    let release = () => {}
-    const held = new Promise<void>((resolve) => { release = resolve })
-    const posted: string[] = []
-    await page.route('**/api/chats/*/move-to-background', async (route) => {
-      posted.push(route.request().url())
-      await held
-      // The call had already ended, so there was nothing left to move. The
-      // guard does not turn on the result, only on where focus is.
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ moved: false }) })
-    })
-
-    await page.locator(CHIP).focus()
-    await expect.poll(() => page.evaluate(() => document.activeElement?.className ?? null))
-      .toContain('composer-move-bg')
-    await page.locator(CHIP).click()
-    await expect.poll(() => posted.length).toBe(1)
-    await expect(page.locator(CHIP)).toBeDisabled()
-    await page.locator('.chat-input').fill('next message')
-
-    await speak(page, END_OF_TURN)
-    await expect(page.locator(CHIP)).toHaveCount(0)
-    await expect(page.locator(STOP)).toHaveCount(0)
-    release()
-
-    // "Nothing to move" is the app's own word that the move call has returned,
-    // and the restore runs in the continuation after it. The toast's DOM is only
-    // observable from a later task, once the whole microtask drain that ran the
-    // restore has finished, so this is a signal rather than a settle.
-    await expect(page.locator('.toast-title', { hasText: 'Nothing to move' })).toBeVisible()
-
-    const focusLog = await page.evaluate(() => (window as unknown as { __focusLog: string[] }).__focusLog)
-    expect(focusLog.filter((c) => c.includes('composer-bar'))).toEqual([])
-    await expect.poll(() => page.evaluate(() => document.activeElement?.className ?? null))
-      .toContain('chat-input')
-    await expect(page.locator('.chat-input')).toHaveValue('next message')
-  })
+  }
 })
 
 test.describe('move a running call to the background (#1413), on a desktop width', () => {
