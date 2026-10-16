@@ -116,6 +116,45 @@ async def test_a_moved_turn_parks_its_announce_for_the_wake(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_queued_followup_after_a_move_announces_normally(tmp_path):
+    class _TwoTurnHost(_RecordingDriveHost):
+        def __init__(self):
+            super().__init__([], tmp_path)
+            self.active_stream = None
+            self.turn = 0
+
+        @staticmethod
+        def _native_question_request_id(_pending_question):
+            return ""
+
+        async def stream_chat(self, chat_id, prompt, images=None, *, unattended=False, compact=False):
+            del chat_id, images, unattended, compact
+            self.turn += 1
+            if self.turn == 1:
+                self.active_stream.moved_to_background = True
+                self.active_stream.enqueue("follow-up")
+                yield ResultEvent(type="result", result="Moved it; output comes later.", session_id="ses_x")
+            else:
+                yield ResultEvent(type="result", result="The follow-up is complete.", session_id="ses_x")
+
+    host = _TwoTurnHost()
+    host.chat.provider = "opencode"
+    host.chat.session_id = "ses_x"
+    stream = ChatStream(prompt_text="first")
+    host.active_stream = stream
+    host._broker.register("chat-1", stream)
+    await ChatStreaming(host).drive(
+        chat_id="chat-1", project_id="project-1", prompt="first", images=None,
+        turn_index=None, chat_meta=host.chat, stream=stream, is_retry=False,
+        unattended=False,
+    )
+
+    assert host.turn == 2
+    assert stream.moved_to_background is False
+    assert len(host.announcements) == 1
+
+
+@pytest.mark.asyncio
 async def test_drain_between_turns_streams_an_opencode_wake(tmp_path, monkeypatch):
     pcm, project, chat = _opencode_chat(tmp_path)
     _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)

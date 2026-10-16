@@ -7738,11 +7738,14 @@ class ProjectChatManager:
         service = self._providers.get(chat_id)
         if service is None:
             return "not_running"
+        # Bind the move to the turn that asked for it: the provider request is
+        # awaited below, and by the time it returns the originating stream may
+        # have finished and a later turn's stream may have registered. The
+        # turn-end announce is the only reader, and it runs once per drive.
+        stream = self._broker.get(chat_id)
         outcome = await service.move_to_background()
-        if outcome == "moved":
-            stream = self._broker.get(chat_id)
-            if stream is not None:
-                stream.moved_to_background = True
+        if outcome == "moved" and stream is not None:
+            stream.moved_to_background = True
         return outcome
 
     async def stop_chat(self, chat_id: str) -> bool:

@@ -1060,6 +1060,10 @@ class ChatStreaming:
                 current_images = merged_images or None
                 current_turn_index = turn_index2
                 compact = False
+                # This is a new turn: a move that backgrounded the previous one
+                # has already had its reply, and the turn-end announce is
+                # evaluated once per drive on its LAST turn (#1413 review round 1).
+                stream.moved_to_background = False
         finally:
             _late_fallback = chat_service._fallback_title(prompt) if prompt else None
             if (

@@ -96,6 +96,24 @@ def test_manager_flags_the_live_stream_when_moved(tmp_path: Path) -> None:
     assert stream.moved_to_background is True
 
 
+def test_manager_flags_the_originating_stream_not_a_replacement(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path); chat_id = _chat(pcm)
+    stream_a = ChatStream()
+    stream_b = ChatStream()
+    pcm._broker.register(chat_id, stream_a)
+
+    async def move_and_replace():
+        pcm._broker.register(chat_id, stream_b)
+        return "moved"
+
+    pcm._providers[chat_id] = SimpleNamespace(
+        move_to_background=AsyncMock(side_effect=move_and_replace),
+    )
+    assert asyncio.run(pcm.move_chat_to_background(chat_id)) == "moved"
+    assert stream_a.moved_to_background is True
+    assert stream_b.moved_to_background is False
+
+
 def test_manager_leaves_the_stream_alone_when_nothing_moved(tmp_path: Path) -> None:
     pcm = _manager(tmp_path); chat_id = _chat(pcm)
     pcm._providers[chat_id] = SimpleNamespace(move_to_background=AsyncMock(return_value="nothing"))
