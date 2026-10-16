@@ -234,6 +234,10 @@ class ToolUseEvent(StreamEvent):
     # raw input, which ``tool_input`` (a summary) does not carry.
     input_chars: int | None = None
     control_surface: str = ""
+    # True when the provider can move this call to the background while it
+    # runs (OpenCode's shell and subagent tools; see
+    # OpencodeProvider.move_to_background). Only set on a call, never a result.
+    backgroundable: bool = False
     # On a ``tool_result`` event: whether the call failed. ``None`` = unknown.
     is_error: bool | None = None
 

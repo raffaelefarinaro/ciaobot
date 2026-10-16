@@ -120,6 +120,7 @@ from ciao.models import (
 from ciao.os_support.files import open_fd
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.provider_service import ProviderService, capabilities_for, supported_providers
+from ciao.providers.base import MoveToBackgroundOutcome
 from ciao.providers.claude import get_session_info
 from ciao.providers.opencode import (
     _OPENCODE_DRAIN_MAX_S,
@@ -7726,6 +7727,23 @@ class ProjectChatManager:
         if duration_ms is not None:
             payload["duration_ms"] = duration_ms
         return payload
+
+    async def move_chat_to_background(self, chat_id: str) -> MoveToBackgroundOutcome:
+        """Move the chat's running foreground shells/subagents to the background (#1413).
+
+        The turn then ends normally and the work finishes as a wake the
+        between-turns drain streams. A moved turn's reply is interim, so its
+        stream is flagged and the turn-end announce is parked for the wake.
+        """
+        service = self._providers.get(chat_id)
+        if service is None:
+            return "not_running"
+        outcome = await service.move_to_background()
+        if outcome == "moved":
+            stream = self._broker.get(chat_id)
+            if stream is not None:
+                stream.moved_to_background = True
+        return outcome
 
     async def stop_chat(self, chat_id: str) -> bool:
         """Stop the chat's in-flight turn.

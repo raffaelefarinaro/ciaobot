@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, AsyncIterable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ciao.models import (
     AgentRequest,
@@ -52,6 +52,10 @@ class ProviderCapabilities:
     subagent_messages: bool = False
     session_history: bool = False
     schedule_unattended: bool = False
+
+
+# Outcome of a "move to background" request (#1413).
+MoveToBackgroundOutcome = Literal["moved", "nothing", "unsupported", "not_running", "failed"]
 
 
 def build_prompt(request: AgentRequest) -> str:
@@ -236,6 +240,17 @@ class BaseProvider(ABC):
         Returns a delivery id, or None when the provider cannot steer now.
         """
         return None
+
+    async def move_to_background(self) -> MoveToBackgroundOutcome:
+        """Move the running turn's foreground tools to the background (OpenCode's Ctrl+B).
+
+        ``moved``: a backgroundable call was running and the provider accepted
+        the request; ``nothing``: accepted, but nothing was running that could
+        move; ``not_running``: no live session; ``failed``: the provider
+        refused or could not be reached. Providers without the feature (Claude)
+        answer ``unsupported``.
+        """
+        return "unsupported"
 
     async def disconnect(self) -> None:
         """Discard any provider-side connection state."""

@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
 
 import pytest
 
@@ -54,6 +57,74 @@ from ciao.providers.opencode import (
     usage_payload,
     workspace_config_placeholder_problems,
 )
+
+
+def test_shell_and_subagent_calls_are_backgroundable(tmp_path: Path) -> None:
+    provider = OpencodeProvider(tmp_path)
+    for tool in ("shell", "subagent"):
+        event = _convert(provider, "session.tool.called", {"id": "c1", "name": tool, "input": {}})[0]
+        assert isinstance(event, ToolUseEvent) and event.backgroundable is True
+    event = _convert(provider, "session.tool.called", {"id": "c2", "name": "read", "input": {}})[0]
+    assert isinstance(event, ToolUseEvent) and event.backgroundable is False
+
+
+def test_tool_result_is_never_backgroundable(tmp_path: Path) -> None:
+    provider = OpencodeProvider(tmp_path)
+    _convert(provider, "session.tool.called", {"id": "c1", "name": "shell", "input": {}})
+    event = _convert(provider, "session.tool.success", {"id": "c1"})[0]
+    assert isinstance(event, ToolUseEvent) and event.type == "tool_result" and not event.backgroundable
+
+
+def test_recovered_running_shell_part_is_backgroundable(tmp_path: Path) -> None:
+    provider = OpencodeProvider(tmp_path)
+    event = provider._tool_part({"callID": "c1", "tool": "shell", "state": {"status": "running", "input": {"command": "sleep 1"}}})[0]
+    assert isinstance(event, ToolUseEvent) and event.backgroundable
+
+
+def _background_provider(tmp_path: Path, post) -> tuple[OpencodeProvider, list[str]]:
+    provider = OpencodeProvider(tmp_path)
+    paths: list[str] = []
+    async def fake_post(path, json=None, timeout=None):
+        paths.append(path)
+        return await post(path, json, timeout)
+    provider._client = SimpleNamespace(post=fake_post)
+    provider._process = SimpleNamespace(returncode=None)
+    provider._session_id = "ses_s"
+    return provider, paths
+
+
+@pytest.mark.asyncio
+async def test_move_to_background_posts_and_reports_a_running_shell(tmp_path: Path) -> None:
+    async def post(*args): return SimpleNamespace(status_code=204, text="")
+    provider, paths = _background_provider(tmp_path, post)
+    provider._tool_calls = {"c1": "shell"}
+    assert await provider.move_to_background() == "moved"
+    assert paths == ["/api/session/ses_s/background"]
+
+
+@pytest.mark.asyncio
+async def test_move_to_background_with_only_other_tools_is_nothing(tmp_path: Path) -> None:
+    async def post(*args): return SimpleNamespace(status_code=204, text="")
+    provider, paths = _background_provider(tmp_path, post)
+    provider._tool_calls = {"c1": "read"}
+    assert await provider.move_to_background() == "nothing"
+    assert paths == ["/api/session/ses_s/background"]
+
+
+@pytest.mark.asyncio
+async def test_move_to_background_without_a_live_server_is_not_running(tmp_path: Path) -> None:
+    provider = OpencodeProvider(tmp_path)
+    assert await provider.move_to_background() == "not_running"
+
+
+@pytest.mark.asyncio
+async def test_move_to_background_reports_a_refusal_as_failed(tmp_path: Path) -> None:
+    async def refused(*args): return SimpleNamespace(status_code=404, text='{"_tag":"SessionNotFoundError"}')
+    provider, _ = _background_provider(tmp_path, refused)
+    assert await provider.move_to_background() == "failed"
+    async def broken(*args): raise httpx.ConnectError("x")
+    provider, _ = _background_provider(tmp_path, broken)
+    assert await provider.move_to_background() == "failed"
 
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
 

@@ -545,6 +545,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["request_id"] = event.request_id
         if event.session_id:
             payload["session_id"] = event.session_id
+        if event.backgroundable:
+            payload["backgroundable"] = True
         touches: list[dict] = []
         if event.file_touches:
             touches = [
@@ -640,6 +642,7 @@ class ChatStream:
         # this stream's ``queue_state`` but are never flushed by it.
         "waiting",
         "user_stopped",
+        "moved_to_background",
         "background",
         # The asyncio.Task currently iterating this stream's turn events.
         # Set by the drive loop before awaiting the turn; cleared when the
@@ -684,6 +687,8 @@ class ChatStream:
         # the user said stop. A queued message goes out only when the user
         # sends it (Steer / Send now) or sends a new message.
         self.user_stopped: bool = False
+        # Set by move_chat_to_background: the turn's reply is interim, so its announce waits for the wake (#1413).
+        self.moved_to_background: bool = False
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
         # queued user messages — a user send while one is active

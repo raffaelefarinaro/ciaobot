@@ -1142,8 +1142,11 @@ class ChatStreaming:
                     chat_now.last_snippet = snippet
                     self._host._save()
                 title = chat_now.title if chat_now else "Ciaobot"
-                interim = follow_up_expected and self._host._is_interim_subagent_text(
-                    last_assistant_text
+                # A turn the user moved to the background (#1413) ends on an interim
+                # reply whatever its wording; the wake carries the real result.
+                interim = follow_up_expected and (
+                    stream.moved_to_background
+                    or self._host._is_interim_subagent_text(last_assistant_text)
                 )
                 if interim:
                     self._host._park_result_announce(

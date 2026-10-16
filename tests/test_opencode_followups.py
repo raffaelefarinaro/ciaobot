@@ -95,6 +95,27 @@ async def test_turn_done_starts_the_between_turns_drain_for_opencode(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_moved_turn_parks_its_announce_for_the_wake(tmp_path):
+    async def drive(moved: bool) -> _RecordingDriveHost:
+        host = _RecordingDriveHost(
+            [ResultEvent(type="result", result="Moved it; the output comes later.", session_id="ses_x")], tmp_path
+        )
+        host.chat.provider = "opencode"
+        host.chat.session_id = "ses_x"
+        streaming = ChatStreaming(host)  # type: ignore[arg-type]
+        stream = ChatStream(prompt_text="hi")
+        stream.moved_to_background = moved
+        host._broker.register("chat-1", stream)
+        await streaming.drive(chat_id="chat-1", project_id="project-1", prompt="hi",
+            images=None, turn_index=None, chat_meta=host.chat, stream=stream,
+            is_retry=False, unattended=False)
+        return host
+
+    assert (await drive(True)).announcements == []
+    assert len((await drive(False)).announcements) == 1
+
+
+@pytest.mark.asyncio
 async def test_drain_between_turns_streams_an_opencode_wake(tmp_path, monkeypatch):
     pcm, project, chat = _opencode_chat(tmp_path)
     _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)

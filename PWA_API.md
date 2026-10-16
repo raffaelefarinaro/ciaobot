@@ -54,6 +54,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/compact` | Compact the chat's provider session to shrink its context window (the Compact button beside the context meter). Runs as a stream like a turn, so status and result events arrive on the chat socket. 404 unknown chat; 409 `{error:"chat is archived", archived:true}`, `{error:"chat is busy"}` while a turn runs, the open-question error while a native question awaits an answer, or `{error:"nothing to compact yet"}` before the chat has a provider session |
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
+| POST | `/api/chats/{chat_id}/move-to-background` | OpenCode's Ctrl+B: move the running turn's foreground shell or subagent to the background. `{moved: bool}`; 409 `{"error":"unsupported"|"not_running"}`, 502 when OpenCode refused. The turn then ends normally and the work finishes as a background wake |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
 | GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
@@ -729,6 +730,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # `stop` message; use this when driving a chat over plain HTTP or when a
 # socket may not be connected.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/stop"
+
+# Move the running turn's foreground shell or subagent to the background
+# (OpenCode chats only; OpenCode's Ctrl+B). {moved: bool}: false when nothing
+# backgroundable was running. 409 {"error":"unsupported"} on Claude chats,
+# {"error":"not_running"} when the chat has no live provider.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/move-to-background"
 
 # Start a new provider session inside an existing chat (resets context).
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/new"
@@ -1529,6 +1536,7 @@ The PWA shows a banner at the top of a chat when an automation is bound to it. A
 Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged with `file_touch`. The PWA renders each card chronologically inside expanded `Activity`, plus a deduplicated `Outputs` chip below the final answer. If a turn is interrupted before producing a final answer, the chip remains inside `Activity` so the touched file is not hidden.
 
 - WS `/ws/chat/{chat_id}` `tool_use` event: adds optional `file_touch: {file_path, action}` when the tool mutates a file on disk. Detection lives in `extract_file_touch` (`ciao/web/chat_broker.py`); `action` is `written | edited`.
+- WS `/ws/chat/{chat_id}` `tool_use` event: adds optional `backgroundable: true` on a call `POST /api/chats/{chat_id}/move-to-background` can move (OpenCode `shell`/`subagent`). The call's result arrives as its own `tool_result` frame (#1416).
 - WS `/ws/chat/{chat_id}` `tool_result` event (OpenCode only): `{tool_name, tool_use_id?, is_error?, detail?, parent_tool_use_id?, session_id?}`. OpenCode emits one after every tool call, as its own frame rather than a second `tool_use` (#1416). The PWA marks the call's existing Activity line failed when `is_error` is set and never paints a second line. Claude emits none.
 - `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Both provider readers honour this.
 - Refused or failed calls get no card. `file_touch` is attached when a call is *requested*, so a denied `Write` used to paint an Outputs chip for a file that was never created. Live: the server publishes `tool_denied {tool_use_id}` on a deny and strips the touch from the replay buffer (the permission gate keys requests by `tool_use_id`, which is the same id the `tool_use` event carries). On reload: `/messages` and the subagent renderer skip the card when that call's `tool_result` came back `is_error`. The activity row stays either way, so the attempt is still visible.

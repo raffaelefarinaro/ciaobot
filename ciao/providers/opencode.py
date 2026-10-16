@@ -72,6 +72,7 @@ from ciao.models import (
 from ciao.providers.base import (
     ActiveHandle,
     BaseSDKProvider,
+    MoveToBackgroundOutcome,
     ProviderCapabilities,
     build_prompt,
     build_runtime_context,
@@ -337,6 +338,9 @@ _MODE_AGENTS: dict[str, str] = {
 # wildcard goes first and specific grants follow. ``auto`` allows routine work
 # while keeping every shell command behind an operator approval card.
 _READ_ONLY_TOOLS = ("read", "glob", "grep")
+# Tools OpenCode's POST /api/session/{id}/background can move (its job
+# types `shell` and `subagent`; verified on 2.0.27, #1413).
+_BACKGROUNDABLE_TOOLS = frozenset({"shell", "subagent"})
 # V2 sends the glob pattern/regex itself as the permission resource; it does
 # not send the search root or result paths. Require an explicit operator card
 # for both search actions in every mode except bypass, so a broad search
@@ -2643,6 +2647,32 @@ class OpencodeProvider(BaseSDKProvider):
             # it can never become an unretrieved task exception.
             logger.debug("OpenCode interrupt failed for %s", session_id, exc_info=True)
 
+    async def move_to_background(self) -> MoveToBackgroundOutcome:
+        """Ask OpenCode to background this session's running shells and subagents (#1413).
+
+        POST /api/session/{id}/background moves every running foreground
+        shell or subagent call to background observation: the call succeeds
+        with a "moved to the background" result, OpenCode steers the model to
+        finish its step, and the turn ends normally. The work then finishes as
+        a wake that `drain_events` streams. An idle session is a no-op (204).
+        """
+        client, session_id = self._client, self._session_id
+        if client is None or not session_id or not self.has_live_server:
+            return "not_running"
+        eligible = any(name in _BACKGROUNDABLE_TOOLS for name in self._tool_calls.values())
+        try:
+            response = await client.post(f"/api/session/{session_id}/background")
+        except httpx.HTTPError:
+            logger.info("OpenCode background request failed for %s", session_id, exc_info=True)
+            return "failed"
+        if response.status_code >= 400:
+            logger.info(
+                "OpenCode refused to background %s: %s",
+                session_id, _sanitize_error(response.text),
+            )
+            return "failed"
+        return "moved" if eligible else "nothing"
+
     async def _compact_session(
         self, client: httpx.AsyncClient, session_id: str, request: AgentRequest
     ) -> AsyncGenerator[StreamEvent, None]:
@@ -3245,6 +3275,7 @@ class OpencodeProvider(BaseSDKProvider):
                 file_touches=_file_touches(tool, raw_input),
                 input_chars=input_chars,
                 control_surface=surface,
+                backgroundable=tool in _BACKGROUNDABLE_TOOLS,
             )]
         if kind in {"session.tool.success", "session.tool.failed"}:
             call_id = str(props.get("id") or "")
@@ -3385,6 +3416,7 @@ class OpencodeProvider(BaseSDKProvider):
                 file_touches=_file_touches(tool, raw_input),
                 input_chars=input_chars,
                 control_surface=surface,
+                backgroundable=tool in _BACKGROUNDABLE_TOOLS,
             )]
 
         if status in {"completed", "error"}:
