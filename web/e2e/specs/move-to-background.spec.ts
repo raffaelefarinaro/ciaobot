@@ -55,22 +55,31 @@ const END_OF_TURN = [{ type: 'tool_result', tool_use_id: MOVE_ID }, { type: 'res
  * Installed before the app loads, since the socket it hooks is created at
  * startup.
  */
-async function watchFrameArrival(page: Page, moveId: string) {
-  await page.addInitScript((wanted) => {
+async function watchFrameArrival(page: Page, chatId: string, moveId: string) {
+  await page.addInitScript(({ chat, wanted }) => {
     const Native = window.WebSocket
     const timings: Timings = { toolUse: null, chip: null }
     ;(window as TimingWindow).__timings = timings
     window.WebSocket = class extends Native {
       constructor(url: string | URL, protocols?: string | string[]) {
         super(url, protocols)
+        if (!String(url).includes(`/ws/chat/${chat}`)) return
         this.addEventListener('message', (event: MessageEvent) => {
           if (timings.toolUse !== null || typeof event.data !== 'string') return
           try {
-            const frame = JSON.parse(event.data) as { type?: unknown; tool_use_id?: unknown }
-            // The events socket carries a snapshot too, and a loose match on the
-            // text would let anything in it — a transcript entry, say — start the
-            // clock early and hide a missing delay.
-            if (frame.type === 'tool_use' && frame.tool_use_id === wanted) {
+            const frame = JSON.parse(event.data) as {
+              type?: unknown; tool_use_id?: unknown; backgroundable?: unknown; parent_tool_use_id?: unknown
+            }
+            // Only the frame that actually starts a movable call dates it, since
+            // that is the frame `nextBackgroundableCalls` dates: anything else
+            // with the same id would start the clock on time belonging to no call
+            // and hide a missing delay.
+            if (
+              frame.type === 'tool_use' &&
+              frame.tool_use_id === wanted &&
+              frame.backgroundable === true &&
+              !frame.parent_tool_use_id
+            ) {
               timings.toolUse = performance.now()
             }
           } catch {
@@ -79,7 +88,7 @@ async function watchFrameArrival(page: Page, moveId: string) {
         })
       }
     } as unknown as typeof WebSocket
-  }, moveId)
+  }, { chat: chatId, wanted: moveId })
 }
 
 /** Note when the chip first appears, in page time. */
@@ -200,7 +209,7 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
   test.use({ viewport: PHONE, isMobile: true, hasTouch: true })
 
   test('the chip is offered only once the call has run 3s, as a 44px target by Stop', async ({ page }) => {
-    await watchFrameArrival(page, MOVE_ID)
+    await watchFrameArrival(page, CHAT_ID, MOVE_ID)
     await boot(page, CHAT_PATH, COMPOSER)
     await watchForChip(page)
     await speak(page, [toolUse(true)])
