@@ -216,6 +216,50 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
     await expectNoFurtherMove(page, posted)
     await page.screenshot({ path: 'test-results/move-bg-after-tap.png' })
   })
+
+  test('focus the user moved while the request was out is left where they put it', async ({ page }) => {
+    await boot(page, CHAT_PATH, COMPOSER)
+    await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', true)])
+    await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
+
+    // Hold the move open so the user can move focus while it is in flight —
+    // the case the comment in moveToBackground() describes: they go to the
+    // textarea to write the next message.
+    let release = () => {}
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const posted: string[] = []
+    await page.route('**/api/chats/*/move-to-background', async (route) => {
+      posted.push(route.request().url())
+      await held
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ moved: true }) })
+    })
+
+    // The tap arms the restore by taking focus, and the chip disables itself the
+    // moment it is clicked — a disabled button cannot hold focus, so by the time
+    // the request is out the chip's focus has already fallen to <body>. Arm the
+    // restore explicitly and assert it before the click, since a chip that was
+    // never focused is a chip with nothing to give back.
+    await page.locator(CHIP).focus()
+    await expect.poll(() => page.evaluate(() => document.activeElement?.className ?? null))
+      .toContain('composer-move-bg')
+    await page.locator(CHIP).click()
+    await expect.poll(() => posted.length).toBe(1)
+    await expect(page.locator(CHIP)).toBeDisabled()
+
+    await page.locator('.chat-input').fill('next message')
+    release()
+
+    // The chip re-enabling is the request coming back, and the restore runs in
+    // the same continuation that re-enables it — so once this passes the
+    // restore has had its say and the check below is not racing it. On this
+    // width an unguarded restore lands on the composer bar, taking the cursor
+    // out of the draft mid-sentence, which is what round 2 of the review of
+    // #1413 was about.
+    await expect(page.locator(CHIP)).toBeEnabled()
+    await expect.poll(() => page.evaluate(() => document.activeElement?.className ?? null))
+      .toContain('chat-input')
+    await expect(page.locator('.chat-input')).toHaveValue('next message')
+  })
 })
 
 test.describe('move a running call to the background (#1413), on a desktop width', () => {
