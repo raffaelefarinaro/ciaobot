@@ -23,6 +23,9 @@ const MOVE_ID = 'toolu_e2e_move'
 const CHIP = '.composer-move-bg'
 const STOP = '.send-btn.is-stop'
 
+interface ControlAppearance { stop: number | null; chip: number | null }
+type AppearanceWindow = Window & { __appear?: ControlAppearance }
+
 /** The `tool_use` a broker emits per foreground shell call. */
 function toolUse(backgroundable: boolean) {
   return {
@@ -54,6 +57,40 @@ async function expectStreaming(page: Page) {
   await expect(page.locator(STOP)).toBeVisible()
 }
 
+/**
+ * Note when each control first appears, in page time.
+ *
+ * The chip is offered by a 1s tick over `Date.now()`, so "it waited 3s" is a
+ * fact about two DOM events, and asserting it by reading a clock around two
+ * awaits makes the runner's scheduling part of the assertion: a machine that
+ * stalled for three seconds between them would fail a correct build. Recording
+ * the two events and comparing them cannot.
+ */
+async function watchWhenControlsAppear(page: Page) {
+  await page.evaluate(({ stop, chip }) => {
+    const times: ControlAppearance = { stop: null, chip: null }
+    ;(window as AppearanceWindow).__appear = times
+    const noteIfPresent = (selector: string, key: 'stop' | 'chip') => {
+      const mark = () => {
+        if (times[key] === null && document.querySelector(selector)) times[key] = performance.now()
+      }
+      new MutationObserver(mark).observe(document.body, {
+        childList: true, subtree: true, attributes: true, attributeFilter: ['class'],
+      })
+      mark()
+    }
+    noteIfPresent(stop, 'stop')
+    noteIfPresent(chip, 'chip')
+  }, { stop: STOP, chip: CHIP })
+}
+
+/** How long after Stop the chip appeared, or null if either never did. */
+async function chipAppearedAfterStopMs(page: Page): Promise<number | null> {
+  const times = await page.evaluate(() => (window as AppearanceWindow).__appear ?? null)
+  if (!times || times.stop === null || times.chip === null) return null
+  return Math.round(times.chip - times.stop)
+}
+
 /** The chip is a phone control: it must clear --touch and sit inside the layout. */
 async function expectTapTargetBesideStop(page: Page) {
   const chip = await page.locator(CHIP).boundingBox()
@@ -76,6 +113,37 @@ async function expectTapTargetBesideStop(page: Page) {
   expect(chipMiddle).toBeLessThan(stop!.y + stop!.height)
 }
 
+/**
+ * Tap the chip with the reply held open, then end the turn, then answer.
+ *
+ * The order matters and is the whole point: a real move ends the reply, so the
+ * chip's `tool_result` retracts the chip and the turn's `result` ends the stream
+ * *while the HTTP request is still out*. Focus is therefore restored after the
+ * element that held it has unmounted, and `document.activeElement` has fallen to
+ * `<body>` — the case that took review rounds 2 and 3. Fulfilling the route
+ * eagerly instead would race the two and quietly test the easy path.
+ */
+async function tapChipAndEndTurn(page: Page) {
+  let release = () => {}
+  const held = new Promise<void>((resolve) => { release = resolve })
+  const posted: string[] = []
+  await page.route('**/api/chats/*/move-to-background', async (route) => {
+    posted.push(route.request().url())
+    await held
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ moved: true }) })
+  })
+
+  await page.locator(CHIP).click()
+  await expect.poll(() => posted.length).toBe(1)
+  expect(posted[0]).toContain(`/api/chats/${CHAT_ID}/move-to-background`)
+
+  await speak(page, END_OF_TURN)
+  await expect(page.locator(CHIP)).toHaveCount(0)
+  await expect(page.locator(STOP)).toHaveCount(0)
+
+  release()
+}
+
 test.beforeEach(async ({ page }, testInfo) => {
   await isolate(page, `move-bg-${testInfo.workerIndex}`)
 })
@@ -85,15 +153,21 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
 
   test('the chip is offered only once the call has run 3s, as a 44px target by Stop', async ({ page }) => {
     await boot(page, CHAT_PATH, COMPOSER)
+    await watchWhenControlsAppear(page)
     await speak(page, [toolUse(true)])
     await expectStreaming(page)
 
-    // The delay is the feature: a call that has only just started must not
-    // offer it. Read straight after Stop renders, so this is well inside 3s.
-    await expect(page.locator(CHIP)).toHaveCount(0)
-
     await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
     await expectTapTargetBesideStop(page)
+
+    // The delay is the feature, and this asserts it directly: the chip may not
+    // appear until the call is 3s old. The 100ms of slack is the gap between
+    // the store dating the call and Stop rendering it; the composer's 1s tick
+    // means a correct build lands somewhere above the threshold.
+    const delay = await chipAppearedAfterStopMs(page)
+    expect(delay).not.toBeNull()
+    expect(delay!).toBeGreaterThanOrEqual(2_900)
+
     await page.screenshot({ path: 'test-results/move-bg-phone.png' })
   })
 
@@ -105,7 +179,9 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
     // the absence below would also hold when nothing arrived at all, and the
     // spec would pass against a gate as broken as always offering the chip.
     await expectStreaming(page)
-    await page.waitForTimeout(3_500)
+    // Past the 3s threshold plus a whole 1s tick, so a gate that ignored the
+    // flag would have rendered the chip by now.
+    await page.waitForTimeout(4_500)
 
     await expect(page.locator(CHIP)).toHaveCount(0)
     await expect(page.locator(STOP)).toBeVisible()
@@ -116,28 +192,11 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
     await speak(page, [toolUse(true)])
     await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
 
-    const posted: string[] = []
-    await page.route('**/api/chats/*/move-to-background', async (route) => {
-      posted.push(route.request().url())
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ moved: true }) })
-    })
-
-    await page.locator(CHIP).click()
-    await expect.poll(() => posted.length).toBe(1)
-    expect(posted[0]).toContain(`/api/chats/${CHAT_ID}/move-to-background`)
-
-    // A successful move ends the reply: the moved call's result retracts the
-    // chip and the turn's result ends the stream. Focus was on the chip, which
-    // no longer exists by the time the request resolves — the case that made
-    // this path take four review rounds.
-    await speak(page, END_OF_TURN)
-    await expect(page.locator(CHIP)).toHaveCount(0)
-    await expect(page.locator(STOP)).toHaveCount(0)
+    await tapChipAndEndTurn(page)
 
     // Focus must come to rest inside the composer, on a target that names
     // itself: the bar is the only one that is always focusable, never disabled,
-    // and never raises the on-screen keyboard. Polled, because the restoration
-    // runs after the store's request resolves.
+    // and never raises the on-screen keyboard.
     await expect.poll(async () => page.evaluate(() => {
       const el = document.activeElement as HTMLElement | null
       return {
@@ -159,12 +218,7 @@ test.describe('move a running call to the background (#1413), on a desktop width
     await speak(page, [toolUse(true)])
     await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
 
-    await page.route('**/api/chats/*/move-to-background', (route) =>
-      route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ moved: true }) }))
-
-    await page.locator(CHIP).click()
-    await speak(page, END_OF_TURN)
-    await expect(page.locator(CHIP)).toHaveCount(0)
+    await tapChipAndEndTurn(page)
 
     // Above COMPOSER_FOCUS_MIN_WIDTH the keyboard is not a concern, so the next
     // message can be typed straight away — the other half of the focus rule.
