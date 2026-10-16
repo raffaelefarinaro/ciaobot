@@ -15,6 +15,10 @@ import { COMPOSER, boot, isolate } from '../support/app'
  * speak on it directly (`POST /__fixture__/chat-frame`) with the frames a broker
  * sends for an OpenCode foreground shell: a `tool_use` carrying `backgroundable`,
  * and the `tool_result` plus `result` that end it.
+ *
+ * The 3s rule is a rule about the app's own clock, so the test that asserts it
+ * runs that clock by hand (`page.clock`), which is what lets it put the
+ * boundary where it is instead of inferring it from wall-clock arrivals.
  */
 const PHONE = { width: 390, height: 844 }
 const CHAT_PATH = '/chat/alpha-chat-1'
@@ -23,95 +27,19 @@ const MOVE_ID = 'toolu_e2e_move'
 const CHIP = '.composer-move-bg'
 const STOP = '.send-btn.is-stop'
 
-interface Timings {
-  /** When the app's own socket delivered the tool call, page time. */
-  toolUse: number | null
-  /** When the chip first appeared, page time. */
-  chip: number | null
-}
-type TimingWindow = Window & { __timings?: Timings }
-
 /** The `tool_use` a broker emits per foreground shell call. */
-function toolUse(backgroundable: boolean) {
+function toolUse(id: string, command: string, backgroundable: boolean) {
   return {
     type: 'tool_use',
-    tool_use_id: MOVE_ID,
+    tool_use_id: id,
     tool_name: 'Bash',
-    tool_input: JSON.stringify({ command: 'sleep 300 && echo done' }),
+    tool_input: JSON.stringify({ command }),
     ...(backgroundable ? { backgroundable: true } : {}),
   }
 }
 
 /** What a successful move causes: the call ends, and with it the turn. */
 const END_OF_TURN = [{ type: 'tool_result', tool_use_id: MOVE_ID }, { type: 'result' }]
-
-/**
- * Note when the app's own socket receives the call.
- *
- * This is the instant the store dates the call, so the 3s rule can be measured
- * from it and nothing else: not from when the test asked for the frame, which
- * would count transport latency as part of the delay, and not from when Stop
- * rendered, which is the browser's scheduling rather than the app's clock.
- * Installed before the app loads, since the socket it hooks is created at
- * startup.
- */
-async function watchFrameArrival(page: Page, chatId: string, moveId: string) {
-  await page.addInitScript(({ chat, wanted }) => {
-    const Native = window.WebSocket
-    const timings: Timings = { toolUse: null, chip: null }
-    ;(window as TimingWindow).__timings = timings
-    window.WebSocket = class extends Native {
-      constructor(url: string | URL, protocols?: string | string[]) {
-        super(url, protocols)
-        if (!String(url).includes(`/ws/chat/${chat}`)) return
-        this.addEventListener('message', (event: MessageEvent) => {
-          if (timings.toolUse !== null || typeof event.data !== 'string') return
-          try {
-            const frame = JSON.parse(event.data) as {
-              type?: unknown; tool_use_id?: unknown; backgroundable?: unknown; parent_tool_use_id?: unknown
-            }
-            // Only the frame that actually starts a movable call dates it, since
-            // that is the frame `nextBackgroundableCalls` dates: anything else
-            // with the same id would start the clock on time belonging to no call
-            // and hide a missing delay.
-            if (
-              frame.type === 'tool_use' &&
-              frame.tool_use_id === wanted &&
-              frame.backgroundable === true &&
-              !frame.parent_tool_use_id
-            ) {
-              timings.toolUse = performance.now()
-            }
-          } catch {
-            /* not a frame this test cares about */
-          }
-        })
-      }
-    } as unknown as typeof WebSocket
-  }, { chat: chatId, wanted: moveId })
-}
-
-/** Note when the chip first appears, in page time. */
-async function watchForChip(page: Page) {
-  await page.evaluate((selector) => {
-    const timings = (window as TimingWindow).__timings
-    if (!timings) throw new Error('the frame-arrival hook did not install')
-    const mark = () => {
-      if (timings.chip === null && document.querySelector(selector)) timings.chip = performance.now()
-    }
-    new MutationObserver(mark).observe(document.body, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ['class'],
-    })
-    mark()
-  }, CHIP)
-}
-
-/** How long the chip took to follow the call, or null if either never happened. */
-async function chipDelayAfterCallMs(page: Page): Promise<number | null> {
-  const timings = await page.evaluate(() => (window as TimingWindow).__timings ?? null)
-  if (!timings || timings.toolUse === null || timings.chip === null) return null
-  return Math.round(timings.chip - timings.toolUse)
-}
 
 async function speak(page: Page, frames: unknown[]) {
   const status = await page.evaluate(async ({ chatId, payload }) => {
@@ -209,30 +137,50 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
   test.use({ viewport: PHONE, isMobile: true, hasTouch: true })
 
   test('the chip is offered only once the call has run 3s, as a 44px target by Stop', async ({ page }) => {
-    await watchFrameArrival(page, CHAT_ID, MOVE_ID)
+    await page.clock.install()
+    await page.clock.pauseAt(Date.now())
     await boot(page, CHAT_PATH, COMPOSER)
-    await watchForChip(page)
-    await speak(page, [toolUse(true)])
+    // A frozen clock does not fire the timer the app opens its chat socket on.
+    await page.clock.runFor(300)
+
+    // A turn is already running when the call arrives — which is the real case,
+    // since a foreground shell shows up after the reply has started — and that
+    // is what puts the call *between* two of the composer's 1s ticks rather
+    // than on one. The tick is what decides when the chip appears, so a call
+    // landing on a tick would hide a delay one tick too short: both thresholds
+    // would be answered by that same tick. 200ms in, the ticks fall at 800,
+    // 1800, 2800 and 3800ms of call age, so 2800ms is a tick that a 3s rule
+    // must refuse and a 2.5s rule would have taken.
+    await speak(page, [toolUse('toolu_e2e_open', 'echo first', false)])
     await expectStreaming(page)
+    await page.clock.runFor(200)
+    await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', true)])
+    // Prove the call landed before asserting anything is absent: without this
+    // the absence below would also hold when nothing arrived at all.
+    await expect(page.locator('.activity-line', { hasText: 'sleep 300' })).toHaveCount(1)
 
-    await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
+    // And it stays unoffered to 2810ms — past the tick at 2800ms, short of 3s.
+    // Checked right through rather than only at the end, so a build that offered
+    // it early and withdrew it again cannot read as never offering it. A build
+    // with no delay, or one a tick short, offers it on or before the 2800ms tick
+    // and fails here; measuring arrival-to-render in wall time instead let
+    // thread scheduling and transport latency decide the number.
+    for (let age = 0; age < 2_810; age += 100) {
+      const step = Math.min(100, 2_810 - age)
+      await page.clock.runFor(step)
+      await expect(page.locator(CHIP), `the chip was offered ${age + step}ms into the call`).toHaveCount(0)
+    }
+    // The next tick, at 3800ms of call age.
+    await page.clock.runFor(1_000)
+    await expect(page.locator(CHIP)).toBeVisible()
+
     await expectTapTargetBesideStop(page)
-
-    // The delay is the feature, and this is the assertion of it: measured from
-    // the moment the app's socket delivered the call, to the moment the chip
-    // appeared. A build with no delay offers it within one tick of that arrival
-    // and fails; counting the test's own request, or Stop's rendering, would
-    // have let transport latency or a stalled thread decide the number.
-    const delay = await chipDelayAfterCallMs(page)
-    expect(delay).not.toBeNull()
-    expect(delay!).toBeGreaterThanOrEqual(2_900)
-
     await page.screenshot({ path: 'test-results/move-bg-phone.png' })
   })
 
   test('a call that is not backgroundable never offers it, however long it runs', async ({ page }) => {
     await boot(page, CHAT_PATH, COMPOSER)
-    await speak(page, [toolUse(false)])
+    await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', false)])
 
     // Prove the frame landed before asserting anything is absent: without this
     // the absence below would also hold when nothing arrived at all, and the
@@ -248,7 +196,7 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
 
   test('tapping it posts once, and focus survives the chip unmounting', async ({ page }) => {
     await boot(page, CHAT_PATH, COMPOSER)
-    await speak(page, [toolUse(true)])
+    await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', true)])
     await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
 
     const posted = await tapChipAndEndTurn(page)
@@ -275,7 +223,7 @@ test.describe('move a running call to the background (#1413), on a desktop width
 
   test('tapping it hands focus to the textarea, not the composer bar', async ({ page }) => {
     await boot(page, CHAT_PATH, COMPOSER)
-    await speak(page, [toolUse(true)])
+    await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', true)])
     await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
 
     const posted = await tapChipAndEndTurn(page)
