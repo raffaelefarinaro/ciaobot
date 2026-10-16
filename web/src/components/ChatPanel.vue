@@ -1091,7 +1091,13 @@
             @focus="handleInputFocus"
             @click="refreshComposerPickers"
           ></textarea>
-          <div class="input-actions composer-bar" ref="composerBarEl" tabindex="-1">
+          <div
+            class="input-actions composer-bar"
+            ref="composerBarEl"
+            tabindex="-1"
+            role="group"
+            aria-label="Message composer"
+          >
             <!-- The model picker's trigger lives in the composer, where the next
                  message is written, as on Home. The selector itself (thinking
                  levels, Option+M) is unchanged; it opens upward from here. -->

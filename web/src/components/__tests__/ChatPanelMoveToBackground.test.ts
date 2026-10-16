@@ -124,7 +124,11 @@ describe('ChatPanel move to background', () => {
     resolveMove(true)
     await flushPromises()
     const composerBar = wrapper.find('.composer-bar').element
-    expect(composerBar.contains(document.activeElement)).toBe(true)
+    const active = document.activeElement as HTMLElement | null
+    expect(composerBar.contains(active)).toBe(true)
+    expect(active).not.toBeNull()
+    expect(active!.getAttribute('role')).toBe('group')
+    expect(active!.getAttribute('aria-label')).toBe('Message composer')
     wrapper.unmount()
   })
 
@@ -152,6 +156,8 @@ describe('ChatPanel move to background', () => {
     expect(active).not.toBeNull()
     expect((active as HTMLButtonElement).disabled).not.toBe(true)
     expect(wrapper.find('.composer-bar').element.contains(active)).toBe(true)
+    expect(active!.getAttribute('role')).toBe('group')
+    expect(active!.getAttribute('aria-label')).toBe('Message composer')
     wrapper.unmount()
   })
 
