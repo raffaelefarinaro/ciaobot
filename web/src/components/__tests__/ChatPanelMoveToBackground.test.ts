@@ -104,6 +104,30 @@ describe('ChatPanel move to background', () => {
     wrapper.unmount()
   })
 
+  it('keeps focus in the composer when the turn ends before the request resolves', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 375 })
+    let resolveMove!: (result: boolean) => void
+    const moveRequest = new Promise<boolean>(resolve => { resolveMove = resolve })
+    const { wrapper, store } = await mountPanel(s => {
+      s.streaming['chat-1'] = true
+      s.backgroundableCalls['chat-1'] = { c1: Date.now() - 4000 }
+      vi.spyOn(s, 'moveChatToBackground').mockReturnValue(moveRequest)
+    })
+    await wrapper.vm.$nextTick()
+    const chip = wrapper.find('.composer-move-bg')
+    ;(chip.element as HTMLButtonElement).focus()
+    await chip.trigger('click')
+    store.streaming['chat-1'] = false
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.composer-move-bg').exists()).toBe(false)
+
+    resolveMove(true)
+    await flushPromises()
+    const composerBar = wrapper.find('.composer-bar').element
+    expect(composerBar.contains(document.activeElement)).toBe(true)
+    wrapper.unmount()
+  })
+
   it('is a native button reachable by keyboard', async () => {
     const { wrapper } = await mountPanel(s => { s.streaming['chat-1'] = true; s.backgroundableCalls['chat-1'] = { c1: Date.now() - 4000 } })
     await wrapper.vm.$nextTick()

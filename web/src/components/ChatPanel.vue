@@ -1091,7 +1091,7 @@
             @focus="handleInputFocus"
             @click="refreshComposerPickers"
           ></textarea>
-          <div class="input-actions composer-bar">
+          <div class="input-actions composer-bar" ref="composerBarEl" tabindex="-1">
             <!-- The model picker's trigger lives in the composer, where the next
                  message is written, as on Home. The selector itself (thinking
                  levels, Option+M) is unchanged; it opens upward from here. -->
@@ -1534,6 +1534,7 @@ const canSend = computed(() =>
 const showStopAction = computed(() => store.isStreaming && !canSend.value)
 const moveBtnEl = ref<HTMLButtonElement | null>(null)
 const sendBtnEl = ref<HTMLButtonElement | null>(null)
+const composerBarEl = ref<HTMLElement | null>(null)
 const movingToBackground = ref(false)
 const showMoveToBackground = computed(() =>
   store.isStreaming && canOfferMoveToBackground(store.activeBackgroundableCalls, nowTs.value),
@@ -1549,7 +1550,11 @@ async function moveToBackground() {
   }
   if (hadFocus) {
     if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
-    else sendBtnEl.value?.focus()
+    else {
+      const sendButton = sendBtnEl.value
+      if (sendButton && !sendButton.disabled) sendButton.focus()
+      else composerBarEl.value?.focus()
+    }
   }
 }
 const primaryActionTitle = computed(() => {
@@ -6550,6 +6555,9 @@ details[open] > .activity-summary::before {
   padding: 6px 2px 0 2px;
   border-top: 1px solid var(--border);
 }
+
+.composer-bar:focus { outline: none; }
+.composer-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .composer-spacer { flex: 1; }
 
