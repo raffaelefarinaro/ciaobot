@@ -18,6 +18,7 @@ from ciao.providers import opencode as opencode_module
 from ciao.providers.opencode import OpencodeProvider
 from ciao.web.chat_broker import ChatStream
 from ciao.web.chat_streaming import ChatStreaming
+from ciao.web.project_chats import ProjectChatManager
 from tests.test_chat_streaming_boundary import _DriveHost
 from tests.test_chat_subagents import _make_manager
 from tests.test_opencode_background_wake import (
@@ -152,6 +153,108 @@ async def test_queued_followup_after_a_move_announces_normally(tmp_path):
     assert host.turn == 2
     assert stream.moved_to_background is False
     assert len(host.announcements) == 1
+
+
+@pytest.mark.asyncio
+async def test_late_move_response_cannot_park_a_queued_followup(tmp_path):
+    release_move = asyncio.Event()
+
+    class _DelayedMove:
+        async def move_to_background(self):
+            await release_move.wait()
+            return "moved"
+
+    class _TwoTurnHost(_RecordingDriveHost):
+        def __init__(self):
+            super().__init__([], tmp_path)
+            self.active_stream = None
+            self.move_task = None
+            self.turn = 0
+            self._providers["chat-1"] = _DelayedMove()
+
+        @staticmethod
+        def _native_question_request_id(_pending_question):
+            return ""
+
+        async def stream_chat(self, chat_id, prompt, images=None, *, unattended=False, compact=False):
+            del chat_id, prompt, images, unattended, compact
+            self.turn += 1
+            if self.turn == 1:
+                self.move_task = asyncio.create_task(
+                    ProjectChatManager.move_chat_to_background(self, "chat-1")
+                )
+                self.active_stream.enqueue("follow-up")
+                yield ResultEvent(type="result", result="Moved it; output comes later.", session_id="ses_x")
+            else:
+                # Release only after the queued turn has started, proving the
+                # provider response arrives after its boundary reset.
+                release_move.set()
+                yield ResultEvent(type="result", result="The follow-up is complete.", session_id="ses_x")
+
+    host = _TwoTurnHost()
+    host.chat.provider = "opencode"
+    host.chat.session_id = "ses_x"
+    stream = ChatStream(prompt_text="first")
+    host.active_stream = stream
+    host._broker.register("chat-1", stream)
+    await ChatStreaming(host).drive(
+        chat_id="chat-1", project_id="project-1", prompt="first", images=None,
+        turn_index=None, chat_meta=host.chat, stream=stream, is_retry=False,
+        unattended=False,
+    )
+    assert await host.move_task == "moved"
+    assert host.turn == 2
+    assert stream.moved_to_background is False
+    assert len(host.announcements) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_move_response_does_not_delay_announce_parking(tmp_path):
+    never_release = asyncio.Event()
+
+    class _PendingMove:
+        async def move_to_background(self):
+            await never_release.wait()
+            return "moved"
+
+    class _OneTurnHost(_RecordingDriveHost):
+        def __init__(self):
+            super().__init__([], tmp_path)
+            self.active_stream = None
+            self.move_task = None
+            self._providers["chat-1"] = _PendingMove()
+
+        @staticmethod
+        def _native_question_request_id(_pending_question):
+            return ""
+
+        async def stream_chat(self, chat_id, prompt, images=None, *, unattended=False, compact=False):
+            del chat_id, prompt, images, unattended, compact
+            self.move_task = asyncio.create_task(
+                ProjectChatManager.move_chat_to_background(self, "chat-1")
+            )
+            # Let the move request synchronously mark the stream before the
+            # provider blocks indefinitely.
+            await asyncio.sleep(0)
+            yield ResultEvent(type="result", result="Moved it; output comes later.", session_id="ses_x")
+
+    host = _OneTurnHost()
+    host.chat.provider = "opencode"
+    host.chat.session_id = "ses_x"
+    stream = ChatStream(prompt_text="first")
+    host.active_stream = stream
+    host._broker.register("chat-1", stream)
+    try:
+        await ChatStreaming(host).drive(
+            chat_id="chat-1", project_id="project-1", prompt="first", images=None,
+            turn_index=None, chat_meta=host.chat, stream=stream, is_retry=False,
+            unattended=False,
+        )
+        assert host.announcements == []
+        assert stream.moved_to_background is True
+    finally:
+        host.move_task.cancel()
+        await asyncio.gather(host.move_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

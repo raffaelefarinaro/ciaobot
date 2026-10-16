@@ -643,6 +643,7 @@ class ChatStream:
         "waiting",
         "user_stopped",
         "moved_to_background",
+        "move_epoch",
         "background",
         # The asyncio.Task currently iterating this stream's turn events.
         # Set by the drive loop before awaiting the turn; cleared when the
@@ -687,8 +688,15 @@ class ChatStream:
         # the user said stop. A queued message goes out only when the user
         # sends it (Steer / Send now) or sends a new message.
         self.user_stopped: bool = False
-        # Set by move_chat_to_background: the turn's reply is interim, so its announce waits for the wake (#1413).
+        # Marked at request time by move_chat_to_background, so this turn's
+        # reply is interim and its announce waits for the wake. Marking before
+        # the provider is awaited means the turn-end read can never be too
+        # early, and a slow response can never land on a later turn (#1413).
         self.moved_to_background: bool = False
+        # Bumped when a queued follow-up turn begins. A move request that
+        # resolves afterwards must clear a mark only if its own turn is still
+        # the current one (#1413 review round 2).
+        self.move_epoch: int = 0
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
         # queued user messages — a user send while one is active

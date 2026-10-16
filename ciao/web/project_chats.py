@@ -7738,14 +7738,20 @@ class ProjectChatManager:
         service = self._providers.get(chat_id)
         if service is None:
             return "not_running"
-        # Bind the move to the turn that asked for it: the provider request is
-        # awaited below, and by the time it returns the originating stream may
-        # have finished and a later turn's stream may have registered. The
-        # turn-end announce is the only reader, and it runs once per drive.
+        # Mark the turn at request time, before the provider is awaited: the
+        # reply is interim whatever the answer turns out to be, and marking now
+        # means a slow response can neither arrive after the turn has ended
+        # (#1413 review round 1) nor land on a queued follow-up turn that began
+        # in the meantime (#1413 review round 2).
         stream = self._broker.get(chat_id)
-        outcome = await service.move_to_background()
-        if outcome == "moved" and stream is not None:
+        epoch = stream.move_epoch if stream is not None else 0
+        if stream is not None:
             stream.moved_to_background = True
+        outcome = await service.move_to_background()
+        if outcome != "moved" and stream is not None and stream.move_epoch == epoch:
+            # Nothing was moved, and no later turn has started on this stream:
+            # undo the mark so an ordinary reply is not parked.
+            stream.moved_to_background = False
         return outcome
 
     async def stop_chat(self, chat_id: str) -> bool:

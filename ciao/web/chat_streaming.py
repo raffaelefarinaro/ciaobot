@@ -1064,6 +1064,7 @@ class ChatStreaming:
                 # has already had its reply, and the turn-end announce is
                 # evaluated once per drive on its LAST turn (#1413 review round 1).
                 stream.moved_to_background = False
+                stream.move_epoch += 1
         finally:
             _late_fallback = chat_service._fallback_title(prompt) if prompt else None
             if (
