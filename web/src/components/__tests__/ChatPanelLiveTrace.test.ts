@@ -172,6 +172,52 @@ describe('ChatPanel live trace', () => {
     expect(wrapper.get('.trace-block.live').classes()).toContain('open')
   })
 
+  it('marks a failed tool call on its own activity line', async () => {
+    const sockets: FakeWebSocket[] = []
+    class FakeWebSocket {
+      static CONNECTING = 0
+      static OPEN = 1
+      static CLOSING = 2
+      static CLOSED = 3
+      readyState = FakeWebSocket.OPEN
+      onmessage: ((event: { data: string }) => void) | null = null
+      onclose: ((event: CloseEvent) => void) | null = null
+      onerror: (() => void) | null = null
+      #onopen: (() => void) | null = null
+      get onopen() { return this.#onopen }
+      set onopen(fn: (() => void) | null) {
+        this.#onopen = fn
+        fn?.()
+      }
+      constructor(public url: string) { sockets.push(this) }
+      send = vi.fn()
+      close(code?: number) {
+        this.readyState = FakeWebSocket.CLOSED
+        this.onclose?.({ code } as CloseEvent)
+      }
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    try {
+      const { wrapper, store } = await mountPanel()
+      store.messages['chat-1'] = turnMessages().slice(0, 1)
+      store.streaming['chat-1'] = true
+      store.connectWs('chat-1')
+      await flushPromises()
+      const socket = sockets[sockets.length - 1]
+      const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+      send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c1' })
+      send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c2' })
+      send({ type: 'tool_result', tool_name: 'shell', tool_use_id: 'c2', is_error: true })
+      await flushPromises()
+      const lines = wrapper.findAll('.trace-step--tool .activity-line')
+      expect(lines).toHaveLength(2)
+      expect(lines[1].classes()).toContain('failed')
+      expect(lines[0].classes()).not.toContain('failed')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('reopens the live trace for the next turn after the user closed it', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = turnMessages().slice(0, 1)

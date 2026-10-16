@@ -448,6 +448,18 @@ export type WsEvent =
       // Populated when one shell command creates/overwrites multiple files.
       file_touches?: Array<{ file_path: string; action: string }>;
     }
+  // A call's completion, as its own frame. OpenCode emits one after every
+  // call; Claude emits none. It marks the call's existing trace line
+  // instead of painting a second one (#1416).
+  | {
+      type: 'tool_result';
+      tool_name?: string;
+      tool_use_id?: string;
+      is_error?: boolean;
+      detail?: string;
+      parent_tool_use_id?: string;
+      session_id?: string;
+    }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
   | { type: 'model_changed'; model: string }

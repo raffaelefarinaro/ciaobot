@@ -3,6 +3,7 @@ import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { buildFixPrompt } from '../lib/fixError'
 import { isPlausibleFilePath } from '../lib/filePaths'
+import { activityLines } from '../lib/chatActivity'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
@@ -254,7 +255,10 @@ export const useProjectStore = defineStore('projects', () => {
   // It breaks contiguous 'tool' groups so the PWA can render a standalone
   // clickable card with a preview link instead of folding it into _activity.
   type StreamEntry =
-    | { kind: 'tool'; content: string }
+    // `tool_use_ids` / `failed` carry one slot per activity line, kept aligned
+    // with `content`'s lines by `_pushToolLine`; a `tool_result` frame for an
+    // id sets its slot's `failed` (#1416).
+    | { kind: 'tool'; content: string; tool_use_ids?: Array<string | undefined>; failed?: boolean[] }
     | { kind: 'thinking'; content: string }
     | { kind: 'text'; content: string; phase?: ChatMessage['phase'] }
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string; tool_use_id?: string }
@@ -5426,24 +5430,61 @@ export const useProjectStore = defineStore('projects', () => {
     streamingThinking.value[chatId] = ''
   }
 
-  function _pushToolLine(chatId: string, line: string) {
+  function _pushToolLine(chatId: string, line: string, toolUseId?: string) {
     if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
     const arr = streamingTimeline.value[chatId]
     const last = arr[arr.length - 1]
-    if (last && last.kind === 'tool') {
-      // Dedupe within the same tool block: replace if same tool name with more detail; append otherwise.
-      const lastLines = last.content.split('\n')
-      const lastLine = lastLines[lastLines.length - 1]
-      const toolName = line.split(' ')[1]
-      if (lastLine && lastLine.split(' ')[1] === toolName && line.length > lastLine.length) {
-        lastLines[lastLines.length - 1] = line
-        last.content = lastLines.join('\n')
-      } else if (lastLine !== line) {
-        last.content = last.content + '\n' + line
+    // One slot per *rendered* line. The template renders `activityLines(content)`,
+    // which trims and drops blanks, so normalise the same way here — a raw
+    // split('\n') desyncs the moment a tool input carries a newline (#1416).
+    const added = activityLines(line)
+    if (!added.length) return
+    if (last && last.kind === 'tool' && last.tool_use_ids && last.failed) {
+      const owned = activityLines(last.content)
+      const ids = last.tool_use_ids
+      const flags = last.failed
+      const lastOwned = owned[owned.length - 1]
+      const lastId = ids[ids.length - 1]
+      const toolName = added[0].split(' ')[1]
+      // A provider can re-announce one call with a fuller summary, reusing its
+      // tool_use_id: replace that call's lines instead of stacking a duplicate.
+      // Frames without an id keep the old heuristic (same tool name, longer
+      // line replaces) — the permission line is built that way.
+      const sameCall = toolUseId !== undefined && lastId === toolUseId
+      const grew = toolUseId === undefined
+        && lastOwned !== undefined
+        && lastOwned.split(' ')[1] === toolName
+        && line.trim().length > lastOwned.length
+      if (sameCall || grew) {
+        let start = ids.length
+        if (sameCall) {
+          // Drop the whole trailing run owned by this call, not just one line.
+          while (start > 0 && ids[start - 1] === toolUseId) start--
+        } else {
+          start = Math.max(0, start - 1)
+        }
+        last.content = owned.slice(0, start).concat(added).join('\n')
+        last.tool_use_ids = ids.slice(0, start).concat(added.map(() => toolUseId))
+        last.failed = flags.slice(0, start).concat(added.map(() => false))
+        return
       }
-    } else {
-      arr.push({ kind: 'tool', content: line })
+      // A repeated id-less frame — the permission line re-announcing the same
+      // request — is the same line, not a new one (the pre-#1416 behaviour).
+      // Id-bearing calls are never deduped this way: two identical calls are two
+      // calls (#1416 review round 2), and an id-bearing call is never swallowed
+      // by an identical id-less line above it (round 3).
+      if (toolUseId === undefined && lastId === undefined && added.join('\n') === lastOwned) return
+      last.content = last.content + '\n' + added.join('\n')
+      last.tool_use_ids = ids.concat(added.map(() => toolUseId))
+      last.failed = flags.concat(added.map(() => false))
+      return
     }
+    arr.push({
+      kind: 'tool',
+      content: added.join('\n'),
+      tool_use_ids: added.map(() => toolUseId),
+      failed: added.map(() => false),
+    })
   }
 
   function _pushStatusLine(chatId: string, text: string) {
@@ -5826,7 +5867,27 @@ export const useProjectStore = defineStore('projects', () => {
           ? `${toolIcon(event.tool_name)} ${event.tool_name} ${event.tool_input}`
           : `${toolIcon(event.tool_name)} ${event.tool_name}`
 
-        _pushToolLine(chatId, line)
+        _pushToolLine(chatId, line, event.tool_use_id)
+        break
+      }
+
+      case 'tool_result': {
+        // A call's completion arrives as its own frame. Mark the line the call
+        // already painted; never push a second one (#1416). A success needs no
+        // mark, so only `is_error` does anything. Claude sends no such frame.
+        if (!event.is_error || !event.tool_use_id) break
+        const entries = streamingTimeline.value[chatId]
+        if (!entries) break
+        const wanted = event.tool_use_id
+        for (const entry of entries) {
+          if (entry.kind !== 'tool' || !entry.tool_use_ids || !entry.failed) continue
+          const ids = entry.tool_use_ids
+          const flags = entry.failed
+          for (let at = 0; at < ids.length; at++) {
+            if (ids[at] === wanted) flags[at] = true
+          }
+          if (ids.includes(wanted)) break
+        }
         break
       }
 
