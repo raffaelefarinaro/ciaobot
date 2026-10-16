@@ -1065,6 +1065,8 @@ class ChatStreaming:
                 # evaluated once per drive on its LAST turn (#1413 review round 1).
                 stream.moved_to_background = False
                 stream.move_epoch += 1
+                stream.move_in_flight = 0
+                stream.move_succeeded = False
         finally:
             _late_fallback = chat_service._fallback_title(prompt) if prompt else None
             if (

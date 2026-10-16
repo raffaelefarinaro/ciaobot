@@ -7738,19 +7738,34 @@ class ProjectChatManager:
         service = self._providers.get(chat_id)
         if service is None:
             return "not_running"
-        # Mark the turn at request time, before the provider is awaited: the
-        # reply is interim whatever the answer turns out to be, and marking now
-        # means a slow response can neither arrive after the turn has ended
-        # (#1413 review round 1) nor land on a queued follow-up turn that began
-        # in the meantime (#1413 review round 2).
         stream = self._broker.get(chat_id)
-        epoch = stream.move_epoch if stream is not None else 0
-        if stream is not None:
-            stream.moved_to_background = True
-        outcome = await service.move_to_background()
-        if outcome != "moved" and stream is not None and stream.move_epoch == epoch:
-            # Nothing was moved, and no later turn has started on this stream:
-            # undo the mark so an ordinary reply is not parked.
+        if stream is None:
+            return await service.move_to_background()
+        # Mark at request time: the reply is interim from the moment the user
+        # asks, so the turn-end read can never be too early and a slow response
+        # can never land on a later turn (#1413 review rounds 1-2).
+        epoch = stream.move_epoch
+        stream.move_in_flight += 1
+        stream.moved_to_background = True
+        try:
+            outcome = await service.move_to_background()
+        finally:
+            if stream.move_epoch == epoch:
+                stream.move_in_flight -= 1
+        # No await may be introduced between here and the returns below: these
+        # checks must see a stable epoch and a stable in-flight count.
+        if stream.move_epoch != epoch:
+            # A queued follow-up turn began while we waited: this request
+            # belongs to the turn that has already ended, and must not touch
+            # the current one (#1413 review round 2).
+            return outcome
+        if outcome == "moved":
+            stream.move_succeeded = True
+        elif not stream.move_in_flight and not stream.move_succeeded:
+            # Nothing in this turn moved and nothing is still waiting to
+            # answer: undo this request's own mark so an ordinary reply is not
+            # parked. A successful sibling keeps the mark until the turn
+            # boundary (#1413 review round 3).
             stream.moved_to_background = False
         return outcome
 

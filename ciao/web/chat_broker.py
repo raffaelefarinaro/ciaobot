@@ -644,6 +644,8 @@ class ChatStream:
         "user_stopped",
         "moved_to_background",
         "move_epoch",
+        "move_in_flight",
+        "move_succeeded",
         "background",
         # The asyncio.Task currently iterating this stream's turn events.
         # Set by the drive loop before awaiting the turn; cleared when the
@@ -694,9 +696,15 @@ class ChatStream:
         # early, and a slow response can never land on a later turn (#1413).
         self.moved_to_background: bool = False
         # Bumped when a queued follow-up turn begins. A move request that
-        # resolves afterwards must clear a mark only if its own turn is still
-        # the current one (#1413 review round 2).
+        # resolves afterwards must not touch the turn that replaced its own
+        # (#1413 review round 2).
         self.move_epoch: int = 0
+        # Move requests of the current epoch still awaiting an answer, and
+        # whether one of them moved something. Together they let an
+        # unsuccessful request undo its own mark without erasing a successful
+        # one (#1413 review round 3).
+        self.move_in_flight: int = 0
+        self.move_succeeded: bool = False
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
         # queued user messages — a user send while one is active

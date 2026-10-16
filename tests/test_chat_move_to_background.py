@@ -122,6 +122,67 @@ def test_manager_leaves_the_stream_alone_when_nothing_moved(tmp_path: Path) -> N
     assert stream.moved_to_background is False
 
 
+def test_an_unsuccessful_move_does_not_erase_a_successful_one(tmp_path: Path) -> None:
+    async def exercise(label: str, outcomes: list[str]) -> tuple[list[str], bool]:
+        root = tmp_path / label
+        root.mkdir()
+        pcm = _manager(root); chat_id = _chat(pcm)
+        stream = ChatStream(); pcm._broker.register(chat_id, stream)
+        pcm._providers[chat_id] = SimpleNamespace(
+            move_to_background=AsyncMock(side_effect=outcomes),
+        )
+        results = [
+            await pcm.move_chat_to_background(chat_id),
+            await pcm.move_chat_to_background(chat_id),
+        ]
+        return results, stream.moved_to_background
+
+    assert asyncio.run(exercise("moved-then-nothing", ["moved", "nothing"])) == (["moved", "nothing"], True)
+    assert asyncio.run(exercise("nothing-then-moved", ["nothing", "moved"])) == (["nothing", "moved"], True)
+
+
+def test_overlapping_moves_keep_the_mark_until_the_last_answers(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        pcm = _manager(tmp_path); chat_id = _chat(pcm)
+        stream = ChatStream(); pcm._broker.register(chat_id, stream)
+        release_moved = asyncio.Event()
+        release_nothing = asyncio.Event()
+        calls = 0
+
+        async def move():
+            nonlocal calls
+            call = calls
+            calls += 1
+            if call == 0:
+                await release_moved.wait()
+                return "moved"
+            await release_nothing.wait()
+            return "nothing"
+
+        pcm._providers[chat_id] = SimpleNamespace(move_to_background=move)
+        moved_task = asyncio.create_task(pcm.move_chat_to_background(chat_id))
+        nothing_task = asyncio.create_task(pcm.move_chat_to_background(chat_id))
+        await asyncio.sleep(0)
+        release_moved.set()
+        assert await moved_task == "moved"
+        assert stream.moved_to_background is True
+        release_nothing.set()
+        assert await nothing_task == "nothing"
+        assert stream.moved_to_background is True
+
+    asyncio.run(exercise())
+
+
+def test_a_lone_unsuccessful_move_clears_the_mark(tmp_path: Path) -> None:
+    pcm = _manager(tmp_path); chat_id = _chat(pcm)
+    stream = ChatStream(); pcm._broker.register(chat_id, stream)
+    pcm._providers[chat_id] = SimpleNamespace(
+        move_to_background=AsyncMock(return_value="nothing"),
+    )
+    assert asyncio.run(pcm.move_chat_to_background(chat_id)) == "nothing"
+    assert stream.moved_to_background is False
+
+
 def test_manager_without_a_provider_is_not_running(tmp_path: Path) -> None:
     pcm = _manager(tmp_path)
     assert asyncio.run(pcm.move_chat_to_background("absent")) == "not_running"
