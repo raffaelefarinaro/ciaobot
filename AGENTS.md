@@ -128,8 +128,7 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
 
 ## Branching and releases
 - All pull requests target `develop`. Only the admin creates releases from `develop`.
-- Use plain, factual engineering notes in commits and pull requests, with a
-  `Co-Authored-By:` trailer naming the tool.
+- Use plain, factual engineering notes in commits and pull requests.
 - [`docs/UPKEEP.md`](docs/UPKEEP.md) is the watchlist of topics we keep an eye on,
   with the last-checked date and the decision. Add a row in whatever PR you are
   already in when you notice something worth watching; a stale date on an
