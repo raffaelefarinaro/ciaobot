@@ -609,6 +609,30 @@ describe('per-chat WS auto-reconnect', () => {
     expect(tool.failed).toEqual([false, false])
   })
 
+  test('an id-bearing call is not swallowed by an identical id-less line', () => {
+    const store = useProjectStore()
+    const chatId = 'c-id-bearing-after-idless'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls' })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c2' })
+    let tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.tool_use_ids).toEqual([undefined, 'c2'])
+    expect(tool.failed).toEqual([false, false])
+
+    send({ type: 'tool_result', tool_use_id: 'c2', is_error: true })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.failed).toEqual([false, true])
+  })
+
   test('does not reconnect after an intentional disconnect', async () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
