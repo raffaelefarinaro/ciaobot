@@ -3,6 +3,7 @@ import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { buildFixPrompt } from '../lib/fixError'
 import { isPlausibleFilePath } from '../lib/filePaths'
+import { activityLines } from '../lib/chatActivity'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
@@ -5433,24 +5434,51 @@ export const useProjectStore = defineStore('projects', () => {
     if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
     const arr = streamingTimeline.value[chatId]
     const last = arr[arr.length - 1]
+    // One slot per *rendered* line. The template renders `activityLines(content)`,
+    // which trims and drops blanks, so normalise the same way here — a raw
+    // split('\n') desyncs the moment a tool input carries a newline (#1416).
+    const added = activityLines(line)
+    if (!added.length) return
     if (last && last.kind === 'tool' && last.tool_use_ids && last.failed) {
-      // Dedupe within the same tool block: replace if same tool name with more detail; append otherwise.
-      const lastLines = last.content.split('\n')
-      const lastLine = lastLines[lastLines.length - 1]
-      const toolName = line.split(' ')[1]
-      if (lastLine && lastLine.split(' ')[1] === toolName && line.length > lastLine.length) {
-        lastLines[lastLines.length - 1] = line
-        last.content = lastLines.join('\n')
-        last.tool_use_ids[lastLines.length - 1] = toolUseId
-        last.failed[lastLines.length - 1] = false
-      } else if (lastLine !== line) {
-        last.content = last.content + '\n' + line
-        last.tool_use_ids.push(toolUseId)
-        last.failed.push(false)
+      const owned = activityLines(last.content)
+      const ids = last.tool_use_ids
+      const flags = last.failed
+      const lastOwned = owned[owned.length - 1]
+      const lastId = ids[ids.length - 1]
+      const toolName = added[0].split(' ')[1]
+      // A provider can re-announce one call with a fuller summary, reusing its
+      // tool_use_id: replace that call's lines instead of stacking a duplicate.
+      // Frames without an id keep the old heuristic (same tool name, longer
+      // line replaces) — the permission line is built that way.
+      const sameCall = toolUseId !== undefined && lastId === toolUseId
+      const grew = toolUseId === undefined
+        && lastOwned !== undefined
+        && lastOwned.split(' ')[1] === toolName
+        && line.trim().length > lastOwned.length
+      if (sameCall || grew) {
+        let start = ids.length
+        if (sameCall) {
+          // Drop the whole trailing run owned by this call, not just one line.
+          while (start > 0 && ids[start - 1] === toolUseId) start--
+        } else {
+          start = Math.max(0, start - 1)
+        }
+        last.content = owned.slice(0, start).concat(added).join('\n')
+        last.tool_use_ids = ids.slice(0, start).concat(added.map(() => toolUseId))
+        last.failed = flags.slice(0, start).concat(added.map(() => false))
+        return
       }
-    } else {
-      arr.push({ kind: 'tool', content: line, tool_use_ids: [toolUseId], failed: [false] })
+      last.content = last.content + '\n' + added.join('\n')
+      last.tool_use_ids = ids.concat(added.map(() => toolUseId))
+      last.failed = flags.concat(added.map(() => false))
+      return
     }
+    arr.push({
+      kind: 'tool',
+      content: added.join('\n'),
+      tool_use_ids: added.map(() => toolUseId),
+      failed: added.map(() => false),
+    })
   }
 
   function _pushStatusLine(chatId: string, text: string) {
@@ -5844,13 +5872,15 @@ export const useProjectStore = defineStore('projects', () => {
         if (!event.is_error || !event.tool_use_id) break
         const entries = streamingTimeline.value[chatId]
         if (!entries) break
+        const wanted = event.tool_use_id
         for (const entry of entries) {
           if (entry.kind !== 'tool' || !entry.tool_use_ids || !entry.failed) continue
-          const at = entry.tool_use_ids.indexOf(event.tool_use_id)
-          if (at !== -1) {
-            entry.failed[at] = true
-            break
+          const ids = entry.tool_use_ids
+          const flags = entry.failed
+          for (let at = 0; at < ids.length; at++) {
+            if (ids[at] === wanted) flags[at] = true
           }
+          if (ids.includes(wanted)) break
         }
         break
       }

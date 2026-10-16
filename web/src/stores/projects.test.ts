@@ -490,6 +490,92 @@ describe('per-chat WS auto-reconnect', () => {
     expect(JSON.stringify(store.currentTimeline)).toBe(before)
   })
 
+  test('a later call of the same tool keeps the earlier call\'s failure mark', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-same-name'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c1' })
+    send({ type: 'tool_result', tool_use_id: 'c1', is_error: true })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'echo a-much-longer-command', tool_use_id: 'c2' })
+
+    const tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.content).toContain('exit 1')
+    expect(tool.tool_use_ids).toEqual(['c1', 'c2'])
+    expect(tool.failed).toEqual([true, false])
+  })
+
+  test('two identical calls keep separate lines', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-identical-calls'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c1' })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c2' })
+
+    const tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.tool_use_ids).toEqual(['c1', 'c2'])
+    expect(tool.failed).toEqual([false, false])
+  })
+
+  test('a multiline tool input gets one slot per rendered line', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-multiline'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'bash', tool_input: 'printf x\nexit 1', tool_use_id: 'c1' })
+    let tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.tool_use_ids).toEqual(['c1', 'c1'])
+    expect(tool.failed).toEqual([false, false])
+
+    send({ type: 'tool_use', tool_name: 'bash', tool_input: 'echo done', tool_use_id: 'c2' })
+    send({ type: 'tool_result', tool_use_id: 'c2', is_error: true })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(3)
+    expect(tool.tool_use_ids).toEqual(['c1', 'c1', 'c2'])
+    expect(tool.failed).toEqual([false, false, true])
+  })
+
+  test('a re-announced call replaces its lines and resets the mark', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-reannounced'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c1' })
+    send({ type: 'tool_result', tool_use_id: 'c1', is_error: true })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1 --verbose', tool_use_id: 'c1' })
+
+    const tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(1)
+    expect(tool.tool_use_ids).toEqual(['c1'])
+    expect(tool.failed).toEqual([false])
+  })
+
   test('does not reconnect after an intentional disconnect', async () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
