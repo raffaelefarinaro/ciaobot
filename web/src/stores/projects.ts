@@ -254,7 +254,10 @@ export const useProjectStore = defineStore('projects', () => {
   // It breaks contiguous 'tool' groups so the PWA can render a standalone
   // clickable card with a preview link instead of folding it into _activity.
   type StreamEntry =
-    | { kind: 'tool'; content: string }
+    // `tool_use_ids` / `failed` carry one slot per activity line, kept aligned
+    // with `content`'s lines by `_pushToolLine`; a `tool_result` frame for an
+    // id sets its slot's `failed` (#1416).
+    | { kind: 'tool'; content: string; tool_use_ids?: Array<string | undefined>; failed?: boolean[] }
     | { kind: 'thinking'; content: string }
     | { kind: 'text'; content: string; phase?: ChatMessage['phase'] }
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string; tool_use_id?: string }
@@ -5426,11 +5429,11 @@ export const useProjectStore = defineStore('projects', () => {
     streamingThinking.value[chatId] = ''
   }
 
-  function _pushToolLine(chatId: string, line: string) {
+  function _pushToolLine(chatId: string, line: string, toolUseId?: string) {
     if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
     const arr = streamingTimeline.value[chatId]
     const last = arr[arr.length - 1]
-    if (last && last.kind === 'tool') {
+    if (last && last.kind === 'tool' && last.tool_use_ids && last.failed) {
       // Dedupe within the same tool block: replace if same tool name with more detail; append otherwise.
       const lastLines = last.content.split('\n')
       const lastLine = lastLines[lastLines.length - 1]
@@ -5438,11 +5441,15 @@ export const useProjectStore = defineStore('projects', () => {
       if (lastLine && lastLine.split(' ')[1] === toolName && line.length > lastLine.length) {
         lastLines[lastLines.length - 1] = line
         last.content = lastLines.join('\n')
+        last.tool_use_ids[lastLines.length - 1] = toolUseId
+        last.failed[lastLines.length - 1] = false
       } else if (lastLine !== line) {
         last.content = last.content + '\n' + line
+        last.tool_use_ids.push(toolUseId)
+        last.failed.push(false)
       }
     } else {
-      arr.push({ kind: 'tool', content: line })
+      arr.push({ kind: 'tool', content: line, tool_use_ids: [toolUseId], failed: [false] })
     }
   }
 
@@ -5826,7 +5833,25 @@ export const useProjectStore = defineStore('projects', () => {
           ? `${toolIcon(event.tool_name)} ${event.tool_name} ${event.tool_input}`
           : `${toolIcon(event.tool_name)} ${event.tool_name}`
 
-        _pushToolLine(chatId, line)
+        _pushToolLine(chatId, line, event.tool_use_id)
+        break
+      }
+
+      case 'tool_result': {
+        // A call's completion arrives as its own frame. Mark the line the call
+        // already painted; never push a second one (#1416). A success needs no
+        // mark, so only `is_error` does anything. Claude sends no such frame.
+        if (!event.is_error || !event.tool_use_id) break
+        const entries = streamingTimeline.value[chatId]
+        if (!entries) break
+        for (const entry of entries) {
+          if (entry.kind !== 'tool' || !entry.tool_use_ids || !entry.failed) continue
+          const at = entry.tool_use_ids.indexOf(event.tool_use_id)
+          if (at !== -1) {
+            entry.failed[at] = true
+            break
+          }
+        }
         break
       }
 

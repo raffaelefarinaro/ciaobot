@@ -448,6 +448,48 @@ describe('per-chat WS auto-reconnect', () => {
     expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(false)
   })
 
+  test('a tool call and its result keep one line and mark a failed call', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-results'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c1' })
+    send({ type: 'tool_result', tool_name: 'shell', tool_use_id: 'c1', is_error: true })
+    let tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(1)
+    expect(tool.content).toContain('shell exit 1')
+    expect(tool.tool_use_ids).toEqual(['c1'])
+    expect(tool.failed).toEqual([true])
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c2' })
+    send({ type: 'tool_result', tool_use_id: 'c2' })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.tool_use_ids).toEqual(['c1', 'c2'])
+    expect(tool.failed).toEqual([true, false])
+  })
+
+  test('a tool_result for an unknown call adds no line', () => {
+    const store = useProjectStore()
+    const chatId = 'c-unknown-tool-result'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c1' })
+    const before = JSON.stringify(store.currentTimeline)
+    send({ type: 'tool_result', tool_use_id: 'ghost', is_error: true })
+    expect(JSON.stringify(store.currentTimeline)).toBe(before)
+  })
+
   test('does not reconnect after an intentional disconnect', async () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()

@@ -485,7 +485,7 @@
                   v-for="(line, k) in activityLines(entry.content)"
                   :key="k"
                   class="activity-line"
-                  :class="{ subagent: isSubagentLine(line) }"
+                  :class="{ subagent: isSubagentLine(line), failed: entry.kind === 'tool' && entry.failed?.[k] === true }"
                   v-html="renderActivityLine(line)"
                 ></div>
               </div>
@@ -5903,6 +5903,8 @@ details[open] > .activity-summary::before {
   text-underline-offset: 2px;
   cursor: pointer;
 }
+/* A tool call whose result came back is_error (#1416). */
+.activity-line.failed { color: var(--error); }
 .message-content :deep(a.file-link:hover),
 .activity-line :deep(a.file-link:hover),
 :deep(a.file-link:hover) {

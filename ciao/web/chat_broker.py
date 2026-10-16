@@ -516,6 +516,24 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["phase"] = event.phase
         return payload
     if isinstance(event, ToolUseEvent):
+        if event.type == "tool_result":
+            # A call's completion is its own frame (#1416). OpenCode sends
+            # one after every call; Claude never does. It marks the call's
+            # existing trace line instead of painting a second one, so it
+            # must not go through the call path below (no file_touch, no
+            # file-touch extraction).
+            payload = {"type": "tool_result", "tool_name": event.tool_name}
+            if event.tool_use_id:
+                payload["tool_use_id"] = event.tool_use_id
+            if event.is_error:
+                payload["is_error"] = True
+            if event.tool_input:
+                payload["detail"] = event.tool_input
+            if event.parent_tool_use_id:
+                payload["parent_tool_use_id"] = event.parent_tool_use_id
+            if event.session_id:
+                payload["session_id"] = event.session_id
+            return payload
         payload = {"type": "tool_use", "tool_name": event.tool_name}
         if event.tool_input:
             payload["tool_input"] = event.tool_input
