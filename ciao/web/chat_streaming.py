@@ -1060,6 +1060,13 @@ class ChatStreaming:
                 current_images = merged_images or None
                 current_turn_index = turn_index2
                 compact = False
+                # This is a new turn: a move that backgrounded the previous one
+                # has already had its reply, and the turn-end announce is
+                # evaluated once per drive on its LAST turn (#1413 review round 1).
+                stream.moved_to_background = False
+                stream.move_epoch += 1
+                stream.move_in_flight = 0
+                stream.move_succeeded = False
         finally:
             _late_fallback = chat_service._fallback_title(prompt) if prompt else None
             if (
@@ -1142,8 +1149,11 @@ class ChatStreaming:
                     chat_now.last_snippet = snippet
                     self._host._save()
                 title = chat_now.title if chat_now else "Ciaobot"
-                interim = follow_up_expected and self._host._is_interim_subagent_text(
-                    last_assistant_text
+                # A turn the user moved to the background (#1413) ends on an interim
+                # reply whatever its wording; the wake carries the real result.
+                interim = follow_up_expected and (
+                    stream.moved_to_background
+                    or self._host._is_interim_subagent_text(last_assistant_text)
                 )
                 if interim:
                     self._host._park_result_announce(

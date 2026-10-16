@@ -11,7 +11,9 @@ from ciao import provider_registry
 from ciao.config import BridgeConfig
 from ciao.models import AgentRequest, StreamEvent
 from ciao.memory_tool import prune_expired_entries
-from ciao.providers.base import ActiveHandle, BaseProvider, ProviderCapabilities
+from ciao.providers.base import (
+    ActiveHandle, BaseProvider, MoveToBackgroundOutcome, ProviderCapabilities,
+)
 from ciao.workspace_guide import guide_path
 
 ProviderImpl = BaseProvider
@@ -154,6 +156,13 @@ class ProviderService:
             return None
         delivery_id: str | None = await self._provider.steer_turn(request)
         return delivery_id
+
+    async def move_to_background(self) -> MoveToBackgroundOutcome:
+        """Background the live turn's foreground tools; ``not_running`` without a provider."""
+        if self._provider is None:
+            return "not_running"
+        outcome: MoveToBackgroundOutcome = await self._provider.move_to_background()
+        return outcome
 
     @property
     def can_drain(self) -> bool:

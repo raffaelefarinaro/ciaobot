@@ -2641,6 +2641,29 @@ async def chat_stop(request: Request) -> JSONResponse:
     return JSONResponse({"stopped": stopped})
 
 
+async def chat_move_to_background(request: Request) -> JSONResponse:
+    """Move a running turn's foreground shell or subagent to the background (#1413).
+
+    OpenCode's Ctrl+B. 200 ``{"moved": true}`` when a running shell or
+    subagent was moved, ``{"moved": false}`` when nothing could move;
+    409 ``unsupported`` for a provider without the feature (Claude) and
+    ``not_running`` when the chat has no live provider; 502 when OpenCode
+    refused or could not be reached.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    outcome = await pcm.move_chat_to_background(chat_id)
+    if outcome in {"moved", "nothing"}:
+        return JSONResponse({"moved": outcome == "moved"})
+    if outcome == "failed":
+        return JSONResponse(
+            {"error": "OpenCode did not accept the request"}, status_code=502
+        )
+    return JSONResponse({"error": outcome}, status_code=409)
+
+
 def _chat_background_run(request: Request) -> tuple[Any, Any] | JSONResponse:
     """The runner and the run named in the path, if this chat owns it.
 

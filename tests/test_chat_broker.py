@@ -82,6 +82,20 @@ def test_event_to_json_tool_result_omits_absent_fields_and_touches() -> None:
     }
 
 
+def test_event_to_json_marks_backgroundable_calls() -> None:
+    marked = event_to_json(ToolUseEvent(
+        type="tool_use", tool_name="shell", tool_use_id="c1", backgroundable=True,
+    ))
+    assert marked["backgroundable"] is True
+    plain = event_to_json(ToolUseEvent(type="tool_use", tool_name="read"))
+    assert "backgroundable" not in plain
+    result = event_to_json(ToolUseEvent(
+        type="tool_result", tool_name="shell", tool_use_id="c1", backgroundable=True,
+    ))
+    assert result["type"] == "tool_result"
+    assert "backgroundable" not in result
+
+
 def test_event_to_json_tool_use_tags_file_writes() -> None:
     """Write/Edit/MultiEdit/NotebookEdit tool calls carry a `file_touch`
     payload so the PWA can render an inline preview card. Non-mutating tools

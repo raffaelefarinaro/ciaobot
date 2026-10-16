@@ -72,6 +72,7 @@ from ciao.web.routes_api import (
     chat_compact,
     chat_prompt,
     chat_stop,
+    chat_move_to_background,
     chat_background_run_cancel,
     chat_background_run_log,
     chat_new_session,
@@ -426,6 +427,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/unread", chat_mark_unread, methods=["POST"]),
         Route("/api/chats/{chat_id}/retry", chat_retry, methods=["POST"]),
         Route("/api/chats/{chat_id}/stop", chat_stop, methods=["POST"]),
+        Route("/api/chats/{chat_id}/move-to-background", chat_move_to_background, methods=["POST"]),
         Route(
             "/api/chats/{chat_id}/background-runs/{run_id}/log",
             chat_background_run_log,

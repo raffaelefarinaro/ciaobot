@@ -23,6 +23,11 @@ from ciao.providers.opencode import OpencodeProvider
 from ciao.web.project_chats import ProjectChatManager
 
 
+@pytest.mark.asyncio
+async def test_claude_cannot_move_to_background(tmp_path: Path) -> None:
+    assert await ClaudeProvider(tmp_path).move_to_background() == "unsupported"
+
+
 @pytest.fixture
 def claude_provider(tmp_path: Path) -> ClaudeProvider:
     return ClaudeProvider(tmp_path)

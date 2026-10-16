@@ -545,6 +545,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["request_id"] = event.request_id
         if event.session_id:
             payload["session_id"] = event.session_id
+        if event.backgroundable:
+            payload["backgroundable"] = True
         touches: list[dict] = []
         if event.file_touches:
             touches = [
@@ -640,6 +642,10 @@ class ChatStream:
         # this stream's ``queue_state`` but are never flushed by it.
         "waiting",
         "user_stopped",
+        "moved_to_background",
+        "move_epoch",
+        "move_in_flight",
+        "move_succeeded",
         "background",
         # The asyncio.Task currently iterating this stream's turn events.
         # Set by the drive loop before awaiting the turn; cleared when the
@@ -684,6 +690,21 @@ class ChatStream:
         # the user said stop. A queued message goes out only when the user
         # sends it (Steer / Send now) or sends a new message.
         self.user_stopped: bool = False
+        # Marked at request time by move_chat_to_background, so this turn's
+        # reply is interim and its announce waits for the wake. Marking before
+        # the provider is awaited means the turn-end read can never be too
+        # early, and a slow response can never land on a later turn (#1413).
+        self.moved_to_background: bool = False
+        # Bumped when a queued follow-up turn begins. A move request that
+        # resolves afterwards must not touch the turn that replaced its own
+        # (#1413 review round 2).
+        self.move_epoch: int = 0
+        # Move requests of the current epoch still awaiting an answer, and
+        # whether one of them moved something. Together they let an
+        # unsuccessful request undo its own mark without erasing a successful
+        # one (#1413 review round 3).
+        self.move_in_flight: int = 0
+        self.move_succeeded: bool = False
         # True for streams carrying between-turns background-subagent events
         # (no user prompt drove them). A background stream must never absorb
         # queued user messages — a user send while one is active
