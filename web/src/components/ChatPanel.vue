@@ -1541,19 +1541,30 @@ const showMoveToBackground = computed(() =>
 )
 async function moveToBackground() {
   if (movingToBackground.value || !chat.value) return
-  const hadFocus = document.activeElement === moveBtnEl.value
+  const chipEl = moveBtnEl.value
+  const hadFocus = document.activeElement === chipEl
   movingToBackground.value = true
   try {
     await store.moveChatToBackground(chat.value.chat_id)
   } finally {
     movingToBackground.value = false
   }
+  // The chip goes away the moment the turn ends, so focus has to be handed
+  // somewhere that is still there — but only when it is still ours. While the
+  // request was out the user may have moved focus, most likely into the
+  // textarea to write the next message; taking it back would interrupt them and
+  // could turn their next Enter into a control they did not choose (#1413
+  // review round 2).
   if (hadFocus) {
-    if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
-    else {
-      const sendButton = sendBtnEl.value
-      if (sendButton && !sendButton.disabled) sendButton.focus()
-      else composerBarEl.value?.focus()
+    const active = document.activeElement as HTMLElement | null
+    const stillOurs = active === chipEl || active === document.body
+    if (stillOurs) {
+      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+      else {
+        const sendButton = sendBtnEl.value
+        if (sendButton && !sendButton.disabled) sendButton.focus()
+        else composerBarEl.value?.focus()
+      }
     }
   }
 }

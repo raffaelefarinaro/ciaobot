@@ -128,6 +128,49 @@ describe('ChatPanel move to background', () => {
     wrapper.unmount()
   })
 
+  it('does not steal focus from a draft being typed while the request is out', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 375 })
+    let resolveMove!: (result: boolean) => void
+    const moveRequest = new Promise<boolean>(resolve => { resolveMove = resolve })
+    const { wrapper, store } = await mountPanel(s => {
+      s.streaming['chat-1'] = true
+      s.backgroundableCalls['chat-1'] = { c1: Date.now() - 4000 }
+      vi.spyOn(s, 'moveChatToBackground').mockReturnValue(moveRequest)
+    })
+    await wrapper.vm.$nextTick()
+    ;(wrapper.find('.composer-move-bg').element as HTMLButtonElement).focus()
+    await wrapper.find('.composer-move-bg').trigger('click')
+    const textarea = wrapper.find('textarea.chat-input')
+    ;(textarea.element as HTMLTextAreaElement).focus()
+    await textarea.setValue('next message')
+    resolveMove(true)
+    await flushPromises()
+    expect(store.moveChatToBackground).toHaveBeenCalledWith('chat-1')
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
+  it('keeps focus in a draft being typed when the background request fails', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 375 })
+    let resolveMove!: (result: boolean) => void
+    const moveRequest = new Promise<boolean>(resolve => { resolveMove = resolve })
+    const { wrapper } = await mountPanel(s => {
+      s.streaming['chat-1'] = true
+      s.backgroundableCalls['chat-1'] = { c1: Date.now() - 4000 }
+      vi.spyOn(s, 'moveChatToBackground').mockReturnValue(moveRequest)
+    })
+    await wrapper.vm.$nextTick()
+    ;(wrapper.find('.composer-move-bg').element as HTMLButtonElement).focus()
+    await wrapper.find('.composer-move-bg').trigger('click')
+    const textarea = wrapper.find('textarea.chat-input')
+    ;(textarea.element as HTMLTextAreaElement).focus()
+    await textarea.setValue('next message')
+    resolveMove(false)
+    await flushPromises()
+    expect(document.activeElement).toBe(textarea.element)
+    wrapper.unmount()
+  })
+
   it('is a native button reachable by keyboard', async () => {
     const { wrapper } = await mountPanel(s => { s.streaming['chat-1'] = true; s.backgroundableCalls['chat-1'] = { c1: Date.now() - 4000 } })
     await wrapper.vm.$nextTick()
