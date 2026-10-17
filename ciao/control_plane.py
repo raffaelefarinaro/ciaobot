@@ -5557,7 +5557,9 @@ class CiaoControlPlane:
     ) -> dict[str, Any]:
         run = self._owned_run(principal, run_id)
         try:
-            updated: BackgroundRun = await self._background_runner().cancel(run.run_id)
+            updated: BackgroundRun = await self._background_runner().cancel(
+                run.run_id, wake_owner=False
+            )
         except BackgroundRunError as exc:
             raise ControlPlaneError(exc.code, str(exc)) from exc
         return _ok(
