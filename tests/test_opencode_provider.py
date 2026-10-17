@@ -4560,3 +4560,123 @@ async def test_frames_until_cancel_leaves_no_pending_tasks():
     await asyncio.sleep(0)
 
     assert asyncio.all_tasks() - before == set()
+
+
+def test_linked_repo_config_content_lists_existing_skill_dirs(tmp_path):
+    from ciao.providers.opencode import linked_repo_config_content
+
+    repo = tmp_path / "repo"
+    (repo / ".claude" / "skills").mkdir(parents=True)
+    (repo / ".opencode" / "skills").mkdir(parents=True)
+    bare = tmp_path / "bare"
+    bare.mkdir()
+
+    paths = json.loads(linked_repo_config_content(str(repo)))["skills"]["paths"]
+
+    assert paths == [str(repo / ".claude" / "skills"), str(repo / ".opencode" / "skills")]
+    assert linked_repo_config_content("") == ""
+    assert linked_repo_config_content(str(bare)) == ""
+
+
+def test_linked_repo_config_content_merges_an_existing_value(tmp_path):
+    from ciao.providers.opencode import linked_repo_config_content
+
+    repo = tmp_path / "repo"
+    (repo / ".agents" / "skills").mkdir(parents=True)
+
+    merged = json.loads(
+        linked_repo_config_content(
+            str(repo), '{"skills":{"paths":["/x"]},"theme":"y"}'
+        )
+    )
+
+    assert merged["theme"] == "y"
+    assert merged["skills"]["paths"] == ["/x", str(repo / ".agents" / "skills")]
+    assert linked_repo_config_content(str(repo), "not json") == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("live_repo", "expect_restart"), [("/r/old", True), ("/r/new", False)]
+)
+async def test_a_changed_linked_repo_restarts_the_opencode_server(
+    tmp_path, monkeypatch, live_repo, expect_restart
+):
+    from ciao.models import provider_reuse_key
+
+    provider = _provider(tmp_path)
+    live_client = object()
+    provider._client = live_client  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        linked_repo = "/r/new"
+
+    request = Request()
+    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
+    provider._fs_scope_key = ("machine", ())
+    provider._linked_repo = live_repo
+    stopped: list[bool] = []
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._process = None
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
+
+    if expect_restart:
+        with pytest.raises(FileNotFoundError):
+            await provider._ensure_server(request)  # type: ignore[arg-type]
+        assert stopped == [True]
+    else:
+        assert await provider._ensure_server(request) is live_client  # type: ignore[arg-type]
+        assert stopped == []
+
+
+@pytest.mark.asyncio
+async def test_the_server_env_carries_the_linked_repo_skills(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    repo = tmp_path / "repo"
+    (repo / ".claude" / "skills").mkdir(parents=True)
+    captured: dict = {}
+
+    class FakeProcess:
+        returncode = None
+        pid = 4242
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*_args, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    async def healthy(self):
+        return None
+
+    _no_op_trees(monkeypatch)
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
+    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(OpencodeProvider, "_await_health", healthy)
+    monkeypatch.setattr(OpencodeProvider, "_verify_contract", healthy)
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        linked_repo = str(repo)
+
+    await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+    paths = json.loads(captured["env"]["OPENCODE_CONFIG_CONTENT"])["skills"]["paths"]
+    assert paths == [str(repo / ".claude" / "skills")]
+    provider._client = None

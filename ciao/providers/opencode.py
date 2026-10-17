@@ -66,6 +66,7 @@ from ciao.models import (
     ThinkingEvent,
     TokenUsageEvent,
     ToolUseEvent,
+    linked_repo_of,
     provider_reuse_key,
     tool_call_facts,
 )
@@ -1485,6 +1486,38 @@ def _sandboxed_server_dirs(binary: str, *, path: str | None = None) -> tuple[lis
     )
 
 
+#: Skill folders opencode is pointed at inside a linked repository, when present.
+LINKED_REPO_SKILL_DIRS: tuple[str, ...] = (".claude/skills", ".agents/skills", ".opencode/skills")
+
+
+def linked_repo_config_content(repo: str, existing: str = "") -> str:
+    """OPENCODE_CONFIG_CONTENT that adds the linked repo's skill folders.
+
+    Returns "" when there is nothing to add (no repo, or no skill folder in
+    it): the caller then leaves the environment alone. ``existing`` is the
+    value already in the environment; its JSON object is kept and the repo
+    folders are appended to its ``skills.paths``. A value that is not a JSON
+    object is left untouched (logged) rather than replaced.
+    """
+    if not repo:
+        return ""
+    paths = [str(Path(repo) / d) for d in LINKED_REPO_SKILL_DIRS if (Path(repo) / d).is_dir()]
+    if not paths:
+        return ""
+    try:
+        config = json.loads(existing) if existing.strip() else {}
+    except ValueError:
+        config = None
+    if not isinstance(config, dict):
+        logger.warning(
+            "opencode: OPENCODE_CONFIG_CONTENT is not a JSON object; linked repo skills not added"
+        )
+        return ""
+    skills = config.setdefault("skills", {})
+    skills["paths"] = list(dict.fromkeys([*skills.get("paths", []), *paths]))
+    return json.dumps(config)
+
+
 class OpencodeProvider(BaseSDKProvider):
     """Runs a chat turn against a per-chat ``opencode serve`` process."""
 
@@ -1556,6 +1589,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._mcp_token: str = ""
         # Filesystem scope and roots the live server was started with.
         self._fs_scope_key: tuple[str, tuple[str, ...]] = ("machine", ())
+        self._linked_repo: str = ""  # linked repo the live server was started with
         # Background work of this chat's session. It outlives a turn, so it is
         # not part of `_reset_turn_state`; only `disconnect` and the HTTP
         # reconciles replace it wholesale (#1391).
@@ -2075,18 +2109,20 @@ class OpencodeProvider(BaseSDKProvider):
         A changed MCP token forces a full restart: opencode reads MCP
         configuration at server scope, so the running process cannot be
         re-pointed at a new token. A changed filesystem scope does too: the
-        sandbox wraps the server process itself.
+        sandbox wraps the server process itself. A changed filesystem scope or
+        linked repo does too.
         """
         if self._client is not None and self._process is not None:
             if (
                 self._process.returncode is None
                 and provider_reuse_key(request) == self._mcp_token
                 and (request.agent_fs_scope, request.agent_roots) == self._fs_scope_key
+                and linked_repo_of(request) == self._linked_repo
             ):
                 return self._client
             if self._process.returncode is None and self.background_work_outstanding:
                 logger.warning(
-                    "Restarting the OpenCode server for %s (agent token or filesystem scope "
+                    "Restarting the OpenCode server for %s (agent token, filesystem scope or linked repo "
                     "changed) stops %d background shell(s) and %d background subagent(s)",
                     self.workspace_root,
                     len(self._background_shells),
@@ -2168,6 +2204,12 @@ class OpencodeProvider(BaseSDKProvider):
             **sandbox_env,
             "OPENCODE_SERVER_PASSWORD": self._password,
         }
+        self._linked_repo = linked_repo_of(request)
+        config_content = linked_repo_config_content(
+            self._linked_repo, env.get("OPENCODE_CONFIG_CONTENT", "")
+        )
+        if config_content:
+            env["OPENCODE_CONFIG_CONTENT"] = config_content
         self._mcp_token = provider_reuse_key(request)
         self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
 
@@ -2346,6 +2388,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._base_url = ""
         self._mcp_token = ""
         self._fs_scope_key = ("machine", ())
+        self._linked_repo = ""
         self._session_handover_context = ""
         self._reset_settings()
 
