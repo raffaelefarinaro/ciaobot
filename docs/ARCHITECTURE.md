@@ -798,8 +798,11 @@ direct browser/engine trust model that replaced the retired client-origin
 model: `docs/REMOTE_BOUNDARY.md` records what it is. Workspace filesystem scope
 (`agent_fs_scope`, #1133) confines the agent and its shell: workspace scope is the
 Claude `sandbox.filesystem` settings plus the OpenCode `sandbox-exec`/`bwrap`
-prefix, and machine scope is the previous unconfined behavior. The file viewer is
-not covered. Credential and storage-isolation work tracked by #546 is still open.
+prefix, and machine scope is the previous unconfined behavior. A project's
+linked repository is added to a chat's roots (workspace scope). It is passed to
+Claude as an add-dir and to opencode as `skills.paths` in `OPENCODE_CONFIG_CONTENT`
+in every scope, fixed when the provider process starts; a change applies from the
+next turn. The file viewer is not covered. Credential and storage-isolation work tracked by #546 is still open.
 
 Write/Edit/MultiEdit/NotebookEdit tool calls are tagged with `file_touch` by
 `ciao/web/chat_broker.py` and surface as standalone `_filecard` entries on
