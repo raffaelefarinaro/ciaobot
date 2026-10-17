@@ -2008,6 +2008,12 @@ class CiaoControlPlane:
             {"workspaces": [workspace_to_dict(item, self.config) for item in self.config.workspaces.values()]}
         )
 
+    def repo_candidates(self, principal: AgentPrincipal) -> dict[str, Any]:
+        """Git checkouts on this machine a project can be linked to (read-only)."""
+        from ciao import repo_link
+
+        return _ok(repo_link.candidates_payload())
+
     # ---- vault ---------------------------------------------------------
 
     def _entity_index_root(self, principal: AgentPrincipal) -> Path:
