@@ -1346,7 +1346,7 @@ import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
-import { canOfferMoveToBackground } from '../lib/moveToBackground'
+import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
@@ -1554,15 +1554,11 @@ async function moveToBackground() {
     movingToBackground.value = false
   }
   // The chip goes away the moment the turn ends, so focus has to be handed
-  // somewhere that is still there — but only when it is still ours. While the
-  // request was out the user may have moved focus, most likely into the
-  // textarea to write the next message; taking it back would interrupt them and
-  // could turn their next Enter into a control they did not choose (#1413
-  // review round 2).
+  // somewhere that is still there — but only when it is still ours, which
+  // `shouldRestoreFocus` decides.
   if (hadFocus) {
-    const active = document.activeElement as HTMLElement | null
-    const stillOurs = active === chipEl || active === document.body
-    if (stillOurs) {
+    const active = document.activeElement
+    if (shouldRestoreFocus(chipEl, active)) {
       // Never the send/stop button. It is a single element in three states —
       // enabled Stop while the turn runs, enabled Send once a draft exists,
       // disabled Send with an empty draft — and the move we just asked for ends
