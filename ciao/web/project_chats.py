@@ -90,7 +90,7 @@ def _restored_pin_paths(raw: Any) -> list[str]:
 import yaml
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import backup_scope, repo_link
+from ciao import backup_scope, repo_link, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
