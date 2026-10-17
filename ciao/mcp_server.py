@@ -493,7 +493,8 @@ async def _op_project_get(service: CiaoMcpService, project_id: str = "") -> dict
 
 
 async def _op_project(service: CiaoMcpService, action: str, name: str = "", context: str = "",
-                      vault_folder: str | None = None, project_id: str = "", stem: str = "") -> dict[str, Any]:
+                      vault_folder: str | None = None, repo_path: str | None = None,
+                      project_id: str = "", stem: str = "") -> dict[str, Any]:
     """Create, update, or restore a project in the active workspace.
 
     action:
@@ -512,6 +513,9 @@ async def _op_project(service: CiaoMcpService, action: str, name: str = "", cont
         context: (create/update) Optional project context string.
         vault_folder: (update) Safe vault-folder binding, or None to
             keep the current value.
+        repo_path: (create/update) Absolute path of a local git checkout to
+            link (must be its top level). (update) "" unlinks; None keeps
+            the current link.
         project_id: (update) Project id or case-insensitive name. Omit
             for the active project.
         stem: (restore) The completed-project stem to restore.
@@ -519,7 +523,7 @@ async def _op_project(service: CiaoMcpService, action: str, name: str = "", cont
     if action == "create":
         return await service._invoke(
             "project",
-            lambda cp, p: cp.project_create(p, name, context),
+            lambda cp, p: cp.project_create(p, name, context, repo_path or ""),
             mutating=True,
         )
     if action == "update":
@@ -527,7 +531,7 @@ async def _op_project(service: CiaoMcpService, action: str, name: str = "", cont
             "project",
             lambda cp, p: cp.project_update(
                 p, project_id, name=name or None, context=context or None,
-                vault_folder=vault_folder,
+                vault_folder=vault_folder, repo_path=repo_path,
             ),
             mutating=True,
         )
