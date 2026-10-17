@@ -2050,9 +2050,10 @@ const railContextEl = ref<HTMLElement | null>(null)
 const isWidePane = ref(false)
 // Chat details steps aside while a file is pinned: the tile is the window on
 // the right then, and two docked windows would leave the chat a sliver. It
-// comes back when the file is unpinned. The info tab still opens it on demand.
+// comes back when the file is unpinned, because ChatLayout mounts a separate
+// ChatPanel for each layout, so the prop never changes on a live instance.
+// The info tab still opens it on demand.
 const railOpen = ref(!props.filePinned)
-watch(() => props.filePinned, (pinned) => { railOpen.value = !pinned })
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
 let panelObserver: ResizeObserver | null = null

@@ -437,13 +437,25 @@ describe('docking beside the chat', () => {
     vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
     const store = useFileViewerStore()
     store.setDockTarget('chat-1')
-    const opened = store.open('notes/today.md:4', 4, 'chat-1')
+    const opened = store.open('notes/today.md', null, 'chat-1')
     // Never shown, not even while the pin write is in flight.
     expect(store.isOpen).toBe(false)
     expect(await opened).toBe(true)
     expect(store.isOpen).toBe(false)
     expect(projects.pinFile).toHaveBeenCalledWith('chat-1', '/work/notes/today.md')
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test('an open that targets a line keeps the viewer, which scrolls to it', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Hello')))
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    await store.open('notes/today.md', 120, 'chat-1')
+    expect(projects.pinFile).not.toHaveBeenCalled()
+    expect(store.isOpen).toBe(true)
+    expect(store.line).toBe(120)
   })
 
   test('a chat open replaces the current pin', async () => {
@@ -481,6 +493,24 @@ describe('docking beside the chat', () => {
     expect(projects.pinFile).toHaveBeenCalledTimes(1)
     expect(store.isOpen).toBe(true)
     expect(store.content).toBe('Hello')
+  })
+
+  test('a slow dock never pins over a newer open', async () => {
+    let finishFirst!: (v: { path: string }) => void
+    vi.mocked(api.get)
+      .mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve as typeof finishFirst }))
+      .mockResolvedValueOnce({ path: '/work/b.md' })
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    const first = store.open('a.md', null, 'chat-1')
+    await store.open('b.md', null, 'chat-1')
+    finishFirst({ path: '/work/a.md' })
+    expect(await first).toBe(true)
+    expect(projects.pinFile).toHaveBeenCalledTimes(1)
+    expect(projects.pinFile).toHaveBeenCalledWith('chat-1', '/work/b.md')
+    expect(store.isOpen).toBe(false)
   })
 
   test('without a dock the viewer opens and nothing is pinned', async () => {

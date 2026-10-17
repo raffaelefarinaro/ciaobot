@@ -55,6 +55,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // available (a wide pane on a chat or project route), '' everywhere else.
   // Owned by the layout so the viewer never pins to a chat that is not shown.
   const dockTarget = ref('')
+  // Generation of the latest open: a dock whose path resolution lands after a
+  // newer open must not pin over the file the user opened since.
+  let dockSeq = 0
   function setDockTarget(key: string): void {
     dockTarget.value = key
   }
@@ -65,9 +68,12 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
    * docks, replacing the current pin; any other open docks only while nothing
    * is pinned, so a link followed from the pinned file itself opens over it
    * rather than navigating it away. Returns false (and the caller opens the
-   * viewer as usual) when there is no dock or the pin write fails.
+   * viewer as usual) when there is no dock or the pin write fails. An open
+   * that targets a line (a `path:N` link, a comment chip) keeps the viewer,
+   * which scrolls to it; the tile has no line to land on.
    */
   async function dockInstead(filePath: string, chat: string): Promise<boolean> {
+    const seq = ++dockSeq
     const key = dockTarget.value
     if (!key || isOpen.value) return false
     const current = projectStore.pinnedFileFor(key)
@@ -84,6 +90,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       }
     }
     target = target.replace(/:\d+$/, '')
+    // Superseded by a newer open: that open owns the outcome, so this one
+    // neither pins nor falls back to the viewer.
+    if (seq !== dockSeq) return true
     if (dockTarget.value !== key) return false
     if (projectStore.pinnedFileFor(key) === target) return true
     return projectStore.pinFile(key, target)
@@ -185,12 +194,15 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     chat: string = '',
   ): Promise<boolean> {
     if (!filePath || !await canReplaceOpenFile(filePath)) return false
-    if (await dockInstead(filePath, chat)) return true
+    if (lineNumber === null && await dockInstead(filePath, chat)) return true
     _reset()
     isOpen.value = true
     path.value = filePath
     line.value = lineNumber
     chatId.value = chat
+    // Provisional until the chat path resolves, so the window opens at its
+    // final size (the prose width or the wide one) instead of resizing.
+    kind.value = fileViewerKindForPath(filePath)
     loading.value = true
     loadToken.value++
     const seq = ++fetchSeq
