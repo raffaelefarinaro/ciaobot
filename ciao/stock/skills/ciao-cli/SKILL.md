@@ -214,9 +214,9 @@ they travel as a file (`--instructions-file`) rather than as a shell argument.
 
 | Command | Purpose | Guard |
 |---|---|---|
-| `run start [--cwd DIR] [--env K=V]... [--timeout-s N] [--label L] -- CMD [ARGS...]` | Run one command in a tracked background subprocess; the chat is woken with status, exit code, log tail, and log path when it exits. | Destructive (approval-gated). Does not block — end the turn after starting it, don't poll `run status` for the common case. `--cwd` must stay under the chat's workspace root; loader-hook env vars are rejected. |
+| `run start [--cwd DIR] [--env K=V]... [--timeout-s N] [--label L] -- CMD [ARGS...]` | Run one command in a tracked background subprocess; the chat is woken with status, exit code, log tail, and log path when it exits. | Destructive (approval-gated). Does not block — end the turn after starting it, don't poll `run status` for the common case. `--cwd` must stay under the chat's workspace root; loader-hook env vars are rejected. For a dev or preview server, start it once in its own reload/watch mode (`npm run dev`, `uvicorn --reload`) and leave that run alive across edits; cancel it only when you are done. A cancel you make yourself does not wake the chat; every other exit does. |
 | `run status RUN_ID [--lines N]` | Status, exit code, and log tail for a run this chat started. | A run started by another chat reports as not found. |
-| `run cancel RUN_ID` | SIGTERM the run's process group, then SIGKILL after a grace period. | Destructive; idempotent — cancelling an already-finished run returns its final state unchanged. |
+| `run cancel RUN_ID` | SIGTERM the run's process group, then SIGKILL after a grace period. | Destructive; idempotent — cancelling an already-finished run returns its final state unchanged. Your own cancel does not wake the chat (the reply is the final state); a cancel by the user from the PWA does. |
 
 ### Workspace and status
 
@@ -289,6 +289,7 @@ ciao webhook create --name "CI failure" --instructions-file @webhook.md --projec
 Background runs:
 ```bash
 ciao run start --label "adoption report" --timeout-s 900 -- ./scripts/report.sh --full
+ciao run start --label "preview" -- npm run dev
 ```
 ```json
 {"ok": true, "data": {"run_id": "run_20b7", "label": "adoption report", "status": "started"}}

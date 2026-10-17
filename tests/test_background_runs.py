@@ -1589,3 +1589,77 @@ def test_rail_routes_only_reach_the_chats_own_runs(tmp_path: Path) -> None:
     assert stopped.status_code == 200
     assert stopped.json()["status"] == "cancelled"
     assert cancelled == ["r1"]
+
+
+async def test_agent_cancel_marks_the_run_as_not_waking_its_owner(
+    tmp_path: Path,
+) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    def on_finish(run: BackgroundRun, tail: list[str]) -> None:
+        seen.append((run.status, run.wake_owner))
+
+    runner = _runner(tmp_path, on_finish=on_finish)
+    run = await runner.start_run(
+        parent_chat_id="chat-1",
+        workspace="work",
+        cmd=_py("import time; time.sleep(30)"),
+        timeout_s=60,
+    )
+
+    await runner.cancel(run.run_id, wake_owner=False)
+
+    assert seen == [("cancelled", False)]
+    stored = runner.get(run.run_id)
+    assert stored is not None
+    assert stored.wake_owner is False
+
+
+async def test_default_cancel_still_wakes_its_owner(tmp_path: Path) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    def on_finish(run: BackgroundRun, tail: list[str]) -> None:
+        seen.append((run.status, run.wake_owner))
+
+    runner = _runner(tmp_path, on_finish=on_finish)
+    run = await runner.start_run(
+        parent_chat_id="chat-1",
+        workspace="work",
+        cmd=_py("import time; time.sleep(30)"),
+        timeout_s=60,
+    )
+
+    await runner.cancel(run.run_id)
+
+    assert seen == [("cancelled", True)]
+
+
+def test_old_registry_rows_default_to_waking_their_owner() -> None:
+    run = BackgroundRunStore._from_item({"run_id": "bg-1", "parent_chat_id": "c"})
+    assert run.wake_owner is True
+
+
+async def test_agent_cancel_through_the_control_plane_does_not_wake_its_owner(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Runs", workspace="work")
+    chat = manager.create_chat(project.project_id, title="Owner")
+    runner = _runner(tmp_path)
+    plane = _plane(manager, runner)
+
+    started = await plane.background_run_start(
+        _principal(chat.chat_id, project.project_id),
+        cmd=_py("import time; time.sleep(30)"),
+        timeout_s=60,
+    )
+    run_id = started["data"]["run_id"]
+
+    cancelled = await plane.background_run_cancel(
+        _principal(chat.chat_id, project.project_id), run_id
+    )
+
+    assert cancelled["data"]["status"] == "cancelled"
+    stored = runner.get(run_id)
+    assert stored is not None
+    assert stored.wake_owner is False
