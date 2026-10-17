@@ -56,6 +56,7 @@
   "context get": "context_get",
   "gws status": "gws_status",
   "workspace list": "workspaces_list",
+  "repo candidates": "repo_candidates",
   "task delegate": "task_delegate",
   "task add-update": "task_add_update",
   "task link-chat": "task_link_chat",

@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -424,6 +425,8 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["project", "get"], ("project_get", {"project_id": ""})),
         (["project", "create", "--name", "Q4", "--context", "ctx"], ("project", {"action": "create", "name": "Q4", "context": "ctx"})),
         (["project", "update", "p1", "--vault-folder", "Projects/Q4"], ("project", {"action": "update", "project_id": "p1", "vault_folder": "Projects/Q4"})),
+        (["project", "create", "--name", "Q4", "--repo", ""], ("project", {"action": "create", "name": "Q4", "repo_path": ""})),
+        (["project", "update", "p1", "--repo", ""], ("project", {"action": "update", "project_id": "p1", "repo_path": ""})),
         (["project", "restore", "q4-launch"], ("project", {"action": "restore", "stem": "q4-launch"})),
         (["project", "complete", "p1"], ("project_action", {"action": "complete", "project_id": "p1"})),
         (["task", "list"], ("task_list", {})),
@@ -469,11 +472,38 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["run", "cancel", "run-1"], ("background_run_cancel", {"run_id": "run-1"})),
         (["gws", "status"], ("gws_status", {})),
         (["workspace", "list"], ("workspaces_list", {})),
+        (["repo", "candidates"], ("repo_candidates", {})),
     ],
 )
 def test_cli_arguments_map_to_operations(argv: list[str], expected: tuple[str, dict]) -> None:
     parser = agent_cli.build_parser()
     assert agent_cli.resolve(parser.parse_args(argv)) == expected
+
+
+def test_cli_repo_flag_is_made_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    parser = agent_cli.build_parser()
+    _op, arguments = agent_cli.resolve(parser.parse_args(["project", "update", "p1", "--repo", "."]))
+    assert arguments["repo_path"] == os.path.abspath(str(tmp_path))
+    assert agent_cli.is_agent_invocation(["repo", "candidates"])
+
+
+def test_repo_candidates_is_a_read_operation() -> None:
+    from ciao import mcp_server
+
+    assert mcp_server.OPERATIONS_BY_NAME["repo_candidates"].annotations == mcp_server._READ
+
+
+def test_repo_candidates_dispatches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "root"
+    (root / "app" / ".git").mkdir(parents=True)
+    monkeypatch.setattr("ciao.repo_link.REPO_ROOTS", (str(root),))
+    service, _plane, _pcm = _names_service(tmp_path)
+    with _client(service) as client:
+        res = _post(client, _token(service), "repo_candidates")
+    body = res.json()
+    assert body["ok"] is True
+    assert [c["name"] for c in body["data"]["candidates"]] == ["app"]
 
 
 def test_every_documented_command_parses(tmp_path: Path) -> None:
