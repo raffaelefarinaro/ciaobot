@@ -281,7 +281,7 @@ def tool_call_facts(tool_name: str, raw_input: object) -> tuple[int, str]:
 
 
 _CD_RE = re.compile(r"(?:^|[;&|(]\s*|&&\s*|\s)cd\s+(\"[^\"]+\"|'[^']+'|[^\s;&|)]+)")
-_GIT_C_RE = re.compile(r"\bgit\s+-C\s+(\"[^\"]+\"|'[^']+'|\S+)")
+_GIT_C_RE = re.compile(r"\bgit\s+-C\s+(\"[^\"]+\"|'[^']+'|[^\s;&|)]+)")
 
 
 def tool_work_dirs(tool_name: str, raw_input: object) -> list[str]:

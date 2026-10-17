@@ -643,3 +643,70 @@ async def test_a_call_streamed_twice_and_its_result_are_one_tool_row() -> None:
             "error": True,
         }
     ]
+
+
+class _RefreshHost(_DriveHost):
+    """A drive host whose repo-location refresh is slow, to test the bounds."""
+
+    def __init__(self, events: list[StreamEvent], workspace_root: Path) -> None:
+        super().__init__(events, workspace_root)
+        self.refresh_started = asyncio.Event()
+
+    async def refresh_repo_location(self, chat_id, hints):
+        self.refresh_started.set()
+        await asyncio.sleep(60)
+        return {"path": "/never"}
+
+
+async def _drive_refresh_host(host: _RefreshHost) -> tuple[ChatStream, asyncio.Task]:
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    stream = ChatStream(prompt_text="hello")
+    host._broker.register("chat-1", stream)
+    task = asyncio.create_task(
+        streaming.drive(
+            chat_id="chat-1",
+            project_id="project-1",
+            prompt="hello",
+            images=None,
+            turn_index=None,
+            chat_meta=host.chat,
+            stream=stream,
+            is_retry=False,
+            unattended=False,
+        )
+    )
+    return stream, task
+
+
+@pytest.mark.asyncio
+async def test_slow_repo_location_refresh_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import repo_location
+
+    monkeypatch.setattr(repo_location, "REFRESH_TIMEOUT_S", 0.05)
+    host = _RefreshHost([AssistantTextDelta(type="text", text="hi")], tmp_path)
+    stream, task = await _drive_refresh_host(host)
+    await asyncio.wait_for(task, 5)
+
+    assert stream.done is True
+    done = [e for e in host.published if e["type"] == "chat_streaming_done"]
+    assert len(done) == 1
+    assert "repo_location" not in done[0]
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_repo_location_refresh_still_finishes_the_turn(
+    tmp_path: Path,
+) -> None:
+    host = _RefreshHost([AssistantTextDelta(type="text", text="hi")], tmp_path)
+    stream, task = await _drive_refresh_host(host)
+    await asyncio.wait_for(host.refresh_started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert stream.done is True
+    assert host._broker.get("chat-1") is None
+    done = [e for e in host.published if e["type"] == "chat_streaming_done"]
+    assert len(done) == 1

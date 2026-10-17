@@ -3839,6 +3839,7 @@ class ProjectChatManager:
         chat = self._chats.pop(chat_id, None)
         if chat is None:
             return False
+        self._repo_location_locks.pop(chat_id, None)
         self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
         task = self._retry_tasks.pop(chat_id, None)
@@ -5581,8 +5582,11 @@ class ProjectChatManager:
             # Unlinked: the stored location was just cleared; the done payload
             # carries no `repo_location` key for such chats.
             return None
-        payload = await asyncio.to_thread(project.to_dict)
-        self._events.publish({"type": "project_updated", "project": payload})
+        try:
+            payload = await asyncio.to_thread(project.to_dict)
+            self._events.publish({"type": "project_updated", "project": payload})
+        except Exception:  # noqa: BLE001 — the location is already stored; keep it
+            logger.exception("project_updated after repo refresh failed for %s", chat_id)
         return result[0]
 
     def schedule_repo_location_refresh(self, chat_id: str) -> None:

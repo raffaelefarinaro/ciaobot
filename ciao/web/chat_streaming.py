@@ -1121,14 +1121,22 @@ class ChatStreaming:
                 # endpoint returns success or an authoritative stale result.
                 self._host._save()
             repo_loc: dict[str, Any] | None = None
+            refresh_cancelled = False
             current = asyncio.current_task()
             if chat_meta is not None and not (
                 current is not None and current.cancelling()
             ):
                 try:
-                    repo_loc = await self._host.refresh_repo_location(
-                        chat_id, repo_hints
+                    # The whole refresh is bounded, lock wait and git included.
+                    repo_loc = await asyncio.wait_for(
+                        self._host.refresh_repo_location(chat_id, repo_hints),
+                        repo_location.REFRESH_TIMEOUT_S,
                     )
+                except TimeoutError:
+                    logger.warning("repo location refresh timed out for %s", chat_id)
+                except asyncio.CancelledError:
+                    # Finish the stream and publish done first; re-raise below.
+                    refresh_cancelled = True
                 except Exception:  # noqa: BLE001 — location is advisory; never block turn end
                     logger.exception("repo location refresh failed for %s", chat_id)
             stream.finish()
@@ -1143,6 +1151,8 @@ class ChatStreaming:
             if repo_loc is not None:
                 done["repo_location"] = repo_loc
             self._host._events.publish(done)
+            if refresh_cancelled:
+                raise asyncio.CancelledError
             chat_for_watcher = self._host._chats.get(chat_id)
             follow_up_expected = False
             if (
