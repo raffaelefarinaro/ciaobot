@@ -160,6 +160,9 @@ class _DriveHost:
         del reason
         self.saves += 1
 
+    async def refresh_repo_location(self, chat_id, hints):
+        return None
+
     async def _await_between_turns_drain(self, chat_id: str) -> None:
         self.drain_awaits.append(chat_id)
 

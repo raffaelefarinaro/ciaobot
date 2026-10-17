@@ -180,6 +180,13 @@ export interface ChatArchivePage {
   limit: number
 }
 
+export interface RepoLocation {
+  path: string
+  branch: string
+  is_worktree: boolean
+  exists: boolean
+}
+
 export interface ChatInfo {
   chat_id: string
   project_id: string
@@ -282,6 +289,8 @@ export interface ChatInfo {
   pinned_file_path?: string
   dismissed_pin_paths?: string[]
   pin_revision?: number
+  // Server sends `{}` for no location; test `repo_location.path`, not the object.
+  repo_location?: Partial<RepoLocation>
 }
 
 /**
@@ -544,7 +553,8 @@ export type EventsWsMessage =
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
-  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string }
+  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
+  | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
   | { type: 'chat_background_runs'; chat_id: string; project_id: string; runs: BackgroundRunSummary[]; finished?: BackgroundRunSummary }

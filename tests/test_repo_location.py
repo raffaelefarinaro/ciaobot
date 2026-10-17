@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from ciao import repo_location
+from ciao.models import tool_work_dirs
+
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _init_repo(path: Path) -> Path:
+    path.mkdir(parents=True)
+    _git(path, "init", "-b", "main")
+    (path / "f.txt").write_text("x")
+    _git(path, "add", ".")
+    _git(path, "commit", "-m", "init")
+    return path.resolve()
+
+
+def test_tool_work_dirs_reads_cd_git_c_and_workdir() -> None:
+    assert tool_work_dirs("Bash", {"command": "cd /a/b && git -C '/c d' status"}) == [
+        "/a/b",
+        "/c d",
+    ]
+    assert tool_work_dirs("Bash", {"command": "cd x && ls"}) == []
+    assert tool_work_dirs("Read", {"command": "cd /a/b"}) == []
+    assert tool_work_dirs("bash", {"command": "ls", "workdir": "/w"}) == ["/w"]
+
+
+@needs_git
+@pytest.mark.asyncio
+async def test_resolve_prefers_latest_worktree_hint_of_the_linked_repo(
+    tmp_path: Path,
+) -> None:
+    main = _init_repo(tmp_path / "main")
+    wt = tmp_path / "wt"
+    _git(main, "worktree", "add", str(wt), "-b", "feat")
+    wt = wt.resolve()
+    result = await repo_location.resolve_chat_location(
+        repo_path=str(main), hints=[str(main), str(wt)], previous={}
+    )
+    assert result == {
+        "path": str(wt),
+        "branch": "feat",
+        "is_worktree": True,
+        "exists": True,
+    }
+
+
+@needs_git
+@pytest.mark.asyncio
+async def test_resolve_ignores_hints_from_other_repos(tmp_path: Path) -> None:
+    main = _init_repo(tmp_path / "main")
+    other = _init_repo(tmp_path / "other")
+    result = await repo_location.resolve_chat_location(
+        repo_path=str(main), hints=[str(other)], previous={}
+    )
+    assert result == {}
+
+
+@needs_git
+@pytest.mark.asyncio
+async def test_resolve_marks_removed_worktree_not_existing(tmp_path: Path) -> None:
+    main = _init_repo(tmp_path / "main")
+    previous = {
+        "path": str(tmp_path / "gone"),
+        "branch": "feat",
+        "is_worktree": True,
+        "exists": True,
+    }
+    result = await repo_location.resolve_chat_location(
+        repo_path=str(main), hints=[], previous=previous
+    )
+    assert result["exists"] is False
+    assert result["path"] == previous["path"]

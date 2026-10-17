@@ -2941,6 +2941,8 @@ async def chat_messages(request: Request) -> JSONResponse:
     chat = pcm.get_chat(chat_id)
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if _request_params(request).get("offset") in (None, "", "0"):
+        pcm.schedule_repo_location_refresh(chat_id)
     rows = await transcript_service._assemble_chat_messages(
         pcm, request.app.state.config, chat
     )

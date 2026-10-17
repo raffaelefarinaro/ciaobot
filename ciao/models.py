@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -233,6 +234,9 @@ class ToolUseEvent(StreamEvent):
     request_id: str = ""
     session_id: str = ""
     file_touches: list | None = None
+    # absolute-or-~ directories a shell call ran in (`cd`, `git -C`, `workdir`),
+    # from the raw input; see `tool_work_dirs`
+    work_dirs: list[str] | None = None
     # Size of the call's raw JSON input and the control surface it went
     # through ("cli" or "mcp", see ``tool_call_facts``). Both come from the
     # raw input, which ``tool_input`` (a summary) does not carry.
@@ -274,6 +278,34 @@ def tool_call_facts(tool_name: str, raw_input: object) -> tuple[int, str]:
         if isinstance(command, str) and _CLI_COMMAND_RE.match(command):
             return input_chars, "cli"
     return input_chars, ""
+
+
+_CD_RE = re.compile(r"(?:^|[;&|(]\s*|&&\s*|\s)cd\s+(\"[^\"]+\"|'[^']+'|[^\s;&|)]+)")
+_GIT_C_RE = re.compile(r"\bgit\s+-C\s+(\"[^\"]+\"|'[^']+'|\S+)")
+
+
+def tool_work_dirs(tool_name: str, raw_input: object) -> list[str]:
+    """Directories a shell call ran in, absolute only, in order, deduped."""
+    if tool_name not in _SHELL_TOOL_NAMES or not isinstance(raw_input, Mapping):
+        return []
+    candidates: list[str] = []
+    for key in ("workdir", "cwd"):
+        value = raw_input.get(key)
+        if isinstance(value, str):
+            candidates.append(value)
+    command = raw_input.get("command")
+    if isinstance(command, str):
+        candidates.extend(m.group(1) for m in _CD_RE.finditer(command))
+        candidates.extend(m.group(1) for m in _GIT_C_RE.finditer(command))
+    out: list[str] = []
+    for raw in candidates:
+        value = raw.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        value = os.path.expanduser(value)
+        if value and Path(value).is_absolute() and value not in out:
+            out.append(value)
+    return out
 
 
 @dataclass(slots=True)

@@ -18,7 +18,7 @@ import json
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Coroutine
+from collections.abc import AsyncGenerator, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -58,6 +58,7 @@ from ciao.web.chat_broker import (
     public_queue,
 )
 from ciao.web.file_snapshots import SnapshotStore
+from ciao import repo_location
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ciao.web.project_chats import ChatInfo
@@ -106,6 +107,10 @@ class ChatStreamingHost(Protocol):
     _snapshots: SnapshotStore
 
     def _save(self, *, reason: str = ...) -> None: ...
+
+    async def refresh_repo_location(
+        self, chat_id: str, hints: Sequence[str]
+    ) -> dict[str, Any] | None: ...
 
     def _get_provider(self, chat_id: str) -> ProviderService: ...
 
@@ -431,6 +436,7 @@ class ChatStreaming:
         # One-line error text that ended the turn, persisted as chat.last_error.
         last_error_text = ""
         had_provider_progress = False
+        repo_hints: list[str] = []
         await self._host._await_between_turns_drain(chat_id)
 
         def _arm_retry(*args: Any, **kwargs: Any) -> bool:
@@ -664,6 +670,7 @@ class ChatStreaming:
                             question_paused = True
                             return
                         if isinstance(event, ToolUseEvent):
+                            repo_hints.extend(repo_location.tool_event_hints(event))
                             touches: list[dict] = []
                             if payload:
                                 multi = payload.get("file_touches")
@@ -1113,17 +1120,29 @@ class ChatStreaming:
                 # was delivered. Keep the persisted card until the response
                 # endpoint returns success or an authoritative stale result.
                 self._host._save()
+            repo_loc: dict[str, Any] | None = None
+            current = asyncio.current_task()
+            if chat_meta is not None and not (
+                current is not None and current.cancelling()
+            ):
+                try:
+                    repo_loc = await self._host.refresh_repo_location(
+                        chat_id, repo_hints
+                    )
+                except Exception:  # noqa: BLE001 — location is advisory; never block turn end
+                    logger.exception("repo location refresh failed for %s", chat_id)
             stream.finish()
             self._host._broker.clear(chat_id, stream)
-            self._host._events.publish(
-                {
-                    "type": "chat_streaming_done",
-                    "chat_id": chat_id,
-                    "project_id": project_id,
-                    "is_error": had_error,
-                    "last_error": chat_meta.last_error if chat_meta is not None else "",
-                }
-            )
+            done: dict[str, Any] = {
+                "type": "chat_streaming_done",
+                "chat_id": chat_id,
+                "project_id": project_id,
+                "is_error": had_error,
+                "last_error": chat_meta.last_error if chat_meta is not None else "",
+            }
+            if repo_loc is not None:
+                done["repo_location"] = repo_loc
+            self._host._events.publish(done)
             chat_for_watcher = self._host._chats.get(chat_id)
             follow_up_expected = False
             if (

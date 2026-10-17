@@ -4313,6 +4313,7 @@ export const useProjectStore = defineStore('projects', () => {
         delete projectStreaming.value[msg.chat_id]
         const doneChat = chats.value.find(c => c.chat_id === msg.chat_id)
         if (doneChat) doneChat.last_error = msg.last_error || ''
+        if (doneChat && msg.repo_location) doneChat.repo_location = msg.repo_location
         // The per-chat WS may have missed the `result` event for this
         // turn (WS flap mid-stream, or the broker stream finished and
         // was cleared between the disconnect and reconnect, leaving no
@@ -4542,6 +4543,11 @@ export const useProjectStore = defineStore('projects', () => {
         // archived transcript keeps the record after the events stop.
         const chat = chats.value.find(c => c.chat_id === msg.chat_id)
         if (chat) chat.postprocess = msg.postprocess || null
+        break
+      }
+      case 'chat_repo_location': {
+        const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
+        if (c) c.repo_location = msg.repo_location
         break
       }
       case 'chat_pin_changed': {
