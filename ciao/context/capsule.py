@@ -42,6 +42,53 @@ TASK_BOARD_HINT = (
     'task done.'
 )
 
+#: Code-work rules for a chat whose project is linked to a git repository.
+#: Sent with the stable block (once per provider session), only when linked.
+LINKED_REPO_RULES = (
+    "Code-work rules for this linked repository:\n"
+    "- The repository's instructions file shown below governs code conventions, tests and git there; follow it.\n"
+    "- Your working directory is the Ciaobot workspace, not the repository. Run repository commands inside it "
+    "(`cd <path> && ...` or `git -C <path> ...`).\n"
+    "- This is a shared checkout. Run `git status` before changing anything and leave changes you did not make alone. "
+    "Commit or push only when the user asks or the repository's instructions say so.\n"
+    "- A repository-specific learning (convention, test command, trap) goes into the repository's instructions file, "
+    "in that file's style; say in your reply that you changed it.\n"
+    "- Project decisions and status go in the project note (canonical_doc), not the repository.\n"
+    "- Never write vault content into the repository, and never put code details into the vault.\n"
+    "- End a turn that changed code with the files you changed and the branch they are on."
+)
+
+
+def render_linked_repo_block(
+    *,
+    path: str,
+    missing: bool,
+    instructions_name: str,
+    instructions_text: str,
+) -> str:
+    """The multi-line ``[Linked repository]`` block of the stable facts.
+
+    The instructions text is not passed through ``_field``: it would flatten the
+    file's newlines and cap it at 1200 characters.
+    """
+    shown = _field(path, limit=300)
+    if missing:
+        return (
+            f"[Linked repository]\npath={shown}\n"
+            "The linked repository is not available on this machine (moved, deleted or no longer a git checkout). "
+            "Tell the user before doing any code work there; do not recreate it.\n"
+            "[End linked repository]"
+        )
+    block = f"[Linked repository]\npath={shown}\n{LINKED_REPO_RULES}\n"
+    if instructions_name:
+        block += (
+            f"[Repository instructions: {shown}/{instructions_name}]\n{instructions_text}\n"
+            "[End repository instructions]"
+        )
+    else:
+        block += "The repository has no AGENTS.md or CLAUDE.md. Ask the user before creating an AGENTS.md; never create a CLAUDE.md."
+    return block + "\n[End linked repository]"
+
 
 def _file_access_line(file_roots: Sequence[str]) -> str:
     """One line: where a workspace-scoped chat may write, and who can widen it."""
@@ -65,6 +112,8 @@ def build_context_capsule(
     handover: str = "",
     include_stable: bool = True,
     file_roots: Sequence[str] = (),
+    linked_repo_block: str = "",
+    linked_repo_line: str = "",
 ) -> str:
     """Render the compact context visible to every provider.
 
@@ -81,6 +130,11 @@ def build_context_capsule(
     The task-board hint is neither: it is a constant line rather than a routing
     fact, so it rides with the stable block and costs the same in every
     workspace. See ``TASK_BOARD_HINT``.
+
+    ``linked_repo_block`` is the multi-line block of a project linked to a git
+    repository (``render_linked_repo_block``); it rides the stable block.
+    ``linked_repo_line`` is the short ``linked_repo=<path> branch=<branch>`` line
+    sent every turn, because the branch changes too often for the stable block.
     """
 
     stable: list[str] = []
@@ -103,12 +157,16 @@ def build_context_capsule(
     if canonical_doc:
         stable.append(f"canonical_doc={_field(canonical_doc, limit=300)}")
     stable.append(_field(TASK_BOARD_HINT, limit=400))
+    if linked_repo_block:
+        stable.append(linked_repo_block)
 
     dynamic: list[str] = [f"today={datetime.now(UTC).date().isoformat()}"]
     if unattended:
         dynamic.append(UNATTENDED_CAPSULE_GUIDANCE)
     if file_roots:
         dynamic.append(_file_access_line(file_roots))
+    if linked_repo_line:
+        dynamic.append(_field(linked_repo_line, limit=400))
 
     parts: list[str] = []
     if include_stable:
@@ -128,9 +186,15 @@ def context_digest(
     project_name: str,
     project_context: str,
     canonical_doc: str,
+    linked_repo: str = "",
 ) -> str:
-    """Return a stable digest for deciding whether routing facts changed."""
-    raw = "\0".join(
-        (workspace, gws_profile, project_name, project_context, canonical_doc)
-    )
+    """Return a stable digest for deciding whether routing facts changed.
+
+    ``linked_repo`` is hashed in only when non-empty, so an unlinked chat keeps
+    the digest it had before linking existed.
+    """
+    parts = [workspace, gws_profile, project_name, project_context, canonical_doc]
+    if linked_repo:
+        parts.append(linked_repo)
+    raw = "\0".join(parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
