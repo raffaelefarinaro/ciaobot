@@ -115,6 +115,7 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
         "d7d8eb94dd11a6f84b9bb329c4f7ed6c5050d79a6fd2fa20fd1e7369c361ce6c",
         "e89dbfdda0580280fdced71cabf50fad529c9824fb275104f60969b000ebb012",
         "f0124b04d973b243b87f63cea957132deefd3022c1018637b71ca702208b1e2e",
+        "b8c7661aed39132e0695763e387e3d25f29663a4041f42af3b5516cd82aa23a9",
     }),
 }
 CODEX_WRAPPER_MARKER = ".ciao-codex-wrapper"

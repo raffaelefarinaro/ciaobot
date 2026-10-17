@@ -339,3 +339,11 @@ def test_parsed_kind_is_normalised_to_the_registry_spelling() -> None:
             assert bullet.kind == kind
             # The end-to-end failure: this raised for every capitalised kind.
             pk.accept_for(bullet.kind)
+
+
+def test_repo_parses_with_its_path_and_accepts_by_append() -> None:
+    bullet = pk.parse_bullet("- [repo /a/b] x  _(from: s)_")
+    assert bullet is not None
+    assert bullet.kind == "repo"
+    assert bullet.target == "/a/b"
+    assert pk.accept_for("repo").action == "append_repo_doc"

@@ -34,6 +34,11 @@ in a sidecar, because none of that is one line. Its accept is its own
 descriptor rather than a region edit or a file move, so a caller branching on
 the descriptor cannot route a whole-note rewrite into the workspace guide.
 
+``[repo <path>]`` is the ninth: a fact specific to a linked code repository.
+The payload is the repository's absolute path, and accepting it appends one
+bullet to ``<repo>/AGENTS.md``, the only file outside the vault a proposal
+accept ever writes.
+
 Kinds may carry a payload inside the brackets (``[people Mo]``,
 ``[project ./projects/x/doc.md]``, ``[category recipe-book]``). The payload is
 exposed as :attr:`ProposalBullet.target`; legacy bullets without one parse
@@ -57,6 +62,7 @@ KINDS: tuple[str, ...] = (
     "review",
     "category",
     "note_edit",
+    "repo",
 )
 """Ordered registry of proposal kinds. Adding a kind here is the only edit a
 new producer needs; the regex below derives from this table."""
@@ -248,6 +254,14 @@ class NoteEditAccept:
     sidecar_id: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class RepoDocAccept:
+    """Accept a `[repo <path>]` proposal by appending one bullet to <repo>/AGENTS.md."""
+
+    action: Literal["append_repo_doc"] = "append_repo_doc"
+    repo_path: str = ""
+
+
 AcceptDescriptor = (
     RegionAccept
     | RehomeAccept
@@ -257,6 +271,7 @@ AcceptDescriptor = (
     | ReviewAccept
     | CategoryAccept
     | NoteEditAccept
+    | RepoDocAccept
 )
 
 _ACCEPT: dict[str, AcceptDescriptor] = {
@@ -274,6 +289,7 @@ _ACCEPT: dict[str, AcceptDescriptor] = {
     "review": ReviewAccept(),
     "category": CategoryAccept(),
     "note_edit": NoteEditAccept(),
+    "repo": RepoDocAccept(),
 }
 
 

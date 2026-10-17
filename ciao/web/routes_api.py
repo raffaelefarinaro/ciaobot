@@ -8049,6 +8049,17 @@ async def proposals_history(request: Request) -> JSONResponse:
     )
 
 
+def _linked_repos_for(request: Request, row: dict[str, Any]) -> list[str]:
+    """Linked repo paths a `[repo]` row is checked against; empty for other kinds.
+
+    Called on the event loop: `list_projects` mutates the project registry.
+    """
+    if str(row.get("kind") or "") != "repo":
+        return []
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    return proposal_service.linked_repo_paths(pcm, str(row.get("workspace") or ""))
+
+
 async def proposal_preview(request: Request) -> JSONResponse:
     """Exactly what accepting one queued proposal would write, without writing.
 
@@ -8074,7 +8085,12 @@ async def proposal_preview(request: Request) -> JSONResponse:
     text = request.query_params.get("text", "")
     # Off the event loop: the preview reads a guide (taking no lock) and a
     # learnings file, and a slow filesystem must not stall every other request.
-    preview = await asyncio.to_thread(proposal_service.preview_row, config, ctx, text)
+    linked = _linked_repos_for(request, ctx["row"])
+    preview = await asyncio.to_thread(
+        functools.partial(
+            proposal_service.preview_row, config, ctx, text, linked_repos=linked
+        )
+    )
     return JSONResponse({"ok": True, "preview": preview})
 
 
@@ -8627,9 +8643,15 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         keep_lines.add(int(row["line"]))
                         continue
                     expected = revisions.get(row["id"], "")
+                    linked = _linked_repos_for(request, row)
                     if expected:
                         current = await asyncio.to_thread(
-                            proposal_service.destination_revision, config, row
+                            functools.partial(
+                                proposal_service.destination_revision,
+                                config,
+                                row,
+                                linked_repos=linked,
+                            )
                         )
                         if current and current != expected:
                             promoted[row["id"]] = proposal_service.AcceptOutcome(
@@ -8656,6 +8678,10 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         promotion = await proposal_service._accept_people_row(config, row)
                     elif accept.action == "append_learnings":
                         promotion = proposal_service._accept_learnings_row(config, row)
+                    elif accept.action == "append_repo_doc":
+                        promotion = await asyncio.to_thread(
+                            proposal_service._accept_repo_row, config, row, linked
+                        )
                     elif accept.action == "add_category":
                         # A registry the validator refuses (a folder another
                         # category already claims) is the owner's problem to fix,
@@ -9086,13 +9112,25 @@ async def proposal_action(request: Request) -> JSONResponse:
             # rule out. The refreshed preview rides along so the client can
             # re-render the card instead of asking for it again. Off the loop:
             # it reads the destination.
+            linked = _linked_repos_for(request, row)
             if expected_revision:
                 current = await asyncio.to_thread(
-                    proposal_service.destination_revision, config, row
+                    functools.partial(
+                        proposal_service.destination_revision,
+                        config,
+                        row,
+                        linked_repos=linked,
+                    )
                 )
                 if current and current != expected_revision:
                     refreshed = await asyncio.to_thread(
-                        proposal_service.preview_row, config, ctx, edited_text
+                        functools.partial(
+                            proposal_service.preview_row,
+                            config,
+                            ctx,
+                            edited_text,
+                            linked_repos=linked,
+                        )
                     )
                     return JSONResponse(
                         {
@@ -9187,6 +9225,19 @@ async def proposal_action(request: Request) -> JSONResponse:
                 if not promoted.ok:
                     return JSONResponse(
                         {"error": promoted.error or "could not append", "id": pid},
+                        status_code=409,
+                    )
+            elif accept.action == "append_repo_doc":
+                promoted = await asyncio.to_thread(
+                    proposal_service._accept_repo_row, config, promote_row, linked
+                )
+                if not promoted.ok:
+                    return JSONResponse(
+                        {
+                            "error": promoted.error or "could not append to AGENTS.md",
+                            "id": pid,
+                            "conflict": bool(promoted.conflict),
+                        },
                         status_code=409,
                     )
             elif accept.action == "add_category":
