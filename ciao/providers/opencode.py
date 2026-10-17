@@ -1545,6 +1545,10 @@ class OpencodeProvider(BaseSDKProvider):
         # Session whose transcript already holds the chat core. V2 keeps prompt
         # text in history, so the core is sent once per session, not every turn.
         self._core_sent_session_id: str = ""
+        # Set when a compaction dropped the core from this provider's session.
+        # OpenCode compaction keeps the session id and the chat's persisted
+        # marker, so the request's ``context_primed`` cannot be trusted after one.
+        self._core_dropped = False
         self._permission_requests: dict[str, _PendingRequest] = {}
         self._question_requests: dict[str, _PendingRequest] = {}
         self._tool_calls: dict[str, str] = {}
@@ -3228,6 +3232,7 @@ class OpencodeProvider(BaseSDKProvider):
             # Compaction replaces the history with a summary, which drops the
             # chat core sent on an earlier turn: send it again next turn.
             self._core_sent_session_id = ""
+            self._core_dropped = True
             return []
 
         if kind in {"session.reasoning.started", "session.text.started"}:
@@ -3675,6 +3680,17 @@ class OpencodeProvider(BaseSDKProvider):
         # a new or replacement session, a handover, or after a compaction
         # (`_event_to_stream` clears the tracked id). The tracked id is set only
         # once the prompt is accepted.
+        # A provider rebuilt after an engine restart or idle reclaim has no
+        # memory of the core it sent. The chat's persisted marker does: trust
+        # it when this turn resumes exactly that session (#1428).
+        if (
+            request.context_primed
+            and not self._core_sent_session_id
+            and not self._core_dropped
+            and not self._session_handover_context
+            and session_id == (request.resume_session or "")
+        ):
+            self._core_sent_session_id = session_id
         developer_instructions = self._developer_instructions
         send_core = developer_instructions is None and (
             session_id != self._core_sent_session_id
@@ -3780,6 +3796,7 @@ class OpencodeProvider(BaseSDKProvider):
                     self._session_handover_context = ""
                     if send_core:
                         self._core_sent_session_id = session_id
+                        self._core_dropped = False
                     prompt_accepted = True
                     self._turn_open = True
                 if prompt_accepted:

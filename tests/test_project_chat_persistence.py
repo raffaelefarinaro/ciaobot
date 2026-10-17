@@ -626,6 +626,26 @@ async def test_context_marker_waits_for_provider_session(tmp_path: Path) -> None
     assert chat.context_session_id == "native-session"
 
 
+def test_request_is_context_primed_only_when_the_marker_matches_the_session(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Primed", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    chat.session_id = "ses_1"
+
+    first = manager.build_agent_request(chat, prompt="first")
+    assert first.context_primed is False
+
+    manager._commit_context_marker(chat, first, "ses_1")
+    second = manager.build_agent_request(chat, prompt="second")
+    assert second.context_primed is True
+    assert manager.build_agent_request(chat, prompt="/compact", compact=True).context_primed is False
+
+    chat.context_digest = ""
+    assert manager.build_agent_request(chat, prompt="third").context_primed is False
+
+
 def test_compact_request_carries_no_context_capsule(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Compact request", workspace="personal")

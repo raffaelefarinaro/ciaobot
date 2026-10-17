@@ -2052,7 +2052,15 @@ def _turn_lines(session_id: str) -> list[str]:
     ]
 
 
-async def _run_recorded_turn(provider, monkeypatch, client, session_id: str):
+async def _run_recorded_turn(
+    provider,
+    monkeypatch,
+    client,
+    session_id: str,
+    *,
+    context_primed: bool = False,
+    resume_session: str | None = None,
+):
     from ciao.models import AgentRequest
 
     client._lines = _turn_lines(session_id)
@@ -2065,7 +2073,14 @@ async def _run_recorded_turn(provider, monkeypatch, client, session_id: str):
 
     monkeypatch.setattr(provider, "_ensure_server", fake_server)
     monkeypatch.setattr(provider, "_ensure_session", fake_session)
-    request = AgentRequest(prompt="hi", model="", mode="bypass", provider="opencode")
+    request = AgentRequest(
+        prompt="hi",
+        model="",
+        mode="bypass",
+        provider="opencode",
+        context_primed=context_primed,
+        resume_session=resume_session,
+    )
     return [
         event
         async for event in provider.run_streaming(request, lambda _handle: None)
@@ -2266,6 +2281,84 @@ async def test_core_is_sent_with_session_handover_context(tmp_path, monkeypatch)
     assert "User: Earlier request" in handover_text
     # The handover is consumed by the accepted prompt, so the next turn is lean.
     assert _CORE_MARKER not in client.bodies[2]["text"]
+
+
+@pytest.mark.asyncio
+async def test_primed_request_on_a_fresh_provider_skips_the_core(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    await _run_recorded_turn(
+        provider,
+        monkeypatch,
+        client,
+        "ses_x",
+        context_primed=True,
+        resume_session="ses_x",
+    )
+
+    assert _CORE_MARKER not in client.bodies[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_primed_request_for_a_different_session_still_sends_the_core(
+    tmp_path, monkeypatch
+):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    await _run_recorded_turn(
+        provider,
+        monkeypatch,
+        client,
+        "ses_new",
+        context_primed=True,
+        resume_session="ses_x",
+    )
+
+    assert _CORE_MARKER in client.bodies[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_primed_request_after_compaction_still_sends_the_core(
+    tmp_path, monkeypatch
+):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    assert (
+        provider._event_to_stream({"type": "session.compacted", "data": {}}) == []
+    )
+    for _ in range(2):
+        await _run_recorded_turn(
+            provider,
+            monkeypatch,
+            client,
+            "ses_x",
+            context_primed=True,
+            resume_session="ses_x",
+        )
+
+    assert _CORE_MARKER in client.bodies[0]["text"]
+    assert _CORE_MARKER not in client.bodies[1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_primed_request_with_handover_still_sends_the_core(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+    provider._session_handover_context = "User: Earlier request"
+
+    await _run_recorded_turn(
+        provider,
+        monkeypatch,
+        client,
+        "ses_x",
+        context_primed=True,
+        resume_session="ses_x",
+    )
+
+    assert _CORE_MARKER in client.bodies[0]["text"]
 
 
 @pytest.mark.asyncio

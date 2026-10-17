@@ -4577,12 +4577,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        digest, session_key = self._stable_context_marker(chat)
-        include_stable = (
-            chat.context_digest != digest
-            or chat.context_session_id != session_key
-            or chat.handover_context_pending
-        )
+        include_stable = self._needs_stable_context(chat)
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
         # it can write; a machine-scope chat gets no file-access line at all.
@@ -4604,6 +4599,14 @@ class ProjectChatManager:
         else:
             return ""
         return f"[CIAO_CONTEXT_BEGIN]\n{capsule}\n[CIAO_CONTEXT_END]\n\n"
+
+    def _needs_stable_context(self, chat: ChatInfo) -> bool:
+        digest, session_key = self._stable_context_marker(chat)
+        return (
+            chat.context_digest != digest
+            or chat.context_session_id != session_key
+            or chat.handover_context_pending
+        )
 
     def _stable_context_marker(self, chat: ChatInfo) -> tuple[str, str]:
         project = self._projects.get(chat.project_id)
@@ -5298,6 +5301,7 @@ class ProjectChatManager:
             prefix = ""
             context_digest = ""
             context_session_id = ""
+            context_primed = False
             provider_prompt = prompt
             full_prompt = prompt
             final_display_prompt = display_prompt
@@ -5307,6 +5311,9 @@ class ProjectChatManager:
             if not prefix:
                 context_digest = ""
                 context_session_id = ""
+            context_primed = bool(context_digest) and not self._needs_stable_context(
+                chat
+            )
             provider_prompt = self.expand_file_refs(prompt, chat.chat_id)
             full_prompt = prefix + provider_prompt if prefix else provider_prompt
             final_display_prompt = prefix + display_prompt if prefix else display_prompt
@@ -5365,6 +5372,7 @@ class ProjectChatManager:
             thinking_level=self._thinking_level_for_chat(chat),
             context_digest=context_digest,
             context_session_id=context_session_id,
+            context_primed=context_primed,
             stable_context_prefix="" if compact else self._stable_context_prefix(chat),
             compact=compact,
         )
