@@ -4549,11 +4549,22 @@ class ProjectChatManager:
         env.update(self.workspace_shell_env(workspace, project))
         return self._config.agent_root(workspace), env
 
+    def _linked_repo_for_chat(self, chat: ChatInfo) -> str:
+        """The chat's linked repository, resolved, or "" when unlinked, missing,
+        or a memory-pass chat (the pass must not be able to write the repo)."""
+        project = self._projects.get(chat.project_id)
+        raw = project.repo_path if project else ""
+        if not raw or is_memory_pass_chat(chat, project):
+            return ""
+        path = Path(raw).expanduser()
+        return str(path.resolve()) if path.is_dir() else ""
+
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
         Roots are the chat's agent root and that workspace's vault root,
-        resolved and de-duplicated, agent root first. A chat granted the data
+        resolved and de-duplicated, agent root first. A project's linked
+        repository follows the vault root. A chat granted the data
         root (the memory-backup setup chat, #1328) also gets that root, last.
         Machine scope never reads them, so they are only computed for the
         workspace case.
@@ -4565,6 +4576,9 @@ class ProjectChatManager:
         agent_root = self._config.agent_root(workspace).resolve()
         vault_root = self._config.workspace_vault_root(workspace).resolve()
         roots = [str(agent_root), str(vault_root)]
+        linked_repo = self._linked_repo_for_chat(chat)
+        if linked_repo:
+            roots.append(linked_repo)
         if chat.grants_data_root:
             roots.append(str(backup_scope.data_root(self._config).resolve()))
         return "workspace", tuple(dict.fromkeys(roots))
@@ -5383,6 +5397,7 @@ class ProjectChatManager:
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             agent_fs_scope=fs_scope,
             agent_roots=fs_roots,
+            linked_repo=self._linked_repo_for_chat(chat),
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
             # stricter ruleset.
@@ -5734,6 +5749,7 @@ class ProjectChatManager:
                 disallowed_tools=self.disallowed_tools_for_chat(chat),
                 agent_fs_scope=fs_scope,
                 agent_roots=fs_roots,
+                linked_repo=self._linked_repo_for_chat(chat),
                 thinking_level=self._thinking_level_for_chat(chat),
             )
             # Lock the chips before the await: an edit or remove landing while

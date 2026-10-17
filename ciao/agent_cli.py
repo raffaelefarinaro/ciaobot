@@ -31,9 +31,10 @@ from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
 AGENT_NOUNS: frozenset[str] = frozenset(
     {
         "memory", "vault", "note", "file", "chat", "project", "task", "schedule",
-        "workspace", "webhook", "context", "help",
+        "workspace", "repo", "webhook", "context", "help",
     }
 )
+_REPO_HELP = "Absolute path (or one relative to this shell) of a local git checkout's top level; \"\" unlinks."
 _SHARED_NOUN_VERBS: dict[str, frozenset[str]] = {
     "run": frozenset({"start", "status", "cancel"}),
     "gws": frozenset({"status"}),
@@ -114,6 +115,13 @@ def _usage_error(parser: argparse.ArgumentParser, message: str) -> int:
     parser.print_usage(sys.stderr)
     sys.stderr.write(f"error: {message}\n")
     return 2
+
+
+def _repo_path(raw: str | None) -> str | None:
+    """`--repo` as the engine needs it: absolute, because this shell's cwd is not the engine's. "" (unlink) and None (keep) pass through."""
+    if raw is None or not raw.strip():
+        return raw
+    return os.path.abspath(os.path.expanduser(raw.strip()))
 
 
 def _verbs(parent: argparse.ArgumentParser, dest: str = "verb") -> argparse._SubParsersAction:
@@ -232,11 +240,13 @@ def build_parser() -> argparse.ArgumentParser:
     pcreate = project.add_parser("create")
     pcreate.add_argument("--name", required=True)
     pcreate.add_argument("--context", default=None)
+    pcreate.add_argument("--repo", dest="repo_path", default=None, help=_REPO_HELP)
     pupdate = project.add_parser("update")
     pupdate.add_argument("project_id", nargs="?", default="")
     pupdate.add_argument("--name", default=None)
     pupdate.add_argument("--context", default=None)
     pupdate.add_argument("--vault-folder", default=None)
+    pupdate.add_argument("--repo", dest="repo_path", default=None, help=_REPO_HELP)
     prestore = project.add_parser("restore")
     prestore.add_argument("stem")
     for verb in ("complete", "delete"):
@@ -360,6 +370,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     workspace = _verbs(nouns.add_parser("workspace", help="Configured logical workspaces."))
     workspace.add_parser("list")
+
+    repo = _verbs(nouns.add_parser("repo", help="Local git checkouts on this machine."))
+    repo.add_parser(
+        "candidates",
+        help="List git checkouts one level under ~/repos, ~/code, ~/src, ~/dev, ~/Developer, ~/projects.",
+    )
     return parser
 
 
@@ -563,6 +579,9 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             arguments = {"action": "create", "name": args.name}
             if args.context is not None:
                 arguments["context"] = args.context
+            repo_path = _repo_path(args.repo_path)
+            if repo_path is not None:
+                arguments["repo_path"] = repo_path
             return "project", arguments
         if verb == "update":
             arguments = {"action": "update", "project_id": args.project_id}
@@ -570,6 +589,9 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 value = getattr(args, param, None)
                 if value is not None:
                     arguments[param] = value
+            repo_path = _repo_path(args.repo_path)
+            if repo_path is not None:
+                arguments["repo_path"] = repo_path
             return "project", arguments
         if verb == "restore":
             return "project", {"action": "restore", "stem": args.stem}
@@ -700,6 +722,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         return "gws_status", {}
     if noun == "workspace":
         return "workspaces_list", {}
+    if noun == "repo":
+        return "repo_candidates", {}
     return None
 
 

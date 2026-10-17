@@ -2924,3 +2924,64 @@ async def test_claude_cli_death_after_the_echo_on_stop_keeps_the_interrupted_err
     results = [e for e in events if isinstance(e, ResultEvent)]
     assert [(r.result, r.is_error) for r in results] == [(_TURN_INTERRUPTED_MESSAGE, True)]
     assert not [e for e in events if isinstance(e, PromptCancelledEvent)]
+
+
+@pytest.mark.asyncio
+async def test_claude_machine_scope_adds_the_linked_repo_dir(tmp_path: Path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    provider = ClaudeProvider(workspace)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    repo = str(tmp_path / "repo")
+    request = AgentRequest(prompt="test", model="sonnet", mode="auto", linked_repo=repo)
+
+    await provider._ensure_connected(request)
+
+    options = captured["options"]
+    assert [str(p) for p in options.add_dirs] == [repo]
+    assert options.sandbox is None
+
+
+@pytest.mark.asyncio
+async def test_claude_workspace_scope_lists_the_linked_repo_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    agent_root = tmp_path / "agent"
+    repo = str(tmp_path / "repo")
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="normal",
+        agent_fs_scope="workspace",
+        agent_roots=(str(agent_root), str(agent_root / "memory-vault"), repo),
+        linked_repo=repo,
+    )
+
+    await provider._ensure_connected(request)
+
+    assert [str(p) for p in captured["options"].add_dirs] == [repo]
+
+
+def test_a_changed_linked_repo_changes_the_claude_spawn_key(tmp_path: Path) -> None:
+    provider = ClaudeProvider(tmp_path)
+    req_a = AgentRequest(prompt="x", model="sonnet", mode="auto", linked_repo="/r/a")
+    req_b = AgentRequest(prompt="x", model="sonnet", mode="auto", linked_repo="/r/b")
+
+    assert provider._spawn_key_for(req_a) != provider._spawn_key_for(req_b)
