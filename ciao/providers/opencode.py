@@ -1514,7 +1514,14 @@ def linked_repo_config_content(repo: str, existing: str = "") -> str:
         )
         return ""
     skills = config.setdefault("skills", {})
-    skills["paths"] = list(dict.fromkeys([*skills.get("paths", []), *paths]))
+    existing_paths = skills.get("paths", []) if isinstance(skills, dict) else None
+    if not isinstance(existing_paths, list):
+        logger.warning(
+            "opencode: OPENCODE_CONFIG_CONTENT has a non-standard skills block; "
+            "linked repo skills not added"
+        )
+        return ""
+    skills["paths"] = list(dict.fromkeys([*existing_paths, *paths]))
     return json.dumps(config)
 
 

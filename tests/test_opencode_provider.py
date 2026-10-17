@@ -4593,6 +4593,8 @@ def test_linked_repo_config_content_merges_an_existing_value(tmp_path):
     assert merged["theme"] == "y"
     assert merged["skills"]["paths"] == ["/x", str(repo / ".agents" / "skills")]
     assert linked_repo_config_content(str(repo), "not json") == ""
+    assert linked_repo_config_content(str(repo), '{"skills": ["x"]}') == ""
+    assert linked_repo_config_content(str(repo), '{"skills": {"paths": "x"}}') == ""
 
 
 @pytest.mark.asyncio
