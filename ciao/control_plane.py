@@ -2286,12 +2286,18 @@ class CiaoControlPlane:
         project = self._resolve_project(principal, project_id)
         return _ok(project.to_dict())
 
-    def project_create(self, principal: AgentPrincipal, name: str, context: str = "") -> dict[str, Any]:
+    def project_create(
+        self, principal: AgentPrincipal, name: str, context: str = "", repo_path: str = ""
+    ) -> dict[str, Any]:
         workspace = self._workspace(principal)
         clean_name = name.strip()
         if not clean_name:
             raise ControlPlaneError("invalid_name", "Project name is required.")
-        return _ok(self.pcm.create_project(clean_name, workspace, context, scaffold=True).to_dict())
+        return _ok(
+            self.pcm.create_project(
+                clean_name, workspace, context, scaffold=True, repo_path=repo_path
+            ).to_dict()
+        )
 
     def project_update(
         self,
@@ -2301,10 +2307,15 @@ class CiaoControlPlane:
         name: str | None = None,
         context: str | None = None,
         vault_folder: str | None = None,
+        repo_path: str | None = None,
     ) -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
         item = self.pcm.update_project(
-            project.project_id, name=name, context=context, vault_folder=vault_folder
+            project.project_id,
+            name=name,
+            context=context,
+            vault_folder=vault_folder,
+            repo_path=repo_path,
         )
         if item is None:
             raise ControlPlaneError("project_not_found", f"Project '{project.project_id}' was not found.")

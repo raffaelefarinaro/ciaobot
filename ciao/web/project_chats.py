@@ -90,7 +90,7 @@ def _restored_pin_paths(raw: Any) -> list[str]:
 import yaml
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import backup_scope, subagent_tracking
+from ciao import backup_scope, repo_link, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -361,6 +361,8 @@ class ProjectInfo:
     # Empty for every ordinary project, so this is not a behaviour switch for
     # an existing install.
     kind: str = ""
+    # Absolute path of the linked local git checkout (its toplevel), or "" when not linked. Validated by ciao.repo_link.
+    repo_path: str = ""
     # Runtime-only: relative path to the canonical vault doc (e.g.
     # "memory-vault/personal/projects/active/ciao-improvements/README.md"). Not
     # persisted in JSON; recomputed on every vault discovery pass.
@@ -384,6 +386,8 @@ class ProjectInfo:
             "order": self.order,
             "vault_folder": self.vault_folder,
             "kind": self.kind,
+            "repo_path": self.repo_path,
+            "repo": repo_link.repo_state(self.repo_path) if self.repo_path else None,
             "vault_doc_path": self.vault_doc_path,
             "is_system": self.is_system,
             "is_auto": self.is_auto,
@@ -923,6 +927,7 @@ class ProjectChatManager:
                 order=pd.get("order", 0),
                 vault_folder=pd.get("vault_folder", ""),
                 kind=pd.get("kind", ""),
+                repo_path=pd.get("repo_path", ""),
             )
         for cid, cd in data.get("chats", {}).items():
             chat_model = cd.get("model", self._config.claude_default_model)
@@ -1043,6 +1048,9 @@ class ProjectChatManager:
                     "order": p.order,
                     "vault_folder": p.vault_folder,
                     "kind": p.kind,
+                    # Only a linked project carries the key, so unlinked
+                    # projects persist exactly as before.
+                    **({"repo_path": p.repo_path} if p.repo_path else {}),
                 }
                 for pid, p in self._projects.items()
             },
@@ -2602,8 +2610,13 @@ class ProjectChatManager:
         context: str = "",
         *,
         scaffold: bool = False,
+        repo_path: str = "",
     ) -> ProjectInfo:
-        """Register a project; with ``scaffold`` also create and bind its vault note."""
+        """Register a project; with ``scaffold`` also create and bind its vault note.
+
+        ``repo_path`` links a local git checkout; ValueError if invalid.
+        """
+        clean_repo = repo_link.validate_repo_path(repo_path)
         pid = f"proj-{chat_service._uuid8()}"
         project = ProjectInfo(
             project_id=pid,
@@ -2612,6 +2625,7 @@ class ProjectChatManager:
             context=context,
             created_at=chat_service._now_iso(),
             order=len(self._projects),
+            repo_path=clean_repo,
         )
         self._projects[pid] = project
         if scaffold:
@@ -2630,10 +2644,12 @@ class ProjectChatManager:
         name: str | None = None,
         context: str | None = None,
         vault_folder: str | None = None,
+        repo_path: str | None = None,
     ) -> ProjectInfo | None:
         project = self._projects.get(project_id)
         if project is None:
             return None
+        clean_repo = repo_link.validate_repo_path(repo_path) if repo_path is not None else None
         if name is not None:
             project.name = name
         context_changed = context is not None and context != project.context
@@ -2657,6 +2673,8 @@ class ProjectChatManager:
             # cleared or no canonical doc exists under the new folder yet.
             doc = self._project_doc_file(project)
             project.vault_doc_path = self._display_path(doc) if doc is not None else ""
+        if clean_repo is not None:
+            project.repo_path = clean_repo
         # Mirror the context into the canonical doc's frontmatter so the two
         # can't drift. Deliberately after the vault_folder branch, so a call
         # that rebinds and re-describes in one go writes to the new doc.

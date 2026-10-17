@@ -147,6 +147,7 @@ from ciao.web.routes_api import (
     project_restore,
     project_files_list,
     project_files_upload,
+    repo_candidates,
     dismiss_older_than,
     memory_receipt_undo,
     memory_receipt_detail,
@@ -411,6 +412,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/projects/{project_id}/chats", create_project_chat, methods=["POST"]),
         Route("/api/projects/{project_id}/files", project_files_list, methods=["GET"]),
         Route("/api/projects/{project_id}/files", project_files_upload, methods=["POST"]),
+        Route("/api/repos/candidates", repo_candidates, methods=["GET"]),
         Route("/api/desktop-drop", desktop_drop_import, methods=["POST"]),
         # Chats
         Route("/api/chats", list_all_chats, methods=["GET"]),

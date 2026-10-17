@@ -46,6 +46,7 @@ from ciao import backup_service
 from ciao import subagent_tracking
 from ciao import entity_types
 from ciao import provider_registry
+from ciao import repo_link
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
@@ -1666,15 +1667,22 @@ async def create_project(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
     body = await request.json()
-    project = pcm.create_project(
-        name=body["name"],
-        # An omitted workspace has to resolve to one that exists: create_project
-        # does not validate the name, so an unknown one yields a project that is
-        # filtered out of every workspace's sidebar.
-        workspace=body.get("workspace") or config.primary_workspace(),
-        context=body.get("context", ""),
-        scaffold=True,
-    )
+    repo_path = body.get("repo_path") or ""
+    if not isinstance(repo_path, str):
+        return JSONResponse({"error": "repo_path must be a string"}, status_code=400)
+    try:
+        project = pcm.create_project(
+            name=body["name"],
+            # An omitted workspace has to resolve to one that exists: create_project
+            # does not validate the name, so an unknown one yields a project that is
+            # filtered out of every workspace's sidebar.
+            workspace=body.get("workspace") or config.primary_workspace(),
+            context=body.get("context", ""),
+            scaffold=True,
+            repo_path=repo_path,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(project.to_dict(), status_code=201)
 
 
@@ -1703,12 +1711,16 @@ async def project_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok})
     # PATCH
     body = await request.json()
+    repo_path = body.get("repo_path")
+    if repo_path is not None and not isinstance(repo_path, str):
+        return JSONResponse({"error": "repo_path must be a string"}, status_code=400)
     try:
         project = pcm.update_project(
             project_id,
             name=body.get("name"),
             context=body.get("context"),
             vault_folder=body.get("vault_folder"),
+            repo_path=repo_path,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1749,6 +1761,12 @@ async def list_completed_projects(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     workspace = request.query_params.get("workspace")
     return JSONResponse(pcm.list_completed_projects(workspace))
+
+
+async def repo_candidates(request: Request) -> JSONResponse:
+    """Git checkouts the project Repository picker can offer. Read-only."""
+    payload = await asyncio.to_thread(repo_link.candidates_payload)
+    return JSONResponse(payload)
 
 
 async def project_restore(request: Request) -> JSONResponse:

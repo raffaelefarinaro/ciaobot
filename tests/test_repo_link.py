@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from ciao import repo_link
+
+
+def _init(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    return path
+
+
+def test_validate_accepts_checkout_toplevel(tmp_path: Path) -> None:
+    repo = _init(tmp_path / "repo")
+    assert os.path.samefile(repo_link.validate_repo_path(str(repo)), repo)
+
+
+def test_validate_empty_string_means_unlink() -> None:
+    assert repo_link.validate_repo_path("  ") == ""
+
+
+def test_validate_rejects_relative_path() -> None:
+    with pytest.raises(ValueError, match="absolute"):
+        repo_link.validate_repo_path("repos/x")
+
+
+def test_validate_rejects_missing_path(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        repo_link.validate_repo_path(str(tmp_path / "gone"))
+
+
+def test_validate_rejects_a_file(tmp_path: Path) -> None:
+    f = tmp_path / "f.txt"
+    f.write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a directory"):
+        repo_link.validate_repo_path(str(f))
+
+
+def test_validate_rejects_plain_directory(tmp_path: Path) -> None:
+    d = tmp_path / "plain"
+    d.mkdir()
+    with pytest.raises(ValueError, match="Not a git repository"):
+        repo_link.validate_repo_path(str(d))
+
+
+def test_validate_rejects_subdirectory_of_checkout(tmp_path: Path) -> None:
+    repo = _init(tmp_path / "repo")
+    (repo / "pkg").mkdir()
+    with pytest.raises(ValueError, match="top of the git checkout"):
+        repo_link.validate_repo_path(str(repo / "pkg"))
+
+
+def test_repo_state_reports_branch_and_dirty(tmp_path: Path) -> None:
+    repo = _init(tmp_path / "repo")
+    state = repo_link.repo_state(str(repo))
+    assert state["branch"] == "main"
+    assert state["dirty"] is False
+    assert state["missing"] is False
+    (repo / "new.txt").write_text("x", encoding="utf-8")
+    assert repo_link.repo_state(str(repo))["dirty"] is True
+
+
+def test_repo_state_missing_path(tmp_path: Path) -> None:
+    assert repo_link.repo_state(str(tmp_path / "gone"))["missing"] is True
+
+
+def test_repo_state_survives_git_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_a: object, **_k: object) -> None:
+        raise subprocess.TimeoutExpired("git", 5)
+
+    monkeypatch.setattr(repo_link.subprocess, "run", boom)
+    state = repo_link.repo_state(str(tmp_path))
+    assert state["branch"] == ""
+    assert state["dirty"] is False
+    assert state["missing"] is False
+
+
+def _make_root(root: Path) -> None:
+    (root / "a" / ".git").mkdir(parents=True)
+    (root / "c").mkdir()
+    (root / "c" / ".git").write_text("gitdir: elsewhere", encoding="utf-8")
+    (root / "b").mkdir()
+    (root / ".hidden" / ".git").mkdir(parents=True)
+    (root / "a" / "nested" / ".git").mkdir(parents=True)
+
+
+def test_candidates_lists_checkouts_one_level_down(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _make_root(root)
+    assert [c["name"] for c in repo_link.candidates([root])] == ["a", "c"]
+    names = [c["name"] for c in repo_link.candidates([tmp_path / "nope", root, root])]
+    assert names == ["a", "c"]
+
+
+def test_candidates_payload_uses_repo_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "root"
+    _make_root(root)
+    monkeypatch.setattr(repo_link, "REPO_ROOTS", (str(root),))
+    payload = repo_link.candidates_payload()
+    assert payload["roots"] == [str(root)]
+    assert [c["name"] for c in payload["candidates"]] == ["a", "c"]

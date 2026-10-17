@@ -30,15 +30,16 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
 | GET, POST | `/api/auth/settings` | Read whether a password is configured, or change the PWA password (`current_password` required) |
-| GET | `/api/projects` | List projects |
-| POST | `/api/projects` | Create project |
-| PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project |
+| GET | `/api/projects` | List projects. Each carries `repo_path` and `repo`: `{path, branch, dirty, missing}` or `null` when unlinked |
+| POST | `/api/projects` | Create project. Optional `repo_path` links a local git checkout (absolute path to its top level; 400 with the reason otherwise) |
+| PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project. PATCH accepts `repo_path` (`""` unlinks) |
 | POST | `/api/projects/reorder` | Reorder a workspace's projects (drag-to-reorder) |
 | POST | `/api/projects/{project_id}/complete` | Close a vault-backed project. Body `{"outcome": "completed"\|"stopped", "note": "..."}`; both fields optional (`completed` and an empty note when omitted). The note is written into the project document before the folder moves to `completed/`. Chats are archived. Open tasks stay on the board |
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
 | GET, POST | `/api/projects/{project_id}/chats` | List or create project chats. `?archived=1&offset=0&limit=10` returns a paginated compact archive catalog |
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
+| GET | `/api/repos/candidates` | Git checkouts one level under ~/repos, ~/code, ~/src, ~/dev, ~/Developer, ~/projects: `{roots, candidates: [{path, name, root}]}` |
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
 | GET | `/api/chats` | List all chats; `?active_only=1` returns only active chats plus compact memory-pass source metadata for Home |
 | GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
@@ -466,12 +467,20 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
   -H 'content-type: application/json' \
   -d '{"name":"Home reno","workspace":"personal","context":""}'
 
-# Update — any subset of: name, context, vault_folder. The running server owns
+# Update — any subset of: name, context, vault_folder, repo_path ("" unlinks). The running server owns
 # `.runtime/web_projects.json`; for renames, use PATCH here (not a hand-edit of
 # the file), or the next request will race with the server and create a duplicate.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/projects/$PID" \
   -H 'content-type: application/json' \
   -d '{"context":"Track the kitchen rebuild"}'
+
+# Link a local git checkout (must be the checkout's top level; 400 with the reason otherwise).
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/projects/$PID" \
+  -H 'content-type: application/json' \
+  -d '{"repo_path":"/Users/me/repos/myapp"}'
+
+# Candidate checkouts for the picker (read-only).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/repos/candidates"
 
 # Reorder — pass the full top-to-bottom sequence of project ids for one
 # workspace. Omitted ids keep their relative order after the listed ones;

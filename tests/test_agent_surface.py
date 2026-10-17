@@ -824,8 +824,10 @@ class _NamesPcm:
         self.updated: list[tuple[str, dict]] = []
         self.created: list[dict] = []
 
-    def create_project(self, name, workspace, context="", *, scaffold=False):
-        self.created.append({"name": name, "workspace": workspace, "context": context, "scaffold": scaffold})
+    def create_project(self, name, workspace, context="", *, scaffold=False, repo_path=""):
+        self.created.append(
+            {"name": name, "workspace": workspace, "context": context, "scaffold": scaffold, "repo_path": repo_path}
+        )
         return SimpleNamespace(to_dict=lambda: {"name": name})
 
     @staticmethod
@@ -888,6 +890,15 @@ def test_project_create_scaffolds_the_vault_note(tmp_path: Path) -> None:
     principal = SimpleNamespace(workspace="personal")
     plane.project_create(principal, "Q4", "ctx")
     assert pcm.created[-1]["scaffold"] is True
+
+
+def test_project_op_forwards_repo_path(tmp_path: Path) -> None:
+    service, _plane, pcm = _names_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        res = _post(client, token, "project", {"action": "create", "name": "Q4", "repo_path": "/x"})
+    assert res.json()["ok"] is True
+    assert pcm.created[-1]["repo_path"] == "/x"
 
 
 def test_chats_list_accepts_a_project_name(tmp_path: Path) -> None:
