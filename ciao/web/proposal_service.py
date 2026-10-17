@@ -1848,7 +1848,7 @@ def _accept_repo_row(
             conflict=True,
             error="AGENTS.md changed since it was read; nothing was written",
         )
-    except (mr.MemoryReceiptError, OSError, UnicodeError, AttributeError, ValueError) as exc:
+    except (mr.MemoryReceiptError, OSError, ValueError) as exc:
         return AcceptOutcome(ok=False, error=str(exc))
     return AcceptOutcome(
         ok=True, destination=str(doc), receipt_id=str(receipt.get("id") or "")

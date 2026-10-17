@@ -1965,3 +1965,13 @@ def test_repo_doc_prepared_receipt_recovers_as_applied(tmp_path):
     assert [row["id"] for row in result.reconciled] == ["mrcpt_repo_prepared"]
     settled = mr.find_receipt(journal, "mrcpt_repo_prepared")
     assert settled is not None and settled["status"] == mr.APPLIED
+
+
+def test_repo_doc_root_refuses_a_differently_cased_agents_md(tmp_path):
+    repo = tmp_path / "cased"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "agents.md").write_text("x\n", encoding="utf-8")
+    if (repo / "AGENTS.md").exists() is False:
+        pytest.skip("case-sensitive filesystem: agents.md is not AGENTS.md")
+    with pytest.raises(nr.NoteTargetRefused):
+        nr.repo_doc_root(repo)

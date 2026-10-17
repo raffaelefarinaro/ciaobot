@@ -1076,7 +1076,12 @@ def repo_doc_root(repo_root: Path | str) -> Path:
         raise NoteTargetRefused(f"repository root is not a directory: {repo_root}")
     if not (root / ".git").exists():
         raise NoteTargetRefused(f"{root} is not a git checkout")
-    resolve_note_path(root, REPO_DOC_NAME)
+    target = resolve_note_path(root, REPO_DOC_NAME)
+    if target.name != REPO_DOC_NAME:
+        raise NoteTargetRefused(
+            f"{target.name} is not spelled {REPO_DOC_NAME}; a repository write "
+            "names that exact file"
+        )
     return root
 
 
@@ -1387,7 +1392,7 @@ def undo_note_receipt(
             root = _repo_root_from_receipt(receipt)
         except NoteTargetRefused as exc:
             raise mr.RevisionConflict(
-                f"the note is no longer a writable note in this vault: {exc}"
+                "the repository's AGENTS.md is no longer a writable checkout file"
             ) from exc
         reverse_kind = REPO_DOC_UNDO
         reverse_provenance["repo_root"] = str(root)

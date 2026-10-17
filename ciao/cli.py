@@ -4238,6 +4238,13 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     if kind == REPO_DESTINATION:
         # Not stat'ed: the pass chat's sandbox may not see the repository, and
         # the accept validates it against the workspace's linked projects.
+        if "]" in payload:
+            print(
+                "kind 'repo' cannot queue a repository path containing ']': "
+                "the queue bullet cannot carry it",
+                file=sys.stderr,
+            )
+            return 2
         repo_payload = Path(payload).expanduser()
         if not repo_payload.is_absolute():
             print(
