@@ -1135,7 +1135,8 @@ class ChatStreaming:
                 except TimeoutError:
                     logger.warning("repo location refresh timed out for %s", chat_id)
                 except asyncio.CancelledError:
-                    # Finish the stream and publish done first; re-raise below.
+                    # Finish the stream, publish done and run the rest of turn end
+                    # first; re-raise at the end of the finally.
                     refresh_cancelled = True
                 except Exception:  # noqa: BLE001 — location is advisory; never block turn end
                     logger.exception("repo location refresh failed for %s", chat_id)
@@ -1151,8 +1152,6 @@ class ChatStreaming:
             if repo_loc is not None:
                 done["repo_location"] = repo_loc
             self._host._events.publish(done)
-            if refresh_cancelled:
-                raise asyncio.CancelledError
             chat_for_watcher = self._host._chats.get(chat_id)
             follow_up_expected = False
             if (
@@ -1205,6 +1204,8 @@ class ChatStreaming:
                 self._host._memory_pass_turn_finished(chat_id),
                 f"memory-pass-{chat_id}",
             )
+            if refresh_cancelled:
+                raise asyncio.CancelledError
 
     async def drive_stream(
         self,

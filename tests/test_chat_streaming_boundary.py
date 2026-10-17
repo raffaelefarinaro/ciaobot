@@ -699,12 +699,22 @@ async def test_slow_repo_location_refresh_is_bounded(
 async def test_cancel_during_repo_location_refresh_still_finishes_the_turn(
     tmp_path: Path,
 ) -> None:
-    host = _RefreshHost([AssistantTextDelta(type="text", text="hi")], tmp_path)
+    host = _RefreshHost(
+        [
+            AssistantTextDelta(type="text", text="hello"),
+            ResultEvent(type="result", result="done", session_id="session-1"),
+        ],
+        tmp_path,
+    )
     stream, task = await _drive_refresh_host(host)
     await asyncio.wait_for(host.refresh_started.wait(), 5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+    # The rest of turn end still ran before the cancellation propagated.
+    assert "memory-pass-chat-1" in host.detached_names
+    assert host.announcements == [("chat-1", "project-1", "Contract", "done")]
 
     assert stream.done is True
     assert host._broker.get("chat-1") is None

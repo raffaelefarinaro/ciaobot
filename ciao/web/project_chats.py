@@ -5561,7 +5561,7 @@ class ProjectChatManager:
                     ),
                     repo_location.REFRESH_TIMEOUT_S,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return dict(chat.repo_location), False
             changed = new != chat.repo_location
             if changed:
