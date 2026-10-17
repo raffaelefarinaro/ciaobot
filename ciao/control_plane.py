@@ -6020,6 +6020,11 @@ class CiaoControlPlane:
         up to three nearest existing paths under the workspace root, ranked by
         basename similarity to the requested path — so the caller can offer a
         correction instead of guessing.
+
+        ``pinned`` is whether this chat's pin now names the file. ``dismissed``
+        is true when the user closed this exact path in this chat earlier, so
+        the surface was skipped on purpose; the user re-arms it by pinning the
+        file themselves from the file viewer.
         """
         workspace = self._workspace(principal)
         # Root at the principal's own agent root, not the install root: sibling
@@ -6038,21 +6043,27 @@ class CiaoControlPlane:
             raise
         if not target.is_file():
             raise ControlPlaneError("unsupported_file", "Only an existing file can be surfaced.")
+        pinned = False
+        dismissed = False
         if principal.chat_id:
             # Only a chat-scoped principal can pin: an unscoped one validates
             # and reports, and must not pick a chat on the model's behalf.
             # Recorded after both checks above, so what is stored is a path this
             # principal was allowed to name, resolved the same way a manual pin
             # resolves it so the two writers produce the same identity key.
-            self.pcm.surface_chat_file(
-                principal.chat_id, target.resolve().as_posix()
-            )
+            canonical = target.resolve().as_posix()
+            pin = self.pcm.surface_chat_file(principal.chat_id, canonical)
+            if isinstance(pin, dict):
+                pinned = pin.get("path") == canonical
+                dismissed = canonical in (pin.get("dismissed_paths") or [])
         viewers, stream_state = self._file_surface_signal(principal.chat_id)
         return _ok(
             {
                 "path": target.relative_to(root).as_posix(),
                 "viewers": viewers,
                 "stream_state": stream_state,
+                "pinned": pinned,
+                "dismissed": dismissed,
             }
         )
 

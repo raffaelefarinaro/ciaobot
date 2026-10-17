@@ -1868,12 +1868,16 @@ class _StreamPcm:
     def __init__(self, stream: Any = None) -> None:
         self._stream = stream
         self.surfaced: list[tuple[str, str]] = []
+        self.dismissed: list[str] = []
 
     def get_active_stream(self, chat_id: str) -> Any:
         return self._stream
 
-    def surface_chat_file(self, chat_id: str, path: str) -> None:
+    def surface_chat_file(self, chat_id: str, path: str) -> dict[str, Any]:
         self.surfaced.append((chat_id, path))
+        if path not in self.dismissed:
+            return {"path": path, "dismissed_paths": list(self.dismissed), "revision": 1}
+        return {"path": "", "dismissed_paths": list(self.dismissed), "revision": 1}
 
 
 def _fake_ws(host: str) -> SimpleNamespace:
@@ -1967,7 +1971,13 @@ def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
     )
     result = plane.file_surface(principal, "note.md")
     assert result["ok"] is True
-    assert result["data"] == {"path": "note.md", "viewers": 1, "stream_state": "active"}
+    assert result["data"] == {
+        "path": "note.md",
+        "viewers": 1,
+        "stream_state": "active",
+        "pinned": True,
+        "dismissed": False,
+    }
 
 
 def test_file_surface_persists_the_canonical_path_only_for_a_chat_principal(
@@ -1987,19 +1997,43 @@ def test_file_surface_persists_the_canonical_path_only_for_a_chat_principal(
     (root / "reports").mkdir(parents=True)
     (root / "reports" / "october.md").write_text("b", encoding="utf-8")
 
-    plane.file_surface(_chat_principal("chat-1"), "reports/october.md")
+    chat_result = plane.file_surface(_chat_principal("chat-1"), "reports/october.md")
     assert pcm.surfaced == [
         ("chat-1", (root / "reports" / "october.md").as_posix())
     ]
+    assert chat_result["data"]["pinned"] is True
+    assert chat_result["data"]["dismissed"] is False
 
     # No chat principal: validation and the honest signal fields still happen,
     # but no chat's pin state is touched.
     result = plane.file_surface(_chat_principal(""), "reports/october.md")
     assert result["ok"] is True
     assert result["data"]["path"] == "reports/october.md"
+    assert result["data"]["pinned"] is False
+    assert result["data"]["dismissed"] is False
     assert pcm.surfaced == [
         ("chat-1", (root / "reports" / "october.md").as_posix())
     ]
+
+
+def test_file_surface_reports_a_dismissed_path(tmp_path: Path) -> None:
+    """A path the user closed in this chat is skipped, and the reply says so.
+
+    The surface stays ``ok`` (the dismissal is the user's choice), but the
+    agent must be able to tell it did not pin, so it can ask the user to pin
+    the file themselves.
+    """
+    plane = _file_surface_plane(tmp_path, stream=None, connection_tracker=None)
+    pcm = plane.pcm
+    assert isinstance(pcm, _StreamPcm)
+    root = plane.config.workspace_root
+    (root / "note.md").write_text("hi", encoding="utf-8")
+    pcm.dismissed = [(root / "note.md").as_posix()]
+
+    result = plane.file_surface(_chat_principal("chat-1"), "note.md")
+    assert result["ok"] is True
+    assert result["data"]["pinned"] is False
+    assert result["data"]["dismissed"] is True
 
 
 def test_file_surface_does_not_pin_a_rejected_path(tmp_path: Path) -> None:

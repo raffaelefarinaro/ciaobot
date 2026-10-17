@@ -1399,7 +1399,12 @@ async def _op_file_surface(service: CiaoMcpService, path: str) -> dict[str, Any]
     currently streaming for this chat, nothing about the panel. Never
     read either field as proof the panel opened or failed to open: say
     you called file_surface, and if the user reports nothing happened,
-    do not claim you already confirmed it failed."""
+    do not claim you already confirmed it failed.
+
+    ``pinned`` says whether the chat's pin now names this file.
+    ``dismissed: true`` means the user closed this file's panel earlier, so
+    the surface was skipped: tell the user it did not open and that they can
+    pin it from the file viewer's ⋯ menu."""
     return await service._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
 
 
