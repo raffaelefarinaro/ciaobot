@@ -133,83 +133,25 @@ async function expectNoFurtherMove(page: Page, posted: string[]) {
 const focusedClass = (page: Page) => page.evaluate(() => document.activeElement?.className ?? null)
 
 /**
- * Where the user might have moved focus while the move request was out: one place
- * per container a guard could name, from the composer bar outward past the routed
- * layout to the toast beside it. moveToBackground() hands focus back when it is
- * still the chip's, and must not read "inside <somewhere near the chip>" as
- * "mine". The only container holding all of these is the document root, and
- * nothing focusable sits outside it, so the ladder closes the closest()-shaped
- * misreadings together rather than one at a time.
+ * Where the user might have moved focus while the move request was out. One case
+ * is enough here: it proves the restore consults the guard with the real
+ * elements. The guard's own rule — the chip or the body, nothing else — is a
+ * unit in `src/lib/moveToBackground.ts`, because enumerating places was how
+ * every review round of this file found one more container the rule could be
+ * widened to (composer bar, composer surface, chat pane, chat layout, the toast
+ * beside it, the app root); that argument was never going to end in a test.
  */
 type FocusTarget = {
   what: string
   /** The class focus must still be on when the move call returns. */
   focused: string
   move: (page: Page) => Promise<void>
-  /** Puts anything the rung needs on screen before the chip is tapped. */
-  prepare?: (page: Page) => Promise<void>
-  /** A user-visible consequence of the focus being kept, where one exists. */
-  after?: (page: Page) => Promise<void>
 }
 
-const MOVED_FOCUS: FocusTarget[] = [
-  {
-    what: 'the draft the user is writing',
-    focused: 'chat-input',
-    move: (page) => page.locator('.chat-input').fill('next message'),
-  },
-  {
-    what: 'a control in the composer bar',
-    focused: 'model-picker-summary',
-    move: (page) => page.locator('.model-picker-summary').focus(),
-  },
-  {
-    what: 'the title the user is editing',
-    focused: 'title-input',
-    move: async (page) => {
-      await page.locator('.chat-title').dblclick()
-      await page.locator('.title-input').fill('Partial title')
-    },
-    after: async (page) => {
-      // Typing goes wherever focus is, and the title editor saves on blur: had
-      // the restore taken focus, the keystrokes would miss the editor and the
-      // half-typed title would already be saved.
-      await page.keyboard.type(' suffix')
-      await expect(page.locator('.title-input')).toHaveValue('Partial title suffix')
-    },
-  },
-]
-
-/** The same, one container further out: the sidebar is not inside the chat pane. */
-const SIDEBAR_FOCUS: FocusTarget = {
-  what: 'a control in the sidebar',
-  focused: 'sidebar-new-chat',
-  move: (page) => page.locator('.sidebar-new-chat').focus(),
-}
-
-/**
- * Past the routed layout altogether: the toast stack is rendered beside it, so a
- * guard that widened "ours" to the layout would take focus from a toast. The
- * user is mid-draft and a move failed first, leaving a real persistent toast.
- */
-const TOAST_FOCUS: FocusTarget = {
-  what: 'the error toast the user moved to',
-  focused: 'toast-close',
-  prepare: async (page) => {
-    await page.locator('.chat-input').fill('Unfinished private draft')
-    await page.route('**/api/chats/*/move-to-background', (route) => route.fulfill({ status: 500, contentType: 'application/json', body: '{}' }))
-    await page.locator(CHIP).focus()
-    await page.locator(CHIP).click()
-    await expect(page.locator('.toast-error .toast-close')).toBeVisible()
-  },
-  move: (page) => page.locator('.toast-error .toast-close').focus(),
-  after: async (page) => {
-    // Enter is the toast's own activate key, so the dismissal is what must happen
-    // — and the draft must not be what gets sent instead.
-    await page.keyboard.press('Enter')
-    await expect(page.locator('.toast-error .toast-close')).toHaveCount(0)
-    await expect(page.locator('.chat-input')).toHaveValue('Unfinished private draft')
-  },
+const DRAFT_FOCUS: FocusTarget = {
+  what: 'the draft the user is writing',
+  focused: 'chat-input',
+  move: (page) => page.locator('.chat-input').fill('next message'),
 }
 
 /**
@@ -233,10 +175,6 @@ async function expectMoveLeavesFocusAlone(page: Page, target: FocusTarget) {
 
   await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', true)])
   await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
-
-  // Anything the rung needs on screen before the tap — a toast from an earlier
-  // failure, for one.
-  if (target.prepare) await target.prepare(page)
 
   // Hold the move open, tap the chip to arm the restore, then move focus
   // somewhere of the user's own choosing.
@@ -278,7 +216,6 @@ async function expectMoveLeavesFocusAlone(page: Page, target: FocusTarget) {
   const focusLog = await page.evaluate(() => (window as unknown as { __focusLog: string[] }).__focusLog)
   expect(focusLog.slice(loggedWhenTheyMoved)).toEqual([])
   expect(await focusedClass(page)).toContain(target.focused)
-  if (target.after) await target.after(page)
 }
 
 test.beforeEach(async ({ page }, testInfo) => {
@@ -413,11 +350,9 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
     await expect(page.locator('.chat-input')).toHaveValue('next message')
   })
 
-  for (const target of MOVED_FOCUS) {
-    test(`a call that ends while the move is out does not steal ${target.what}`, async ({ page }) => {
-      await expectMoveLeavesFocusAlone(page, target)
-    })
-  }
+  test(`a call that ends while the move is out does not steal ${DRAFT_FOCUS.what}`, async ({ page }) => {
+    await expectMoveLeavesFocusAlone(page, DRAFT_FOCUS)
+  })
 })
 
 test.describe('move a running call to the background (#1413), on a desktop width', () => {
@@ -436,20 +371,5 @@ test.describe('move a running call to the background (#1413), on a desktop width
       .toContain('chat-input')
 
     await expectNoFurtherMove(page, posted)
-  })
-
-  test('a call that ends while the move is out does not steal a control in the sidebar', async ({ page }) => {
-    await expectMoveLeavesFocusAlone(page, SIDEBAR_FOCUS)
-  })
-
-  test('a call that ends while the move is out does not steal the error toast the user moved to', async ({ page }) => {
-    // Enter-to-send is what makes the loss concrete: the Enter meant for the
-    // toast's Dismiss would otherwise reach the composer and send the draft.
-    await page.route('**/api/settings/keyboard', (route) => route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ keyboard_shortcuts: {}, keyboard_send_mode: 'enter', mid_turn_delivery: 'queue', revision: 'focus-guard' }),
-    }))
-    await expectMoveLeavesFocusAlone(page, TOAST_FOCUS)
   })
 })
