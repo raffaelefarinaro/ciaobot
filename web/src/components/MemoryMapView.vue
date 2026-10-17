@@ -1704,7 +1704,7 @@ onBeforeUnmount(() => {
   flex: none;
   min-width: 280px;
   max-width: 60%;
-  margin: var(--space-2) var(--space-2) var(--space-2) 0;
+  margin: var(--space-4) var(--space-4) var(--space-4) 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
