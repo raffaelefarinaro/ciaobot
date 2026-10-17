@@ -72,6 +72,19 @@ describe('descriptorFor', () => {
   })
 })
 
+describe('repo', () => {
+  it('repo rows name the repository AGENTS.md and accept only with a target', () => {
+    const r = row({ kind: 'repo', target: '/Users/x/app' })
+    expect(PROPOSAL_KINDS.repo.label).toBe('repo')
+    expect(descriptorFor(r).destination(r)).toBe('/Users/x/app/AGENTS.md')
+    const unnamed = row({ kind: 'repo' })
+    expect(descriptorFor(unnamed).destination(unnamed)).toBe('no repository named')
+    expect(PROPOSAL_KINDS.repo.canAccept(r)).toBe(true)
+    expect(PROPOSAL_KINDS.repo.canAccept(unnamed)).toBe(false)
+    expect(PROPOSAL_KINDS.repo.fallback).toBeNull()
+  })
+})
+
 describe('note_edit', () => {
   function editRow(over: Partial<ProposalRow> = {}): ProposalRow {
     return row({

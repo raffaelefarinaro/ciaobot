@@ -16,6 +16,9 @@ belongs. The destination vocabulary is :data:`DESTINATIONS`:
 * ``[learnings]`` — reusable how-to knowledge → ``Workspace/Learnings.md``.
 * ``[review]``   — nobody was sure → waits for a human or the curator.
 
+``[repo <path>]`` is queued too but is not in :data:`DESTINATIONS`, see
+:data:`REPO_DESTINATION`.
+
 It also owns the one note-rewriting primitive the queue needs outside a region:
 :func:`set_note_type`, which a `[category <id>]` accept uses to retype the notes
 that were already filed under a spelling nobody had written down.
@@ -282,6 +285,13 @@ DESTINATIONS: tuple[str, ...] = (
 """Destination vocabulary shared with the proposals queue and the stock memory
 assets. A bullet tagged outside this set is treated as untagged and falls back
 to section defaults."""
+
+REPO_DESTINATION = "repo"
+"""The ``[repo <path>]`` kind: a fact for a linked repository's ``AGENTS.md``.
+
+Deliberately not in :data:`DESTINATIONS`: it needs a linked-repo payload that
+transcript-only producers (``import_extract``) cannot supply. The CLI and the
+memory pass use this constant instead."""
 
 # Matches a trailing destination tag: ``[memory]``, ``[project]``,
 # ``[people: Mo Salah]``. The colon-payload form is what the queue and the

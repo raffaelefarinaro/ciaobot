@@ -48,6 +48,7 @@ _DESTINATION_ACTIONS = (
     "fold_doc",
     "write_people_note",
     "append_learnings",
+    "append_repo_doc",
     "add_category",
 )
 

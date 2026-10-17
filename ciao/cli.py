@@ -4169,6 +4169,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         return refused
     from ciao.memory_proposals import (
         DESTINATIONS,
+        REPO_DESTINATION,
         MemoryProposal,
         append_proposals,
         was_dismissed,
@@ -4217,22 +4218,34 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     # (newlines included) into a single space.
     text = " ".join(text.split())
     kind = args.kind.strip().lower()
-    if kind not in DESTINATIONS:
+    allowed = (*DESTINATIONS, REPO_DESTINATION)
+    if kind not in allowed:
         print(
-            f"unknown kind {kind!r}; expected one of: {', '.join(DESTINATIONS)}",
+            f"unknown kind {kind!r}; expected one of: {', '.join(allowed)}",
             file=sys.stderr,
         )
         return 2
-    if kind in {"people", "project"} and not payload:
+    if kind in {"people", "project", REPO_DESTINATION} and not payload:
         # The PWA accept handlers refuse these bullets ("the bullet names no
         # person" / "...no project doc"), so queueing one would create a row
         # nobody can ever promote.
         print(
             f"kind {kind!r} requires a --payload naming its target "
-            "(person name for people, doc path for project)",
+            "(person name for people, doc path for project, repository path for repo)",
             file=sys.stderr,
         )
         return 2
+    if kind == REPO_DESTINATION:
+        # Not stat'ed: the pass chat's sandbox may not see the repository, and
+        # the accept validates it against the workspace's linked projects.
+        repo_payload = Path(payload).expanduser()
+        if not repo_payload.is_absolute():
+            print(
+                "kind 'repo' needs the repository's absolute path as --payload/--payload-file",
+                file=sys.stderr,
+            )
+            return 2
+        payload = str(repo_payload)
     # `--request` is lesson provenance: it is what a `[learnings]` accept hands
     # to `append_learning` so the line can cite the user request the sighting
     # came from instead of an archive turn that does not exist. A request on any
@@ -7625,15 +7638,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="memory",
         help=(
             "Destination kind: memory, profile, project, people, learnings, "
-            "review. Defaults to memory."
+            "review, repo. Defaults to memory."
         ),
     )
     memory_proposal_add_parser.add_argument(
         "--payload",
         default="",
         help=(
-            "Kind payload: person name for people, doc path for project. "
-            "Required for those two kinds."
+            "Kind payload: person name for people, doc path for project, "
+            "absolute repository path for repo. Required for those kinds."
         ),
     )
     memory_proposal_add_parser.add_argument(

@@ -16,6 +16,7 @@ dictionary the routes read back by string.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 from contextlib import contextmanager
@@ -1782,6 +1783,78 @@ def _accept_learnings_row(config, row: dict[str, Any]) -> AcceptOutcome:
     return AcceptOutcome(ok=True, destination="Workspace/Learnings.md")
 
 
+def linked_repo_paths(pcm: Any, workspace: str) -> list[str]:
+    """repo_path of every project in *workspace* that is linked. Call on the event loop."""
+    if pcm is None:
+        return []
+    return [p.repo_path for p in pcm.list_projects(workspace) if getattr(p, "repo_path", "")]
+
+
+def _resolve_repo_doc(
+    row: dict[str, Any], linked_repos: Sequence[str]
+) -> tuple[Path | None, str]:
+    """(<repo>/AGENTS.md, "") or (None, reason)."""
+    from ciao import note_receipts as nr
+
+    target = str(row.get("target") or "").strip()
+    if not target:
+        return None, "the bullet names no repository"
+
+    def canon(raw: str) -> str:
+        return os.path.normcase(str(Path(raw).resolve()))
+
+    wanted = canon(target)
+    match = next((path for path in linked_repos if canon(path) == wanted), None)
+    if match is None:
+        return None, f"no project in this workspace is linked to {target} any more"
+    try:
+        root = nr.repo_doc_root(match)
+    except nr.NoteTargetRefused:
+        return None, (
+            f"{match} has no AGENTS.md this accept can append to "
+            "(or it is not a git checkout)"
+        )
+    return root / nr.REPO_DOC_NAME, ""
+
+
+def _accept_repo_row(
+    config, row: dict[str, Any], linked_repos: Sequence[str]
+) -> AcceptOutcome:
+    """Append an accepted `[repo <path>]` fact to the linked repository's AGENTS.md."""
+    from ciao import memory_receipts as mr
+    from ciao import note_receipts as nr
+
+    doc, reason = _resolve_repo_doc(row, linked_repos)
+    if doc is None:
+        return AcceptOutcome(ok=False, error=reason)
+    try:
+        vault = Path(config.workspace_vault_root(row["workspace"]))
+        text = doc.read_bytes().decode("utf-8")
+        item = "- " + str(row["text"]).strip()
+        if item in text.splitlines():
+            return AcceptOutcome(ok=True, destination=str(doc), duplicate=True)
+        receipt = nr.append_repo_doc_item(
+            vault_root=vault,
+            repo_root=doc.parent,
+            expected_revision=mr.content_revision(text),
+            item=item,
+            actor="proposal-accept",
+            source="pwa",
+            workspace=row["workspace"],
+        )
+    except mr.RevisionConflict:
+        return AcceptOutcome(
+            ok=False,
+            conflict=True,
+            error="AGENTS.md changed since it was read; nothing was written",
+        )
+    except (mr.MemoryReceiptError, OSError, UnicodeError, AttributeError, ValueError) as exc:
+        return AcceptOutcome(ok=False, error=str(exc))
+    return AcceptOutcome(
+        ok=True, destination=str(doc), receipt_id=str(receipt.get("id") or "")
+    )
+
+
 def _note_path_in_vault(vault: Path, rendered: str) -> Path:
     """Resolve a rendered ``Entry.path`` back to a file inside *vault*.
 
@@ -2698,6 +2771,49 @@ def _learnings_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]
     return out
 
 
+def _repo_preview(
+    config, row: dict[str, Any], text: str, linked_repos: Sequence[str]
+) -> dict[str, Any]:
+    """What accepting one `[repo <path>]` bullet would leave in <repo>/AGENTS.md."""
+    from ciao import note_receipts as nr
+    from ciao.memory_receipts import content_revision
+
+    out = _base_preview(row)
+    doc, reason = _resolve_repo_doc(row, linked_repos)
+    if doc is None:
+        out["reason"] = reason
+        return out
+    out["destination"] = out["destination_path"] = str(doc)
+    try:
+        before = doc.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        out["reason"] = f"could not read {doc}: {exc}"
+        return out
+    item = "- " + text.strip()
+    duplicate = item in before.splitlines()
+    try:
+        after = before if duplicate else nr.compose_repo_doc_append(before, item)
+    except Exception as exc:  # noqa: BLE001 - a refused compose is a reason, not a 500
+        out["reason"] = str(exc)
+        return out
+    before_clip, before_cut = _clip(before)
+    after_clip, after_cut = _clip(after)
+    out["revision"] = content_revision(before)
+    out["before"] = before_clip
+    out["after"] = after_clip
+    out["truncated"] = before_cut or after_cut
+    out["operation"] = "none" if duplicate else "add"
+    out["exact"] = True
+    out["can_accept"] = True
+    out["reason"] = (
+        "already in AGENTS.md; accepting only clears the row"
+        if duplicate
+        else "adds one bullet under ## Agent learnings in the repository's AGENTS.md; "
+        "undoable from History and visible in git diff"
+    )
+    return out
+
+
 def _people_preview(config, row: dict[str, Any], text: str) -> dict[str, Any]:
     """What accepting one `[people]` bullet would write.
 
@@ -3007,7 +3123,13 @@ def _rehome_preview(config, row: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def preview_row(config, ctx: dict[str, Any], text: str = "") -> dict[str, Any]:
+def preview_row(
+    config,
+    ctx: dict[str, Any],
+    text: str = "",
+    *,
+    linked_repos: Sequence[str] = (),
+) -> dict[str, Any]:
     """Exactly what accepting one queued row would write, without writing it.
 
     ``text`` overrides the bullet's own wording, which is what the review
@@ -3035,6 +3157,8 @@ def preview_row(config, ctx: dict[str, Any], text: str = "") -> dict[str, Any]:
         out = _region_preview(config, row, fact)
     elif accept.action == "append_learnings":
         out = _learnings_preview(config, row, fact)
+    elif accept.action == "append_repo_doc":
+        out = _repo_preview(config, row, fact, linked_repos)
     elif accept.action == "write_people_note":
         out = _people_preview(config, row, fact)
     elif accept.action == "fold_doc":
@@ -3054,7 +3178,9 @@ def preview_row(config, ctx: dict[str, Any], text: str = "") -> dict[str, Any]:
     return out
 
 
-def destination_revision(config, row: dict[str, Any]) -> str:
+def destination_revision(
+    config, row: dict[str, Any], *, linked_repos: Sequence[str] = ()
+) -> str:
     """The destination's revision right now, for the accept's conflict check.
 
     The same digest :func:`preview_row` pins, recomputed at accept time. An
@@ -3088,6 +3214,11 @@ def destination_revision(config, row: dict[str, Any]) -> str:
 
             vault = Path(config.workspace_vault_root(row["workspace"]))
             return content_revision(read_learnings(vault))
+        if accept.action == "append_repo_doc":
+            doc, _reason = _resolve_repo_doc(row, linked_repos)
+            if doc is None:
+                return ""
+            return content_revision(doc.read_bytes().decode("utf-8"))
         if accept.action == "write_people_note":
             from ciao.memory_proposals import PERSON_TYPE_ID, entity_note_path
 
