@@ -1198,6 +1198,9 @@ class ChatStreaming:
         # Steps are joined with a paragraph break where a tool call or thinking
         # block separated them, as the live view renders them.
         streamed_steps = TextStepJoiner()
+        # A compaction keeps the native session id but drops the stable
+        # context from its history, so this turn must not re-commit the marker.
+        compacted_this_turn = False
 
         async for event in provider.execute_streaming(request):
             streamed_steps.feed(event)
@@ -1308,24 +1311,34 @@ class ChatStreaming:
                 if sdk_sid != chat.session_id:
                     self._host._rotate_session_id(chat, sdk_sid)
                     changed = True
-                changed = (
-                    self._host._commit_context_marker(chat, request, sdk_sid) or changed
-                )
                 if changed:
                     self._host._save()
-            if isinstance(event, ResultEvent) and event.session_id:
-                changed = False
-                if event.session_id != chat.session_id:
-                    self._host._rotate_session_id(chat, event.session_id)
-                    changed = True
-                changed = (
-                    self._host._commit_context_marker(
-                        chat, request, event.session_id
-                    )
-                    or changed
-                )
-                if changed:
+            if isinstance(event, SystemStatusEvent) and (event.status or "").startswith(
+                "Compacted context"
+            ):
+                compacted_this_turn = True
+                if chat.context_digest or chat.context_session_id:
+                    chat.context_digest = ""
+                    chat.context_session_id = ""
                     self._host._save()
+            if isinstance(event, ResultEvent):
+                result_sid = event.session_id or provider.current_session_id
+                if result_sid:
+                    changed = False
+                    if event.session_id and event.session_id != chat.session_id:
+                        self._host._rotate_session_id(chat, event.session_id)
+                        changed = True
+                    # Only a turn that completed proves the session holds the
+                    # stable context: a rejected prompt never reached it.
+                    if not event.is_error and not compacted_this_turn:
+                        changed = (
+                            self._host._commit_context_marker(
+                                chat, request, result_sid
+                            )
+                            or changed
+                        )
+                    if changed:
+                        self._host._save()
             yield event
 
     def record_stopped_turn(

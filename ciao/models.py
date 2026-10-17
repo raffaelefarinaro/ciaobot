@@ -136,6 +136,10 @@ class AgentRequest:
     # lets a pre-session failure retry with the full capsule.
     context_digest: str = ""
     context_session_id: str = ""
+    # True when the chat's persisted context marker says the resumed native
+    # session already holds Ciaobot's stable context (and, for OpenCode, the
+    # chat core sent with it). Lets a freshly built provider skip re-sending.
+    context_primed: bool = False
     # Full stable context held aside for providers that have to replace a
     # missing/invalid resumed session after the request was built.
     stable_context_prefix: str = ""
