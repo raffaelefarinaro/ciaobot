@@ -4137,3 +4137,66 @@ def test_a_settled_entry_row_cannot_be_accepted_again(tmp_path: Path) -> None:
     assert (vault / _ENTRY_NOTE).read_text(encoding="utf-8") == _ENTRY_PLAIN, (
         "a settled record is not a licence to splice the bullet out afterwards"
     )
+
+
+# ── [repo <path>] rows ─────────────────────────────────────────────────────
+
+
+def _repo_vault(tmp_path: Path) -> tuple[CiaoConfig, Path]:
+    from types import SimpleNamespace  # noqa: F401
+
+    repo = tmp_path / "linked-repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "AGENTS.md").write_text("# App\n\nRules.\n", encoding="utf-8")
+    config = _config(tmp_path)
+    for ws in ("personal", "work"):
+        (config.workspace_vault_root(ws) / "Workspace").mkdir(parents=True, exist_ok=True)
+    _write_queue(
+        config,
+        "work",
+        "# Memory Proposals\n\n## 2026-08-19 curation pass (this pass)\n\n"
+        f"- [repo {repo}] Run tests with make test  _(from: Decisions)_\n",
+    )
+    return config, repo
+
+
+def test_repo_accept_appends_to_linked_agents_md(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    config, repo = _repo_vault(tmp_path)
+    pcm = SimpleNamespace(
+        list_projects=lambda ws=None: [SimpleNamespace(workspace="work", repo_path=str(repo))]
+    )
+    client = _client(config, pcm)
+    row = _accept_kind_row(client, "repo")
+
+    preview = client.post(f"/api/proposals/{row['id']}/preview").json()["preview"]
+    assert preview["exact"] is True
+    assert preview["operation"] == "add"
+    assert preview["destination_path"] == str(repo.resolve() / "AGENTS.md")
+
+    resp = client.post(
+        f"/api/proposals/{row['id']}/accept", json={"expected_revision": preview["revision"]}
+    )
+
+    assert resp.status_code == 200, resp.json()
+    text = (repo / "AGENTS.md").read_text(encoding="utf-8")
+    assert "## Agent learnings" in text
+    assert "- Run tests with make test" in text
+    assert client.get("/api/proposals").json()["rows"] == []
+
+
+def test_repo_accept_refuses_unlinked_repo_and_keeps_row(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    config, repo = _repo_vault(tmp_path)
+    pcm = SimpleNamespace(list_projects=lambda ws=None: [])
+    client = _client(config, pcm)
+    row = _accept_kind_row(client, "repo")
+
+    resp = client.post(f"/api/proposals/{row['id']}/accept")
+
+    assert resp.status_code == 409
+    assert "linked" in resp.json()["error"]
+    assert "make test" not in (repo / "AGENTS.md").read_text(encoding="utf-8")
+    assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]

@@ -1606,3 +1606,24 @@ _EVIDENCE_TRANSCRIPT = "\n".join([
         "content": [{"type": "text", "text": "[scheduled] run the nightly audit"}],
     }),
 ])
+
+
+def test_add_command_repo_requires_an_absolute_path_payload(tmp_path: Path) -> None:
+    from ciao.cli import _memory_proposal_add_command
+
+    queue = tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md"
+    for payload in ("", "rel/path"):
+        assert _memory_proposal_add_command(_add_args(tmp_path, kind="repo", payload=payload)) == 2
+        assert not queue.exists()
+
+    repo = str(tmp_path / "app")
+    assert _memory_proposal_add_command(_add_args(tmp_path, kind="repo", payload=repo)) == 0
+    assert f"[repo {repo}]" in queue.read_text(encoding="utf-8")
+
+
+def test_add_command_repo_refuses_a_path_with_a_closing_bracket(tmp_path: Path) -> None:
+    from ciao.cli import _memory_proposal_add_command
+
+    payload = str(tmp_path / "app]x")
+    assert _memory_proposal_add_command(_add_args(tmp_path, kind="repo", payload=payload)) == 2
+    assert not (tmp_path / "memory-vault" / "Workspace" / "Memory-Proposals.md").exists()

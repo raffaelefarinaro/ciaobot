@@ -1792,3 +1792,46 @@ def test_observation_section_is_skipped_without_a_chat_id() -> None:
 def test_observation_prompt_formats_its_one_placeholder() -> None:
     rendered = memory_pass.OBSERVATION_PROMPT.format(chat_id="chat-1")
     assert "{" not in rendered and "}" not in rendered
+
+
+# ── Linked repository (#1437) ─────────────────────────────────────────────
+
+
+def _linked_pass(tmp_path: Path, repo: Path | None) -> tuple[ProjectChatManager, ChatInfo]:
+    manager = _make_manager(tmp_path)
+    source = _source(manager)
+    if repo is not None:
+        manager._projects[source.project_id].repo_path = str(repo)
+    project = manager._memory_pass.ensure_project("work")
+    pass_chat = manager.create_chat(
+        project.project_id,
+        title="Memory pass · Pricing rework",
+        helper={
+            "kind": "memory_pass",
+            "source_chat_id": source.chat_id,
+            "archive_policy": "when_clean",
+        },
+    )
+    return manager, pass_chat
+
+
+def test_pass_for_linked_project_carries_repo_section(tmp_path: Path) -> None:
+    repo = tmp_path / "app"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text("use make test\n", encoding="utf-8")
+    manager, pass_chat = _linked_pass(tmp_path, repo)
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert memory_pass.REPO_PROPOSAL_COMMAND in prompt
+    assert str(repo) in prompt
+    assert "use make test" in prompt
+    assert memory_pass.REPO_DOC_FENCE_OPEN in prompt
+
+
+def test_pass_for_unlinked_project_has_no_repo_section(tmp_path: Path) -> None:
+    manager, pass_chat = _linked_pass(tmp_path, None)
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert memory_pass.REPO_PROPOSAL_COMMAND not in prompt

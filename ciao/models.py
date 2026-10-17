@@ -153,6 +153,10 @@ class AgentRequest:
     # workspace vault root, de-duplicated. Machine scope ignores both.
     agent_fs_scope: str = "machine"
     agent_roots: tuple[str, ...] = ()
+    # Resolved path of the project's linked git repository ("" = none). Both
+    # providers load its skills and allow it in every filesystem scope; it is
+    # fixed when the provider process starts.
+    linked_repo: str = ""
 
     @property
     def control_token(self) -> str:
@@ -169,6 +173,11 @@ def agent_control_token(request: object) -> str:
     """
     extra_env = getattr(request, "extra_env", None) or {}
     return str(extra_env.get("CIAO_AGENT_TOKEN", "") or "")
+
+
+def linked_repo_of(request: object) -> str:
+    """The request's linked repository path, or "" (see AgentRequest.linked_repo)."""
+    return str(getattr(request, "linked_repo", "") or "")
 
 
 def provider_reuse_key(request: object) -> str:

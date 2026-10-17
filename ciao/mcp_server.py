@@ -575,6 +575,13 @@ async def _op_workspaces_list(service: CiaoMcpService) -> dict[str, Any]:
     return await service._invoke("workspaces_list", lambda cp, p: cp.workspaces_list(p))
 
 
+async def _op_repo_candidates(service: CiaoMcpService) -> dict[str, Any]:
+    """List git checkouts one level under ~/repos, ~/code, ~/src, ~/dev,
+    ~/Developer and ~/projects, as {roots, candidates: [{path, name, root}]}.
+    Read-only; link one with the project operation's repo_path."""
+    return await service._invoke("repo_candidates", lambda cp, p: cp.repo_candidates(p))
+
+
 async def _op_chats_list(
     service: CiaoMcpService,
     project_id: str = "",
@@ -1427,6 +1434,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("project", _WRITE, _op_project.__doc__ or "", _op_project),
     Operation("project_action", _DESTRUCTIVE, _op_project_action.__doc__ or "", _op_project_action),
     Operation("workspaces_list", _READ, _op_workspaces_list.__doc__ or "", _op_workspaces_list),
+    Operation("repo_candidates", _READ, _op_repo_candidates.__doc__ or "", _op_repo_candidates),
     Operation("chats_list", _READ, _op_chats_list.__doc__ or "", _op_chats_list),
     Operation("chat_get", _READ, _op_chat_get.__doc__ or "", _op_chat_get),
     Operation("chat_create", _WRITE, _op_chat_create.__doc__ or "", _op_chat_create),

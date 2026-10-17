@@ -22,6 +22,7 @@ export const PROJECTS = WORKSPACES.flatMap((workspace, wi) => ([
     workspace: workspace.name,
     context: `Synthetic ${workspace.name} general project`,
     order: 0,
+    repo: wi === 0 ? { path: '/synthetic/repos/alpha-app', branch: 'main', dirty: true, missing: false } : null,
     color: ['#ff4d6d', '#6a47b8', '#37b39c'][wi],
   },
   {
