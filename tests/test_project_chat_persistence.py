@@ -640,10 +640,82 @@ def test_request_is_context_primed_only_when_the_marker_matches_the_session(
     manager._commit_context_marker(chat, first, "ses_1")
     second = manager.build_agent_request(chat, prompt="second")
     assert second.context_primed is True
-    assert manager.build_agent_request(chat, prompt="/compact", compact=True).context_primed is False
+    compact = manager.build_agent_request(chat, prompt="/compact", compact=True)
+    assert compact.context_primed is False
 
     chat.context_digest = ""
     assert manager.build_agent_request(chat, prompt="third").context_primed is False
+
+
+async def _drive_marker_turn(tmp_path: Path, events: list) -> ChatInfo:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Marker", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    request = manager.build_agent_request(chat, prompt="first")
+
+    class _Provider:
+        current_session_id = None
+
+        async def execute_streaming(self, _request):
+            self.current_session_id = "native-session"
+            for event in events:
+                yield event
+
+    manager._providers[chat.chat_id] = _Provider()  # type: ignore[assignment]
+    outcome = _StreamOutcome(effective_model=chat.model)
+    async for _ in manager._drive_stream(
+        chat_id=chat.chat_id, request=request, outcome=outcome
+    ):
+        pass
+    return chat
+
+
+@pytest.mark.asyncio
+async def test_error_result_does_not_commit_the_context_marker(tmp_path: Path) -> None:
+    chat = await _drive_marker_turn(
+        tmp_path,
+        [
+            ResultEvent(
+                type="result",
+                result="rejected",
+                is_error=True,
+                session_id="native-session",
+            )
+        ],
+    )
+
+    assert chat.context_digest == ""
+    assert chat.context_session_id == ""
+    assert chat.session_id == "native-session"
+
+
+@pytest.mark.asyncio
+async def test_successful_result_commits_the_context_marker(tmp_path: Path) -> None:
+    chat = await _drive_marker_turn(
+        tmp_path,
+        [ResultEvent(type="result", result="ok", session_id="native-session")],
+    )
+
+    assert chat.context_digest
+    assert chat.context_session_id == "native-session"
+
+
+@pytest.mark.asyncio
+async def test_compaction_in_a_turn_leaves_the_context_marker_cleared(
+    tmp_path: Path,
+) -> None:
+    from ciao.models import SystemStatusEvent
+
+    chat = await _drive_marker_turn(
+        tmp_path,
+        [
+            SystemStatusEvent(type="system", status="Compacted context: 1 → 2 tokens"),
+            ResultEvent(type="result", result="ok", session_id="native-session"),
+        ],
+    )
+
+    assert chat.context_digest == ""
+    assert chat.context_session_id == ""
 
 
 def test_compact_request_carries_no_context_capsule(tmp_path: Path) -> None:

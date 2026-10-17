@@ -2110,7 +2110,8 @@ async def test_core_is_sent_again_after_compaction(tmp_path, monkeypatch, kind):
     client = _PromptRecordingClient()
 
     await _run_recorded_turn(provider, monkeypatch, client, "ses_core_compact")
-    assert provider._event_to_stream({"type": kind, "data": {}}) == []
+    events = provider._event_to_stream({"type": kind, "data": {}})
+    assert [e.status for e in events] == ["Compacted context"]
     await _run_recorded_turn(provider, monkeypatch, client, "ses_core_compact")
     await _run_recorded_turn(provider, monkeypatch, client, "ses_core_compact")
 
@@ -2326,9 +2327,8 @@ async def test_primed_request_after_compaction_still_sends_the_core(
     provider = _provider(tmp_path)
     client = _PromptRecordingClient()
 
-    assert (
-        provider._event_to_stream({"type": "session.compacted", "data": {}}) == []
-    )
+    events = provider._event_to_stream({"type": "session.compacted", "data": {}})
+    assert [(e.type, e.status) for e in events] == [("system", "Compacted context")]
     for _ in range(2):
         await _run_recorded_turn(
             provider,
@@ -2341,6 +2341,14 @@ async def test_primed_request_after_compaction_still_sends_the_core(
 
     assert _CORE_MARKER in client.bodies[0]["text"]
     assert _CORE_MARKER not in client.bodies[1]["text"]
+
+
+def test_compaction_event_reports_a_system_status(tmp_path):
+    events = _provider(tmp_path)._event_to_stream(
+        {"type": "session.compacted", "data": {}}
+    )
+
+    assert [(e.type, e.status) for e in events] == [("system", "Compacted context")]
 
 
 @pytest.mark.asyncio

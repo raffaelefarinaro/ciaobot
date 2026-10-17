@@ -3233,7 +3233,7 @@ class OpencodeProvider(BaseSDKProvider):
             # chat core sent on an earlier turn: send it again next turn.
             self._core_sent_session_id = ""
             self._core_dropped = True
-            return []
+            return [SystemStatusEvent(type="system", status="Compacted context")]
 
         if kind in {"session.reasoning.started", "session.text.started"}:
             part_kind = "reasoning" if kind.startswith("session.reasoning.") else "text"
