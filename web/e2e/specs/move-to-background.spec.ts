@@ -138,8 +138,9 @@ const focusedClass = (page: Page) => page.evaluate(() => document.activeElement?
  * elements. The guard's own rule — the chip or the body, nothing else — is a
  * unit in `src/lib/moveToBackground.ts`, because enumerating places was how
  * every review round of this file found one more container the rule could be
- * widened to (composer bar, composer surface, chat pane, chat layout, the toast
- * beside it, the app root); that argument was never going to end in a test.
+ * widened to (composer bar, composer surface, chat layout, the toast beside it,
+ * the app root, and the comment box teleported outside it); that argument was
+ * never going to end in a test.
  */
 type FocusTarget = {
   what: string
