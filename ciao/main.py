@@ -835,6 +835,9 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # window, so waiting for it would leave the chat claiming a run is
         # live for seconds after it exited.
         pcm.announce_background_runs(run.parent_chat_id, finished=run)
+        # The agent cancelled this run itself and already has its final state.
+        if not run.wake_owner:
+            return
         pcm.queue_background_wake(
             run.parent_chat_id,
             run_id=run.run_id,

@@ -188,6 +188,9 @@ class BackgroundRun:
     # Set when a terminal run's wake could not be delivered because the server
     # was draining for restart (or shutting down). The next start() replays it.
     wake_pending: bool = False
+    # False when the owning chat's agent cancelled the run itself: its cancel
+    # reply already carries the final state, so the finish edge must not wake it.
+    wake_owner: bool = True
 
     def is_terminal(self) -> bool:
         return self.status in _TERMINAL_STATUSES
@@ -803,7 +806,12 @@ class BackgroundRunner:
 
     # ── cancel ────────────────────────────────────────────────────────
 
-    async def cancel(self, run_id: str) -> BackgroundRun:
+    async def cancel(self, run_id: str, *, wake_owner: bool = True) -> BackgroundRun:
+        """Stop a live run.
+
+        ``wake_owner=False`` is the agent cancelling its own run: the finish
+        edge still announces, but does not wake the chat.
+        """
         run = self._store.get(run_id)
         if run is None:
             raise BackgroundRunError("run_not_found", f"Run '{run_id}' was not found.")
@@ -814,6 +822,9 @@ class BackgroundRunner:
             # Non-terminal with no live process: a crash orphan that start()
             # has not resolved yet. Resolve it here rather than hanging.
             return self._resolve_orphan(run)
+        if not wake_owner:
+            run.wake_owner = False
+            self._store.replace(run)
         self._cancelling.add(run_id)
         await self._terminate(proc, self._trees[run_id])
         self._close_tree(run_id)
