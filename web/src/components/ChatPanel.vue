@@ -1466,6 +1466,8 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
 }
 
 
+// `filePinned`: a file is docked beside this chat (ChatLayout's split view).
+const props = defineProps<{ filePinned?: boolean }>()
 const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 
 const store = useProjectStore()
@@ -2046,7 +2048,11 @@ const panelEl = ref<HTMLElement | null>(null)
 const railEl = ref<HTMLElement | null>(null)
 const railContextEl = ref<HTMLElement | null>(null)
 const isWidePane = ref(false)
-const railOpen = ref(true)
+// Chat details steps aside while a file is pinned: the tile is the window on
+// the right then, and two docked windows would leave the chat a sliver. It
+// comes back when the file is unpinned. The info tab still opens it on demand.
+const railOpen = ref(!props.filePinned)
+watch(() => props.filePinned, (pinned) => { railOpen.value = !pinned })
 const railShown = computed(() => isWidePane.value && railOpen.value)
 const drawerShown = computed(() => !isWidePane.value && inspectorOpen.value)
 let panelObserver: ResizeObserver | null = null
@@ -4804,7 +4810,9 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  min-height: 52px;
+  /* The pinned-file tile's title bar height (PinnedFilePanel), so both docked
+     windows carry the same bar. */
+  min-height: 44px;
   margin: -16px -16px 16px;
   padding: 0 12px 0 16px;
   border-bottom: 1px solid var(--border);
@@ -4845,8 +4853,13 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg2);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+  /* The docked pinned-file tile's shadow (ChatLayout .chat-split-side): the
+     two windows are one layer and lift the same way. */
+  box-shadow: 0 12px 32px -14px rgb(0 0 0 / 45%);
   font-size: var(--text-sm);
+}
+:global(:root.theme-light) .chat-rail:not(.chat-rail--drawer) {
+  box-shadow: 0 10px 28px -14px rgb(26 26 46 / 28%);
 }
 
 .chat-rail-origin {

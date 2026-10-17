@@ -50,6 +50,45 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   // unpins through the server, whereas an ordinary dismiss stays local.
   const sharedPinChatId = ref('')
 
+  // Where a file opens docked instead of in this viewer: the pin key of the
+  // chat or project on screen, set by ChatLayout while its split view is
+  // available (a wide pane on a chat or project route), '' everywhere else.
+  // Owned by the layout so the viewer never pins to a chat that is not shown.
+  const dockTarget = ref('')
+  function setDockTarget(key: string): void {
+    dockTarget.value = key
+  }
+
+  /**
+   * Pin the file beside the chat instead of opening the viewer, so it lands in
+   * the tile without the modal flashing up first. A file a chat opens always
+   * docks, replacing the current pin; any other open docks only while nothing
+   * is pinned, so a link followed from the pinned file itself opens over it
+   * rather than navigating it away. Returns false (and the caller opens the
+   * viewer as usual) when there is no dock or the pin write fails.
+   */
+  async function dockInstead(filePath: string, chat: string): Promise<boolean> {
+    const key = dockTarget.value
+    if (!key || isOpen.value) return false
+    const current = projectStore.pinnedFileFor(key)
+    if (current && !chat) return false
+    let target = filePath
+    if (chat) {
+      try {
+        const resolved = await api.get<{ path: string }>(
+          `/api/chats/${encodeURIComponent(chat)}/file-path?path=${encodeURIComponent(filePath)}`,
+        )
+        target = resolved.path
+      } catch {
+        return false
+      }
+    }
+    target = target.replace(/:\d+$/, '')
+    if (dockTarget.value !== key) return false
+    if (projectStore.pinnedFileFor(key) === target) return true
+    return projectStore.pinFile(key, target)
+  }
+
   // Edit state. When `editing` is true the modal swaps the read-only viewer
   // for a textarea pre-filled with `content`. `editBuffer` holds the in-flight
   // edits so cancel discards cleanly without clobbering on-disk content.
@@ -146,6 +185,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     chat: string = '',
   ): Promise<boolean> {
     if (!filePath || !await canReplaceOpenFile(filePath)) return false
+    if (await dockInstead(filePath, chat)) return true
     _reset()
     isOpen.value = true
     path.value = filePath
@@ -289,6 +329,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
 
   async function openImage(filePath: string, chat: string = ''): Promise<boolean> {
     if (!filePath || !await canReplaceOpenFile(filePath)) return false
+    if (await dockInstead(filePath, chat)) return true
     _reset()
     isOpen.value = true
     kind.value = 'image'
@@ -413,6 +454,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     loadToken,
     chatId,
     sharedPinChatId,
+    dockTarget,
     editing,
     isDirty,
     editBuffer,
@@ -429,6 +471,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     open,
     openImage,
     openSharedPin,
+    setDockTarget,
     loadSource,
     setHtmlView,
     close,

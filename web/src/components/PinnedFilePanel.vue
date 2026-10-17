@@ -1292,12 +1292,13 @@ defineExpose({ isBusyAuthoring })
 }
 
 /* A window title bar, not a page header: shorter than the chat's, on the tile
-   surface, with its own tight inset instead of the page grid's gutter. 52px =
-   the chat header's 61px less the tile's 8px inset and 1px border, so the two
-   header rules meet on one line across the gap. */
+   surface, with its own tight inset instead of the page grid's gutter. 44px =
+   the chat header's 61px less the tile's 16px inset and 1px border, so the two
+   header rules meet on one line across the gap. The 16px leading inset is
+   Chat details' padding, so both windows start their titles alike. */
 .pinned-file-panel > :deep(.pane-header) {
-  height: 52px;
-  padding: 0 4px 0 12px;
+  height: 44px;
+  padding: 0 4px 0 16px;
   background: transparent;
 }
 

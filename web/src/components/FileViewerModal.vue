@@ -14,11 +14,16 @@
           @escape-key-down="onEscapeKeyDown"
           @pointer-down-outside="onPointerDownOutside"
         >
-          <div class="fv-modal" tabindex="-1">
+          <div class="fv-modal" :class="{ 'fv-modal--doc': isProse }" tabindex="-1">
             <header :ref="setModalEl" class="fv-header">
               <div class="fv-titles">
                 <DialogTitle as="div" class="fv-title" :title="store.path">{{ basename }}</DialogTitle>
-                <DialogDescription as="div" class="fv-subtitle" :title="store.path">{{ store.path }}<span v-if="store.line"> :{{ store.line }}</span></DialogDescription>
+                <!-- The folder, shortened as the pinned tile shows it; the
+                     full path stays in the description for screen readers. -->
+                <DialogDescription as="div" class="fv-subtitle" :title="store.path">
+                  <span aria-hidden="true">{{ shortDirname(cleanPath(store.path)) }}<template v-if="store.line"> :{{ store.line }}</template></span>
+                  <span class="sr-only">{{ store.path }}<template v-if="store.line"> :{{ store.line }}</template></span>
+                </DialogDescription>
               </div>
         <div class="fv-actions">
           <button
@@ -44,7 +49,7 @@
           <button
             v-if="store.path"
             type="button"
-            class="fv-text-btn"
+            class="fv-text-btn fv-discuss-btn"
             title="Discuss in chat"
             @click="discussInChat"
           >Discuss</button>
@@ -67,6 +72,10 @@
             </DropdownMenuTrigger>
             <DropdownMenuContent as-child align="end" :side-offset="6" :collision-padding="8">
               <div class="fv-actions-menu">
+                <!-- On a phone Discuss moves here, so the filename keeps the bar. -->
+                <DropdownMenuItem v-if="store.path" as-child class="fv-menu-discuss" @select="discussInChat">
+                  <button type="button">Discuss in chat</button>
+                </DropdownMenuItem>
                 <DropdownMenuItem as-child @select.prevent="copyPath">
                   <button type="button">{{ copyState === 'ok' ? 'Copied' : 'Copy path' }}</button>
                 </DropdownMenuItem>
@@ -338,6 +347,7 @@ import { buildVaultDocumentMetadata, humanizeVaultMetadata, isVaultMetadataUrl, 
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isLoopbackPage } from '../lib/loopback'
 import { isCsvPath } from '../lib/csv'
+import { shortDirname } from '../lib/chatActivity'
 import { useFileComments } from '../composables/useFileComments'
 import { useTypeToComment } from '../composables/useTypeToComment'
 import { useViewportHeight } from '../composables/useViewportHeight'
@@ -767,10 +777,11 @@ const openExternalState = ref<'' | 'loading' | 'ok'>('')
 // or another Mac it would open on a screen nobody is looking at.
 const canOpenExternally = isLoopbackPage()
 
-const activePinKey = computed(() => {
-  return store.chatId || projectsStore.activeChatId || projectsStore.activeChat?.project_id || ''
-})
-const canPin = computed(() => !!activePinKey.value && window.innerWidth > 768)
+// The chat or project on screen whose split view can take the file; '' where
+// there is none (a phone, Home, Settings, the memory map). Pinning anywhere
+// else would put the file beside a chat that is not shown.
+const activePinKey = computed(() => store.dockTarget)
+const canPin = computed(() => !!activePinKey.value)
 const isPinned = computed(() => {
   if (!activePinKey.value) return false
   return projectsStore.pinnedFileFor(activePinKey.value) === cleanPath(store.path)
@@ -791,24 +802,6 @@ async function togglePin(): Promise<void> {
     if (pinned && store.loadToken === generation && cleanPath(store.path) === path) void store.close()
   }
 }
-
-// Automatically pin opened documents to the side panel if desktop split view is available
-// and no file is currently pinned in the active chat/project, bypassing the modal overlay.
-watch(
-  [() => store.isOpen, () => store.path, () => store.loading],
-  ([isOpen, currentPath, loading]) => {
-    if (!isOpen || !currentPath || loading || store.error) return
-    const key = activePinKey.value
-    if (canPin.value && key && !projectsStore.pinnedFileFor(key)) {
-      void (async () => {
-        const generation = store.loadToken
-        const pinned = await projectsStore.pinFile(key, cleanPath(currentPath))
-        if (pinned && store.loadToken === generation && store.path === currentPath) void store.close()
-      })()
-    }
-  },
-  { immediate: true },
-)
 
 // Selection-driven comment UX. Two states:
 //   1. selectionAnchor != null  → floating "Comment" trigger sits near the
@@ -1024,6 +1017,10 @@ const basename = computed(() => {
 
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(store.path))
 const isCsv = computed(() => isCsvPath(store.path))
+// A text document reads at its measure, so the window is sized to it rather
+// than leaving the prose on the left of a 1200px box. Images, PDFs, artifacts
+// and CSV tables keep the wide window.
+const isProse = computed(() => store.kind === 'text' && !isCsv.value)
 
 // Scroll the modal into focus + jump to line if requested whenever the
 // store finishes loading a new file.
@@ -1254,10 +1251,12 @@ watch(
   outline: none;
 }
 .fv-modal {
-  background: var(--bg);
+  /* The pinned tile's window (ChatLayout .chat-split-side): the sidebar's
+     surface, 14px radius, a 1px border. */
+  background: var(--bg2);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   width: min(1200px, 100%);
   height: min(94vh, 1100px);
   display: flex;
@@ -1266,19 +1265,36 @@ watch(
   overflow: hidden;
   position: relative;
 }
+.fv-modal--doc {
+  /* The document's 680px measure plus the body's 32px margins. */
+  width: min(760px, 100%);
+}
+.fv-modal--doc .fv-md,
+.fv-modal--doc .fv-meta { max-width: none; }
+/* The pinned tile's title bar: filename, then the muted folder on the same
+   line, giving way before the filename does. */
 .fv-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px 10px 20px;
+  min-height: 52px;
+  padding: 4px 8px 4px 16px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  box-sizing: border-box;
 }
 .fv-titles {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
 }
 .fv-title {
+  /* The filename keeps its width and the folder takes the squeeze; only a
+     name longer than the whole bar ellipses. */
+  flex: 0 0 auto;
+  max-width: 100%;
   font-weight: 650;
   font-size: var(--text-lg);
   white-space: nowrap;
@@ -1286,7 +1302,9 @@ watch(
   text-overflow: ellipsis;
 }
 .fv-subtitle {
-  font-size: var(--text-xs);
+  flex: 0 1000 auto;
+  min-width: 0;
+  font-size: var(--text-sm);
   color: var(--fg3);
   white-space: nowrap;
   overflow: hidden;
@@ -1325,6 +1343,11 @@ watch(
   white-space: nowrap;
 }
 .fv-text-btn:hover { border-color: var(--border-strong); }
+.fv-actions-menu .fv-menu-discuss { display: none; }
+@media (max-width: 640px) {
+  .fv-discuss-btn { display: none; }
+  .fv-actions-menu .fv-menu-discuss { display: flex; }
+}
 @media (pointer: coarse) {
   .fv-text-btn { min-height: var(--touch); }
 }

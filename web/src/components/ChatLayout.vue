@@ -45,7 +45,7 @@
             :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" file-pinned @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
@@ -401,9 +401,9 @@ const SIDEBAR_SNAP_THRESHOLD = 15 // px
 const DEFAULT_SPLIT_RATIO = 0.5
 const MIN_CHAT_PANE_WIDTH = 240
 const MIN_SIDE_PANE_WIDTH = 240
-// Gutter + the tile's right inset (both --space-2): width the docked file tile
-// occupies beyond its own box.
-const SIDE_TILE_CHROME = 16
+// Gutter (--space-2) + the tile's right inset (--space-4): width the docked
+// file tile occupies beyond its own box.
+const SIDE_TILE_CHROME = 24
 const SPLIT_SNAP_THRESHOLD = 15 // px
 const LATEST_STATUS_SYNC_MS = 15000
 
@@ -744,6 +744,14 @@ const activePinKey = computed(() => {
   const chatId = (route.params.chatId as string) || ''
   return chatId && store.activeChat?.chat_id === chatId ? chatId : ''
 })
+// A file opened while the split view is available docks beside the chat or
+// project on screen instead of opening the viewer (stores/fileViewer.ts).
+watch(
+  [activePinKey, isMobile],
+  ([key, mobile]) => fileViewer.setDockTarget(mobile ? '' : key),
+  { immediate: true },
+)
+onBeforeUnmount(() => fileViewer.setDockTarget(''))
 const pinnedFilePath = computed(() => {
   if (isMobile.value) return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
@@ -1818,11 +1826,14 @@ onBeforeUnmount(() => {
 }
 /* The pinned file is a window docked inside the pane, not a second flat
    column: inset from the pane edges, in the sidebar's tone (--bg2), so the
-   sidebar and the file read as one layer and the chat is the canvas between. */
+   sidebar and the file read as one layer and the chat is the canvas between.
+   The inset is Chat details' and the composer's 16px, so every docked window
+   keeps the same distance from the pane's edge; with the 44px title bar
+   (PinnedFilePanel) the bar's rule lands on the chat header's. */
 .chat-split-side {
   flex: 1 1 0;
   min-width: 240px;
-  margin: var(--space-2) var(--space-2) var(--space-2) 0;
+  margin: var(--space-4) var(--space-4) var(--space-4) 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
