@@ -7,7 +7,7 @@ description: "Build a self-contained interactive HTML page (an artifact) that Ci
 
 An artifact is one self-contained `.html` file in the workspace. Ciaobot renders it in the pinned panel next to the chat, with a Preview/Code toggle, and the user can open it full-window in a real browser.
 
-Write the file, then run `ciao file surface <path>` on it. Writing alone paints an inline card; only `ciao file surface` opens the panel.
+Write the file, then run `ciao file surface <path>` on it. Writing alone paints an inline card; only `ciao file surface` opens the panel. If the reply has `"dismissed": true`, the user closed this artifact's panel earlier and it stays closed: tell them, and that they can pin it from the file viewer's ⋯ menu.
 
 ## Use an artifact when
 

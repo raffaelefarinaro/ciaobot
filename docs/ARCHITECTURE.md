@@ -509,7 +509,9 @@ carries `chat_pins` for every persisted chat, including unpinned and archived
 ones, so a reconnecting client can close stale state. `file_surface` is the only
 place agent intent becomes a pin — replaying browser tool traces is deliberately
 not a second writer — and its `viewers`/`stream_state` fields still say nothing
-about whether a panel actually rendered. Vault-backed project IDs are
+about whether a panel actually rendered. Its `pinned`/`dismissed` fields report
+what the pin write did, so a surface skipped by a dismissal is visible to the
+agent. Vault-backed project IDs are
 deterministic for newly discovered `(workspace, vault_folder)` pairs. At
 startup, archive discovery resolves both display names and vault-folder slugs;
 missing active rows are reconstructed from normalized runtime transcripts only

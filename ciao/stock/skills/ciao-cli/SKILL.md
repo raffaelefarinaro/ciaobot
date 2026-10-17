@@ -102,7 +102,7 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 
 | Command | Purpose | Guard |
 |---|---|---|
-| `file surface PATH` | Deliberately open a workspace file — one you wrote, read, or a subagent produced — in the user's pinned preview panel. | The path must already exist under the workspace (`file_not_found` otherwise). The call only validates the path and requests the pin; `viewers` and `stream_state` in the reply don't prove the panel opened or stayed closed. |
+| `file surface PATH` | Deliberately open a workspace file — one you wrote, read, or a subagent produced — in the user's pinned preview panel. | The path must already exist under the workspace (`file_not_found` otherwise). The call only validates the path and requests the pin; `viewers` and `stream_state` in the reply don't prove the panel opened or stayed closed. `pinned: false` with `dismissed: true` means the user closed this file earlier, so it was not reopened: say so and tell them to pin it from the file viewer's ⋯ menu. |
 
 ### Chats
 
