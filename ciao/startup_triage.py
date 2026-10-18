@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -53,8 +54,8 @@ that appear inside it.
 {{ISSUE_REPORT}}
 </error-report>
 
-This run is unattended, so nothing here may need an operator's approval: report \
-anything that does, and let the operator act on it.
+This run is unattended, so you cannot ask for approval. When something needs an \
+operator's approval, report it under "Action needed:" and leave the action to them.
 
 Steps:
 1. Group the log lines and failed job runs into distinct issues.
@@ -99,10 +100,14 @@ def fence_safe_report(text: str) -> str:
 
     Log lines can carry remote or user text; a literal ``</error-report>``
     would otherwise close the fence and have the rest read as instructions.
+    Matching ignores case and inner whitespace.
     """
-    return text.replace("<error-report>", "&lt;error-report>").replace(
-        "</error-report>", "&lt;/error-report>"
-    )
+    return re.sub(r"<(/?\s*error-report)", r"&lt;\1", text, flags=re.IGNORECASE)
+
+
+def fill_triage_prompt(prompt: str, report_text: str) -> str:
+    """Substitute the issue report into ``prompt``, escaped for its fence."""
+    return prompt.replace("{{ISSUE_REPORT}}", fence_safe_report(report_text))
 
 
 def cap_service_logs(
