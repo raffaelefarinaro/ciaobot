@@ -104,14 +104,25 @@ def _split_profile_and_args(argv: Sequence[str]) -> tuple[str | None, list[str]]
 
 
 def main(argv: list[str] | None = None) -> int:
-    from ciao.config import GWS_DEFAULT_PROFILE, CiaoConfig
+    from ciao.config import CiaoConfig
 
     args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["--profile"]:
+        print("ciao gws: --profile needs an account name.", file=sys.stderr)
+        return 2
     profile, rest = _split_profile_and_args(args)
     config = CiaoConfig.from_env()
 
+    if profile is None:
+        profile = os.environ.get("GWS_PROFILE", "")
+    profile = profile.strip()
     if not profile:
-        profile = os.environ.get("GWS_PROFILE", "").strip() or GWS_DEFAULT_PROFILE
+        print(
+            "No Google account is linked to this workspace. "
+            "Link one in Settings → Workspaces.",
+            file=sys.stderr,
+        )
+        return 2
 
     workspace_root = _configured_workspace_root(config) or Path(
         config.workspace_root

@@ -1060,29 +1060,29 @@ def test_workspace_gws_profile_synthetic_link_is_not_connected(tmp_path: Path) -
     assert gws_auth.workspace_gws_profile(cfg, "home") == ""
 
 
-def test_workspace_gws_profile_falls_back_only_to_a_real_default(
+def test_workspace_gws_profile_unlinked_without_accounts_is_empty(
     tmp_path: Path,
 ) -> None:
-    """A default that names no existing account is not used."""
+    """No link and no account: nothing to resolve."""
     cfg = _profile_config(
         tmp_path,
         workspaces={"home": _workspace_cfg("home", "")},
     )
     cfg.workspace = lambda name: cfg.workspaces.get(name)
-    # No account named personal exists → the workspace has no profile.
     assert gws_auth.workspace_gws_profile(cfg, "home") == ""
 
 
-def test_workspace_gws_profile_default_when_account_exists(
+def test_workspace_gws_profile_unlinked_returns_empty_even_when_personal_exists(
     tmp_path: Path,
 ) -> None:
+    """An unlinked workspace has no Google access, whatever accounts exist."""
     cfg = _profile_config(
         tmp_path,
         workspaces={"home": _workspace_cfg("home", "")},
     )
     cfg.workspace = lambda name: cfg.workspaces.get(name)
     _write_client_secret(tmp_path / "secrets" / "gws-personal")
-    assert gws_auth.workspace_gws_profile(cfg, "home") == "personal"
+    assert gws_auth.workspace_gws_profile(cfg, "home") == ""
 
 
 def test_workspace_gws_profile_no_config_returns_empty(tmp_path: Path) -> None:

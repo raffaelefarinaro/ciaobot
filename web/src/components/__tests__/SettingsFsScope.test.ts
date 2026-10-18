@@ -25,7 +25,6 @@ vi.mock('../../lib/api', () => {
       return Promise.resolve({
         installed: false,
         binary_path: '',
-        default_profile: '',
         cli_available: false,
         profiles: [],
       })
