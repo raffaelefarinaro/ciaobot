@@ -670,7 +670,7 @@ class ScheduleDispatcher:
         had_issue_placeholder = "{{ISSUE_REPORT}}" in prompt
         if had_issue_placeholder:
             from ciao.debug_report import build_issue_report
-            from ciao.startup_triage import TRIAGE_SCHEDULE_ID
+            from ciao.startup_triage import TRIAGE_SCHEDULE_ID, fill_triage_prompt
 
             # Exclude the triage's own past runs so a triage prompt built from
             # {{ISSUE_REPORT}} never re-triages its own recorded summary.
@@ -679,9 +679,7 @@ class ScheduleDispatcher:
                 self._host._config.workspace_root,
                 exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
             )
-            prompt = prompt.replace(
-                "{{ISSUE_REPORT}}", issue_report["report_text"]
-            )
+            prompt = fill_triage_prompt(prompt, issue_report["report_text"])
 
         try:
             stream = self._host.start_stream(target_id, prompt, unattended=True)

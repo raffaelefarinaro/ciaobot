@@ -38,7 +38,6 @@ vi.mock('../../lib/api', () => {
     '/api/integrations/gws': {
       installed: false,
       binary_path: '',
-      default_profile: '',
       cli_available: false,
       profiles: [],
     },

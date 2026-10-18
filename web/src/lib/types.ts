@@ -947,7 +947,6 @@ export interface GwsIntegrationProfile {
 export interface GwsIntegrationSettings {
   installed: boolean
   binary_path: string
-  default_profile: string
   cli_available: boolean
   profiles: GwsIntegrationProfile[]
 }
