@@ -646,19 +646,6 @@
                   ref="editInput"
                   autofocus
                 />
-                <span
-                  v-if="editingProject !== project.project_id && projectRepoTag(project.repo)"
-                  class="project-repo-tag"
-                  :class="{ 'project-repo-tag--missing': project.repo?.missing }"
-                  :title="projectRepoTag(project.repo)!.title"
-                >
-                  <template v-if="project.repo?.missing">missing<span class="sr-only"> repository folder</span></template>
-                  <template v-else>
-                    <span aria-hidden="true">⑂ </span><span class="sr-only">branch </span>{{ projectRepoTag(project.repo)!.branch }}
-                    <span v-if="projectRepoTag(project.repo)!.dirty" class="project-repo-dot" aria-hidden="true"></span>
-                    <span v-if="projectRepoTag(project.repo)!.dirty" class="sr-only">, uncommitted changes</span>
-                  </template>
-                </span>
                 <DropdownMenuTrigger
                   v-if="!project.is_auto"
                   as-child
@@ -920,7 +907,7 @@ import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
-import { chatRepoTag, projectRepoTag } from '../lib/repoLocation'
+import { chatRepoTag } from '../lib/repoLocation'
 import { isChatCodeModeOn } from '../lib/codeMode'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
@@ -2632,27 +2619,6 @@ async function confirmDeleteChat(chatId: string) {
   font: 600 calc(10px * var(--font-scale))/1 var(--font-mono);
 }
 
-/* The repo branch, once per project, in the mono register of the task tag. */
-.project-repo-tag {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--fg3);
-  font: 500 calc(11px * var(--font-scale))/1 var(--font-mono);
-}
-.project-repo-tag--missing { color: var(--warning); }
-.project-repo-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-left: 4px;
-  border-radius: 50%;
-  background: var(--warning);
-  vertical-align: middle;
-}
 /* Same squared tag as .chat-task-tag, but it can truncate (branch names run long). */
 .chat-repo-tag {
   flex: 0 1 auto;

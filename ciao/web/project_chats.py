@@ -393,7 +393,7 @@ class ProjectInfo:
             "vault_folder": self.vault_folder,
             "kind": self.kind,
             "repo_path": self.repo_path,
-            "repo": repo_link.repo_state(self.repo_path) if self.repo_path else None,
+            "repo": repo_link.repo_payload(self.repo_path) if self.repo_path else None,
             "vault_doc_path": self.vault_doc_path,
             "is_system": self.is_system,
             "is_auto": self.is_auto,

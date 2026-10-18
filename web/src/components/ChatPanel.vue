@@ -34,17 +34,27 @@
             <!-- The project is the context envelope for this chat. The workspace
                  is already the sidebar's scope, so repeating it here would add
                  a second, competing location cue. It links to the project page. -->
-            <input
-              v-if="editingTitle"
-              class="title-input"
-              v-model="titleValue"
-              @keyup.enter="saveTitle"
-              @keyup.escape="editingTitle = false"
-              @blur="saveTitle"
-              @click.stop
-              autofocus
-            />
-            <span v-else class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
+            <div class="chat-title-row">
+              <input
+                v-if="editingTitle"
+                class="title-input"
+                v-model="titleValue"
+                @keyup.enter="saveTitle"
+                @keyup.escape="editingTitle = false"
+                @blur="saveTitle"
+                @click.stop
+                autofocus
+              />
+              <span v-else class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
+              <button
+                v-if="codeModeOn && !chat.archived && !editingTitle"
+                type="button"
+                class="chat-code-badge"
+                aria-label="Code mode is on. Show repository details"
+                title="Code mode is on"
+                @click.stop="showDetails('repo')"
+              ><span class="chat-code-badge-tag" aria-hidden="true">code</span></button>
+            </div>
             <div v-if="projectCrumb && !railShown && project" class="breadcrumb-scope">
               <router-link
                 :to="`/project/${project.project_id}`"
@@ -59,7 +69,6 @@
         <!-- Archive is the header's one action, so it gets words, not just a
              glyph. Chat details moved out: it opens from the info tab at the
              top right of the chat body and hides from its own heading. -->
-        <ChatRepoChip v-if="!chat.archived" :repo="project?.repo ?? null" :location="chat.repo_location ?? null" :chat-id="chat.chat_id" :code-mode="isChatCodeModeOn(chat, project?.repo)" />
         <button
           v-if="!chat.archived"
           type="button"
@@ -1233,11 +1242,23 @@
         <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
         <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
       </p>
+      <!-- The linked repository and its Code mode switch; the header's `code` badge opens here. -->
+      <div v-if="project?.repo" ref="railRepoEl" class="chat-rail-repo" tabindex="-1">
+        <ChatRepoSection
+          :repo="project.repo"
+          :location="chat.repo_location ?? null"
+          :chat-id="chat.chat_id"
+          :code-mode="codeModeOn"
+          :archived="!!chat.archived"
+          @open-file="openInspectorFile"
+        />
+      </div>
       <!-- What the agent is given. The project also lives here on wide panes;
            the header only names it when this rail is hidden. -->
       <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
         <AgentContextSection
           :project="project"
+          :code-mode="codeModeOn"
           :context-pct="contextPct"
           :compacting="compacting"
           :compact-disabled="compactDisabled"
@@ -1340,7 +1361,7 @@ import { useArchiveChat } from '../composables/useArchiveChat'
 import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, RunningSubagent, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
-import ChatRepoChip from './ChatRepoChip.vue'
+import ChatRepoSection from './ChatRepoSection.vue'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
@@ -1924,6 +1945,7 @@ onMounted(() => {
 })
 
 const project = computed(() => store.activeProject)
+const codeModeOn = computed(() => isChatCodeModeOn(chat.value, project.value?.repo))
 
 // A turn's duration lives on its closing bubble's footer meta. The Activity
 // row sits before that bubble, so look ahead within the same turn.
@@ -2057,6 +2079,7 @@ function subagentLabel(sub: RunningSubagent): string {
 const panelEl = ref<HTMLElement | null>(null)
 const railEl = ref<HTMLElement | null>(null)
 const railContextEl = ref<HTMLElement | null>(null)
+const railRepoEl = ref<HTMLElement | null>(null)
 const isWidePane = ref(false)
 // Chat details steps aside while a file is pinned: the tile is the window on
 // the right then, and two docked windows would leave the chat a sliver. It
@@ -2087,11 +2110,12 @@ const railRunningEl = ref<HTMLElement | null>(null)
  * drops on a trigger that just unmounted. The drawer's focus trap places it,
  * so the named section has to be its initial focus rather than a later move.
  */
-type DetailsTarget = 'close' | 'running' | 'context'
+type DetailsTarget = 'close' | 'running' | 'context' | 'repo'
 const detailsTarget = ref<DetailsTarget>('close')
 const detailsFocusEl = computed<HTMLElement | null>(() => {
   if (detailsTarget.value === 'running') return railRunningEl.value ?? railHideButton.value
   if (detailsTarget.value === 'context') return railContextEl.value ?? railHideButton.value
+  if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
   return railHideButton.value
 })
 function showDetails(target: DetailsTarget = 'close') {
@@ -4965,6 +4989,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* The shared rail rhythm is `.rail-section + .rail-section`; this wrapper
    (the focus target for "See what Ciao knows") sits between two of them. */
 .chat-rail-agent-context + .rail-section { margin-top: var(--space-5); }
+.chat-rail-repo + .chat-rail-agent-context { margin-top: var(--space-5); }
+.chat-rail-repo:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: var(--radius-xs);
+}
 .chat-rail-agent-context:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
@@ -5070,6 +5100,20 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .header-breadcrumb .chat-title {
   flex: 0 1 auto;
 }
+.header-breadcrumb .chat-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+.chat-title-row .chat-title { flex: 0 1 auto; min-width: 0; }
+.chat-code-badge { display: inline-grid; place-items: center; flex: none; padding: 0 2px; border: 0; background: none; cursor: pointer; border-radius: var(--radius-xs); }
+.chat-code-badge-tag { display: inline-grid; place-items: center; height: 16px; padding: 0 4px; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); border-radius: var(--radius-xs); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font: 600 calc(10px * var(--font-scale))/1 var(--font-mono); }
+.chat-code-badge:hover .chat-code-badge-tag { border-color: var(--accent); }
+.chat-code-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (pointer: coarse), (max-width: 768px) { .chat-code-badge { min-width: var(--touch); min-height: var(--touch); } }
 
 /* A pane too narrow for the Chat details rail (a phone, or a desktop pane
    squeezed by the sidebar or a pinned file) gives the title its own row and
@@ -5080,7 +5124,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   justify-content: center;
   row-gap: 2px;
 }
-.header-breadcrumb--stacked .chat-title {
+.header-breadcrumb--stacked .chat-title-row {
   width: 100%;
 }
 .header-breadcrumb--stacked .breadcrumb-scope {

@@ -130,4 +130,31 @@ describe('AgentContextSection', () => {
     expect(label.text()).toBe('Compacting…')
     expect(label.attributes('aria-busy')).toBe('true')
   })
+
+  const repoProject = (instructions: { name: 'AGENTS.md' | 'CLAUDE.md'; chars: number } | null) => ({
+    ...PROJECT,
+    repo: { path: '/r/upwordo', branch: 'main', dirty: false, missing: false, instructions },
+  }) as unknown as ProjectInfo
+
+  it('lists the repository instructions in code mode with their size', async () => {
+    const wrapper = await mountSection({ project: repoProject({ name: 'AGENTS.md', chars: 4000 }), codeMode: true })
+    const row = wrapper.get('.agent-context-repo')
+    expect(row.text()).toContain('upwordo/AGENTS.md')
+    expect(row.text()).toContain('1k tokens')
+    expect(row.text()).toContain('Repository instructions')
+    await row.trigger('click')
+    expect(wrapper.emitted('open-file')?.[0]).toEqual(['/r/upwordo/AGENTS.md'])
+  })
+
+  it('says not found when the repository has no instructions', async () => {
+    const wrapper = await mountSection({ project: repoProject(null), codeMode: true })
+    const row = wrapper.get('.agent-context-repo')
+    expect(row.text()).toContain('Repository instructions')
+    expect(row.text()).toContain('not found')
+  })
+
+  it('has no repository row while code mode is off', async () => {
+    const wrapper = await mountSection({ project: repoProject({ name: 'AGENTS.md', chars: 4000 }), codeMode: false })
+    expect(wrapper.find('.agent-context-repo').exists()).toBe(false)
+  })
 })

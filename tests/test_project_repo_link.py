@@ -65,6 +65,14 @@ def test_create_project_persists_repo_path(tmp_path: Path) -> None:
     assert reloaded.to_dict()["repo"]["branch"] == "main"
 
 
+def test_project_dict_reports_repo_instructions(tmp_path: Path) -> None:
+    pcm, _config = _make_manager(tmp_path)
+    repo = _init(tmp_path / "repo")
+    (repo / "AGENTS.md").write_text("rules", encoding="utf-8")
+    project = pcm.create_project("Code", "personal", repo_path=str(repo))
+    assert project.to_dict()["repo"]["instructions"]["name"] == "AGENTS.md"
+
+
 def test_unlinked_project_reports_repo_none(tmp_path: Path) -> None:
     pcm, _config = _make_manager(tmp_path)
     data = pcm.create_project("Plain", "personal").to_dict()
