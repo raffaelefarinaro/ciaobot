@@ -40,7 +40,6 @@ def test_stock_package_contains_memory_skill_commands_and_schedules() -> None:
     assert stock.joinpath("workspace", "CIAO_CUSTOMIZATION.md").is_file()
     assert stock.joinpath("evals", "scenarios.json").is_file()
     assert stock.joinpath("deploy", "com.ciao.server.plist.tmpl").is_file()
-    assert stock.joinpath("schedules", "weekly-review-template.md").is_file()
     plist = stock.joinpath("deploy", "com.ciao.server.plist.tmpl").read_text(encoding="utf-8")
     assert "<string>{{CIAO_EXECUTABLE}}</string>" in plist
     assert "{{LAUNCHD_PROGRAM_ARGUMENTS}}" in plist
@@ -234,7 +233,6 @@ def test_pyproject_packages_stock_data() -> None:
     assert "public/*.md" in package_data["ciao.stock"]
     assert "workspace/*.md" in package_data["ciao.stock"]
     assert "schedules.json" in package_data["ciao.stock"]
-    assert "schedules/*.md" in package_data["ciao.stock"]
     assert "evals/*.json" in package_data["ciao.stock"]
 
 
