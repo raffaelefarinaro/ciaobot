@@ -5,6 +5,7 @@ import { branchLabel, findRepoInstructions } from '../lib/repo'
 import { chatLocationDiffers, repoChip } from '../lib/repoLocation'
 import type { ProjectRepo, RepoLocation } from '../lib/types'
 import { useProjectStore } from '../stores/projects'
+import HostTerminalButton from './HostTerminalButton.vue'
 
 const props = defineProps<{
   repo: ProjectRepo
@@ -96,6 +97,7 @@ watch(() => props.chatId, () => { error.value = ''; openError.value = '' })
       :disabled="opening"
       @click="openInstructions"
     >Open AGENTS.md</button>
+    <HostTerminalButton v-if="!chip.missing" :chat-id="chatId" />
     <p v-if="openError" class="repo-code-error" role="alert">{{ openError }}</p>
   </section>
 </template>

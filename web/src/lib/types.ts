@@ -890,6 +890,31 @@ export interface RoutineSettings {
   }
 }
 
+/** Action ids the engine can run in a terminal on its own machine (ciao/host_terminal.py::ACTION_IDS). */
+export type HostTerminalAction =
+  | 'claude-install'
+  | 'claude-login'
+  | 'opencode-install'
+  | 'opencode-login'
+  | 'gws-install'
+  | 'skills-update'
+
+/** `GET /api/host/terminal`. */
+export interface HostTerminalCapabilities {
+  available: boolean
+  platform: string
+  reason: string
+  terminal: string
+  actions: HostTerminalAction[]
+}
+
+/** `POST /api/host/terminal` on success. */
+export interface HostTerminalLaunchResult {
+  ok: boolean
+  platform: string
+  launched: string
+}
+
 export interface ProviderConnection {
   name: string
   // Display names from the backend registry, so the Settings card never has to
@@ -911,6 +936,8 @@ export interface ProviderConnection {
   install_url?: string
   /** Shell line that puts the CLI on PATH (`not_installed`, `missing`, `cli_too_old`). */
   path_command?: string
+  /** Terminal action that runs the command shown for this row, when the engine offers one. */
+  terminal_action?: HostTerminalAction
   /** Desktop app found while the CLI is missing. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */
@@ -1159,6 +1186,8 @@ export interface SetupProviderStatus {
   install_url?: string
   /** Shell line that puts the CLI on PATH (`not_installed`, `missing`, `cli_too_old`). */
   path_command?: string
+  /** Terminal action that runs the command shown for this row, when the engine offers one. */
+  terminal_action?: HostTerminalAction
   /** Desktop app found while the CLI is missing, so setup can say which step is left. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */

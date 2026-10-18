@@ -5,6 +5,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import ChatRepoSection from '../ChatRepoSection.vue'
 import { useProjectStore } from '../../stores/projects'
+import { api } from '../../lib/api'
+import { resetHostTerminalForTests } from '../../composables/useHostTerminal'
 import type { ProjectRepo, RepoLocation } from '../../lib/types'
 
 const repo: ProjectRepo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
@@ -109,5 +111,22 @@ describe('ChatRepoSection', () => {
     expect(wrapper.emitted('open-file')).toHaveLength(1)
     expect(wrapper.get('[role=alert]').text()).toContain('no AGENTS.md or CLAUDE.md')
     wrapper.unmount()
+  })
+
+  it('offers Open in Terminal at the chat folder when the engine can open one', async () => {
+    resetHostTerminalForTests()
+    vi.spyOn(api, 'get').mockResolvedValue({
+      available: true, platform: 'macos', reason: '', terminal: 'Terminal', actions: [],
+    })
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true, platform: 'macos', launched: 'Terminal' })
+    const wrapper = mountSection(repo, {})
+    await flushPromises()
+    const button = wrapper.findAll('button').find((b) => b.text() === 'Open in Terminal')
+    expect(button).toBeDefined()
+    await button!.trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/host/terminal', { open: 'folder', chat_id: 'c1' })
+    wrapper.unmount()
+    resetHostTerminalForTests()
   })
 })
