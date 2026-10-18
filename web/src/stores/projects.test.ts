@@ -4130,6 +4130,40 @@ describe('chat_streaming_done clears stale streaming for inactive chats', () => 
     expect(store.chats[0].repo_location).toEqual({ ...loc, exists: false })
   })
 
+  it('chat_code_mode flips the flag and refetches the chat', async () => {
+    const ev = { code_mode: true, actor: 'agent', at: '2026-01-01T09:01:00Z', after_turn_index: 2 }
+    apiGet.mockImplementation(async (url: string) => (
+      url === '/api/chats/c-loc'
+        ? { chat_id: 'c-loc', project_id: 'p1', title: 'T', code_mode: true, code_mode_events: [ev] }
+        : []
+    ))
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'c-loc', project_id: 'p1', title: 'T' } as never]
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_code_mode', chat_id: 'c-loc', project_id: 'p1', code_mode: true, actor: 'agent', at: ev.at,
+      }),
+    })
+    expect(store.chats[0].code_mode).toBe(true)
+    expect(apiGet).toHaveBeenCalledWith('/api/chats/c-loc')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(store.chats[0].code_mode_events).toEqual([ev])
+  })
+
+  it('setChatCodeMode PATCHes code_mode', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'c1', project_id: 'p1', title: 'T' } as never]
+    apiPatch.mockResolvedValueOnce({ chat_id: 'c1', project_id: 'p1', title: 'T', code_mode: true })
+    await store.setChatCodeMode('c1', true)
+    expect(apiPatch).toHaveBeenCalledWith('/api/chats/c1', { code_mode: true })
+    expect(store.chats[0].code_mode).toBe(true)
+
+    apiPatch.mockRejectedValueOnce(new Error('Link a repository first'))
+    await expect(store.setChatCodeMode('c1', false)).rejects.toThrow('Link a repository first')
+  })
+
   test('an inactive chat finishing clears its orphaned local streaming flag', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
@@ -5102,7 +5136,7 @@ describe('workspace and chat transitions', () => {
     expect(apiGet).not.toHaveBeenCalledWith('/api/chats/c-personal-old/messages')
   })
 
-  test('switchWorkspace with transition false updates workspace and chat ID but does not redirect', async () => {
+  test('switchWorkspace with transition false updates workspace, opens no chat and does not redirect', async () => {
     const store = useProjectStore()
     store.projects = [
       { project_id: 'p-personal', name: 'Proj Personal', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
@@ -5121,7 +5155,7 @@ describe('workspace and chat transitions', () => {
     await store.switchWorkspace('personal', { transition: false })
 
     expect(store.activeWorkspace).toBe('personal')
-    expect(store.activeChatId).toBe('c-personal')
+    expect(store.activeChatId).toBeNull()
     expect(routerPush).not.toHaveBeenCalled()
     expect(apiPost).not.toHaveBeenCalled()
   })

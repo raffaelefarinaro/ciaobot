@@ -941,7 +941,7 @@ export const useProjectStore = defineStore('projects', () => {
       .filter(p => p.workspace === activeWorkspace.value)
       // The Memory project is app-owned (memory passes run in it) and hidden
       // here, the one point every list agrees: sidebar, move-to menu, reorder,
-      // selectFirstChat and the Home "new chat" fallback all read this.
+      // transitionToFirstChat and the Home "new chat" fallback all read this.
       .filter(p => !isMemoryProject(p))
       .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
   )
@@ -2222,18 +2222,6 @@ export const useProjectStore = defineStore('projects', () => {
     void navigator.serviceWorker.ready.then(() => postUnreadSync())
   }
 
-  function selectFirstChat() {
-    const wsProjects = workspaceProjects.value
-    for (const p of wsProjects) {
-      const pChats = projectChats(p.project_id)
-      if (pChats.length > 0) {
-        activeChatId.value = pChats[0].chat_id
-        return
-      }
-    }
-    activeChatId.value = null
-  }
-
   async function transitionToFirstChat() {
     let nextChatId: string | null = null
     const wsProjects = workspaceProjects.value
@@ -2519,12 +2507,18 @@ export const useProjectStore = defineStore('projects', () => {
       mode?: string
       provider?: RuntimeProvider
       thinking_level?: string
+      code_mode?: boolean
     },
   ) {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+  }
+
+  /** PATCH a chat's code mode. Throws the ApiError so the chip can show the engine's message. */
+  async function setChatCodeMode(chatId: string, on: boolean): Promise<void> {
+    await updateChat(chatId, { code_mode: on })
   }
 
   async function handoverChat(
@@ -3726,18 +3720,16 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeWorkspace.value === ws) return
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
+    // A workspace switch expresses scope, not a request to open an arbitrary
+    // conversation. Selecting the first chat here also made the switch (and
+    // cross-workspace "new chat") wait for that chat's complete transcript
+    // before the home screen could render. Without a transition the caller
+    // stays on its own view (schedules, tasks, memory, settings).
+    activeChatId.value = null
+    persistState()
     if (transition) {
-      // A workspace pill expresses scope, not a request to open an arbitrary
-      // conversation. Selecting the first chat here also made the switch (and
-      // cross-workspace "new chat") wait for that chat's complete transcript
-      // before the home screen could render.
-      activeChatId.value = null
-      persistState()
       const { router } = await import('../router')
       await router.push('/')
-    } else {
-      selectFirstChat()
-      persistState()
     }
   }
 
@@ -4548,6 +4540,19 @@ export const useProjectStore = defineStore('projects', () => {
       case 'chat_repo_location': {
         const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
         if (c) c.repo_location = msg.repo_location
+        break
+      }
+      case 'chat_code_mode': {
+        const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
+        if (!c) break
+        c.code_mode = msg.code_mode
+        // A switch made from this client also gets the PATCH response, so this is a
+        // second fetch of the same chat. Harmless; keep it, the agent's switches need it.
+        // The event has no after_turn_index; the server's ChatInfo does. Refetch
+        // rather than guess the anchor (an optimistic user row has no turn_index yet).
+        void api.get<ChatInfo>(`/api/chats/${encodeURIComponent(msg.chat_id)}`)
+          .then((fresh) => { replaceChat(fresh) })
+          .catch(() => { /* next chats load heals it */ })
         break
       }
       case 'chat_pin_changed': {
@@ -6354,7 +6359,7 @@ export const useProjectStore = defineStore('projects', () => {
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
-    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,

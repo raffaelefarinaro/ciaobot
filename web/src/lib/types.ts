@@ -202,6 +202,9 @@ export interface RepoLocation {
   exists: boolean
 }
 
+export type CodeModeActor = 'user' | 'agent'
+export interface CodeModeEvent { code_mode: boolean; actor: CodeModeActor; at: string; after_turn_index: number }
+
 export interface ChatInfo {
   chat_id: string
   project_id: string
@@ -306,6 +309,9 @@ export interface ChatInfo {
   pin_revision?: number
   // Server sends `{}` for no location; test `repo_location.path`, not the object.
   repo_location?: Partial<RepoLocation>
+  // G1: always sent; optional for older payloads/test stubs.
+  code_mode?: boolean
+  code_mode_events?: CodeModeEvent[]
 }
 
 /**
@@ -570,6 +576,7 @@ export type EventsWsMessage =
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
   | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
+  | { type: 'chat_code_mode'; chat_id: string; project_id: string; code_mode: boolean; actor: CodeModeActor; at: string }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
   | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
   | { type: 'chat_background_runs'; chat_id: string; project_id: string; runs: BackgroundRunSummary[]; finished?: BackgroundRunSummary }
