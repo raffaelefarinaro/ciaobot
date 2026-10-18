@@ -260,6 +260,8 @@ def test_user_prompt_keeps_a_hostile_artifact_inside_the_artifact_tag() -> None:
         {"verdict": "approve", "confidence": 4},
         {"verdict": "ship", "confidence": "high"},
         {"verdict": "ship", "confidence": True},
+        {"verdict": "ship", "confidence": None},
+        {"verdict": "ship", "confidence": 4, "issues": [{"claim": "x"}]},
         {"verdict": "ship", "confidence": 4, "issues": [{"severity": "critical"}]},
         {"verdict": "ship", "confidence": 4, "issues": ["not an object"]},
         {"confidence": 4},
@@ -279,3 +281,17 @@ def test_review_one_rejects_out_of_schema_replies(monkeypatch, reply) -> None:
     assert result.review is None
     assert "schema" in (result.error or "")
     assert crt.aggregate([result])["ok_count"] == 0
+
+
+def test_aggregate_over_validated_reviews_sorts_without_crashing() -> None:
+    reviews = [
+        {"verdict": "revise", "confidence": 4, "issues": [{"severity": "major", "claim": "a"}]},
+        {"verdict": "ship", "issues": [{"severity": "major", "claim": "b"}, {"severity": "nit", "claim": "c"}]},
+    ]
+    results = []
+    for i, review in enumerate(reviews):
+        assert crt.validate_review(review) is None
+        results.append(crt.ModelResult(f"m{i}", 1.0, True, review=review))
+    agg = crt.aggregate(results)
+    assert agg["total_issues"] == 3
+    assert [i["claim"] for i in agg["issues"]] == ["a", "b", "c"]

@@ -202,9 +202,10 @@ def validate_review(review: dict[str, Any]) -> str | None:
     """Return why ``review`` is out of schema, or None when it is acceptable."""
     if review.get("verdict") not in _VERDICTS:
         return f"unknown verdict {review.get('verdict')!r}"
-    confidence = review.get("confidence")
-    if confidence is not None and (isinstance(confidence, bool) or not isinstance(confidence, (int, float))):
-        return f"non-numeric confidence {confidence!r}"
+    if "confidence" in review:
+        confidence = review["confidence"]
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            return f"non-numeric confidence {confidence!r}"
     issues = review.get("issues")
     if issues is not None:
         if not isinstance(issues, list):
