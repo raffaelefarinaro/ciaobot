@@ -1940,4 +1940,19 @@ def test_approved_task_section_names_the_completion_id() -> None:
         "completion_id": _COMPLETION_ID,
     }
     section = memory_pass.MemoryPassCoordinator._focus_section(helper)
-    assert f"cite this completion id as the sighting: {_COMPLETION_ID}." in section
+    assert f"Cite this completion id as the sighting: {_COMPLETION_ID}." in section
+
+
+def test_approved_task_section_without_a_completion_id_cites_the_task_file() -> None:
+    helper = {"focus": "approved_task", "task_title": "Ship it", "task_summary": "x"}
+    section = memory_pass.MemoryPassCoordinator._focus_section(helper)
+    assert "No completion id is recorded for this task; cite the task file instead." in section
+    assert "none recorded" not in section
+
+
+def test_lesson_step_three_requires_origins_and_the_draft_ends_the_turn_in_step_six() -> None:
+    text = _rendered_chat_lesson_routing()
+    assert "Include an `origins` list; it is the only link to the learning" in text
+    step6, step7 = text.split("\n7. ")
+    assert "the draft is where your turn ends" in step6
+    assert step7 == "Report. Mention each filed proposal or draft in your closing list."
