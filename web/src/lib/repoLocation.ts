@@ -78,9 +78,11 @@ export function repoChip(repo: Repo, loc: Loc): RepoChip | null {
   }
 }
 
-export function repoChipLabel(chip: RepoChip): string {
-  if (chip.missing) return `Repository ${chip.name}, folder missing`
+export function repoChipLabel(chip: RepoChip, codeMode = false): string {
+  const suffix = codeMode ? ', code mode on' : ''
+  if (chip.missing) return `Repository ${chip.name}, folder missing${suffix}`
   return `Repository ${chip.name}, branch ${chip.branch}`
     + (chip.isWorktree ? ', worktree' : '')
     + (chip.dirty ? ', uncommitted changes' : '')
+    + suffix
 }

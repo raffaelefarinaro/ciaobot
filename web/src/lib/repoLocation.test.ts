@@ -76,4 +76,12 @@ describe('repoLocation', () => {
     const dirty = repoChip({ ...repo, dirty: true }, {})!
     expect(repoChipLabel(dirty)).toBe('Repository app, branch main, uncommitted changes')
   })
+
+  it('labels code mode', () => {
+    const wt = repoChip(repo, { path: '/r/app-wt', branch: 'feat', is_worktree: true, exists: true })
+    expect(repoChipLabel(wt!, true)).toBe('Repository app, branch feat, worktree, code mode on')
+    expect(repoChipLabel(wt!)).toBe('Repository app, branch feat, worktree')
+    const missing = repoChip({ ...repo, missing: true }, {})
+    expect(repoChipLabel(missing!, true)).toBe('Repository app, folder missing, code mode on')
+  })
 })

@@ -747,6 +747,7 @@
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
                     <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
+                    <span v-if="isChatCodeModeOn(chat, project.repo)" class="chat-code-tag" title="Code mode is on">code</span>
                     <span
                       v-if="chatRepoTag(project.repo, chat.repo_location)"
                       class="chat-repo-tag"
@@ -920,6 +921,7 @@ import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
 import { chatRepoTag, projectRepoTag } from '../lib/repoLocation'
+import { isChatCodeModeOn } from '../lib/codeMode'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
@@ -2616,7 +2618,8 @@ async function confirmDeleteChat(chatId: string) {
 /* A delegated task's chat says so in words, as a small squared tag
    (DESIGN.md: --radius-xs, the keycap's tokens) so it cannot read as a count.
    It never shrinks; the title truncates first, and the tag stays short. */
-.chat-task-tag {
+.chat-task-tag,
+.chat-code-tag {
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
@@ -2911,9 +2914,9 @@ async function confirmDeleteChat(chatId: string) {
   }
   /* The button takes the place of the row's trailing marks while it shows,
      rather than half-covering them; they keep their space so nothing shifts. */
-  .chat-item:hover :is(.chat-task-tag, .chat-repo-tag, .chat-signals, .remote-chip),
-  .chat-item:focus-within :is(.chat-task-tag, .chat-repo-tag, .chat-signals, .remote-chip),
-  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-repo-tag, .chat-signals, .remote-chip) {
+  .chat-item:hover :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip),
+  .chat-item:focus-within :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip),
+  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip) {
     visibility: hidden;
   }
 }
