@@ -245,6 +245,7 @@ def _linked_repo_manager(tmp_path: Path, scope: str, *, repo: Path):
     project = manager.create_project("linked", workspace="personal")
     project.repo_path = str(repo)
     chat = manager.create_chat(project.project_id, provider="claude")
+    chat.code_mode = True
     return manager, chat
 
 
@@ -299,6 +300,18 @@ def test_a_memory_pass_chat_is_not_granted_the_linked_repo(tmp_path: Path) -> No
             "archive_policy": "when_clean",
         },
     )
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.linked_repo == ""
+    assert str(repo.resolve()) not in request.agent_roots
+
+
+def test_a_linked_repo_with_code_mode_off_is_not_granted(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager, chat = _linked_repo_manager(tmp_path, "workspace", repo=repo)
+    chat.code_mode = False
 
     request = manager.build_agent_request(chat, prompt="hi")
 

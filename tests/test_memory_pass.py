@@ -1802,6 +1802,7 @@ def _linked_pass(tmp_path: Path, repo: Path | None) -> tuple[ProjectChatManager,
     source = _source(manager)
     if repo is not None:
         manager._projects[source.project_id].repo_path = str(repo)
+        source.code_mode = True
     project = manager._memory_pass.ensure_project("work")
     pass_chat = manager.create_chat(
         project.project_id,
@@ -1831,6 +1832,18 @@ def test_pass_for_linked_project_carries_repo_section(tmp_path: Path) -> None:
 
 def test_pass_for_unlinked_project_has_no_repo_section(tmp_path: Path) -> None:
     manager, pass_chat = _linked_pass(tmp_path, None)
+
+    prompt = manager._memory_pass._prompt_for(pass_chat)
+
+    assert memory_pass.REPO_PROPOSAL_COMMAND not in prompt
+
+
+def test_pass_for_linked_project_with_code_mode_off_has_no_repo_section(tmp_path: Path) -> None:
+    repo = tmp_path / "app"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text("use make test\n", encoding="utf-8")
+    manager, pass_chat = _linked_pass(tmp_path, repo)
+    manager._chats[pass_chat.helper["source_chat_id"]].code_mode = False
 
     prompt = manager._memory_pass._prompt_for(pass_chat)
 
