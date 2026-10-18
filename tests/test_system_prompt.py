@@ -106,7 +106,7 @@ def test_updated_rule_agrees_across_prompts() -> None:
 
 
 def test_cli_skill_example_is_not_an_entry_argv_fact() -> None:
-    cli = _stock("skills", "ciao-cli", "SKILL.md")
+    cli = _stock("skills", "ciao-cli", "reference.md")
     assert 'ciao memory update --region memory --action add --entry "Prefers terse' not in cli
     assert "memory-proposal-add --kind memory --text-file" in cli
     assert '{"ok": true, "data": {"queued"' not in cli

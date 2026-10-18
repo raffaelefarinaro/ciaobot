@@ -162,9 +162,11 @@ door. The target is resolved, not trusted — `skills_inventory.resolve_owned_sk
 decides, so a stock copy, a provider mirror, a shared source and an unknown name
 are refused by name, and the record carries the resolved path and revision
 rather than whatever the caller said. `--input-file` holds a JSON object with
-`title`, `problem`, `change`, `rationale` and a non-empty `sources` list whose
-entries carry `chat_id`, `archive`, `turn` and a verbatim `excerpt`: the finding
-is conversation prose, so none of it may travel as a shell argument. It proposes
+`title`, `problem`, `change`, `rationale` and either a non-empty `sources` list
+whose entries carry `chat_id`, `archive`, `turn` and a verbatim `excerpt`, or a
+non-empty `origins` list (`learning_id` and `finding`, optionally
+`source_revision` and `summary`) for a routed learning: the finding is
+conversation prose, so none of it may travel as a shell argument. It proposes
 only — `ciao skill-proposal-remove NAME` settles, and a settled record stays
 settled while it keeps collecting evidence. It records which outcome it was:
 `--applied` when the change landed and was checked (a promotion, so History
