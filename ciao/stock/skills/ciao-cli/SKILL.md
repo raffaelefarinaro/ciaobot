@@ -147,6 +147,11 @@ Top-level commands, outside the `<noun> <verb>` table: plain text output (a `--j
 | `task report TASK_ID --outcome done\|blocked\|needs_input --summary-file FILE.md` | **When you were delegated a task**, say how far you got, once, before your turn ends. `done`: finished, for the user to review. `blocked`: you cannot go on. `needs_input`: you end the turn still waiting on the user's answer (ask it with your question tool first, and carry on in this turn if they reply). The summary (Markdown: what you did, where the results are, what is left) is saved on the task and handed to any later attempt. | Only the chat holding the task's live attempt may report (`task_report_not_holder` otherwise). It never moves or completes the task. A turn that ends **without** a report is shown to the user as *Unfinished*, not as a result to review. |
 | `task attempt ATTEMPT_ID ACTION` | `stop` (ends the running turn; irreversible), `resume` (continues the **same** chat under the **same** attempt), `retry` (starts a **new** attempt in a new chat, leaving the old one as history) or `detach` (stops the turn and clears the linkage, which is what makes the task completable again). | `stop` is destructive and is asked for like one. `resume` only works on an attempt that did not finish — a `ready_for_review` result is waiting for the user's decision, so continuing it is their call. None of these completes a task. |
 
+The user's tasks are this board, not your provider's todo tool. Asked to delegate
+a task, run `task delegate` rather than doing the work in this turn. When you work
+a task yourself, `task link-chat` it to this chat, `task add-update` a milestone
+(not a chat dump), then `task move` it to `in_review`.
+
 There is no `task delete` on this surface: a task record is the user's own
 Markdown file, and removing one is their decision, made in the PWA.
 
@@ -205,6 +210,9 @@ The sender side is not this CLI: an external system calls
 `POST /hooks/v1/<trigger_id>` with `Authorization: Bearer <that secret>` and an
 `Idempotency-Key`, and a body of exactly `{"text": "..."}`. `202` means the event
 is **recorded**, not that a turn finished. Both recipes are in `PWA_API.md`.
+
+A trigger is created disabled, so ask the user before `webhook update --enable`,
+then tell them the sender needs the secret as a bearer token.
 
 Instructions are operator prose that the launched turn reads as its own, so
 they travel as a file (`--instructions-file`) rather than as a shell argument.

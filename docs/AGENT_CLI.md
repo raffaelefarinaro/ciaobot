@@ -181,8 +181,9 @@ that simply finished: a turn ending is not a verified edit.
 
 The CLI replaces the transport recipes, not behavioural knowledge. Ciaobot's
 core prompt tells the agent to use `ciao <noun> <verb>` commands for the
-control plane (the compact command table lives in `ciao/system_prompt.md`) and
-keeps `ciao help` / `ciao <noun> --help` as the long reference. Provider and
+control plane and points at `ciao help` / `ciao <noun> --help` for the command
+reference (the command tables live in the `ciao-cli` skill, not in
+`ciao/system_prompt.md`, #1464). Provider and
 integration skills — Google Workspace, research, document authoring — remain
 useful because the CLI does not encode those domain decisions.
 

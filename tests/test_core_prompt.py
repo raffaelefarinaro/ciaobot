@@ -16,7 +16,7 @@ def test_system_prompt_payload_returns_instructions_for_empty() -> None:
     assert payload is not None
     assert payload["type"] == "preset"
     assert payload["preset"] == "claude_code"
-    assert "Ciaobot core instructions" in payload["append"]
+    assert "<ciaobot_core>" in payload["append"]
 
 
 def test_system_prompt_points_to_gws_wrapper() -> None:
@@ -126,7 +126,7 @@ def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
     assert payload["type"] == "preset"
     assert payload["preset"] == "claude_code"
     assert payload["exclude_dynamic_sections"] is True
-    assert "Ciaobot core instructions" in payload["append"]
+    assert "<ciaobot_core>" in payload["append"]
     assert "hello memory" in payload["append"]
 
 
@@ -139,11 +139,39 @@ def test_system_prompt_payload_preserves_existing_append() -> None:
     payload = mi.system_prompt_payload("memory block", base_system_prompt=base)
     assert payload is not None
     assert payload["append"].startswith("operator hint")
-    assert "Ciaobot core instructions" in payload["append"]
+    assert "<ciaobot_core>" in payload["append"]
     assert "memory block" in payload["append"]
 
 
-def test_system_prompt_payload_includes_expertise_header() -> None:
+def test_core_sections_are_tag_delimited() -> None:
     payload = mi.system_prompt_payload("memory block")
     assert payload is not None
-    assert "[SYSTEM EXPERTISE: Ciaobot core]" in payload["append"]
+    append = payload["append"]
+    assert "[SYSTEM EXPERTISE" not in append
+    for tag in (
+        "ciaobot_core",
+        "ciaobot_operating_contract",
+        "ciaobot_retrieval",
+        "ciaobot_deliverables",
+        "ciaobot_response_quality",
+        "ciaobot_cli_reference",
+    ):
+        assert append.count(f"<{tag}>") == 1, tag
+        assert append.count(f"</{tag}>") == 1, tag
+        assert append.index(f"<{tag}>") < append.index(f"</{tag}>")
+    assert "\n## " not in append and not append.startswith("# ")
+    assert "ciao vault review" not in append  # the synopsis lives in ciao-cli
+
+
+def test_rules_carry_a_reason_in_the_same_bullet() -> None:
+    """Each formerly bare prohibition says why (#1464)."""
+    text = mi._system_instructions()
+    bullets = {line for line in text.splitlines() if line.startswith("- ")}
+
+    def bullet(needle: str) -> str:
+        return next(line for line in bullets if needle in line)
+
+    assert "cuts off the PWA session" in bullet("Never restart Ciaobot")
+    assert "bypasses those guards" in bullet("Do not use curl")
+    assert "agent surface" in bullet("Do not use curl")
+    assert "outside Ciaobot's schedule list" in bullet("provider-native recurring automations")

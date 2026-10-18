@@ -1,9 +1,9 @@
 """The documented `ciao` command set must match the parsers (#1471).
 
-The core prompt's synopsis and `ciao-cli/SKILL.md` both list commands and
-flags; the parsers in `ciao/agent_cli.py` (`ciao <noun> <verb>`) and
+`ciao-cli/SKILL.md` lists commands and flags (the core prompt no longer carries
+a synopsis, #1464); the parsers in `ciao/agent_cli.py` (`ciao <noun> <verb>`) and
 `ciao/cli.py` (top-level commands) are the truth. These tests derive the
-documented set from the two documents and compare it to the parsers in both
+documented set from the skill and compare it to the parsers in both
 directions, so a renamed flag, a verb that never existed or an agent verb nobody
 documented fails here instead of misleading a model.
 """
@@ -101,30 +101,6 @@ def _match_leaf(text: str, leaves: set[Leaf]) -> Leaf | None:
     return best
 
 
-def documented_in_prompt(leaves: set[Leaf]) -> Documented:
-    block = PROMPT.split("## Ciaobot command line", 1)[1].split("```", 2)[1]
-    sched_text = ""
-    lines: list[str] = []
-    in_sched = False
-    for raw in block.splitlines():
-        if raw.startswith("<sched>"):
-            in_sched = True
-        if in_sched:
-            sched_text += " " + raw
-        elif raw.strip():
-            lines.append(raw)
-    sched_flags, _ = _split_flags(sched_text)
-    found: Documented = {}
-    for line in lines:
-        leaf = _match_leaf(line, leaves)
-        assert leaf is not None, f"core synopsis documents `{line.strip()}`, which is not an agent command"
-        every, required = _split_flags(line[len(" ".join(leaf)):])
-        if "<sched>" in line:
-            every |= sched_flags
-        found[leaf] = (every, required)
-    return found
-
-
 def documented_in_skill(leaves: set[Leaf]) -> Documented:
     shared = re.search(r"Shared `\.\.\.flags`[^:]*: `([^`]*)`", SKILL)
     assert shared, "the shared schedule flags paragraph is gone"
@@ -163,11 +139,16 @@ def _all_leaves() -> tuple[Surface, Surface]:
     return agent_surface(), operator_surface()
 
 
-def test_prompt_synopsis_matches_the_agent_parser() -> None:
-    agent, _ = _all_leaves()
-    documented = documented_in_prompt(set(agent))
-    assert drift_problems(documented, agent, where="system_prompt.md") == []
-    assert sorted(set(agent) - set(documented)) == [], "agent verbs missing from the core synopsis"
+def _agent_documented(agent: Surface) -> Documented:
+    documented = documented_in_skill(set(agent) | set(operator_surface()))
+    return {leaf: v for leaf, v in documented.items() if leaf in agent}
+
+
+def test_core_prompt_carries_no_command_synopsis() -> None:
+    """The synopsis moved to ciao-cli (#1464); the prompt only points at it."""
+    assert "```" not in PROMPT
+    assert "<sched>" not in PROMPT
+    assert "ciao help" in PROMPT
 
 
 def test_skill_tables_match_the_parsers() -> None:
@@ -197,7 +178,7 @@ def test_skill_documents_the_origins_input() -> None:
 
 def test_a_removed_flag_fails_the_comparison() -> None:
     agent, _ = _all_leaves()
-    documented = documented_in_prompt(set(agent))
+    documented = _agent_documented(agent)
     assert drift_problems(documented, agent, where="x") == []
     flags, required = agent[("chat", "send")]
     broken = {**agent, ("chat", "send"): (flags - {"--prompt"}, required - {"--prompt"})}
@@ -209,7 +190,7 @@ def test_a_removed_flag_fails_the_comparison() -> None:
 
 def test_an_undocumented_verb_fails_the_comparison() -> None:
     agent, _ = _all_leaves()
-    documented = documented_in_prompt(set(agent))
+    documented = _agent_documented(agent)
     documented.pop(("task", "report"))
     assert ("task", "report") in set(agent) - set(documented)
 
