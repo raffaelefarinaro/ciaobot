@@ -42,6 +42,7 @@ from ciao.cli_envelopes import (
     envelope_notification_fields,
     envelope_notification_task_statuses,
     is_cli_envelope,
+    is_code_mode_continuation,
     is_compact_summary,
     is_control_slash_command,
     is_interrupted_request_sentinel,
@@ -391,6 +392,8 @@ def _is_countable_user_turn(
     if is_cli_envelope(text):
         return False
     if is_compact_summary(record, text):
+        return False
+    if is_code_mode_continuation(text):
         return False
     if is_synthesis_nudge(text):
         return False

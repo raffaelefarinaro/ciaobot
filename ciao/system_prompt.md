@@ -63,7 +63,7 @@ file surface      PATH
 chat list         [--project P]
 chat get          [--chat C]
 chat create       [--project P] [--title T] [--provider P] [--model M] [--mode M] [--prompt TEXT]
-chat update       [--chat C] [--title T] [--provider P] [--model M] [--mode M] [--thinking-level L] [--project P]
+chat update       [--chat C] [--title T] [--provider P] [--model M] [--mode M] [--thinking-level L] [--project P] [--code on|off]
 chat send         --chat C --prompt TEXT
 chat continue     --chat C
 chat retry        [--chat C] [--action set|stop|try_now] [--prompt TEXT]

@@ -106,7 +106,7 @@ are reproducible and comparable:
 | `extraction_prompt_sha256` | the prompts that shape what is written to the vault — after #627 that is the region reconcile in `ciao/memory_proposals.py` alone |
 | `scenario_set_sha256` | the packaged catalog bytes |
 | `provider` / `model` | the run arguments |
-| `tool_catalog_sha256` / `tool_count` | the shipped MCP catalog |
+| `tool_catalog_sha256` / `tool_count` | the `ciao <noun> <verb>` command list from the ciao-cli skill (the surface a production chat has), or the `--catalog-file` text |
 
 `provenance_fingerprint` is one hash over those fields, excluding the
 timestamp. `ciao eval compare --baseline a.json --candidate b.json` reports
