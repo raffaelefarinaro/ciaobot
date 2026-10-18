@@ -75,7 +75,7 @@ async function mountLayout(seed: { permissions?: Array<ReturnType<typeof makePer
     history: createMemoryHistory(),
     routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId', component: EmptyStub }],
   })
-  await router.push('/')
+  await router.push(`/chat/${CHAT_ID}`)
   await router.isReady()
 
   const store = useProjectStore()
