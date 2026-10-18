@@ -804,7 +804,8 @@ def build_probe_prompts(
     """Return ``(system_prompt, user_prompt)`` for one scenario probe.
 
     ``tool_names`` (the CLI command list by default) is rendered one per line;
-    ``catalog_text`` replaces it with an arbitrary surface description. ``core_prompt_text`` swaps the shipped ``system_prompt.md``
+    ``catalog_text`` replaces it with an arbitrary surface description.
+    ``core_prompt_text`` swaps the shipped ``system_prompt.md``
     instructions inside the rendered preset for a variant, so a surface
     experiment can rephrase the tool guidance without editing the shipped
     file. Both default to the production rendering.
@@ -1241,8 +1242,9 @@ def cli_command_operations() -> dict[str, str]:
 
     The mapping is the skill's own "Operation names for telemetry" table, so
     a probe that reports ``ciao vault search --limit 5`` scores against the
-    same ``vault_search`` expectation as an MCP probe. Missing or malformed
-    file means no aliases, never an error: the MCP arm must not depend on it.
+    same ``vault_search`` expectation as a bare operation name. It also feeds
+    :func:`cli_surface_catalog`, the default probe catalog. A missing or
+    malformed file means no aliases and an unavailable catalog, never an error.
     """
     try:
         raw = json.loads(_CLI_COMMANDS_PATH.read_text(encoding="utf-8"))
