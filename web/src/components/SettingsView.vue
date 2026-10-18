@@ -3144,9 +3144,8 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
   try {
     const result = await api.post<ProviderActionResult>(`/api/settings/providers/${provider}/${action}`)
     if (action === 'connect') {
-      providerConnectionResult.value = result.opened
-        ? `Opened ${provider === 'opencode' ? 'opencode' : 'Claude Code'} login in Terminal.`
-        : `Run ${result.command} in Terminal.`
+      const providerName = provider === 'opencode' ? 'opencode' : 'Claude Code'
+      providerConnectionResult.value = `Opened the ${providerName} sign-in in ${result.launched || 'a terminal'}.`
     } else if (action === 'logout') {
       providerConnectionResult.value = 'Logged out.'
     } else {
@@ -3154,7 +3153,12 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
     }
     await fetchProviderKeys()
   } catch (e) {
-    providerConnectionResult.value = `Error: ${errorMessage(e)}`
+    // Connect answers a browser that is not on the engine's computer (or a host that
+    // cannot open a terminal) with the command to run there: guidance, not an error.
+    const command = errorPayload(e)?.command
+    providerConnectionResult.value = typeof command === 'string' && command
+      ? errorMessage(e)
+      : `Error: ${errorMessage(e)}`
   } finally {
     providerConnectionPending.value = ''
   }

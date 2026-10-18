@@ -27,8 +27,7 @@ These read the registry and pick up a new id with no further edit:
 
 - Workspace default provider, chat and schedule validation, `ciao` flags
   that take `--provider`.
-- Settings → Providers connection cards, including the macOS Terminal
-  login launcher (`POST /api/providers/{id}/connect`).
+- Settings → Providers connection cards.
 - Startup connection checks for every descriptor that has a status probe,
   except Claude, which is probed on its own path (`ciao/main.py`).
 - `/api/models`, which ships each provider's `ProviderCapabilities`.
@@ -113,6 +112,7 @@ arm.
 | Stop escalation disconnects only Claude. | A wedged CLI is not torn down on Stop unless `ActiveHandle.stop` already did it. | `ProjectChatManager` force-stop. |
 | One-shot raises `Unknown one-shot provider`. | Titles, critique, doc folding, and routine-model calls fail. | `ciao/providers/oneshot.py`. This is a separate no-tools call, not `run_streaming`. |
 | Critique's availability map has no entry. | The review panel skips the provider. | `ciao/critique.py` `default_critique_panel`. |
+| Connect has no `<id>-login` action. | Settings → Connect answers 404. | `ACTION_IDS` and `action_command` in `ciao/host_terminal.py`; `tests/test_provider_connect_route.py::test_every_provider_has_a_login_action` fails until it is added. |
 | Logout assumes `auth_command` is `[binary, auth, login]`. | Settings → Logout runs `[binary, auth, logout]`. A CLI with a different shape signs nobody out and can still exit 0. | `provider_connection_action` in `ciao/web/routes_api.py`. |
 | `ciao auth --print-only` has a missing-binary fallback only for OpenCode. | The printed command errors when the binary is not installed. | `ciao/cli.py`. |
 

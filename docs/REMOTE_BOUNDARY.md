@@ -66,13 +66,12 @@ carried by the session.
 - There is no native capability of any kind left: the macOS app and its shell
   are retired (`#579`), so a remote browser gets nothing a local one does not,
   and `trigger_app_update` does not exist. A browser is a local control path only
-  through session routes that also require the host: `/api/workspace-move*` and
-  `/api/host/terminal` check the loopback peer, a loopback `Host` and a
-  same-host `Origin`; `/api/workspace-open` checks the loopback peer only. Each
-  refuses a non-host peer. One exception is not yet narrowed:
-  `POST /api/settings/providers/{provider}/connect` opens the provider login in
-  macOS Terminal for any signed-in session; adding the host check there is
-  tracked as a follow-up (#1508).
+  through session routes that also require the host: `/api/workspace-move*`,
+  `/api/host/terminal` and `POST /api/settings/providers/{provider}/connect`
+  check the loopback peer, a loopback `Host` and a same-host `Origin`;
+  `/api/workspace-open` checks the loopback peer only. Each refuses a non-host
+  peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
+  `command` to run on the host.
 
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.
