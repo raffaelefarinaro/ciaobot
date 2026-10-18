@@ -36,8 +36,7 @@ carried by the session.
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update
   coordinator's drain handshake, and `/api/admin/restart-blockers` (the
-  reason-tagged list `ciao service` gates restart/stop on). It reads the TCP source address, never the
-  `Host` header, which a caller controls. A loopback peer carrying
+  reason-tagged list `ciao service` gates restart/stop on). It requires a loopback TCP source address, a loopback `Host` (`localhost`, `127.0.0.1`, `::1`) and, when the request carries `Origin` or `Referer`, one naming this exact origin, for every method. The peer address is what makes a caller local; the `Host` check refuses a DNS-rebound page on this machine, which is a loopback peer whose `Origin` matches its own (attacker-chosen) `Host`. A request that fails takes the normal session path, so Settings still reads restart blockers with its session. A loopback peer carrying
   reverse-proxy headers (`Forwarded`, `Via`, any `X-Forwarded-*`,
   `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, any
   `Tailscale-*`) is not local: `tailscale serve` and

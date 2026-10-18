@@ -51,7 +51,7 @@ from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mu
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
-from ciao.web.auth import is_loopback_client
+from ciao.web.auth import LOOPBACK_HOST_NAMES, is_loopback_client
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
@@ -6725,13 +6725,12 @@ async def admin_restart(request: Request) -> JSONResponse:
 # does not exclude it — and these routes need no session. The Host check
 # closes that: the name in the request is the only part of a rebound request
 # the attacker controls, so it has to be one this engine serves.
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _forbidden_host(request: Request) -> JSONResponse | None:
     """The 403 a request for a host this engine does not serve gets, or None."""
     host = (request.url.hostname or "").lower()
-    if host in _LOOPBACK_HOSTS:
+    if host in LOOPBACK_HOST_NAMES:
         return None
     return JSONResponse({"error": "forbidden host"}, status_code=403)
 

@@ -556,8 +556,7 @@ For security changes, the boundary is one origin and one session: every
 `ciao/web/auth.py`), every `/ws/*` handshake is checked for same-origin before
 the session, and every state-changing `/api/*` request must present a matching
 `Origin`/`Referer`. The loopback-only set (`_LOOPBACK_ONLY_API`, the update
-drain and the local feed) is gated on the TCP peer address, never the `Host`
-header. Do not add a capability or an origin exception for a page the model or
+drain and the local feed) is gated on the TCP peer address plus a loopback `Host` and a same-origin `Origin`/`Referer` when present; the peer alone never grants it. Do not add a capability or an origin exception for a page the model or
 a remote browser can influence. Auth/origin coverage is in
 `tests/test_auth_security.py`; hostile artifact coverage is in
 `tests/test_workspace_html.py`. This does not yet confine broad file endpoints,
