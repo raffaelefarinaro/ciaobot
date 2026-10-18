@@ -716,7 +716,7 @@ def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
     `<ciaobot_cli_reference>`. `tests/test_cli_docs_drift.py` checks them
     against the parsers; every command must also be in the reference `ciao help`
     prints. The cap stays at 12000, unchanged: measured as the payload length
-    the prompt is 10008 with the synopsis, so no raise was needed. A
+    the prompt is 10067 with the synopsis, so no raise was needed. A
     raise should move a section out rather than buy more room.
     """
     cli = system_prompt_payload("")["append"]
