@@ -406,7 +406,7 @@ def test_chat_turn_env_points_bare_gws_at_the_linked_account(
     assert extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] == str(creds.resolve())
 
 
-def test_chat_turn_env_leaves_gws_config_unset_for_an_unlinked_workspace(
+def test_chat_turn_env_isolates_bare_gws_for_an_unlinked_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     creds = tmp_path / "secrets" / "gws-personal"
@@ -416,13 +416,18 @@ def test_chat_turn_env_leaves_gws_config_unset_for_an_unlinked_workspace(
     extra_env = _chat_extra_env(tmp_path, monkeypatch)
 
     assert extra_env["GWS_PROFILE"] == ""
-    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in extra_env
+    # Pointed at a dir that holds no credentials, so a bare `gws` cannot fall
+    # back to the operator's ~/.config/gws login.
+    unlinked = Path(extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"])
+    assert unlinked.name == "gws-unlinked"
+    assert not unlinked.exists()
+    assert (tmp_path / "secrets") not in unlinked.parents
 
 
-def test_chat_turn_env_leaves_gws_config_unset_without_an_account(
+def test_chat_turn_env_isolates_bare_gws_without_an_account(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     extra_env = _chat_extra_env(tmp_path, monkeypatch)
 
     assert extra_env["GWS_PROFILE"] == ""
-    assert "GOOGLE_WORKSPACE_CLI_CONFIG_DIR" not in extra_env
+    assert Path(extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]).name == "gws-unlinked"

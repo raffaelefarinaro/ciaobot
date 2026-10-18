@@ -5283,13 +5283,16 @@ class ProjectChatManager:
         # Point a bare `gws` at the same credential dir `ciao gws` would use.
         # Without it, an agent that skips the wrapper reads `~/.config/gws`
         # (often a stale keyring-encrypted login) and reports Google as
-        # unauthenticated while the workspace account is connected.
-        if gws_profile:
-            from ciao.gws_auth import profile_config_dir
+        # unauthenticated while the workspace account is connected. A workspace
+        # with no linked account must not fall through to that login either (it
+        # is the operator's own account), so it gets a directory that never
+        # holds credentials and a bare `gws` finds none.
+        from ciao.gws_auth import profile_config_dir
 
-            config_dir = profile_config_dir(self._config, gws_profile)
-            if config_dir is not None:
-                env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
+        config_dir = profile_config_dir(self._config, gws_profile) if gws_profile else None
+        if config_dir is None:
+            config_dir = Path(self._config.state_path).parent / "gws-unlinked"
+        env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id

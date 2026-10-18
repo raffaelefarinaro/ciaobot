@@ -107,11 +107,15 @@ def main(argv: list[str] | None = None) -> int:
     from ciao.config import CiaoConfig
 
     args = list(sys.argv[1:] if argv is None else argv)
+    if args == ["--profile"]:
+        print("ciao gws: --profile needs an account name.", file=sys.stderr)
+        return 2
     profile, rest = _split_profile_and_args(args)
     config = CiaoConfig.from_env()
 
-    if not profile:
-        profile = os.environ.get("GWS_PROFILE", "").strip()
+    if profile is None:
+        profile = os.environ.get("GWS_PROFILE", "")
+    profile = profile.strip()
     if not profile:
         print(
             "No Google account is linked to this workspace. "

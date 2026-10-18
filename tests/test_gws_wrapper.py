@@ -222,3 +222,20 @@ def test_main_refuses_without_a_linked_profile(tmp_path, monkeypatch, capsys) ->
 
     assert gws_wrapper.main(["drive", "files", "list"]) == 2
     assert "No Google account is linked to this workspace" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--profile", "", "drive"], ["--profile", "  ", "drive"], ["--profile"]],
+    ids=["empty", "whitespace", "dangling"],
+)
+def test_main_refuses_a_blank_or_dangling_profile_flag(tmp_path, monkeypatch, capsys, argv) -> None:
+    """An explicit blank profile must not fall back to a GWS_PROFILE in the env."""
+    monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: _config(tmp_path)))
+    monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
+    monkeypatch.setenv("GWS_PROFILE", "personal")
+    monkeypatch.setattr(gws_wrapper, "resolve_command", lambda name: pytest.fail("must not resolve gws"))
+    monkeypatch.setattr(gws_wrapper, "hand_off", lambda *a: pytest.fail("must not run"))
+
+    assert gws_wrapper.main(argv) == 2
+    assert capsys.readouterr().err
