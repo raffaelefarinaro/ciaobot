@@ -231,10 +231,14 @@ they travel as a file (`--instructions-file`) rather than as a shell argument.
 
 Memory:
 ```bash
-ciao memory update --region memory --action add --entry "Prefers terse commit messages"
+cat > fact.txt <<'EOF'
+<the fact, in the user's words>
+EOF
+ciao memory-proposal-add --kind memory --text-file fact.txt
 ```
-```json
-{"ok": true, "data": {"region": "memory", "action": "add", "over_cap": false}}
+The fact travels in a file, never as a shell argument. `memory update --entry` is only for text you wrote yourself, such as consolidating existing entries. This admin command does not return the JSON envelope; it prints:
+```
+Queued [memory] proposal in <workspace>/Workspace/Memory-Proposals.md.
 ```
 
 Vault:
