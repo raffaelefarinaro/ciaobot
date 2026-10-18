@@ -231,10 +231,12 @@ they travel as a file (`--instructions-file`) rather than as a shell argument.
 
 Memory:
 ```bash
-ciao memory update --region memory --action add --entry "Prefers terse commit messages"
+printf %s "Prefers terse commit messages" > fact.txt
+ciao memory-proposal-add --kind memory --text-file fact.txt
 ```
+The fact travels in a file, never as a shell argument. `memory update --entry` is only for text you wrote yourself, such as consolidating existing entries.
 ```json
-{"ok": true, "data": {"region": "memory", "action": "add", "over_cap": false}}
+{"ok": true, "data": {"queued": true}}
 ```
 
 Vault:
