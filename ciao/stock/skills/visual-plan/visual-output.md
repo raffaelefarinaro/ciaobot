@@ -13,7 +13,6 @@ Markdown is always the canonical approval artifact. HTML is an optional companio
 Use HTML when the reviewer needs to inspect interaction, layout, state changes, or a diagram that argues a relationship: an interactive UI flow, a side-by-side comparison, a timeline, a prototype, or an architecture/flow/sequence drawn as inline SVG. It is for when the visual *is* the answer.
 
 - Author interactive HTML companions and inline-SVG diagrams by **loading and following the stock `html-artifact` skill**. Do not re-inline its sandbox rules; the stock skill already ships to every workspace and defines the CSP and panel constraints. If that skill is not installed, write the plan without the companion and say so.
-- Keep the HTML self-contained: one file, everything inline, no network at runtime, no forms, no animation loops, under 2 MB.
 - A narrow panel is a first-class review target. Design for roughly 420px wide first and let it grow.
 - The HTML is never the commentable source. Keep the decisions in Markdown.
 

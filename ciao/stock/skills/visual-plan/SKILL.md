@@ -25,7 +25,7 @@ Also skip it for a routine working doc: notes, an analysis, a draft with no appr
 
 ## Required workflow
 
-1. **Proceed to write the plan file.** Execution mode is fixed at auto: file writes run silently, and a destructive or system-level step asks for approval. Do not gate the plan on a mode that no longer exists — just create the file.
+1. **Check the chat mode first.** If this chat is in plan mode (writes return `plan_mode_read_only`), give the plan in the chat and say it can be saved as a file once the mode changes. Otherwise write the plan file.
 2. Read the project canonical document, relevant files, current implementation patterns, and recent changes.
 3. State the outcome, scope, non-goals, and the files or areas that may change.
 4. Record hard-to-reverse decisions and their recommended defaults.
