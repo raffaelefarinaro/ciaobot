@@ -464,8 +464,7 @@ def audit_entries(
 # Days after which a note's facts count as unverified, by note type. Two
 # overrides over one default because entity types rot at different speeds: an
 # active project's state changes weekly while a person's employer changes
-# yearly. 90 days for people matches the weekly-review template's existing
-# staleness rule, which until now was aspirational.
+# yearly.
 STALE_NOTE_THRESHOLDS_DAYS: dict[str, int] = {
     "project": 30,
     "person": 90,

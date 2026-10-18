@@ -187,7 +187,6 @@ ciao/                          Python backend (Starlette).
     public/                    Public extraction allowlist file (AGENTS.md), copied by public_release.py.
     workspace/                 Agent-readable docs copied into installed workspaces (`AGENTS.md`, `CIAO_CUSTOMIZATION.md`).
     schedules.json             Per-workspace system schedules (Workspace care).
-    schedules/                 Supplemental packaged schedule assets, including the legacy weekly-review template.
     evals/scenarios.json       Synthetic behavioral-eval scenarios (recall, abstention, supersession, attended/unattended extraction, approval deferral, tool choice, isolation, injection). No real vault content; consumed by `ciao eval` via `ciao/behavioral_eval.py`.
   web/                         PWA web server (Python routes) + static assets (built by web/).
     app.py                     Starlette app factory: middleware, route table, SPA catch-all.
