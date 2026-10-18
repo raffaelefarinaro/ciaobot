@@ -5,6 +5,7 @@ import { branchLabel, findRepoInstructions } from '../lib/repo'
 import { chatLocationDiffers, repoChip } from '../lib/repoLocation'
 import type { ProjectRepo, RepoLocation } from '../lib/types'
 import { useProjectStore } from '../stores/projects'
+import HostTerminalButton from './HostTerminalButton.vue'
 
 const props = defineProps<{
   repo: ProjectRepo
@@ -96,6 +97,7 @@ watch(() => props.chatId, () => { error.value = ''; openError.value = '' })
       :disabled="opening"
       @click="openInstructions"
     >Open AGENTS.md</button>
+    <HostTerminalButton v-if="!chip.missing" :chat-id="chatId" class="chat-repo-terminal" />
     <p v-if="openError" class="repo-code-error" role="alert">{{ openError }}</p>
   </section>
 </template>
@@ -191,6 +193,7 @@ watch(() => props.chatId, () => { error.value = ''; openError.value = '' })
   text-underline-offset: 2px;
   cursor: pointer;
 }
+.chat-repo-terminal { display: block; margin-top: var(--space-2); }
 .chat-repo-open:hover { text-decoration-color: currentColor; }
 .chat-repo-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
 @media (pointer: coarse) {

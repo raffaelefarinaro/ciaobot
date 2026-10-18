@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { api } from '../lib/api'
+import HostTerminalButton from './HostTerminalButton.vue'
 import type { ProviderConfigSettings, ProviderConnection } from '../lib/types'
 
 // Shown under a chat turn that failed because the provider CLI is signed out.
@@ -57,12 +58,13 @@ async function copy() {
       <p v-if="loading" class="signin-hint-status">Looking up the sign-in command…</p>
       <p v-else-if="loadError" class="signin-hint-status" role="alert">{{ loadError }} Settings → Models has the provider's sign-in button.</p>
       <ol v-else-if="connection" class="signin-hint-steps">
-        <li>On the computer running Ciaobot, open a terminal (Terminal on a Mac, PowerShell on Windows).</li>
+        <li>On the computer running Ciaobot, open a terminal (Terminal on a Mac, PowerShell on Windows), or use Run in Terminal below when you are on that computer.</li>
         <li>
           Paste this command, press Enter and finish signing in{{ connection.label ? ` to ${connection.label}` : '' }} in the browser window it opens:
           <div class="signin-hint-cmd">
             <code>{{ connection.command }}</code>
             <button class="btn-small" type="button" @click="copy">{{ copied ? 'Copied' : 'Copy' }}</button>
+            <HostTerminalButton v-if="connection.terminal_action" :action="connection.terminal_action" variant="small" />
           </div>
         </li>
         <li>

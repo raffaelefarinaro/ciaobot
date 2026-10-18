@@ -625,6 +625,14 @@
                         rel="noopener noreferrer"
                       >installation guide ↗</a>
                     </p>
+                    <p v-if="(conn.auth === 'not_installed' || conn.auth === 'unsupported_version') && conn.terminal_action" class="set-row-sub">
+                      <HostTerminalButton
+                        :action="conn.terminal_action"
+                        variant="small"
+                        :aria-label="`Install ${conn.label || connKey} in Terminal`"
+                        label="Install in Terminal"
+                      />
+                    </p>
                     <p
                       v-if="conn.auth !== 'not_installed' && conn.path_command"
                       class="set-row-sub"
@@ -1256,6 +1264,7 @@
                 </p>
                 <div class="action-row">
                   <button class="btn-primary btn-small" @click="installGwsInChat">Install in Chat</button>
+                  <HostTerminalButton action="gws-install" variant="small" label="Install in Terminal" />
                 </div>
                 <p class="hint hint--compact">Opens a chat that walks through <code>npm install -g @googleworkspace/cli</code> with you — Ciaobot does not run package installs on its own.</p>
               </div>
@@ -1572,7 +1581,7 @@
               <p class="hint">
                 These are the skills of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>skills/</code> folder or included with the app. Ask for one in chat, or invoke it by name with <code>/name</code> when your provider supports skill commands. Workspace git sync carries your own skills to other machines.
               </p>
-              <p class="hint">Skills installed directly in Claude Code or opencode can also be used in chats run by that provider, even if they are not listed here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#skills" target="_blank" rel="noopener noreferrer">How skills work</a></p>
+              <p class="hint">Skills installed directly in Claude Code or opencode can also be used in chats run by that provider, even if they are not listed here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#skills" target="_blank" rel="noopener noreferrer">How skills work</a> <HostTerminalButton action="skills-update" label="Update skills in Terminal" /></p>
             </div>
             <div class="settings-card-header-actions">
               <button class="set-link set-link--quiet" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
@@ -2067,6 +2076,7 @@ import {
   DropdownMenuTrigger,
 } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
+import HostTerminalButton from './HostTerminalButton.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'

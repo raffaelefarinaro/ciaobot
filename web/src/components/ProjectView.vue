@@ -130,6 +130,7 @@
                 :disabled="repoBusy"
                 @click="openRepoInstructions"
               >Open AGENTS.md</button>
+              <HostTerminalButton :project-id="project.project_id" />
             </p>
           </template>
           <p v-else class="empty-row">No repository linked. Link one to give this project's chats the repository's agent instructions and skills.</p>
@@ -434,6 +435,7 @@ import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
+import HostTerminalButton from './HostTerminalButton.vue'
 import RepoPickerDialog from './RepoPickerDialog.vue'
 import { branchLabel, findRepoInstructions } from '../lib/repo'
 import ChatSignals from './ChatSignals.vue'
@@ -1257,6 +1259,9 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   text-underline-offset: 3px;
 }
 
+.repo-meta :deep(.host-terminal-link) { color: var(--accent); font-size: var(--text-sm); min-height: 32px; text-decoration: none; }
+.repo-meta :deep(.host-terminal-link:hover:not(:disabled)) { text-decoration: underline; text-underline-offset: 3px; }
+
 .text-action:disabled {
   cursor: default;
   opacity: 0.55;
@@ -1652,7 +1657,8 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 }
 
 @media (pointer: coarse) {
-  .text-action { min-height: var(--touch); min-width: var(--touch); }
+  .text-action,
+  .repo-meta :deep(.host-terminal-link) { min-height: var(--touch); min-width: var(--touch); }
 }
 
 @media (max-width: 768px) {
