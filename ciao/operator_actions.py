@@ -1072,11 +1072,11 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
                 f"These variables in my `.env` are no longer read by the engine: "
                 f"{names}. For each one: "
                 + "; ".join(f"{name}: {hint}" for name, hint in stale)
-                + ". Tell me its current value and check that the setting that "
-                "replaced it says what I want. Do not try to edit `.env` — the "
-                "sandbox forbids writes to it, and the tile's own Remove button "
-                "comments these lines out. Explain what each variable used to "
-                "control and where its setting lives now."
+                + ". Do not try to read or edit `.env` — the sandbox denies it "
+                "to you, and the tile's own Remove button comments these lines "
+                "out. Explain what each variable used to control and where its "
+                "setting lives now, and how I can check the current value (in "
+                "Settings, where it has one)."
             ),
         )
     ]
