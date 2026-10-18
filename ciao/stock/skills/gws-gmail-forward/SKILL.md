@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-forward
-description: "Gmail: Forward a message to new recipients."
+description: "Use to forward an existing message to new recipients."
 metadata:
   version: 0.22.5
 ---

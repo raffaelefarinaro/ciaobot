@@ -1,6 +1,6 @@
 ---
 name: gws-calendar-agenda
-description: "Google Calendar: Show upcoming events across all calendars."
+description: "Use to show upcoming events across all calendars (today, tomorrow, this week, the next N days)."
 metadata:
   version: 0.22.5
 ---

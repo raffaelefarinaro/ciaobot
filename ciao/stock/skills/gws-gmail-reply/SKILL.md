@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-reply
-description: "Gmail: Reply to a message (handles threading automatically)."
+description: "Use to reply only to the sender of a message, keeping the thread; needs the message ID (find it with gws-gmail-triage)."
 metadata:
   version: 0.22.5
 ---

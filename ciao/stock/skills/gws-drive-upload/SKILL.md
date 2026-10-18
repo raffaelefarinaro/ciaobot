@@ -1,6 +1,6 @@
 ---
 name: gws-drive-upload
-description: "Google Drive: Upload a file with automatic metadata."
+description: "Use to upload a local file to Drive with automatic name and metadata."
 metadata:
   version: 0.22.5
 ---

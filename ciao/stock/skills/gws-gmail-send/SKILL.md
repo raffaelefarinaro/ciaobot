@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-send
-description: "Gmail: Send an email."
+description: "Use when the user wants to send a new email or save one as a draft."
 metadata:
   version: 0.22.5
 ---
