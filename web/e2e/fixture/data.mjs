@@ -84,6 +84,8 @@ function chat(workspace, n, projectId, title, extra = {}) {
     pinned_file_path: '',
     dismissed_pin_paths: [],
     pin_revision: 0,
+    code_mode: false,
+    code_mode_events: [],
     ...extra,
   }
 }
@@ -109,7 +111,11 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
     workspace.name === 'beta'
       ? { pinned_file_path: '/synthetic/beta/pinned-report.md', dismissed_pin_paths: [], pin_revision: 1 }
       : workspace.name === 'alpha'
-        ? { repo_location: { path: '/synthetic/repos/alpha-app-wt-login', branch: 'feature/login', is_worktree: true, exists: true } }
+        ? {
+          repo_location: { path: '/synthetic/repos/alpha-app-wt-login', branch: 'feature/login', is_worktree: true, exists: true },
+          code_mode: true,
+          code_mode_events: [{ code_mode: true, actor: 'agent', at: '2026-01-01T09:01:00Z', after_turn_index: -1 }],
+        }
         : {}),
   chat(workspace.name, 2, `${workspace.name}-notes`, `${workspace.name} second conversation`),
   // Archived, and only in the first workspace: the sidebar hides it, so every

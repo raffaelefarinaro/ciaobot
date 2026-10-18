@@ -333,7 +333,16 @@ def test_curation_prunes_only_active_learnings_and_leaves_resolved_to_cleanup() 
 
 def test_curation_report_lists_every_deferred_category() -> None:
     report = _curation_section(_curation_prompt(), "## 10. Report")
-    for category in ("skill proposal", "draft", "vault-review candidate", "`note_edit` proposal", "cross-project fact"):
+    for category in (
+        "skill proposal",
+        "draft",
+        "vault-review candidate",
+        "`note_edit` proposal",
+        "cross-project fact",
+        "learnings ready to retire",
+        "`[review]` questions",
+        "Unresolved audit findings",
+    ):
         assert category in report
 
 
