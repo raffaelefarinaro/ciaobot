@@ -101,7 +101,7 @@ describe('ChatRepoChip', () => {
     sw.click()
     await flushPromises()
     expect(document.querySelector('[role=alert]')!.textContent).toContain('Link a repository first')
-    expect(sw.disabled).toBe(false)
+    expect(sw.getAttribute('aria-disabled')).toBe('false')
     wrapper.unmount()
   })
 })

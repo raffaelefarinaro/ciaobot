@@ -17,6 +17,7 @@ const open = ref(false)
 const pending = ref(false)
 const error = ref('')
 const switchId = useId()
+const hintId = useId()
 const chip = computed(() => repoChip(props.repo, props.location))
 const label = computed(() => (chip.value ? repoChipLabel(chip.value, props.codeMode) : ''))
 
@@ -84,14 +85,15 @@ watch(open, (v) => { if (!v) error.value = '' })
           :aria-checked="codeMode"
           :aria-labelledby="switchId"
           :aria-busy="pending"
-          :disabled="pending"
+          :aria-disabled="pending"
+          :aria-describedby="hintId"
           @click="toggleCodeMode"
         >
           <span class="switch-word">{{ codeMode ? 'On' : 'Off' }}</span>
           <span class="switch-track" aria-hidden="true"></span>
         </button>
       </div>
-      <p class="repo-code-hint">Loads the repository's instructions, skills and write access in this chat.</p>
+      <p :id="hintId" class="repo-code-hint">Loads the repository's instructions, skills and write access in this chat.</p>
       <p v-if="error" class="repo-code-error" role="alert">{{ error }}</p>
       </div>
     </PopoverContent>
@@ -170,7 +172,7 @@ watch(open, (v) => { if (!v) error.value = '' })
   font-size: var(--text-sm);
   cursor: pointer;
 }
-.repo-code-switch:disabled { opacity: 0.6; cursor: default; }
+.repo-code-switch[aria-disabled='true'] { opacity: 0.6; cursor: default; }
 .repo-code-switch:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

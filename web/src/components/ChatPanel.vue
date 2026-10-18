@@ -5588,6 +5588,7 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .transcript-event {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: var(--space-2);
   width: 100%;
   color: var(--fg3);
@@ -5597,10 +5598,16 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 .transcript-event::before,
 .transcript-event::after {
   content: '';
-  flex: 1;
+  flex: 1 1 var(--space-4);
+  min-width: var(--space-4);
   border-top: 1px solid var(--border);
 }
-.transcript-event-time { font-weight: 400; }
+.transcript-event-text { flex: 0 1 auto; min-width: 0; text-align: center; overflow-wrap: anywhere; }
+.transcript-event-time { flex: none; font-weight: 400; }
+@media (max-width: 480px) {
+  /* On a phone the timestamp would force a second line; the rules stay. */
+  .transcript-event-time { display: none; }
+}
 
 .retry-btn {
   margin-top: 6px;

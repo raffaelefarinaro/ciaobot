@@ -4560,6 +4560,8 @@ export const useProjectStore = defineStore('projects', () => {
         const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
         if (!c) break
         c.code_mode = msg.code_mode
+        // A switch made from this client also gets the PATCH response, so this is a
+        // second fetch of the same chat. Harmless; keep it, the agent's switches need it.
         // The event has no after_turn_index; the server's ChatInfo does. Refetch
         // rather than guess the anchor (an optimistic user row has no turn_index yet).
         void api.get<ChatInfo>(`/api/chats/${encodeURIComponent(msg.chat_id)}`)
