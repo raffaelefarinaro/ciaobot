@@ -69,6 +69,7 @@ from ciao.models import (
     linked_repo_of,
     provider_reuse_key,
     tool_call_facts,
+    tool_work_dirs,
 )
 from ciao.providers.base import (
     ActiveHandle,
@@ -3328,6 +3329,7 @@ class OpencodeProvider(BaseSDKProvider):
                 tool_input=_summarize_tool_input(tool, raw_input),
                 tool_use_id=call_id or None,
                 file_touches=_file_touches(tool, raw_input),
+                work_dirs=tool_work_dirs(tool, raw_input) or None,
                 input_chars=input_chars,
                 control_surface=surface,
                 backgroundable=tool in _BACKGROUNDABLE_TOOLS,
@@ -3469,6 +3471,7 @@ class OpencodeProvider(BaseSDKProvider):
                 tool_input=_summarize_tool_input(tool, raw_input),
                 tool_use_id=call_id or None,
                 file_touches=_file_touches(tool, raw_input),
+                work_dirs=tool_work_dirs(tool, raw_input) or None,
                 input_chars=input_chars,
                 control_surface=surface,
                 backgroundable=tool in _BACKGROUNDABLE_TOOLS,
@@ -3488,6 +3491,7 @@ class OpencodeProvider(BaseSDKProvider):
                     tool_input=_summarize_tool_input(tool, raw_input),
                     tool_use_id=call_id or None,
                     file_touches=_file_touches(tool, raw_input),
+                    work_dirs=tool_work_dirs(tool, raw_input) or None,
                     input_chars=input_chars,
                     control_surface=surface,
                 ))

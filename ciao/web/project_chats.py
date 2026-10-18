@@ -12,7 +12,7 @@ import re
 import shutil
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -90,7 +90,7 @@ def _restored_pin_paths(raw: Any) -> list[str]:
 import yaml
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import backup_scope, repo_link, subagent_tracking
+from ciao import backup_scope, repo_link, repo_location, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -576,6 +576,10 @@ class ChatInfo:
     pinned_file_path: str = ""
     dismissed_pin_paths: list[str] = field(default_factory=list)
     pin_revision: int = 0
+    # Where this chat last worked in the project's linked repo: `{}` or
+    # `{path, branch, is_worktree, exists}`. Kept only for chats in a linked
+    # project (see `repo_location.py`).
+    repo_location: dict = field(default_factory=dict)
     # Set only by the memory-backup setup route (#1328). A workspace-scoped
     # chat with this flag may also read and write the install's data root,
     # the parent of every workspace folder, because a git repository there is
@@ -620,6 +624,7 @@ class ChatInfo:
             "pinned_file_path": self.pinned_file_path,
             "dismissed_pin_paths": list(self.dismissed_pin_paths),
             "pin_revision": self.pin_revision,
+            "repo_location": dict(self.repo_location),
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -878,6 +883,7 @@ class ProjectChatManager:
         # mid-flight, and any exception it raised is reported as "Task
         # exception was never retrieved" at GC time instead of being logged.
         self._detached_tasks: set[asyncio.Task[object]] = set()
+        self._repo_location_locks: dict[str, asyncio.Lock] = {}
         # Chats with a native-title poll in flight. Both the first-message and
         # the end-of-turn trigger want to title the same chat, and each poll
         # costs real provider reads (an opencode read spawns a throwaway
@@ -999,6 +1005,11 @@ class ProjectChatManager:
                 pinned_file_path=str(cd.get("pinned_file_path", "") or ""),
                 dismissed_pin_paths=_restored_pin_paths(cd.get("dismissed_pin_paths")),
                 pin_revision=int(cd.get("pin_revision", 0) or 0),
+                repo_location=(
+                    dict(cd["repo_location"])
+                    if isinstance(cd.get("repo_location"), dict)
+                    else {}
+                ),
                 grants_data_root=bool(cd.get("grants_data_root", False)),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
@@ -1108,6 +1119,7 @@ class ProjectChatManager:
                     "pinned_file_path": c.pinned_file_path,
                     "dismissed_pin_paths": list(c.dismissed_pin_paths),
                     "pin_revision": c.pin_revision,
+                    "repo_location": dict(c.repo_location),
                     "grants_data_root": c.grants_data_root,
                 }
                 for cid, c in self._chats.items()
@@ -3829,6 +3841,7 @@ class ProjectChatManager:
         chat = self._chats.pop(chat_id, None)
         if chat is None:
             return False
+        self._repo_location_locks.pop(chat_id, None)
         self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
         task = self._retry_tasks.pop(chat_id, None)
@@ -5566,6 +5579,77 @@ class ProjectChatManager:
 
         task.add_done_callback(_done)
         return task
+
+    async def _update_repo_location(
+        self, chat_id: str, hints: Sequence[str]
+    ) -> tuple[dict[str, Any], bool] | None:
+        """(location, changed), or None when the chat is not in a linked project."""
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        project = self._projects.get(chat.project_id)
+        repo_path = getattr(project, "repo_path", "") if project else ""
+        if not repo_path:
+            if chat.repo_location:
+                chat.repo_location = {}
+                self._save()
+                return {}, True
+            return None
+        async with self._repo_location_locks.setdefault(chat_id, asyncio.Lock()):
+            try:
+                new = await asyncio.wait_for(
+                    repo_location.resolve_chat_location(
+                        repo_path=repo_path,
+                        hints=list(hints),
+                        previous=chat.repo_location,
+                    ),
+                    repo_location.REFRESH_TIMEOUT_S,
+                )
+            except TimeoutError:
+                return dict(chat.repo_location), False
+            changed = new != chat.repo_location
+            if changed:
+                chat.repo_location = new
+                self._save()
+            return dict(new), changed
+
+    async def refresh_repo_location(
+        self, chat_id: str, hints: Sequence[str]
+    ) -> dict[str, Any] | None:
+        """Turn end: update the chat, re-broadcast its project's repo state."""
+        result = await self._update_repo_location(chat_id, hints)
+        if result is None:
+            return None
+        chat = self._chats.get(chat_id)
+        project = self._projects.get(chat.project_id) if chat else None
+        if project is None or not getattr(project, "repo_path", ""):
+            # Unlinked: the stored location was just cleared; the done payload
+            # carries no `repo_location` key for such chats.
+            return None
+        try:
+            payload = await asyncio.to_thread(project.to_dict)
+            self._events.publish({"type": "project_updated", "project": payload})
+        except Exception:  # noqa: BLE001 — the location is already stored; keep it
+            logger.exception("project_updated after repo refresh failed for %s", chat_id)
+        return result[0]
+
+    def schedule_repo_location_refresh(self, chat_id: str) -> None:
+        """Chat open: recheck in the background; publish `chat_repo_location` on change."""
+        self._spawn_detached(
+            self._refresh_on_open(chat_id), name=f"repo-location-{chat_id}"
+        )
+
+    async def _refresh_on_open(self, chat_id: str) -> None:
+        result = await self._update_repo_location(chat_id, ())
+        chat = self._chats.get(chat_id)
+        if result is None or chat is None or not result[1]:
+            return
+        self._events.publish({
+            "type": "chat_repo_location",
+            "chat_id": chat_id,
+            "project_id": chat.project_id,
+            "repo_location": result[0],
+        })
 
     def _record_stopped_turn(
         self,

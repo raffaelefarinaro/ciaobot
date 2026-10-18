@@ -4093,6 +4093,43 @@ describe('memoryInsightRows', () => {
 })
 
 describe('chat_streaming_done clears stale streaming for inactive chats', () => {
+  const loc = { path: '/r/wt', branch: 'feat', is_worktree: true, exists: true }
+
+  it('chat_streaming_done applies repo_location to the chat', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'c-loc', project_id: 'p1', title: 'T' } as never]
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done',
+        chat_id: 'c-loc',
+        project_id: 'p1',
+        is_error: false,
+        repo_location: loc,
+      }),
+    })
+    expect(store.chats[0].repo_location).toEqual(loc)
+  })
+
+  it('chat_repo_location updates the chat', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'c-loc', project_id: 'p1', title: 'T' } as never]
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_repo_location',
+        chat_id: 'c-loc',
+        project_id: 'p1',
+        repo_location: { ...loc, exists: false },
+      }),
+    })
+    expect(store.chats[0].repo_location).toEqual({ ...loc, exists: false })
+  })
+
   test('an inactive chat finishing clears its orphaned local streaming flag', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()

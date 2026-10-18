@@ -78,6 +78,7 @@ from ciao.models import (
     linked_repo_of,
     provider_reuse_key,
     tool_call_facts,
+    tool_work_dirs,
 )
 from ciao.execution_modes import (
     harness_skill_overrides,
@@ -1710,6 +1711,7 @@ class ClaudeProvider(BaseSDKProvider):
                         tool_use_id=getattr(block, "id", None),
                         parent_tool_use_id=parent_id,
                         file_touches=touches or None,
+                        work_dirs=tool_work_dirs(block.name, raw_input) or None,
                         input_chars=input_chars,
                         control_surface=surface,
                     ))
