@@ -55,8 +55,22 @@ LINKED_REPO_RULES = (
     "in that file's style; say in your reply that you changed it.\n"
     "- Project decisions and status go in the project note (canonical_doc), not the repository.\n"
     "- Never write vault content into the repository, and never put code details into the vault.\n"
-    "- End a turn that changed code with the files you changed and the branch they are on."
+    "- End a turn that changed code with the files you changed and the branch they are on.\n"
+    "- Only code and files the repository owns (including its AGENTS.md) go in the repository. Notes, plans, "
+    "reports, drafts and artifacts go in the project's Ciaobot folder (canonical_doc's folder), as usual."
 )
+
+#: Sent instead of the full block when the project is linked but the chat's code mode is off.
+LINKED_REPO_OFF_HINT = (
+    "Code mode is off: treat this as a normal chat. When the user wants to work on the code "
+    "in this repository, run `ciao chat update --code on` first."
+)
+
+
+def render_linked_repo_off_block(*, path: str) -> str:
+    """The light ``[Linked repository]`` block of a linked chat with code mode off."""
+    shown = _field(path, limit=300)
+    return f"[Linked repository]\npath={shown}\n{LINKED_REPO_OFF_HINT}\n[End linked repository]"
 
 
 def render_linked_repo_block(

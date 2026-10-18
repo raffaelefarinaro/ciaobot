@@ -57,6 +57,7 @@ async def test_delete_chat_drops_its_repo_location_lock(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     project.repo_path = str(repo)
+    chat.code_mode = True
     await manager.refresh_repo_location(chat.chat_id, [])
     assert chat.chat_id in manager._repo_location_locks
 
@@ -72,6 +73,7 @@ async def test_to_dict_failure_still_returns_the_location(
     project = manager.create_project("Repo", workspace="work")
     chat = manager.create_chat(project.project_id, title="C")
     project.repo_path = str(tmp_path)
+    chat.code_mode = True
     loc = {"path": "/x/wt", "branch": "feat", "is_worktree": True, "exists": True}
 
     async def fake_update(chat_id, hints):
@@ -83,3 +85,19 @@ async def test_to_dict_failure_still_returns_the_location(
     manager._update_repo_location = fake_update  # type: ignore[method-assign]
     monkeypatch.setattr(type(project), "to_dict", boom)
     assert await manager.refresh_repo_location(chat.chat_id, []) == loc
+
+
+@pytest.mark.asyncio
+async def test_code_mode_off_skips_location_refresh(tmp_path: Path) -> None:
+    manager = _manager(tmp_path)
+    project = manager.create_project("Repo", workspace="work")
+    chat = manager.create_chat(project.project_id, title="C")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    project.repo_path = str(repo)
+    chat.repo_location = {"path": str(repo), "branch": "main", "is_worktree": False, "exists": True}
+    assert chat.code_mode is False
+
+    assert await manager.refresh_repo_location(chat.chat_id, []) is None
+    assert chat.repo_location == {}
+    assert chat.chat_id not in manager._repo_location_locks

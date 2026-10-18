@@ -305,7 +305,9 @@ def _linked_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: i
         "ciao.web.project_chats.repo_state",
         lambda path: {"path": path, "branch": "main", "dirty": False, "missing": False},
     )
-    return manager, manager.create_chat(project.project_id), repo
+    chat = manager.create_chat(project.project_id)
+    chat.code_mode = True
+    return manager, chat, repo
 
 
 def test_a_linked_project_prefix_injects_agents_md_and_resends_on_edit(
@@ -328,3 +330,21 @@ def test_an_unlinked_project_prefix_has_no_repo_block(tmp_path: Path) -> None:
     prefix = manager._build_prompt_prefix(manager.create_chat(project.project_id))
     assert "[Linked repository]" not in prefix
     assert "linked_repo=" not in prefix
+
+
+def test_a_linked_chat_with_code_mode_off_gets_the_light_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat, _repo = _linked_manager(tmp_path, monkeypatch)
+    on_marker = manager._stable_context_marker(chat)[0]
+    chat.code_mode = False
+    prefix = manager._build_prompt_prefix(chat)
+    assert "Code mode is off" in prefix
+    assert "code_mode=off" in prefix
+    assert "Run make test" not in prefix
+    assert "Code-work rules" not in prefix
+    assert manager._stable_context_marker(chat)[0] != on_marker
+
+
+def test_the_linked_repo_rules_keep_notes_out_of_the_repo() -> None:
+    assert "Notes, plans, reports, drafts and artifacts" in LINKED_REPO_RULES

@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
@@ -101,6 +101,7 @@ from ciao.config import (
 from ciao.context.capsule import (
     build_context_capsule,
     render_linked_repo_block,
+    render_linked_repo_off_block,
 )
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
@@ -181,6 +182,8 @@ logger = logging.getLogger(__name__)
 # a stdin write on Claude, so this only bites on a wedged CLI; it must not hold
 # the chat's socket loop.
 _STEER_DISPATCH_TIMEOUT_S = 10.0
+# Most code-mode switch markers a chat keeps; the oldest are dropped.
+CODE_MODE_EVENTS_MAX = 200
 
 _ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
@@ -580,6 +583,11 @@ class ChatInfo:
     # `{path, branch, is_worktree, exists}`. Kept only for chats in a linked
     # project (see `repo_location.py`).
     repo_location: dict = field(default_factory=dict)
+    # Per-chat code mode (#1450). Persisted only when set, so unlinked or off
+    # chats persist exactly as before. Each event is
+    # {code_mode, actor, at, after_turn_index}.
+    code_mode: bool = False
+    code_mode_events: list[dict] = field(default_factory=list)
     # Set only by the memory-backup setup route (#1328). A workspace-scoped
     # chat with this flag may also read and write the install's data root,
     # the parent of every workspace folder, because a git repository there is
@@ -625,6 +633,8 @@ class ChatInfo:
             "dismissed_pin_paths": list(self.dismissed_pin_paths),
             "pin_revision": self.pin_revision,
             "repo_location": dict(self.repo_location),
+            "code_mode": self.code_mode,
+            "code_mode_events": [dict(e) for e in self.code_mode_events],
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -1010,6 +1020,10 @@ class ProjectChatManager:
                     if isinstance(cd.get("repo_location"), dict)
                     else {}
                 ),
+                code_mode=bool(cd.get("code_mode", False)),
+                code_mode_events=[
+                    dict(e) for e in cd.get("code_mode_events", []) if isinstance(e, dict)
+                ],
                 grants_data_root=bool(cd.get("grants_data_root", False)),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
@@ -1120,6 +1134,12 @@ class ProjectChatManager:
                     "dismissed_pin_paths": list(c.dismissed_pin_paths),
                     "pin_revision": c.pin_revision,
                     "repo_location": dict(c.repo_location),
+                    **({"code_mode": True} if c.code_mode else {}),
+                    **(
+                        {"code_mode_events": [dict(e) for e in c.code_mode_events]}
+                        if c.code_mode_events
+                        else {}
+                    ),
                     "grants_data_root": c.grants_data_root,
                 }
                 for cid, c in self._chats.items()
@@ -3291,6 +3311,61 @@ class ProjectChatManager:
                 "project_id": chat.project_id,
                 "old_project_id": moved_from,
             })
+            if chat.code_mode:
+                self.set_code_mode(chat_id, False, actor="user")
+        return chat
+
+    def set_code_mode(
+        self, chat_id: str, on: bool, *, actor: Literal["user", "agent"]
+    ) -> ChatInfo | None:
+        """Switch the chat's code mode. None for an unknown chat; ValueError when it cannot be on."""
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        if chat.code_mode == on:
+            return chat
+        if chat.archived:
+            raise ValueError("Cannot change code mode of an archived chat")
+        project = self._projects.get(chat.project_id)
+        if on:
+            raw = project.repo_path if project else ""
+            if not raw:
+                raise ValueError(
+                    "Code mode needs a project linked to a git repository. "
+                    "Link one in the project's settings first."
+                )
+            if not Path(raw).expanduser().is_dir():
+                raise ValueError(f"The linked repository is not available on this machine: {raw}")
+        at = chat_service._now_iso()
+        chat.code_mode = on
+        chat.code_mode_events = [
+            *chat.code_mode_events,
+            {
+                "code_mode": on,
+                "actor": actor,
+                "at": at,
+                "after_turn_index": chat.user_turn_count - 1,
+            },
+        ][-CODE_MODE_EVENTS_MAX:]
+        cleared_location = not on and bool(chat.repo_location)
+        if cleared_location:
+            chat.repo_location = {}
+        self._save()
+        self._events.publish({
+            "type": "chat_code_mode",
+            "chat_id": chat_id,
+            "project_id": chat.project_id,
+            "code_mode": on,
+            "actor": actor,
+            "at": at,
+        })
+        if cleared_location:
+            self._events.publish({
+                "type": "chat_repo_location",
+                "chat_id": chat_id,
+                "project_id": chat.project_id,
+                "repo_location": {},
+            })
         return chat
 
     # ── Chat pins (durable pinned-file state, #1118) ─────────────────────
@@ -4173,6 +4248,7 @@ class ProjectChatManager:
         chat.archived = False
         chat.archive_path = ""
         chat.handover_messages = []
+        chat.code_mode_events = []
         chat.handover_context_pending = False
         # A fresh session abandons any question the old one paused on, along
         # with follow-ups parked for that answer turn — they must not leak
@@ -4564,12 +4640,18 @@ class ProjectChatManager:
         env.update(self.workspace_shell_env(workspace, project))
         return self._config.agent_root(workspace), env
 
+    def _effective_code_mode(self, chat: ChatInfo) -> bool:
+        """Code mode counts only in a linked project."""
+        project = self._projects.get(chat.project_id)
+        return bool(chat.code_mode and project is not None and project.repo_path)
+
     def _linked_repo_for_chat(self, chat: ChatInfo) -> str:
         """The chat's linked repository, resolved, or "" when unlinked, missing,
-        or a memory-pass chat (the pass must not be able to write the repo)."""
+        code mode is off, or a memory-pass chat (the pass must not be able to
+        write the repo)."""
         project = self._projects.get(chat.project_id)
         raw = project.repo_path if project else ""
-        if not raw or is_memory_pass_chat(chat, project):
+        if not raw or not chat.code_mode or is_memory_pass_chat(chat, project):
             return ""
         path = Path(raw).expanduser()
         return str(path.resolve()) if path.is_dir() else ""
@@ -4605,12 +4687,27 @@ class ProjectChatManager:
         if callable(revoke):
             revoke(chat_id)
 
-    def _linked_repo_context(self, project: ProjectInfo | None) -> tuple[str, str, str]:
-        """(stable block, digest fingerprint, per-turn line) for a linked project; ("", "", "") when unlinked."""
+    def _linked_repo_context(
+        self, chat: ChatInfo, project: ProjectInfo | None
+    ) -> tuple[str, str, str]:
+        """(stable block, digest fingerprint, per-turn line); ("", "", "") when unlinked.
+
+        Code mode on: the full block with the repository's instructions. Linked
+        but off: a light hint naming the path and how to switch on.
+        """
         if project is None or not project.repo_path:
             return "", "", ""
         path = project.repo_path
         state = repo_state(path)
+        if not chat.code_mode:
+            block = render_linked_repo_off_block(path=path)
+            if state["missing"]:
+                return block, f"{path}\0off", f"linked_repo={path} missing=true code_mode=off"
+            return (
+                block,
+                f"{path}\0off",
+                f"linked_repo={path} branch={state['branch'] or '(detached)'} code_mode=off",
+            )
         if state["missing"]:
             block = render_linked_repo_block(path=path, missing=True, instructions_name="", instructions_text="")
             return block, f"{path}\0missing", f"linked_repo={path} missing=true"
@@ -4643,7 +4740,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        repo_block, _repo_fp, repo_line = self._linked_repo_context(project)
+        repo_block, _repo_fp, repo_line = self._linked_repo_context(chat, project)
         include_stable = self._needs_stable_context(chat)
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
@@ -4684,7 +4781,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        _b, repo_fp, _l = self._linked_repo_context(project)
+        _b, repo_fp, _l = self._linked_repo_context(chat, project)
         return (
             stable_context_digest(
                 workspace=workspace,
@@ -4705,7 +4802,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
-        repo_block, _repo_fp, repo_line = self._linked_repo_context(project)
+        repo_block, _repo_fp, repo_line = self._linked_repo_context(chat, project)
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -5589,7 +5686,7 @@ class ProjectChatManager:
             return None
         project = self._projects.get(chat.project_id)
         repo_path = getattr(project, "repo_path", "") if project else ""
-        if not repo_path:
+        if not repo_path or not chat.code_mode:
             if chat.repo_location:
                 chat.repo_location = {}
                 self._save()
@@ -5622,8 +5719,8 @@ class ProjectChatManager:
             return None
         chat = self._chats.get(chat_id)
         project = self._projects.get(chat.project_id) if chat else None
-        if project is None or not getattr(project, "repo_path", ""):
-            # Unlinked: the stored location was just cleared; the done payload
+        if project is None or not getattr(project, "repo_path", "") or not chat or not chat.code_mode:
+            # Unlinked or code mode off: the stored location was just cleared; the done payload
             # carries no `repo_location` key for such chats.
             return None
         try:
