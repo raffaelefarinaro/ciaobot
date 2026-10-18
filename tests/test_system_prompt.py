@@ -27,7 +27,7 @@ def test_new_vault_notes_require_frontmatter() -> None:
 
 def test_rewrites_preserve_frontmatter() -> None:
     text = _system_instructions()
-    assert "`updated:` moves only through a `note verify`" in text
+    assert "`updated:` moves only through a `note verify` still_valid/update verdict or `vault review keep`" in text
 
 
 def test_notes_are_typed_from_the_vocabularys_categories_block() -> None:
@@ -99,6 +99,8 @@ def test_cli_skill_example_is_not_an_entry_argv_fact() -> None:
     cli = _stock("skills", "ciao-cli", "SKILL.md")
     assert 'ciao memory update --region memory --action add --entry "Prefers terse' not in cli
     assert "memory-proposal-add --kind memory --text-file" in cli
+    assert '{"ok": true, "data": {"queued"' not in cli
+    assert "Queued [memory] proposal in" in cli
     caps = _stock("skills", "ciao-capabilities", "SKILL.md")
     assert "`ciao memory update --region {memory,profile} --action {add,replace,remove}`" not in caps
 
