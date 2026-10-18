@@ -108,7 +108,9 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
     // alpha chats every other spec measures.
     workspace.name === 'beta'
       ? { pinned_file_path: '/synthetic/beta/pinned-report.md', dismissed_pin_paths: [], pin_revision: 1 }
-      : {}),
+      : workspace.name === 'alpha'
+        ? { repo_location: { path: '/synthetic/repos/alpha-app-wt-login', branch: 'feature/login', is_worktree: true, exists: true } }
+        : {}),
   chat(workspace.name, 2, `${workspace.name}-notes`, `${workspace.name} second conversation`),
   // Archived, and only in the first workspace: the sidebar hides it, so every
   // other spec sees the same rows it saw before, while a deep link to its id

@@ -799,4 +799,34 @@ describe('ProjectSidebar accessible context menus', () => {
     expect(document.body.querySelectorAll('[data-reka-menu-content]')).toHaveLength(1)
     wrapper.unmount()
   })
+
+  it('shows the linked repository branch once on the project row', async () => {
+    const store = useProjectStore()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: true, missing: false }
+    const wrapper = await mountSidebar()
+    const tags = wrapper.findAll('.project-repo-tag')
+    expect(tags).toHaveLength(1)
+    expect(tags[0].text()).toContain('main')
+    expect(tags[0].text()).toContain('uncommitted changes')
+    wrapper.unmount()
+  })
+
+  it('tags a chat only when it worked outside the main checkout', async () => {
+    const store = useProjectStore()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
+    store.chats[0].repo_location = { path: '/r/app', branch: 'main', is_worktree: false, exists: true }
+    store.chats.push({
+      ...store.chats[0],
+      chat_id: 'chat-wt',
+      title: 'In a worktree',
+      repo_location: { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true },
+    })
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    const tags = wrapper.findAll('.chat-repo-tag')
+    expect(tags).toHaveLength(1)
+    expect(tags[0].text()).toBe('⑂ feat-x')
+    expect(tags[0].attributes('title')).toBe('Worktree: /r/app-wt')
+    wrapper.unmount()
+  })
 })

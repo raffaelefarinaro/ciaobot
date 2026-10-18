@@ -646,6 +646,19 @@
                   ref="editInput"
                   autofocus
                 />
+                <span
+                  v-if="editingProject !== project.project_id && projectRepoTag(project.repo)"
+                  class="project-repo-tag"
+                  :class="{ 'project-repo-tag--missing': project.repo?.missing }"
+                  :title="projectRepoTag(project.repo)!.title"
+                >
+                  <template v-if="project.repo?.missing">missing<span class="sr-only"> repository folder</span></template>
+                  <template v-else>
+                    <span aria-hidden="true">⑂ </span><span class="sr-only">branch </span>{{ projectRepoTag(project.repo)!.branch }}
+                    <span v-if="projectRepoTag(project.repo)!.dirty" class="project-repo-dot" aria-hidden="true"></span>
+                    <span v-if="projectRepoTag(project.repo)!.dirty" class="sr-only">, uncommitted changes</span>
+                  </template>
+                </span>
                 <DropdownMenuTrigger
                   v-if="!project.is_auto"
                   as-child
@@ -734,6 +747,12 @@
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
                     <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
+                    <span
+                      v-if="chatRepoTag(project.repo, chat.repo_location)"
+                      class="chat-repo-tag"
+                      :class="{ 'chat-repo-tag--removed': chatRepoTag(project.repo, chat.repo_location)!.removed }"
+                      :title="chatRepoTag(project.repo, chat.repo_location)!.title"
+                    >{{ chatRepoTag(project.repo, chat.repo_location)!.label }}</span>
                     <ChatSignals
                       :chat-id="chat.chat_id"
                       density="row"
@@ -900,6 +919,7 @@ import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
+import { chatRepoTag, projectRepoTag } from '../lib/repoLocation'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
@@ -2605,6 +2625,48 @@ async function confirmDeleteChat(chatId: string) {
   font: 600 calc(10px * var(--font-scale))/1 var(--font-mono);
 }
 
+/* The repo branch, once per project, in the mono register of the task tag. */
+.project-repo-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg3);
+  font: 500 calc(11px * var(--font-scale))/1 var(--font-mono);
+}
+.project-repo-tag--missing { color: var(--warning); }
+.project-repo-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 4px;
+  border-radius: 50%;
+  background: var(--warning);
+  vertical-align: middle;
+}
+/* Same squared tag as .chat-task-tag, but it can truncate (branch names run long). */
+.chat-repo-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 9em;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font: 600 calc(10px * var(--font-scale))/14px var(--font-mono);
+}
+.chat-repo-tag--removed {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
 /* Unread is full-strength text plus the row's dot, not bold: bold chat
    titles read as a second level of headings next to the projects. */
 .chat-title--unread {
@@ -2845,9 +2907,9 @@ async function confirmDeleteChat(chatId: string) {
   }
   /* The button takes the place of the row's trailing marks while it shows,
      rather than half-covering them; they keep their space so nothing shifts. */
-  .chat-item:hover :is(.chat-task-tag, .chat-signals, .remote-chip),
-  .chat-item:focus-within :is(.chat-task-tag, .chat-signals, .remote-chip),
-  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-signals, .remote-chip) {
+  .chat-item:hover :is(.chat-task-tag, .chat-repo-tag, .chat-signals, .remote-chip),
+  .chat-item:focus-within :is(.chat-task-tag, .chat-repo-tag, .chat-signals, .remote-chip),
+  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-repo-tag, .chat-signals, .remote-chip) {
     visibility: hidden;
   }
 }
