@@ -409,7 +409,7 @@
           "Prefers tabs over spaces.",
           "Uses tabs, never spaces.",
           "Tab indentation is preferred to spaces",
-    "Prefers tabs over spaces; uses tabs, never spaces."
+          "Prefers tabs over spaces; uses tabs, never spaces."
         ]
       }
     },
