@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -111,3 +113,50 @@ def candidates(roots: list[Path] | None = None) -> list[dict[str, str]]:
 def candidates_payload() -> dict[str, Any]:
     roots = default_roots()
     return {"roots": [str(r) for r in roots if r.is_dir()], "candidates": candidates(roots)}
+
+
+#: Largest repo instructions file injected into chat context, in characters.
+#: Larger files are cut at a line boundary with a note naming the file.
+REPO_INSTRUCTIONS_MAX_CHARS = 20_000
+
+_ENVELOPE_REPLACEMENTS = (
+    ("[CIAO_CONTEXT_BEGIN]", "[CIAO-CONTEXT-BEGIN]"),
+    ("[CIAO_CONTEXT_END]", "[CIAO-CONTEXT-END]"),
+    ("<ciao-context>", "<ciao-context-quoted>"),
+    ("</ciao-context>", "</ciao-context-quoted>"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RepoInstructions:
+    name: str  # "AGENTS.md", "CLAUDE.md", or "" when neither exists
+    text: str  # sanitized, possibly truncated; "" when name == ""
+    truncated: bool
+    digest: str  # sha256(full raw text)[:16]; "" when name == ""
+
+
+def read_repo_instructions(repo: str | Path) -> RepoInstructions:
+    """The repo's AGENTS.md, or CLAUDE.md only when AGENTS.md is absent."""
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        path = Path(repo) / name
+        if not path.is_file():
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        text = raw
+        for old, new in _ENVELOPE_REPLACEMENTS:
+            text = text.replace(old, new)
+        truncated = len(text) > REPO_INSTRUCTIONS_MAX_CHARS
+        if truncated:
+            total = len(text)
+            cut = text[:REPO_INSTRUCTIONS_MAX_CHARS]
+            cut = cut[: cut.rfind("\n")] if "\n" in cut else cut
+            text = (
+                f"{cut}\n[truncated: showing {len(cut)} of {total} characters; "
+                f"read {path} for the rest]"
+            )
+        return RepoInstructions(name=name, text=text, truncated=truncated, digest=digest)
+    return RepoInstructions(name="", text="", truncated=False, digest="")

@@ -100,6 +100,7 @@ from ciao.config import (
 )
 from ciao.context.capsule import (
     build_context_capsule,
+    render_linked_repo_block,
 )
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
@@ -107,6 +108,7 @@ from ciao.context.capsule import (
 from ciao.entity_types import load_entity_types
 from ciao.frontmatter import split_frontmatter
 from ciao.model_tiers import is_tier
+from ciao.repo_link import read_repo_instructions, repo_state
 from ciao.models import (
     THINKING_LEVELS,
     AgentRequest,
@@ -4590,6 +4592,25 @@ class ProjectChatManager:
         if callable(revoke):
             revoke(chat_id)
 
+    def _linked_repo_context(self, project: ProjectInfo | None) -> tuple[str, str, str]:
+        """(stable block, digest fingerprint, per-turn line) for a linked project; ("", "", "") when unlinked."""
+        if project is None or not project.repo_path:
+            return "", "", ""
+        path = project.repo_path
+        state = repo_state(path)
+        if state["missing"]:
+            block = render_linked_repo_block(path=path, missing=True, instructions_name="", instructions_text="")
+            return block, f"{path}\0missing", f"linked_repo={path} missing=true"
+        ins = read_repo_instructions(path)
+        block = render_linked_repo_block(
+            path=path, missing=False, instructions_name=ins.name, instructions_text=ins.text
+        )
+        return (
+            block,
+            f"{path}\0ok\0{ins.name}\0{ins.digest}",
+            f"linked_repo={path} branch={state['branch'] or '(detached)'}",
+        )
+
     def _build_prompt_prefix(
         self,
         chat: ChatInfo,
@@ -4609,6 +4630,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
+        repo_block, _repo_fp, repo_line = self._linked_repo_context(project)
         include_stable = self._needs_stable_context(chat)
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
@@ -4625,6 +4647,8 @@ class ProjectChatManager:
             handover=handover,
             include_stable=include_stable,
             file_roots=fs_roots if fs_scope == "workspace" else (),
+            linked_repo_block=repo_block,
+            linked_repo_line=repo_line,
         )
         if capsule:
             capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
@@ -4647,6 +4671,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
+        _b, repo_fp, _l = self._linked_repo_context(project)
         return (
             stable_context_digest(
                 workspace=workspace,
@@ -4654,6 +4679,7 @@ class ProjectChatManager:
                 project_name=project_name,
                 project_context=project_context,
                 canonical_doc=canonical_doc,
+                linked_repo=repo_fp,
             ),
             chat.session_id or "__pending__",
         )
@@ -4666,6 +4692,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
+        repo_block, _repo_fp, repo_line = self._linked_repo_context(project)
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -4674,6 +4701,8 @@ class ProjectChatManager:
             canonical_doc=canonical_doc,
             workspace_vault_root=self._workspace_vault_display(workspace),
             include_stable=True,
+            linked_repo_block=repo_block,
+            linked_repo_line=repo_line,
         )
         if not capsule:
             return ""

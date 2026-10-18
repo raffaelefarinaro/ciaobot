@@ -716,6 +716,15 @@ into every model context with none of those filters around it. The board itself 
 a delegated child (`POST /api/tasks/{id}/delegate`), so a turn that was handed
 one already has its text.
 
+A linked project (`ProjectInfo.repo_path`) adds a `[Linked repository]` block to
+the capsule (#1436): the repo path, `LINKED_REPO_RULES` (the shared-checkout and
+vault-versus-repo rules), and the repo's `AGENTS.md`, or `CLAUDE.md` when that is
+absent, capped at `REPO_INSTRUCTIONS_MAX_CHARS` and stripped of envelope markers.
+The block rides the stable facts, and a fingerprint of path, file name and content
+hash is part of `context_digest` (only when non-empty, so unlinked chats keep their
+digest), so editing AGENTS.md re-sends it on the next turn. The branch changes too
+often for that, so it is a per-turn `linked_repo=<path> branch=<branch>` line.
+
 ## Schedules and background automation
 
 Schedule dispatch (`ciao/schedules.py`) runs cron-shaped jobs through the normal chat pipeline. One packaged routine is left and it is `per_workspace`: **Workspace care** retains the persisted base id `system-memory-curation`. Fan-out materializes `<base-id>@<workspace>` rows with independent enable and last-run state. The other packaged routine, **Skill reflection** (`system-skill-evolution`), was removed in #697; because the set is derived from the packaged file on every read, its persisted `<base>@<workspace>` rows retire by id and never by a name match, so a user-authored schedule is untouched. Workspace care carries its curation procedure directly in the packaged schedule prompt; it processes memory proposals and learnings every night, then uses `Workspace/Curation-Log.md`'s `last_full_pass` marker to run an overdue full pass even when the server missed Sunday. The full pass refreshes `INDEX.md`/`VOCABULARY.md`, reviews stale notes without unattended deletion, runs `os-audit --scope workspace`, and applies only safe structural repairs. Install-wide failures are not a weekly model schedule: startup triage and Automation surface failed jobs on every install, housekeeping surfaces upgrade actions, and development mode adds the verbose debug report. Proposal helper chats carry persisted proposal IDs and an archive policy; resolution helpers archive only after a clean idle turn and after every owned proposal is absent, while review/discussion helpers remain manual. User schedules live in `.runtime/schedules.json`; mutable packaged state lives in `.runtime/system_schedules_state.json`. Compare persisted and live system IDs through `system_base_id` because fan-out qualifies live IDs by workspace.
