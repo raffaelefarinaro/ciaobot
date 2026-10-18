@@ -62,6 +62,7 @@ When pass 0 hands you a `stale_entry` item, one call judges that one fact instea
 
 - The item's `reason` names which kind of staleness it is, and the difference is work. `unverified for 400d against a 90d horizon` is a fact somebody checked and time passed. `nobody has recorded a [verified:] check on this entry` is a fact nobody has ever looked at. The second wants the same evidence and no more, and a `still_valid` on it is refused until the entry carries a stamp to move, so read the note before deciding it needs a source.
 - Run `ciao note related` on the entry's note too, and treat a disagreeing note exactly as above.
+- Record the key you settled with `ciao curation-progress --holder <lease.holder> --key <key>`, like any other item.
 
 ## The `uncovered` count
 

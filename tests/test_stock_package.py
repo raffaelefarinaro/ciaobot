@@ -518,3 +518,8 @@ def test_convert_documents_skill_states_when_and_interpreter() -> None:
     assert "Use when" in skill.split("---")[1]
     assert "`python3`" in skill
     assert "temp-file/worker" not in skill
+
+
+def test_stale_entry_items_record_their_progress_key() -> None:
+    section = _reference("curation-pass-3-reverify.md").split("## `stale_entry` items", 1)[1].split("\n## ", 1)[0]
+    assert "ciao curation-progress --holder" in section

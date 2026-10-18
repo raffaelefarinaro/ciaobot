@@ -16,6 +16,6 @@ When a removal needs judgment you cannot confidently make, keep the entry and qu
 1. Write `Keep "<entry text>" in ciao:<region>? Proposed action: drop because <reason>. (memory curation)` to a scratch file.
 2. File it with `ciao memory-proposal-add --kind review --text-file <file>`. The command flattens the text onto one line and dedupes an unanswered question already queued.
 
-The queue cannot apply a drop. The user dismisses the question to keep the entry (`ciao memory-proposal-dismiss --text-file <file>`, with no `--action`, since the question template always contains double quotes), or asks an attended chat to drop it. The Proposals panel's accept button is disabled for review rows on purpose.
+The queue cannot apply a drop. The user dismisses the question to keep the entry (`ciao memory-proposal-dismiss --text-file <file>`, since the question template always contains double quotes), or asks an attended chat to drop it. The To decide view's accept button is disabled for review rows on purpose.
 
 The cap is advisory: nothing refuses a write at edit time, and an over-cap write reports `over_cap`. A durable fact is never worth dropping just to fit the cap. If a region stays over cap because every entry is high-signal, say so and give the user their options: leave the region over its advisory cap, or ask any attended chat to consolidate further.

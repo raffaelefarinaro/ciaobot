@@ -13,7 +13,7 @@ The file must be inside this workspace and under the size cap. Put long evidence
 - `relative_path`: the note's vault-relative path.
 - `expected_revision`: the lowercase hex SHA-256 of the note's full text as UTF-8, unmodified. Copy it from the `revision <hex>` the `stale_note` item (or `ciao note related`) prints instead of hashing the note yourself. A revision that does not match comes back `conflict` and verifies nothing.
 - `outcome`: `still_valid`, `update`, `retire` or `unverified`.
-- `coverage`: `complete` or `partial`. A `still_valid` needs `complete` plus a citation naming the note.
+- `coverage`: `complete` or `partial`. A `still_valid` needs `complete` plus a citation naming the note. An applied `still_valid` re-stamps the note's `updated:` to today.
 - `evidence`: a list of citations, each with `source_type`, `source_ref`, `quoted` and `supports`.
 - `before` / `after`: the exact text being replaced and its replacement. An `update` carries them, and its `after` carries a fresh `updated:` because the service does not re-stamp an update. An `update` is applied only when every evidence row is a citation someone could re-open.
 - `reason`: one line saying why.
