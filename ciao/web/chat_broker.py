@@ -665,6 +665,7 @@ class ChatStream:
         # {"event": asyncio.Event(), "answer": None}. Populated by the
         # image-capability pre-flight, resolved via `resolve_capability`.
         "pending_capability",
+        "code_mode_continue",
     )
 
     def __init__(self, prompt_text: str = "", *, background: bool = False) -> None:
@@ -721,6 +722,9 @@ class ChatStream:
         # with no reader.
         self.accepting_queue: bool = True
         self.pending_capability: dict[str, dict] | None = None
+        # Set by `arm_code_mode_continuation` when the agent switched this chat
+        # into code mode mid-turn; the drive loop consumes it once at turn end.
+        self.code_mode_continue: bool = False
 
     def enqueue(
         self,

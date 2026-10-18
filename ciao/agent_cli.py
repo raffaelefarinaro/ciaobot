@@ -210,6 +210,12 @@ def build_parser() -> argparse.ArgumentParser:
         elif verb == "update":
             for flag, _param in _CHAT_UPDATE_FLAGS:
                 sub.add_argument(flag, default=None)
+            sub.add_argument(
+                "--code",
+                choices=("on", "off"),
+                default=None,
+                help="Code mode for a chat in a project linked to a repository.",
+            )
         elif verb == "handover":
             sub.add_argument("--provider", default="")
             sub.add_argument("--model", default="")
@@ -563,6 +569,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 value = getattr(args, flag.lstrip("-").replace("-", "_"), None)
                 if value is not None:
                     arguments[param] = value
+            if args.code is not None:
+                arguments["code_mode"] = args.code == "on"
             return "chat_update", arguments
         if verb == "handover":
             arguments = {"chat_id": args.chat, "provider": args.provider, "model": args.model}
