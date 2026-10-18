@@ -67,6 +67,95 @@ _SEND_CAUTION_SKILLS = frozenset(
     {"gws-gmail-reply", "gws-gmail-reply-all", "gws-gmail-forward"}
 )
 
+# "Use when" descriptions: the model picks a skill from this one line, so each
+# says when to choose it and points overlapping skills at each other.
+_DESCRIPTIONS = {
+    "gws-shared": (
+        "Use when running any Google Workspace command in Ciaobot (Gmail, Calendar, Drive, "
+        "Docs, Sheets, Slides, Forms, Tasks): load first for auth through the Ciaobot wrapper and "
+        "write rules."
+    ),
+    "gws-gmail": (
+        "Use when you need the raw Gmail API (labels, drafts, threads, history, settings); "
+        "for send, reply, forward, read or search use the + helper skills instead."
+    ),
+    "gws-gmail-send": "Use when the user wants to send a new email or save one as a draft.",
+    "gws-gmail-triage": (
+        "Use to list or search the inbox with any Gmail query (from:, subject:, after:, "
+        "is:unread); with no query it shows unread mail."
+    ),
+    "gws-gmail-read": (
+        "Use to read one email's body or headers once you have its message ID "
+        "(find IDs with gws-gmail-triage)."
+    ),
+    "gws-gmail-reply": "Use to reply only to the sender of a message, keeping the thread.",
+    "gws-gmail-reply-all": (
+        "Use to reply to everyone on a message (sender, To and Cc), keeping the thread."
+    ),
+    "gws-gmail-forward": "Use to forward an existing message to new recipients.",
+    "gws-calendar": (
+        "Use when you need the raw Calendar API (calendars, event updates or deletes, "
+        "free/busy); to list upcoming events use gws-calendar-agenda, to create one use "
+        "gws-calendar-insert."
+    ),
+    "gws-calendar-agenda": (
+        "Use to show upcoming events across all calendars (today, this week, the next N days)."
+    ),
+    "gws-calendar-insert": "Use to create a new calendar event, optionally with attendees and a Meet link.",
+    "gws-docs": (
+        "Use to read a Google Doc, or to edit it beyond appending (raw Docs API); to append "
+        "text use gws-docs-write."
+    ),
+    "gws-docs-write": "Use to append text to the end of a Google Doc.",
+    "gws-drive": (
+        "Use to search, list, download, share or manage Drive files, folders and shared "
+        "drives (raw Drive API); to upload a file use gws-drive-upload."
+    ),
+    "gws-drive-upload": "Use to upload a local file to Drive with automatic name and metadata.",
+    "gws-forms": "Use to read a Google Form, its questions and responses, or to edit it.",
+    "gws-sheets": (
+        "Use for spreadsheet-level work (create, format, add sheets; raw Sheets API); to read "
+        "values use gws-sheets-read, to add a row use gws-sheets-append."
+    ),
+    "gws-sheets-append": "Use to append a row of values to the end of a sheet.",
+    "gws-sheets-read": "Use to read cell values from a range of a spreadsheet.",
+    "gws-slides": "Use to read or edit a Google Slides presentation.",
+    "gws-tasks": "Use to list, create, complete or delete Google Tasks and task lists.",
+}
+
+_DISCOVERY_BLOCK = re.compile(
+    r"## Discovering Commands\n.*?Use `(?:ciao gws \"\$GWS_PROFILE\" )?gws schema` output "
+    r"to build your `--params` and `--json` flags\.\n",
+    re.DOTALL,
+)
+_DISCOVERY_NEW = (
+    "## Discovering Commands\n\n"
+    'Browse a service with `ciao gws "$GWS_PROFILE" <service> --help`. Before calling an API '
+    'method, run `ciao gws "$GWS_PROFILE" schema <service>.<resource>.<method>` and build '
+    "`--params` and `--json` from its output.\n"
+)
+
+# One clause per API method: the first sentence, without the doc-link tail.
+_API_BULLET = re.compile(r"(?m)^(  - `[^`]+` — .*?[.)`a-z0-9])\. (?=[A-Z]).*$")
+
+_CALENDAR_INSERT_FIXES = (
+    (
+        "Start time (ISO 8601, e.g., 2024-01-01T10:00:00Z)",
+        "Start time (RFC3339 with offset, e.g., 2026-06-17T09:00:00-07:00)",
+    ),
+    ("End time (ISO 8601)", "End time (RFC3339 with offset)"),
+    (
+        "--summary 'Review' --start ... --end ... --attendee",
+        "--summary 'Review' --start '2026-06-17T14:00:00-07:00' "
+        "--end '2026-06-17T15:00:00-07:00' --attendee",
+    ),
+    (
+        "--summary 'Meet' --start ... --end ... --meet",
+        "--summary 'Meet' --start '2026-06-17T16:00:00-07:00' "
+        "--end '2026-06-17T16:30:00-07:00' --meet",
+    ),
+)
+
 _PREREQUISITE_LINE = re.compile(r"(?m)^> \*\*PREREQUISITE:\*\*.*\n")
 
 _CIAOBOT_SHARED_HEAD = f"""## Installation
@@ -75,7 +164,7 @@ Install `gws` from Settings → Workspaces (or see the Ciaobot README). The bina
 
 ## Authentication (Ciaobot)
 
-Run every Google API call through the `ciao` CLI — never bare `gws`:
+Run every Google API call through the `ciao` CLI — never bare `gws`. Bare `gws` reads `~/.config/gws`, which is often a stale login for a different account:
 
 ```bash
 ciao gws "$GWS_PROFILE" <service> <subcommand> [flags]
@@ -99,6 +188,10 @@ scheduled Google tasks.
 ## Untrusted content
 
 {_UNTRUSTED_CONTENT}
+
+## Write commands
+
+Confirm with the user before running any of these helpers, or any raw API method that creates, updates, sends, trashes or deletes: `gmail` `+send`, `+reply`, `+reply-all`, `+forward`; `calendar` `+insert`; `docs` `+write`; `drive` `+upload`; `sheets` `+append`. Everything else here (`+triage`, `+read`, `+agenda`, `sheets +read`, `list`/`get` methods) only reads.
 
 """
 
@@ -215,6 +308,13 @@ def curate_gws_shared(text: str) -> str:
     # Model Armor needs the cloud-platform scope, which Ciaobot never grants.
     text = re.sub(r"(?m)^\| `--sanitize <TEMPLATE>` \|.*\n", "", text)
     text = re.sub(r"(?m)^- Use `--sanitize` .*\n", "", text)
+    text = re.sub(
+        r"(?m)^\| `--format <FORMAT>` \|.*\n",
+        "| `--format <FORMAT>` | Output format: `json`, `table`, `yaml`, `csv`. Raw API methods "
+        "default to `json`; `+helpers` pick their own default (`+triage` table, `+read` text), "
+        "so pass `--format json` when you parse the output |\n",
+        text,
+    )
     pattern = re.compile(r"## Installation\b.*?## Global Flags\b", re.DOTALL)
     if not pattern.search(text):
         return text
@@ -239,8 +339,27 @@ def curate_gws_skill(name: str, text: str) -> str:
         if name == "gws-gmail":
             # gws-gmail-watch is not shipped (Pub/Sub scopes, blocking stream).
             text = re.sub(r"(?m)^\| \[`\+watch`\].*\n", "", text)
+        if name in _DESCRIPTIONS:
+            text = _set_description(text, _DESCRIPTIONS[name])
+        text = _DISCOVERY_BLOCK.sub(_DISCOVERY_NEW, text)
+        text = _API_BULLET.sub(r"\1.", text)
+        if name == "gws-calendar-insert":
+            for old, new in _CALENDAR_INSERT_FIXES:
+                text = text.replace(old, new)
+    if name == "gws-shared":
+        text = _set_description(text, _DESCRIPTIONS[name])
+    text = text.replace("`gws schema`", '`ciao gws "$GWS_PROFILE" schema`')
     text = rewrite_gws_commands(text)
     return _normalize(text)
+
+
+def _set_description(text: str, description: str) -> str:
+    return re.sub(
+        r'(?m)^description: ".*"$',
+        lambda _m: f'description: "{description}"',
+        text,
+        count=1,
+    )
 
 
 def _normalize(text: str) -> str:

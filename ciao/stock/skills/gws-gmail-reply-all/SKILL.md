@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-reply-all
-description: "Gmail: Reply-all to a message (handles threading automatically)."
+description: "Use to reply to everyone on a message (sender, To and Cc), keeping the thread."
 metadata:
   version: 0.22.5
 ---

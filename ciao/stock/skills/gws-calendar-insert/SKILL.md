@@ -1,6 +1,6 @@
 ---
 name: gws-calendar-insert
-description: "Google Calendar: Create a new event."
+description: "Use to create a new calendar event, optionally with attendees and a Meet link."
 metadata:
   version: 0.22.5
 ---
@@ -23,8 +23,8 @@ ciao gws "$GWS_PROFILE" calendar +insert --summary <TEXT> --start <TIME> --end <
 |------|----------|---------|-------------|
 | `--calendar` | — | primary | Calendar ID (default: primary) |
 | `--summary` | ✓ | — | Event summary/title |
-| `--start` | ✓ | — | Start time (ISO 8601, e.g., 2024-01-01T10:00:00Z) |
-| `--end` | ✓ | — | End time (ISO 8601) |
+| `--start` | ✓ | — | Start time (RFC3339 with offset, e.g., 2026-06-17T09:00:00-07:00) |
+| `--end` | ✓ | — | End time (RFC3339 with offset) |
 | `--location` | — | — | Event location |
 | `--description` | — | — | Event description/body |
 | `--attendee` | — | — | Attendee email (can be used multiple times) |
@@ -34,8 +34,8 @@ ciao gws "$GWS_PROFILE" calendar +insert --summary <TEXT> --start <TIME> --end <
 
 ```bash
 ciao gws "$GWS_PROFILE" calendar +insert --summary 'Standup' --start '2026-06-17T09:00:00-07:00' --end '2026-06-17T09:30:00-07:00'
-ciao gws "$GWS_PROFILE" calendar +insert --summary 'Review' --start ... --end ... --attendee alice@example.com
-ciao gws "$GWS_PROFILE" calendar +insert --summary 'Meet' --start ... --end ... --meet
+ciao gws "$GWS_PROFILE" calendar +insert --summary 'Review' --start '2026-06-17T14:00:00-07:00' --end '2026-06-17T15:00:00-07:00' --attendee alice@example.com
+ciao gws "$GWS_PROFILE" calendar +insert --summary 'Meet' --start '2026-06-17T16:00:00-07:00' --end '2026-06-17T16:30:00-07:00' --meet
 ```
 
 ## Tips
