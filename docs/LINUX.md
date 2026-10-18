@@ -182,6 +182,16 @@ Store backups privately. Git does not include runtime state or credentials.
 If an upgrade migrates data, rollback requires its matching pre-upgrade backup,
 not just the previous code. Keep only one active host scheduler during migration.
 
+## Open in Terminal
+
+The Open in Terminal buttons only work when the engine can reach a desktop
+session. The documented systemd system service has no `DISPLAY` or
+`WAYLAND_DISPLAY`, so the buttons stay hidden. A desktop user running the engine
+in their own graphical session gets the first terminal found from
+`x-terminal-emulator`, `gnome-terminal`, `konsole`, `xfce4-terminal`, `kitty`
+and `alacritty`. A terminal started by the engine is in its cgroup and closes
+when the service stops.
+
 ## Verification
 
 Run `mypy ciao`, `pytest tests/`, and frontend tests/build from the checkout.

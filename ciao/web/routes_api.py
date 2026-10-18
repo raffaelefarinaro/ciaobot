@@ -1223,10 +1223,6 @@ async def gws_integration_settings(request: Request) -> JSONResponse:
     return JSONResponse(_gws_integration_payload(request.app.state.config))
 
 
-GWS_CLI_PACKAGE = "@googleworkspace/cli"
-
-
-
 async def gws_save_client_secret(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:
@@ -6339,8 +6335,16 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
 # this machine cannot ride the session cookie.
 
 
-def _workspace_move_local(request: Request) -> bool:
+def host_browser_request(request: Request) -> bool:
+    """A browser on the computer running Ciaobot: loopback TCP peer, loopback Host, same-host Origin/Referer.
+
+    Narrows a session route; grants nothing by itself (AuthMiddleware still requires the session).
+    """
     return _localhost_request(request) and _setup_finish_origin_allowed(request)
+
+
+def _workspace_move_local(request: Request) -> bool:
+    return host_browser_request(request)
 
 
 def _workspace_move_guard(request: Request) -> JSONResponse | None:
