@@ -146,6 +146,7 @@ def documented_in_skill(leaves: set[Leaf]) -> Documented:
 
 def drift_problems(documented: Documented, surface: Surface, *, where: str) -> list[str]:
     problems: list[str] = []
+    # `--json` is accepted everywhere as a compatibility no-op, so docs may omit it.
     for leaf, (every, required) in sorted(documented.items()):
         command = " ".join(leaf)
         flags, really_required = surface[leaf]
