@@ -20,6 +20,12 @@
         class="toast-fix"
         @click.stop="onFix(t)"
       >{{ t.restoreDraft ? 'Restore draft' : (t.fixRoute ? (t.fixLabel || 'Fix in Settings') : 'Fix this error') }}</button>
+      <button
+        v-else-if="t.onAction"
+        class="toast-link toast-action"
+        type="button"
+        @click.stop="onAction(t)"
+      >{{ t.actionLabel || 'Open' }}</button>
       <a
         v-else-if="t.linkUrl"
         class="toast-link"
@@ -113,6 +119,11 @@ async function onClick(toast: InAppToast) {
     await store.switchWorkspace(project.workspace)
   }
   await store.switchChat(toast.chat_id)
+  store.dismissToast(toast.id)
+}
+
+function onAction(toast: InAppToast) {
+  toast.onAction?.()
   store.dismissToast(toast.id)
 }
 

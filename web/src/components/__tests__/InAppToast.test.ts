@@ -23,6 +23,23 @@ beforeEach(() => {
   routerPush.mockReset()
 })
 
+describe('info toast action', () => {
+  it('runs and dismisses an info toast action', async () => {
+    const { wrapper, store } = mountToast()
+    const spy = vi.fn()
+    store.pushToast({ chat_id: '', title: 't', body: 'b', actionLabel: 'Show question', onAction: spy })
+    await wrapper.vm.$nextTick()
+
+    const action = wrapper.find('.toast-action')
+    expect(action.text()).toBe('Show question')
+    expect(wrapper.find('.toast-fix').exists()).toBe(false)
+    await action.trigger('click')
+
+    expect(spy).toHaveBeenCalledOnce()
+    expect(store.toasts).toHaveLength(0)
+  })
+})
+
 describe('error toast Fix action', () => {
   it('routes to the configured settings page instead of seeding a fix chat', async () => {
     const { wrapper, store } = mountToast()

@@ -545,6 +545,7 @@ export type WsEvent =
       state: 'answered' | 'cancelled' | 'rejected';
       error?: string;
       retryable?: boolean;
+      delivered_as_message?: boolean;
     }
   | { type: 'question_resolved'; request_id: string; session_id?: string }
   | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean }
@@ -629,6 +630,9 @@ export interface InAppToast {
   // new" on the update-available toast). Opens in a new tab.
   linkUrl?: string
   linkLabel?: string
+  // An in-app action button on an info toast, which is dismissed after it runs.
+  actionLabel?: string
+  onAction?: () => void
   // When set, "Fix" becomes "Restore draft": reopens `text` as a fresh chat
   // draft in `projectId` (falling back to General if that project is gone)
   // instead of the error/fixRoute flow. `originalChatId` is the dead chat's

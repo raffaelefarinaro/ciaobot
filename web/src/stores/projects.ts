@@ -428,6 +428,7 @@ export const useProjectStore = defineStore('projects', () => {
   // active until an acknowledged reply/cancel; legacy cards without a request
   // id are cleared by the next ordinary message.
   const activeQuestions = ref<Record<string, ActiveQuestion[]>>({})
+  const questionBlockToastIds: Record<string, number> = {}
   type QuestionResponse = {
     requestId: string
     sessionId: string
@@ -741,7 +742,11 @@ export const useProjectStore = defineStore('projects', () => {
     // server snapshot that hasn't caught up yet.
     if (resolvedQuestions.value[chatId]?.has(questionsSignature(qs))) return
     const current = activeQuestions.value[chatId]
-    if (current && questionsSignature(current) === questionsSignature(qs)) return
+    if (current && questionsSignature(current) === questionsSignature(qs)) {
+      const stale = qs.some(q => q.stale)
+      if (stale && !current.some(q => q.stale)) for (const q of current) q.stale = true
+      return
+    }
     activeQuestions.value[chatId] = qs
   }
 
@@ -4779,6 +4784,36 @@ export const useProjectStore = defineStore('projects', () => {
     messages.value[chatId].splice(idx, 1)
   }
 
+  function revealQuestionCard() {
+    if (typeof document === 'undefined') return
+    const card = document.querySelector<HTMLElement>('.question-card')
+    card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    card?.querySelector<HTMLElement>('.question-option, .question-other')?.focus()
+  }
+
+  // A native form whose provider is gone (engine restart, or the last reply came back
+  // retryable while nothing is running) no longer owns the turn: the composer may supersede it.
+  function nativeQuestionIsDead(chatId: string): boolean {
+    const qs = activeQuestions.value[chatId]
+    if (!qs?.some(q => q.requestId)) return false
+    if (isChatStreaming(chatId)) return false
+    if (qs.some(q => q.stale)) return true
+    const sub = questionSubmissions.value[chatId]
+    return Boolean(sub && !sub.pending && sub.retryable && sub.error)
+  }
+
+  function toastQuestionBlocksSend(chatId: string) {
+    const existing = questionBlockToastIds[chatId]
+    if (existing && toasts.value.some(t => t.id === existing)) return
+    questionBlockToastIds[chatId] = pushToast({
+      chat_id: chatId,
+      title: 'Answer the open question first',
+      body: 'The model is waiting for the question above before it can continue.',
+      actionLabel: 'Show question',
+      onAction: revealQuestionCard,
+    }).id
+  }
+
   function sendMessage(
     chatId: string,
     text: string,
@@ -4788,17 +4823,12 @@ export const useProjectStore = defineStore('projects', () => {
   ): boolean {
     // A native V2 form owns the turn until its reply/cancel is acknowledged.
     // Do not silently dismiss it by sending an unrelated composer message.
-    if (activeQuestions.value[chatId]?.some(q => q.requestId)) {
-      pushToast({
-        chat_id: chatId,
-        title: 'Answer the open question first',
-        body: 'The model is waiting for the highlighted question before it can continue.',
-        variant: 'error',
-      })
+    if (activeQuestions.value[chatId]?.some(q => q.requestId) && !nativeQuestionIsDead(chatId)) {
+      toastQuestionBlocksSend(chatId)
       return false
     }
-    // Claude's legacy picker has no request id and is intentionally dismissed
-    // by the next ordinary message.
+    // Legacy pickers and dead native forms are superseded by the next ordinary message;
+    // the server clears a dead form in start_stream.
     if (activeQuestions.value[chatId]) {
       clearQuestion(chatId)
     }
@@ -5955,6 +5985,10 @@ export const useProjectStore = defineStore('projects', () => {
         )
         if (event.ok) {
           clearQuestion(chatId, event.request_id, responseSession)
+          if (event.delivered_as_message) {
+            // The engine started a turn carrying the answer; its user_echo brings the bubble.
+            streaming.value[chatId] = true
+          }
         } else {
           questionSubmissions.value[chatId] = {
             ...submission,
