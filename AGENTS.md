@@ -136,6 +136,36 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
   `/ciao-upkeep` skill. `/ciao-release` does not fix things: a defect found
   during a release becomes an issue, fixed on `develop` before the next cut.
 
+## Loop engineering notes
+Facts the user-level `loop-engineering` skill (`~/.claude/skills`) reads from
+this file; the gates are the ones under Verification.
+- PR target is `develop`. `Closes #N` does not auto-close on a develop merge;
+  close issues explicitly: "Merged into develop via #<PR> (<sha>). Ships in the
+  next release."
+- The repo is registered in Orca; loop state lives in
+  `~/orca/workspaces/ciaobot/plans/`. Branch prefix:
+  `raffaelefarinaro/issue-<N>-<slug>`.
+- Gates run from a worktree with the main checkout's venv, which is an
+  editable install of `~/repos/ciaobot`: always set `PYTHONPATH=$PWD`
+  (`PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto tests/`).
+- Symlink `web/node_modules` (and `desktop/runtime` when `desktop/` changes)
+  from the main checkout; delete both before every push.
+- Before planning, read `docs/DEVELOPMENT.md`, plus `web/README.md` and
+  `DESIGN.md` for anything under `web/`.
+- New issues: `[Bug]` → label `bug`, `[Feature]` → `enhancement` (see the
+  `ciao-support` skill). `report`-labelled issues are auto-opened and may be
+  noise: flag, don't drop. `not_ready` issues are skipped by the backlog loop.
+- Security-sensitive diffs (ship fan-out plus a PR-scoped security review):
+  auth, secrets, `/api` or `/ws` routes, `docs/REMOTE_BOUNDARY.md`, `desktop/`
+  (also run the `desktop/src-tauri` commands in `docs/DEVELOPMENT.md`),
+  release plumbing.
+- There is no `/code-review` command for reviewer workers; review from
+  `git diff origin/develop...HEAD`.
+- An engine booted inside a worktree can push memory-backup commits
+  (`backup <ts>Z`, `<branch> session commit <ts>`) to the branch. Compare
+  `git ls-remote origin <branch>` with the reported sha and drop strays with
+  `--force-with-lease`.
+
 ## Reporting issues
 When you find a bug, test failure or worthwhile enhancement, explain it to the
 user and suggest filing it:
