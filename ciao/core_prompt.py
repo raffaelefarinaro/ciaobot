@@ -57,7 +57,6 @@ def system_prompt_payload(
     parts = []
     if existing_append:
         parts.append(existing_append)
-    parts.append("[SYSTEM EXPERTISE: Ciaobot core]")
     parts.append(_system_instructions())
     if memory_block:
         parts.append(memory_block.strip())
