@@ -384,3 +384,9 @@ def test_curated_skills_have_no_doc_link_tails_or_orphan_lines() -> None:
     for name, text in _curated_stock().items():
         assert "For more information" not in text, name
         assert "- https://www.googleapis.com/auth" not in text, name
+
+
+def test_curated_gws_shared_offers_no_other_account() -> None:
+    out = _curated_stock()["gws-shared"]
+    assert "different account name" not in out
+    assert "only account available in a chat" in out
