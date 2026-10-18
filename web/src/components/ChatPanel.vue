@@ -656,6 +656,7 @@
         <span class="question-card-title">The model has a question</span>
         <button class="question-card-dismiss" :disabled="questionSubmitting" @click="dismissQuestions" title="Dismiss">&times;</button>
       </div>
+      <p v-if="activeQuestions[0]?.stale" class="question-card-note">The engine restarted. Your answer will be sent as a message.</p>
       <template v-for="(q, qi) in activeQuestions" :key="qi">
         <div v-if="isQuestionActive(qi, q)" class="question-block">
           <div class="question-block-header">
@@ -7052,6 +7053,7 @@ details[open] > .activity-summary::before {
   color: var(--fg);
 }
 .question-card-icon { font-size: 16px; color: var(--accent); }
+.question-card-note { margin: 0; font-size: 12px; line-height: 1.4; color: var(--fg2); }
 .question-card-title { flex: 1 1 auto; }
 .capability-countdown {
   flex: 0 0 auto;

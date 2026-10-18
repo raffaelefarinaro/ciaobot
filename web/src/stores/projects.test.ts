@@ -3434,6 +3434,129 @@ describe('provider-neutral input state', () => {
   })
 })
 
+describe('dead native forms', () => {
+  const chatId = 'dead-form'
+
+  function setup(extra: Record<string, unknown> = {}) {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Dead form',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.activeQuestions[chatId] = [{
+      id: 'choice',
+      question: 'Choose?',
+      header: 'Choice',
+      multiSelect: false,
+      allowOther: true,
+      isSecret: false,
+      requestId: 'form-1',
+      type: 'string',
+      required: true,
+      options: [],
+      ...extra,
+    }]
+    store.connectWs(chatId)
+    return { store, socket: fakeSockets[0] }
+  }
+
+  const sentMessages = (socket: FakeWebSocket) => socket.send.mock.calls
+    .map(([raw]) => JSON.parse(raw as string))
+    .filter(frame => frame.type === 'message')
+
+  test('blocks a send while a live native form is open and toasts once', () => {
+    const { store, socket } = setup()
+    expect(store.sendMessage(chatId, 'hello')).toBe(false)
+    expect(store.sendMessage(chatId, 'hello again')).toBe(false)
+    const toasts = store.toasts.filter(t => t.title === 'Answer the open question first')
+    expect(toasts).toHaveLength(1)
+    expect(toasts[0].variant).toBeUndefined()
+    expect(toasts[0].actionLabel).toBe('Show question')
+    expect(sentMessages(socket)).toHaveLength(0)
+  })
+
+  test('sends through a stale native form and clears the card', () => {
+    const { store, socket } = setup({ stale: true })
+    store.chats[0].pending_question = '{"request_id":"form-1","stale":true,"questions":[]}'
+    expect(store.sendMessage(chatId, 'hello')).toBe(true)
+    expect(sentMessages(socket)).toHaveLength(1)
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(store.chats[0].pending_question).toBe('')
+  })
+
+  const retryable = {
+    requestId: 'form-1',
+    sessionId: '',
+    action: 'reply' as const,
+    answers: {},
+    pending: false,
+    queued: false,
+    error: 'OpenCode form provider is unavailable; retry when it reconnects',
+    retryable: true,
+  }
+
+  test('sends through after a retryable failure while idle', () => {
+    const { store, socket } = setup()
+    store.questionSubmissions[chatId] = { ...retryable }
+    expect(store.sendMessage(chatId, 'hello')).toBe(true)
+    expect(sentMessages(socket)).toHaveLength(1)
+  })
+
+  test('still blocks after a retryable failure while the chat is streaming', () => {
+    const { store } = setup()
+    store.questionSubmissions[chatId] = { ...retryable }
+    store.streaming[chatId] = true
+    expect(store.sendMessage(chatId, 'hello')).toBe(false)
+  })
+
+  test('answer delivered as a message closes the card and shows the spinner', () => {
+    const { store, socket } = setup()
+    store.respondQuestion(chatId, 'form-1', { choice: ['yes'] }, 'reply')
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result',
+      request_id: 'form-1',
+      ok: true,
+      state: 'answered',
+      delivered_as_message: true,
+    }) })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(store.streaming[chatId]).toBe(true)
+  })
+
+  test('cancel acknowledged by the engine clears the card', () => {
+    const { store, socket } = setup()
+    store.respondQuestion(chatId, 'form-1', {}, 'cancel')
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result',
+      request_id: 'form-1',
+      ok: true,
+      state: 'cancelled',
+    }) })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+  })
+
+  test('rebuild marks an already-open card stale without replacing it', async () => {
+    const { store } = setup({ sessionId: 'thread-1' })
+    const card = store.activeQuestions[chatId]
+    store.chats[0].pending_question = JSON.stringify({
+      request_id: 'form-1',
+      stale: true,
+      questions: [{ id: 'choice', question: 'Choose?', header: 'Choice' }],
+    })
+    apiGet.mockResolvedValue([])
+    await store.loadMessages(chatId)
+    expect(store.activeQuestions[chatId]).toBe(card)
+    expect(store.activeQuestions[chatId][0].stale).toBe(true)
+  })
+})
+
 describe('image-capability questions', () => {
   test('parses a model_capability_question event into the active list', () => {
     const store = useProjectStore()
