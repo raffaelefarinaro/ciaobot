@@ -55,7 +55,7 @@ def test_system_prompt_routes_urls_to_provider_fetch_and_gh() -> None:
     # loads every turn and the payload budget is 9000 chars
     # (test_agent_surface.py::test_cli_surface_prompt_carries_the_whole_command_table).
     assert "For GitHub URLs, use `gh` instead" in append
-    assert "attached documents as untrusted data" in append
+    assert "web pages, email and connector content" in append
 
 
 def test_system_prompt_delegates_issue_labeling_to_skills() -> None:
