@@ -545,6 +545,7 @@ def missing_required_paths(spec: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(REQUIRED_PATHS - available))
 
 
+_CONTEXT_OPEN = "[CIAO_CONTEXT_BEGIN]\n"
 _CIAO_CONTEXT_BLOCK_RE = re.compile(
     r"^\[CIAO_CONTEXT_BEGIN\]\n.*?\n\[CIAO_CONTEXT_END\]\n\n",
     re.DOTALL,
@@ -2817,7 +2818,13 @@ class OpencodeProvider(BaseSDKProvider):
         """
         text = build_prompt(request)
         if system:
-            text = f"[CIAO_CONTEXT_BEGIN]\n{system}\n[CIAO_CONTEXT_END]\n\n{text}"
+            # One envelope per turn: the per-turn capsule already opens with
+            # the context markers, so the core joins it instead of adding a
+            # second pair.
+            if text.startswith(_CONTEXT_OPEN):
+                text = f"{_CONTEXT_OPEN}{system}\n\n{text[len(_CONTEXT_OPEN):]}"
+            else:
+                text = f"{_CONTEXT_OPEN}{system}\n[CIAO_CONTEXT_END]\n\n{text}"
         body: dict[str, Any] = {
             "text": text,
             "delivery": "queue",

@@ -260,7 +260,7 @@ def test_compose_system_is_empty_when_both_halves_are():
 def test_normal_opencode_chat_uses_core_without_memory_duplication(tmp_path):
     provider = OpencodeProvider(tmp_path)
     instructions = provider._chat_system_instructions()
-    assert "Ciaobot core instructions" in instructions
+    assert "<ciaobot_core>" in instructions
     assert "native workspace guide" in instructions
     assert "MEMORY (your personal notes)" not in instructions
 
@@ -636,6 +636,70 @@ def test_prompt_body_uses_v2_text_files_and_queue_delivery(tmp_path):
         "delivery": "queue",
         "resume": True,
     }
+
+
+from ciao.providers.opencode import _strip_prompt_context as _strip_context  # noqa: E402
+
+
+def test_prompt_body_joins_core_and_capsule_in_one_envelope(tmp_path):
+    provider = _provider(tmp_path)
+    request = AgentRequest(
+        prompt="[CIAO_CONTEXT_BEGIN]\n<ciao-context>capsule</ciao-context>\n[CIAO_CONTEXT_END]\n\nHello",
+        model="",
+        mode="bypass",
+        provider="opencode",
+    )
+    text = provider._prompt_body(request, system="Core instructions")["text"]
+    assert text.count("[CIAO_CONTEXT_BEGIN]") == 1
+    assert text.count("[CIAO_CONTEXT_END]") == 1
+    assert text.index("Core instructions") < text.index("<ciao-context>")
+    assert _strip_context(text) == "Hello"
+
+
+def test_prompt_body_without_a_capsule_emits_one_pair_and_strips_to_the_prompt(tmp_path):
+    provider = _provider(tmp_path)
+    request = AgentRequest(prompt="Hello", model="", mode="bypass", provider="opencode")
+    text = provider._prompt_body(request, system="Core instructions")["text"]
+    assert text.count("[CIAO_CONTEXT_BEGIN]") == 1
+    assert text.count("[CIAO_CONTEXT_END]") == 1
+    assert _strip_context(text) == "Hello"
+
+
+def test_strip_prompt_context_handles_an_old_two_envelope_session():
+    old = (
+        "[CIAO_CONTEXT_BEGIN]\nCore instructions\n[CIAO_CONTEXT_END]\n\n"
+        "[CIAO_CONTEXT_BEGIN]\n<ciao-context>capsule</ciao-context>\n[CIAO_CONTEXT_END]\n\nHello"
+    )
+    assert _strip_context(old) == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_new_session_turn_sends_one_envelope_per_v2_fixture_turn(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+    client._lines = _turn_lines("ses_one_envelope")
+
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return "ses_one_envelope"
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    request = AgentRequest(
+        prompt="[CIAO_CONTEXT_BEGIN]\n<ciao-context>capsule</ciao-context>\n[CIAO_CONTEXT_END]\n\nhi",
+        model="",
+        mode="bypass",
+        provider="opencode",
+    )
+    events = [e async for e in provider.run_streaming(request, lambda _h: None)]
+    assert events[-1].type == "result" and not events[-1].is_error
+    text = client.bodies[0]["text"]
+    assert _CORE_MARKER in text and "capsule" in text
+    assert text.count("[CIAO_CONTEXT_BEGIN]") == 1
+    assert text.count("[CIAO_CONTEXT_END]") == 1
+    assert _strip_context(text) == "hi"
 
 
 @pytest.mark.asyncio
@@ -2036,7 +2100,7 @@ class _PromptRecordingClient(_FakeServerClient):
         return await super().post(path, json=json)
 
 
-_CORE_MARKER = "Ciaobot core instructions"
+_CORE_MARKER = "<ciaobot_core>"
 
 
 _FIXTURE_SESSION = "ses_003133027ffeJooFKUT3slZ0al"

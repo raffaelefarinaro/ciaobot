@@ -1,9 +1,9 @@
 """The documented `ciao` command set must match the parsers (#1471).
 
-The core prompt's synopsis and `ciao-cli/SKILL.md` both list commands and
-flags; the parsers in `ciao/agent_cli.py` (`ciao <noun> <verb>`) and
+`ciao-cli/SKILL.md` is the full reference; the core prompt carries a compact
+synopsis of the common commands (#1464). The parsers in `ciao/agent_cli.py` (`ciao <noun> <verb>`) and
 `ciao/cli.py` (top-level commands) are the truth. These tests derive the
-documented set from the two documents and compare it to the parsers in both
+documented set from the skill and compare it to the parsers in both
 directions, so a renamed flag, a verb that never existed or an agent verb nobody
 documented fails here instead of misleading a model.
 """
@@ -101,30 +101,6 @@ def _match_leaf(text: str, leaves: set[Leaf]) -> Leaf | None:
     return best
 
 
-def documented_in_prompt(leaves: set[Leaf]) -> Documented:
-    block = PROMPT.split("## Ciaobot command line", 1)[1].split("```", 2)[1]
-    sched_text = ""
-    lines: list[str] = []
-    in_sched = False
-    for raw in block.splitlines():
-        if raw.startswith("<sched>"):
-            in_sched = True
-        if in_sched:
-            sched_text += " " + raw
-        elif raw.strip():
-            lines.append(raw)
-    sched_flags, _ = _split_flags(sched_text)
-    found: Documented = {}
-    for line in lines:
-        leaf = _match_leaf(line, leaves)
-        assert leaf is not None, f"core synopsis documents `{line.strip()}`, which is not an agent command"
-        every, required = _split_flags(line[len(" ".join(leaf)):])
-        if "<sched>" in line:
-            every |= sched_flags
-        found[leaf] = (every, required)
-    return found
-
-
 def documented_in_skill(leaves: set[Leaf]) -> Documented:
     shared = re.search(r"Shared `\.\.\.flags`[^:]*: `([^`]*)`", SKILL)
     assert shared, "the shared schedule flags paragraph is gone"
@@ -163,11 +139,89 @@ def _all_leaves() -> tuple[Surface, Surface]:
     return agent_surface(), operator_surface()
 
 
-def test_prompt_synopsis_matches_the_agent_parser() -> None:
-    agent, _ = _all_leaves()
-    documented = documented_in_prompt(set(agent))
-    assert drift_problems(documented, agent, where="system_prompt.md") == []
-    assert sorted(set(agent) - set(documented)) == [], "agent verbs missing from the core synopsis"
+def _agent_documented(agent: Surface) -> Documented:
+    documented = documented_in_skill(set(agent) | set(operator_surface()))
+    return {leaf: v for leaf, v in documented.items() if leaf in agent}
+
+
+def _prompt_synopsis() -> list[str]:
+    section = re.search(r"<ciaobot_cli_reference>(.*?)</ciaobot_cli_reference>", PROMPT, re.S)
+    assert section, "the core prompt lost its <ciaobot_cli_reference> section"
+    block = re.search(r"```\n(.*?)```", section.group(1), re.S)
+    assert block, "the core prompt lost its compact ciao synopsis"
+    return [line for line in block.group(1).splitlines() if line.strip()]
+
+
+def _alternatives(word: str) -> set[str]:
+    """``a|b`` names two words; ``x-add|dismiss`` names ``x-add`` and ``x-dismiss``."""
+    parts = word.split("|")
+    stem = parts[0].rsplit("-", 1)[0] + "-" if "-" in parts[0] else ""
+    return {parts[0], *(part if "-" in part else stem + part for part in parts[1:])}
+
+
+def _named_leaves(words: list[str], leaves: set[Leaf]) -> tuple[list[Leaf], int]:
+    """Leaves a synopsis line names and how many of its words they use."""
+    for size in (3, 2, 1):
+        if len(words) < size:
+            continue
+        found = [
+            leaf for leaf in leaves
+            if len(leaf) == size and leaf[:-1] == tuple(words[: size - 1]) and leaf[-1] in _alternatives(words[size - 1])
+        ]
+        if found:
+            return found, size
+    return [], 0
+
+
+def prompt_problems(lines: list[str], surface: Surface) -> list[str]:
+    """Every command and flag the compact synopsis shows must exist in the parsers.
+
+    A line naming several verbs (`task complete|delegate|link-chat`) is held to
+    every one of them: each flag shown must exist on each verb named.
+    """
+    problems: list[str] = []
+    for line in lines:
+        words = line.replace("`", "").split()
+        found, size = _named_leaves(words, set(surface))
+        if not found:
+            problems.append(f"prompt shows `{line}`, which is not a command")
+            continue
+        shown = set(_FLAG.findall(" ".join(words[size:]))) - {"--json"}
+        for leaf in sorted(found):
+            for flag in sorted(shown - surface[leaf][0]):
+                problems.append(f"prompt: `{' '.join(leaf)}` is shown with {flag}, which it does not have")
+    return problems
+
+
+def test_core_prompt_synopsis_matches_the_parsers() -> None:
+    agent, operator = _all_leaves()
+    surface = {**agent, **operator}
+    lines = _prompt_synopsis()
+    assert prompt_problems(lines, surface) == []
+    # The recall-critical commands must stay in the prompt (routing eval, #1464).
+    text = "\n".join(lines)
+    for command in ("vault search", "memory update", "file surface", "schedule", "task report", "run start"):
+        assert command in text, command
+
+
+def test_prompt_synopsis_rejects_an_unknown_flag_or_verb() -> None:
+    agent, operator = _all_leaves()
+    surface = {**agent, **operator}
+    assert prompt_problems(["vault search QUERY [--nope N]"], surface)
+    assert prompt_problems(["vault sarch QUERY"], surface)
+    assert prompt_problems(["vault search QUERY [--limit N]"], surface) == []
+
+
+def test_prompt_synopsis_holds_every_named_verb_to_every_flag() -> None:
+    """The lines #1464 first shipped: a flag valid on only one of the verbs named."""
+    agent, operator = _all_leaves()
+    surface = {**agent, **operator}
+    wrong_task = "task update|move|complete|delegate|add-update|link-chat ID --revision REV [--to STATUS] [--text-file F]"
+    assert any("--to" in p for p in prompt_problems([wrong_task], surface))
+    assert prompt_problems(["vault review list|show|keep [--candidate ID]"], surface)
+    assert prompt_problems(["vault review list --candidate ID"], surface)
+    assert prompt_problems(["vault review show PATH"], surface) == []
+    assert prompt_problems(["task move ID --revision REV --to backlog"], surface) == []
 
 
 def test_skill_tables_match_the_parsers() -> None:
@@ -197,7 +251,7 @@ def test_skill_documents_the_origins_input() -> None:
 
 def test_a_removed_flag_fails_the_comparison() -> None:
     agent, _ = _all_leaves()
-    documented = documented_in_prompt(set(agent))
+    documented = _agent_documented(agent)
     assert drift_problems(documented, agent, where="x") == []
     flags, required = agent[("chat", "send")]
     broken = {**agent, ("chat", "send"): (flags - {"--prompt"}, required - {"--prompt"})}
@@ -209,7 +263,7 @@ def test_a_removed_flag_fails_the_comparison() -> None:
 
 def test_an_undocumented_verb_fails_the_comparison() -> None:
     agent, _ = _all_leaves()
-    documented = documented_in_prompt(set(agent))
+    documented = _agent_documented(agent)
     documented.pop(("task", "report"))
     assert ("task", "report") in set(agent) - set(documented)
 

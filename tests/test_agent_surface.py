@@ -707,57 +707,25 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     assert "`AGENTS.md`" in append
 
 
-def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
-    """D-12: the prompt is the reference, so it cannot drift from the CLI.
+def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
+    """The prompt keeps a compact synopsis; the full reference is ciao-cli (#1464).
 
-    Every session on the CLI surface opened with a `ciao help` call (1.56 per
-    session on claude, 1.08 on opencode), which is most of the +4.5 s / +8.3 s
-    the surface cost per turn. The table is in the prompt so that call is not
-    needed; this test is what keeps it true when a command is added.
+    An eval showed routing accuracy fell (0.823 -> 0.726, recall answered
+    without `ciao vault search`) once the synopsis left the prompt, so the
+    common commands, one line each with key flags, stay in
+    `<ciaobot_cli_reference>`. `tests/test_cli_docs_drift.py` checks them
+    against the parsers; every command must also be in the reference `ciao help`
+    prints. The cap stays at 12000, unchanged: measured as the payload length
+    the prompt is 10067 with the synopsis, so no raise was needed. A
+    raise should move a section out rather than buy more room.
     """
     cli = system_prompt_payload("")["append"]
-    missing = [command for command in _commands() if command not in cli]
+    reference = (Path(agent_cli._SKILL_PATH)).read_text(encoding="utf-8")
+    missing = [command for command in _commands() if command not in reference]
     assert missing == []
-    # It has to stay cheap: this text is prepended to every turn of every
-    # CLI-surface chat. Raised from 9000 to 9500 for `note verify` (#726-D) —
-    # the previous 9000 left 24 characters of headroom, so the operation the
-    # agent is supposed to use INSTEAD of hand-editing stale notes could not
-    # be described at all. A command with no line here is a command the model
-    # does not know exists, which for this one means it hand-edits a note's
-    # `updated:` and leaves no receipt behind: exactly the defect the child
-    # exists to close. Raised to 10300 for the task board (#1021, B3), which is
-    # the same trade for six commands: an agent that never sees `task list`
-    # invents its own board in a note and there is no second source of truth for
-    # it to have come from. The revision discipline and the completion refusal
-    # have to travel with the verbs, or the first thing it does is overwrite a
-    # task nobody read. Pay for the line, and keep the ceiling honest.
-    # Raised again to 10600 for task delegation (#1033, B5), the same trade for two
-    # more: without `task delegate`/`task attempt` an agent handed "work on the
-    # board task" reaches for `task update` and edits the record by hand, which
-    # produces no chat, no attempt and no review — the three things that make a
-    # delegation a delegation. Two lines of prose had to come with them, because
-    # "attended, not bypassing" and "a finished turn waits for review" are the two
-    # properties a model cannot infer from a verb list.
-    # Raised again to 11000 for webhook triggers (#1039, A6), the same trade for five
-    # commands: the shown-once secret and the created-disabled rule are the two facts
-    # that keep an agent from pasting a credential into a note or enabling a trigger
-    # nobody asked to enable, and neither survives being left to `ciao help`.
-    # B5 (#1033) and A6 (#1039) added their lines on divergent branches and meet
-    # here, so this is 11400 rather than either's 10600/11000: both sets of prose
-    # have to travel or one feature's guarantee silently disappears.
-    # Raised again to 11700 after a real chat (2026-10-05) asked "what can I
-    # delegate to you?", did the work in its own turn, left every task untouched,
-    # and only found `in_review` from `--help`. The column names, the
-    # delegate-means-`task delegate` rule and the note-then-`in_review` rule for
-    # self-worked tasks are what that chat lacked; `ciao-capabilities` gets one
-    # line so feature questions stop being answered from general knowledge.
-    # Raised again to 12000 for `task report` (#1064), the same trade for one
-    # command: a delegated turn that ends without a report reads to the user as
-    # *Unfinished* rather than as a result to review, so the verb a delegated
-    # agent is required to call is exactly the one a verb list cannot imply. This
-    # is the fifth raise, and `docs/UPKEEP.md` records the standing argument that
-    # the next one should move a section OUT to the `ciao-cli` skill instead of
-    # buying a sixth. Pay for the line, and keep the ceiling honest.
+    assert "ciao help" in cli and "ciao <noun> --help" in cli
+    assert "vault search       QUERY" in cli and "task report" in cli
+    assert "vault review restore-completed" not in cli
     assert len(cli) < 12000
 
 
