@@ -2267,3 +2267,14 @@ def test_a_pre_1_0_workspaces_env_marks_a_set_up_workspace(
 
     (tmp_path / ".env").write_text(line + "\n", encoding="utf-8")
     assert is_set_up_workspace(tmp_path) is expected
+
+
+def test_provider_rows_carry_their_terminal_action(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: "")
+    monkeypatch.setattr("ciao.setup_status.claude_app_path", lambda: "")
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+
+    claude = setup_status(_config(tmp_path), env={})["providers"]["claude"]
+
+    assert claude["auth"] == "not_installed"
+    assert claude["terminal_action"] == "claude-install"

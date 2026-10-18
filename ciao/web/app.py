@@ -203,6 +203,7 @@ from ciao.web.routes_import import (
     import_preview,
     import_sources,
 )
+from ciao.web.routes_host_terminal import host_terminal_launch, host_terminal_status
 from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.routes_tasks import (
     task_add_update,
@@ -464,6 +465,9 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspace-image", workspace_image, methods=["GET"]),
         Route("/api/workspace-binary", workspace_binary, methods=["GET"]),
         Route("/api/workspace-open", workspace_open, methods=["POST"]),
+        # host-only: session + host_browser_request; never in _LOOPBACK_ONLY_API
+        Route("/api/host/terminal", host_terminal_status, methods=["GET"]),
+        Route("/api/host/terminal", host_terminal_launch, methods=["POST"]),
         Route("/api/libreoffice-status", libreoffice_status_endpoint, methods=["GET"]),
         # File snapshots — History and Diff tabs in the file viewer.
         Route("/api/file-history", file_history, methods=["GET"]),

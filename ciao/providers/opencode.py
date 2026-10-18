@@ -420,6 +420,9 @@ def resolve_opencode_binary(env: Mapping[str, str] | None = None) -> str | None:
 #: single method; the row's command carries the one-line form.
 OPENCODE_INSTALL_DOCS_URL = "https://opencode.ai/download"
 
+#: The sign-in command shown on the provider row and run by the host terminal.
+OPENCODE_LOGIN_COMMAND = "opencode auth login"
+
 
 def opencode_install_command() -> str:
     """The documented one-line installer for this platform.
@@ -4705,6 +4708,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
             detail="opencode is not installed on this machine.",
             version="not installed",
             install_url=OPENCODE_INSTALL_DOCS_URL,
+            terminal_action="opencode-install",
             # Mirrors Claude's row so the wizard offers one PATH line whatever
             # the provider. Empty when the installer used needs none.
             path_command=opencode_path_hint(),
@@ -4725,6 +4729,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
             command="opencode --version",
             detail=OPENCODE_V2_REQUIRED,
             version=version or "unknown",
+            terminal_action="opencode-install",
         )
     credentials = _credential_count(binary, timeout=timeout)
     # opencode's own free tier serves models with no credentials at all, so an
@@ -4745,7 +4750,8 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
         name="opencode",
         ok=True,
         auth=auth,
-        command="opencode auth login",
+        command=OPENCODE_LOGIN_COMMAND,
+        terminal_action="opencode-login",
         detail=detail,
         version=version or "unknown",
         skills=found.skills,

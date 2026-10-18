@@ -149,6 +149,9 @@ new terminal, install [Git for Windows](https://gitforwindows.org/).
 
 ## Known differences from macOS
 
+- Open in Terminal uses Windows Terminal when it is installed, else a PowerShell
+  window that stays open. A PowerShell window started this way belongs to the
+  engine's task and closes if the engine task is stopped.
 - No Apple Intelligence (it needs a Mac host) and no macOS desktop shell. Pick
   Claude or OpenCode models.
 - The engine starts at your logon, not at boot, and stopping it is a hard stop

@@ -48,6 +48,14 @@ carried by the session.
   same-host `Origin`: browsing folders and moving the install are for the
   computer running Ciaobot. The peer check narrows a session route here; it
   grants nothing. A remote browser gets the CLI command instead.
+- Opening a terminal on the engine's machine (`GET`/`POST /api/host/terminal`)
+  needs the session *and* the same host-browser rule (`host_browser_request`:
+  loopback peer, localhost `Host`, same-host `Origin`/`Referer`). It is
+  deliberately not in `_LOOPBACK_ONLY_API`, because that set lets a loopback peer
+  skip the session, and any local process or DNS-rebound page could then open
+  terminals. The body carries an action id or a chat/project id, never a command
+  or a path. `GET` reports `not_on_host` (200) to a signed-in remote browser so it
+  can hide the buttons; `POST` answers 403.
 - Model-authored HTML is served from `/api/workspace-html` under a sandboxing
   CSP (`sandbox allow-scripts`, no `allow-same-origin`, `connect-src 'none'`,
   `form-action 'none'`), so an artifact cannot reach the API or the local-only
@@ -57,8 +65,9 @@ carried by the session.
   server-side grant and is expanded only in the provider prompt.
 - There is no native capability of any kind left: the macOS app and its shell
   are retired (`#579`), so a remote browser gets nothing a local one does not,
-  and `trigger_app_update` does not exist. A browser is never a local control
-  path.
+  and `trigger_app_update` does not exist. A browser is a local control path only
+  through the session-plus-host routes above (`/api/workspace-open`,
+  `/api/workspace-move*`, `/api/host/terminal`), and each refuses a non-host peer.
 
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.

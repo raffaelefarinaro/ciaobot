@@ -8,6 +8,10 @@ from pathlib import Path
 # in PWA_API.md → Agent recipes. Each entry needs a one-line reason so future
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
+    "/api/host/terminal": (
+        "browser Open/Run in Terminal button; host-only (session + loopback peer + "
+        "loopback Host), takes an action id or a chat/project id, never a command or a path"
+    ),
     "/api/auth": "browser login flow; the recipe's auth step covers this",
     "/api/auth/logout": "browser logout; clears the session cookie",
     "/api/chats/{chat_id}/background-runs/{run_id}/cancel": (
