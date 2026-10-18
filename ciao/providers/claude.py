@@ -75,6 +75,7 @@ from ciao.models import (
     ThinkingEvent,
     TokenUsageEvent,
     ToolUseEvent,
+    linked_repo_of,
     provider_reuse_key,
     tool_call_facts,
     tool_work_dirs,
@@ -659,6 +660,7 @@ class ClaudeProvider(BaseSDKProvider):
         CIAO_MODEL is left out: a model change is applied with set_model.
         The guide fingerprint makes a guide or memory edit reach the model,
         as it did when every turn started a fresh CLI.
+        The linked repo is an add-dir, fixed at spawn.
         """
         env = tuple(sorted(
             (k, v) for k, v in (request.extra_env or {}).items() if k != "CIAO_MODEL"
@@ -668,6 +670,7 @@ class ClaudeProvider(BaseSDKProvider):
             tuple(request.disallowed_tools or ()),
             env,
             _guide_fingerprint(Path(self.workspace_root)),
+            linked_repo_of(request),
         )
 
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
@@ -777,6 +780,13 @@ class ClaudeProvider(BaseSDKProvider):
                 matcher="|".join(CLAUDE_FILE_TOOL_PATH_KEYS),
                 hooks=[claude_file_tool_guard(cwd=Path(self.workspace_root), roots=roots)],
             )]
+        # The linked repository is added in every scope: it is what loads the
+        # repo's .claude/skills and .claude/commands. Workspace scope may already
+        # list it among the roots above. It is added even inside the workspace
+        # root, because the CLI only discovers skills from cwd and its parents.
+        linked_repo = linked_repo_of(request)
+        if linked_repo and linked_repo not in {str(d) for d in add_dirs}:
+            add_dirs.append(linked_repo)
         self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
 
         options = ClaudeAgentOptions(

@@ -100,6 +100,7 @@ from ciao.config import (
 )
 from ciao.context.capsule import (
     build_context_capsule,
+    render_linked_repo_block,
 )
 from ciao.context.capsule import (
     context_digest as stable_context_digest,
@@ -107,6 +108,7 @@ from ciao.context.capsule import (
 from ciao.entity_types import load_entity_types
 from ciao.frontmatter import split_frontmatter
 from ciao.model_tiers import is_tier
+from ciao.repo_link import read_repo_instructions, repo_state
 from ciao.models import (
     THINKING_LEVELS,
     AgentRequest,
@@ -4562,11 +4564,22 @@ class ProjectChatManager:
         env.update(self.workspace_shell_env(workspace, project))
         return self._config.agent_root(workspace), env
 
+    def _linked_repo_for_chat(self, chat: ChatInfo) -> str:
+        """The chat's linked repository, resolved, or "" when unlinked, missing,
+        or a memory-pass chat (the pass must not be able to write the repo)."""
+        project = self._projects.get(chat.project_id)
+        raw = project.repo_path if project else ""
+        if not raw or is_memory_pass_chat(chat, project):
+            return ""
+        path = Path(raw).expanduser()
+        return str(path.resolve()) if path.is_dir() else ""
+
     def _agent_fs_scope_for_chat(self, chat: ChatInfo) -> tuple[str, tuple[str, ...]]:
         """The chat's workspace filesystem scope and the roots it confines to.
 
         Roots are the chat's agent root and that workspace's vault root,
-        resolved and de-duplicated, agent root first. A chat granted the data
+        resolved and de-duplicated, agent root first. A project's linked
+        repository follows the vault root. A chat granted the data
         root (the memory-backup setup chat, #1328) also gets that root, last.
         Machine scope never reads them, so they are only computed for the
         workspace case.
@@ -4578,6 +4591,9 @@ class ProjectChatManager:
         agent_root = self._config.agent_root(workspace).resolve()
         vault_root = self._config.workspace_vault_root(workspace).resolve()
         roots = [str(agent_root), str(vault_root)]
+        linked_repo = self._linked_repo_for_chat(chat)
+        if linked_repo:
+            roots.append(linked_repo)
         if chat.grants_data_root:
             roots.append(str(backup_scope.data_root(self._config).resolve()))
         return "workspace", tuple(dict.fromkeys(roots))
@@ -4588,6 +4604,25 @@ class ProjectChatManager:
         revoke = getattr(registry, "revoke_chat", None)
         if callable(revoke):
             revoke(chat_id)
+
+    def _linked_repo_context(self, project: ProjectInfo | None) -> tuple[str, str, str]:
+        """(stable block, digest fingerprint, per-turn line) for a linked project; ("", "", "") when unlinked."""
+        if project is None or not project.repo_path:
+            return "", "", ""
+        path = project.repo_path
+        state = repo_state(path)
+        if state["missing"]:
+            block = render_linked_repo_block(path=path, missing=True, instructions_name="", instructions_text="")
+            return block, f"{path}\0missing", f"linked_repo={path} missing=true"
+        ins = read_repo_instructions(path)
+        block = render_linked_repo_block(
+            path=path, missing=False, instructions_name=ins.name, instructions_text=ins.text
+        )
+        return (
+            block,
+            f"{path}\0ok\0{ins.name}\0{ins.digest}",
+            f"linked_repo={path} branch={state['branch'] or '(detached)'}",
+        )
 
     def _build_prompt_prefix(
         self,
@@ -4608,6 +4643,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
+        repo_block, _repo_fp, repo_line = self._linked_repo_context(project)
         include_stable = self._needs_stable_context(chat)
         handover = self._format_handover_context(chat)
         # Only a workspace-scoped chat is confined, so only it is told where
@@ -4624,6 +4660,8 @@ class ProjectChatManager:
             handover=handover,
             include_stable=include_stable,
             file_roots=fs_roots if fs_scope == "workspace" else (),
+            linked_repo_block=repo_block,
+            linked_repo_line=repo_line,
         )
         if capsule:
             capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
@@ -4646,6 +4684,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
+        _b, repo_fp, _l = self._linked_repo_context(project)
         return (
             stable_context_digest(
                 workspace=workspace,
@@ -4653,6 +4692,7 @@ class ProjectChatManager:
                 project_name=project_name,
                 project_context=project_context,
                 canonical_doc=canonical_doc,
+                linked_repo=repo_fp,
             ),
             chat.session_id or "__pending__",
         )
@@ -4665,6 +4705,7 @@ class ProjectChatManager:
         project_name = project.name if project else ""
         project_context = project.context if project else ""
         canonical_doc = project.vault_doc_path if project else ""
+        repo_block, _repo_fp, repo_line = self._linked_repo_context(project)
         capsule = build_context_capsule(
             workspace=workspace,
             gws_profile=gws_profile,
@@ -4673,6 +4714,8 @@ class ProjectChatManager:
             canonical_doc=canonical_doc,
             workspace_vault_root=self._workspace_vault_display(workspace),
             include_stable=True,
+            linked_repo_block=repo_block,
+            linked_repo_line=repo_line,
         )
         if not capsule:
             return ""
@@ -5396,6 +5439,7 @@ class ProjectChatManager:
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             agent_fs_scope=fs_scope,
             agent_roots=fs_roots,
+            linked_repo=self._linked_repo_for_chat(chat),
             # The guardrail marker: Claude reads the extra denies off
             # ``disallowed_tools``, opencode needs a marker to pick its own
             # stricter ruleset.
@@ -5818,6 +5862,7 @@ class ProjectChatManager:
                 disallowed_tools=self.disallowed_tools_for_chat(chat),
                 agent_fs_scope=fs_scope,
                 agent_roots=fs_roots,
+                linked_repo=self._linked_repo_for_chat(chat),
                 thinking_level=self._thinking_level_for_chat(chat),
             )
             # Lock the chips before the await: an edit or remove landing while

@@ -155,6 +155,20 @@ export interface McpUsage {
 
 // ── Projects & Chats ────────────────────────────────────────────────────
 
+/** A1: the project's linked repository main checkout, as the engine sees it now. */
+export interface ProjectRepo {
+  path: string
+  branch: string      // '' when HEAD is detached
+  dirty: boolean
+  missing: boolean    // folder gone or no longer a git toplevel
+}
+
+/** A1: one entry of GET /api/repos/candidates `candidates` ({roots, candidates:[{path,name,root}]}). */
+export interface RepoCandidate {
+  path: string
+  name: string
+}
+
 export interface ProjectInfo {
   project_id: string
   name: string
@@ -169,6 +183,7 @@ export interface ProjectInfo {
   // 'memory' marks the app-owned per-workspace Memory project. The PWA hides
   // it from the sidebar; a user project may legitimately be named "Memory".
   kind?: string
+  repo?: ProjectRepo | null
 }
 
 export type ArchivedChatSummary = Pick<ChatInfo, 'chat_id' | 'title' | 'created_at' | 'archive_path'>

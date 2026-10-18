@@ -544,3 +544,7 @@ def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb(
         with pytest.raises(SystemExit) as excinfo:
             parser.parse_args(argv)
         assert excinfo.value.code == 0, f"`ciao {noun} {verb}` is not a command"
+
+
+def test_stock_memory_assets_route_repo_facts() -> None:
+    assert "`repo`" in _stock("commands/remember.md")

@@ -73,8 +73,8 @@ chat delete       [--chat C]
 chat stop         --chat C
 project list      [--include-completed]
 project get       [ID|NAME]
-project create    --name NAME [--context TEXT]
-project update    [ID|NAME] [--name NAME] [--context TEXT] [--vault-folder F]
+project create    --name NAME [--context TEXT] [--repo PATH]
+project update    [ID|NAME] [--name NAME] [--context TEXT] [--vault-folder F] [--repo PATH]
 project complete  ID|NAME
 project delete    ID|NAME
 project restore   STEM
@@ -108,6 +108,7 @@ run cancel        ID
 context get
 gws status
 workspace list
+repo candidates
 
 <sched> = [--prompt TEXT] [--frequency daily|weekly|monthly|once|interval|manual]
           [--daily-time HH:MM] [--timezone TZ] [--interval-minutes N]
@@ -116,7 +117,7 @@ workspace list
           [--archive-policy P]
 ```
 
-- The memory-proposal review queue has its own two commands, outside the table: `ciao memory-proposals` lists it, and `ciao memory-proposal-dismiss --text-file F [--promoted]` removes one row (fact text in a file, never argv; `--promoted` only after filing the fact).
+- Outside the table: `ciao memory-proposals` lists the proposal queue; `ciao memory-proposal-dismiss --text-file F [--promoted]` removes one row (text in a file, never argv; `--promoted` only after filing the fact).
 - `note verify --payload-file F` settles a stale note's facts (JSON: `relative_path`, `expected_revision`, `outcome`, `coverage`, `evidence`, `before`/`after`); `status` is `applied`, `needs_review` (a `note_edit` proposal for a person), `unverified` or `conflict`.
 - The user's tasks are this board (`ciao task …`), not your provider's todo tool; link one as `[title](/tasks/<id>)`, full id. `task list`/`task get` return the `revision` every edit passes back. A stale revision changes nothing: re-read and re-plan, never resend it. You cannot mark a task done: report what is finished and let the user close it. `task delegate` hands it to the agent as one ordinary attended chat, and `task attempt ID ACTION` then stops, resumes, retries or detaches that run; delegated work reports back once, before the turn ends, with `task report ID --outcome done|blocked|needs_input --summary-file FILE.md`, and a delegated turn that ends without one reads to the user as Unfinished rather than as a result to review; a finished turn waits for review, it does not close the task. Asked to delegate, run `task delegate` rather than doing the work in this turn. When you work a task yourself, `task link-chat` it to this chat, `task add-update` a milestone (not a chat dump), then move it to `in_review`.
 - `webhook create|rotate` return a secret **shown once**: hand it to the user, never store it. A trigger is created disabled, so ask before `webhook update --enable`, then tell them the sender POSTs `{"text": "..."}` to `/hooks/v1/<trigger_id>` on this engine, with that secret as a bearer token and an `Idempotency-Key`. `webhook rotate` kills the old secret at once. Instructions go in a file: `--instructions-file`.

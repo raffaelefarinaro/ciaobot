@@ -1864,3 +1864,114 @@ def test_append_ignores_frontmatter_and_indented_code_headings(
     receipt = _append_item(vault, path, section="Notes", item="- new fact")
     assert receipt["changed"] is True
     assert path.read_bytes().decode("utf-8") == indented + "- new fact\n"
+
+
+# ── Repo AGENTS.md appends ─────────────────────────────────────────────────
+
+
+def _repo(tmp_path: Path, text: str = "# App\n\nRules.\n") -> Path:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "AGENTS.md").write_bytes(text.encode("utf-8"))
+    return repo
+
+
+def test_repo_doc_append_journals_in_the_vault_and_undoes(tmp_path):
+    vault = _vault(tmp_path)
+    repo = _repo(tmp_path)
+    agents = repo / "AGENTS.md"
+    original = agents.read_bytes()
+
+    receipt = nr.append_repo_doc_item(
+        vault_root=vault,
+        repo_root=repo,
+        expected_revision=_revision(agents),
+        item="- Run tests with make test",
+        actor="proposal-accept",
+        source="pwa",
+        workspace="personal",
+    )
+
+    assert receipt["status"] == mr.APPLIED
+    text = agents.read_text(encoding="utf-8")
+    assert "## Agent learnings" in text
+    assert "- Run tests with make test" in text
+    rows = _rows(vault)
+    assert [row["kind"] for row in rows] == ["repo_doc_apply"]
+    assert rows[0]["provenance"]["repo_root"] == str(repo.resolve())
+
+    mr.undo_receipt(str(receipt["id"]), vault_root=vault)
+
+    assert agents.read_bytes() == original
+    kinds = {row["kind"]: row for row in _rows(vault)}
+    assert kinds["repo_doc_apply"]["status"] == mr.UNDONE
+    assert kinds["repo_doc_undo"]["provenance"]["repo_root"] == str(repo.resolve())
+
+
+def test_repo_doc_root_refuses_non_checkout_and_symlink(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "AGENTS.md").write_text("x\n", encoding="utf-8")
+    with pytest.raises(nr.NoteTargetRefused):
+        nr.repo_doc_root(plain)
+
+    linked = tmp_path / "linked"
+    (linked / ".git").mkdir(parents=True)
+    real = tmp_path / "real.md"
+    real.write_text("x\n", encoding="utf-8")
+    (linked / "AGENTS.md").symlink_to(real)
+    with pytest.raises(nr.NoteTargetRefused):
+        nr.repo_doc_root(linked)
+
+    empty = tmp_path / "empty"
+    (empty / ".git").mkdir(parents=True)
+    with pytest.raises(nr.NoteTargetRefused):
+        nr.repo_doc_root(empty)
+
+    assert nr.repo_doc_root(_repo(tmp_path)) == (tmp_path / "repo").resolve()
+
+
+def test_repo_doc_prepared_receipt_recovers_as_applied(tmp_path):
+    vault = _vault(tmp_path)
+    repo = _repo(tmp_path)
+    agents = repo / "AGENTS.md"
+    before = agents.read_text(encoding="utf-8")
+    after = nr.compose_repo_doc_append(before, "- Run tests with make test")
+    journal = _journal(vault)
+    mr._append(
+        journal,
+        {
+            "id": "mrcpt_repo_prepared",
+            "ts": mr._now(),
+            "actor": "proposal-accept",
+            "source": "pwa",
+            "workspace": "personal",
+            "kind": "repo_doc_apply",
+            "note": str(agents),
+            "relative_path": "AGENTS.md",
+            "vault_root": str(repo),
+            "before_revision": mr.content_revision(before),
+            "after_revision": mr.content_revision(after),
+            "before_text": before,
+            "after_text": after,
+            "provenance": {"repo_root": str(repo.resolve())},
+            "status": mr.PREPARED,
+        },
+    )
+    agents.write_bytes(after.encode("utf-8"))
+
+    result = mr.recover_pending(journal=journal)
+
+    assert [row["id"] for row in result.reconciled] == ["mrcpt_repo_prepared"]
+    settled = mr.find_receipt(journal, "mrcpt_repo_prepared")
+    assert settled is not None and settled["status"] == mr.APPLIED
+
+
+def test_repo_doc_root_refuses_a_differently_cased_agents_md(tmp_path):
+    repo = tmp_path / "cased"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "agents.md").write_text("x\n", encoding="utf-8")
+    if (repo / "AGENTS.md").exists() is False:
+        pytest.skip("case-sensitive filesystem: agents.md is not AGENTS.md")
+    with pytest.raises(nr.NoteTargetRefused):
+        nr.repo_doc_root(repo)

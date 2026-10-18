@@ -2378,7 +2378,7 @@ export const useProjectStore = defineStore('projects', () => {
     return p
   }
 
-  async function updateProject(projectId: string, updates: { name?: string; context?: string }) {
+  async function updateProject(projectId: string, updates: { name?: string; context?: string; repo_path?: string }) {
     const p = await api.patch<ProjectInfo>(`/api/projects/${projectId}`, updates)
     const idx = projects.value.findIndex(x => x.project_id === projectId)
     if (idx >= 0) projects.value[idx] = p
