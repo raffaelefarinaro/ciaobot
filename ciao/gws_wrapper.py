@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from ciao.agent_surface import AGENT_TOKEN_ENV
 from ciao.gws_auth import GWS_SERVICE_NAMES, profile_config_dir
 from ciao.os_support.processes import hand_off
 from ciao.tool_path import login_shell_path, resolve_command
@@ -110,12 +111,11 @@ def main(argv: list[str] | None = None) -> int:
     if args == ["--profile"]:
         print("ciao gws: --profile needs an account name.", file=sys.stderr)
         return 2
-    profile, rest = _split_profile_and_args(args)
+    explicit, rest = _split_profile_and_args(args)
     config = CiaoConfig.from_env()
 
-    if profile is None:
-        profile = os.environ.get("GWS_PROFILE", "")
-    profile = profile.strip()
+    linked = os.environ.get("GWS_PROFILE", "").strip()
+    profile = linked if explicit is None else explicit.strip()
     if not profile:
         print(
             "No Google account is linked to this workspace. "
@@ -127,6 +127,21 @@ def main(argv: list[str] | None = None) -> int:
     workspace_root = _configured_workspace_root(config) or Path(
         config.workspace_root
     )
+
+    # Inside a chat (the agent token is present) only the workspace's own
+    # linked account is reachable, whatever the arguments say: an instruction
+    # in an email or document must not steer the agent to another account.
+    # An operator terminal has no token and keeps the explicit override.
+    if explicit is not None and os.environ.get(AGENT_TOKEN_ENV):
+        from types import SimpleNamespace
+
+        scope = SimpleNamespace(workspace_root=str(workspace_root))
+        if profile_config_dir(scope, profile) != profile_config_dir(scope, linked):
+            print(
+                "This workspace can only use its linked Google account.",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         env = _gws_environment(workspace_root, profile)
