@@ -829,4 +829,21 @@ describe('ProjectSidebar accessible context menus', () => {
     expect(tags[0].attributes('title')).toBe('Worktree: /r/app-wt')
     wrapper.unmount()
   })
+
+  it('tags a code-mode chat with a quiet code marker', async () => {
+    const store = useProjectStore()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
+    store.chats[0].code_mode = true
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    expect(wrapper.findAll('.chat-code-tag')).toHaveLength(1)
+    expect(wrapper.get('.chat-code-tag').text()).toBe('code')
+    wrapper.unmount()
+
+    store.projects[0].repo = null
+    const unlinked = await mountSidebar()
+    await flushPromises()
+    expect(unlinked.find('.chat-code-tag').exists()).toBe(false)
+    unlinked.unmount()
+  })
 })

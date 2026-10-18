@@ -59,7 +59,7 @@
         <!-- Archive is the header's one action, so it gets words, not just a
              glyph. Chat details moved out: it opens from the info tab at the
              top right of the chat body and hides from its own heading. -->
-        <ChatRepoChip v-if="!chat.archived" :repo="project?.repo ?? null" :location="chat.repo_location ?? null" />
+        <ChatRepoChip v-if="!chat.archived" :repo="project?.repo ?? null" :location="chat.repo_location ?? null" :chat-id="chat.chat_id" :code-mode="isChatCodeModeOn(chat, project?.repo)" />
         <button
           v-if="!chat.archived"
           type="button"
@@ -108,7 +108,7 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" :class="{ 'messages--empty': !blockingHistoryLoad && renderItems.length === 0 && !inputText.trim() }" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
+    <div class="messages" :class="{ 'messages--empty': !blockingHistoryLoad && transcriptEmpty && !inputText.trim() }" ref="messagesEl" :aria-busy="store.messageHistoryLoading" :style="{ overflowAnchor: isNearBottom ? 'none' : 'auto' }" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <!-- Selecting a message (click or Enter) outlines it and shows its
          actions, leaving the rest of the transcript readable; clicking the
          message again or pressing Esc puts it back. -->
@@ -150,7 +150,7 @@
         </div>
       </Transition>
       <section
-        v-if="!blockingHistoryLoad && renderItems.length === 0 && !inputText.trim()"
+        v-if="!blockingHistoryLoad && transcriptEmpty && !inputText.trim()"
         class="chat-empty-state"
         aria-labelledby="chat-empty-title"
       >
@@ -375,6 +375,11 @@
             :action-disabled="store.isStreaming"
             @action="retryFromError(i)"
           />
+        </div>
+        <!-- A code-mode switch, at the point it happened (lib/codeMode.ts). -->
+        <div v-else-if="item.kind === 'code-mode'" class="transcript-event" role="note">
+          <span class="transcript-event-text">{{ item.msg.content }}</span>
+          <span v-if="item.msg.timestamp" class="transcript-event-time">{{ formatTime(item.msg.timestamp) }}</span>
         </div>
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
@@ -1353,6 +1358,7 @@ import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeU
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
+import { interleaveCodeModeEvents, isChatCodeModeOn, isCodeModeMarker } from '../lib/codeMode'
 import { backgroundRunElapsed, backgroundRunLabel, backgroundRunOutcome } from '../lib/backgroundRuns'
 import BackgroundRunRows from './BackgroundRunRows.vue'
 import {
@@ -1417,6 +1423,7 @@ type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
   | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number; meta?: TurnMeta }
   | { kind: 'system'; msg: ChatMessage }
+  | { kind: 'code-mode'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; turnIndex?: number }
 
 type RenderItem = RenderItemInput & { key: string }
@@ -1425,7 +1432,8 @@ function renderItemKey(item: RenderItemInput): string {
   switch (item.kind) {
     case 'user':
     case 'assistant':
-    case 'system': {
+    case 'system':
+    case 'code-mode': {
       const m = item.msg
       const ts = m.timestamp || ''
       const content = (m.content || '').slice(0, 60)
@@ -4014,7 +4022,17 @@ const renderData = computed<{
     buffer = []
   }
 
-  for (const msg of store.activeMessages) {
+  const rows = interleaveCodeModeEvents(
+    store.activeMessages,
+    store.activeChat?.code_mode_events,
+    { hasOlder: store.activeChatId ? store.canLoadOlder(store.activeChatId) : false },
+  )
+  for (const msg of rows) {
+    if (isCodeModeMarker(msg)) {
+      flushTurn()
+      items.push(withKey({ kind: 'code-mode', msg }))
+      continue
+    }
     if (msg.role === 'user') {
       flushTurn()
       currentTurnIndex = typeof msg.turn_index === 'number'
@@ -4109,6 +4127,8 @@ const renderData = computed<{
 })
 
 const renderItems = computed<RenderItem[]>(() => renderData.value.items)
+// A code-mode switch row alone does not make a transcript: the starters stay.
+const transcriptEmpty = computed(() => renderItems.value.every(item => item.kind === 'code-mode'))
 const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
 
 // One consistent full-screen state for "this chat isn't ready to show yet" —
@@ -5564,6 +5584,23 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   width: 98%;
   max-width: 98%;
 }
+
+.transcript-event {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  color: var(--fg3);
+  font: 600 var(--text-xs) var(--font-mono);
+  letter-spacing: 0.02em;
+}
+.transcript-event::before,
+.transcript-event::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--border);
+}
+.transcript-event-time { font-weight: 400; }
 
 .retry-btn {
   margin-top: 6px;

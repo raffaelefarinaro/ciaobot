@@ -1,19 +1,22 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ChatRepoChip from '../ChatRepoChip.vue'
+import { useProjectStore } from '../../stores/projects'
 import type { ProjectRepo, RepoLocation } from '../../lib/types'
 
 const repo: ProjectRepo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
 const worktree: RepoLocation = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
 
-function mountChip(r: ProjectRepo | null, location: Partial<RepoLocation> | null) {
-  return mount(ChatRepoChip, { attachTo: document.body, props: { repo: r, location } })
+function mountChip(r: ProjectRepo | null, location: Partial<RepoLocation> | null, codeMode = false) {
+  return mount(ChatRepoChip, { attachTo: document.body, props: { repo: r, location, chatId: 'c1', codeMode } })
 }
 
 describe('ChatRepoChip', () => {
+  beforeEach(() => { setActivePinia(createPinia()) })
   afterEach(() => { document.body.innerHTML = '' })
 
   it('renders nothing without a linked repo', () => {
@@ -61,5 +64,44 @@ describe('ChatRepoChip', () => {
     await nextTick()
     expect(document.querySelector('.repo-popover')!.textContent).not.toContain('Changes')
     wt.unmount()
+  })
+
+  it('shows the on state with a leading code label', () => {
+    const wrapper = mountChip(repo, worktree, true)
+    const btn = wrapper.get('.repo-chip')
+    expect(wrapper.find('.repo-chip--code').exists()).toBe(true)
+    expect(btn.text().startsWith('code')).toBe(true)
+    expect(btn.attributes('aria-label')?.endsWith(', code mode on')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('toggles code mode from the popover switch', async () => {
+    const store = useProjectStore()
+    const spy = vi.spyOn(store, 'setChatCodeMode').mockResolvedValue()
+    const wrapper = mountChip(repo, worktree)
+    await wrapper.get('.repo-chip').trigger('click')
+    await nextTick()
+    const sw = document.querySelector('[role=switch]') as HTMLButtonElement
+    expect(sw.tagName).toBe('BUTTON')
+    expect(sw.getAttribute('type')).toBe('button')
+    expect(sw.getAttribute('aria-checked')).toBe('false')
+    sw.click()
+    await flushPromises()
+    expect(spy).toHaveBeenCalledWith('c1', true)
+    wrapper.unmount()
+  })
+
+  it("shows the engine's error inline", async () => {
+    const store = useProjectStore()
+    vi.spyOn(store, 'setChatCodeMode').mockRejectedValue({ payload: { error: 'Link a repository first' } })
+    const wrapper = mountChip(repo, worktree)
+    await wrapper.get('.repo-chip').trigger('click')
+    await nextTick()
+    const sw = document.querySelector('[role=switch]') as HTMLButtonElement
+    sw.click()
+    await flushPromises()
+    expect(document.querySelector('[role=alert]')!.textContent).toContain('Link a repository first')
+    expect(sw.disabled).toBe(false)
+    wrapper.unmount()
   })
 })
