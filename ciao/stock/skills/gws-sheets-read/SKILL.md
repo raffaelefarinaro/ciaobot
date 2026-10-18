@@ -1,6 +1,6 @@
 ---
 name: gws-sheets-read
-description: "Google Sheets: Read values from a spreadsheet."
+description: "Use to read cell values from a range of a spreadsheet."
 metadata:
   version: 0.22.5
 ---

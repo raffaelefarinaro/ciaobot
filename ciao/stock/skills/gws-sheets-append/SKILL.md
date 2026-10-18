@@ -1,6 +1,6 @@
 ---
 name: gws-sheets-append
-description: "Google Sheets: Append a row to a spreadsheet."
+description: "Use to append a row of values to the end of a sheet."
 metadata:
   version: 0.22.5
 ---

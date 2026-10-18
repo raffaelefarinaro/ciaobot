@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-read
-description: "Gmail: Read a message and extract its body or headers."
+description: "Use to read one email's body or headers once you have its message ID (find IDs with gws-gmail-triage)."
 metadata:
   version: 0.22.5
 ---
