@@ -1,6 +1,6 @@
 # Pass 2: consolidate bounded regions
 
-Check usage with `ciao memory status`. When a region is at or above ~85% of its cap (or over it), consolidate that region now. This run may edit regions for consolidation only. Before removing or replacing any entry, copy its original text into the undo log (`<vault>/Workspace/Memory-Consolidations.md`, under a `## YYYY-MM-DD` heading naming the region), so the user can restore any line.
+Check usage with `ciao memory status`. When a region is at or above ~85% of its cap (or over it), consolidate that region now. This run may edit regions for consolidation only. Before removing or replacing any entry, copy its original text into the undo log (`<vault>/Workspace/Memory-Consolidations.md`, under a `## YYYY-MM-DD` heading naming the region), so the user can restore any line. Create the file if it does not exist.
 
 Consolidation means:
 

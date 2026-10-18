@@ -36,6 +36,8 @@ For each item:
    - `needs_review`: the rule refused to write it unattended and one `note_edit` proposal is queued for the user. Report it under **What needs you** and move on.
    - `unverified`: nothing this pass reached could settle it, and nothing was written. It will be asked again.
    - `conflict`: the note moved since you read it. Re-read it and judge the text that is actually there.
+   - `already_checked`: a check for this exact revision is in its cooldown or waiting on a proposal.
+   - `failed`: the note could not be used at all.
 5. Record the key you settled with `ciao curation-progress --holder <lease.holder> --key <key>`, so the next run resumes instead of re-asking.
 
 When the related notes disagree and the real sources do not settle which is current, pick no side:
@@ -52,7 +54,7 @@ A note marked `"retrieved_recently": false` is both stale and unused by recall, 
 
 If you checked another note's facts against a real source while checking this one, send that note its own `note verify` payload, with the `revision` that `ciao note related` printed as its `expected_revision` and its own evidence. The check is then recorded and the nightly worklist will not plan that note during the cooldown. Do this only for related notes with `"due": true`: `due: false` means the worklist would not plan it, either because the note is not stale for its type (a journal never is) or because a check already settles it.
 
-Reading a note is not checking it, and citing it as evidence is not checking it either. Send `still_valid` only for a note whose facts you actually checked. These extra verdicts are not worklist items and have no progress key.
+Reading a note is not checking it, and citing it as evidence is not checking it either. Send `still_valid` only for a note whose facts you actually checked. These extra verdicts are not worklist items and have no progress key. Re-read the note after every write here too.
 
 ## `stale_entry` items
 

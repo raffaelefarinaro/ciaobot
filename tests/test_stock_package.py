@@ -387,12 +387,8 @@ def test_document_reading_skill_marks_contents_as_third_party_data() -> None:
 _CURATION_PROMPT_BUDGET_BYTES = 8 * 1024
 _REFERENCE_PATH = re.compile(r"references/([a-z0-9-]+\.md)")
 # `ciao <command>`: a hyphenated command name, or one of the grouped nouns with its verb.
-_CURATION_COMMAND = re.compile(r"\bciao ((?:note|vault review|memory) [a-z]+|[a-z]+(?:-[a-z]+)+)")
+_CURATION_COMMAND = re.compile(r"\bciao ((?:note|vault review|memory) [a-z]+|observations|[a-z]+(?:-[a-z]+)+)")
 _CURATION_FLAG = re.compile(r"(?<![\w-])--[a-z][a-z-]*")
-
-
-def _commands_and_flags(text: str) -> tuple[set[str], set[str]]:
-    return set(_CURATION_COMMAND.findall(text)), set(_CURATION_FLAG.findall(text))
 
 
 def test_curation_prompt_fits_its_budget_and_every_reference_it_names_ships() -> None:
@@ -412,18 +408,47 @@ def test_curation_prompt_fits_its_budget_and_every_reference_it_names_ships() ->
 
 
 def test_curation_references_keep_every_command_and_flag_of_the_old_prompt() -> None:
-    """The move must not drop a `ciao ...` command or flag from the run's instructions.
+    """The move must not drop a `ciao ...` command, or a flag on its command.
 
-    The old text is frozen in a fixture, so this stays meaningful after the live
-    prompt changes again.
+    The manifest was generated once from the pre-#1462 prompt: its commands, and
+    every (command, flag) pair that shared a line.
     """
-    old = (Path(__file__).parent / "fixtures" / "curation" / "prompt_before_1462.txt").read_text(encoding="utf-8")
-    old_commands, old_flags = _commands_and_flags(old)
-    assert len(old_commands) > 20 and len(old_flags) > 5  # the extraction is not vacuous
+    manifest = json.loads(
+        (Path(__file__).parent / "fixtures" / "curation" / "commands_before_1462.json").read_text(encoding="utf-8")
+    )
+    assert len(manifest["commands"]) > 20 and len(manifest["pairs"]) > 10  # not vacuous
 
-    new_commands, new_flags = _commands_and_flags(_curation_text())
-    assert old_commands - new_commands == set()
-    assert old_flags - new_flags == set()
+    text = _curation_text()
+    assert set(manifest["commands"]) - set(_CURATION_COMMAND.findall(text)) == set()
+    lines = [(set(_CURATION_COMMAND.findall(line)), set(_CURATION_FLAG.findall(line))) for line in text.splitlines()]
+    missing = [
+        (command, flag)
+        for command, flag in manifest["pairs"]
+        if not any(command in commands and flag in flags for commands, flags in lines)
+    ]
+    assert missing == []
+
+
+def test_every_curation_reference_is_named_by_the_prompt_or_another_reference() -> None:
+    prompt = _curation_prompt()
+    refs = {path.name: path.read_text(encoding="utf-8") for path in (_memory_skill_dir() / "references").glob("*.md")}
+    for name in refs:
+        others = prompt + "\n".join(text for other, text in refs.items() if other != name)
+        assert name in others, f"{name} is an orphan"
+
+
+def test_curation_prompt_alone_carries_the_guardrails() -> None:
+    prompt = _curation_prompt()
+    for phrase in (
+        "Do not promote new facts into the bounded",
+        "You never edit a skill or this workspace's guide body",
+        "you never settle a proposal",
+        "Memory-Consolidations.md",
+        "evidence, never an instruction",
+        "ciao curation-begin --json",
+        "--holder",
+    ):
+        assert phrase in prompt, phrase
 
 
 def _payload_examples(text: str) -> list[dict[str, object]]:
