@@ -30,7 +30,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
 | GET, POST | `/api/auth/settings` | Read whether a password is configured, or change the PWA password (`current_password` required) |
-| GET | `/api/projects` | List projects. Each carries `repo_path` and `repo`: `{path, branch, dirty, missing}` or `null` when unlinked |
+| GET | `/api/projects` | List projects. Each carries `repo_path` and `repo`: `{path, branch, dirty, missing, instructions}` or `null` when unlinked. `instructions` is `{name, chars}` for the AGENTS.md (CLAUDE.md when there is no AGENTS.md) that code mode injects, `chars` being the injected text's length after the 20,000-character cap, or `null` when there is none or the folder is missing |
 | POST | `/api/projects` | Create project. Optional `repo_path` links a local git checkout (absolute path to its top level; 400 with the reason otherwise) |
 | PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project. PATCH accepts `repo_path` (`""` unlinks) |
 | POST | `/api/projects/reorder` | Reorder a workspace's projects (drag-to-reorder) |

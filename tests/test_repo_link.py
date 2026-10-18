@@ -151,3 +151,36 @@ def test_read_repo_instructions_neutralises_envelope_markers(tmp_path: Path) -> 
     assert "[CIAO_CONTEXT_BEGIN]" not in text
     assert "<ciao-context>" not in text
     assert "</ciao-context>" not in text
+
+
+def test_repo_payload_reports_agents_md_size(tmp_path: Path) -> None:
+    repo = _init(tmp_path / "repo")
+    (repo / "AGENTS.md").write_text("x" * 100, encoding="utf-8")
+    payload = repo_link.repo_payload(str(repo))
+    assert payload["instructions"] == {"name": "AGENTS.md", "chars": 100}
+    assert {"branch", "dirty", "missing"} <= payload.keys()
+
+
+def test_repo_payload_falls_back_to_claude_md(tmp_path: Path) -> None:
+    repo = _init(tmp_path / "repo")
+    (repo / "CLAUDE.md").write_text("hello", encoding="utf-8")
+    assert repo_link.repo_payload(str(repo))["instructions"] == {"name": "CLAUDE.md", "chars": 5}
+
+
+def test_repo_payload_without_instructions_is_none(tmp_path: Path) -> None:
+    repo = _init(tmp_path / "repo")
+    assert repo_link.repo_payload(str(repo))["instructions"] is None
+
+
+def test_repo_payload_missing_folder(tmp_path: Path) -> None:
+    payload = repo_link.repo_payload(str(tmp_path / "gone"))
+    assert payload["missing"] is True
+    assert payload["instructions"] is None
+
+
+def test_repo_payload_counts_the_capped_text(tmp_path: Path) -> None:
+    repo = _init(tmp_path / "repo")
+    (repo / "AGENTS.md").write_text("line of text\n" * 2500, encoding="utf-8")
+    payload = repo_link.repo_payload(str(repo))
+    assert payload["instructions"]["chars"] == len(repo_link.read_repo_instructions(str(repo)).text)
+    assert payload["instructions"]["chars"] < 30000

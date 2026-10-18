@@ -160,3 +160,18 @@ def read_repo_instructions(repo: str | Path) -> RepoInstructions:
             )
         return RepoInstructions(name=name, text=text, truncated=truncated, digest=digest)
     return RepoInstructions(name="", text="", truncated=False, digest="")
+
+
+def repo_payload(path: str) -> dict[str, Any]:
+    """`repo_state` plus the instructions file code mode injects.
+
+    `instructions` is `{name, chars}` (chars = length of the injected, capped
+    text) or None when the folder is missing or has no AGENTS.md/CLAUDE.md.
+    """
+    state = repo_state(path)
+    if state["missing"]:
+        state["instructions"] = None
+        return state
+    ins = read_repo_instructions(path)
+    state["instructions"] = {"name": ins.name, "chars": len(ins.text)} if ins.name else None
+    return state

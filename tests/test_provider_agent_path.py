@@ -419,7 +419,7 @@ def test_chat_turn_env_isolates_bare_gws_for_an_unlinked_workspace(
     # Pointed at a dir that holds no credentials, so a bare `gws` cannot fall
     # back to the operator's ~/.config/gws login.
     unlinked = Path(extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"])
-    assert unlinked.name == "gws-unlinked"
+    assert unlinked.parent.name == "gws-unlinked"
     assert not unlinked.exists()
     assert (tmp_path / "secrets") not in unlinked.parents
 
@@ -430,4 +430,18 @@ def test_chat_turn_env_isolates_bare_gws_without_an_account(
     extra_env = _chat_extra_env(tmp_path, monkeypatch)
 
     assert extra_env["GWS_PROFILE"] == ""
-    assert Path(extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]).name == "gws-unlinked"
+    assert Path(extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"]).parent.name == "gws-unlinked"
+
+
+def test_unlinked_workspaces_get_separate_bare_gws_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Credentials an agent logs in to one unlinked workspace must not serve another."""
+    manager = _make_manager(tmp_path, gws_profile="")
+    dirs = set()
+    for workspace in ("personal", "side-project"):
+        project = manager.create_project(workspace, workspace=workspace)
+        chat = manager.create_chat(project.project_id, provider="claude")
+        dirs.add(manager.build_agent_request(chat, prompt="hi").extra_env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"])
+    assert len(dirs) == 2
+    assert all(Path(d).parent.name == "gws-unlinked" for d in dirs)

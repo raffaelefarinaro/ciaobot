@@ -442,7 +442,7 @@ class ProjectInfo:
             "vault_folder": self.vault_folder,
             "kind": self.kind,
             "repo_path": self.repo_path,
-            "repo": repo_link.repo_state(self.repo_path) if self.repo_path else None,
+            "repo": repo_link.repo_payload(self.repo_path) if self.repo_path else None,
             "vault_doc_path": self.vault_doc_path,
             "is_system": self.is_system,
             "is_auto": self.is_auto,
@@ -5344,7 +5344,10 @@ class ProjectChatManager:
 
         config_dir = profile_config_dir(self._config, gws_profile) if gws_profile else None
         if config_dir is None:
-            config_dir = Path(self._config.state_path).parent / "gws-unlinked"
+            # One directory per workspace, so credentials an agent logs in
+            # to one unlinked workspace never serve another.
+            slug = re.sub(r"[^a-z0-9_-]+", "-", (workspace or GWS_DEFAULT_PROFILE).lower()).strip("-")
+            config_dir = Path(self._config.state_path).parent / "gws-unlinked" / (slug or GWS_DEFAULT_PROFILE)
         env["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"] = str(config_dir)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or GWS_DEFAULT_PROFILE
         if project:
