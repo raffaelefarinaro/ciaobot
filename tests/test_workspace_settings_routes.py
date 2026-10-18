@@ -556,7 +556,7 @@ def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch)
     data = client.get("/api/integrations/gws").json()
     assert data["installed"] is True
     assert data["binary_path"] == "/usr/local/bin/gws"
-    assert data["default_profile"] == "personal"
+    assert "default_profile" not in data
 
     profiles = {profile["name"]: profile for profile in data["profiles"]}
     assert profiles["personal"]["configured"] is True
@@ -580,7 +580,6 @@ def test_gws_integration_starts_with_no_google_accounts(tmp_path, monkeypatch):
     data = client.get("/api/integrations/gws").json()
 
     assert data["profiles"] == []
-    assert data["default_profile"] == ""
 
 
 def test_gws_profile_add_and_remove_round_trip(tmp_path, monkeypatch):
