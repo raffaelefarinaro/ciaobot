@@ -941,7 +941,7 @@ export const useProjectStore = defineStore('projects', () => {
       .filter(p => p.workspace === activeWorkspace.value)
       // The Memory project is app-owned (memory passes run in it) and hidden
       // here, the one point every list agrees: sidebar, move-to menu, reorder,
-      // selectFirstChat and the Home "new chat" fallback all read this.
+      // transitionToFirstChat and the Home "new chat" fallback all read this.
       .filter(p => !isMemoryProject(p))
       .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
   )
@@ -2220,18 +2220,6 @@ export const useProjectStore = defineStore('projects', () => {
     // resolved). Handles the cold-boot race where fetchAll completes before
     // controller is ever set.
     void navigator.serviceWorker.ready.then(() => postUnreadSync())
-  }
-
-  function selectFirstChat() {
-    const wsProjects = workspaceProjects.value
-    for (const p of wsProjects) {
-      const pChats = projectChats(p.project_id)
-      if (pChats.length > 0) {
-        activeChatId.value = pChats[0].chat_id
-        return
-      }
-    }
-    activeChatId.value = null
   }
 
   async function transitionToFirstChat() {
@@ -3732,18 +3720,16 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeWorkspace.value === ws) return
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
+    // A workspace switch expresses scope, not a request to open an arbitrary
+    // conversation. Selecting the first chat here also made the switch (and
+    // cross-workspace "new chat") wait for that chat's complete transcript
+    // before the home screen could render. Without a transition the caller
+    // stays on its own view (schedules, tasks, memory, settings).
+    activeChatId.value = null
+    persistState()
     if (transition) {
-      // A workspace pill expresses scope, not a request to open an arbitrary
-      // conversation. Selecting the first chat here also made the switch (and
-      // cross-workspace "new chat") wait for that chat's complete transcript
-      // before the home screen could render.
-      activeChatId.value = null
-      persistState()
       const { router } = await import('../router')
       await router.push('/')
-    } else {
-      selectFirstChat()
-      persistState()
     }
   }
 

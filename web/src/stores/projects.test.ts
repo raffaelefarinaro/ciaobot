@@ -5136,7 +5136,7 @@ describe('workspace and chat transitions', () => {
     expect(apiGet).not.toHaveBeenCalledWith('/api/chats/c-personal-old/messages')
   })
 
-  test('switchWorkspace with transition false updates workspace and chat ID but does not redirect', async () => {
+  test('switchWorkspace with transition false updates workspace, opens no chat and does not redirect', async () => {
     const store = useProjectStore()
     store.projects = [
       { project_id: 'p-personal', name: 'Proj Personal', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
@@ -5155,7 +5155,7 @@ describe('workspace and chat transitions', () => {
     await store.switchWorkspace('personal', { transition: false })
 
     expect(store.activeWorkspace).toBe('personal')
-    expect(store.activeChatId).toBe('c-personal')
+    expect(store.activeChatId).toBeNull()
     expect(routerPush).not.toHaveBeenCalled()
     expect(apiPost).not.toHaveBeenCalled()
   })

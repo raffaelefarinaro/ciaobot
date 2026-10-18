@@ -859,12 +859,6 @@ function clearRetainedChatView() {
 }
 
 onMounted(async () => {
-  // `fetchAll()` is a boot *and* a refresh, and its first step is
-  // `restoreState()`, which re-applies `ciao-active-chat` from localStorage.
-  // Remembering the selection across that await is what separates a chat the
-  // store just restored from one the session already had open: only the
-  // former may be reconciled away below.
-  const selectedBeforeFetch = store.activeChatId
   await store.fetchAll()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
@@ -874,12 +868,10 @@ onMounted(async () => {
   // so a chat route is resolved against where the router actually is now.
   const chatId = (route.params.chatId as string) || ''
   if (isHomeRoute(route.path)) {
-    // Home alone: no conversation, no pinned page. Only the id that came back
-    // from storage is cleared, so a selection this session made before the
-    // layout existed is left to the route watcher above to own.
-    if (store.activeChatId && store.activeChatId !== selectedBeforeFetch) {
-      store.clearActiveChatView()
-    }
+    // Home alone: no conversation, no pinned page. The store restores
+    // `ciao-active-chat` from localStorage when it is created, before this
+    // layout mounts, so a reload of `/` arrives here with that chat selected.
+    clearRetainedChatView()
   } else if (chatId && store.activeChatId !== chatId) {
     await store.openChatFromDeepLink(chatId)
   }
