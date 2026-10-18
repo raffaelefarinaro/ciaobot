@@ -18,7 +18,7 @@ vi.mock('../../lib/api', () => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
     if (path === '/api/integrations/gws') {
-      return Promise.resolve({ installed: false, binary_path: '', default_profile: '', cli_available: false, profiles: [] })
+      return Promise.resolve({ installed: false, binary_path: '', cli_available: false, profiles: [] })
     }
     return Promise.resolve({})
   })

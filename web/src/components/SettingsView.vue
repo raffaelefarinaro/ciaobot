@@ -981,7 +981,7 @@
                     </details>
                   </div>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
-                    <option value="">{{ gwsUnlinkedOptionLabel }}</option>
+                    <option value="">No Google account</option>
                     <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
                       {{ profile.label }} ({{ profile.email || profile.name }})
                     </option>
@@ -1121,7 +1121,7 @@
                   <label class="settings-field set-subrow">
                     <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
                     <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
-                      <option value="">{{ gwsUnlinkedOptionLabel }}</option>
+                      <option value="">No Google account</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
                       </option>
@@ -2717,8 +2717,6 @@ function gwsProfileBadgeClass(profile: GwsProfile): string {
   return 'badge--error'
 }
 
-const defaultGwsProfileName = computed(() => gwsIntegration.value?.default_profile || '')
-
 // Only the accounts this install actually has. No built-in personal/work pair:
 // a fresh install has none until the user adds one below.
 const gwsProfileOptions = computed(() =>
@@ -2727,12 +2725,6 @@ const gwsProfileOptions = computed(() =>
     label: profile.label,
     email: profile.email,
   })),
-)
-
-const gwsUnlinkedOptionLabel = computed(() =>
-  defaultGwsProfileName.value
-    ? `Default (${defaultGwsProfileName.value})`
-    : 'No Google account',
 )
 
 function workspaceCustomGwsProfile(profile: string): boolean {

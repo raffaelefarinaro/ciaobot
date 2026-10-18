@@ -56,7 +56,6 @@ from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
     CLAUDE_MODELS,
-    GWS_DEFAULT_PROFILE,
     MAX_IMAGE_SIZE_BYTES,
     RESTART_EXIT_CODE,
     WorkspaceConfig,
@@ -1209,15 +1208,9 @@ def _gws_integration_payload(config) -> dict:
         if entry.get("label")
     }
     names = _gws_profile_names(config)
-    # An operator default that names no existing account is not a default the
-    # UI should advertise; workspaces then show "No Google account" instead.
-    default_profile = GWS_DEFAULT_PROFILE
-    if default_profile not in names:
-        default_profile = ""
     return {
         "installed": bool(binary_path),
         "binary_path": binary_path,
-        "default_profile": default_profile,
         "cli_available": bool(binary_path),
         "profiles": [
             _gws_profile_payload(config, profile, usage, health.get(profile), labels)
