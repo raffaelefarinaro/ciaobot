@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_REPO = "raffaelefarinaro/ciaobot"
 DEFAULT_LIMIT = 100
 
-# Title-prefix -> classification label, from ciao/system_prompt.md "Issue
-# labeling". Keys are normalized (lowercased, stripped) bracket tokens.
+# Title-prefix -> classification label, from the "GitHub issue labels" section of
+# ciao/stock/skills/ciao-support/SKILL.md. Keys are normalized (lowercased, stripped) bracket tokens.
 PREFIX_LABELS: dict[str, str] = {
     "bug": "bug",
     "feature": "enhancement",

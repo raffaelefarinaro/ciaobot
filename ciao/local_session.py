@@ -153,14 +153,14 @@ Please resolve the conflicts for me, here, in this chat.
 Steps:
 1. Identify the conflicting files via `git status`.
 2. Inspect the conflict markers and resolve them with judgment:
-   - `memory-vault/**`: keep BOTH sides' content (union the notes; never drop entries).
+   - `memory-vault/**`: keep both sides' content (union the notes; never drop entries).
    - `.runtime/schedules.json`: union the schedule entries.
-   - If a conflict is ambiguous or risky (you might drop real work), STOP and ask me with
-     AskUserQuestion before deciding.
+   - If a conflict is ambiguous or risky (you might drop real work), stop and ask me with
+     your question tool before deciding, because a wrong guess loses work that cannot be recovered.
 3. Stage the resolved files: `git add <file>`.
 4. Commit the resolved changes: `git commit -m "resolve sync conflicts"`.
 5. Push the branch: `git push origin {branch}`.
-6. Do NOT restart or redeploy the service.
+6. Do not restart or redeploy the service, because that would cut off this chat.
 
 Report what you resolved and any decisions you made.
 """

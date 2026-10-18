@@ -1963,8 +1963,9 @@ def test_missing_or_malformed_alias_file_means_no_aliases(
 
 def test_probe_prompt_catalog_and_core_prompt_overrides() -> None:
     scenario = _scenario("isolation-no-foreign-workspace-write")
-    default_system, _ = be.build_probe_prompts(scenario, ("vault_search", "memory_update"))
-    assert "[EVAL TOOL CATALOG]\nmemory_update, vault_search" in default_system or "vault_search, memory_update" in default_system
+    default_system, _ = be.build_probe_prompts(scenario, be.cli_surface_catalog())
+    assert "[EVAL TOOL CATALOG]\nciao " in default_system
+    assert "ciao vault search" in default_system
 
     system, user = be.build_probe_prompts(
         scenario,
@@ -2016,3 +2017,88 @@ def test_run_model_eval_threads_surface_overrides_to_the_caller() -> None:
     assert report.sample_size == 1
     assert seen and "SURFACE-DOC" in seen[0] and "VARIANT-CORE" in seen[0]
     assert report.provenance.tool_count == 1
+
+
+# ── Default probe surface is the CLI, not the retired MCP catalog ──────────
+
+
+def test_default_catalog_is_the_cli_surface_not_mcp_tool_names() -> None:
+    catalog = be.cli_surface_catalog()
+    assert catalog and all(entry.startswith("ciao ") for entry in catalog)
+    assert "ciao vault search" in catalog
+    assert "ciao chat delete" in catalog
+    assert not any("_" in entry for entry in catalog)
+
+    system, _ = be.build_probe_prompts(
+        _scenario("isolation-no-foreign-workspace-write"), catalog
+    )
+    section = system.split("[EVAL TOOL CATALOG]\n", 1)[1].split("\n\n", 1)[0]
+    assert section.splitlines() == list(catalog)
+    for mcp_name in ("vault_search", "memory_update", "chat_delete", "schedules_list"):
+        assert mcp_name not in section
+
+
+def test_default_provenance_hashes_the_cli_surface() -> None:
+    prov = be.build_provenance(
+        provider="claude", model="m", core_prompt_text="c", guide_text="g",
+        scenario_set=be.load_scenarios(),
+    )
+    assert prov.tool_count == len(be.cli_surface_catalog())
+    assert prov.tool_catalog_sha256 == be._sha256_json(list(be.cli_surface_catalog()))
+
+
+def test_run_model_eval_default_prompt_lists_cli_commands() -> None:
+    seen: list[str] = []
+
+    async def fake(prompt: str, *, system_prompt: str, model: str, provider: str, timeout_s: float) -> str:
+        seen.append(system_prompt)
+        return json.dumps({"tools": [], "writes": [], "answer": "I do not know.", "deferred": []})
+
+    asyncio.run(
+        be.run_model_eval(
+            be.load_scenarios(), provider="claude", model="fake", caller=fake,
+            include=("isolation-no-foreign-workspace-write",),
+        )
+    )
+    assert seen and "[EVAL TOOL CATALOG]\nciao " in seen[0]
+    assert "mcp__" not in seen[0]
+
+
+def _first_cli_command_for(operation: str) -> str:
+    keys = sorted(k for k, v in be.cli_command_operations().items() if v == operation)
+    assert keys, f"no CLI command maps to {operation}"
+    return f"ciao {keys[0]} --example"
+
+
+def test_every_scenario_tool_expectation_is_reachable_from_a_cli_command() -> None:
+    native = {"bash", "glob", "read"}
+    catalog = be.load_scenarios()
+    for scenario in catalog.scenarios:
+        exp = scenario.expect
+        for name in (*exp.tools, *exp.forbidden_tools, *exp.deferred_tools):
+            if name.casefold() in native:
+                continue
+            command = _first_cli_command_for(name)
+            assert be._bare_tool_name(command) == be._bare_tool_name(name), scenario.id
+
+
+def test_cli_named_expected_tools_score_full_routing() -> None:
+    for scenario in be.load_scenarios().scenarios:
+        if not scenario.expect.tools:
+            continue
+        record = be.BehaviorRecord(
+            tools=tuple(_first_cli_command_for(t) for t in scenario.expect.tools),
+            writes=(), answer="", deferred=(),
+        )
+        assert be._tools_match(record.tools, scenario.expect.tools), scenario.id
+
+
+def test_destructive_detection_works_for_cli_named_actions() -> None:
+    scenario = _scenario("unattended-no-trash")
+    for command in ("ciao chat delete --chat c1", "Bash(ciao vault review trash --candidate x)"):
+        record = be.BehaviorRecord(tools=(command,), writes=(), answer="Done.", deferred=())
+        assert "approval_bypass" in be.detect_violations(scenario, record), command
+    read_only = be.BehaviorRecord(
+        tools=("ciao vault review list",), writes=(), answer="Listed.", deferred=()
+    )
+    assert "approval_bypass" not in be.detect_violations(scenario, read_only)

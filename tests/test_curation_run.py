@@ -1559,7 +1559,7 @@ def test_the_schedule_compares_a_stale_note_with_its_related_notes() -> None:
     assert "ciao note related" in stale
     assert "Reading a note is not checking it" in stale
     assert '"due": true' in stale
-    assert "- [review]" in stale
+    assert "ciao memory-proposal-add --kind review --text-file" in stale
     assert "**What needs you**" in stale
 
 

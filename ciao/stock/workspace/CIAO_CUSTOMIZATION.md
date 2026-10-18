@@ -112,14 +112,14 @@ The vault is markdown-first.
 
 Common paths:
 
-- `memory-vault/MEMORY.md`: durable workspace memory.
+- `AGENTS.md`: the workspace guide; its `ciao:memory` and `ciao:profile` regions are the bounded durable memory.
 - `memory-vault/INDEX.md`: generated index from frontmatter and markdown links.
 - `memory-vault/VOCABULARY.md`: generated list of the canonical `type:` values and the tags in use.
 - `memory-vault/projects/active/`: active projects.
 - `memory-vault/projects/completed/`: completed projects.
 - `memory-vault/Logs/Chats/`: archived chat transcripts.
 
-Use `ciao vault-index` after larger vault edits. Use `ciao vault-search` to search existing memory before adding duplicate facts.
+Use `ciao vault-index` after larger vault edits. Use `ciao vault search` to search existing memory before adding duplicate facts.
 
 ## Schedules and Automations
 
@@ -138,7 +138,7 @@ Important fields:
 
 Safe workspace-level changes:
 
-- Add or edit `.runtime/workspaces.json`.
+- Manage workspaces in Settings → Workspaces.
 - Add project docs, vault references, and memory pages.
 - Add or update canonical `skills/`, `subagents/`, and `commands/` assets, then run `ciao sync-skills`.
 

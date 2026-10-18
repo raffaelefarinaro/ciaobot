@@ -155,6 +155,22 @@ def strip_injected_context(content: str) -> str:
     return stripped or content
 
 
+#: The hidden turn the drive loop sends after an agent switched its own chat
+#: into code mode mid-turn (`ciao chat update --code on`). Not something the
+#: user typed: renderers hide it and turn counters skip it, so
+#: `code_mode_events[].after_turn_index` keeps matching visible user rows.
+CODE_MODE_CONTINUE_PROMPT = (
+    "[Ciaobot] Code mode is now on: repository instructions, skills and write "
+    "access are loaded. Continue the user's request."
+)
+_CODE_MODE_CONTINUE_COLLAPSED = " ".join(CODE_MODE_CONTINUE_PROMPT.split())
+
+
+def is_code_mode_continuation(content: str) -> bool:
+    """True when `content` (with or without the context capsule) is the hidden continuation prompt."""
+    return " ".join(strip_injected_context(content).split()) == _CODE_MODE_CONTINUE_COLLAPSED
+
+
 def _flag_on(value: object, name: str) -> bool:
     if isinstance(value, dict):
         return bool(value.get(name))

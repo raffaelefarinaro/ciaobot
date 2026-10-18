@@ -654,8 +654,13 @@ async def _op_chat_create(service: CiaoMcpService, project_id: str | None = None
 async def _op_chat_update(service: CiaoMcpService, chat_id: str = "", title: str | None = None,
                           provider: str | None = None, model: str | None = None,
                           mode: str | None = None, thinking_level: str | None = None,
-                          project_id: str | None = None) -> dict[str, Any]:
-    """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
+                          project_id: str | None = None,
+                          code_mode: bool | None = None) -> dict[str, Any]:
+    """Update chat metadata and same-backend model settings. Omit chat_id for calling chat.
+
+    ``code_mode`` switches code mode for a chat in a project linked to a
+    repository; turning it on returns ``repo_instructions`` and a ``note``.
+    """
     return await service._invoke(
         "chat_update",
         lambda cp, p: cp.chat_update(
@@ -667,6 +672,7 @@ async def _op_chat_update(service: CiaoMcpService, chat_id: str = "", title: str
             mode=mode,
             thinking_level=thinking_level,
             project_id=project_id,
+            code_mode=code_mode,
         ),
         mutating=True,
     )
