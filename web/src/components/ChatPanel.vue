@@ -59,6 +59,7 @@
         <!-- Archive is the header's one action, so it gets words, not just a
              glyph. Chat details moved out: it opens from the info tab at the
              top right of the chat body and hides from its own heading. -->
+        <ChatRepoChip v-if="!chat.archived" :repo="project?.repo ?? null" :location="chat.repo_location ?? null" />
         <button
           v-if="!chat.archived"
           type="button"
@@ -1334,6 +1335,7 @@ import { useArchiveChat } from '../composables/useArchiveChat'
 import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, RunningSubagent, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
+import ChatRepoChip from './ChatRepoChip.vue'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
