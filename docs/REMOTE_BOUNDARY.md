@@ -23,7 +23,7 @@ carried by the session.
 
 - `ciao/web/auth.py` is the whole boundary. `/api/*` requires the signed
   `ciao_session` cookie, minus a small public allowlist (`/api/auth`,
-  `/api/auth/check`, `/api/startup-status`, `/api/active-chats`,
+  `/api/auth/check`, `/api/startup-status`,
   `/api/setup-status`, `/api/setup/finish`, `/api/setup/list-dirs`,
   `/api/setup/inspect-folder`, `/api/setup/mkdir`). The setup routes answer only in first-run bootstrap
   mode and only to a loopback TCP peer (`is_loopback_client`) whose `Host`
@@ -34,8 +34,9 @@ carried by the session.
   proxy-declared `X-Forwarded-Host`.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
-  name, no native client) and the update
-  coordinator's drain handshake. It reads the TCP source address, never the
+  name, no native client), the update
+  coordinator's drain handshake, and `/api/admin/restart-blockers` (the
+  reason-tagged list `ciao service` gates restart/stop on). It reads the TCP source address, never the
   `Host` header, which a caller controls. A loopback peer carrying
   reverse-proxy headers (`Forwarded`, `Via`, any `X-Forwarded-*`,
   `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, any

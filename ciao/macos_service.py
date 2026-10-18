@@ -446,17 +446,89 @@ def _command_error(completed: subprocess.CompletedProcess[str]) -> str:
     return (completed.stderr or completed.stdout or "").strip()
 
 
-def active_chat_ids(port: int, *, timeout: float = 2.0) -> list[str]:
+class RestartBlockersUnavailable(RuntimeError):
+    """The engine answered but its restart blockers could not be read."""
+
+
+def restart_blockers(port: int, *, timeout: float = 2.0) -> list[dict[str, Any]]:
+    """Chats a restart would interrupt, from the engine's loopback-only route.
+
+    An engine that is not listening has nothing to interrupt, so it reads as
+    empty. Any other failure raises, so the gate refuses rather than guesses.
+    """
     try:
         with urllib.request.urlopen(
-            f"http://localhost:{port}/api/active-chats",
+            f"http://localhost:{port}/api/admin/restart-blockers",
             timeout=timeout,
         ) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, urllib.error.URLError, ValueError):
+    except urllib.error.HTTPError as exc:
+        raise RestartBlockersUnavailable(f"the engine answered HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, ConnectionRefusedError):
+            return []
+        raise RestartBlockersUnavailable(str(exc)) from exc
+    except ConnectionRefusedError:
         return []
-    values = payload.get("active_chat_ids") if isinstance(payload, dict) else None
-    return [str(value) for value in values] if isinstance(values, list) else []
+    except OSError as exc:
+        raise RestartBlockersUnavailable(str(exc)) from exc
+    except ValueError as exc:
+        raise RestartBlockersUnavailable("invalid JSON from the engine") from exc
+    values = payload.get("restart_blockers") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        raise RestartBlockersUnavailable("unexpected answer from the engine")
+    return [
+        {
+            "chat_id": str(value["chat_id"]),
+            "reasons": [str(reason) for reason in value.get("reasons") or []],
+        }
+        for value in values
+        if isinstance(value, dict) and value.get("chat_id")
+    ]
+
+
+_GATE_VERBS = {
+    "stop": "stopping the engine",
+    "restart": "restarting the engine",
+    "update-engine": "updating Ciaobot",
+}
+
+
+def restart_gate(
+    port: int,
+    action: str,
+    *,
+    force: bool,
+    details: dict[str, Any] | None = None,
+) -> ServiceResult | None:
+    """Refuse a stop/restart/update that would interrupt chats, or cannot tell."""
+    if force:
+        return None
+    verb = _GATE_VERBS[action]
+    try:
+        blockers = restart_blockers(port)
+    except RestartBlockersUnavailable as exc:
+        # An engine that is not serving has nothing to interrupt. Some hosts
+        # (Windows runners among them) time out instead of refusing a closed
+        # port, so check before failing closed on an engine that is down.
+        if not server_reachable(port):
+            return None
+        return ServiceResult(
+            False,
+            action,
+            f"Could not read which chats {verb} would interrupt ({exc}). Pass --force to continue anyway.",
+            {**(details or {}), "restart_blockers": None, "requires_confirmation": True},
+        )
+    if not blockers:
+        return None
+    listed = ", ".join(f"{b['chat_id']} ({', '.join(b['reasons'])})" for b in blockers)
+    return ServiceResult(
+        False,
+        action,
+        f"Chats that would be interrupted must be confirmed before {verb}: {listed}. "
+        "Let them finish or answer their open cards, or pass --force.",
+        {**(details or {}), "restart_blockers": blockers, "requires_confirmation": True},
+    )
 
 
 def server_reachable(port: int, *, timeout: float = 2.0) -> bool:
@@ -486,8 +558,16 @@ def service_status(
         _plist_program_arguments(load_server_plist(Path(runtime.server_plist).parent)),
     )
     reachable = server_reachable(runtime.port)
-    active = active_chat_ids(runtime.port) if reachable else []
+    blockers: list[dict[str, Any]] | None
+    try:
+        blockers = restart_blockers(runtime.port) if reachable else []
+    except RestartBlockersUnavailable:
+        blockers = None
     message = "Ciaobot engine is running." if reachable else "Ciaobot engine is stopped."
+    if blockers:
+        message += f"\n{len(blockers)} chat(s) would be interrupted by a restart."
+    elif blockers is None and reachable:
+        message += "\nCould not read restart blockers from the engine."
     if plist_matches_loaded is False:
         message += (
             "\nWarning: the loaded service definition differs from the plist on disk "
@@ -505,7 +585,7 @@ def service_status(
             "loaded_python_path": loaded_python_path,
             "plist_matches_loaded": plist_matches_loaded,
             "reachable": reachable,
-            "active_chat_ids": active,
+            "restart_blockers": blockers,
         },
     )
 
@@ -550,14 +630,9 @@ def stop_service(
     runner: Runner = subprocess.run,
 ) -> ServiceResult:
     runtime = runtime or discover_runtime()
-    active = active_chat_ids(runtime.port)
-    if active and not force:
-        return ServiceResult(
-            False,
-            "stop",
-            "Active chats must be confirmed before stopping the engine.",
-            {**asdict(runtime), "active_chat_ids": active, "requires_confirmation": True},
-        )
+    refusal = restart_gate(runtime.port, "stop", force=force, details=asdict(runtime))
+    if refusal is not None:
+        return refusal
     resolved_uid = _getuid() if uid is None else uid
     try:
         completed = _launchctl(
@@ -596,14 +671,9 @@ def restart_service(
     runner: Runner = subprocess.run,
 ) -> ServiceResult:
     runtime = runtime or discover_runtime()
-    active = active_chat_ids(runtime.port)
-    if active and not force:
-        return ServiceResult(
-            False,
-            "restart",
-            "Active chats must be confirmed before restarting the engine.",
-            {**asdict(runtime), "active_chat_ids": active, "requires_confirmation": True},
-        )
+    refusal = restart_gate(runtime.port, "restart", force=force, details=asdict(runtime))
+    if refusal is not None:
+        return refusal
     resolved_uid = _getuid() if uid is None else uid
     domain = f"gui/{resolved_uid}"
     try:
@@ -722,18 +792,11 @@ def update_engine(
     from ciao.package_version import update_package
 
     runtime = runtime or discover_runtime()
-    active = active_chat_ids(runtime.port)
-    if active and not force:
-        return ServiceResult(
-            False,
-            "update-engine",
-            "Active chats must be confirmed before updating Ciaobot.",
-            {
-                **asdict(runtime),
-                "active_chat_ids": active,
-                "requires_confirmation": True,
-            },
-        )
+    refusal = restart_gate(
+        runtime.port, "update-engine", force=force, details=asdict(runtime)
+    )
+    if refusal is not None:
+        return refusal
     bundled_engine = bool(
         runtime.python_path
         and "Ciaobot.app/Contents/Resources/ciao-runtime"

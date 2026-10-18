@@ -2019,6 +2019,7 @@ import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
+import { describeInterruptedCards, type RestartBlocker } from '../lib/restartBlockers'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import {
   DEFAULT_FONT_SCALE,
@@ -4216,7 +4217,11 @@ async function doDeploy(confirmWarnings = false) {
   const confirmation = restartOnly
     ? 'Restart the installed server? Active chats will finish before it restarts.'
     : 'Restart? This will pull latest, rebuild, and restart.'
-  if (!confirmWarnings && !await askConfirm(confirmation, {
+  let cardNote = ''
+  try {
+    cardNote = describeInterruptedCards((await api.get<{ restart_blockers: RestartBlocker[] }>('/api/admin/restart-blockers')).restart_blockers || [])
+  } catch { /* best effort: confirmation text falls back */ }
+  if (!confirmWarnings && !await askConfirm(cardNote ? `${confirmation}\n\n${cardNote}` : confirmation, {
     title: restartOnly ? 'Restart server' : 'Restart and redeploy',
     confirmLabel: 'Restart',
   })) return

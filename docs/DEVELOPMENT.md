@@ -49,7 +49,7 @@ repoint one that already serves a different workspace; use `ciao setup --workspa
 <dir> --load-launchd --yes` to repoint it. The macOS
 desktop-shell actions (`login`, `migrate`, `migration-classify`, `rollback`) and
 `update-engine` are not available on Windows and say so; `stop` and `restart`
-refuse while a chat is active unless `--force` is given.
+refuse while a chat would be interrupted (working, or holding an open question/approval card) unless `--force` is given.
 
 The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
 

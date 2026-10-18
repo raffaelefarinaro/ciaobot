@@ -39,7 +39,6 @@ _PUBLIC_API = {
     "/api/auth",
     "/api/auth/check",
     "/api/startup-status",
-    "/api/active-chats",
     "/api/setup-status",
     "/api/setup/finish",
     "/api/setup/list-dirs",
@@ -51,12 +50,14 @@ _PUBLIC_API = {
 # `/api/menubar-chats` is how the tray reads chat titles (it holds no cookie).
 # `/api/admin/drain` and `/api/admin/drain/cancel` are the update coordinator's own drain handshake,
 # driven by `ciao update apply` before it bootstraps the detached updater job.
+# `/api/admin/restart-blockers` is the `ciao service` restart/stop gate (reason-tagged).
 # All are gated on the peer address rather than the Host header, which a caller
 # controls.
 _LOOPBACK_ONLY_API = {
     "/api/menubar-chats",
     "/api/admin/drain",
     "/api/admin/drain/cancel",
+    "/api/admin/restart-blockers",
 }
 
 

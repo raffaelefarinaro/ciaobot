@@ -51,6 +51,7 @@ from ciao.web.routes_api import (
     admin_deploy,
     admin_drain,
     admin_drain_cancel,
+    admin_restart_blockers,
     admin_restart,
     admin_snapshot,
     admin_skills,
@@ -161,7 +162,6 @@ from ciao.web.routes_api import (
     run_schedule_now,
     schedule_detail,
     startup_status_endpoint,
-    active_chats_endpoint,
     menubar_chats_endpoint,
     open_chat_endpoint,
     status_endpoint,
@@ -584,7 +584,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/integrations/gws/relogin/cancel", gws_relogin_cancel, methods=["POST"]),
         Route("/api/status", status_endpoint, methods=["GET", "PATCH"]),
         Route("/api/startup-status", startup_status_endpoint, methods=["GET"]),
-        Route("/api/active-chats", active_chats_endpoint, methods=["GET"]),
         Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"]),
         Route("/api/open-chat/{chat_id}", open_chat_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
@@ -687,6 +686,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/admin/restart", admin_restart, methods=["POST"]),
         Route("/api/admin/drain", admin_drain, methods=["POST"]),
         Route("/api/admin/drain/cancel", admin_drain_cancel, methods=["POST"]),
+        Route("/api/admin/restart-blockers", admin_restart_blockers, methods=["GET"]),
         Route("/api/admin/status", admin_status, methods=["GET"]),
         # The engine's verified start-at-sign-in state, and the switch for it.
         # Session-protected like every other /api route, and deliberately not

@@ -37,6 +37,30 @@ it.each([true, false])('chooses the advertised restart action (restart_only=%s)'
   }
 })
 
+it('mentions open cards a restart would close', async () => {
+  setActivePinia(createPinia())
+  const stub = defineComponent({ render: () => h('div') })
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: stub }] })
+  await router.push('/settings')
+  await router.isReady()
+  vi.spyOn(api, 'get').mockImplementation(async (path) => {
+    if (path === '/api/local/status') return { git_repo: true, branch: 'main', dirty: false, restart_only: true } as never
+    if (path === '/api/admin/restart-blockers') return { restart_blockers: [{ chat_id: 'c1', reasons: ['open_question'] }] } as never
+    throw new Error('Unrelated settings data unavailable in this test')
+  })
+  vi.spyOn(api, 'post').mockResolvedValue({ ok: true, steps: [] })
+  const confirm = vi.spyOn(confirmation, 'askConfirm').mockResolvedValue(false)
+  const wrapper = mount(SettingsView, { global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: stub } } })
+  try {
+    await flushPromises()
+    await wrapper.findAll('button').find(b => b.text() === 'Restart')!.trigger('click')
+    await flushPromises()
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('closes the open question or approval card in 1 chat'), expect.any(Object))
+  } finally {
+    wrapper.unmount()
+  }
+})
+
 it('installer mode shows re-run guidance and no update button', async () => {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
