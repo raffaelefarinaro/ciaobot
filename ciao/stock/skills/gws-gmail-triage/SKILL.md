@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-triage
-description: "Gmail: Show unread inbox summary (sender, subject, date)."
+description: "Use to list or search the inbox with any Gmail query (from:, subject:, after:, is:unread); with no query it shows unread mail."
 metadata:
   version: 0.22.5
 ---

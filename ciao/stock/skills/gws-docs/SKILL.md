@@ -1,6 +1,6 @@
 ---
 name: gws-docs
-description: "Read and write Google Docs."
+description: "Use to read a Google Doc, or to edit it beyond appending (raw Docs API); to append text use gws-docs-write."
 metadata:
   version: 0.22.5
 ---
@@ -25,20 +25,10 @@ ciao gws "$GWS_PROFILE" docs <resource> <method> [flags]
 
 ### documents
 
-  - `batchUpdate` — Applies one or more updates to the document. Each request is validated before being applied. If any request is not valid, then the entire request will fail and nothing will be applied. Some requests have replies to give you some information about how they are applied. Other requests do not need to return information; these each return an empty reply. The order of replies matches that of the requests.
-  - `create` — Creates a blank document using the title given in the request. Other fields in the request, including any provided content, are ignored. Returns the created document.
+  - `batchUpdate` — Applies one or more updates to the document. Other requests do not need to return information; these each return an empty reply.
+  - `create` — Creates a blank document using the title given in the request.
   - `get` — Gets the latest version of the specified document.
 
 ## Discovering Commands
 
-Before calling any API method, inspect it:
-
-```bash
-# Browse resources and methods
-ciao gws "$GWS_PROFILE" docs --help
-
-# Inspect a method's required params, types, and defaults
-ciao gws "$GWS_PROFILE" schema docs.<resource>.<method>
-```
-
-Use `gws schema` output to build your `--params` and `--json` flags.
+Browse a service with `ciao gws "$GWS_PROFILE" <service> --help`. Before calling an API method, run `ciao gws "$GWS_PROFILE" schema <service>.<resource>.<method>` and build `--params` and `--json` from its output.

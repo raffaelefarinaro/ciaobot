@@ -109,9 +109,11 @@ def test_customization_template_matches_the_core_prompt() -> None:
 
 def test_updated_rule_agrees_across_prompts() -> None:
     assert "refreshes `updated:` to today" not in _system_instructions()
-    assert "Never refresh the note's `updated:` on an ordinary save" in _stock(
-        "commands", "remember.md"
+    # One copy of the rule (#1462): the skill owns it, /remember points at it.
+    assert "Leave the note's `updated:` alone on an ordinary save" in _stock(
+        "skills", "ciao-memory", "SKILL.md"
     )
+    assert '"Writing entity notes"' in _stock("commands", "remember.md")
 
 
 def test_cli_skill_example_is_not_an_entry_argv_fact() -> None:

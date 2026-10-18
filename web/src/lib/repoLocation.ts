@@ -33,19 +33,6 @@ export function chatRepoTag(repo: Repo, loc: Loc): RepoTag | null {
   }
 }
 
-export interface ProjectRepoTag { branch: string; dirty: boolean; missing: boolean; title: string }
-
-/** The sidebar project-row tag, or null when the project has no linked repo. */
-export function projectRepoTag(repo: Repo): ProjectRepoTag | null {
-  if (!repo) return null
-  return {
-    branch: repo.missing ? '' : branchLabel(repo.branch),
-    dirty: !repo.missing && repo.dirty,
-    missing: repo.missing,
-    title: repo.path,
-  }
-}
-
 export interface RepoChip {
   name: string
   branch: string
@@ -76,13 +63,4 @@ export function repoChip(repo: Repo, loc: Loc): RepoChip | null {
     path: repo.path,
     missing: repo.missing,
   }
-}
-
-export function repoChipLabel(chip: RepoChip, codeMode = false): string {
-  const suffix = codeMode ? ', code mode on' : ''
-  if (chip.missing) return `Repository ${chip.name}, folder missing${suffix}`
-  return `Repository ${chip.name}, branch ${chip.branch}`
-    + (chip.isWorktree ? ', worktree' : '')
-    + (chip.dirty ? ', uncommitted changes' : '')
-    + suffix
 }

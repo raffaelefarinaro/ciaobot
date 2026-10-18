@@ -184,3 +184,58 @@ describe('ChatPanel code mode rows', () => {
     expect(wrapper.get('.transcript-event').text()).toContain('Left code mode · by you')
   })
 })
+
+describe('ChatPanel code badge', () => {
+  const scrollProto = Element.prototype as unknown as { scrollTo?: unknown }
+  const originalScrollTo = scrollProto.scrollTo
+  const REPO = { path: '/r/app', branch: 'main', dirty: false, missing: false, instructions: null }
+
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+    localStorage.clear()
+    scrollProto.scrollTo = function scrollTo() {}
+  })
+
+  afterEach(() => {
+    scrollProto.scrollTo = originalScrollTo
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  it('shows a code badge beside the title only while code mode is on', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    store.projects[0].repo = REPO
+    store.chats[0].code_mode = true
+    await flushPromises()
+    expect(wrapper.get('.chat-title-row .chat-code-badge').text()).toBe('code')
+    expect(wrapper.find('.header-actions .repo-chip').exists()).toBe(false)
+
+    store.chats[0].code_mode = false
+    await flushPromises()
+    expect(wrapper.find('.chat-code-badge').exists()).toBe(false)
+    expect(wrapper.find('.header-actions .repo-chip').exists()).toBe(false)
+  })
+
+  it('shows no badge for an unlinked chat in code mode', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    store.chats[0].code_mode = true
+    await flushPromises()
+    expect(wrapper.find('.chat-code-badge').exists()).toBe(false)
+  })
+
+  it('opens Chat details at the Repository section from the badge', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    store.projects[0].repo = REPO
+    store.chats[0].code_mode = true
+    await flushPromises()
+    await wrapper.get('.chat-code-badge').trigger('click')
+    await flushPromises()
+    const rail = document.querySelector('#chat-work-rail') ?? wrapper.element.querySelector('#chat-work-rail')
+    expect(rail).not.toBeNull()
+    expect(rail!.querySelector('.chat-rail-repo')).not.toBeNull()
+  })
+})

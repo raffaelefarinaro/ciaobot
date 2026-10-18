@@ -1458,9 +1458,22 @@ def _stock(relative: str) -> str:
     return resources.files("ciao.stock").joinpath(relative).read_text(encoding="utf-8")
 
 
+def _care_references() -> str:
+    """Every curation reference file of the `ciao-memory` skill, concatenated (#1462)."""
+    from importlib import resources
+
+    refs = resources.files("ciao.stock").joinpath("skills", "ciao-memory", "references")
+    return "\n\n".join(
+        item.read_text(encoding="utf-8")
+        for item in sorted(refs.iterdir(), key=lambda i: i.name)
+        if item.name.endswith(".md")
+    )
+
+
 def test_the_schedule_starts_from_the_computed_worklist() -> None:
     """The agent must not re-derive by hand what pass 0 already decided."""
     skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
+    skill = skill + "\n\n" + _care_references()
 
     assert "ciao curation-begin --json" in skill
     assert "ciao curation-progress" in skill
@@ -1509,7 +1522,9 @@ def test_the_schedule_verifies_stale_notes_through_the_managed_operation() -> No
         for entry in json.loads(_stock("schedules.json"))["schedules"]
         if entry["schedule_id"] == "system-memory-curation"
     )
-    stale = prompt[prompt.index("**`stale_notes`**") : prompt.index("## 4.")]
+    reverify = _stock("skills/ciao-memory/references/curation-pass-3-reverify.md")
+    stale = reverify[reverify.index("## `stale_notes`") : reverify.index("## `stale_entry` items")]
+    prompt = prompt + "\n\n" + reverify
 
     # The managed pass, and the operation that is the only way to settle a note.
     assert "`note verify`" in stale
@@ -1549,12 +1564,8 @@ def test_the_memory_skill_routes_note_verification_through_the_operation() -> No
 
 
 def test_the_schedule_compares_a_stale_note_with_its_related_notes() -> None:
-    prompt = next(
-        entry["prompt"]
-        for entry in json.loads(_stock("schedules.json"))["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
-    stale = prompt[prompt.index("**`stale_notes`**") : prompt.index("## 4.")]
+    reverify = _stock("skills/ciao-memory/references/curation-pass-3-reverify.md")
+    stale = reverify[reverify.index("## `stale_notes`") : reverify.index("## `stale_entry` items")]
 
     assert "ciao note related" in stale
     assert "Reading a note is not checking it" in stale
@@ -1602,7 +1613,7 @@ def test_the_memory_skill_points_at_note_related() -> None:
 def test_the_memory_skill_did_not_grow() -> None:
     skill = _stock("skills/ciao-memory/SKILL.md")
 
-    assert len(skill.encode()) <= 15884
+    assert len(skill.encode()) <= 13200
 
 
 # ── The Learnings cleanup pass (#728-E) ──────────────────────────────────────
@@ -2865,5 +2876,7 @@ def test_the_care_prompt_proposes_observations_between_sections_4_and_5() -> Non
 
     assert "## 4b. Propose recurring observations" in prompt
     assert prompt.index("## 4. ") < prompt.index("## 4b. ") < prompt.index("## 5. ")
+    observations = _stock("skills/ciao-memory/references/curation-pass-4b-observations.md")
+    assert "references/curation-pass-4b-observations.md" in prompt
     for command in ("ciao observation-propose", "ciao observation-merge", "ciao observation-prune"):
-        assert command in prompt
+        assert command in observations

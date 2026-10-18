@@ -60,6 +60,20 @@
           v-html="contextHtml"
         ></p>
       </div>
+      <button v-if="repoInstr" type="button" class="rail-item agent-context-row agent-context-repo"
+        :title="`Open ${repoInstrPath}`" @click="emit('open-file', repoInstrPath)">
+        <span class="agent-context-row-top">
+          <span class="agent-context-name">{{ repoInstrLabel }}</span>
+          <span class="agent-context-meta">{{ formatTokens(tokensFor(repoInstr.chars)) }} tokens</span>
+        </span>
+        <small>Repository instructions</small>
+      </button>
+      <div v-else-if="repoInstr === null" class="rail-item agent-context-row agent-context-repo" role="status">
+        <span class="agent-context-row-top">
+          <span class="agent-context-name">Repository instructions</span>
+          <span class="agent-context-meta">not found</span>
+        </span>
+      </div>
     </div>
   </section>
 </template>
@@ -68,6 +82,7 @@
 import { computed, ref, watch } from 'vue'
 import type { ProjectInfo } from '../lib/types'
 import { linkifyText } from '../lib/filePaths'
+import { joinRepoPath, repoName } from '../lib/repo'
 import { fetchWorkspaceGuide, formatTokens, tokensFor, type WorkspaceGuide } from '../lib/workspaceGuide'
 
 const props = defineProps<{
@@ -78,6 +93,8 @@ const props = defineProps<{
   compacting: boolean
   /** The chat is streaming or a compact request is in flight. */
   compactDisabled: boolean
+  /** Code mode is effectively on (chat.code_mode and a linked repo). */
+  codeMode?: boolean
 }>()
 const emit = defineEmits<{ 'open-file': [path: string]; compact: [] }>()
 
@@ -112,6 +129,11 @@ const briefText = computed(() => {
   return lines.join('\n')
 })
 const briefTokens = computed(() => tokensFor(briefText.value.length))
+
+// undefined = no row; null = code mode is on but the repo has no instructions.
+const repoInstr = computed(() => (props.codeMode && props.project?.repo) ? (props.project.repo.instructions ?? null) : undefined)
+const repoInstrPath = computed(() => repoInstr.value && props.project?.repo ? joinRepoPath(props.project.repo.path, repoInstr.value.name) : '')
+const repoInstrLabel = computed(() => repoInstr.value && props.project?.repo ? `${repoName(props.project.repo.path)}/${repoInstr.value.name}` : '')
 
 // Plain text is escaped by the shared linker; a canonical filename resolves
 // to its full path without adding another copy below the description.
@@ -196,6 +218,8 @@ const contextPctLabel = computed(() => {
 .agent-context-row small { line-height: 1.4; }
 .agent-context-brief { cursor: default; }
 .agent-context-brief:hover { color: var(--fg); }
+.agent-context-repo[role='status'] { cursor: default; }
+.agent-context-repo[role='status']:hover { color: var(--fg); }
 .agent-context-description {
   margin: 4px 0 0;
   color: var(--fg2);

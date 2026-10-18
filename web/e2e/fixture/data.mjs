@@ -22,7 +22,7 @@ export const PROJECTS = WORKSPACES.flatMap((workspace, wi) => ([
     workspace: workspace.name,
     context: `Synthetic ${workspace.name} general project`,
     order: 0,
-    repo: wi === 0 ? { path: '/synthetic/repos/alpha-app', branch: 'main', dirty: true, missing: false } : null,
+    repo: wi === 0 ? { path: '/synthetic/repos/alpha-app', branch: 'main', dirty: true, missing: false, instructions: { name: 'AGENTS.md', chars: 3200 } } : null,
     color: ['#ff4d6d', '#6a47b8', '#37b39c'][wi],
   },
   {
@@ -112,7 +112,7 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
       ? { pinned_file_path: '/synthetic/beta/pinned-report.md', dismissed_pin_paths: [], pin_revision: 1 }
       : workspace.name === 'alpha'
         ? {
-          repo_location: { path: '/synthetic/repos/alpha-app-wt-login', branch: 'feature/login', is_worktree: true, exists: true },
+          repo_location: { path: '/synthetic/repos/alpha-app-worktrees/feature-login-a-very-long-unbreakable-worktree-directory-name', branch: 'feature/login', is_worktree: true, exists: true },
           code_mode: true,
           code_mode_events: [{ code_mode: true, actor: 'agent', at: '2026-01-01T09:01:00Z', after_turn_index: -1 }],
         }

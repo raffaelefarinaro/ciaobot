@@ -54,6 +54,23 @@ test.describe('narrow viewport', () => {
     ).toBeLessThanOrEqual(0)
   })
 
+  test('the Repository section fits the Chat details drawer at 390px', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.locator('.chat-code-badge').click()
+    const rail = page.locator('#chat-work-rail')
+    await expect(rail).toBeVisible()
+    const sideways = await rail.evaluate((el) => el.scrollWidth - el.clientWidth)
+    expect(sideways, 'Chat details scrolls sideways').toBe(0)
+    const row = page.locator('.agent-context-repo')
+    await expect(row).toContainText('alpha-app/AGENTS.md')
+    await expect(row).toContainText('tokens')
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(
+      overflow,
+      `document scrolls ${overflow}px past the viewport; widest unclipped: ${JSON.stringify(culprits)}`,
+    ).toBeLessThanOrEqual(0)
+  })
+
   test('a reply shows its actions on a phone and keeps them inside its turn', async ({ page }) => {
     // There is no hover on touch, so the action row is simply visible there.
     // It is always laid out, so it must fit inside its own turn: the sent

@@ -267,10 +267,10 @@ def test_care_report_makes_unresolved_audit_findings_locatable() -> None:
     # operator had to ask for the items. The prompt (which owns the run's
     # report; the skill defers to it) must ask for categories plus the affected
     # note, and separate a finished scan from resolved findings.
-    prompt = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
-    assert "Unresolved audit findings are listed here too, grouped by category" in prompt
-    assert "A count alone" in prompt
-    assert "finishing the scan does not resolve them" in prompt
+    prompt = _care_prompt()
+    assert "List unresolved audit findings grouped by category, each naming its note" in prompt
+    assert "a bare count is not actionable" in prompt
+    assert "say separately that the scan finished and how many findings remain" in prompt
     assert "with its category and the affected note's vault-relative path" in prompt
 
 
@@ -328,17 +328,13 @@ def test_the_care_schedule_no_longer_instructs_unattended_promotion_or_settlemen
     destination nor rejection, so each of those is now a filed proposal a
     person decides.
     """
-    prompt = next(
-        entry["prompt"]
-        for entry in json.loads(_stock("schedules.json"))["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
+    prompt = _care_prompt()
     assert "into canonical guidance (the AGENTS.md body or the relevant skill/doc)" not in prompt
     assert "belongs here as a standing instruction, citing its sources" not in prompt
     assert "Only settle a proposal after its change is actually in place" not in prompt
     # And each is replaced by the routed proposal, named with the commands.
-    assert "**Route** an entry at x3 or more" in prompt
-    assert "a priority order and not a licence to edit" in prompt
+    assert "Route an entry at x3 or more" in prompt
+    assert "An x3 is a priority order, not permission to edit" in prompt
     assert "You never edit a skill or this workspace's guide body" in prompt
     assert "you never settle a proposal" in prompt
     assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
@@ -493,10 +489,15 @@ def test_the_development_doc_covers_the_draft_commands() -> None:
 
 
 def _care_prompt() -> str:
-    return next(
+    """The schedule prompt plus the `ciao-memory` curation references it points at (#1462)."""
+    prompt = next(
         entry["prompt"]
         for entry in json.loads(_stock("schedules.json"))["schedules"]
         if entry["schedule_id"] == "system-memory-curation"
+    )
+    refs = resources.files("ciao.stock").joinpath("skills", "ciao-memory", "references")
+    return "\n\n".join(
+        [prompt, *(item.read_text(encoding="utf-8") for item in sorted(refs.iterdir(), key=lambda i: i.name) if item.name.endswith(".md"))]
     )
 
 

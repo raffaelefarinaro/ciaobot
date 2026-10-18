@@ -59,26 +59,9 @@ Not for:
 | Command | Purpose | Guard |
 |---|---|---|
 | `note related PATH [--limit N]` | List the vault notes connected to one note: the ones it links to, the ones linking to it and the ones whose body names its title or an alias. Read it before a verdict on a stale note. | Read-only, scoped to this workspace's vault, `PATH` vault-relative. Each related note prints its own `revision` and `due`: `revision` is the `expected_revision` a `note verify` payload for that note needs, and `due: false` means a check already settles it. |
-| `note verify --payload-file FILE` | Record one stale note's verification verdict — or one stale **entry's**, with `entry` + `entry_fingerprint`: `still_valid`, `update`, `retire` or `unverified`, with its evidence. | `FILE` is JSON: `relative_path`, `expected_revision`, `outcome`, `coverage`, `evidence[]`, `before`/`after`, `reason`, plus `entry`/`entry_fingerprint` for the one-fact case. Every field is note prose or a citation, so it never travels as a shell argument — pass the path and let the server read it. The file must be inside this workspace and under the size cap. `expected_revision` is the lowercase hex SHA-256 of the note's full text as UTF-8, unmodified; the `stale_note` item you were given prints it as `revision <hex>`, so pass that rather than hashing it yourself. With `entry` set, `before`/`after` are the **entry's** text — a whole-note replacement there would rewrite every other fact in the file — and the `stale_entry` item's `reason` prints the note's `revision <hex>`, the `entry identity <hex>`, the `entry fingerprint <hex>` and the `at characters <start>-<end>` span to fill the three fields with, all of them whole: a truncated fingerprint is a different string and comes back `conflict`, and an `entry` that is not all 64 characters is refused before the note is opened. The reply gains `scope: "entry"`. |
+| `note verify --payload-file FILE` | Record one stale note's verification verdict, or one stale **entry's** with `entry` + `entry_fingerprint`: `still_valid`, `update`, `retire` or `unverified`, with its evidence. | `FILE` is JSON inside this workspace (note prose never travels as a shell argument). Fields, the `expected_revision` rule, the entry-level steps and an example are in the `ciao-memory` skill, `references/note-verify.md`. |
 
-The reply's `status` is the whole decision, and the words are not
-interchangeable: `applied` wrote the note through a durable receipt;
-`needs_review` means the rule refused to write it unattended and **one typed
-`note_edit` proposal is now queued for a person** — report it, do not route
-around it; `unverified` means nothing this pass reached could settle the
-verdict (no source, partial coverage, or an input too large to judge), with
-nothing written; `conflict` means the note moved since you read it, so re-read
-and judge the text that is there; `already_checked` means a check for this exact
-revision is in its cooldown or waiting on a proposal; `failed` means the note
-could not be used at all.
-
-`still_valid` re-stamps the note's frontmatter `updated:` and needs `coverage:
-complete` plus a citation naming the note. An `update` is applied only when
-*every* evidence row is a citation someone could re-open, and it must carry a
-fresh `updated:` in its own `after` text. Retirement is never applied here: it
-comes back `needs_review` and reaches a person as a proposal. Do not hand-edit
-a stale note's Markdown instead of calling this — a hand edit leaves no receipt,
-no check state and no record of who decided.
+The reply's `status` is the whole decision: `applied` wrote the note through a durable receipt; `needs_review` means one typed `note_edit` proposal is queued for a person (report it, do not route around it); `unverified` and `conflict` wrote nothing; `already_checked` means a check for this exact revision is in its cooldown or waiting on a proposal; `failed` means the note could not be used at all. Retirement always comes back `needs_review`. Do not hand-edit a stale note's Markdown instead of calling this.
 
 ### Review queues
 
@@ -126,7 +109,7 @@ Top-level commands, outside the `<noun> <verb>` table: plain text output (a `--j
 | `project list [--include-completed]` | List projects in the active workspace. | — |
 | `project get [ID\|NAME]` | Get one project by id or name. | Omit for the active project. |
 | `project create --name N [--context TEXT] [--repo PATH]` | Create a project. | Also creates `projects/active/<slug>/<slug>.md` with valid frontmatter and binds it; edit that note, do not write a new one. Skipped when the folder name is taken. `--vault-folder` is not a create-time flag; set it with `project update` after creating. `--repo` links a local git checkout and must be its top level (relative paths resolve against your shell's directory). |
-| `project update [ID\|NAME] [--name] [--context] [--vault-folder] [--repo PATH]` | Update project metadata or its safe vault-folder binding. | Omit `ID` for the active project; an omitted flag keeps its current value. `--repo ""` unlinks. `project get`/`list` report `repo: {path, branch, dirty, missing}`. |
+| `project update [ID\|NAME] [--name] [--context] [--vault-folder] [--repo PATH]` | Update project metadata or its safe vault-folder binding. | Omit `ID` for the active project; an omitted flag keeps its current value. `--repo ""` unlinks. `project get`/`list` report `repo: {path, branch, dirty, missing, instructions}`. |
 | `project restore STEM` | Restore a completed vault project into the active workspace. | Takes the completed project's *stem*, not a project id. |
 | `project complete ID\|NAME` | Move a vault-backed project to completed and archive its active record. | Destructive. |
 | `project delete ID\|NAME` | Delete a non-vault-backed project and its chats. | Destructive. |

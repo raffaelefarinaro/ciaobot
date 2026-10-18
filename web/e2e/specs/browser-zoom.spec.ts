@@ -67,4 +67,21 @@ test.describe('zoom and text scaling', () => {
       `scaled layout scrolls ${overflow}px sideways; widest unclipped: ${JSON.stringify(culprits)}`,
     ).toBeLessThanOrEqual(0)
   })
+
+  test('the Repository section reflows at 200% zoom and the largest font scale', async ({ page }) => {
+    await page.addInitScript(() => {
+      try { localStorage.setItem('ciao-font-scale', '1.5') } catch { /* blocked */ }
+    })
+    await page.setViewportSize({ width: 640, height: 450 })
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.locator('.chat-code-badge').click()
+    await expect(page.locator('.chat-repo-section')).toBeVisible()
+    const sideways = await page.locator('#chat-work-rail').evaluate((el) => el.scrollWidth - el.clientWidth)
+    expect(sideways, 'Chat details scrolls sideways').toBeLessThanOrEqual(0)
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(
+      overflow,
+      `scaled layout scrolls ${overflow}px sideways; widest unclipped: ${JSON.stringify(culprits)}`,
+    ).toBeLessThanOrEqual(0)
+  })
 })
