@@ -370,7 +370,7 @@ def test_visual_plan_and_capabilities_agree_on_plan_mode() -> None:
     plan = _skill_text("visual-plan")
     assert "plan_mode_read_only" in plan
     assert "no longer exists" not in plan
-    caps = _skill_text("ciao-capabilities")
+    caps = _skill_text("ciao-capabilities", "references", "models-and-extensions.md")
     assert "Plan mode cannot produce a plan file" not in caps
     assert "gives the plan in the chat" in caps
 

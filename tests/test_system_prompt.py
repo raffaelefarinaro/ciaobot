@@ -20,6 +20,17 @@ def _stock(*parts: str) -> str:
     return node.read_text(encoding="utf-8")
 
 
+def _capabilities() -> str:
+    """The capabilities index plus every reference file, as one string."""
+    root = resources.files("ciao.stock").joinpath("skills", "ciao-capabilities")
+    parts = [root.joinpath("SKILL.md").read_text(encoding="utf-8")]
+    parts += [
+        f.read_text(encoding="utf-8")
+        for f in sorted(root.joinpath("references").iterdir(), key=lambda f: f.name)
+    ]
+    return "\n".join(parts)
+
+
 def test_new_vault_notes_require_frontmatter() -> None:
     text = _system_instructions()
     assert "Every vault note you create opens with YAML frontmatter" in text
@@ -109,20 +120,20 @@ def test_cli_skill_example_is_not_an_entry_argv_fact() -> None:
     assert "memory-proposal-add --kind memory --text-file" in cli
     assert '{"ok": true, "data": {"queued"' not in cli
     assert "Queued [memory] proposal in" in cli
-    caps = _stock("skills", "ciao-capabilities", "SKILL.md")
+    caps = _capabilities()
     assert "`ciao memory update --region {memory,profile} --action {add,replace,remove}`" not in caps
 
 
 def test_schedule_targets_are_projects_everywhere() -> None:
     core = _system_instructions()
-    caps = _stock("skills", "ciao-capabilities", "SKILL.md")
+    caps = _capabilities()
     assert "confirm the target project or chat" not in core
     assert "target project/chat" not in caps
     assert "Automations page" in core
 
 
 def test_chat_api_is_operator_only_in_capabilities() -> None:
-    caps = _stock("skills", "ciao-capabilities", "SKILL.md")
+    caps = _capabilities()
     assert "an in-chat agent can drive" not in caps
     assert "PATCH /api/chats" not in caps
     assert "Do not use curl" in _system_instructions()

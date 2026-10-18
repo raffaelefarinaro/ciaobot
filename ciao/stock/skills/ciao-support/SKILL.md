@@ -1,6 +1,6 @@
 ---
 name: ciao-support
-description: Diagnose Ciaobot failures and apply the repository's GitHub issue-label convention.
+description: Use when Ciaobot itself is failing, or the user wants to report a problem to the project. Diagnoses failures from the local logs, checks whether a released version already fixes them, and applies the repository's GitHub issue-label convention. Trigger on "ciaobot is broken", "ciaobot is not responding", "error", "crash", "it stopped working", "file a bug", "open an issue", "report a bug".
 ---
 
 # Ciaobot support
@@ -15,7 +15,9 @@ Inspect, when present:
 
 - `.runtime/server_errors.log`
 - `.runtime/job_runs.jsonl`
-- `.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log` for macOS service issues
+- Service logs, by OS:
+  - macOS and Windows: `.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log`
+  - Linux (systemd service): `journalctl -u ciaobot`
 
 State clearly when evidence is missing or empty. Do not claim the problem is
 fixed from a log tail alone.
