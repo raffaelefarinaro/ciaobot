@@ -890,18 +890,17 @@ def test_the_authoring_guidance_names_the_entry_contract() -> None:
         .joinpath("commands/remember.md")
         .read_text(encoding="utf-8")
     )
-    for text in (skill, command):
-        assert "one fact per bullet" in text or "One assertion per `-` bullet" in text
-        assert "after actually going and checking" in text or (
-            "only after actual" in text
-        ) or "you did not earn" in text
-        assert "updated:" in text
-    # The care prompt is JSON, so its guidance is asserted through the parsed
-    # value rather than through a substring of the file.
-    schedules = json.loads(
-        resources.files("ciao.stock").joinpath("schedules.json").read_text("utf-8")
+    # One copy of the rules (#1462): the skill carries them, and the command and
+    # the care run's pass-3 reference point at that section instead of restating.
+    assert "one fact per bullet" in skill.lower()
+    assert "after actually going and checking" in skill
+    assert "you did not earn" not in command  # not restated in the command
+    assert "updated:" in skill
+    assert 'follow the "Writing entity notes" steps in the `ciao-memory` skill' in command
+    reverify = (
+        resources.files("ciao.stock")
+        .joinpath("skills/ciao-memory/references/curation-pass-3-reverify.md")
+        .read_text(encoding="utf-8")
     )
-    prompt = schedules["schedules"][0]["prompt"]
-    assert "one fact per bullet" in prompt
-    assert "you did not earn" in prompt
-    assert "uncovered" in prompt
+    assert '"Writing entity notes"' in reverify
+    assert "uncovered" in reverify
