@@ -1,7 +1,7 @@
 """The documented `ciao` command set must match the parsers (#1471).
 
-`ciao-cli/SKILL.md` lists commands and flags (the core prompt no longer carries
-a synopsis, #1464); the parsers in `ciao/agent_cli.py` (`ciao <noun> <verb>`) and
+`ciao-cli/SKILL.md` is the full reference; the core prompt carries a compact
+synopsis of the common commands (#1464). The parsers in `ciao/agent_cli.py` (`ciao <noun> <verb>`) and
 `ciao/cli.py` (top-level commands) are the truth. These tests derive the
 documented set from the skill and compare it to the parsers in both
 directions, so a renamed flag, a verb that never existed or an agent verb nobody
@@ -144,11 +144,68 @@ def _agent_documented(agent: Surface) -> Documented:
     return {leaf: v for leaf, v in documented.items() if leaf in agent}
 
 
-def test_core_prompt_carries_no_command_synopsis() -> None:
-    """The synopsis moved to ciao-cli (#1464); the prompt only points at it."""
-    assert "```" not in PROMPT
-    assert "<sched>" not in PROMPT
-    assert "ciao help" in PROMPT
+def _prompt_synopsis() -> list[str]:
+    section = re.search(r"<ciaobot_cli_reference>(.*?)</ciaobot_cli_reference>", PROMPT, re.S)
+    assert section, "the core prompt lost its <ciaobot_cli_reference> section"
+    block = re.search(r"```\n(.*?)```", section.group(1), re.S)
+    assert block, "the core prompt lost its compact ciao synopsis"
+    return [line for line in block.group(1).splitlines() if line.strip()]
+
+
+def _alternatives(word: str) -> set[str]:
+    """``a|b`` names two words; ``x-add|dismiss`` names ``x-add`` and ``x-dismiss``."""
+    parts = word.split("|")
+    stem = parts[0].rsplit("-", 1)[0] + "-" if "-" in parts[0] else ""
+    return {parts[0], *(part if "-" in part else stem + part for part in parts[1:])}
+
+
+def _named_leaves(words: list[str], leaves: set[Leaf]) -> tuple[list[Leaf], int]:
+    """Leaves a synopsis line names and how many of its words they use."""
+    for size in (3, 2, 1):
+        if len(words) < size:
+            continue
+        found = [
+            leaf for leaf in leaves
+            if len(leaf) == size and leaf[:-1] == tuple(words[: size - 1]) and leaf[-1] in _alternatives(words[size - 1])
+        ]
+        if found:
+            return found, size
+    return [], 0
+
+
+def prompt_problems(lines: list[str], surface: Surface) -> list[str]:
+    """Every command and flag the compact synopsis shows must exist in the parsers."""
+    problems: list[str] = []
+    for line in lines:
+        words = line.replace("`", "").split()
+        found, size = _named_leaves(words, set(surface))
+        if not found:
+            problems.append(f"prompt shows `{line}`, which is not a command")
+            continue
+        shown = set(_FLAG.findall(" ".join(words[size:])))
+        known = set().union(*(surface[leaf][0] for leaf in found))
+        for flag in sorted(shown - known - {"--json"}):
+            problems.append(f"prompt: `{' '.join(words[:size])}` shows {flag}, which no named verb has")
+    return problems
+
+
+def test_core_prompt_synopsis_matches_the_parsers() -> None:
+    agent, operator = _all_leaves()
+    surface = {**agent, **operator}
+    lines = _prompt_synopsis()
+    assert prompt_problems(lines, surface) == []
+    # The recall-critical commands must stay in the prompt (routing eval, #1464).
+    text = "\n".join(lines)
+    for command in ("vault search", "memory update", "file surface", "schedule", "task report", "run start"):
+        assert command in text, command
+
+
+def test_prompt_synopsis_rejects_an_unknown_flag_or_verb() -> None:
+    agent, operator = _all_leaves()
+    surface = {**agent, **operator}
+    assert prompt_problems(["vault search QUERY [--nope N]"], surface)
+    assert prompt_problems(["vault sarch QUERY"], surface)
+    assert prompt_problems(["vault search QUERY [--limit N]"], surface) == []
 
 
 def test_skill_tables_match_the_parsers() -> None:

@@ -707,19 +707,24 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     assert "`AGENTS.md`" in append
 
 
-def test_cli_surface_prompt_points_at_the_command_reference() -> None:
-    """The synopsis lives in the ciao-cli skill, not in the per-turn prompt (#1464).
+def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
+    """The prompt keeps a compact synopsis; the full reference is ciao-cli (#1464).
 
-    Every command must still be in the reference `ciao help` prints, and the
-    core prompt keeps only the envelope, exit codes and the pointer. The cap
-    stays: this text is prepended to every turn of every CLI-surface chat, and
-    a raise should move a section out rather than buy more room.
+    An eval showed routing accuracy fell (0.823 -> 0.726, recall answered
+    without `ciao vault search`) once the synopsis left the prompt, so the
+    common commands, one line each with key flags, stay in
+    `<ciaobot_cli_reference>`. `tests/test_cli_docs_drift.py` checks them
+    against the parsers; every command must also be in the reference `ciao help`
+    prints. The cap stays at 12000, unchanged: measured as the payload length
+    the prompt is 9488 with the synopsis, so no raise was needed. A
+    raise should move a section out rather than buy more room.
     """
     cli = system_prompt_payload("")["append"]
     reference = (Path(agent_cli._SKILL_PATH)).read_text(encoding="utf-8")
     missing = [command for command in _commands() if command not in reference]
     assert missing == []
     assert "ciao help" in cli and "ciao <noun> --help" in cli
+    assert "vault search       QUERY" in cli and "task report" in cli
     assert "vault review restore-completed" not in cli
     assert len(cli) < 12000
 
