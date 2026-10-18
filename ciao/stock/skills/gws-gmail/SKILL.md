@@ -23,7 +23,6 @@ ciao gws "$GWS_PROFILE" gmail <resource> <method> [flags]
 | [`+reply-all`](../gws-gmail-reply-all/SKILL.md) | Reply-all to a message (handles threading automatically) |
 | [`+forward`](../gws-gmail-forward/SKILL.md) | Forward a message to new recipients |
 | [`+read`](../gws-gmail-read/SKILL.md) | Read a message and extract its body or headers |
-| [`+watch`](../gws-gmail-watch/SKILL.md) | Watch for new emails and stream them as NDJSON |
 
 ## API Resources
 
