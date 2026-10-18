@@ -92,4 +92,5 @@ def test_capabilities_references_have_no_spliced_sentences() -> None:
     root = STOCK_SKILLS / "ciao-capabilities"
     for path in [root / "SKILL.md", *sorted((root / "references").glob("*.md"))]:
         text = path.read_text(encoding="utf-8")
+        assert ")are " not in text and not re.search(r"\)[a-z]{2,} ", text), path
         assert not re.search(r"[a-z]\.[A-Z][a-z]+ ", re.sub(r"`[^`]*`|\.md|e\.g\.|i\.e\.", "", text)), path

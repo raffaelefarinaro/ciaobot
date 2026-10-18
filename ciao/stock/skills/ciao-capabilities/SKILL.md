@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Use for questions about what Ciaobot can do or how one of its features works, and for tours and onboarding of new users. Covers memory and the vault, vault review, adversarial review, schedules and webhook triggers, workspaces, projects, forks, subagents, files and pinned panels, the task board, skills, MCP, models and providers, permission modes, notifications, updates, importing past conversations, and installing on macOS, Linux or Windows. Not for performing the action itself (scheduling, remembering, adding a task). Trigger on "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can ciaobot ...", "how does ... work in ciaobot", even when the word Ciaobot is not mentioned.
+description: Use for questions about what Ciaobot can do or how one of its features works, and for tours and onboarding of new users. Covers memory and the vault, Memory Map, vault review, adversarial review, schedules and webhook triggers, workspaces, projects, forks, subagents, files and pinned panels, file access, slash commands, keyboard shortcuts, document conversion, HTML artifacts and CSV tables, the task board, skills, MCP, models and providers, permission modes, notifications, updates, importing past conversations, and installing on macOS, Linux or Windows. Not for performing the action itself (scheduling, remembering, adding a task). Trigger on "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can ciaobot / can you / can I ...", "how does ... work in ciaobot", even when the word Ciaobot is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -42,7 +42,7 @@ Each area has a reference file next to this one. Open only the file the question
 | Memory and the vault | the memory pass, what is automatic vs yours, To decide, History and Undo, Memory Map, Vault Review, retirement candidates, conversation import, memory backup | `references/memory.md` |
 | Automations | schedules, interval runs, project vs chat targets, catch-up, webhook triggers | `references/automations.md` |
 | Files | viewer and pinned panel, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
-| Skills, models, Google Workspace | stock and custom skills, skill proposals, providers, permission modes, queue and steer, critique, `gws` | `references/models-and-extensions.md` |
+| Skills, models, Google Workspace | skills, subagents, slash commands, skill proposals, providers, permission modes, queue and steer, critique, `gws` | `references/models-and-extensions.md` |
 | Task board | the Tasks page, Delegate to agent, Approve Done, "After this update" tasks | `references/tasks.md` |
 | App and system | Settings page, MCP, installing and updating, other devices, forgotten password, Linux, Windows, local API | `references/install-and-settings.md` |
 
