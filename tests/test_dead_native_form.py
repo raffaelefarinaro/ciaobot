@@ -158,6 +158,8 @@ def test_startup_marks_persisted_native_forms_stale(tmp_path: Path) -> None:
     project = manager.create_project("Stale", workspace="personal")
     a = manager.create_chat(project.project_id, provider="opencode")
     b = manager.create_chat(project.project_id)
+    permission = json.dumps({"request_id": "perm-1", "tool_name": "Bash", "message": "ok?"})
+    a.pending_permission = permission
     a.pending_question = json.dumps(_FORM)
     legacy = {"questions": [{"id": "q1", "question": "Continue?"}]}
     b.pending_question = json.dumps(legacy)
@@ -166,6 +168,7 @@ def test_startup_marks_persisted_native_forms_stale(tmp_path: Path) -> None:
     reloaded = _make_manager(tmp_path)
     assert json.loads(reloaded._chats[a.chat_id].pending_question)["stale"] is True
     assert json.loads(reloaded._chats[b.chat_id].pending_question) == legacy
+    assert reloaded._chats[a.chat_id].pending_permission == permission
 
 
 def test_native_answer_prompt_maps_option_values_to_labels() -> None:
@@ -175,6 +178,6 @@ def test_native_answer_prompt_maps_option_values_to_labels() -> None:
     )
     assert 'Answer to your question "Next step": Hold, typed' in prompt
     assert "Answer to your question: extra" in prompt
-    assert prompt.startswith("(The question form closed when the engine restarted")
+    assert prompt.startswith("(The question form is no longer open")
     empty = ProjectChatManager._native_answer_prompt(form, {})
     assert "I submitted your question form without answers." in empty

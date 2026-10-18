@@ -7761,7 +7761,7 @@ class ProjectChatManager:
         if not lines:
             lines.append("I submitted your question form without answers.")
         return (
-            "(The question form closed when the engine restarted, so here is my "
+            "(The question form is no longer open, so here is my "
             "answer as a message.)\n" + "\n".join(lines)
         )
 
