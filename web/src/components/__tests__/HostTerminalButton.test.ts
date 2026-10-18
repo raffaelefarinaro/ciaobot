@@ -82,6 +82,16 @@ describe('HostTerminalButton', () => {
     expect(wrapper.get('button').attributes('disabled')).toBeUndefined()
   })
 
+  it('uses the link style by default', async () => {
+    const wrapper = await mountButton({ action: 'claude-install', variant: 'link' })
+    expect(wrapper.get('button').classes()).toContain('host-terminal-link')
+  })
+
+  it('uses the small button style for the small variant', async () => {
+    const wrapper = await mountButton({ action: 'claude-install', variant: 'small' })
+    expect(wrapper.get('button').classes()).toContain('btn-small')
+  })
+
   it('uses a native type=button control', async () => {
     const wrapper = await mountButton({ action: 'claude-install', variant: 'small' })
     const button = wrapper.get('button')

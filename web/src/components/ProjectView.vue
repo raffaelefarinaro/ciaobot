@@ -1259,6 +1259,9 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   text-underline-offset: 3px;
 }
 
+.repo-meta :deep(.host-terminal-link) { color: var(--accent); font-size: var(--text-sm); min-height: 32px; text-decoration: none; }
+.repo-meta :deep(.host-terminal-link:hover:not(:disabled)) { text-decoration: underline; text-underline-offset: 3px; }
+
 .text-action:disabled {
   cursor: default;
   opacity: 0.55;

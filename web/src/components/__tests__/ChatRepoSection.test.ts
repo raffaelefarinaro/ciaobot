@@ -129,4 +129,16 @@ describe('ChatRepoSection', () => {
     wrapper.unmount()
     resetHostTerminalForTests()
   })
+
+  it('marks the terminal link with chat-repo-terminal when the engine can open one', async () => {
+    resetHostTerminalForTests()
+    vi.spyOn(api, 'get').mockResolvedValue({
+      available: true, platform: 'macos', reason: '', terminal: 'Terminal', actions: [],
+    })
+    const wrapper = mountSection(repo, {})
+    await flushPromises()
+    expect(wrapper.find('.chat-repo-terminal').exists()).toBe(true)
+    wrapper.unmount()
+    resetHostTerminalForTests()
+  })
 })

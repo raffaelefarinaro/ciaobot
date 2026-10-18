@@ -1581,10 +1581,9 @@
               <p class="hint">
                 These are the skills of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>skills/</code> folder or included with the app. Ask for one in chat, or invoke it by name with <code>/name</code> when your provider supports skill commands. Workspace git sync carries your own skills to other machines.
               </p>
-              <p class="hint">Skills installed directly in Claude Code or opencode can also be used in chats run by that provider, even if they are not listed here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#skills" target="_blank" rel="noopener noreferrer">How skills work</a></p>
+              <p class="hint">Skills installed directly in Claude Code or opencode can also be used in chats run by that provider, even if they are not listed here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#skills" target="_blank" rel="noopener noreferrer">How skills work</a> <HostTerminalButton action="skills-update" label="Update skills in Terminal" /></p>
             </div>
             <div class="settings-card-header-actions">
-              <HostTerminalButton action="skills-update" variant="small" label="Update skills in Terminal" />
               <button class="set-link set-link--quiet" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
               <button class="btn-small" type="button" :aria-expanded="showAddSkill" @click="toggleAddSkill">
                 {{ showAddSkill ? 'Cancel' : 'New skill' }}

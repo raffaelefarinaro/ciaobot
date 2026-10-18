@@ -61,8 +61,7 @@ async function launch() {
 
 <style scoped>
 .host-terminal-link {
-  display: inline-block;
-  margin-top: var(--space-2);
+  display: inline;
   padding: 0;
   border: 0;
   background: none;
