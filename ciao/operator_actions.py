@@ -1075,8 +1075,8 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
                 + ". Do not try to read or edit `.env` — the sandbox denies it "
                 "to you, and the tile's own Remove button comments these lines "
                 "out. Explain what each variable used to control and where its "
-                "setting lives now, and how I can check the current value in "
-                "Settings."
+                "setting lives now, and how I can check the current value (in "
+                "Settings, where it has one)."
             ),
         )
     ]
