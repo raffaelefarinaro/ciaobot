@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import html
 import inspect
 import json
 import logging
@@ -384,13 +383,17 @@ Output: Mail al cliente sul ritardo di consegna
 """
 
 
+def _escape_angles(text: str) -> str:
+    return text.replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _title_prompt(user_text: str, assistant_text: str) -> str:
     """The titler's user prompt, with both texts escaped so a stray tag in a
     message cannot close its own block or open another."""
-    sections = [f"<user>{html.escape(user_text[:1500], quote=False)}</user>"]
+    sections = [f"<user>{_escape_angles(user_text[:1500])}</user>"]
     if assistant_text:
         sections.append(
-            f"<assistant>{html.escape(assistant_text[:800], quote=False)}</assistant>"
+            f"<assistant>{_escape_angles(assistant_text[:800])}</assistant>"
         )
     return "<session>\n" + "\n".join(sections) + "\n</session>"
 

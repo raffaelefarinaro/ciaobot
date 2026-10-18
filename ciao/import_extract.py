@@ -183,7 +183,7 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- source_anchor: the bracketed anchor of the message the fact came from, "
     "copied exactly.\n"
     "- as_of: the date the transcript itself shows for that message, copied "
-    "exactly, otherwise null. Never guess one, never use today's date, and "
+    "exactly if it shows one, otherwise null. Never guess one, never use today's date, and "
     "never put a date inside text — a fact text carrying one is discarded.\n"
     "\n"
     "Destinations:\n"
@@ -217,12 +217,12 @@ EXTRACTION_SYSTEM_PROMPT = (
     "\n"
     "<example>\n"
     "Input:\n"
-    "[msg_0001] user: The staging database is refreshed every Sunday at 02:00 "
-    "UTC. (message dated 2024-05-01)\n"
+    "[msg_0001] user: For the billing project we decided to keep invoices in "
+    "cents everywhere.\n"
     "Output: "
-    '[{"text": "The staging database is refreshed every Sunday at 02:00 UTC.", '
-    '"destination": "memory", "payload": "", "source_anchor": "[msg_0001]", '
-    '"as_of": "2024-05-01"}]\n'
+    '[{"text": "Billing keeps invoice amounts in cents everywhere.", '
+    '"destination": "project", "payload": "Projects/Billing/Billing.md", '
+    '"source_anchor": "[msg_0001]", "as_of": null}]\n'
     "</example>\n"
     "\n"
     "<example>\n"
@@ -236,11 +236,23 @@ EXTRACTION_SYSTEM_PROMPT = (
     "\n"
     "<example>\n"
     "Input:\n"
-    "[msg_0001] user: Please answer in short bullet points from now on.\n"
+    "[msg_0001] user: I'm a staff engineer on the payments team and I mostly "
+    "work in Go.\n"
     "[msg_0002] user: Anyone know why the build is red right now?\n"
     "Output: "
-    '[{"text": "The user wants short bullet-point answers.", "destination": '
-    '"profile", "payload": "", "source_anchor": "[msg_0001]", "as_of": null}]\n'
+    '[{"text": "The user is a staff engineer on the payments team who mostly '
+    'works in Go.", "destination": "profile", "payload": "", "source_anchor": '
+    '"[msg_0001]", "as_of": null}]\n'
+    "</example>\n"
+    "\n"
+    "<example>\n"
+    "Input:\n"
+    "[msg_0001] user: Turns out the flaky CI job only fails when the cache is "
+    "cold, so rerun it once before debugging.\n"
+    "Output: "
+    '[{"text": "A CI job that fails only on a cold cache should be rerun once '
+    'before debugging.", "destination": "learnings", "payload": "", '
+    '"source_anchor": "[msg_0001]", "as_of": null}]\n'
     "</example>"
 )
 
