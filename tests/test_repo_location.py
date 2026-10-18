@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,15 +31,18 @@ def _init_repo(path: Path) -> Path:
     return path.resolve()
 
 
+def _abs(*parts: str) -> str:
+    """An absolute path on this platform (a drive-less "/a" is relative on Windows)."""
+    return os.path.abspath(os.path.join(os.sep, *parts))
+
+
 def test_tool_work_dirs_reads_cd_git_c_and_workdir() -> None:
-    assert tool_work_dirs("Bash", {"command": "cd /a/b && git -C '/c d' status"}) == [
-        "/a/b",
-        "/c d",
-    ]
-    assert tool_work_dirs("Bash", {"command": "git -C /x; ls"}) == ["/x"]
+    ab, cd, x, w = _abs("a", "b"), _abs("c d"), _abs("x"), _abs("w")
+    assert tool_work_dirs("Bash", {"command": f"cd {ab} && git -C '{cd}' status"}) == [ab, cd]
+    assert tool_work_dirs("Bash", {"command": f"git -C {x}; ls"}) == [x]
     assert tool_work_dirs("Bash", {"command": "cd x && ls"}) == []
-    assert tool_work_dirs("Read", {"command": "cd /a/b"}) == []
-    assert tool_work_dirs("bash", {"command": "ls", "workdir": "/w"}) == ["/w"]
+    assert tool_work_dirs("Read", {"command": f"cd {ab}"}) == []
+    assert tool_work_dirs("bash", {"command": "ls", "workdir": w}) == [w]
 
 
 @needs_git
@@ -94,13 +98,13 @@ def test_tool_event_hints_skip_surfaced_results_and_relative_paths() -> None:
         type="tool_use",
         tool_name="Bash",
         file_touches=[
-            {"file_path": "/a/b/c.txt", "action": "write"},
-            {"file_path": "/s/surfaced.md", "action": "surfaced"},
+            {"file_path": os.path.join(_abs("a", "b"), "c.txt"), "action": "write"},
+            {"file_path": os.path.join(_abs("s"), "surfaced.md"), "action": "surfaced"},
             {"file_path": "rel/d.txt", "action": "write"},
         ],
         work_dirs=["/w"],
     )
-    assert repo_location.tool_event_hints(event) == ["/a/b", "/w"]
+    assert repo_location.tool_event_hints(event) == [_abs("a", "b"), "/w"]
     result = ToolUseEvent(
         type="tool_result", tool_name="Bash", file_touches=event.file_touches, work_dirs=["/w"]
     )
