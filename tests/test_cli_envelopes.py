@@ -412,3 +412,13 @@ def test_prose_quoting_a_notification_advances_both_turn_counters(
 
     # The renderer's side of the same claim: three user bubbles.
     assert subagent_tracking._is_countable_user_turn(f"why did this fail?\n{ONE}")
+
+
+def test_code_mode_continuation_is_recognised_with_and_without_the_capsule():
+    prompt = cli_envelopes.CODE_MODE_CONTINUE_PROMPT
+    capsule = "[CIAO_CONTEXT_BEGIN]\nx\n[CIAO_CONTEXT_END]\n\n"
+    assert cli_envelopes.is_code_mode_continuation(prompt)
+    assert cli_envelopes.is_code_mode_continuation(capsule + prompt)
+    assert not cli_envelopes.is_code_mode_continuation("please " + prompt)
+    assert not cli_envelopes.is_code_mode_continuation("ordinary text")
+    assert not subagent_tracking._is_countable_user_turn(capsule + prompt)
