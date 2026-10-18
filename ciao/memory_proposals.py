@@ -1333,6 +1333,40 @@ Be conservative: when unsure between update and add, choose add.
 Reply with ONLY a JSON array, one object per candidate in their given order:
 [{"action": "add"}, {"action": "update", "index": 2, "text": "..."}, {"action": "covered"}]
 No prose, no code fences, no trailing commentary.
+
+<example>
+Input:
+Region `ciao:memory` current entries:
+1. The user prefers tabs over spaces.
+2. Deploys happen on Fridays.
+
+Candidate facts:
+A. The user likes tabs for indentation.
+Output: [{"action": "covered"}]
+</example>
+
+<example>
+Input:
+Region `ciao:memory` current entries:
+1. The user prefers tabs over spaces.
+2. Deploys happen on Fridays.
+
+Candidate facts:
+A. The user's dog is called Biscuit.
+Output: [{"action": "add"}]
+</example>
+
+<example>
+Input:
+Region `ciao:memory` current entries:
+1. The user prefers tabs over spaces.
+2. Deploys happen on Fridays.
+
+Candidate facts:
+A. Deploys now happen on Thursdays, not Fridays.
+B. The user prefers short commit messages.
+Output: [{"action": "update", "index": 2, "text": "Deploys happen on Thursdays."}, {"action": "add"}]
+</example>
 """
 
 # One reconcile call is bounded by the region cap (~3000 chars) plus a few

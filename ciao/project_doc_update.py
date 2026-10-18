@@ -48,8 +48,9 @@ _FOLD_SECTIONS = ("Decisions", "Open loops", "Notes")
 _DOC_UPDATE_SYSTEM_PROMPT = """\
 You maintain the canonical documentation file for a project.
 You receive the file's current bullets as numbered entries and a short set of
-material facts from a conversation that just ended in this project. Decide
-where each fact belongs: a new bullet, a rewording of one entry, or nothing.
+material facts from a conversation that just ended in this project. Pick the
+one most important edit: a new bullet, a rewording of one entry, or nothing.
+Your reply carries exactly one action, so it files at most one fact.
 
 Rules:
 - Do not invent facts. Do not summarise the chat. Do not append a changelog.
@@ -400,8 +401,8 @@ async def update_project_doc(
 _PERSON_FOLD_SYSTEM_PROMPT = """\
 You maintain a note about one person in a personal knowledge vault.
 You receive the note's current bullets as numbered entries and one new fact
-about that person that the operator has approved. Decide where the fact
-belongs: a new bullet, a rewording of one entry, or nothing.
+about that person that the operator has approved. Pick the one edit that
+records it: a new bullet, a rewording of one entry, or nothing.
 
 Rules:
 - Do not invent facts, and do not drop or reword anything already there
@@ -411,7 +412,7 @@ Rules:
 - Reply with one JSON object and nothing else — no code fences, no commentary:
   - {"action":"covered"} when the entries already say what the fact says.
   - {"action":"add","section":"Notes","text":"- one bullet"} to file the fact
-    as a new bullet. section is Decisions, Open loops, or Notes.
+    as a new bullet. section is always Notes.
   - {"action":"update","index":1,"text":"- one bullet"} to reword entry 1.
     index is one of the numbered entries below.
 - text is one list item with no trailing newline.
