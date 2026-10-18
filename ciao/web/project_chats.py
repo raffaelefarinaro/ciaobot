@@ -4640,11 +4640,6 @@ class ProjectChatManager:
         env.update(self.workspace_shell_env(workspace, project))
         return self._config.agent_root(workspace), env
 
-    def _effective_code_mode(self, chat: ChatInfo) -> bool:
-        """Code mode counts only in a linked project."""
-        project = self._projects.get(chat.project_id)
-        return bool(chat.code_mode and project is not None and project.repo_path)
-
     def _linked_repo_for_chat(self, chat: ChatInfo) -> str:
         """The chat's linked repository, resolved, or "" when unlinked, missing,
         code mode is off, or a memory-pass chat (the pass must not be able to
@@ -5719,7 +5714,12 @@ class ProjectChatManager:
             return None
         chat = self._chats.get(chat_id)
         project = self._projects.get(chat.project_id) if chat else None
-        if project is None or not getattr(project, "repo_path", "") or not chat or not chat.code_mode:
+        if (
+            project is None
+            or not getattr(project, "repo_path", "")
+            or chat is None
+            or not chat.code_mode
+        ):
             # Unlinked or code mode off: the stored location was just cleared; the done payload
             # carries no `repo_location` key for such chats.
             return None

@@ -892,7 +892,7 @@ class MemoryPassCoordinator:
         chat = self._host._chats.get(str(helper.get("source_chat_id") or ""))
         if chat is None or not chat.code_mode:
             return ""
-        project = self._host._projects.get(chat.project_id) if chat is not None else None
+        project = self._host._projects.get(chat.project_id)
         repo_path = str(getattr(project, "repo_path", "") or "")
         if not repo_path:
             return ""
