@@ -177,7 +177,7 @@ def action_command(action: str) -> str:
     if action == "claude-login":
         cli = setup_status.claude_cli_path()
         command = setup_status.claude_auth_command(cli)
-        if sys.platform == "win32" and command != "claude auth login":
+        if host_platform() == PLATFORM_WINDOWS and command != "claude auth login":
             # shlex.quote output is not valid PowerShell; use the call operator.
             return "& " + _ps_quote(cli) + " auth login"
         return command

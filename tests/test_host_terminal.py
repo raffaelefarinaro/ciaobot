@@ -50,7 +50,9 @@ def _setup(
     return spawns
 
 
-def test_actions_map_to_the_commands_ciaobot_already_shows() -> None:
+def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The Windows claude-login form (`& '<path>' auth login`) has its own test.
+    monkeypatch.setattr(host_terminal, "host_platform", lambda: host_terminal.PLATFORM_MACOS)
     assert host_terminal.action_command("claude-install") == setup_status.claude_install_command()
     assert host_terminal.action_command("claude-login") == setup_status.claude_auth_command(
         setup_status.claude_cli_path()
