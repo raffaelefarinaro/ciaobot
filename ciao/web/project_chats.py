@@ -90,7 +90,7 @@ def _restored_pin_paths(raw: Any) -> list[str]:
 import yaml
 
 from ciao.os_support.media_types import guess_type as guess_media_type
-from ciao import backup_scope, repo_link, repo_location, subagent_tracking
+from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
 from ciao.config import (
     CLAUDE_MODELS,
@@ -3488,7 +3488,7 @@ class ProjectChatManager:
             if turn["user"] is not None:
                 user_content = turn["user"]
                 user_content = re.sub(r'(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*', '', user_content)
-                if user_content.strip():
+                if user_content.strip() and not cli_envelopes.is_code_mode_continuation(user_content):
                     turns_data.append({
                         "role": "user",
                         "content": user_content,
@@ -5829,6 +5829,18 @@ class ProjectChatManager:
         })
         return True
 
+    def arm_code_mode_continuation(self, chat_id: str) -> bool:
+        """Ask the running foreground turn for one hidden continuation turn.
+
+        False when there is no foreground turn to continue: the chat is idle, or
+        only a between-turns drain stream is live (it has no drive loop).
+        """
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.background or not stream.accepting_queue:
+            return False
+        stream.code_mode_continue = True
+        return True
+
     async def set_queue_delivery(
         self, chat_id: str, entry_ids: list[str], delivery: str
     ) -> bool:
@@ -6059,6 +6071,11 @@ class ProjectChatManager:
             stream.publish({"type": "prompt_cancelled", "turn_index": turn_index})
         # The capsule rode on the prompt that never ran; the resend carries it.
         chat.context_digest = ""
+        if cli_envelopes.is_code_mode_continuation(prompt):
+            # Our hidden continuation is not something the user typed: never
+            # show it as a waiting message.
+            self._save()
+            return
         entry = {
             "id": f"q-{uuid.uuid4().hex[:12]}",
             "text": prompt,

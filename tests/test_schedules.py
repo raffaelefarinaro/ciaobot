@@ -932,7 +932,8 @@ def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> 
     assert "Workspace/Memory-Consolidations.md" in prompt
     assert "undo log" in prompt
     # Guardrail 2: judgment calls become reviewable questions, not deletions.
-    assert "[review] Keep" in prompt
+    assert 'Keep "<entry text>" in ciao:<region>?' in prompt
+    assert "ciao memory-proposal-add --kind review --text-file" in prompt
     assert "Memory-Proposals.md" in prompt
     assert "ciao memory status" in prompt
     # The old blanket ban must be gone, or the two instructions cancel out.
