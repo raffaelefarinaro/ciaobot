@@ -251,6 +251,18 @@ def test_curation_schedule_defers_and_never_hard_caps() -> None:
     assert "Workspace/Memory-Consolidations.md" in skill
 
 
+def test_care_report_makes_unresolved_audit_findings_locatable() -> None:
+    # A care run once reported only "findings remain" with a total, and the
+    # operator had to ask for the items. The prompt (which owns the run's
+    # report; the skill defers to it) must ask for categories plus the affected
+    # note, and separate a finished scan from resolved findings.
+    prompt = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
+    assert "Unresolved audit findings are listed here too, grouped by category" in prompt
+    assert "A count alone" in prompt
+    assert "finishing the scan does not resolve them" in prompt
+    assert "with its category and the affected note's vault-relative path" in prompt
+
+
 def test_capabilities_skill_does_not_claim_nothing_is_durable_without_approval() -> None:
     skill = _stock("skills/ciao-capabilities/SKILL.md")
     assert "nothing becomes durable without approval" not in skill
