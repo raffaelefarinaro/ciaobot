@@ -513,6 +513,7 @@ export type WsEvent =
       ok: boolean;
       error?: string;
       retryable?: boolean;
+      expired?: boolean;
     }
   | { type: 'permission_resolved'; request_id: string; session_id?: string }
   // The selected model cannot see the attached images; the engine asks the

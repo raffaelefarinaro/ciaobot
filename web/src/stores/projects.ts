@@ -6282,6 +6282,14 @@ export const useProjectStore = defineStore('projects', () => {
         )
         if (event.ok) {
           clearPermission(chatId, event.request_id, responseSession)
+          if (event.expired && submission.approved) {
+            // The turn that asked is gone (engine restart): the approval could not be applied.
+            pushToast({
+              chat_id: chatId,
+              title: 'Approval not applied',
+              body: 'That request belonged to a turn that is no longer running, so the tool did not run. Send a message to continue.',
+            })
+          }
         } else {
           permissionSubmissions.value[chatId] = {
             ...submission,

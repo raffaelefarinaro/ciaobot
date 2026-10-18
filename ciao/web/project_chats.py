@@ -6987,6 +6987,11 @@ class ProjectChatManager:
                     "Answer the open question before sending another message."
                 )
             dead_form_request = native_request
+        dead_permission_request = (
+            self._native_question_request_id(chat_meta.pending_permission)
+            if chat_meta is not None and self._providers.get(chat_id) is None
+            else ""
+        )
         if chat_meta is not None:
             # Waiting (parked) messages stay waiting: a new send never flushes
             # them. They leave only through send-now, edit, remove or reorder,
@@ -7008,6 +7013,13 @@ class ProjectChatManager:
                 chat_id,
             )
             chat_meta.pending_question = ""
+        if dead_permission_request and chat_meta is not None:
+            logger.info(
+                "Superseding dead permission request %s for chat %s",
+                dead_permission_request,
+                chat_id,
+            )
+            chat_meta.pending_permission = ""
         if chat_meta is not None and not compact:
             # A new user turn answers (or supersedes) any legacy paused
             # question, so the persisted picker state no longer applies.
@@ -7888,9 +7900,9 @@ class ProjectChatManager:
         legacy Claude gate remains supported as a local boolean seam.
         """
         chat = self._chats.get(chat_id)
-        stored = self._pending_response_record(
-            chat.pending_permission if chat is not None else ""
-        )
+        if chat is None:
+            return QuestionResponseResult(False, "This chat no longer exists.", False)
+        stored = self._pending_response_record(chat.pending_permission)
         stored_request = str(stored.get("request_id") or "")
         stored_session = str(stored.get("session_id") or "")
         if stored_request and stored_request != request_id:
@@ -7902,6 +7914,19 @@ class ProjectChatManager:
         expected_session = session_id or stored_session or str(
             getattr(chat, "session_id", "") or ""
         )
+
+        if self._native_form_is_dead(chat_id):
+            if not stored_request:
+                # Already settled (another tab, or superseded) and nothing to deliver to.
+                return QuestionResponseResult(True)
+            # No provider owns the request and no turn is running: the tool call it
+            # guarded is gone. A deny is already true; an allow cannot be applied.
+            self._clear_permission_state(chat_id, request_id, expected_session)
+            logger.info(
+                "Settled dead permission request %s for chat %s (approved=%s)",
+                request_id, chat_id, approved,
+            )
+            return QuestionResponseResult(True, expired=True)
 
         provider_service = self._providers.get(chat_id)
         provider = provider_service.provider if provider_service is not None else None

@@ -223,6 +223,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                             "ok": result.ok,
                             "error": result.error,
                             "retryable": result.retryable,
+                            **({"expired": True} if result.expired else {}),
                         })
                     except (WebSocketDisconnect, RuntimeError):
                         break

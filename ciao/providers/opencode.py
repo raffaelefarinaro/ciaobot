@@ -1233,6 +1233,7 @@ class QuestionResponseResult:
     error: str = ""
     retryable: bool = True
     delivered_as_message: bool = False
+    expired: bool = False
 
 
 class _FormValidationError(ValueError):

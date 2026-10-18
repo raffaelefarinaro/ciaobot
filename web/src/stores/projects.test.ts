@@ -3555,6 +3555,56 @@ describe('dead native forms', () => {
     expect(store.activeQuestions[chatId]).toBe(card)
     expect(store.activeQuestions[chatId][0].stale).toBe(true)
   })
+
+  function expiredPermission(approved: boolean) {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Dead permission',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'permission-1',
+        session_id: 'session-1',
+      }),
+    }]
+    store.pendingPermissions[chatId] = [{
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      tool_name: 'shell',
+      tool_input: 'echo ok',
+      message: 'Approve?',
+      received_at: Date.now(),
+    }]
+    store.respondPermission(chatId, 'permission-1', approved, '')
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({ data: JSON.stringify({
+      type: 'permission_response_result',
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      ok: true,
+      expired: true,
+    }) })
+    return store
+  }
+
+  test('an approval for an expired permission clears the card and says the tool did not run', () => {
+    const store = expiredPermission(true)
+    expect(store.pendingPermissions[chatId]).toBeUndefined()
+    const toasts = store.toasts.filter(t => t.title === 'Approval not applied')
+    expect(toasts).toHaveLength(1)
+  })
+
+  test('a deny for an expired permission clears the card without a toast', () => {
+    const store = expiredPermission(false)
+    expect(store.pendingPermissions[chatId]).toBeUndefined()
+    expect(store.toasts.filter(t => t.title === 'Approval not applied')).toHaveLength(0)
+  })
 })
 
 describe('image-capability questions', () => {
