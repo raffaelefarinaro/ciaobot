@@ -1222,7 +1222,7 @@ export interface SetupStatus {
 /** `/api/settings/providers/{provider}/{connect|logout|check}`. */
 export interface ProviderActionResult {
   ok?: boolean
-  opened?: boolean
+  launched?: string
   command?: string
   auth?: string
   detail?: string

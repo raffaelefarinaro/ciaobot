@@ -903,6 +903,60 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
+  it('SettingsView Connect reports the terminal it opened', async () => {
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, launched: 'Terminal', command: 'opencode auth login' })
+
+    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
+    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
+    await connect.trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('.action-result').text()).toBe('Opened the opencode sign-in in Terminal.')
+    wrapper.unmount()
+  })
+
+  it('SettingsView Connect on a remote browser shows the command to run on the host', async () => {
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const hint = 'Opening a terminal is only available in a browser on the computer running Ciaobot. Run this in a terminal on the computer running Ciaobot: opencode auth login'
+    vi.mocked(api.post).mockRejectedValueOnce(
+      Object.assign(new Error(hint), {
+        status: 403,
+        payload: { ok: false, reason: 'not_on_host', command: 'opencode auth login', error: hint },
+      }),
+    )
+
+    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
+    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
+    await connect.trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    const text = wrapper.find('.action-result').text()
+    expect(text).toContain('opencode auth login')
+    expect(text.startsWith('Error:')).toBe(false)
+    wrapper.unmount()
+  })
+
   it('SettingsView renders the shared install block for a missing provider CLI', async () => {
     // Both providers share one branch: the install command, the PATH line, and
     // the docs link. opencode used to report `auth: 'missing'` with a bare
