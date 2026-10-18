@@ -1280,7 +1280,13 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
     assert result["data"]["title"] == "Renamed"
 
 
-def _code_mode_plane(tmp_path: Path, *, was_on: bool = False, set_error: Exception | None = None):
+def _code_mode_plane(
+    tmp_path: Path,
+    *,
+    was_on: bool = False,
+    set_error: Exception | None = None,
+    arm_result: bool = True,
+):
     """A control plane over a recording pcm for the `chat update --code` tests."""
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
@@ -1302,7 +1308,7 @@ def _code_mode_plane(tmp_path: Path, *, was_on: bool = False, set_error: Excepti
 
     def arm(cid):
         armed.append(cid)
-        return True
+        return arm_result
 
     pcm = SimpleNamespace(
         update_chat=lambda cid, **kwargs: SimpleNamespace(
@@ -1355,6 +1361,20 @@ def test_chat_update_code_on_for_another_chat_does_not_arm(tmp_path: Path) -> No
     assert armed == []
     assert data["note"] == CODE_MODE_ON_NEXT_TURN_NOTE
     assert "repo_instructions" in data
+
+
+def test_chat_update_code_on_own_chat_without_a_live_turn_says_your_next_turn(
+    tmp_path: Path,
+) -> None:
+    from ciao.control_plane import CODE_MODE_ON_OWN_NEXT_TURN_NOTE
+
+    plane, _, armed = _code_mode_plane(tmp_path, arm_result=False)
+
+    data = plane.chat_update(_chat_create_principal(), "", code_mode=True)["data"]
+
+    assert armed == ["chat-1"]
+    assert data["note"] == CODE_MODE_ON_OWN_NEXT_TURN_NOTE
+    assert "your next turn" in data["note"]
 
 
 def test_chat_update_code_on_when_already_on_adds_nothing(tmp_path: Path) -> None:

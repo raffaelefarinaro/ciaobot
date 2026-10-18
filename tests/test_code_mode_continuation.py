@@ -6,7 +6,7 @@ import asyncio
 from pathlib import Path
 
 from ciao.cli_envelopes import CODE_MODE_CONTINUE_PROMPT
-from ciao.models import ResultEvent
+from ciao.models import ResultEvent, ToolUseEvent
 from tests.test_project_chats_queue import _make_manager, _wait_for
 
 
@@ -112,3 +112,55 @@ async def test_arm_returns_false_without_a_foreground_turn(tmp_path: Path) -> No
     chat = pcm.create_chat(project.project_id, title="code-idle")
     assert pcm.arm_code_mode_continuation(chat.chat_id) is False
     assert pcm.arm_code_mode_continuation("missing") is False
+
+
+async def test_a_paused_question_ends_the_turn_without_a_continuation(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-code-question", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="code-question")
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        _switch_on(pcm, chat_id)
+        yield ToolUseEvent(
+            type="assistant",
+            tool_name="AskUserQuestion",
+            tool_input='{"questions":[{"question":"Which branch?"}]}',
+        )
+        yield _result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    async def consume(stream) -> None:
+        async for _ in stream.subscribe():
+            pass
+
+    await asyncio.wait_for(consume(pcm.start_stream(chat.chat_id, "initial")), timeout=5.0)
+
+    assert turn_calls == ["initial"]
+    assert pcm.get_active_stream(chat.chat_id) is None
+
+
+async def test_a_cancelled_continuation_is_not_requeued_as_a_user_message(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-code-cancel", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="code-cancel")
+    chat.context_digest = "digest"
+    gate = asyncio.Event()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        await gate.wait()
+        yield _result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    await _wait_for(lambda: pcm.get_active_stream(chat.chat_id) is not None)
+
+    pcm.on_prompt_cancelled(chat.chat_id, stream, CODE_MODE_CONTINUE_PROMPT, None, None)
+
+    assert chat.pending_queue == []
+    assert chat.context_digest == ""
+    gate.set()

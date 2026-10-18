@@ -6068,6 +6068,11 @@ class ProjectChatManager:
             stream.publish({"type": "prompt_cancelled", "turn_index": turn_index})
         # The capsule rode on the prompt that never ran; the resend carries it.
         chat.context_digest = ""
+        if cli_envelopes.is_code_mode_continuation(prompt):
+            # Our hidden continuation is not something the user typed: never
+            # show it as a waiting message.
+            self._save()
+            return
         entry = {
             "id": f"q-{uuid.uuid4().hex[:12]}",
             "text": prompt,

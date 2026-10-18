@@ -198,6 +198,10 @@ CODE_MODE_ON_NOTE = (
     "Code mode is on. Follow these repository instructions now; repository skills and "
     "write access load when this turn ends and the conversation continues automatically."
 )
+CODE_MODE_ON_OWN_NEXT_TURN_NOTE = (
+    "Code mode is on. Follow these repository instructions now; repository skills and "
+    "write access load on your next turn."
+)
 CODE_MODE_ON_NEXT_TURN_NOTE = (
     "Code mode is on. Repository instructions, skills and write access load on that chat's next turn."
 )
@@ -2575,7 +2579,12 @@ class CiaoControlPlane:
                 "text": ins.text,
                 "truncated": ins.truncated,
             }
-            result["note"] = CODE_MODE_ON_NOTE if continues else CODE_MODE_ON_NEXT_TURN_NOTE
+            if continues:
+                result["note"] = CODE_MODE_ON_NOTE
+            elif chat_id == principal.chat_id:
+                result["note"] = CODE_MODE_ON_OWN_NEXT_TURN_NOTE
+            else:
+                result["note"] = CODE_MODE_ON_NEXT_TURN_NOTE
         return _ok(result)
 
     def chat_send(self, principal: AgentPrincipal, chat_id: str, prompt: str) -> dict[str, Any]:
