@@ -21,6 +21,7 @@ from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.providers.opencode import OpencodeProvider, QuestionResponseResult
+from ciao.web.chat_streaming import ChatStream
 from ciao.web.project_chats import ProjectChatManager
 
 
@@ -100,9 +101,15 @@ async def test_respond_permission_keeps_matching_pending_without_ack(tmp_path: P
         "request_id": "req-1", "tool_name": "Bash", "message": "Approve use of Bash?", "tool_input": "",
     })
 
-    await pcm.respond_permission(chat.chat_id, request_id="req-1", approved=True, reason="")
+    pcm._broker.register(chat.chat_id, ChatStream(prompt_text="x"))
+
+    result = await pcm.respond_permission(
+        chat.chat_id, request_id="req-1", approved=True, reason=""
+    )
 
     # No provider acknowledgement means the persisted card stays retryable.
+    assert result.ok is False
+    assert result.retryable is True
     assert pcm._chats[chat.chat_id].pending_permission != ""
 
 
