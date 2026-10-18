@@ -163,9 +163,14 @@ ls ciao/stock/skills/ | grep -v '^gws-'
 
 For each one, check it appears in:
 
-- `ciao/stock/skills/ciao-capabilities/SKILL.md` — the right section, **and**
-  trigger keywords in the frontmatter `description`. A feature that is described
-  but not triggerable does not get found.
+- `ciao/stock/skills/ciao-capabilities/` — the feature goes in the matching
+  file under `references/` (the area table in `SKILL.md` says which: workspaces
+  and chats, memory, automations, files, models and extensions, tasks, install
+  and settings), and a new area gets a row in that table. Keep the `SKILL.md`
+  index under 10 KB and its frontmatter `description` under 1,024 characters
+  (`tests/test_stock_frontmatter.py` enforces both); add trigger keywords only
+  for questions about the feature, not for actions another skill performs. A
+  feature that is described but not triggerable does not get found.
 - `site/builtin.html` — the stock table, with a link to its `SKILL.md`. Verify
   the links resolve rather than assuming:
   ```bash
@@ -181,8 +186,8 @@ For each one, check it appears in:
   of one catalog, no test.
 
 **Capabilities** — for a user-facing feature, `ciao-capabilities` is the answer
-to "can you…?". After any feature that adds one: add the entry, add the
-trigger words, and skim the changelog since the last tag for features that
+to "can you…?". After any feature that adds one: add the entry to the right
+`references/` file, add the trigger words to the `SKILL.md` description, and skim the changelog since the last tag for features that
 shipped without one.
 
 ## 3. The marketing site

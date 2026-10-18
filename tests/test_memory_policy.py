@@ -35,6 +35,17 @@ def _stock(relative: str) -> str:
     return resources.files("ciao.stock").joinpath(relative).read_text(encoding="utf-8")
 
 
+def _capabilities() -> str:
+    """The capabilities index plus every reference file, as one string."""
+    root = resources.files("ciao.stock").joinpath("skills", "ciao-capabilities")
+    parts = [root.joinpath("SKILL.md").read_text(encoding="utf-8")]
+    parts += [
+        f.read_text(encoding="utf-8")
+        for f in sorted(root.joinpath("references").iterdir(), key=lambda f: f.name)
+    ]
+    return "\n".join(parts)
+
+
 def test_every_policy_row_declares_advisory_caps_only() -> None:
     """Acceptance: no shipped instruction claims a hard cap while it is advisory."""
     assert mp.CAP_SEMANTICS_ADVISORY == "advisory"
@@ -264,7 +275,7 @@ def test_care_report_makes_unresolved_audit_findings_locatable() -> None:
 
 
 def test_capabilities_skill_does_not_claim_nothing_is_durable_without_approval() -> None:
-    skill = _stock("skills/ciao-capabilities/SKILL.md")
+    skill = _capabilities()
     assert "nothing becomes durable without approval" not in skill
     assert "no unattended run promotes a new always-loaded fact" in skill
 
@@ -408,7 +419,7 @@ def test_the_remember_command_states_the_provenance_rule() -> None:
 def test_the_capabilities_catalog_describes_the_memory_backup() -> None:
     """The catalog has to name the three entry points a user will look for in
     Settings, and say that the engine then runs on its own."""
-    skill = " ".join(_stock("skills/ciao-capabilities/SKILL.md").split())
+    skill = " ".join(_stock("skills/ciao-capabilities/references/memory.md").split())
     assert "**Memory backup** (Settings → General → Memory backup)" in skill
     assert "**Set up in Ciaobot**" in skill
     assert "**Copy setup prompt**" in skill
@@ -423,7 +434,7 @@ def test_the_capabilities_catalog_describes_the_routing_without_overclaiming() -
     that the unattended run prepares rather than acts — otherwise the two
     surfaces tell a person opposite things about the same nightly run.
     """
-    skill = _stock("skills/ciao-capabilities/SKILL.md")
+    skill = _stock("skills/ciao-capabilities/references/models-and-extensions.md")
     assert "A reusable lesson in `Workspace/Learnings.md` routes the same way" in skill
     assert "an inventory match is a candidate, not proof" in skill
     assert "the issue body is sanitized" in skill
