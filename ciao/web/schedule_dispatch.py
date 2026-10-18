@@ -628,7 +628,7 @@ class ScheduleDispatcher:
         had_issue_placeholder = "{{ISSUE_REPORT}}" in prompt
         if had_issue_placeholder:
             from ciao.debug_report import build_issue_report
-            from ciao.startup_triage import TRIAGE_SCHEDULE_ID
+            from ciao.startup_triage import TRIAGE_SCHEDULE_ID, fence_safe_report
 
             # Exclude the triage's own past runs so a triage prompt built from
             # {{ISSUE_REPORT}} never re-triages its own recorded summary.
@@ -638,7 +638,7 @@ class ScheduleDispatcher:
                 exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
             )
             prompt = prompt.replace(
-                "{{ISSUE_REPORT}}", issue_report["report_text"]
+                "{{ISSUE_REPORT}}", fence_safe_report(issue_report["report_text"])
             )
 
         try:
