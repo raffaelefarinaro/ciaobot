@@ -656,6 +656,23 @@ def test_prompt_body_joins_core_and_capsule_in_one_envelope(tmp_path):
     assert _strip_context(text) == "Hello"
 
 
+def test_prompt_body_without_a_capsule_emits_one_pair_and_strips_to_the_prompt(tmp_path):
+    provider = _provider(tmp_path)
+    request = AgentRequest(prompt="Hello", model="", mode="bypass", provider="opencode")
+    text = provider._prompt_body(request, system="Core instructions")["text"]
+    assert text.count("[CIAO_CONTEXT_BEGIN]") == 1
+    assert text.count("[CIAO_CONTEXT_END]") == 1
+    assert _strip_context(text) == "Hello"
+
+
+def test_strip_prompt_context_handles_an_old_two_envelope_session():
+    old = (
+        "[CIAO_CONTEXT_BEGIN]\nCore instructions\n[CIAO_CONTEXT_END]\n\n"
+        "[CIAO_CONTEXT_BEGIN]\n<ciao-context>capsule</ciao-context>\n[CIAO_CONTEXT_END]\n\nHello"
+    )
+    assert _strip_context(old) == "Hello"
+
+
 @pytest.mark.asyncio
 async def test_new_session_turn_sends_one_envelope_per_v2_fixture_turn(tmp_path, monkeypatch):
     provider = _provider(tmp_path)

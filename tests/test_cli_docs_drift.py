@@ -174,7 +174,11 @@ def _named_leaves(words: list[str], leaves: set[Leaf]) -> tuple[list[Leaf], int]
 
 
 def prompt_problems(lines: list[str], surface: Surface) -> list[str]:
-    """Every command and flag the compact synopsis shows must exist in the parsers."""
+    """Every command and flag the compact synopsis shows must exist in the parsers.
+
+    A line naming several verbs (`task complete|delegate|link-chat`) is held to
+    every one of them: each flag shown must exist on each verb named.
+    """
     problems: list[str] = []
     for line in lines:
         words = line.replace("`", "").split()
@@ -182,10 +186,10 @@ def prompt_problems(lines: list[str], surface: Surface) -> list[str]:
         if not found:
             problems.append(f"prompt shows `{line}`, which is not a command")
             continue
-        shown = set(_FLAG.findall(" ".join(words[size:])))
-        known = set().union(*(surface[leaf][0] for leaf in found))
-        for flag in sorted(shown - known - {"--json"}):
-            problems.append(f"prompt: `{' '.join(words[:size])}` shows {flag}, which no named verb has")
+        shown = set(_FLAG.findall(" ".join(words[size:]))) - {"--json"}
+        for leaf in sorted(found):
+            for flag in sorted(shown - surface[leaf][0]):
+                problems.append(f"prompt: `{' '.join(leaf)}` is shown with {flag}, which it does not have")
     return problems
 
 
@@ -206,6 +210,18 @@ def test_prompt_synopsis_rejects_an_unknown_flag_or_verb() -> None:
     assert prompt_problems(["vault search QUERY [--nope N]"], surface)
     assert prompt_problems(["vault sarch QUERY"], surface)
     assert prompt_problems(["vault search QUERY [--limit N]"], surface) == []
+
+
+def test_prompt_synopsis_holds_every_named_verb_to_every_flag() -> None:
+    """The lines #1464 first shipped: a flag valid on only one of the verbs named."""
+    agent, operator = _all_leaves()
+    surface = {**agent, **operator}
+    wrong_task = "task update|move|complete|delegate|add-update|link-chat ID --revision REV [--to STATUS] [--text-file F]"
+    assert any("--to" in p for p in prompt_problems([wrong_task], surface))
+    assert prompt_problems(["vault review list|show|keep [--candidate ID]"], surface)
+    assert prompt_problems(["vault review list --candidate ID"], surface)
+    assert prompt_problems(["vault review show PATH"], surface) == []
+    assert prompt_problems(["task move ID --revision REV --to backlog"], surface) == []
 
 
 def test_skill_tables_match_the_parsers() -> None:

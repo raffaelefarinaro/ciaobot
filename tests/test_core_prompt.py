@@ -175,3 +175,6 @@ def test_rules_carry_a_reason_in_the_same_bullet() -> None:
     assert "bypasses those guards" in bullet("Do not use curl")
     assert "agent surface" in bullet("Do not use curl")
     assert "outside Ciaobot's schedule list" in bullet("provider-native recurring automations")
+    assert "cannot be undone or are seen by others" in bullet("destructive git operations")
+    assert "output lands in transcripts and replies" in bullet("never quote or repeat credentials")
+    assert "public and permanent" in bullet("Public GitHub issues")
