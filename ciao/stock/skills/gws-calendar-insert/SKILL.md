@@ -1,6 +1,6 @@
 ---
 name: gws-calendar-insert
-description: "Use to create a new calendar event, optionally with attendees and a Meet link."
+description: "Use to create a new calendar event, meeting or appointment, optionally with attendees and a Meet link."
 metadata:
   version: 0.22.5
 ---

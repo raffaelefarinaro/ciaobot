@@ -1,6 +1,6 @@
 ---
 name: gws-shared
-description: "Use when running any Google Workspace command in Ciaobot (Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks): load first for auth through the Ciaobot wrapper and write rules."
+description: "Use when running any Google Workspace command in Ciaobot (Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks): load first for auth through the Ciaobot wrapper and the confirm-before-write rules."
 metadata:
   version: 0.22.5
 ---

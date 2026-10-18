@@ -1,6 +1,6 @@
 ---
 name: gws-calendar-agenda
-description: "Use to show upcoming events across all calendars (today, this week, the next N days)."
+description: "Use to show upcoming events across all calendars (today, tomorrow, this week, the next N days)."
 metadata:
   version: 0.22.5
 ---

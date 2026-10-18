@@ -73,7 +73,7 @@ _DESCRIPTIONS = {
     "gws-shared": (
         "Use when running any Google Workspace command in Ciaobot (Gmail, Calendar, Drive, "
         "Docs, Sheets, Slides, Forms, Tasks): load first for auth through the Ciaobot wrapper and "
-        "write rules."
+        "the confirm-before-write rules."
     ),
     "gws-gmail": (
         "Use when you need the raw Gmail API (labels, drafts, threads, history, settings); "
@@ -88,9 +88,9 @@ _DESCRIPTIONS = {
         "Use to read one email's body or headers once you have its message ID "
         "(find IDs with gws-gmail-triage)."
     ),
-    "gws-gmail-reply": "Use to reply only to the sender of a message, keeping the thread.",
+    "gws-gmail-reply": "Use to reply only to the sender of a message, keeping the thread; needs the message ID (find it with gws-gmail-triage).",
     "gws-gmail-reply-all": (
-        "Use to reply to everyone on a message (sender, To and Cc), keeping the thread."
+        "Use to reply to everyone on a message (sender, To and Cc), keeping the thread; needs the message ID (find it with gws-gmail-triage)."
     ),
     "gws-gmail-forward": "Use to forward an existing message to new recipients.",
     "gws-calendar": (
@@ -99,9 +99,9 @@ _DESCRIPTIONS = {
         "gws-calendar-insert."
     ),
     "gws-calendar-agenda": (
-        "Use to show upcoming events across all calendars (today, this week, the next N days)."
+        "Use to show upcoming events across all calendars (today, tomorrow, this week, the next N days)."
     ),
-    "gws-calendar-insert": "Use to create a new calendar event, optionally with attendees and a Meet link.",
+    "gws-calendar-insert": "Use to create a new calendar event, meeting or appointment, optionally with attendees and a Meet link.",
     "gws-docs": (
         "Use to read a Google Doc, or to edit it beyond appending (raw Docs API); to append "
         "text use gws-docs-write."
@@ -136,7 +136,41 @@ _DISCOVERY_NEW = (
 )
 
 # One clause per API method: the first sentence, without the doc-link tail.
-_API_BULLET = re.compile(r"(?m)^(  - `[^`]+` — .*?[.)`a-z0-9])\. (?=[A-Z]).*$")
+# Sentences that state a destructive or hidden effect are never trimmed away.
+_API_BULLET_START = re.compile(r"  - `[^`]+` — ")
+_SENTENCE_SPLIT = re.compile(r"(?<=\.) (?=[A-Z])")
+_EFFECT_SENTENCE = re.compile(r"delet|clear|remov|permanent|trash|hidden|empt", re.IGNORECASE)
+
+
+def trim_api_descriptions(text: str) -> str:
+    """Cut each API-method bullet to its first sentence plus any destructive-effect sentences.
+
+    A bullet's wrapped continuation lines (up to the next bullet, heading or
+    blank line) are folded into it before trimming, so no orphan fragments
+    stay behind. Sentences that mention deleting, clearing, removing,
+    trashing, hiding or permanence are kept.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if not _API_BULLET_START.match(line):
+            out.append(line)
+            continue
+        parts = [line]
+        while i < len(lines) and lines[i].strip() and not lines[i].startswith(("  - ", "#")):
+            parts.append(lines[i].strip())
+            i += 1
+        sentences = _SENTENCE_SPLIT.split(" ".join(parts))
+        kept = [sentences[0]] + [
+            sentence
+            for sentence in sentences[1:]
+            if _EFFECT_SENTENCE.search(sentence) and not sentence.startswith("For more information")
+        ]
+        out.append(" ".join(kept))
+    return "\n".join(out)
 
 _CALENDAR_INSERT_FIXES = (
     (
@@ -342,7 +376,7 @@ def curate_gws_skill(name: str, text: str) -> str:
         if name in _DESCRIPTIONS:
             text = _set_description(text, _DESCRIPTIONS[name])
         text = _DISCOVERY_BLOCK.sub(_DISCOVERY_NEW, text)
-        text = _API_BULLET.sub(r"\1.", text)
+        text = trim_api_descriptions(text)
         if name == "gws-calendar-insert":
             for old, new in _CALENDAR_INSERT_FIXES:
                 text = text.replace(old, new)

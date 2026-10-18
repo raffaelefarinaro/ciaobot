@@ -296,8 +296,14 @@ def test_overlapping_gws_descriptions_route_to_the_right_skill() -> None:
     assert "from:" in desc["gws-gmail-triage"]
     assert "only to the sender" in desc["gws-gmail-reply"]
     assert "everyone" in desc["gws-gmail-reply-all"]
-    assert "gws-gmail-triage" in desc["gws-gmail-read"] or "message ID" in desc["gws-gmail-read"]
-    assert "+" in desc["gws-gmail"] or "helper" in desc["gws-gmail"]
+    assert "gws-gmail-triage" in desc["gws-gmail-read"]
+    assert "message ID" in desc["gws-gmail-read"]
+    assert "message ID" in desc["gws-gmail-reply"]
+    assert "message ID" in desc["gws-gmail-reply-all"]
+    assert "+ helper" in desc["gws-gmail"]
+    assert "tomorrow" in desc["gws-calendar-agenda"]
+    assert "meeting or appointment" in desc["gws-calendar-insert"]
+    assert "confirm-before-write" in desc["gws-shared"]
     assert "gws-sheets-read" in desc["gws-sheets"]
     assert desc["gws-shared"].startswith("Use when")
 
@@ -345,3 +351,36 @@ def test_calendar_insert_uses_one_time_format_and_real_examples() -> None:
     assert "RFC3339" in text
     assert "--start ..." not in text
     assert "--end ..." not in text
+
+
+def test_api_trim_keeps_destructive_effect_sentences() -> None:
+    text = (
+        "### calendars\n\n"
+        "  - `clear` — Clears a primary calendar. This operation deletes all events on it. "
+        "For more information, see [x](https://x).\n"
+        "  - `delete` — Deletes a secondary calendar. Use calendars.clear for primary calendars.\n"
+        "  - `clear` — Clears a task list. All tasks are marked as hidden. Extra detail.\n"
+        "  - `get` — Gets by ID. For more information, see [x](https://x).\n"
+        "  - `transferOwnership` — Transfers a calendar. Requires scopes:\n"
+        "- https://www.googleapis.com/auth/calendar \n"
+        "- https://www.googleapis.com/auth/calendar.calendars In the request, set it. "
+        "Disabled or deleted calendars aren't supported.\n"
+        "  - `list` — Lists them.\n\n"
+    )
+    out = gws_skills.trim_api_descriptions(text)
+    assert "deletes all events on it." in out
+    assert "Use calendars.clear for primary calendars." in out
+    assert "marked as hidden." in out
+    assert "Extra detail" not in out
+    assert "  - `get` — Gets by ID.\n" in out
+    assert "For more information" not in out
+    assert "googleapis.com/auth" not in out
+    assert "deleted calendars aren't supported." in out
+    assert "  - `list` — Lists them.\n" in out
+    assert gws_skills.trim_api_descriptions(out) == out
+
+
+def test_curated_skills_have_no_doc_link_tails_or_orphan_lines() -> None:
+    for name, text in _curated_stock().items():
+        assert "For more information" not in text, name
+        assert "- https://www.googleapis.com/auth" not in text, name

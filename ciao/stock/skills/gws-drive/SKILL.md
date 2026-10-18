@@ -29,7 +29,7 @@ ciao gws "$GWS_PROFILE" drive <resource> <method> [flags]
 
 ### accessproposals
 
-  - `get` — Retrieves an access proposal by ID. For more information, see [Manage pending access proposals](https://developers.google.com/workspace/drive/api/guides/pending-access).
+  - `get` — Retrieves an access proposal by ID.
   - `list` — List the access proposals on a file.
   - `resolve` — Approves or denies an access proposal.
 
@@ -39,7 +39,7 @@ ciao gws "$GWS_PROFILE" drive <resource> <method> [flags]
   - `cancel` — Cancels an approval.
   - `comment` — Comments on an approval.
   - `decline` — Declines an approval.
-  - `get` — Gets an approval by ID. For more information, see [Manage approvals](https://developers.google.com/workspace/drive/api/guides/approvals).
+  - `get` — Gets an approval by ID.
   - `list` — Lists the approvals on a file.
   - `reassign` — Reassigns the reviewers on an approval.
   - `start` — Starts an approval on a file.
@@ -63,14 +63,14 @@ ciao gws "$GWS_PROFILE" drive <resource> <method> [flags]
 
   - `create` — Creates a comment on a file.
   - `delete` — Deletes a comment.
-  - `get` — Gets a comment by ID. For more information, see [Manage comments and replies](https://developers.google.com/workspace/drive/api/guides/manage-comments).
+  - `get` — Gets a comment by ID.
   - `list` — Lists a file's comments.
   - `update` — Updates a comment with patch semantics.
 
 ### drives
 
   - `create` — Creates a shared drive.
-  - `get` — Gets a shared drive's metadata by ID. For more information, see [Manage shared drives](https://developers.google.com/workspace/drive/api/guides/manage-shareddrives).
+  - `get` — Gets a shared drive's metadata by ID.
   - `hide` — Hides a shared drive from the default view.
   - `list` — Lists the user's shared drives.
   - `unhide` — Restores a shared drive to the default view.
@@ -84,8 +84,8 @@ ciao gws "$GWS_PROFILE" drive <resource> <method> [flags]
   - `export` — Exports a Google Workspace document to the requested MIME type and returns exported byte content.
   - `generateCseToken` — Generates a CSE token which can be used to create or update CSE files.
   - `generateIds` — Generates a set of file IDs which can be provided in create or copy requests.
-  - `get` — Gets a file's metadata or content by ID. For more information, see [Search for files and folders](https://developers.google.com/workspace/drive/api/guides/search-files).
-  - `list` — Lists the user's files.
+  - `get` — Gets a file's metadata or content by ID.
+  - `list` — Lists the user's files. This method returns *all* files by default, including trashed files. If you don't want trashed files to appear in the list, use the `trashed=false` query parameter to remove trashed files from the results.
   - `listLabels` — Lists the labels on a file.
   - `modifyLabels` — Modifies the set of labels applied to a file.
   - `update` — Updates a file's metadata, content, or both.
@@ -99,7 +99,7 @@ ciao gws "$GWS_PROFILE" drive <resource> <method> [flags]
 
   - `create` — Creates a permission for a file or shared drive.
   - `delete` — Deletes a permission.
-  - `get` — Gets a permission by ID. For more information, see [Share files, folders, and drives](https://developers.google.com/workspace/drive/api/guides/manage-sharing).
+  - `get` — Gets a permission by ID.
   - `list` — Lists a file's or shared drive's permissions.
   - `update` — Updates a permission with patch semantics.
 
@@ -107,14 +107,14 @@ ciao gws "$GWS_PROFILE" drive <resource> <method> [flags]
 
   - `create` — Creates a reply to a comment.
   - `delete` — Deletes a reply.
-  - `get` — Gets a reply by ID. For more information, see [Manage comments and replies](https://developers.google.com/workspace/drive/api/guides/manage-comments).
+  - `get` — Gets a reply by ID.
   - `list` — Lists a comment's replies.
   - `update` — Updates a reply with patch semantics.
 
 ### revisions
 
-  - `delete` — Permanently deletes a file version.
-  - `get` — Gets a revision's metadata or content by ID. For more information, see [Manage file revisions](https://developers.google.com/workspace/drive/api/guides/manage-revisions).
+  - `delete` — Permanently deletes a file version. You can only delete revisions for files with binary content in Google Drive, like images or videos. Revisions for other files, like Google Docs or Sheets, and the last remaining file version can't be deleted.
+  - `get` — Gets a revision's metadata or content by ID.
   - `list` — Lists a file's revisions.
   - `update` — Updates a revision with patch semantics.
 

@@ -18,7 +18,7 @@ ciao gws "$GWS_PROFILE" forms <resource> <method> [flags]
 ### forms
 
   - `batchUpdate` — Change the form with a batch of updates.
-  - `create` — Create a new form using the title given in the provided form message in the request. *Important:* Only the form.info.title and form.info.document_title fields are copied to the new form.
+  - `create` — Create a new form using the title given in the provided form message in the request. *Important:* Only the form.info.title and form.info.document_title fields are copied to the new form. To create a new form and add items, you must first call forms.create to create an empty form with a title and (optional) document title, and then call forms.update to add the items.
   - `get` — Get a form.
   - `setPublishSettings` — Updates the publish settings of a form.
   - `responses` — Operations on the 'responses' resource

@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-reply-all
-description: "Use to reply to everyone on a message (sender, To and Cc), keeping the thread."
+description: "Use to reply to everyone on a message (sender, To and Cc), keeping the thread; needs the message ID (find it with gws-gmail-triage)."
 metadata:
   version: 0.22.5
 ---

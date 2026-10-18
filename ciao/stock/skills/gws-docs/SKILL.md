@@ -25,7 +25,7 @@ ciao gws "$GWS_PROFILE" docs <resource> <method> [flags]
 
 ### documents
 
-  - `batchUpdate` — Applies one or more updates to the document.
+  - `batchUpdate` — Applies one or more updates to the document. Other requests do not need to return information; these each return an empty reply.
   - `create` — Creates a blank document using the title given in the request.
   - `get` — Gets the latest version of the specified document.
 

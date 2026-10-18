@@ -24,10 +24,10 @@ ciao gws "$GWS_PROFILE" sheets <resource> <method> [flags]
 
 ### spreadsheets
 
-  - `batchUpdate` — Applies one or more updates to the spreadsheet.
+  - `batchUpdate` — Applies one or more updates to the spreadsheet. For example, if you applied 4 updates and the 3rd one had a reply, then the response will have 2 empty replies, the actual reply, and another empty reply, in that order.
   - `create` — Creates a spreadsheet, returning the newly created spreadsheet.
-  - `get` — Returns the spreadsheet at the given ID. The caller must specify the spreadsheet ID. By default, data within grids is not returned.
-  - `getByDataFilter` — Returns the spreadsheet at the given ID. The caller must specify the spreadsheet ID. For more information, see [Read, write, and search metadata](https://developers.google.com/workspace/sheets/api/guides/metadata).
+  - `get` — Returns the spreadsheet at the given ID.
+  - `getByDataFilter` — Returns the spreadsheet at the given ID.
   - `developerMetadata` — Operations on the 'developerMetadata' resource
   - `sheets` — Operations on the 'sheets' resource
   - `values` — Operations on the 'values' resource

@@ -44,17 +44,14 @@ ciao gws "$GWS_PROFILE" calendar <resource> <method> [flags]
 
 ### calendars
 
-  - `clear` — Clears a primary calendar.
-  - `delete` — Deletes a secondary calendar.
+  - `clear` — Clears a primary calendar. This operation deletes all events associated with the primary calendar of an account.
+  - `delete` — Deletes a secondary calendar. Use calendars.clear for clearing all events on primary calendars.
   - `get` — Returns metadata for a calendar.
   - `insert` — Creates a secondary calendar.
-The authenticated user for the request is made the data owner of the new calendar.
 
 Note: We recommend to authenticate as the intended data owner of the calendar. You can use domain-wide delegation of authority to allow applications to act on behalf of a specific user. Don't use a service account for authentication. If you use a service account for authentication, the service account is the data owner, which can lead to unexpected behavior.
   - `patch` — Updates metadata for a calendar.
-  - `transferOwnership` — Transfers a secondary calendar between users within a Google Workspace organization.
-- https://www.googleapis.com/auth/calendar 
-- https://www.googleapis.com/auth/calendar.calendars In the request, set useAdminAccess to true. The secondary calendar must be active to be transferred. Transferring disabled or deleted calendars isn't supported.
+  - `transferOwnership` — Transfers a secondary calendar between users within a Google Workspace organization. Transferring disabled or deleted calendars isn't supported.
   - `update` — Updates metadata for a calendar.
 
 ### channels
@@ -68,9 +65,8 @@ Note: We recommend to authenticate as the intended data owner of the calendar. Y
 ### events
 
   - `delete` — Deletes an event.
-  - `get` — Returns an event based on its Google Calendar ID. To retrieve an event using its iCalendar ID, call the events.list method using the iCalUID parameter.
+  - `get` — Returns an event based on its Google Calendar ID.
   - `import` — Imports an event.
-Deprecated behavior: If a non-default event is imported, its type will be changed to default and any event-type-specific properties it may have will be dropped.
   - `insert` — Creates an event.
   - `instances` — Returns instances of the specified recurring event.
   - `list` — Returns events on the specified calendar.

@@ -17,7 +17,7 @@ ciao gws "$GWS_PROFILE" slides <resource> <method> [flags]
 
 ### presentations
 
-  - `batchUpdate` — Applies one or more updates to the presentation.
+  - `batchUpdate` — Applies one or more updates to the presentation. Other requests do not need to return information; these each return an empty reply.
   - `create` — Creates a blank presentation using the title given in the request.
   - `get` — Gets the latest version of the specified presentation.
   - `pages` — Operations on the 'pages' resource
