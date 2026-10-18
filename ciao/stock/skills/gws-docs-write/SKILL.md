@@ -1,6 +1,6 @@
 ---
 name: gws-docs-write
-description: "Google Docs: Append text to a document."
+description: "Use to append text to the end of a Google Doc."
 metadata:
   version: 0.22.5
 ---
