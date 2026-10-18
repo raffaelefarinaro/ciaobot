@@ -171,7 +171,7 @@ def test_restart_and_stop_require_confirmation_for_active_chats(
     monkeypatch,
 ) -> None:
     runtime = _runtime(tmp_path)
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: ["chat-1"])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [{"chat_id": "chat-1", "reasons": ["streaming"]}])
     calls: list[list[str]] = []
 
     restart = macos_service.restart_service(
@@ -186,13 +186,13 @@ def test_restart_and_stop_require_confirmation_for_active_chats(
     assert restart.ok is False
     assert restart.details["requires_confirmation"] is True
     assert stop.ok is False
-    assert stop.details["active_chat_ids"] == ["chat-1"]
+    assert stop.details["restart_blockers"] == [{"chat_id": "chat-1", "reasons": ["streaming"]}]
     assert calls == []
 
 
 def test_force_stop_boots_out_server(tmp_path: Path, monkeypatch) -> None:
     runtime = _runtime(tmp_path)
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: ["chat-1"])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [{"chat_id": "chat-1", "reasons": ["streaming"]}])
     calls: list[list[str]] = []
 
     result = macos_service.stop_service(
@@ -646,7 +646,7 @@ def test_update_engine_requires_confirmation_before_upgrading_active_chats(
     tmp_path: Path, monkeypatch
 ) -> None:
     runtime = _runtime(tmp_path)
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: ["chat-1"])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [{"chat_id": "chat-1", "reasons": ["streaming"]}])
     monkeypatch.setattr(
         "ciao.package_version.update_package",
         lambda: (_ for _ in ()).throw(AssertionError("upgrade must not start")),
@@ -656,7 +656,7 @@ def test_update_engine_requires_confirmation_before_upgrading_active_chats(
 
     assert result.ok is False
     assert result.details["requires_confirmation"] is True
-    assert result.details["active_chat_ids"] == ["chat-1"]
+    assert result.details["restart_blockers"] == [{"chat_id": "chat-1", "reasons": ["streaming"]}]
 
 
 def test_update_engine_surfaces_already_current_for_a_noop_upgrade(
@@ -966,7 +966,7 @@ def test_restart_reloads_the_definition_when_the_plist_was_edited(
 ) -> None:
     runtime = _runtime(tmp_path)
     _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [])
     monkeypatch.delenv("CIAO_CHAT_ID", raising=False)
     monkeypatch.setattr(macos_service, "_sleep", lambda _s: None)
     calls: list[list[str]] = []
@@ -991,7 +991,7 @@ def test_reload_waits_for_launchd_to_forget_the_job_before_bootstrap(
 ) -> None:
     runtime = _runtime(tmp_path)
     _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [])
     monkeypatch.delenv("CIAO_CHAT_ID", raising=False)
     sleeps: list[float] = []
     monkeypatch.setattr(macos_service, "_sleep", sleeps.append)
@@ -1013,7 +1013,7 @@ def test_reload_times_out_without_bootstrapping_a_half_dead_job(
 ) -> None:
     runtime = _runtime(tmp_path)
     _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [])
     monkeypatch.delenv("CIAO_CHAT_ID", raising=False)
     sleeps: list[float] = []
     monkeypatch.setattr(macos_service, "_sleep", sleeps.append)
@@ -1035,7 +1035,7 @@ def test_reload_times_out_without_bootstrapping_a_half_dead_job(
 def test_reload_is_refused_from_inside_a_chat_shell(tmp_path: Path, monkeypatch) -> None:
     runtime = _runtime(tmp_path)
     _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/new/bin/python"])
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [])
     monkeypatch.setenv("CIAO_CHAT_ID", "chat-1")
     calls: list[list[str]] = []
 
@@ -1053,7 +1053,7 @@ def test_reload_is_refused_from_inside_a_chat_shell(tmp_path: Path, monkeypatch)
 def test_kickstart_still_restarts_from_inside_a_chat_shell(tmp_path: Path, monkeypatch) -> None:
     runtime = _runtime(tmp_path)
     _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [])
     monkeypatch.setenv("CIAO_CHAT_ID", "chat-1")
     calls: list[list[str]] = []
 
@@ -1071,7 +1071,7 @@ def test_restart_kickstarts_when_the_loaded_definition_matches(
 ) -> None:
     runtime = _runtime(tmp_path)
     _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [])
     calls: list[list[str]] = []
 
     result = macos_service.restart_service(
@@ -1091,7 +1091,7 @@ def test_restart_kickstarts_when_the_job_is_not_loaded(tmp_path: Path, monkeypat
     # Nothing is loaded to compare against, so restart keeps today's kickstart.
     runtime = _runtime(tmp_path)
     _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port: [])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [])
     calls: list[list[str]] = []
 
     macos_service.restart_service(
@@ -1137,3 +1137,61 @@ def test_load_server_plist_defaults_to_the_isolated_launch_agents_dir() -> None:
         plistlib.dump({"ProgramArguments": ["/x", "serve"]}, handle)
 
     assert macos_service.load_server_plist() == {"ProgramArguments": ["/x", "serve"]}
+
+
+def test_gate_refuses_when_blockers_cannot_be_read(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+
+    def unreadable(_port: int) -> list[dict[str, object]]:
+        raise macos_service.RestartBlockersUnavailable("the engine answered HTTP 404")
+
+    monkeypatch.setattr(macos_service, "restart_blockers", unreadable)
+    calls: list[list[str]] = []
+
+    refused = macos_service.stop_service(runtime=runtime, runner=_runner(calls))
+
+    assert refused.ok is False
+    assert refused.details["restart_blockers"] is None
+    assert refused.details["requires_confirmation"] is True
+    assert "--force" in refused.message
+    assert calls == []
+
+    forced = macos_service.stop_service(runtime=runtime, force=True, runner=_runner(calls))
+
+    assert forced.details.get("requires_confirmation") is not True
+    assert calls
+
+
+def test_restart_blockers_returns_empty_when_engine_is_down(monkeypatch) -> None:
+    import urllib.error
+
+    def refuse(*_args, **_kwargs):
+        raise urllib.error.URLError(ConnectionRefusedError())
+
+    monkeypatch.setattr(macos_service.urllib.request, "urlopen", refuse)
+
+    assert macos_service.restart_blockers(8543) == []
+
+
+def test_restart_blockers_raises_on_http_error(monkeypatch) -> None:
+    import urllib.error
+
+    def not_found(*_args, **_kwargs):
+        raise urllib.error.HTTPError("http://x", 404, "nf", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(macos_service.urllib.request, "urlopen", not_found)
+
+    with pytest.raises(macos_service.RestartBlockersUnavailable, match="404"):
+        macos_service.restart_blockers(8543)
+
+
+def test_status_reports_restart_blockers(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path)
+    blockers = [{"chat_id": "chat-1", "reasons": ["open_question"]}]
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: True)
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: blockers)
+
+    result = macos_service.service_status(runtime=runtime, uid=501, runner=_launchd_runner([], ""))
+
+    assert result.details["restart_blockers"] == blockers
+    assert result.message.endswith("1 chat(s) would be interrupted by a restart.")

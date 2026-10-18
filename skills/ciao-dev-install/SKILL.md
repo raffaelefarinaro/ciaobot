@@ -68,9 +68,11 @@ From the JSON, note:
   skill repoints the plist, which switches the daily-driver service over to
   `develop`. Back the old plist up (`cp …/com.ciao.server.plist …plist.bak.devinstall`)
   so the release install is one command away.
-- `active_chat_ids` — **non-empty means live chats/background agents are
-  running.** Ask the user to let them finish (or confirm explicitly) before
-  proceeding; the restart happens underneath them. `ciao service restart` and
+- `restart_blockers` — a list of `{chat_id, reasons}`. **Non-empty means a
+  restart would interrupt chats** (working, or waiting on an open
+  question/approval card); `null` means the engine could not be asked, which
+  should be treated as blocked. Ask the user to let them finish (or confirm
+  explicitly) before proceeding; the restart happens underneath them. `ciao service restart` and
   `ciao service stop` enforce the same gate with a `--force` escape hatch —
   never pass `--force` silently.
 - `loaded`/`installed` — sanity check that the engine you are about to replace
@@ -157,7 +159,7 @@ fi
 
 ### 4. Restart the service
 
-Gate on active chats first, then restart:
+Gate on restart blockers first, then restart:
 
 ```bash
 tmp=$(mktemp)
@@ -165,10 +167,10 @@ tmp=$(mktemp)
 python3 - "$tmp" <<'EOF'
 import json, sys
 data = json.loads(open(sys.argv[1]).read())["details"]
-active = data.get("active_chat_ids")
-if active:
-    raise SystemExit(f"Active chats still running: {active}")
-print("no active chats - clear to restart")
+blockers = data.get("restart_blockers")
+if blockers is None or blockers:
+    raise SystemExit(f"Restart would interrupt: {blockers}")
+print("no restart blockers - clear to restart")
 EOF
 [ $? -eq 0 ] && .venv/bin/ciao service restart
 ```

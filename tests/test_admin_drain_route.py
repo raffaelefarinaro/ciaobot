@@ -65,7 +65,7 @@ def test_drain_closes_admission_and_reports_active_chats() -> None:
 
     assert resp.status_code == 200
     assert resp.json() == {"draining": True, "active_chat_ids": ["c-1", "c-2"]}
-    # The caller polls by asking again rather than reading /api/active-chats,
+    # The caller polls by asking again rather than reading a separate chat list,
     # so the drain has to have actually happened rather than merely be
     # acknowledged — and asking again must stay idempotent.
     again = client.post("/api/admin/drain")

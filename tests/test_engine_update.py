@@ -1251,7 +1251,7 @@ def test_apply_drains_then_bootstraps_updater(tmp_path: Path) -> None:
     result = _apply(engine, state)
 
     # The drain is polled by POSTing it again rather than by reading
-    # `/api/active-chats`, which a client-mode node would forward to the host.
+    # a separate chat list.
     # Every request the engine saw is the drain itself.
     assert engine.posts == [f"{BASE}/api/admin/drain"] * 5
     assert result.phase == "applying"

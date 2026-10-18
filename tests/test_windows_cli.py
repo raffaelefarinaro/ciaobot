@@ -116,7 +116,7 @@ def _on_windows(
         service_backend, "current_backend", service_backend.WindowsBackend
     )
     monkeypatch.setattr(macos_service, "server_reachable", lambda _port, **_kw: False)
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port, **_kw: [])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port, **_kw: [])
     return _Schtasks(registered=registered, end_fails=end_fails).install(monkeypatch)
 
 
@@ -382,11 +382,11 @@ def test_service_stop_refuses_while_a_chat_is_active(
     """/End is a hard stop, so an active chat needs --force, exactly as on macOS."""
 
     _schtasks = _on_windows(monkeypatch, tmp_path, registered=True)
-    monkeypatch.setattr(macos_service, "active_chat_ids", lambda _port, **_kw: ["chat-1"])
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port, **_kw: [{"chat_id": "chat-1", "reasons": ["streaming"]}])
 
     assert cli.main(["service", "stop"]) == 1
 
-    assert "Active chats must be confirmed" in capsys.readouterr().err
+    assert "would be interrupted must be confirmed" in capsys.readouterr().err
     assert _schtasks.calls == []
 
     assert cli.main(["service", "stop", "--force"]) == 0

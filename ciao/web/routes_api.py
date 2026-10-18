@@ -5824,20 +5824,6 @@ async def _cached_update_hint(request: Request) -> tuple[str, bool]:
     return getattr(app.state, "update_hint", ("", False))
 
 
-async def active_chats_endpoint(request: Request) -> JSONResponse:
-    """Return chat IDs with in-flight work (streaming or background subagents).
-
-    Drives the macOS menu bar: it spins the icon while anything is working and
-    marks those chats in the open-chats list. Unauthenticated like the
-    startup-status endpoint, since the local menu bar process has no session;
-    it only leaks opaque chat IDs, not their contents.
-    """
-    pcm = getattr(request.app.state, "project_chat_manager", None)
-    if pcm is None:
-        return JSONResponse({"active_chat_ids": []})
-    return JSONResponse({"active_chat_ids": pcm.active_chat_ids()})
-
-
 def _menubar_chat_needs_input(pending_question: str, pending_permission: str = "") -> bool:
     """True when AskUserQuestion JSON or an Approve/Deny prompt is waiting."""
     if (pending_permission or "").strip():
@@ -5859,9 +5845,8 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     """Open-chat summaries for the macOS menu bar.
 
     Usable without a session, but only from a loopback peer (the tray holds no
-    session cookie) — see ``_LOOPBACK_ONLY_API`` in ``ciao.web.auth``. Unlike
-    ``/api/active-chats`` this returns titles and workspace names, so it must
-    not be reachable from the network.
+    session cookie) — see ``_LOOPBACK_ONLY_API`` in ``ciao.web.auth``. It
+    returns titles and workspace names, so it must not be reachable from the network.
     """
     limit_raw = request.query_params.get("limit", "10")
     try:
@@ -6795,6 +6780,14 @@ async def admin_drain_cancel(request: Request) -> JSONResponse:
     request.app.state.update_drain_active = False
     pcm.cancel_restart_drain()
     return JSONResponse({"draining": False})
+
+
+async def admin_restart_blockers(request: Request) -> JSONResponse:
+    """Chats a restart/stop would interrupt, reason-tagged. Loopback without session (ciao service gate) or with session (Settings)."""
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"restart_blockers": []})
+    return JSONResponse({"restart_blockers": pcm.restart_blockers()})
 
 
 async def admin_deploy(request: Request) -> JSONResponse:

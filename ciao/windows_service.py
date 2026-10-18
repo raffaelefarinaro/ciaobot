@@ -557,7 +557,7 @@ def start_service(workspace: Path | None = None) -> macos_service.ServiceResult:
 def stop_service(port: int, *, force: bool = False) -> macos_service.ServiceResult:
     """``/End`` the task. Active chats need ``force``, as on macOS."""
 
-    guard = _active_chat_guard(port, "stop", force)
+    guard = macos_service.restart_gate(port, "stop", force=force, details={"task": TASK_NAME})
     if guard is not None:
         return guard
     failure = _end_task("stop")
@@ -571,7 +571,7 @@ def stop_service(port: int, *, force: bool = False) -> macos_service.ServiceResu
 def restart_service(port: int, *, force: bool = False) -> macos_service.ServiceResult:
     """End the task, then run it again. Active chats need ``force``, as on macOS."""
 
-    guard = _active_chat_guard(port, "restart", force)
+    guard = macos_service.restart_gate(port, "restart", force=force, details={"task": TASK_NAME})
     if guard is not None:
         return guard
     # A task that was not running is not an error here: the point of a restart
@@ -614,20 +614,3 @@ def _failed(
     action: str, message: str, details: dict[str, Any] | None = None
 ) -> macos_service.ServiceResult:
     return macos_service.ServiceResult(False, action, message, details or {})
-
-
-def _active_chat_guard(port: int, action: str, force: bool) -> macos_service.ServiceResult | None:
-    """A refusal while chats are active, else None. ``/End`` is a hard stop."""
-
-    if force:
-        return None
-    active = macos_service.active_chat_ids(port)
-    if not active:
-        return None
-    return macos_service.ServiceResult(
-        False,
-        action,
-        "Active chats must be confirmed before "
-        f"{'stopping' if action == 'stop' else 'restarting'} the engine.",
-        {"active_chat_ids": active, "requires_confirmation": True, "task": TASK_NAME},
-    )

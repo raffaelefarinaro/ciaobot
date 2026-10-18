@@ -278,6 +278,13 @@ _BACKGROUND_WAKE_TAIL_LINES = 50
 # takes (ciao/providers/opencode.py::_ensure_server,
 # ciao/providers/claude.py::_ensure_connected).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
+RESTART_BLOCKER_REASONS = (
+    "streaming",
+    "background_agents",
+    "background_work",
+    "open_question",
+    "open_permission",
+)
 # How often the sweep runs. Well under the timeout so a provider is reclaimed
 # within roughly one interval of becoming eligible, and far above any per-turn
 # cadence so an idle install is not woken constantly.
@@ -4400,6 +4407,18 @@ class ProjectChatManager:
             except Exception:  # noqa: BLE001 — a sweep failure must not kill the loop
                 logger.exception("Idle provider sweep failed")
 
+    def _provider_background_busy(self, chat_id: str, service: Any) -> bool:
+        """Whether a provider still has background work a teardown would cut off."""
+        if service is None or not service.background_work_outstanding:
+            return False
+        # Same horizon as the drain: a server whose drain ended with work
+        # still outstanding stays up while its events are recent, then
+        # falls back to the idle timeout.
+        return bool(
+            self._streaming.has_live_drain(chat_id)
+            or service.background_activity_age < _OPENCODE_DRAIN_MAX_S
+        )
+
     def _provider_is_busy(self, chat_id: str, active: set[str]) -> bool:
         """Whether a chat has work that a provider teardown would interrupt.
 
@@ -4413,21 +4432,7 @@ class ProjectChatManager:
         # not work. Claude's background agents are counted by active_chat_ids,
         # a drain streaming a follow-up holds a broker stream, and opencode
         # reports its own outstanding work.
-        service = self._providers.get(chat_id)
-        if (
-            service is not None
-            and self._streaming.has_live_drain(chat_id)
-            and service.background_work_outstanding
-        ):
-            return True
-        if (
-            service is not None
-            and service.background_work_outstanding
-            # Same horizon as the drain: a server whose drain ended with work
-            # still outstanding stays up while its events are recent, then
-            # falls back to the idle timeout.
-            and service.background_activity_age < _OPENCODE_DRAIN_MAX_S
-        ):
+        if self._provider_background_busy(chat_id, self._providers.get(chat_id)):
             return True
         for tasks in (self._retry_tasks, self._background_wake_tasks):
             task = tasks.get(chat_id)
@@ -6305,6 +6310,34 @@ class ProjectChatManager:
         ids.update(self.background_agent_counts)
         ids.update(self._subagents.watching_chat_ids())
         return sorted(ids)
+
+    def restart_blockers(self) -> list[dict[str, Any]]:
+        """Chats a restart or stop would break, each with the reasons why. Superset of active_chat_ids()."""
+        reasons: dict[str, list[str]] = {}
+
+        def add(chat_id: str, reason: str) -> None:
+            tags = reasons.setdefault(chat_id, [])
+            if reason not in tags:
+                tags.append(reason)
+
+        for cid in self.active_stream_chat_ids():
+            add(cid, "streaming")
+        for cid in set(self.background_agent_counts) | set(self._subagents.watching_chat_ids()):
+            add(cid, "background_agents")
+        for cid, service in list(self._providers.items()):
+            if self._provider_background_busy(cid, service):
+                add(cid, "background_work")
+            chat = self._chats.get(cid)
+            if chat is None:
+                continue
+            if self._native_question_request_id(chat.pending_question):
+                add(cid, "open_question")
+            if self._native_question_request_id(chat.pending_permission):
+                add(cid, "open_permission")
+        return [
+            {"chat_id": cid, "reasons": sorted(reasons[cid], key=RESTART_BLOCKER_REASONS.index)}
+            for cid in sorted(reasons)
+        ]
 
     def begin_restart_drain(self) -> None:
         """Stop admitting new turns while existing chat work finishes.
