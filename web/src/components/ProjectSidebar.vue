@@ -1139,7 +1139,11 @@ function selectWorkspaceScope(workspace: string): void {
     void selectAutomationWorkspace(workspace)
     return
   }
-  void store.switchWorkspace(workspace, { transition: false })
+  // From a chat or project, switching lands on the new workspace's Home, the
+  // same as its number key. Views with no chat to leave stay where they are.
+  void store.switchWorkspace(workspace, {
+    transition: !props.mode || props.mode === 'chat' || props.mode === 'project',
+  })
 }
 
 function onWorkspaceMenuKeydown(event: KeyboardEvent): void {

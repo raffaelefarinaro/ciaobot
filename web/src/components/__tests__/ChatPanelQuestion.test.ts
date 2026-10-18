@@ -94,7 +94,7 @@ async function mountLayout(seed: { questions?: ReturnType<typeof makeQuestion>[]
     history: createMemoryHistory(),
     routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId', component: EmptyStub }],
   })
-  await router.push('/')
+  await router.push(`/chat/${CHAT_ID}`)
   await router.isReady()
 
   const store = useProjectStore()

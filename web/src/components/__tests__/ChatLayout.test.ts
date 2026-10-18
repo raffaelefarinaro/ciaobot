@@ -378,9 +378,9 @@ describe('ChatLayout', () => {
   it('keeps the mobile sidebar closed when the chat close button is clicked', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -785,9 +785,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -841,9 +841,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -956,9 +956,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1014,9 +1014,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1072,9 +1072,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1272,9 +1272,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1319,9 +1319,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1365,9 +1365,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1502,6 +1502,16 @@ describe('ChatLayout Home navigation clears the selected chat', () => {
     expect(store.activeChatId).toBe('chat-1')
     expect(wrapper.find('[data-testid="close-chat"]').exists()).toBe(true)
     expect(wrapper.find('.chat-split').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('a reload of Home does not reopen the chat restored from storage', async () => {
+    // The store restores `ciao-active-chat` when it is created, before the
+    // layout mounts, so a reload of `/` mounts with that chat selected.
+    const { wrapper, store } = await mountWithSelection('/')
+    expect(wrapper.find('.empty-shell').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="close-chat"]').exists()).toBe(false)
+    expect(store.activeChatId).toBeNull()
     wrapper.unmount()
   })
 
@@ -2389,9 +2399,9 @@ describe('ChatLayout PWA Option/Alt chords', () => {
   async function mountWebLayout() {
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
