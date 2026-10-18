@@ -181,3 +181,23 @@ def test_question_response_still_answers_when_no_control_plane_is_bound() -> Non
         result = ws.receive_json()
 
     assert result["ok"] is True
+
+
+def test_question_response_reports_delivered_as_message() -> None:
+    class _DeadFormManager(_Manager):
+        async def respond_question(self, _chat_id: str, **payload):
+            self.calls.append(payload)
+            return QuestionResponseResult(True, delivered_as_message=True)
+
+    manager = _DeadFormManager()
+    with signed_in(TestClient(_app(manager))).websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_json({
+            "type": "question_response",
+            "request_id": "form-1",
+            "action": "reply",
+            "answers": {"choice": ["yes"]},
+        })
+        result = ws.receive_json()
+
+    assert result["delivered_as_message"] is True
+    assert result["ok"] is True

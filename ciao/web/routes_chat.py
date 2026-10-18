@@ -275,6 +275,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                             "state": "cancelled" if action == "cancel" else "answered",
                             "error": result.error,
                             "retryable": result.retryable,
+                            **({"delivered_as_message": True} if result.delivered_as_message else {}),
                         })
                     except (WebSocketDisconnect, RuntimeError):
                         break

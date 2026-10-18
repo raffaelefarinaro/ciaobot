@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from unittest.mock import AsyncMock
@@ -857,6 +858,7 @@ def test_compaction_refused_while_a_native_question_is_open(tmp_path: Path) -> N
     chat = manager.create_chat(project.project_id)
     chat.session_id = "native-session"
     chat.pending_question = json.dumps({"request_id": "form-1"})
+    manager._providers[chat.chat_id] = SimpleNamespace(provider=object())  # type: ignore[assignment]
 
     with pytest.raises(ValueError, match="Answer the open question"):
         manager.start_stream(chat.chat_id, "/compact", compact=True)

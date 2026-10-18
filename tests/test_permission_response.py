@@ -52,6 +52,8 @@ def test_a_native_question_blocks_a_new_ordinary_turn(tmp_path: Path) -> None:
         "questions": [{"id": "choice", "question": "Continue?"}],
     })
 
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=object())  # type: ignore[assignment]
+
     with pytest.raises(ValueError, match="Answer the open question"):
         pcm.start_stream(chat.chat_id, "send around the form")
 
@@ -122,7 +124,7 @@ async def test_respond_permission_ignores_stale_reply_for_a_superseded_request(
 
 
 @pytest.mark.asyncio
-async def test_persisted_question_without_a_provider_is_retryable_and_retained(
+async def test_persisted_question_without_a_provider_cancel_clears_it(
     tmp_path: Path,
 ) -> None:
     pcm = _make_manager(tmp_path)
@@ -141,9 +143,8 @@ async def test_persisted_question_without_a_provider_is_retryable_and_retained(
         action="cancel",
     )
 
-    assert result.ok is False
-    assert result.retryable is True
-    assert json.loads(chat.pending_question)["request_id"] == "form-1"
+    assert result.ok is True
+    assert chat.pending_question == ""
 
 
 @pytest.mark.asyncio

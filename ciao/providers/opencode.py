@@ -1232,6 +1232,7 @@ class QuestionResponseResult:
     ok: bool
     error: str = ""
     retryable: bool = True
+    delivered_as_message: bool = False
 
 
 class _FormValidationError(ValueError):
