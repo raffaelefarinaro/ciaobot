@@ -122,6 +122,7 @@ def test_rebound_host_header_is_not_on_host(tmp_path: Path, monkeypatch: pytest.
     client, rec, _ = _client(tmp_path, monkeypatch, base_url=origin)
     response = client.post(PATH, json={"action": "gws-install"}, headers=_signed(client, origin))
     assert response.status_code == 403
+    assert response.json()["reason"] == "not_on_host"
     assert rec.launches == []
 
 
@@ -215,3 +216,33 @@ def test_launch_oserror_is_500(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     response = client.post(PATH, json={"action": "gws-install"}, headers=_signed(client))
     assert response.status_code == 500
     assert response.json()["reason"] == "launch_failed"
+
+
+def test_rebound_host_header_sees_not_on_host_on_get(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    origin = "http://evil.example:8443"
+    client, _, _ = _client(tmp_path, monkeypatch, base_url=origin)
+    body = client.get(PATH, headers=_signed(client, origin)).json()
+    assert body["available"] is False and body["reason"] == "not_on_host"
+
+
+def test_proxy_header_sees_not_on_host_on_get(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _, _ = _client(tmp_path, monkeypatch)
+    headers = {**_signed(client), "X-Forwarded-For": "203.0.113.9"}
+    body = client.get(PATH, headers=headers).json()
+    assert body["available"] is False and body["reason"] == "not_on_host"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"open": "folder", "chat_id": {"a": 1}},
+        {"open": "folder", "project_id": 5},
+        {"open": "folder", "chat_id": "c1", "project_id": ["p1"]},
+    ],
+)
+def test_non_string_ids_are_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: Any) -> None:
+    client, rec, _ = _client(tmp_path, monkeypatch)
+    response = client.post(PATH, json=body, headers=_signed(client))
+    assert response.status_code == 400
+    assert response.json()["reason"] == "bad_request"
+    assert rec.launches == []

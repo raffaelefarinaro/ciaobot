@@ -76,7 +76,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
 | POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
 | GET | `/api/host/terminal` | Can this browser open a terminal on the engine's machine: {available, platform, reason, terminal, actions}; a non-host browser gets available:false, reason:"not_on_host" |
-| POST | `/api/host/terminal` | Open a terminal on the engine's machine: {"action": <id>} runs one allowlisted command, {"open":"folder", chat_id?|project_id?} opens the chat's code-mode worktree, the project repo or the workspace agent root; 200 {ok, platform, launched}; 403 not_on_host; 409 unavailable_headless / no_terminal_found / unsupported_platform / folder_missing; 400 unknown_action |
+| POST | `/api/host/terminal` | Open a terminal on the engine's machine: {"action": <id>} runs one allowlisted command, {"open":"folder", chat_id?\|project_id?} opens the chat's code-mode worktree, the project repo or the workspace agent root; 200 {ok, platform, launched}; 403 not_on_host; 409 unavailable_headless / no_terminal_found / unsupported_platform / folder_missing; 400 unknown_action |
 | GET | `/api/file-history` | List snapshots for a `(chat_id, file_path)` |
 | GET | `/api/file-content` | Read one snapshot's content |
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |

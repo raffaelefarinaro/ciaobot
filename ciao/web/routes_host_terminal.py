@@ -69,6 +69,9 @@ async def host_terminal_launch(request: Request) -> JSONResponse:
         and keys & {"chat_id", "project_id"}
         and body["open"] == "folder"
     ):
+        for key in ("chat_id", "project_id"):
+            if key in body and not isinstance(body[key], str):
+                return _fail("bad_request", f"{key} must be a string", 400)
         try:
             folder = host_terminal.resolve_folder(
                 config,

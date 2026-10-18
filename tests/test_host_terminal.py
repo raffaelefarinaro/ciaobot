@@ -128,7 +128,7 @@ def test_windows_terminal_runs_the_command_in_powershell(
     monkeypatch.setattr(host_terminal, "SKILLS_UPDATE_COMMAND", "a; b")
     host_terminal.launch(tmp_path, action="skills-update", runtime_dir=tmp_path)
     argv = spawns.calls[0][0]
-    assert argv[-5:] == ["-NoExit", "-ExecutionPolicy", "RemoteSigned", "-Command", "a\; b"]
+    assert argv[-5:] == ["-NoExit", "-ExecutionPolicy", "RemoteSigned", "-Command", "a\\; b"]
 
 
 def test_windows_falls_back_to_a_powershell_console(
@@ -203,10 +203,11 @@ def test_terminal_env_drops_engine_secrets(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     monkeypatch.setenv("PWA_AUTH_TOKEN", "x")
     monkeypatch.setenv("CIAO_AGENT_TOKEN", "x")
+    monkeypatch.setenv("CIAO_MEMORY_DIR", "/x")
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "x")
     monkeypatch.setenv("HOME", "/home/me")
     env = host_terminal._terminal_env()
-    for key in ("ANTHROPIC_API_KEY", "PWA_AUTH_TOKEN", "CIAO_AGENT_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS"):
+    for key in ("ANTHROPIC_API_KEY", "PWA_AUTH_TOKEN", "CIAO_AGENT_TOKEN", "CIAO_MEMORY_DIR", "GOOGLE_APPLICATION_CREDENTIALS"):
         assert key not in env
     assert env["HOME"] == "/home/me"
     assert env["PATH"] == "/term/path"
@@ -291,3 +292,68 @@ def test_resolve_folder_unknown_chat_is_lookup_error(tmp_path: Path) -> None:
 def test_resolve_folder_needs_an_id(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         host_terminal.resolve_folder(_config(tmp_path), _Pcm({}, {}))
+
+
+def test_windows_terminal_escapes_a_semicolon_in_the_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spawns = _setup(monkeypatch, "win32", found={"wt", "powershell.exe"})
+    folder = tmp_path / "a;new-tab calc"
+    folder.mkdir()
+    host_terminal.launch(folder, action=None, runtime_dir=tmp_path)
+    argv, cwd, _env, _flags = spawns.calls[0]
+    assert argv == ["/bin/wt", "-d", str(folder).replace(";", "\\;")]
+    assert cwd == folder
+
+
+def test_macos_removes_the_script_when_the_spawn_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _setup(monkeypatch, "darwin")
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise OSError("no open")
+
+    monkeypatch.setattr(host_terminal, "_spawn", boom)
+    runtime = tmp_path / "rt"
+    with pytest.raises(OSError):
+        host_terminal.launch(tmp_path, action="gws-install", runtime_dir=runtime)
+    assert list(runtime.glob("terminal-*.command")) == []
+
+
+def test_linux_quotes_a_hostile_folder_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    spawns = _setup(monkeypatch, "linux", found={"x-terminal-emulator"})
+    folder = tmp_path / "a'b $(x) ;c"
+    folder.mkdir()
+    host_terminal.launch(folder, action="gws-install", runtime_dir=tmp_path)
+    script = spawns.calls[0][0][-1]
+    assert script.startswith(f"cd -- {shlex.quote(str(folder))} && ")
+
+
+def test_every_emitted_terminal_action_is_allowlisted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows: list[dict[str, Any]] = []
+
+    def claude_row() -> dict[str, Any]:
+        return setup_status._claude_status({}, tmp_path / "cfg.json", workspace_root=tmp_path)
+
+    # Claude rows: not installed, signed in, too old, signed out.
+    monkeypatch.setattr(setup_status, "claude_app_path", lambda: "")
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "")
+    rows.append(claude_row())
+    monkeypatch.setattr(setup_status, "claude_cli_path", lambda: "/bin/claude")
+    monkeypatch.setattr(setup_status, "_cli_version", lambda _b: "2.0.0")
+    for status in ({"logged_in": True}, {"logged_in": False, "cli_too_old": True}, {"logged_in": False}):
+        monkeypatch.setattr(setup_status, "claude_auth_status", lambda *a, s=status, **k: s)
+        rows.append(claude_row())
+    # opencode rows: not installed, unsupported version, ok.
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda: None)
+    rows.append(opencode.opencode_login_status(inventory=False))
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda: "/bin/opencode")
+    monkeypatch.setattr(opencode, "_credential_count", lambda *a, **k: 1)
+    for error in ("too old", None):
+        monkeypatch.setattr(opencode, "_server_version_error", lambda _v, e=error: e)
+        rows.append(opencode.opencode_login_status(inventory=False))
+    actions = [row.get("terminal_action") for row in rows]
+    assert all(action in host_terminal.ACTION_IDS for action in actions)

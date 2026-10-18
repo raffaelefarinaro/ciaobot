@@ -203,10 +203,14 @@ def _launch_macos(folder: Path, command: str | None, env: dict[str, str], runtim
         f"{command}\n"
         'exec "${SHELL:-/bin/zsh}" -l\n'
     )
-    with open(script, "x", encoding="utf-8", newline="") as handle:
+    fd = os.open(script, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
         handle.write(text)
-    os.chmod(script, 0o700)
-    _spawn(["/usr/bin/open", "-a", "Terminal", str(script)], cwd=folder, env=env)
+    try:
+        _spawn(["/usr/bin/open", "-a", "Terminal", str(script)], cwd=folder, env=env)
+    except OSError:
+        script.unlink(missing_ok=True)
+        raise
     return "Terminal"
 
 
@@ -214,7 +218,7 @@ def _launch_windows(folder: Path, command: str | None, env: dict[str, str]) -> s
     ps = _which("powershell.exe") or "powershell.exe"
     wt = _which("wt")
     if wt:
-        argv = [wt, "-d", str(folder)]
+        argv = [wt, "-d", str(folder).replace(";", "\\;")]
         if command is not None:
             argv += [ps, "-NoExit", "-ExecutionPolicy", "RemoteSigned", "-Command", command.replace(";", "\\;")]
         _spawn(argv, cwd=folder, env=env, creationflags=_DETACHED_PROCESS | _CREATE_NEW_PROCESS_GROUP)

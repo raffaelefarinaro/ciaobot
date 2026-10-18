@@ -1223,9 +1223,6 @@ async def gws_integration_settings(request: Request) -> JSONResponse:
     return JSONResponse(_gws_integration_payload(request.app.state.config))
 
 
-
-
-
 async def gws_save_client_secret(request: Request) -> JSONResponse:
     config = request.app.state.config
     try:

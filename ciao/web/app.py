@@ -194,6 +194,7 @@ from ciao.web.routes_push import (
     push_unsubscribe,
 )
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
+from ciao.web.routes_host_terminal import host_terminal_launch, host_terminal_status
 from ciao.web.routes_import import (
     import_batch_cancel,
     import_batch_delete,
@@ -203,7 +204,6 @@ from ciao.web.routes_import import (
     import_preview,
     import_sources,
 )
-from ciao.web.routes_host_terminal import host_terminal_launch, host_terminal_status
 from ciao.web.routes_service_login import service_login_status, service_login_update
 from ciao.web.routes_tasks import (
     task_add_update,
