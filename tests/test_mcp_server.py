@@ -1499,11 +1499,24 @@ def test_gws_status_reports_unlinked_workspace(tmp_path: Path) -> None:
 
     assert result["ok"] is True
     data = result["data"]
-    # No workspace link, and the operator-level default "personal" does not name
-    # a real account on a fresh install, so nothing is reported as connected.
+    # No workspace link means no Google access.
     assert data["profile"] == ""
     assert data["configured"] is False
     assert data["connected"] is False
+
+
+def test_gws_status_unlinked_workspace_ignores_an_existing_personal_account(
+    tmp_path: Path,
+) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    secret_dir = Path(config.workspace_root) / "secrets" / "gws-personal"
+    secret_dir.mkdir(parents=True)
+    (secret_dir / "client_secret.json").write_text("{}", encoding="utf-8")
+
+    data = plane.gws_status(_chat_create_principal())["data"]
+
+    assert data["profile"] == ""
+    assert data["configured"] is False
 
 
 def test_gws_status_reports_connected_profile(tmp_path: Path) -> None:

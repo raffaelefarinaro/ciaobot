@@ -1509,26 +1509,15 @@ class CiaoControlPlane:
         """Report Google Workspace connection status for the active workspace.
 
         Resolves the workspace's linked ``gws_profile`` the same way the runtime
-        does (the operator-level default only counts when it names an account
-        that actually exists), then reports whether credentials are present and
-        whether the periodic health monitor's last reading says the token is
-        valid. Read-only and cheap: it never runs ``gws auth status`` itself, so
+        does (only an explicit link naming an existing account counts), then
+        reports whether credentials are present and whether the periodic health
+        monitor's last reading says the token is valid. Read-only and cheap: it never runs ``gws auth status`` itself, so
         the agent can answer "is Google connected?" without a subprocess.
         """
         workspace = self._workspace(principal)
         from ciao import gws_auth
 
-        profile = str(
-            getattr(self.config.workspace(workspace), "gws_profile", "") or ""
-        ).strip()
-        if not profile:
-            from ciao.config import GWS_DEFAULT_PROFILE
-
-            profile = (
-                GWS_DEFAULT_PROFILE
-                if GWS_DEFAULT_PROFILE in gws_auth.known_profiles(self.config)
-                else ""
-            )
+        profile = gws_auth.workspace_gws_profile(self.config, workspace)
         if not profile:
             return _ok(
                 {
