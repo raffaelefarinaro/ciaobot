@@ -36,8 +36,7 @@ carried by the session.
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update
   coordinator's drain handshake, and `/api/admin/restart-blockers` (the
-  reason-tagged list `ciao service` gates restart/stop on). It reads the TCP source address, never the
-  `Host` header, which a caller controls. A loopback peer carrying
+  reason-tagged list `ciao service` gates restart/stop on). It requires a loopback TCP source address, a loopback `Host` (`localhost`, `127.0.0.1`, `::1`) and, when the request carries `Origin` or `Referer`, one naming this exact origin, for every method. The peer address is what makes a caller local; the `Host` check refuses a DNS-rebound page on this machine, which is a loopback peer whose `Origin` matches its own (attacker-chosen) `Host`. A request that fails takes the normal session path, so Settings still reads restart blockers with its session. A loopback peer carrying
   reverse-proxy headers (`Forwarded`, `Via`, any `X-Forwarded-*`,
   `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, any
   `Tailscale-*`) is not local: `tailscale serve` and
@@ -67,13 +66,12 @@ carried by the session.
 - There is no native capability of any kind left: the macOS app and its shell
   are retired (`#579`), so a remote browser gets nothing a local one does not,
   and `trigger_app_update` does not exist. A browser is a local control path only
-  through session routes that also require the host: `/api/workspace-move*` and
-  `/api/host/terminal` check the loopback peer, a loopback `Host` and a
-  same-host `Origin`; `/api/workspace-open` checks the loopback peer only. Each
-  refuses a non-host peer. One exception is not yet narrowed:
-  `POST /api/settings/providers/{provider}/connect` opens the provider login in
-  macOS Terminal for any signed-in session; adding the host check there is
-  tracked as a follow-up (#1508).
+  through session routes that also require the host: `/api/workspace-move*`,
+  `/api/host/terminal` and `POST /api/settings/providers/{provider}/connect`
+  check the loopback peer, a loopback `Host` and a same-host `Origin`;
+  `/api/workspace-open` checks the loopback peer only. Each refuses a non-host
+  peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
+  `command` to run on the host.
 
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.

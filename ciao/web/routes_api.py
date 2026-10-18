@@ -13,7 +13,6 @@ import math
 import os
 import posixpath
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -39,6 +38,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.media_types import guess_type as guess_media_type
+from ciao import host_terminal
 from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import service_backend
@@ -51,7 +51,7 @@ from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mu
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
-from ciao.web.auth import is_loopback_client
+from ciao.web.auth import LOOPBACK_HOST_NAMES, is_loopback_client
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
@@ -953,36 +953,8 @@ def _provider_config_payload(config) -> dict:
     }
 
 
-def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
-    """Open the provider-owned interactive login in macOS Terminal."""
-    if not provider_registry.is_provider(provider):
-        raise ValueError(f"unsupported provider '{provider}'")
-    command = _auth_command_for_provider(provider)
-    rendered = shlex.join(command)
-    if sys.platform != "darwin":
-        return False, rendered
-    runtime_root = Path(config.state_path).parent
-    runtime_root.mkdir(parents=True, exist_ok=True)
-    script = runtime_root / f"provider-login-{provider}.command"
-    script.write_text(
-        "#!/bin/zsh\n"
-        "script_path=$0\n"
-        "rm -f -- \"$script_path\"\n"
-        f"{rendered}\n"
-        "status=$?\n"
-        "echo\n"
-        "echo 'Authentication finished. You can close this window.'\n"
-        "exit $status\n",
-        encoding="utf-8", newline="",
-    )
-    script.chmod(0o700)
-    subprocess.Popen(
-        ["/usr/bin/open", "-a", "Terminal", str(script)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    return True, rendered
+def _connect_hint(command: str) -> str:
+    return f"Run this in a terminal on the computer running Ciaobot: {command}"
 
 
 async def provider_connection_action(request: Request) -> JSONResponse:
@@ -992,11 +964,42 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     if not provider_registry.is_provider(provider):
         return JSONResponse({"error": "unsupported provider"}, status_code=404)
     if action == "connect":
+        login_action = f"{provider}-login"
+        if login_action not in host_terminal.ACTION_IDS:
+            return JSONResponse({"error": "this provider has no sign-in action"}, status_code=404)
+        command = await asyncio.to_thread(host_terminal.action_command, login_action)
+        if not host_browser_request(request):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "reason": "not_on_host",
+                    "command": command,
+                    "error": f"{host_terminal.REASON_MESSAGES['not_on_host']} {_connect_hint(command)}",
+                },
+                status_code=403,
+            )
+        workspace = Path(config.workspace_root)
+        folder = workspace if workspace.is_dir() else Path.home()
         try:
-            opened, command = await asyncio.to_thread(_launch_provider_login, config, provider)
-        except (FileNotFoundError, OSError, ValueError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        return JSONResponse({"ok": True, "opened": opened, "command": command}, status_code=202)
+            launched = await asyncio.to_thread(
+                host_terminal.launch,
+                folder,
+                action=login_action,
+                runtime_dir=Path(config.state_path).parent,
+            )
+        except host_terminal.TerminalUnavailable as exc:
+            return JSONResponse(
+                {"ok": False, "reason": exc.reason, "command": command,
+                 "error": f"{exc} {_connect_hint(command)}"},
+                status_code=409,
+            )
+        except OSError as exc:
+            return JSONResponse(
+                {"ok": False, "reason": "launch_failed", "command": command,
+                 "error": f"Could not open a terminal: {exc}. {_connect_hint(command)}"},
+                status_code=500,
+            )
+        return JSONResponse({"ok": True, "launched": launched, "command": command}, status_code=202)
     if action == "verify":
         if provider == "claude":
             from ciao.setup_status import clear_claude_discovery_cache
@@ -6722,13 +6725,12 @@ async def admin_restart(request: Request) -> JSONResponse:
 # does not exclude it — and these routes need no session. The Host check
 # closes that: the name in the request is the only part of a rebound request
 # the attacker controls, so it has to be one this engine serves.
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _forbidden_host(request: Request) -> JSONResponse | None:
     """The 403 a request for a host this engine does not serve gets, or None."""
     host = (request.url.hostname or "").lower()
-    if host in _LOOPBACK_HOSTS:
+    if host in LOOPBACK_HOST_NAMES:
         return None
     return JSONResponse({"error": "forbidden host"}, status_code=403)
 
