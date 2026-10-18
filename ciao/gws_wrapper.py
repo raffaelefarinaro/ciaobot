@@ -132,6 +132,9 @@ def main(argv: list[str] | None = None) -> int:
     # linked account is reachable, whatever the arguments say: an instruction
     # in an email or document must not steer the agent to another account.
     # An operator terminal has no token and keeps the explicit override.
+    # A guardrail against an agent being steered to another account (#1483),
+    # not a sandbox: the agent's own shell can still rewrite these variables.
+    # Engine-side account resolution is tracked separately.
     if explicit is not None and os.environ.get(AGENT_TOKEN_ENV):
         from types import SimpleNamespace
 
