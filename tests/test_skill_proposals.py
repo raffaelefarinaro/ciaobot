@@ -2010,7 +2010,6 @@ def test_a_link_pointing_out_of_its_workspace_is_not_a_link(tmp_path: Path) -> N
     assert settlement.settled is False
 
 
-
 def test_improvement_prompt_fences_model_written_fields_and_evidence(tmp_path: Path) -> None:
     config = _config(tmp_path)
     stored = sp.upsert_proposal(
