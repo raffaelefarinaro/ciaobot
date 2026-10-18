@@ -800,14 +800,12 @@ describe('ProjectSidebar accessible context menus', () => {
     wrapper.unmount()
   })
 
-  it('shows the linked repository branch once on the project row', async () => {
+  it('does not tag the project row with its branch', async () => {
     const store = useProjectStore()
     store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: true, missing: false }
     const wrapper = await mountSidebar()
-    const tags = wrapper.findAll('.project-repo-tag')
-    expect(tags).toHaveLength(1)
-    expect(tags[0].text()).toContain('main')
-    expect(tags[0].text()).toContain('uncommitted changes')
+    expect(wrapper.find('.project-repo-tag').exists()).toBe(false)
+    expect(wrapper.get('.project-header').text()).not.toContain('main')
     wrapper.unmount()
   })
 

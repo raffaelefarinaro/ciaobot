@@ -109,7 +109,7 @@ Top-level commands, outside the `<noun> <verb>` table: plain text output (a `--j
 | `project list [--include-completed]` | List projects in the active workspace. | — |
 | `project get [ID\|NAME]` | Get one project by id or name. | Omit for the active project. |
 | `project create --name N [--context TEXT] [--repo PATH]` | Create a project. | Also creates `projects/active/<slug>/<slug>.md` with valid frontmatter and binds it; edit that note, do not write a new one. Skipped when the folder name is taken. `--vault-folder` is not a create-time flag; set it with `project update` after creating. `--repo` links a local git checkout and must be its top level (relative paths resolve against your shell's directory). |
-| `project update [ID\|NAME] [--name] [--context] [--vault-folder] [--repo PATH]` | Update project metadata or its safe vault-folder binding. | Omit `ID` for the active project; an omitted flag keeps its current value. `--repo ""` unlinks. `project get`/`list` report `repo: {path, branch, dirty, missing}`. |
+| `project update [ID\|NAME] [--name] [--context] [--vault-folder] [--repo PATH]` | Update project metadata or its safe vault-folder binding. | Omit `ID` for the active project; an omitted flag keeps its current value. `--repo ""` unlinks. `project get`/`list` report `repo: {path, branch, dirty, missing, instructions}`. |
 | `project restore STEM` | Restore a completed vault project into the active workspace. | Takes the completed project's *stem*, not a project id. |
 | `project complete ID\|NAME` | Move a vault-backed project to completed and archive its active record. | Destructive. |
 | `project delete ID\|NAME` | Delete a non-vault-backed project and its chats. | Destructive. |

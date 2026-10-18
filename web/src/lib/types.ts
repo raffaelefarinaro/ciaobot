@@ -161,6 +161,7 @@ export interface ProjectRepo {
   branch: string      // '' when HEAD is detached
   dirty: boolean
   missing: boolean    // folder gone or no longer a git toplevel
+  instructions?: { name: 'AGENTS.md' | 'CLAUDE.md'; chars: number } | null  // what code mode injects; null = none
 }
 
 /** A1: one entry of GET /api/repos/candidates `candidates` ({roots, candidates:[{path,name,root}]}). */
