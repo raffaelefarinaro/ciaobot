@@ -960,6 +960,7 @@ class ProjectChatManager:
             self._loop = None
         self._push_delay_seconds = 30
         self._load()
+        self._mark_persisted_native_forms_stale()
         self._migrate_remove_claude_code_cli_project()
         self._migrate_drop_qn_prefix()
         self._ensure_defaults()
@@ -6939,14 +6940,20 @@ class ProjectChatManager:
         sent_at_iso: str = ""
         # An open native form owns the provider session: neither a new turn
         # nor a compaction may start until it is answered.
-        if chat_meta is not None and self._native_question_request_id(
-            chat_meta.pending_question
-        ):
-            self._broker.clear(chat_id, stream)
-            stream.finish()
-            raise ValueError(
-                "Answer the open question before sending another message."
-            )
+        dead_form_request = ""
+        native_request = (
+            self._native_question_request_id(chat_meta.pending_question)
+            if chat_meta is not None
+            else ""
+        )
+        if native_request:
+            if self._providers.get(chat_id) is not None:
+                self._broker.clear(chat_id, stream)
+                stream.finish()
+                raise ValueError(
+                    "Answer the open question before sending another message."
+                )
+            dead_form_request = native_request
         if chat_meta is not None:
             # Waiting (parked) messages stay waiting: a new send never flushes
             # them. They leave only through send-now, edit, remove or reorder,
@@ -6961,6 +6968,13 @@ class ProjectChatManager:
                 self._broker.clear(chat_id, stream)
                 stream.finish()
                 raise
+        if dead_form_request and chat_meta is not None:
+            logger.info(
+                "Superseding dead native form %s for chat %s",
+                dead_form_request,
+                chat_id,
+            )
+            chat_meta.pending_question = ""
         if chat_meta is not None and not compact:
             # A new user turn answers (or supersedes) any legacy paused
             # question, so the persisted picker state no longer applies.
@@ -7707,6 +7721,64 @@ class ProjectChatManager:
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    def _native_form_is_dead(self, chat_id: str) -> bool:
+        """No provider owns the form and no turn is running, so nothing can answer it natively."""
+        return self._providers.get(chat_id) is None and self._broker.get(chat_id) is None
+
+    @staticmethod
+    def _native_answer_prompt(question_json: str, answers: dict[str, list[str]]) -> str:
+        """Format a native form answer as the text of an ordinary turn."""
+        payload = ProjectChatManager._pending_response_record(question_json)
+        raw_questions = payload.get("questions") or []
+        questions = [
+            q for q in (raw_questions if isinstance(raw_questions, list) else [])
+            if isinstance(q, dict)
+        ]
+        lines: list[str] = []
+        known: set[str] = set()
+        for q in questions:
+            qid = str(q.get("id") or "")
+            known.add(qid)
+            values = answers.get(qid) or []
+            if not values:
+                continue
+            raw_options = q.get("options") or []
+            labels = {
+                str(o.get("value") or o.get("label") or ""): str(
+                    o.get("label") or o.get("value") or ""
+                )
+                for o in (raw_options if isinstance(raw_options, list) else [])
+                if isinstance(o, dict)
+            }
+            title = str(q.get("header") or q.get("question") or qid).strip()
+            lines.append(
+                f'Answer to your question "{title}": '
+                + ", ".join(labels.get(v, v) for v in values)
+            )
+        for key, values in answers.items():
+            if key not in known and values:
+                lines.append("Answer to your question: " + ", ".join(values))
+        if not lines:
+            lines.append("I submitted your question form without answers.")
+        return (
+            "(The question form is no longer open, so here is my "
+            "answer as a message.)\n" + "\n".join(lines)
+        )
+
+    def _mark_persisted_native_forms_stale(self) -> None:
+        """A persisted native form belongs to a provider process from before this boot."""
+        changed = False
+        for chat in self._chats.values():
+            if not self._native_question_request_id(chat.pending_question):
+                continue
+            payload = self._pending_response_record(chat.pending_question)
+            if payload and payload.get("stale") is not True:
+                payload["stale"] = True
+                chat.pending_question = json.dumps(payload, ensure_ascii=False)
+                changed = True
+        if changed:
+            self._save()
+
     def _notify_question(self, chat_id: str, question_json: str) -> None:
         """Fire the configured question notification callback, if any.
 
@@ -7934,6 +8006,24 @@ class ProjectChatManager:
         expected_session = session_id or stored_session or str(
             getattr(chat, "session_id", "") or ""
         )
+
+        if self._native_form_is_dead(chat_id):
+            if not stored_request:
+                # Already settled (another tab, or cleared) and nothing to deliver to.
+                return QuestionResponseResult(True)
+            if action == "cancel":
+                self._clear_question_state(chat_id, request_id, expected_session)
+                return QuestionResponseResult(True)
+            if chat is None or chat.archived:
+                return QuestionResponseResult(False, "This chat has been archived.", False)
+            prompt = self._native_answer_prompt(chat.pending_question, answers)
+            try:
+                self.start_stream(chat_id, prompt)
+            except RestartDrainingError as exc:
+                return QuestionResponseResult(False, str(exc), True)
+            except ValueError as exc:
+                return QuestionResponseResult(False, str(exc), False)
+            return QuestionResponseResult(True, delivered_as_message=True)
 
         provider_service = self._providers.get(chat_id)
         provider = provider_service.provider if provider_service is not None else None

@@ -275,15 +275,17 @@ async def ws_chat(websocket: WebSocket) -> None:
                             "state": "cancelled" if action == "cancel" else "answered",
                             "error": result.error,
                             "retryable": result.retryable,
+                            **({"delivered_as_message": True} if result.delivered_as_message else {}),
                         })
                     except (WebSocketDisconnect, RuntimeError):
                         break
-                    if result.ok:
+                    if result.ok and not result.delivered_as_message:
                         # Answering a native card starts no turn, so nothing else
                         # re-settles a delegated attempt the card was holding at
                         # ``needs_you`` with a `done` report already on it (#1110).
                         # Best effort: a settlement that cannot be made must not
-                        # fail the answer the user just gave.
+                        # fail the answer the user just gave. A dead form's reply
+                        # starts a turn, whose own result settles the attempt.
                         await _resettle_after_question_answer(websocket, chat_id)
                 continue
 
