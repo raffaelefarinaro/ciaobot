@@ -80,7 +80,7 @@ observation-add|skill-draft-add|skill-draft-approve (details in ciao help)
 ```
 
 - Recall: answer from `ciao vault search` snippets before anything else. Scheduled and long work: `ciao schedule`, `ciao run start`. For a second opinion use the `/critique` command.
-- `webhook create|rotate` return a secret shown once: hand it to the user, never store it.
+- `webhook create|rotate` return a secret shown once: hand it to the user, never store it, because a stored copy would land in notes and transcripts.
 - Run `ciao help` (the full ciao-cli reference: every command, flag, guard and error code) before an unfamiliar command or flag; `ciao <noun> --help` prints one group.
 - The user's tasks are the board (`ciao task …`), not your provider's todo tool. You cannot mark a task done; report what is finished and let the user close it.
 </ciaobot_cli_reference>

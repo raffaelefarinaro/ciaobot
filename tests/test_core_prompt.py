@@ -178,3 +178,4 @@ def test_rules_carry_a_reason_in_the_same_bullet() -> None:
     assert "cannot be undone or are seen by others" in bullet("destructive git operations")
     assert "output lands in transcripts and replies" in bullet("never quote or repeat credentials")
     assert "public and permanent" in bullet("Public GitHub issues")
+    assert "land in notes and transcripts" in bullet("webhook create|rotate")
