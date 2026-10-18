@@ -92,7 +92,6 @@ namespaces = false
   "skills/.gitkeep",
   "skills/**/*",
   "schedules.json",
-  "schedules/*.md",
   "update-tasks/**/*",
 ]
 
