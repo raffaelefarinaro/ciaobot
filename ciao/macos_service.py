@@ -508,6 +508,11 @@ def restart_gate(
     try:
         blockers = restart_blockers(port)
     except RestartBlockersUnavailable as exc:
+        # An engine that is not serving has nothing to interrupt. Some hosts
+        # (Windows runners among them) time out instead of refusing a closed
+        # port, so check before failing closed on an engine that is down.
+        if not server_reachable(port):
+            return None
         return ServiceResult(
             False,
             action,

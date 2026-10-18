@@ -1146,6 +1146,9 @@ def test_gate_refuses_when_blockers_cannot_be_read(tmp_path: Path, monkeypatch) 
         raise macos_service.RestartBlockersUnavailable("the engine answered HTTP 404")
 
     monkeypatch.setattr(macos_service, "restart_blockers", unreadable)
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port, **_kw: True)
+    # The forced stop walks the launchd path, which needs a uid (absent on Windows).
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
     calls: list[list[str]] = []
 
     refused = macos_service.stop_service(runtime=runtime, runner=_runner(calls))
@@ -1195,3 +1198,13 @@ def test_status_reports_restart_blockers(tmp_path: Path, monkeypatch) -> None:
 
     assert result.details["restart_blockers"] == blockers
     assert result.message.endswith("1 chat(s) would be interrupted by a restart.")
+
+
+def test_gate_lets_a_stopped_engine_through_when_blockers_cannot_be_read(tmp_path: Path, monkeypatch) -> None:
+    def unreadable(_port: int) -> list[dict[str, object]]:
+        raise macos_service.RestartBlockersUnavailable("timed out")
+
+    monkeypatch.setattr(macos_service, "restart_blockers", unreadable)
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port, **_kw: False)
+
+    assert macos_service.restart_gate(8443, "restart", force=False) is None
