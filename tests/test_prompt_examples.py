@@ -128,10 +128,16 @@ def test_title_prompt_escapes_user_and_assistant_text() -> None:
     assert prompt.count("</session>") == 1
 
 
-@pytest.mark.parametrize("prompt", [_DOC_UPDATE_SYSTEM_PROMPT, _PERSON_FOLD_SYSTEM_PROMPT])
-def test_fold_prompts_state_the_single_action_contract(prompt: str) -> None:
+@pytest.mark.parametrize(
+    ("prompt", "contract"),
+    [
+        (_DOC_UPDATE_SYSTEM_PROMPT, "one most important edit"),
+        (_PERSON_FOLD_SYSTEM_PROMPT, "one edit that"),
+    ],
+)
+def test_fold_prompts_state_the_single_action_contract(prompt: str, contract: str) -> None:
     assert "each fact" not in prompt
-    assert "one" in prompt and "edit" in prompt
+    assert contract in prompt
 
 
 def test_person_fold_offers_only_the_notes_section() -> None:
