@@ -5166,10 +5166,11 @@ class ProjectChatManager:
         """The Google account this workspace uses, or "" when none is linked.
 
         Resolved through ``gws_auth.workspace_gws_profile`` so skill sync and
-        the chat runtime agree on the same effective profile: an explicit link
-        or operator default only counts when it names an account that actually
-        exists (a bootstrap-synthetic or stale link points at a credential
-        directory nobody created, which just produces auth errors mid-task).
+        the chat runtime agree on the same effective profile: only an explicit
+        link counts, and only when it names an account that actually exists (a
+        bootstrap-synthetic or stale link points at a credential directory
+        nobody created, which just produces auth errors mid-task). An unlinked
+        workspace has no Google access.
         """
         try:
             from ciao.gws_auth import workspace_gws_profile

@@ -1523,8 +1523,9 @@ class CiaoControlPlane:
         Resolves the workspace's linked ``gws_profile`` the same way the runtime
         does (only an explicit link naming an existing account counts), then
         reports whether credentials are present and whether the periodic health
-        monitor's last reading says the token is valid. Read-only and cheap: it never runs ``gws auth status`` itself, so
-        the agent can answer "is Google connected?" without a subprocess.
+        monitor's last reading says the token is valid. Read-only and cheap: it
+        never runs ``gws auth status`` itself, so the agent can answer "is
+        Google connected?" without a subprocess.
         """
         workspace = self._workspace(principal)
         from ciao import gws_auth
