@@ -1,6 +1,6 @@
 ---
 name: ciao-cli
-description: "The `ciao` command-line surface for Ciaobot's own state — memory, vault, files, chats, projects, tasks, schedules, webhook triggers, and background runs. Use whenever a chat needs to read or change Ciaobot state itself, not the user's workspace files: checking or editing bounded memory, searching or reviewing the vault, surfacing a file in the pinned panel, listing/creating/sending to/archiving chats, managing projects, filing and moving the workspace task board, creating or running schedules, configuring webhook triggers an external sender can call, or starting/checking/cancelling a tracked background command."
+description: "Exact syntax, flags, guards and error codes for the `ciao <noun> <verb>` commands that read or change Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, background runs, surfacing a file in the pinned panel, and filing into the review queues. Use when a chat needs the exact form of one of those commands. What to write to memory or the vault, and when, is the `ciao-memory` skill's policy, not this one's."
 ---
 
 # ciao CLI
@@ -10,14 +10,14 @@ One `ciao <noun> <verb>` command per Ciaobot operation, callable from the shell.
 ## When to use / when not to
 
 Use it for:
-- Reading or changing Ciaobot's own state: bounded memory, the vault, chats, projects, the task board, schedules, webhook triggers, background runs.
+- Reading or changing Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, background runs, and the memory, vault and review-queue commands (syntax only; their write policy is `ciao-memory`).
 - Surfacing a file you produced in the user's pinned preview panel.
 
 Not for:
 - Editing ordinary workspace files — use the provider's native Read/Write/Edit/Glob, same as today.
 - Third-party MCP connectors (Google Workspace beyond `gws status`, or any other integration) — those keep their own tool surface.
 - Git — use the shell's `git` directly; `ciao` has no source-control verbs.
-- Anything not listed in the command tables below.
+- Deciding what is worth remembering or where it belongs: follow `ciao-memory`.
 
 ## Calling convention
 
@@ -80,23 +80,22 @@ comes back `needs_review` and reaches a person as a proposal. Do not hand-edit
 a stale note's Markdown instead of calling this — a hand edit leaves no receipt,
 no check state and no record of who decided.
 
-### Memory-proposal review queue
+### Review queues
 
-Two older top-level commands, outside the `<noun> <verb>` table and its JSON envelope (plain text unless `--json`). They are how a chat resolves a row from the app's review page.
+Top-level commands, outside the `<noun> <verb>` table: plain text output (a `--json` flag gives structured output where noted), not the JSON envelope. They file into, list and settle the queues the app's review page shows. Every free-text field travels in a file, never as a shell argument: it is conversation prose, and `$()`, backticks or quotes would run or mangle.
 
 | Command | Purpose | Guard |
 |---|---|---|
 | `memory-proposals [--limit N] [--offset N] [--json]` | List the pending proposals in this workspace's review queue, one page at a time (default 20, max 200). | Read-only. When the page has `next_offset` (or the text output says `more with --offset N`), pass `--offset` with it for the next page. `--json` gives `proposals`, `total`, `offset`, `limit`, and `truncated`/`next_offset` only when more remain. |
-| `memory-proposal-dismiss --text-file FILE [--promoted]` | Remove one queued proposal, matched by a unique substring of its text. | Write the text to a file; never pass it as an argument, since proposal text is arbitrary prose. File the fact first, then dismiss with `--promoted`; a plain dismissal records a decision against the fact. Never delete the bullet from the queue file by hand. |
-
-### Skill-proposal review queue
-
-The other top-level pair, same envelope rules. They are how a supported skill improvement is filed and then decided — never how a skill is edited.
-
-| Command | Purpose | Guard |
-|---|---|---|
-| `skill-proposal-add NAME --input-file FILE` | File one supported improvement proposal for a skill in this workspace's `Workspace/Skill-Proposals/`, merging it into that skill's existing record. | `FILE` is JSON: `title`, `problem`, `change`, `rationale`, and a non-empty `sources` list whose entries carry `chat_id`, `archive`, `turn` and a short verbatim `excerpt`. Every field is text from a conversation, so it never travels as a shell argument. The target is resolved, not trusted: only a source this workspace owns under its own `skills/` directory is accepted, so a packaged skill, a provider mirror, a shared source and an unknown name are refused. Never write into the queue folder by hand, and never edit the skill here. |
+| `memory-proposal-add [TEXT] [--text-file FILE] [--kind K] [--payload P] [--payload-file FILE] [--source S] [--request ID] [--allow-dismissed] [--json]` | Queue one durable fact in `Workspace/Memory-Proposals.md` for review. | `--kind` is `memory` (default), `profile`, `project`, `people`, `learnings`, `review` or `repo`; `project`, `people` and `repo` also need `--payload` (a doc path, a person's name, an absolute repository path). Prefer `--text-file` over `TEXT`. Re-filing identical text is a no-op; `--allow-dismissed` re-files a dismissed fact, a promoted one stays deduped. `--request` is for `learnings` only. |
+| `memory-proposal-dismiss --text-file FILE [--promoted]` | Remove one queued proposal, matched by a unique substring of its text. | Write the text to a file. File the fact first, then dismiss with `--promoted`; a plain dismissal records a decision against the fact. Never delete the bullet from the queue file by hand. |
+| `observation-add --about user\|NAME [--about-file FILE] --source CHAT_ID --text-file FILE [--json]` | Count this chat's sighting of one behavioural pattern in `Workspace/Observations.md`. | `--source` is required. A chat counts at most once per observation; at three distinct chats the Workspace care run proposes it. The file holds the one-sentence pattern. |
+| `skill-proposal-add NAME --input-file FILE` | File one supported improvement proposal for a skill in this workspace's `Workspace/Skill-Proposals/`, merging it into that skill's existing record. | `FILE` is JSON: `title`, `problem`, `change`, `rationale`, and either a non-empty `sources` list (entries carry `chat_id`, `archive`, `turn` and a short verbatim `excerpt`) or, for a routed learning, a non-empty `origins` list (entries carry `learning_id` and `finding`, optionally `source_revision` and `summary`; `workspace` may only name this one; `state` and `verification` are refused). A payload with neither is refused; `origins` without `sources` is the lesson-routing form. Every field is text from a conversation, so it never travels as a shell argument. The target is resolved, not trusted: only a source this workspace owns under its own `skills/` directory is accepted, so a packaged skill, a provider mirror, a shared source and an unknown name are refused. Never write into the queue folder by hand, and never edit the skill here. |
 | `skill-proposal-remove NAME` | Settle a proposal once the decision is made (implemented, or decided against); `NAME` is the skill or proposal id exactly, or else a unique substring of the skill. | Records the decision and takes the row out of the queue. The record stays on disk, keeps accumulating evidence, and stays settled — re-filing the same finding does not reopen it. Only settle a proposal after its change is actually in place or decided against. `--applied` on a proposal that links learning findings also needs a verification: `--verification-file FILE` for a readback (never paste it as an argument), or `--verification ID` for a managed write receipt. |
+| `skill-draft-add --input-file FILE [--json]` | File one `[review]` draft for a lesson this workspace cannot edit in place: `target` `upstream_issue` (a packaged, mirrored or shared skill) or `new_skill` (a workflow no skill covers). | `FILE` is JSON: `target`, `skill`, `title`, `change`, plus a sanitized `body` for an issue, and optionally `repository` (`owner/name`), `version`, `private_evidence`, `origins`. Title, skill, version and body reach `gh`, so any carrying a transcript excerpt, path, name or credential is refused. Files and nothing more: no issue is opened and no skill created. |
+| `skill-drafts [--all] [--json]` | List open skill drafts (`--all` adds settled ones) with the ids `skill-draft-approve` takes. | Read-only. |
+| `skill-draft-approve DRAFT_ID [--content-file FILE] [--reason R] [--json]` | Act on one draft: search for a matching GitHub issue and link or file it, or create a `new_skill` under this workspace's `skills/`. | Attended only: exits 4 and changes nothing while a curation run holds the lease, so a schedule reports the draft instead. `--content-file` (the SKILL.md text) is required for `new_skill`. A failed or ambiguous request leaves the draft pending with the reason. |
+| `skill-draft-reject DRAFT_ID [--reason R] [--json]` | Turn a draft down so it is not offered again. | Same attended-only guard as `approve`. |
 
 ### Files
 
@@ -112,10 +111,10 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 | `chat get [--chat ID] [--full]` | Get one chat's metadata plus its last 10 messages, each capped at 2,000 characters (`truncated: true` and `content_chars` mark a cut message; `messages_total` counts all of them). | Omit `--chat` for the calling chat. `--full` returns every message untruncated. |
 | `chat create [--project ID\|NAME] [--title T] [--provider P] [--model M] [--mode MODE] [--prompt TEXT]` | Create a chat, optionally sending its first prompt in the same call. | Omit `--project` to reuse the calling chat's own project — no need to list projects first for a sub-topic. |
 | `chat update [--chat ID] [--title] [--provider] [--model] [--mode] [--thinking-level] [--project] [--code on\|off]` | Update chat metadata and same-backend model settings. | Omit `--chat` for the calling chat. `--code on` needs a project linked to a repository; the reply then carries `repo_instructions` (follow them now) and a `note`. Your own turn continues automatically once it ends, with the repository's skills and write access loaded; do not ask the user to send another message. Refused in plan mode. |
-| `chat send --chat ID --prompt TEXT` | Start or queue a user turn in another chat. | `--chat` is required here — there is no "send to self" case. |
+| `chat send [--chat ID] --prompt TEXT` | Start or queue a user turn in a chat. | Omit `--chat` for the calling chat; pass it to reach another chat in this workspace. |
 | `chat continue --chat ID` | Continue an archived chat as a new active chat. | — |
 | `chat retry [--chat ID] [--action set\|stop\|try_now] [--prompt TEXT]` | Manage a deferred provider-limit retry. | Default action is `try_now`. |
-| `chat handover [--chat ID] --provider P [--model M] [--messages @file.json]` | Move a chat to a fresh provider session, optionally carrying visible history. | With both `--provider` and `--model` empty, it only clears the current session in place. |
+| `chat handover [--chat ID] [--provider P] [--model M] [--messages @file.json]` | Move a chat to a fresh provider session, optionally carrying visible history. | With both `--provider` and `--model` empty, it only clears the current session in place. |
 | `chat archive [--chat ID]` | Archive a chat to the vault and trigger normal post-archive memory extraction. | — |
 | `chat delete [--chat ID]` | Delete a chat. | Destructive; deleting the calling chat itself is deferred until the turn finishes. |
 | `chat stop --chat ID` | Stop another chat's active provider turn. | Destructive; a chat cannot stop its own turn. |
@@ -125,12 +124,12 @@ The other top-level pair, same envelope rules. They are how a supported skill im
 | Command | Purpose | Guard |
 |---|---|---|
 | `project list [--include-completed]` | List projects in the active workspace. | — |
-| `project get [ID]` | Get one project by id or name. | Omit for the active project. |
+| `project get [ID\|NAME]` | Get one project by id or name. | Omit for the active project. |
 | `project create --name N [--context TEXT] [--repo PATH]` | Create a project. | Also creates `projects/active/<slug>/<slug>.md` with valid frontmatter and binds it; edit that note, do not write a new one. Skipped when the folder name is taken. `--vault-folder` is not a create-time flag; set it with `project update` after creating. `--repo` links a local git checkout and must be its top level (relative paths resolve against your shell's directory). |
-| `project update ID [--name] [--context] [--vault-folder] [--repo PATH]` | Update project metadata or its safe vault-folder binding. | Omit `ID` for the active project; an omitted flag keeps its current value. `--repo ""` unlinks. `project get`/`list` report `repo: {path, branch, dirty, missing}`. |
+| `project update [ID\|NAME] [--name] [--context] [--vault-folder] [--repo PATH]` | Update project metadata or its safe vault-folder binding. | Omit `ID` for the active project; an omitted flag keeps its current value. `--repo ""` unlinks. `project get`/`list` report `repo: {path, branch, dirty, missing}`. |
 | `project restore STEM` | Restore a completed vault project into the active workspace. | Takes the completed project's *stem*, not a project id. |
-| `project complete ID` | Move a vault-backed project to completed and archive its active record. | Destructive. |
-| `project delete ID` | Delete a non-vault-backed project and its chats. | Destructive. |
+| `project complete ID\|NAME` | Move a vault-backed project to completed and archive its active record. | Destructive. |
+| `project delete ID\|NAME` | Delete a non-vault-backed project and its chats. | Destructive. |
 
 ### Tasks
 
@@ -179,13 +178,13 @@ which are the user's decision rather than yours to resolve:
 | `schedule list` | List schedules in the active workspace with their next run. | — |
 | `schedule preview ...flags` | Validate fields and compute `next_run` without saving. | Run before `create` for a new recurring schedule; a missing or invalid `next_run` means the fields don't validate yet. |
 | `schedule create ...flags` | Create a validated schedule (recurring, one-off, or manual-only). | Show the user a draft — `next_run`, workspace, project — and get confirmation unless they already asked to apply it. |
-| `schedule update ID ...flags` | Update an existing schedule; only fields you pass change. | A system schedule (`scope=system`) only accepts `--enabled`/workspace changes — anything else raises `system_schedule_read_only`. |
+| `schedule update ID ...flags` | Update an existing schedule; only fields you pass change. | A system schedule (`scope=system`) only accepts workspace, model, provider and archive-policy changes — anything else raises `system_schedule_read_only`. Pause or resume one with `schedule pause|resume`; there is no `--enabled` flag. |
 | `schedule pause ID` | Pause a schedule without deleting it. | Destructive. |
 | `schedule resume ID` | Resume a paused schedule. | Destructive. |
 | `schedule run ID` | Dispatch a schedule immediately through the normal chat pipeline. | Destructive. |
 | `schedule delete ID` | Delete a removable user schedule. | Destructive; a system schedule cannot be deleted (`schedule_not_removable`). |
 
-Shared `...flags` for `schedule create/update/preview`: `--prompt --daily-time --timezone --frequency {daily,weekly,monthly,manual,once,interval} --interval-minutes --days-of-week mon,tue --day-of-month --run-at-date --project --title --description --provider --model --archive-policy {manual,auto}`. There is no `--chat` binding flag — schedules bind to a project and workspace, never to one chat.
+Shared `...flags` for `schedule create/update/preview`: `--prompt --daily-time --timezone --frequency {daily,weekly,monthly,manual,once,interval} --interval-minutes --days-of-week mon,tue --day-of-month --run-at-date --project --title --description --provider --model --archive-policy {manual,auto} --command`. `--command` is operator-gated, see Calling convention. There is no `--chat` binding flag — schedules bind to a project and workspace, never to one chat.
 
 ### Webhook triggers
 
@@ -227,164 +226,6 @@ they travel as a file (`--instructions-file`) rather than as a shell argument.
 | `workspace list` | List all configured logical workspaces — names, vault roots, defaults — not just the active one. | — |
 | `repo candidates` | List git checkouts one level under ~/repos, ~/code, ~/src, ~/dev, ~/Developer, ~/projects, to offer for `project update --repo`. | Read-only; a checkout elsewhere can still be linked by path. |
 
-## Worked examples
+## Examples and errors
 
-Memory:
-```bash
-cat > fact.txt <<'EOF'
-<the fact, in the user's words>
-EOF
-ciao memory-proposal-add --kind memory --text-file fact.txt
-```
-The fact travels in a file, never as a shell argument. `memory update --entry` is only for text you wrote yourself, such as consolidating existing entries. This admin command does not return the JSON envelope; it prints:
-```
-Queued [memory] proposal in <workspace>/Workspace/Memory-Proposals.md.
-```
-
-Vault:
-```bash
-ciao vault review trash --candidate cand_8f2a
-```
-```json
-{"ok": true, "data": {"candidate_id": "cand_8f2a", "path": "People/Old-Contact.md", "state": "trashed"}}
-```
-
-Files:
-```bash
-ciao file surface Workspace/deploy-report.html
-```
-```json
-{"ok": true, "data": {"path": "Workspace/deploy-report.html", "viewers": 1, "stream_state": "active"}}
-```
-
-Chats:
-```bash
-ciao chat send --chat chat_91ab --prompt "Re-run the nightly check now"
-```
-```json
-{"ok": true, "data": {"chat_id": "chat_91ab", "status": "queued"}}
-```
-
-Projects:
-```bash
-ciao project create --name "Q4 Launch" --context "Coordinates the Q4 rollout"
-# creates projects/active/q4-launch/q4-launch.md and binds it
-```
-```json
-{"ok": true, "data": {"project_id": "proj_q4launch", "name": "Q4 Launch"}}
-```
-
-Schedules:
-```bash
-ciao schedule create --prompt "Check open PRs" --frequency daily --daily-time 09:00 \
-  --timezone Europe/Rome --project "Engineering"
-```
-```json
-{"ok": true, "data": {"schedule_id": "sch_4471", "next_run": "2026-09-22T09:00:00+02:00"}}
-```
-
-Webhook triggers:
-```bash
-ciao webhook create --name "CI failure" --instructions-file @webhook.md --project Engineering
-```
-```json
-{"ok": true, "data": {"trigger": {"trigger_id": "5b1f…", "enabled": false, "revision": 1}, "secret": "kQ8…(shown once)"}}
-```
-
-Background runs:
-```bash
-ciao run start --label "adoption report" --timeout-s 900 -- ./scripts/report.sh --full
-ciao run start --label "preview" -- npm run dev
-```
-```json
-{"ok": true, "data": {"run_id": "run_20b7", "label": "adoption report", "status": "started"}}
-```
-
-Workspace and status:
-```bash
-ciao context get
-```
-```json
-{"ok": true, "data": {"workspace": "personal", "project": "General", "chat_id": "chat_91ab", "system": {"server": "up"}}}
-```
-
-## Common mistakes
-
-- **`code_mode_unavailable`**: `--code on` in a chat whose project has no linked repository, or whose repository folder is missing. Link one with `project update --repo PATH`, or ask the user.
-- **`file_not_found`** — `file surface` only opens a path that already exists under the workspace root. Check the file was actually written (or that the path is relative to the workspace, not absolute or outside it) before surfacing it.
-- **`memory_update_invalid` / `invalid_action`** — every `action`-style flag across this CLI is a closed enum, not free text (`memory update` takes `add`/`replace`/`remove`, never `append`). Run `ciao memory update --help` (or the equivalent `--help` on any command) to see the exact accepted values before guessing.
-- **`unattended_forbidden`** — `vault review keep|trash|restore|complete|restore-completed|delete` only resolve during an attended turn. Running as a schedule or other unattended automation, don't attempt the mutation: report the candidate and its evidence instead, and let an attended turn decide.
-- **`payload_required` / `payload_invalid` / `payload_too_large`** — `note verify` takes a path, and the server reads and bounds the document. An empty flag, a path outside the workspace, malformed JSON, an `outcome` outside `still_valid|update|retire|unverified`, or a payload over the cap are all refused before anything is written. Put long evidence in the vault and cite its path instead of pasting it.
-- **`workspace_forbidden`** — a `note verify` payload may not name a workspace other than this chat's. The check state and the note-edit proposal are filed per workspace; pairing one workspace's name with another's vault would record a verdict about a vault nobody claimed. Drop the `workspace` field or make it match.
-- **`task_revision_conflict`** — the task file changed since you read it. Nothing was written. Run `task get` (or `task list`) again, re-plan your edit against what is there now, and send the new `revision`; resending the old one is the same refusal.
-- **`task_completion_requires_user`** — the user, not you, marks a task done. Do not retry, do not reach for `task move --to done`, and do not edit the file: say which task is finished and let them close it.
-- **`task_not_found`** — a task id that is well formed but absent *from this workspace*. Another workspace's task is answered exactly this way, so this is also the answer when you reached for an id from the wrong vault.
-- **`webhook_revision_conflict`** — the trigger changed since you read it (`webhook list`). Nothing was written: re-read and re-plan instead of resending the same `--revision`.
-- **`webhook_not_found`** — no trigger with that id **in this workspace**. A trigger belonging to another workspace answers exactly this way, so do not look for it in another workspace; report the id back and let the operator reconcile it.
-- **`webhook_invalid`** — the store refused one field: a blank name or a `--revision` that is not a number. Enabling a revoked trigger is also refused this way: rotate its secret first.
-- **`unauthorized` on the sender's POST** — the trigger's secret does not authorize right now. Missing, disabled, revoked and wrong are one answer; if the secret was rotated, the old one is dead by design and the sender needs the new one, which `webhook create`/`webhook rotate` showed once.
-
-## Operation names for telemetry
-
-```json
-{
-  "memory status": "memory_status",
-  "memory update": "memory_update",
-  "vault search": "vault_search",
-  "vault review list": "vault_review",
-  "vault review show": "vault_review",
-  "vault review keep": "vault_review",
-  "vault review trash": "vault_review",
-  "vault review restore": "vault_review",
-  "vault review complete": "vault_review",
-  "vault review restore-completed": "vault_review",
-  "vault review delete": "vault_review",
-  "note verify": "verify_note",
-  "note related": "note_related",
-  "file surface": "file_surface",
-  "chat list": "chats_list",
-  "chat get": "chat_get",
-  "chat create": "chat_create",
-  "chat update": "chat_update",
-  "chat send": "chat_send",
-  "chat continue": "chat_continue",
-  "chat retry": "chat_retry",
-  "chat handover": "chat_handover",
-  "chat archive": "chat_archive",
-  "chat delete": "chat_delete",
-  "chat stop": "chat_stop",
-  "project list": "projects_list",
-  "project get": "project_get",
-  "project create": "project",
-  "project update": "project",
-  "project restore": "project",
-  "project complete": "project_action",
-  "project delete": "project_action",
-  "task list": "task_list",
-  "task get": "task_get",
-  "task create": "task_create",
-  "task update": "task_update",
-  "task move": "task_action",
-  "task complete": "task_action",
-  "schedule list": "schedules_list",
-  "schedule preview": "schedule",
-  "schedule create": "schedule",
-  "schedule update": "schedule",
-  "schedule pause": "schedule_action",
-  "schedule resume": "schedule_action",
-  "schedule run": "schedule_action",
-  "schedule delete": "schedule_action",
-  "webhook list": "webhook_list",
-  "webhook create": "webhook_create",
-  "webhook update": "webhook_update",
-  "webhook rotate": "webhook_rotate",
-  "webhook delete": "webhook_delete",
-  "run start": "background_run_start",
-  "run status": "background_run_status",
-  "run cancel": "background_run_cancel",
-  "context get": "context_get",
-  "gws status": "gws_status",
-  "workspace list": "workspaces_list",
-  "repo candidates": "repo_candidates"
-}
-```
+Worked examples per command family and the error-code catalogue (`unattended_forbidden`, `task_revision_conflict`, `webhook_*` and the rest) are in `reference.md` beside this file; `ciao help` prints it after this document.

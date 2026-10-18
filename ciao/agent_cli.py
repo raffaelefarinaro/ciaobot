@@ -74,6 +74,27 @@ CHAT_GET_RECENT_MESSAGES = 10
 #: Characters of one message's content `chat get` returns by default.
 CHAT_MESSAGE_MAX_CHARS = 2000
 
+_VAULT_REVIEW_HELP: dict[str, str] = {
+    "keep": "Keep a note and stamp its updated date.",
+    "trash": "Move a note to trash (reversible).",
+    "restore": "Restore a trashed note.",
+    "complete": "Close a project out into projects/completed/.",
+    "restore-completed": "Undo a project completion.",
+    "delete": "Permanently delete a trashed note.",
+}
+_CHAT_TARGET_HELP: dict[str, str] = {
+    "get": "Get one chat's metadata and recent messages.",
+    "archive": "Archive a chat to the vault.",
+    "delete": "Delete a chat.",
+    "retry": "Manage a deferred provider-limit retry.",
+    "update": "Update chat metadata and model settings.",
+    "handover": "Move a chat to a fresh provider session.",
+}
+_CHAT_EXPLICIT_HELP: dict[str, str] = {
+    "stop": "Stop another chat's active turn.",
+    "continue": "Continue an archived chat as a new chat.",
+}
+
 _CHAT_UPDATE_FLAGS: tuple[tuple[str, str], ...] = (
     ("--title", "title"),
     ("--provider", "provider"),
@@ -155,13 +176,13 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
     review = _verbs(vault.add_parser("review", help="Vault-note review queue."), dest="action")
-    review.add_parser("list")
-    show = review.add_parser("show")
+    review.add_parser("list", help="List review candidates (stale, orphaned, duplicate, weakly linked).")
+    show = review.add_parser("show", help="Show one candidate's evidence.")
     show.add_argument("path")
     # `restore-completed` is hyphenated like the rest of the verb surface; the
     # action it maps to is the review module's own `restore_completed`.
-    for verb in ("keep", "trash", "restore", "complete", "restore-completed", "delete"):
-        sub = review.add_parser(verb)
+    for verb, verb_help in _VAULT_REVIEW_HELP.items():
+        sub = review.add_parser(verb, help=verb_help)
         sub.add_argument("--candidate", required=True)
         if verb == "delete":
             sub.add_argument("--confirm", required=True, help="Repeat the candidate id.")
@@ -186,17 +207,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     file_ = _verbs(nouns.add_parser("file", help="Surface a workspace file in the pinned panel."))
-    surface = file_.add_parser("surface")
+    surface = file_.add_parser("surface", help="Open a workspace file in the pinned panel.")
     surface.add_argument("path")
 
     chat = _verbs(nouns.add_parser("chat", help="Chats in the active workspace."))
-    lst = chat.add_parser("list")
+    lst = chat.add_parser("list", help="List chats, newest activity first.")
     lst.add_argument("--project", default="")
     lst.add_argument("--limit", type=int, default=CHATS_LIST_DEFAULT_LIMIT, help="Rows per page, 1-200.")
     lst.add_argument("--offset", type=int, default=0, help="Rows to skip (newest first); use next_offset to page on.")
     lst.add_argument("--full", action="store_true", help="Full rows instead of the compact listing fields.")
-    for verb in ("get", "archive", "delete", "retry", "update", "handover"):
-        sub = chat.add_parser(verb)
+    for verb, verb_help in _CHAT_TARGET_HELP.items():
+        sub = chat.add_parser(verb, help=verb_help)
         sub.add_argument("--chat", default="", help="Defaults to the calling chat.")
         if verb == "get":
             sub.add_argument(
@@ -220,18 +241,18 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--provider", default="")
             sub.add_argument("--model", default="")
             sub.add_argument("--messages", default=None, help="Visible history to carry: @file.json or inline JSON.")
-    create = chat.add_parser("create")
+    create = chat.add_parser("create", help="Create a chat, optionally with a first prompt.")
     create.add_argument("--project", default=None)
     create.add_argument("--title", default="New Chat")
     create.add_argument("--provider", default=None)
     create.add_argument("--model", default=None)
     create.add_argument("--mode", default=None)
     create.add_argument("--prompt", default=None)
-    send = chat.add_parser("send")
+    send = chat.add_parser("send", help="Start or queue a user turn in a chat.")
     send.add_argument("--chat", default="", help="Defaults to the calling chat.")
     send.add_argument("--prompt", required=True)
-    for verb in ("stop", "continue"):
-        sub = chat.add_parser(verb)
+    for verb, verb_help in _CHAT_EXPLICIT_HELP.items():
+        sub = chat.add_parser(verb, help=verb_help)
         # Target-only operations: stopping the calling chat hits
         # ``self_stop_forbidden``, and continuing requires an *archived* chat,
         # so the calling chat is never a valid default. Make the target
@@ -239,40 +260,43 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--chat", required=True)
 
     project = _verbs(nouns.add_parser("project", help="Projects in the active workspace."))
-    plist = project.add_parser("list")
+    plist = project.add_parser("list", help="List projects.")
     plist.add_argument("--include-completed", action="store_true")
-    pget = project.add_parser("get")
+    pget = project.add_parser("get", help="Get one project by id or name.")
     pget.add_argument("project_id", nargs="?", default="")
-    pcreate = project.add_parser("create")
+    pcreate = project.add_parser("create", help="Create a project.")
     pcreate.add_argument("--name", required=True)
     pcreate.add_argument("--context", default=None)
     pcreate.add_argument("--repo", dest="repo_path", default=None, help=_REPO_HELP)
-    pupdate = project.add_parser("update")
+    pupdate = project.add_parser("update", help="Update project metadata or its repository link.")
     pupdate.add_argument("project_id", nargs="?", default="")
     pupdate.add_argument("--name", default=None)
     pupdate.add_argument("--context", default=None)
     pupdate.add_argument("--vault-folder", default=None)
     pupdate.add_argument("--repo", dest="repo_path", default=None, help=_REPO_HELP)
-    prestore = project.add_parser("restore")
+    prestore = project.add_parser("restore", help="Restore a completed vault project.")
     prestore.add_argument("stem")
-    for verb in ("complete", "delete"):
-        sub = project.add_parser(verb)
+    for verb, verb_help in (
+        ("complete", "Move a vault-backed project to completed."),
+        ("delete", "Delete a non-vault-backed project and its chats."),
+    ):
+        sub = project.add_parser(verb, help=verb_help)
         sub.add_argument("project_id")
 
     task = _verbs(nouns.add_parser("task", help="Tasks in the active workspace."))
-    tlist = task.add_parser("list")
+    tlist = task.add_parser("list", help="List the board.")
     tlist.add_argument("--completed-since", default=None, metavar="ISO-8601", help="Keep tasks completed at or after this time (inclusive).")
     tlist.add_argument("--completed-before", default=None, metavar="ISO-8601", help="Keep tasks completed before this time (exclusive).")
-    tget = task.add_parser("get")
+    tget = task.add_parser("get", help="Get one task with its body.")
     tget.add_argument("task_id")
-    tcreate = task.add_parser("create")
+    tcreate = task.add_parser("create", help="File a task.")
     tcreate.add_argument("--title", required=True)
     # The body is Markdown prose (description, links, acceptance criteria):
     # a path, for the same reason `note verify --payload-file` is one.
     tcreate.add_argument("--body-file", default=None, metavar="FILE", help="Markdown file holding the task body: @file.md or a plain path.")
     tcreate.add_argument("--project", default=None)
     tcreate.add_argument("--due", default=None, metavar="YYYY-MM-DD")
-    tupdate = task.add_parser("update")
+    tupdate = task.add_parser("update", help="Edit one task; only the passed fields change.")
     tupdate.add_argument("task_id")
     tupdate.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
     tupdate.add_argument("--title", default=None)
@@ -280,14 +304,14 @@ def build_parser() -> argparse.ArgumentParser:
     tupdate.add_argument("--due", default=None, metavar="YYYY-MM-DD")
     tupdate.add_argument("--assignee", default=None, choices=["user", "agent"])
     tupdate.add_argument("--status", default=None, choices=["backlog", "in_progress", "in_review", "done"])
-    tmove = task.add_parser("move")
+    tmove = task.add_parser("move", help="Set a task's column.")
     tmove.add_argument("task_id")
     tmove.add_argument("--to", required=True, choices=["backlog", "in_progress", "in_review", "done"])
     tmove.add_argument("--revision", required=True)
-    tcomplete = task.add_parser("complete")
+    tcomplete = task.add_parser("complete", help="Ask to mark a task done (refused to agents).")
     tcomplete.add_argument("task_id")
     tcomplete.add_argument("--revision", required=True)
-    tdelegate = task.add_parser("delegate")
+    tdelegate = task.add_parser("delegate", help="Hand a task to the agent as one chat.")
     tdelegate.add_argument("task_id")
     tdelegate.add_argument("--revision", required=True, help="The revision you read; a stale one starts nothing.")
     tdelegate.add_argument("--project", default=None, help="Override the chat's project; omit to use the task's own, else General.")
@@ -304,35 +328,43 @@ def build_parser() -> argparse.ArgumentParser:
     treport.add_argument("task_id")
     treport.add_argument("--outcome", required=True, choices=["done", "blocked", "needs_input"])
     treport.add_argument("--summary-file", required=True, metavar="FILE", help="Markdown: what you did, where the results are, what is left. @file.md or a plain path.")
-    tattempt = task.add_parser("attempt")
+    tattempt = task.add_parser("attempt", help="Stop, resume, retry or detach a delegated attempt.")
     tattempt.add_argument("attempt_id")
     tattempt.add_argument(
         "action", choices=["stop", "resume", "retry", "detach"]
     )
 
     schedule = _verbs(nouns.add_parser("schedule", help="Schedules in the active workspace."))
-    schedule.add_parser("list")
-    for verb in ("create", "preview"):
-        sub = schedule.add_parser(verb)
+    schedule.add_parser("list", help="List schedules with their next run.")
+    for verb, verb_help in (
+        ("create", "Create a validated schedule."),
+        ("preview", "Validate fields and compute next_run without saving."),
+    ):
+        sub = schedule.add_parser(verb, help=verb_help)
         for flag, _param, kind in _SCHEDULE_FLAGS:
             sub.add_argument(
                 flag, default=None, type=(int if kind is int else str),
                 help=_SCHEDULE_FLAG_HELP.get(flag),
             )
-    upd = schedule.add_parser("update")
+    upd = schedule.add_parser("update", help="Update a schedule; only the passed fields change.")
     upd.add_argument("schedule_id")
     for flag, _param, kind in _SCHEDULE_FLAGS:
         upd.add_argument(
             flag, default=None, type=(int if kind is int else str),
             help=_SCHEDULE_FLAG_HELP.get(flag),
         )
-    for verb in ("pause", "resume", "run", "delete"):
-        sub = schedule.add_parser(verb)
+    for verb, verb_help in (
+        ("pause", "Pause a schedule without deleting it."),
+        ("resume", "Resume a paused schedule."),
+        ("run", "Dispatch a schedule now."),
+        ("delete", "Delete a removable user schedule."),
+    ):
+        sub = schedule.add_parser(verb, help=verb_help)
         sub.add_argument("schedule_id")
 
     webhook = _verbs(nouns.add_parser("webhook", help="Webhook triggers in the active workspace."))
-    webhook.add_parser("list")
-    wcreate = webhook.add_parser("create")
+    webhook.add_parser("list", help="List triggers as public records.")
+    wcreate = webhook.add_parser("create", help="Create a disabled trigger and mint its secret (shown once).")
     wcreate.add_argument("--name", required=True)
     # The instructions are operator prose that the launched turn runs as: a
     # path, for the same reason `task create --body-file` is one.
@@ -343,7 +375,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Markdown/text file holding the trigger's instructions: @file.md or a plain path.",
     )
     wcreate.add_argument("--project", default=None, metavar="P")
-    wupdate = webhook.add_parser("update")
+    wupdate = webhook.add_parser("update", help="Edit a trigger, or enable/disable it.")
     wupdate.add_argument("trigger_id")
     wupdate.add_argument("--revision", required=True, help="The revision you read; a stale one changes nothing.")
     wupdate.add_argument("--name", default=None)
@@ -353,8 +385,11 @@ def build_parser() -> argparse.ArgumentParser:
     # without touching its name or instructions.
     wupdate.add_argument("--enable", action="store_true", help="Make the trigger callable.")
     wupdate.add_argument("--disable", action="store_true", help="Stop the trigger, including events already accepted.")
-    for verb in ("rotate", "delete"):
-        sub = webhook.add_parser(verb)
+    for verb, verb_help in (
+        ("rotate", "Replace the secret; the old one stops working."),
+        ("delete", "Delete the trigger."),
+    ):
+        sub = webhook.add_parser(verb, help=verb_help)
         sub.add_argument("trigger_id")
         sub.add_argument("--revision", required=True)
 
@@ -365,17 +400,17 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--timeout-s", type=int, default=None)
     start.add_argument("--label", default=None)
     start.add_argument("cmd", nargs=argparse.REMAINDER, help="-- CMD [ARGS...]")
-    status = run.add_parser("status")
+    status = run.add_parser("status", help="Status and log tail of a run this chat started.")
     status.add_argument("run_id")
     status.add_argument("--lines", type=int, default=None)
-    cancel = run.add_parser("cancel")
+    cancel = run.add_parser("cancel", help="Cancel a running background command.")
     cancel.add_argument("run_id")
 
     gws = _verbs(nouns.add_parser("gws", help="Google Workspace connection status."))
-    gws.add_parser("status")
+    gws.add_parser("status", help="Report whether the Google Workspace login is valid.")
 
     workspace = _verbs(nouns.add_parser("workspace", help="Configured logical workspaces."))
-    workspace.add_parser("list")
+    workspace.add_parser("list", help="List the configured workspaces.")
 
     repo = _verbs(nouns.add_parser("repo", help="Local git checkouts on this machine."))
     repo.add_parser(
@@ -785,6 +820,7 @@ def main(argv: list[str]) -> int:
     if args.noun == "help":
         try:
             sys.stdout.write(_SKILL_PATH.read_text(encoding="utf-8"))
+            sys.stdout.write("\n" + _SKILL_PATH.with_name("reference.md").read_text(encoding="utf-8"))
         except OSError:
             parser.print_help()
         return 0
