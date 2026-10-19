@@ -253,7 +253,8 @@ describe('ChatPanel aligned layout', () => {
     expect(rail.text()).not.toContain('Current state')
     // The task origin note sits in the rail, and only there, while it shows.
     const origins = wrapper.findAllComponents({ name: 'TaskOriginNote' })
-    expect(origins.map(o => o.props('variant'))).toEqual(['rail'])
+    expect(origins).toHaveLength(1)
+    expect(rail.findComponent({ name: 'TaskOriginNote' }).exists()).toBe(true)
 
     // The header carries Archive only, as an icon button (labelled on wide
     // panes, icon-only on narrow); the toggle lives with Chat details.
@@ -316,11 +317,30 @@ describe('ChatPanel aligned layout', () => {
       wrapper.unmount()
     })
 
-    it('puts the task origin note above the transcript while the rail is hidden', async () => {
+    it('keeps the task origin out of the transcript and in Chat details', async () => {
+      const observers: Array<() => void> = []
+      vi.stubGlobal('ResizeObserver', class {
+        private cb: ResizeObserverCallback
+        constructor(cb: ResizeObserverCallback) { this.cb = cb }
+        observe() {
+          observers.push(() => this.cb([{ contentRect: { width: 600 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+        }
+        disconnect() {}
+        unobserve() {}
+      })
       const wrapper = await mountPanel(DELEGATED_TURNS, DELEGATION)
-      const note = wrapper.getComponent({ name: 'TaskOriginNote' })
-      expect(note.props('variant')).toBe('note')
-      expect(note.props('chat')).toMatchObject({ chat_id: 'chat-1', helper: DELEGATION.helper })
+      observers.forEach(fire => fire())
+      await nextTick()
+
+      expect(wrapper.find('.chat-rail--drawer').exists()).toBe(false)
+      expect(wrapper.findAllComponents({ name: 'TaskOriginNote' })).toHaveLength(0)
+
+      await wrapper.get('.work-inspector-trigger').trigger('click')
+      await nextTick()
+      const drawer = wrapper.get('#chat-work-rail.chat-rail--drawer')
+      const origins = drawer.findAllComponents({ name: 'TaskOriginNote' })
+      expect(origins).toHaveLength(1)
+      expect(origins[0].props('chat')).toMatchObject({ chat_id: 'chat-1', helper: DELEGATION.helper })
       wrapper.unmount()
     })
   })

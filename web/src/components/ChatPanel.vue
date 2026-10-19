@@ -113,7 +113,6 @@
       <AppIcon class="chat-origin-note-icon" name="spark" :size="16" />
       <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
     </p>
-    <TaskOriginNote v-if="!railShown && !inspectorOpen" :chat="chat" variant="note" @marked-done="archiveAfterTaskDone" />
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
@@ -1220,7 +1219,7 @@
         <AppIcon class="chat-rail-origin-icon" name="clock" :size="16" />
         <span>This chat comes from the automation <router-link :to="`/schedules/${s.schedule_id}`">{{ s.title || 'Automation' }}</router-link>.</span>
       </p>
-      <TaskOriginNote :chat="chat" variant="rail" @marked-done="archiveAfterTaskDone" />
+      <TaskOriginNote :chat="chat" @marked-done="archiveAfterTaskDone" />
       <p v-if="memoryPassOrigin" class="chat-rail-origin">
         <AppIcon class="chat-rail-origin-icon" name="spark" :size="16" />
         <span>Memory insight for <button type="button" class="chat-origin-link" @click="openMemoryPassSource">{{ memoryPassOrigin.title }}</button>.</span>
@@ -5558,8 +5557,12 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 }
 
 /* A reply's buttons share the prose's left edge: the quiet button's own
-   horizontal padding would otherwise indent the icon. */
+   horizontal padding would otherwise indent the icon. The row stretches to
+   the turn's width: as a column-flex item it would otherwise be max-content
+   wide, so the facts strip could not shrink to the turn and got clipped at
+   the transcript edge instead of scrolling inside it. */
 .message-wrap.assistant .message-actions {
+  align-self: stretch;
   margin-left: -8px;
 }
 
@@ -5612,17 +5615,27 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* The turn's facts close the footer: when it finished, how long it took and
    what ran it, then what it cost. Context-window occupancy is deliberately
    absent — the rail states it as a meter against the window's size.
-   `flex: 1 1 auto` pushes the block to the card's right edge on a wide pane
-   and drops it onto its own line, whole, when the footer runs out of room. */
+   The facts stay on one line beside the actions at every width: the zero
+   flex-basis keeps them from breaking onto a line of their own, and when the
+   pane cannot hold them the strip scrolls sideways. The first fact carries
+   the auto margin, so the strip is right-aligned while there is room and both
+   ends stay reachable once it overflows. A user message's send time is a
+   single text-only flex container and keeps `flex-end`. */
 .message-actions .message-meta {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
   gap: 2px 12px;
   min-width: 0;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  overscroll-behavior-inline: contain;
 }
+.message-actions .message-meta > :first-child { margin-left: auto; }
+.message-actions > span.message-meta { justify-content: flex-end; }
 
 .message-action-btn--busy {
   animation: action-busy-pulse 1s ease-in-out infinite;
