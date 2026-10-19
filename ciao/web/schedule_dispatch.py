@@ -732,8 +732,10 @@ class ScheduleDispatcher:
                     chat.mode = orig_mode
 
         chat_state = self._host._chats.get(target_id)
+        network_retry = False
         if chat_state and chat_state.retry_status == "pending":
             outcome.retry_pending = True
+            network_retry = chat_state.retry_kind == "network"
 
         # A clean parent turn may still have live background subagents. Wait for them to finish
         # before the archive decision so the classifier judges the completed
@@ -858,6 +860,11 @@ class ScheduleDispatcher:
             and not outcome.question_requested
         ):
             _row_status = schedule_support.RUN_STATUS_UNFINISHED
+        if network_retry:
+            # The agent could not reach an external service and armed a network
+            # retry; the retried turn settles the row (ProjectChatManager.
+            # _settle_schedule_retry). The job-run log keeps "skipped".
+            _row_status = schedule_support.RUN_STATUS_RETRYING
         result["status"] = _row_status
         # A failed run is stamped on the stored row, not just in the job log:
         # without this a wall-clock entry failing every run (an archived target
@@ -908,7 +915,8 @@ class ScheduleDispatcher:
     def _stamp_row_outcome(self, schedule_id: str, dispatch_id: str, status: str) -> None:
         """Write a run's outcome onto the stored row, if the row still names it."""
         if not schedule_id or status not in {
-            "error", "ok", "skipped", schedule_support.RUN_STATUS_UNFINISHED
+            "error", "ok", "skipped", schedule_support.RUN_STATUS_UNFINISHED,
+            schedule_support.RUN_STATUS_RETRYING,
         }:
             return
         store = cast(ScheduleStore | None, getattr(self._host, "schedule_store", None))
