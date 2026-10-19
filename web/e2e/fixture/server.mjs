@@ -104,6 +104,24 @@ const TRANSCRIPT = [
 ]
 
 /**
+ * One turn whose facts are wider than a phone: a long model name and six-digit
+ * token counts, so the footer strip has to scroll sideways rather than wrap or
+ * clip. Guards the action row's facts staying on the buttons' line at 390px.
+ */
+const TURN_FACTS_TRANSCRIPT = [
+  { role: 'user', content: 'Summarise the release.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  {
+    role: 'assistant',
+    content: 'The release is ready.',
+    sent_at: '2026-01-01T09:51:23Z',
+    duration_ms: 83000,
+    effective_model: 'claude-opus-5-5-with-a-deliberately-long-model-name',
+    usage: { input_tokens: 123456, output_tokens: 987654, context_pct: '99.9%' },
+    turn_index: 0,
+  },
+]
+
+/**
  * A settled reply followed by the user's comment-reference turn: the sent
  * `<user-comment-reference>` card (see lib/commentContext.ts) sits immediately
  * under the reply it annotates. It exists so a browser spec can select the
@@ -418,7 +436,9 @@ const server = http.createServer(async (req, res) => {
           ? COMMENT_TRANSCRIPT
           : body?.shape === 'task-link'
             ? TASK_LINK_TRANSCRIPT
-            : TRANSCRIPT
+            : body?.shape === 'turn-facts'
+              ? TURN_FACTS_TRANSCRIPT
+              : TRANSCRIPT
       return sendJson(res, { ok: true, turns: state.transcript.length })
     }
     if (pathname === '/__fixture__/update-tasks') {

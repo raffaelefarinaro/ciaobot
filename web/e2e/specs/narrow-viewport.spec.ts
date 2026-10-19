@@ -100,6 +100,80 @@ test.describe('narrow viewport', () => {
     expect(measured.actionsBottom - measured.nextTop, 'the action row crosses the next turn').toBeLessThanOrEqual(0)
   })
 
+  test('turn facts stay on one line and scroll sideways at 390px', async ({ page }) => {
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await page.evaluate(() => fetch('/__fixture__/transcript', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ shape: 'turn-facts' }),
+    }))
+    await page.reload()
+    await page.waitForSelector('.message-wrap.assistant .message-meta')
+
+    const measured = await page.evaluate(() => {
+      const replies = document.querySelectorAll('.message-wrap.assistant')
+      const wrap = replies[replies.length - 1] as HTMLElement
+      const actions = wrap.querySelector('.message-actions') as HTMLElement
+      const meta = actions.querySelector('.message-meta') as HTMLElement
+      const copy = actions.querySelector('.message-action-btn') as HTMLElement
+      const first = meta.firstElementChild as HTMLElement
+      const last = meta.lastElementChild as HTMLElement
+      const wrapBox = wrap.getBoundingClientRect()
+      const actionsBox = actions.getBoundingClientRect()
+      const metaBox = meta.getBoundingClientRect()
+      const copyBox = copy.getBoundingClientRect()
+      const style = getComputedStyle(meta)
+      // The reply's action row pulls 8px left so the icon's own padding lines
+      // its glyph up with the prose; that negative margin is the only part of
+      // the row allowed outside the turn.
+      const actionsIndent = Math.abs(parseFloat(getComputedStyle(actions).marginLeft) || 0)
+
+      meta.scrollLeft = 0
+      const firstLeft = first.getBoundingClientRect().left - meta.getBoundingClientRect().left
+      meta.scrollLeft = meta.scrollWidth
+      const lastRight = last.getBoundingClientRect().right - meta.getBoundingClientRect().right
+
+      return {
+        flexWrap: style.flexWrap,
+        whiteSpace: style.whiteSpace,
+        overflowX: style.overflowX,
+        centreDelta: Math.abs(
+          (metaBox.top + metaBox.bottom) / 2 - (copyBox.top + copyBox.bottom) / 2,
+        ),
+        actionsInsideWrap:
+          actionsBox.left >= wrapBox.left - actionsIndent - 1 &&
+          actionsBox.right <= wrapBox.right + 1,
+        actionsWidth: actionsBox.width,
+        wrapWidth: wrapBox.width,
+        metaInsideActions: metaBox.left >= actionsBox.left - 1 && metaBox.right <= actionsBox.right + 1,
+        scrollWidth: meta.scrollWidth,
+        clientWidth: meta.clientWidth,
+        firstLeft,
+        lastRight,
+      }
+    })
+
+    expect(measured.flexWrap, 'the facts wrap onto their own line').toBe('nowrap')
+    expect(measured.whiteSpace).toBe('nowrap')
+    expect(measured.overflowX).toBe('auto')
+    expect(measured.centreDelta, 'the facts do not share the action row').toBeLessThanOrEqual(1)
+    expect(
+      measured.actionsInsideWrap,
+      `the action row (${measured.actionsWidth}px) is not confined to its turn (${measured.wrapWidth}px)`,
+    ).toBe(true)
+    expect(measured.metaInsideActions, 'the facts strip overflows its action row').toBe(true)
+    expect(measured.scrollWidth, 'the facts are not overflowing, so the strip does not scroll')
+      .toBeGreaterThan(measured.clientWidth)
+    expect(measured.firstLeft, 'the first fact is clipped at the start of the strip').toBeGreaterThanOrEqual(-1)
+    expect(measured.lastRight, 'the last fact is clipped at the end of the strip').toBeLessThanOrEqual(1)
+
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(
+      overflow,
+      `document scrolls ${overflow}px past the viewport; widest unclipped: ${JSON.stringify(culprits)}`,
+    ).toBeLessThanOrEqual(0)
+  })
+
   test('icon-only controls still hit the 44px touch minimum', async ({ page }) => {
     // The open chat is where the icon-only controls live (hamburger, close,
     // model picker, archive); the home view has one.
