@@ -688,13 +688,12 @@ async def _op_chat_continue(service: CiaoMcpService, chat_id: str) -> dict[str, 
     return await service._invoke("chat_continue", lambda cp, p: cp.chat_continue(p, chat_id), mutating=True)
 
 
-async def _op_chat_retry(service: CiaoMcpService, chat_id: str = "", action: str = "try_now", prompt: str = "") -> dict[str, Any]:
-    """Manage a deferred provider-limit retry: set, stop, or (default)
-    immediately try it now."""
+async def _op_chat_retry(service: CiaoMcpService, chat_id: str = "", action: str = "try_now", prompt: str = "", kind: str = "") -> dict[str, Any]:
+    """Manage a deferred retry: set, stop, or (default) immediately try it now. kind=network (with action=set) re-runs this chat's prompt after a network outage."""
     return await service._invoke(
         "chat_retry",
         lambda cp, p: cp.chat_retry_update(
-            p, chat_id, action=action, prompt=prompt  # type: ignore[arg-type]
+            p, chat_id, action=action, prompt=prompt, kind=kind  # type: ignore[arg-type]
         ),
         mutating=True,
     )

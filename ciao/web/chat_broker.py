@@ -667,6 +667,8 @@ class ChatStream:
         "pending_capability",
         "code_mode_continue",
         "reload_continue",
+        "network_retry_turn",
+        "network_retry_armed",
     )
 
     def __init__(self, prompt_text: str = "", *, background: bool = False) -> None:
@@ -727,6 +729,13 @@ class ChatStream:
         # into code mode mid-turn; the drive loop consumes it once at turn end.
         self.code_mode_continue: bool = False
         self.reload_continue: bool = False
+        # True when this turn began with a network retry pending on the chat: the
+        # retried turn itself, or a user turn that just cleared it. Its end settles
+        # the schedule row (ProjectChatManager._settle_schedule_retry).
+        self.network_retry_turn: bool = False
+        # Set when the agent armed a network retry during this turn, so the turn end
+        # does not clear the retry it just asked for (chat_streaming turn end).
+        self.network_retry_armed: bool = False
 
     def enqueue(
         self,

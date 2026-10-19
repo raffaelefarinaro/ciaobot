@@ -125,6 +125,15 @@ def test_capsule_unattended_guidance_defers_approval_requiring_work() -> None:
     assert "Defer and report" in text
 
 
+def test_capsule_unattended_guidance_arms_a_network_retry() -> None:
+    text = mp.UNATTENDED_CAPSULE_GUIDANCE
+    assert "ciao chat retry --action set --kind network" in text
+    assert "Do not ask questions or wait for approval" in text
+    assert "do not route around the absent reviewer" in text
+    assert "Defer and report" in text
+    assert "Never print secret values (env files, tokens, provider configs) into the conversation." in text
+
+
 def test_capsule_unattended_guidance_defers_source_and_runtime_edits() -> None:
     text = mp.UNATTENDED_CAPSULE_GUIDANCE
     assert "editing application source code" in text

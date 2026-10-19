@@ -369,6 +369,174 @@ def test_unsettled_subagents_stamp_unfinished_not_skipped(tmp_path: Path) -> Non
     assert stored.last_status == "unfinished"
 
 
+def _retry_dispatch(tmp_path: Path, kind: str) -> tuple[dict, object]:
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
+    entry = store.create(
+        daily_time_utc="08:00", prompt="brief", model="opus", mode="auto",
+        chat_id=0, frequency="daily", web_chat_id=chat.chat_id, workspace="personal",
+    )
+    chat.retry_status = "pending"
+    chat.retry_kind = kind
+    chat.retry_prompt = "brief"
+    pcm.start_stream = _stream_stub(
+        [{"type": "result", "text": "network looks down", "is_error": False}]
+    )  # type: ignore[method-assign]
+    result = asyncio.run(
+        pcm.dispatch_schedule(entry, entry.prompt, "opus", "auto", "claude")
+    )
+    return result, store.get(entry.schedule_id)
+
+
+def test_network_retry_stamps_retrying_not_skipped(tmp_path: Path) -> None:
+    result, stored = _retry_dispatch(tmp_path, "network")
+
+    assert result["status"] == "retrying"
+    assert stored is not None
+    assert stored.last_status == "retrying"
+    assert stored.last_completed_on == ""
+
+
+def test_quota_retry_still_stamps_skipped(tmp_path: Path) -> None:
+    result, stored = _retry_dispatch(tmp_path, "quota")
+
+    assert result["status"] == "skipped"
+    assert stored is not None
+    assert stored.last_status == "skipped"
+
+
+def _retrying_row(pcm, store, dispatch_id: str = "2026-06-15#abc"):
+    project = pcm.create_project("Holder", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Daily brief", model="opus")
+    entry = store.create(
+        daily_time_utc="08:00", prompt="brief", model="opus", mode="auto",
+        chat_id=0, frequency="daily", web_chat_id=chat.chat_id, workspace="personal",
+    )
+    entry.last_status = "retrying"
+    entry.last_run_chat_id = chat.chat_id
+    entry.last_dispatch_id = dispatch_id
+    store.replace(entry)
+    return chat, entry
+
+
+def test_retry_turn_end_settles_the_retrying_row(tmp_path: Path) -> None:
+    pcm, store = _dispatch_manager(tmp_path)
+    chat, entry = _retrying_row(pcm, store)
+    chat.retry_status = "pending"
+
+    pcm._settle_schedule_retry(chat.chat_id, succeeded=True)
+    assert store.get(entry.schedule_id).last_status == "retrying"
+
+    chat.retry_status = ""
+    pcm._settle_schedule_retry(chat.chat_id, succeeded=True)
+    stored = store.get(entry.schedule_id)
+    assert stored.last_status == "ok"
+    assert stored.last_completed_on == "2026-06-15"
+
+    chat2, entry2 = _retrying_row(pcm, store)
+    pcm._settle_schedule_retry(chat2.chat_id, succeeded=False)
+    assert store.get(entry2.schedule_id).last_status == "error"
+
+
+def test_stopping_a_network_retry_fails_the_run(tmp_path: Path) -> None:
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+
+    async def _go():
+        chat, entry = _retrying_row(pcm, store)
+        assert pcm.arm_network_retry(chat.chat_id, "brief") == "armed"
+        pcm.stop_chat_retry(chat.chat_id)
+        return entry
+
+    entry = asyncio.run(_go())
+
+    assert store.get(entry.schedule_id).last_status == "error"
+
+
+def test_network_retry_cap_fails_the_run(tmp_path: Path) -> None:
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+
+    async def _go():
+        chat, entry = _retrying_row(pcm, store)
+        chat.retry_status = "pending"
+        chat.retry_kind = "network"
+        chat.retry_prompt = "brief"
+        chat.retry_attempts = 3
+        assert pcm.try_chat_retry_now(chat.chat_id) is None
+        return chat, entry
+
+    chat, entry = asyncio.run(_go())
+
+    assert store.get(entry.schedule_id).last_status == "error"
+    assert chat.retry_status == "stopped"
+
+
+async def _switched_kind_turn(tmp_path: Path, *, error: bool) -> tuple[object, object]:
+    from ciao.models import ResultEvent
+
+    pcm, store = _dispatch_manager(tmp_path)
+    chat, entry = _retrying_row(pcm, store)
+    chat.retry_status = "pending"
+    chat.retry_kind = "connection"
+    chat.retry_prompt = "brief"
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        if error:
+            # Simulates the cap: the retry is gone by the time the turn ends.
+            pcm._clear_chat_retry(chat, status="stopped")
+        yield ResultEvent(
+            type="result", result="boom" if error else "done", session_id="s",
+            is_error=error, effective_model=chat.model, usage={}, quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    async for _ in stream.subscribe():
+        pass
+    return store, entry
+
+
+def test_switched_kind_retry_turn_settles_the_retrying_row(tmp_path: Path) -> None:
+    import asyncio
+
+    store, entry = asyncio.run(_switched_kind_turn(tmp_path, error=False))
+
+    assert store.get(entry.schedule_id).last_status == "ok"
+
+
+def test_switched_kind_retry_turn_that_errors_after_cap_fails_the_row(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    store, entry = asyncio.run(_switched_kind_turn(tmp_path, error=True))
+
+    assert store.get(entry.schedule_id).last_status == "error"
+
+
+def test_deleting_the_run_chat_fails_a_retrying_run(tmp_path: Path) -> None:
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+
+    async def _go():
+        chat, entry = _retrying_row(pcm, store)
+        assert pcm.delete_chat(chat.chat_id) is True
+        return entry
+
+    entry = asyncio.run(_go())
+
+    assert store.get(entry.schedule_id).last_status == "error"
+
+
 def test_health_stamp_publishes_schedules_changed(tmp_path: Path) -> None:
     """An open sidebar or Automations page refetches only on the
     schedules_changed event; the health write must publish it or the new

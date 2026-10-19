@@ -54,3 +54,4 @@ the sender's own call is a short `curl` recipe in `PWA_API.md`.
 - Reusable for "whenever X happens, open a chat and do Y" — say what the sender
   should POST and Ciaobot can set up the trigger, or configure it yourself when
   the user wants to do it by hand.
+- **Network blips:** if a routine's job cannot reach an external service, the run re-tries itself in the same chat after 10, 20 and 40 minutes; Automations shows "Retrying" meanwhile and "failed" if all three attempts miss.

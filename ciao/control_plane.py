@@ -2611,8 +2611,27 @@ class CiaoControlPlane:
         chat_id: str,
         action: Literal["set", "stop", "try_now"],
         prompt: str = "",
+        kind: str = "",
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
+        if kind:
+            if kind != "network":
+                raise ControlPlaneError("invalid_kind", "kind must be network.")
+            if action != "set":
+                raise ControlPlaneError("invalid_action", "kind=network only works with action=set.")
+            armed: str = self.pcm.arm_network_retry(chat_id, prompt)
+            if armed == "not_found":
+                raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
+            if armed == "no_prompt":
+                raise ControlPlaneError("empty_prompt", "No prompt to retry: pass --prompt with the job to re-run.")
+            if armed == "exhausted":
+                raise ControlPlaneError(
+                    "retry_exhausted",
+                    "The network retry cap is spent and no further retry was armed. "
+                    "Report the failure in your final message.",
+                )
+            chat = self.pcm.get_chat(chat_id)
+            return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
         if action == "set":
             chat = self.pcm.set_chat_retry(chat_id, prompt, image_refs=[], reason="mcp")
             if chat is None:
