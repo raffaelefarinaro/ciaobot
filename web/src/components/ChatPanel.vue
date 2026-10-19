@@ -1299,7 +1299,7 @@
             v-for="output in inspectorOutputs"
             :key="`${output.action}:${output.file_path}`"
             type="button"
-            class="rail-item"
+            class="rail-item chat-rail-file"
             :title="output.file_path"
             @click="openFileCard(output.file_path)"
           >
@@ -1315,7 +1315,7 @@
               v-for="path in mentionedFiles"
               :key="`mentioned-${path}`"
               type="button"
-              class="rail-item"
+              class="rail-item chat-rail-file"
               :title="path"
               @click="openFileCard(path)"
             >
@@ -4984,6 +4984,10 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   text-transform: uppercase;
 }
 .chat-rail-running .rail-label + .chat-rail-subhead { margin-top: var(--space-1); }
+
+.chat-rail-file { min-width: 0; max-width: 100%; }
+.chat-rail-file > span,
+.chat-rail-file > small { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* .rail-item stacks its children; an agent row reads as one line. */
 .chat-rail-agent {
