@@ -1,311 +1,113 @@
 <template>
-  <div v-if="subs.length" class="subagent-panel" :class="{ open: panelOpen }">
-    <div class="subagent-summary" @click.stop="togglePanel">
-      <span class="chevron">{{ panelOpen ? '\u25BE' : '\u25B8' }}</span>
-      <span v-if="runningCount" class="running-spinner" aria-hidden="true"></span>
-      <span v-else class="icon">&#129302;</span>
-      <span class="label">Subagent activity</span>
-      <span class="meta">
-        {{ subs.length }} subagent{{ subs.length === 1 ? '' : 's' }}<template v-if="runningCount"> &middot; {{ runningCount }} running</template>
-      </span>
-    </div>
-    <div v-if="panelOpen" class="subagent-body">
-      <div
-        v-for="(sub, i) in subs"
-        :key="sub.agent_id"
-        class="subagent-block"
-        :class="{ open: !!openAgents[i] }"
-      >
-        <div class="subagent-head" @click.stop="toggleAgent(i)">
-          <span class="chevron">{{ openAgents[i] ? '\u25BE' : '\u25B8' }}</span>
-          <span class="agent-id">
-            <template v-if="sub.subagent_type">[{{ sub.subagent_type }}]&nbsp;</template>{{ sub.description || shortAgentId(sub.agent_id) }}
-          </span>
-          <span v-if="sub.status" class="status-chip" :class="sub.status">{{ sub.status }}</span>
-          <span class="meta">{{ agentMeta(sub) }}</span>
-          <!-- Same destination as the sidebar row, so the two ways of reaching
-               a subagent land in one place. Inline here (a rollup among the
-               parent's other trace blocks), full-pane there. -->
-          <RouterLink
-            v-if="chatId"
-            class="open-link"
-            :to="subagentPath(chatId, sub.agent_id)"
-            :title="`Open ${sub.description || shortAgentId(sub.agent_id)} in a read-only view`"
-            @click.stop
-          >open</RouterLink>
-        </div>
-        <div v-if="openAgents[i]" class="subagent-turns">
-          <div v-for="(m, j) in sub.messages" :key="j" class="sub-msg" :class="m.role">
-            <!-- Activity rollup from _extract_assistant_blocks: tool_name === '_activity' -->
-            <div v-if="m.tool_name === '_activity'" class="sub-activity">
-              <div
-                v-for="(line, k) in m.content.split('\n')"
-                :key="k"
-                class="sub-activity-line"
-                v-text="line"
-              ></div>
-            </div>
-            <div v-else-if="m.role === 'user'" class="sub-bubble user">
-              <div class="sub-role">User</div>
-              <div class="sub-content" v-html="renderMarkdown(m.content)"></div>
-            </div>
-            <div v-else-if="m.role === 'assistant'" class="sub-bubble assistant">
-              <div class="sub-role">Assistant</div>
-              <div class="sub-content" v-html="renderMarkdown(m.content)"></div>
-            </div>
-            <div v-else class="sub-bubble system">
-              <div class="sub-content" v-text="m.content"></div>
-            </div>
-          </div>
-          <div v-if="!sub.messages.length" class="sub-empty">No captured turns.</div>
-        </div>
-      </div>
-    </div>
-  </div>
+  <ul v-if="subs.length" class="subagent-rows" role="list">
+    <li v-for="sub in subs" :key="sub.agent_id" class="subagent-row" :class="sub.status">
+      <ActivityGlyph v-if="sub.status === 'running'" kind="agent" />
+      <span class="subagent-row-name">{{ nameOf(sub) }}</span>
+      <span v-if="sub.subagent_type" class="subagent-row-type">{{ sub.subagent_type }}</span>
+      <span class="subagent-row-status">{{ statusWord(sub.status) }}<template v-if="duration(sub)"> &middot; {{ duration(sub) }}</template></span>
+      <RouterLink
+        v-if="chatId"
+        class="subagent-row-open"
+        :to="subagentPath(chatId, sub.agent_id)"
+        :aria-label="`Open ${nameOf(sub)} transcript`"
+      >Open &rarr;</RouterLink>
+    </li>
+  </ul>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { SubagentTranscript } from '../lib/types'
-import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { shortAgentId, subagentPath } from '../lib/subagentIds'
+import { formatDuration } from '../lib/time'
+import ActivityGlyph from './ActivityGlyph.vue'
 
-// `chatId` is optional so the panel still renders in isolation (tests, and any
+// `chatId` is optional so the rows still render in isolation (tests, and any
 // caller that has no route to offer); the link is simply omitted then.
 const props = defineProps<{ subagents: SubagentTranscript[]; chatId?: string }>()
 const chatId = computed(() => props.chatId || '')
 
 const subs = computed<SubagentTranscript[]>(() => props.subagents || [])
-const runningCount = computed(
-  () => subs.value.filter(s => s.status === 'running').length,
-)
-// Open by default while agents are still working so the live feed is
-// visible without a click; collapsed once everything has completed.
-const panelOpen = ref(runningCount.value > 0)
-const openAgents = ref<Record<number, boolean>>({})
 
-function togglePanel() {
-  panelOpen.value = !panelOpen.value
+function nameOf(sub: SubagentTranscript): string {
+  return sub.description || shortAgentId(sub.agent_id)
 }
 
-function toggleAgent(i: number) {
-  openAgents.value = { ...openAgents.value, [i]: !openAgents.value[i] }
+function statusWord(status: SubagentTranscript['status']): string {
+  switch (status) {
+    case 'running': return 'running'
+    case 'completed': return 'finished'
+    case 'failed': return 'failed'
+    case 'stopped': return 'stopped'
+    default: return ''
+  }
 }
 
-function agentMeta(sub: SubagentTranscript): string {
-  const userTurns = sub.messages.filter(m => m.role === 'user').length
-  const assistantTurns = sub.messages.filter(
-    m => m.role === 'assistant' && m.tool_name !== '_activity',
-  ).length
-  const tools = sub.messages.filter(m => m.tool_name === '_activity').length
-  const parts: string[] = []
-  if (userTurns) parts.push(`${userTurns} prompt${userTurns === 1 ? '' : 's'}`)
-  if (assistantTurns) parts.push(`${assistantTurns} repl${assistantTurns === 1 ? 'y' : 'ies'}`)
-  if (tools) parts.push(`${tools} tool call${tools === 1 ? '' : 's'}`)
-  return parts.join(' \u00B7 ') || 'empty'
-}
-
-function renderMarkdown(text: string): string {
-  return renderSafeMarkdown(text)
+function duration(sub: SubagentTranscript): string {
+  const times = sub.messages
+    .map(m => Date.parse(m.timestamp))
+    .filter(t => Number.isFinite(t))
+  if (times.length < 2) return ''
+  return formatDuration(times[times.length - 1] - times[0])
 }
 </script>
 
 <style scoped>
-.subagent-panel {
-  align-self: flex-start;
-  max-width: 95%;
-  width: 95%;
-  background: transparent;
-  border: 1px dashed var(--border);
-  border-left: 3px solid var(--accent2);
-  border-radius: var(--radius);
-  font-size: 12px;
-}
-
-.subagent-summary {
-  padding: 8px 12px;
-  cursor: pointer;
-  user-select: none;
+.subagent-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.subagent-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
   color: var(--fg2);
-  line-height: 1.4;
 }
 
-.subagent-summary:hover { color: var(--fg); }
-
-.chevron { font-size: 10px; color: var(--fg2); }
-.icon { font-size: 14px; }
-.label { color: var(--fg2); }
-
-.running-spinner {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent2);
-  animation: subagent-pulse 1.1s ease-in-out infinite;
+.subagent-row-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-@keyframes subagent-pulse {
-  0%, 100% { transform: scale(0.55); opacity: 0.35; }
-  50% { transform: scale(1); opacity: 1; }
+.subagent-row-type {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  flex: 0 0 auto;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .running-spinner { animation-duration: 2.2s; }
+.subagent-row-status {
+  color: var(--fg3);
+  flex: 0 0 auto;
 }
 
-.status-chip {
-  font-size: 10px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  color: var(--fg2);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
+.running .subagent-row-status { color: var(--accent2); }
+.failed .subagent-row-status { color: var(--error); }
 
-.status-chip.running { color: var(--accent2); border-color: var(--accent2); }
-.status-chip.failed { color: var(--error, #e5484d); border-color: var(--error, #e5484d); }
-.meta {
-  color: var(--fg2);
-  opacity: 0.7;
-  font-weight: 400;
+.subagent-row-open {
   margin-left: auto;
-  font-size: 11px;
-}
-
-.subagent-body {
-  padding: 6px 12px 10px;
-  border-top: 1px dashed var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.subagent-block {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-}
-
-.subagent-head {
-  padding: 6px 10px;
-  cursor: pointer;
-  user-select: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  flex: 0 0 auto;
   color: var(--fg2);
-}
-
-.subagent-head:hover { color: var(--fg); }
-
-.agent-id {
-  font-weight: 600;
-  color: var(--fg);
-}
-.open-link {
-  flex: none;
-  color: var(--accent);
   text-decoration: none;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.open-link:hover { text-decoration: underline; }
-
-.agent-id code {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11px;
-  color: var(--fg2);
 }
 
-.subagent-turns {
-  padding: 6px 10px 10px;
-  border-top: 1px dashed var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.subagent-row-open:hover { text-decoration: underline; }
+.subagent-row-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.sub-bubble {
-  padding: 6px 10px;
-  border-radius: 4px;
-  line-height: 1.45;
-}
-
-.sub-bubble.user {
-  background: var(--bg3);
-  color: var(--fg);
-}
-
-.sub-bubble.assistant {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-}
-
-.sub-bubble.system {
-  color: var(--fg2);
-  font-size: 11px;
-  opacity: 0.85;
-}
-
-.sub-role {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fg2);
-  margin-bottom: 3px;
-}
-
-.sub-content :deep(p) { margin: 3px 0; }
-.sub-content :deep(a) {
-  color: var(--accent);
-  text-decoration: underline;
-}
-.sub-content :deep(a:hover) {
-  color: var(--accent-strong);
-}
-.sub-content :deep(ul),
-.sub-content :deep(ol) {
-  padding-left: 22px;
-  margin: 3px 0;
-  list-style-position: outside;
-}
-.sub-content :deep(pre) {
-  background: var(--bg);
-  padding: 6px 8px;
-  border-radius: 4px;
-  overflow-x: auto;
-  font-size: 11px;
-}
-.sub-content :deep(code) {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11px;
-}
-
-.sub-activity {
-  background: var(--bg2);
-  border-radius: 4px;
-  padding: 4px 8px;
-  font-size: 11px;
-  color: var(--fg2);
-}
-
-.sub-activity-line {
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.sub-empty {
-  color: var(--fg2);
-  font-style: italic;
-  font-size: 11px;
-  padding: 4px 0;
+@media (pointer: coarse) {
+  .subagent-row-open {
+    min-height: var(--touch);
+    display: inline-flex;
+    align-items: center;
+  }
 }
 </style>

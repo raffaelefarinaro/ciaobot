@@ -1789,8 +1789,8 @@ describe('ephemeral status events', () => {
 describe('subagent thinking deltas', () => {
   test('do not leak a subagent thinking delta into the parent turn trace or messages', () => {
     // Regression: thinking deltas fired from inside a Task subagent arrive
-    // with parent_tool_use_id set. The PWA already renders the subagent's
-    // transcript in its own "Subagent activity" box, so accumulating the
+    // with parent_tool_use_id set. The subagent's transcript belongs to its
+    // own read-only view, so accumulating the
     // delta into the parent's thinking buffer used to produce a stray
     // _thinking message at the end of the parent turn's trace block and
     // persist it into the chat history after the result event.
