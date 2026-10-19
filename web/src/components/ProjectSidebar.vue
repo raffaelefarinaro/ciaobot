@@ -613,12 +613,13 @@
                   @click="openProject(project.project_id)"
                   title="Open project page"
                 >
-                  {{ project.name }}
+                  <span class="project-name-text">{{ project.name }}</span>
                   <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
                   <!-- Only a collapsed project summarises its chats: expanded,
                        each chat row already carries its own signal. One static
                        dot when a chat wants the user (accent if it waits for an
-                       answer), else the working ring - never a count. -->
+                       answer), else the working ring - never a count. A chat's
+                       background run adds the static run glyph beside either. -->
                   <template v-if="!expandedProjects.has(project.project_id)">
                     <span
                       v-if="projectAttention(project.project_id)"
@@ -634,6 +635,13 @@
                       title="A chat in this project is working"
                       aria-label="A chat in this project is working"
                     ><span class="rollup-ring-core" aria-hidden="true" /></span>
+                    <span
+                      v-if="projectRunCount(project.project_id) > 0"
+                      class="project-run-rollup"
+                      role="img"
+                      :title="projectRunsLabel(project.project_id)"
+                      :aria-label="projectRunsLabel(project.project_id)"
+                    ><ActivityGlyph kind="run" /></span>
                   </template>
                 </button>
                 <input
@@ -734,13 +742,16 @@
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
                     <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
-                    <span v-if="isChatCodeModeOn(chat, project.repo)" class="chat-code-tag" title="Code mode is on">code</span>
+                    <span v-if="isChatCodeModeOn(chat, project.repo) && !branchChip(chat, project.repo)" class="chat-code-tag" title="Code mode is on">code</span>
                     <span
-                      v-if="chatRepoTag(project.repo, chat.repo_location)"
+                      v-if="branchChip(chat, project.repo)"
                       class="chat-repo-tag"
-                      :class="{ 'chat-repo-tag--removed': chatRepoTag(project.repo, chat.repo_location)!.removed }"
-                      :title="chatRepoTag(project.repo, chat.repo_location)!.title"
-                    >{{ chatRepoTag(project.repo, chat.repo_location)!.label }}</span>
+                      :class="{
+                        'chat-repo-tag--removed': branchChip(chat, project.repo)!.removed,
+                        'chat-repo-tag--code-off': branchChip(chat, project.repo)!.codeOff,
+                      }"
+                      :title="branchChip(chat, project.repo)!.title"
+                    >{{ branchChip(chat, project.repo)!.label }}</span>
                     <ChatSignals
                       :chat-id="chat.chat_id"
                       density="row"
@@ -907,7 +918,8 @@ import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
-import { chatRepoTag } from '../lib/repoLocation'
+import ActivityGlyph from './ActivityGlyph.vue'
+import { sidebarBranchChip } from '../lib/repoLocation'
 import { isChatCodeModeOn } from '../lib/codeMode'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
@@ -1094,6 +1106,23 @@ function projectAttentionLabel(projectId: string): string {
   if (needs) parts.push(`${needs} waiting for your answer`)
   if (unread) parts.push(`${unread} unread`)
   return parts.join(', ')
+}
+
+// The branch chip for a chat row, with code mode folded in.
+function branchChip(chat: ChatInfo, repo: ProjectInfo['repo']) {
+  return sidebarBranchChip(repo, chat.repo_location, isChatCodeModeOn(chat, repo))
+}
+
+// Background command runs across this project's visible chats. A run can sit
+// in a chat for hours (a dev server), so a collapsed project says it has one.
+function projectRunCount(projectId: string): number {
+  return store.projectChats(projectId)
+    .reduce((n, chat) => n + (store.backgroundRuns[chat.chat_id]?.length || 0), 0)
+}
+
+function projectRunsLabel(projectId: string): string {
+  const n = projectRunCount(projectId)
+  return n === 1 ? '1 background run in this project' : `${n} background runs in this project`
 }
 
 function workspaceInitial(workspace: string): string {
@@ -2436,10 +2465,14 @@ async function confirmDeleteChat(chatId: string) {
   border-left: 1px solid var(--border);
 }
 
+/* A flex row so only the name truncates: the auto chip and the collapsed
+   state marks after it stay visible however long the name runs. */
 .project-name {
+  display: flex;
   flex: 1;
+  align-items: center;
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
   min-height: var(--touch);
@@ -2454,14 +2487,24 @@ async function confirmDeleteChat(chatId: string) {
   letter-spacing: inherit;
 }
 .project-name:hover { color: var(--fg); }
+.project-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.project-name > :not(.project-name-text) { flex-shrink: 0; }
 
-/* The project header is a text button, not a flex row, so the state marks sit
-   flush against the last letter of the name. Space them the same 6px .badge
-   already gives itself, and align them to the text rather than the baseline.
-   Scoped here on purpose: the workspace pill puts the same marks in a flex row
-   with a gap, where a margin would double up. */
+/* The state marks sit flush after the name (the row has no gap), spaced the
+   same 6px .badge already gives itself. Scoped here on purpose: the workspace
+   pill puts the same marks in a flex row with a gap, where a margin would
+   double up. */
 .project-name .rollup-needs-dot,
 .project-name .rollup-ring {
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
+.project-name .project-run-rollup {
+  display: inline-flex;
   margin-left: var(--space-2);
   vertical-align: middle;
 }
@@ -2638,6 +2681,11 @@ async function confirmDeleteChat(chatId: string) {
 .chat-repo-tag--removed {
   text-decoration: line-through;
   opacity: 0.6;
+}
+/* A worktree the chat is no longer coding in: still named, visibly inactive. */
+.chat-repo-tag--code-off {
+  border-style: dashed;
+  opacity: 0.55;
 }
 
 /* Unread is full-strength text plus the row's dot, not bold: bold chat

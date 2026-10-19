@@ -23,29 +23,15 @@
       class="chat-signal chat-signal--working"
       title="Working"
       aria-label="Working"
-    ><span class="activity-spinner" aria-hidden="true" /></span>
+    ><ActivityGlyph kind="working" /></span>
     <span
       v-else-if="primarySignal === 'agents'"
       class="chat-signal chat-signal--agents"
       :title="agentsTitle"
       :aria-label="agentsTitle"
     >
-      <span class="activity-spinner" aria-hidden="true" />
+      <ActivityGlyph kind="agent" />
       <span v-if="density === 'card' && agentCount > 1" class="chat-signal-count">{{ agentCount }}</span>
-    </span>
-    <!-- Ranked below agents: both mean "still going", but an agent has a
-         transcript to open and a run has only a count and a log, so when a
-         chat has both the agent is the more useful thing to point at. Its own
-         state rather than folded into `agents`, because that label counts
-         agents and a background run is not one. -->
-    <span
-      v-else-if="primarySignal === 'runs'"
-      class="chat-signal chat-signal--runs"
-      :title="runsTitle"
-      :aria-label="runsTitle"
-    >
-      <span class="activity-spinner" aria-hidden="true" />
-      <span v-if="density === 'card' && runCount > 1" class="chat-signal-count">{{ runCount }}</span>
     </span>
     <span
       v-else-if="primarySignal === 'retry'"
@@ -53,6 +39,18 @@
       title="Retry scheduled"
       aria-label="Retry scheduled"
     >↻</span>
+    <!-- Not on the ladder: a run can outlive everything else on the row (a dev
+         server goes for hours), so it shows beside needs-you, working and agents
+         instead of hiding behind them. -->
+    <span
+      v-if="runCount > 0"
+      class="chat-signal chat-signal--runs"
+      :title="runsTitle"
+      :aria-label="runsTitle"
+    >
+      <ActivityGlyph kind="run" />
+      <span v-if="density === 'card' && runCount > 1" class="chat-signal-count">{{ runCount }}</span>
+    </span>
     <span
       v-if="intervalSummary"
       class="chat-signal chat-signal--interval"
@@ -78,6 +76,7 @@ import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import type { WorkspaceAccent } from '../lib/workspaceColors'
 import { backgroundRunLabel } from '../lib/backgroundRuns'
+import ActivityGlyph from './ActivityGlyph.vue'
 
 const props = withDefaults(defineProps<{
   chatId: string
@@ -122,12 +121,11 @@ const memoryAttention = computed(() => store.memoryPassNeedsAttention(props.chat
 
 // Unread is a separate static notification dot. The per-chat value is binary,
 // so the numeric counts remain reserved for project/workspace rollups.
-const primarySignal = computed<'needs' | 'memory' | 'working' | 'agents' | 'runs' | 'retry' | null>(() => {
+const primarySignal = computed<'needs' | 'memory' | 'working' | 'agents' | 'retry' | null>(() => {
   if (needsInput.value) return 'needs'
   if (memoryAttention.value) return 'memory'
   if (working.value) return 'working'
   if (agentCount.value > 0) return 'agents'
-  if (runCount.value > 0) return 'runs'
   if (props.density === 'row' && retryPending.value) return 'retry'
   return null
 })
@@ -213,38 +211,11 @@ const intervalTitle = computed(() => {
   white-space: nowrap;
 }
 
-/* Working reuses the chat transcript's own activity pulse rather than a
-   bordered pill: a solid accent dot with a halo and an expanding ring. The
-   outlined ring it replaced was nearly invisible at sidebar size, and the
-   card variant carried a redundant "working" label under a tier heading that
-   already said working. Kept in sync with .activity-spinner in ChatPanel.vue —
-   if that changes, change this. */
+/* Working, agents and runs draw ActivityGlyph; the gap keeps a count clear of it. */
 .chat-signal--working,
 .chat-signal--agents,
 .chat-signal--runs {
   gap: var(--space-1);
-}
-
-.activity-spinner {
-  position: relative;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 4px var(--accent);
-  animation: chat-signal-pulse 1.1s ease-in-out infinite;
-  flex-shrink: 0;
-}
-
-.activity-spinner::before {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border-radius: 50%;
-  background: var(--accent);
-  opacity: 0.45;
-  animation: chat-signal-ring 1.1s ease-out infinite;
-  pointer-events: none;
 }
 
 /* Only shown for more than one agent or run, where the number is the point. */
@@ -254,6 +225,9 @@ const intervalTitle = computed(() => {
   font-size: var(--text-xs);
   font-weight: 700;
 }
+
+/* A run is neutral (it is not the accent's "live turn"), and so is its count. */
+.chat-signal--runs .chat-signal-count { color: var(--fg2); }
 
 .chat-signal--retry {
   color: var(--warning);
@@ -278,25 +252,5 @@ const intervalTitle = computed(() => {
 
 .chat-signal--interval.stopped {
   color: var(--fg3);
-}
-
-@keyframes chat-signal-pulse {
-  0%, 100% { transform: scale(0.55); opacity: 0.35; }
-  50% { transform: scale(1); opacity: 1; }
-}
-
-@keyframes chat-signal-ring {
-  0% { transform: scale(0.6); opacity: 0.45; }
-  100% { transform: scale(1.6); opacity: 0; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .activity-spinner,
-  .activity-spinner::before {
-    animation: none;
-  }
-
-  .activity-spinner { opacity: 1; }
-  .activity-spinner::before { opacity: 0.3; }
 }
 </style>
