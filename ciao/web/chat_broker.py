@@ -112,6 +112,18 @@ def _flushed_entry(entry: dict) -> dict:
     return flushed
 
 
+def shared_origin(entries: list[dict]) -> str:
+    """The origin every entry carries, or "" if any entry lacks it or they differ.
+
+    A steered or combined message counts as engine-written only when all of it
+    is: a person's words mixed in must stay a visible bubble.
+    """
+    origins = {str(e.get("origin") or "") for e in entries}
+    if len(origins) != 1:
+        return ""
+    return origins.pop()
+
+
 def public_queue(entries: list[dict], waiting: list[dict] | None = None) -> list[dict]:
     """The ``queue_state`` shape of queue entries: no internal steer id.
 
