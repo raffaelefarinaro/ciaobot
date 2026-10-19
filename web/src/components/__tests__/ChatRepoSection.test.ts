@@ -27,22 +27,23 @@ describe('ChatRepoSection', () => {
   beforeEach(() => { setActivePinia(createPinia()) })
   afterEach(() => { document.body.innerHTML = ''; vi.unstubAllGlobals() })
 
-  it('shows name, path, branch and clean state for the main checkout', () => {
+  it('shows name, branch and clean state for the main checkout', () => {
     const wrapper = mountSection(repo, {})
     expect(wrapper.get('.chat-repo-name').text()).toBe('app')
-    expect(wrapper.get('.chat-repo-path').text()).toBe('/r/app')
+    expect(wrapper.get('.chat-repo-name').attributes('title')).toBe('/r/app')
+    expect(wrapper.text()).not.toContain('/r/app')
     expect(wrapper.get('.chat-repo-branch').text()).toContain('main')
     expect(wrapper.get('.chat-repo-clean').text()).toBe('clean')
-    expect(wrapper.find('.chat-repo-note').exists()).toBe(false)
+    expect(wrapper.find('.chat-repo-branch').attributes('title')).toBeUndefined()
     wrapper.unmount()
   })
 
-  it("shows the chat's worktree, its note, and no dirty state", () => {
+  it("shows the chat's worktree and no dirty state", () => {
     const wrapper = mountSection({ ...repo, dirty: true }, worktree)
     expect(wrapper.get('.chat-repo-branch').text()).toContain('feat-x')
     expect(wrapper.get('.chat-repo-kind').text()).toBe('worktree')
-    expect(wrapper.get('.chat-repo-note').text()).toContain('/r/app-wt')
-    expect(wrapper.get('.chat-repo-note').text()).toContain('main')
+    expect(wrapper.text()).not.toContain('This chat works in')
+    expect(wrapper.get('.chat-repo-branch').attributes('title')).toBe('Main checkout is on main')
     expect(wrapper.find('.chat-repo-dirty').exists()).toBe(false)
     expect(wrapper.find('.chat-repo-clean').exists()).toBe(false)
     wrapper.unmount()
@@ -56,11 +57,11 @@ describe('ChatRepoSection', () => {
     wrapper.unmount()
   })
 
-  it('warns when the folder is missing and hides Open AGENTS.md', () => {
+  it('warns when the folder is missing and hides the copy button', () => {
     const wrapper = mountSection({ ...repo, missing: true }, {})
     expect(wrapper.get('.chat-repo-missing').text()).toContain('folder is missing')
     expect(wrapper.find('.chat-repo-meta').exists()).toBe(false)
-    expect(wrapper.find('.chat-repo-open').exists()).toBe(false)
+    expect(wrapper.find('.chat-repo-copy').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -95,22 +96,51 @@ describe('ChatRepoSection', () => {
     wrapper.unmount()
   })
 
-  it('opens AGENTS.md through findRepoInstructions', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 })
-    vi.stubGlobal('fetch', fetchMock)
-    const wrapper = mountSection(repo, {})
-    await wrapper.get('.chat-repo-open').trigger('click')
-    await flushPromises()
-    expect(fetchMock.mock.calls[0][0]).toContain('exact=1')
-    expect(wrapper.emitted('open-file')).toEqual([['/r/app/AGENTS.md']])
-    expect(wrapper.find('[role=alert]').exists()).toBe(false)
-
-    fetchMock.mockResolvedValue({ ok: false, status: 404 })
-    await wrapper.get('.chat-repo-open').trigger('click')
-    await flushPromises()
-    expect(wrapper.emitted('open-file')).toHaveLength(1)
-    expect(wrapper.get('[role=alert]').text()).toContain('no AGENTS.md or CLAUDE.md')
+  it("copies the chat's folder path", async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { clipboard: { writeText } })
+    const wrapper = mountSection(repo, worktree)
+    const copy = wrapper.get('.chat-repo-copy')
+    expect(copy.attributes('aria-label')).toBe('Copy path')
+    await copy.trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(writeText).toHaveBeenCalledWith('/r/app-wt')
+    expect(copy.attributes('aria-label')).toBe('Path copied')
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(copy.attributes('aria-label')).toBe('Copy path')
     wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('keeps the code-mode hint behind the info button', async () => {
+    const wrapper = mountSection(repo, {})
+    const info = wrapper.get('.repo-code-info')
+    const hint = wrapper.get('.repo-code-hint').element.parentElement!
+    expect(info.attributes('aria-expanded')).toBe('false')
+    expect(hint.classList.contains('sr-only')).toBe(true)
+    expect(info.attributes('aria-controls')).toBe(hint.id)
+    const describedBy = wrapper.get('[role=switch]').attributes('aria-describedby')!
+    expect(wrapper.get('.repo-code-hint').element.id).toBe(describedBy)
+    await info.trigger('click')
+    expect(info.attributes('aria-expanded')).toBe('true')
+    expect(hint.classList.contains('sr-only')).toBe(false)
+    expect(document.getElementById(describedBy)).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  it('puts Open in Terminal before the code-mode row', async () => {
+    resetHostTerminalForTests()
+    vi.spyOn(api, 'get').mockResolvedValue({
+      available: true, platform: 'macos', reason: '', terminal: 'Terminal', actions: [],
+    })
+    const wrapper = mountSection(repo, {})
+    await flushPromises()
+    const terminal = wrapper.get('.chat-repo-terminal').element
+    const row = wrapper.get('.repo-code-row').element
+    expect(terminal.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    wrapper.unmount()
+    resetHostTerminalForTests()
   })
 
   it('offers Open in Terminal at the chat folder when the engine can open one', async () => {

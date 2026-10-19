@@ -31,6 +31,13 @@ async function mountSection(props: Partial<InstanceType<typeof AgentContextSecti
 describe('AgentContextSection', () => {
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
+  it('heads the file list with Always loaded', async () => {
+    const wrapper = await mountSection()
+    const sub = wrapper.get('.agent-context-sub')
+    expect(sub.text()).toBe('Always loaded')
+    expect(sub.element.nextElementSibling?.classList.contains('rail-list')).toBe(true)
+  })
+
   it('lists the guide and the project brief with their sizes', async () => {
     const wrapper = await mountSection()
     const rows = wrapper.findAll('.agent-context-row')

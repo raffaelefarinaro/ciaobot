@@ -26,6 +26,7 @@
         >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
       </div>
     </template>
+    <p class="agent-context-sub">Always loaded</p>
     <div class="rail-list">
       <button
         v-if="guide.path"
@@ -159,6 +160,7 @@ const contextPctLabel = computed(() => {
 </script>
 
 <style scoped>
+.agent-context-sub { margin: var(--space-3) 0 var(--space-1); color: var(--fg3); font-size: var(--text-xs); }
 .agent-context-meter-row {
   display: flex;
   align-items: center;

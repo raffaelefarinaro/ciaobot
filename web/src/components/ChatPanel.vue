@@ -1234,7 +1234,6 @@
           :code-mode="codeModeOn"
           :code-mode-locked="codeModeLocked"
           :archived="!!chat.archived"
-          @open-file="openInspectorFile"
         />
       </div>
       <!-- What the agent is given. The project also lives here on wide panes;
