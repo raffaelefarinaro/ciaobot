@@ -5645,6 +5645,7 @@ export const useProjectStore = defineStore('projects', () => {
             // previous receipt of the same echo). Don't push a duplicate, but
             // do reflect the implied streaming state.
             if (event.unattended) existingWithTurn.unattended = true
+            if (event.origin) existingWithTurn.origin = event.origin
             if (!streaming.value[chatId]) streaming.value[chatId] = true
             break
           }
@@ -5677,6 +5678,7 @@ export const useProjectStore = defineStore('projects', () => {
               }
               m.turn_index = turnIndex
               if (event.unattended) m.unattended = true
+              if (event.origin) m.origin = event.origin
               upgraded = true
               break
             }
@@ -5701,6 +5703,7 @@ export const useProjectStore = defineStore('projects', () => {
           // Loop/schedule tick: marked so the bubble reads as self-driven
           // rather than something the user typed.
           unattended: event.unattended || undefined,
+          origin: event.origin || undefined,
         })
         messages.value[chatId] = normalizeMessages([...msgs])
         // Flushed turn = we're streaming again. Make sure the flag reflects it.

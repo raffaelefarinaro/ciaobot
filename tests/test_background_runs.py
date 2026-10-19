@@ -975,15 +975,19 @@ class _RecordingManager:
         self.queue_accepts = queue_accepts
         self.queued: list[tuple[str, str]] = []
         self.started: list[tuple[str, str, bool]] = []
+        self.queued_origins: list[str] = []
+        self.started_origins: list[str] = []
 
-    def queue_message(self, chat_id: str, text: str) -> bool:
+    def queue_message(self, chat_id: str, text: str, *, origin: str = "") -> bool:
         if self.queue_accepts:
             self.queued.append((chat_id, text))
+            self.queued_origins.append(origin)
             return True
         return False
 
     def start_stream(self, chat_id: str, text: str, **kwargs: object) -> None:
         self.started.append((chat_id, text, bool(kwargs.get("unattended", False))))
+        self.started_origins.append(str(kwargs.get("origin", "")))
 
 
 def _wake_entry(**overrides: object) -> dict:
@@ -1068,6 +1072,7 @@ async def test_background_completions_coalesce_into_one_wake(
     assert "2 background runs finished" in text
     # Bypass mode would let a woken chat act without approval cards.
     assert unattended is False
+    assert recorder.started_origins == ["background_run"]
     assert manager._background_wake_pending.get(chat.chat_id) in (None, [])
 
 
@@ -1097,6 +1102,7 @@ async def test_background_wake_queues_behind_a_live_turn(
 
     assert len(recorder.queued) == 1
     assert recorder.started == []
+    assert recorder.queued_origins == ["background_run"]
 
 
 async def test_live_runs_are_announced_and_snapshotted(
@@ -1175,7 +1181,7 @@ async def test_background_wake_publishes_its_delivery(
     manager = _make_manager(tmp_path)
     project = manager.create_project("Runs", workspace="work")
     chat = manager.create_chat(project.project_id, title="Owner")
-    manager.queue_message = lambda chat_id, text: True  # type: ignore[method-assign]
+    manager.queue_message = lambda chat_id, text, **_kw: True  # type: ignore[method-assign]
     published: list[dict] = []
     monkeypatch.setattr(manager._events, "publish", published.append)
 
@@ -1309,7 +1315,7 @@ async def test_cancelled_drain_replays_marked_wake(
     chat = manager.create_chat(project.project_id, title="Owner")
     queued: list[tuple[str, str]] = []
 
-    def _queue_message(chat_id: str, text: str) -> bool:
+    def _queue_message(chat_id: str, text: str, *, origin: str = "") -> bool:
         # What the real queue_message does for an idle chat: there is no stream
         # to append to, so _deliver_wake falls through to start_stream — which
         # a drain refuses and which, after the cancel, would start a real turn.

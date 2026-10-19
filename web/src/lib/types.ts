@@ -347,6 +347,11 @@ export interface ChatRetryInfo {
   interval_seconds: number
 }
 
+/** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
+export type TurnOrigin =
+  | 'background_run' | 'cli_task_wake' | 'schedule' | 'task_delegation'
+  | 'task_resume' | 'webhook' | 'update_task'
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
@@ -363,6 +368,8 @@ export interface ChatMessage {
   unattended?: boolean
   // Sent into the running turn instead of starting its own (steered).
   steered?: boolean
+  // Set when the engine wrote this user turn (wake, automation, webhook, ...); drawn as a notice card.
+  origin?: TurnOrigin
   // Monotonic per-chat user-turn index. Server-assigned; used to dedup
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
@@ -532,7 +539,7 @@ export type WsEvent =
       timeout_s: number;
     }
   | { type: 'chat_title'; chat_id: string; title: string }
-  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string }
+  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string; origin?: TurnOrigin }
   // A tool call was refused (user Deny, or the auto-deny on an unattended
   // run). The call never executed, so any file card already painted for this
   // tool_use_id has to be retracted.

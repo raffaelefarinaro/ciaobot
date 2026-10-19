@@ -950,7 +950,7 @@ async def test_delegation_launches_one_attended_chat_and_no_prompt_body(
 
     assert len(pcm.create_chat_calls) == 1
     assert len(pcm.start_stream_calls) == 1
-    assert pcm.start_stream_kwargs == [{"args": ()}], pcm.start_stream_kwargs
+    assert pcm.start_stream_kwargs == [{"args": (), "origin": "task_delegation"}], pcm.start_stream_kwargs
     _chat_id, prompt = pcm.start_stream_calls[0]
     assert "Draft the runbook" in prompt
     assert "Steps and links." in prompt

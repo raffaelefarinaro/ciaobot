@@ -646,7 +646,7 @@ def _dispatch(pcm: Any, task: UpdateTask, chat_id: str, prompt: str) -> None:
     function exists to keep recoverable.
     """
     try:
-        pcm.start_stream(chat_id, prompt)
+        pcm.start_stream(chat_id, prompt, origin="update_task")
     except Exception as exc:  # noqa: BLE001 — one failed dispatch is not a crash
         logger.exception(
             "Failed to start the update-task turn for %s@%s", task.id, task.revision

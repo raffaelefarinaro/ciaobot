@@ -213,6 +213,24 @@
         <div v-else-if="item.kind === 'user' && taskHandover && item.msg === taskHandover.msg" class="message-wrap task-handover-wrap">
           <TaskHandoverCard :handover="taskHandover.handover" :prompt="item.msg.content" :known-paths="knownFilePaths" />
         </div>
+        <!-- A turn the engine wrote (a wake, an automation run, a resume, a webhook,
+             an update task) reads as a notice, not as something the reader typed. -->
+        <div
+          v-else-if="item.kind === 'user' && injectedPrompts.get(item.msg)"
+          class="message-wrap injected-prompt-wrap"
+          :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-user-${i}`"
+          :data-msg-index="i"
+          data-msg-role="user"
+        >
+          <InjectedPromptCard
+            :prompt="injectedPrompts.get(item.msg)!"
+            :raw="item.msg.content"
+            :timestamp="item.msg.timestamp"
+            :chat-title="chat.title"
+            :schedule="injectedSchedule"
+            :known-paths="knownFilePaths"
+          />
+        </div>
         <!-- User message -->
         <div v-else-if="item.kind === 'user'" class="message-wrap user">
           <div class="message-row">
@@ -241,7 +259,7 @@
                   title="Sent into the running reply"
                 >steered</span>
               </div>
-              <div v-if="item.msg.unattended" class="message-meta">
+              <div v-if="item.msg.unattended && !item.msg.origin" class="message-meta">
                 <span
                   class="unattended-mark"
                   title="Sent automatically by an automation"
@@ -1347,6 +1365,8 @@ import { isLiveAttemptState } from '../lib/taskBoard'
 import type { TaskAttemptActionResponse } from '../lib/types'
 import TaskHandoverCard from './TaskHandoverCard.vue'
 import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
+import InjectedPromptCard from './InjectedPromptCard.vue'
+import { parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
@@ -1742,6 +1762,18 @@ const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | nul
   return handover ? { msg, handover } : null
 })
 
+/** Engine-written user turns (wakes, automation runs, resumes, webhooks, update
+ *  tasks), keyed by message identity like taskHandover. */
+const injectedPrompts = computed(() => {
+  const map = new Map<ChatMessage, InjectedPrompt>()
+  for (const m of store.activeMessages) {
+    if (m.role !== 'user') continue
+    const parsed = parseInjectedPrompt(m.content, m.origin)
+    if (parsed) map.set(m, parsed)
+  }
+  return map
+})
+
 // The source is archived, so the transcript is the only thing it can open. The
 // browser's chat list holds active chats only, so the path comes from the pass's
 // own `memory_source`, which the engine sends on the row.
@@ -1840,6 +1872,12 @@ const chatSchedules = computed(() => {
   return taskStore.schedules.filter(s =>
     (sid && s.schedule_id === sid) || (cid && s.web_chat_id === cid),
   )
+})
+
+const injectedSchedule = computed<{ id: string; title: string } | null>(() => {
+  const linked = chatSchedules.value[0]
+  const id = linked?.schedule_id || chat.value.schedule_id || ''
+  return id ? { id, title: linked?.title || chat.value.schedule_title || 'Automation' } : null
 })
 
 // ── Action dock ─────────────────────────────────────────────────────
@@ -5413,6 +5451,9 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* The handed-over task spans the column: it is the brief the turns below
    answer, not a bubble the user typed. */
 .message-wrap.task-handover-wrap {
+  align-self: stretch;
+}
+.message-wrap.injected-prompt-wrap {
   align-self: stretch;
 }
 

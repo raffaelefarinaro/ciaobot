@@ -105,6 +105,7 @@ class _FakePCM:
         self.chats: dict[str, _Chat] = {}
         self.created: list[_Chat] = []
         self.dispatched: list[tuple[str, str]] = []
+        self.origins: list[str] = []
         self.fail_stream = False
         self.on_stream: Any = None
 
@@ -137,12 +138,13 @@ class _FakePCM:
     def delete_chat(self, chat_id: str) -> None:
         self.chats.pop(chat_id, None)
 
-    def start_stream(self, chat_id: str, prompt: str) -> None:
+    def start_stream(self, chat_id: str, prompt: str, *, origin: str = "") -> None:
         if self.on_stream is not None:
             self.on_stream(chat_id, prompt)
         if self.fail_stream:
             raise RuntimeError("the bridge is down")
         self.dispatched.append((chat_id, prompt))
+        self.origins.append(origin)
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -282,6 +284,7 @@ def test_first_start_creates_one_chat_with_the_packaged_prompt(
         "prompt_digest": digest,
     }
     assert pcm.dispatched == [(chat.chat_id, PROMPT_R1)]
+    assert pcm.origins == ["update_task"]
 
     state = _state(tmp_path)
     assert state.lifecycle == "in_progress"

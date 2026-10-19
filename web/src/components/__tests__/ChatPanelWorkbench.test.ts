@@ -299,4 +299,58 @@ describe('ChatPanel aligned layout', () => {
       wrapper.unmount()
     })
   })
+
+  describe('engine-injected turns', () => {
+    const WAKE = '[Ciaobot] 1 background run finished.\n\n\u2014 nightly (bg-1, FAILED, exit 3)\nlog: /logs/bg-1.log\n(no output)'
+    const at = '2026-09-25T10:00:00Z'
+
+    it('draws an origin turn as a notice card, not a user bubble', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: WAKE, timestamp: at, turn_index: 0, origin: 'background_run' },
+      ])
+      const card = wrapper.getComponent({ name: 'InjectedPromptCard' })
+      expect(card.props('prompt').kind).toBe('background_run')
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(0)
+      expect(wrapper.find('.injected-prompt-wrap[data-msg-role="user"]').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('draws a legacy background wake without origin as a card', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: WAKE, timestamp: at, turn_index: 0 },
+      ])
+      expect(wrapper.getComponent({ name: 'InjectedPromptCard' }).props('prompt').kind).toBe('background_run')
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(0)
+      wrapper.unmount()
+    })
+
+    it("links an automation turn to the chat's automation", async () => {
+      const wrapper = await mountPanel(
+        [{ role: 'user', content: 'Run the digest.', timestamp: at, turn_index: 0, origin: 'schedule', unattended: true }],
+        { schedule_id: 'sched-1', schedule_title: 'Nightly digest' },
+      )
+      const card = wrapper.getComponent({ name: 'InjectedPromptCard' })
+      expect(card.props('schedule')).toEqual({ id: 'sched-1', title: 'Nightly digest' })
+      expect(wrapper.find('.unattended-mark').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('keeps the auto mark for an unattended turn with no origin', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: 'tick', timestamp: at, turn_index: 0, unattended: true },
+      ])
+      expect(wrapper.findComponent({ name: 'InjectedPromptCard' }).exists()).toBe(false)
+      expect(wrapper.find('.unattended-mark').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('leaves typed text that merely starts with [Ciaobot] as a bubble', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: '[Ciaobot] is a nice name', timestamp: at, turn_index: 0 },
+      ])
+      expect(wrapper.findComponent({ name: 'InjectedPromptCard' }).exists()).toBe(false)
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(1)
+      wrapper.unmount()
+    })
+  })
 })

@@ -95,7 +95,7 @@ class SubagentWatcherHost(Protocol):
 
     def _cli_owner_alive(self, chat_id: str) -> bool: ...
 
-    def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int) -> str: ...
+    def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int, origin: str) -> str: ...
 
     async def _watch_subagent_completion(
         self, chat_id: str, project_id: str
@@ -478,7 +478,7 @@ class SubagentWatchers:
         for task in tasks:
             self._cli_task_wakes_sent.add((parent.chat_id, task.agent_id))
         prompt = self.build_cli_task_wake_prompt(tasks)
-        self._host._deliver_wake(parent, prompt, count=len(tasks))
+        self._host._deliver_wake(parent, prompt, count=len(tasks), origin="cli_task_wake")
 
     def sweep_orphaned_cli_tasks(self) -> int:
         """After a restart, wake chats whose CLI tasks (Monitor / background Bash)

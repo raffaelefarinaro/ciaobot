@@ -34,6 +34,7 @@ class _StubHost:
         self.saves = 0
         self.flushed: list[str] = []
         self.wakes: list[tuple[str, int]] = []
+        self.wake_origins: list[str] = []
 
     def _save(self, *, reason: str = "registry_mutation") -> None:
         self.saves += 1
@@ -51,8 +52,9 @@ class _StubHost:
     def _cli_owner_alive(self, chat_id: str) -> bool:
         return False
 
-    def _deliver_wake(self, parent, prompt: str, *, count: int) -> str:
+    def _deliver_wake(self, parent, prompt: str, *, count: int, origin: str) -> str:
         self.wakes.append((parent.chat_id, count))
+        self.wake_origins.append(origin)
         return "queued"
 
     async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
@@ -100,6 +102,7 @@ def test_wake_bookkeeping_is_the_collaborators_own() -> None:
     assert watchers.unwoken_tasks("chat-1", tasks) == tasks
     watchers.wake_for_dead_cli_tasks(parent, "proj-1", tasks)
     assert host.wakes == [("chat-1", 1)]
+    assert host.wake_origins == ["cli_task_wake"]
 
     # Recorded before delivery, so a failed wake is never re-armed.
     assert watchers.unwoken_tasks("chat-1", tasks) == []

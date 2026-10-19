@@ -151,6 +151,7 @@ class ScheduleDispatchHost(Protocol):
         *,
         is_retry: bool = ...,
         unattended: bool = ...,
+        origin: str = ...,
     ) -> ChatStream: ...
 
     async def _await_schedule_subagents(
@@ -682,7 +683,7 @@ class ScheduleDispatcher:
             prompt = fill_triage_prompt(prompt, issue_report["report_text"])
 
         try:
-            stream = self._host.start_stream(target_id, prompt, unattended=True)
+            stream = self._host.start_stream(target_id, prompt, unattended=True, origin="schedule")
             async for raw_payload in stream.subscribe():
                 if not isinstance(raw_payload, dict):
                     continue
