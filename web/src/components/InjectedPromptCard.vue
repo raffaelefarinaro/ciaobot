@@ -125,7 +125,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
               class="injected-pill"
               :class="`injected-pill--${summary.tone}`"
             >{{ prompt.command.timedOut ? 'timed out' : `exit ${prompt.command.exitCode}` }}</span>
-            <code>{{ prompt.command.command }}</code>
+            <code class="injected-card-command">{{ prompt.command.command }}</code>
           </button>
           <pre v-if="detailOpen" :id="detailId" class="injected-card-output" tabindex="0">{{ prompt.command.output }}</pre>
         </template>
@@ -259,6 +259,12 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 .injected-card-runs li + li { margin-top: 12px; }
 .injected-card-run-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .injected-card-id { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg3); }
+.injected-card-command {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
 .injected-card-muted { color: var(--fg3); }
 .injected-card-error { margin: 4px 0 0; color: var(--error); }
 .injected-card-log { margin: 4px 0 0; }

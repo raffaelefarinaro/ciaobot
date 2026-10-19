@@ -76,6 +76,19 @@ describe('InjectedPromptCard', () => {
     expect(wrapper.get('.injected-card-output').text()).toBe('all good')
   })
 
+  it('keeps a multi-line command readable in the output toggle', async () => {
+    const wrapper = mountCard({
+      prompt: {
+        kind: 'schedule',
+        command: { command: 'cd repo\n./digest.sh', exitCode: 0, timedOut: false, output: 'ok' },
+        prompt: 'Summarise.',
+      },
+      raw: 'raw',
+    })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-command').element.textContent).toBe('cd repo\n./digest.sh')
+  })
+
   it('names the webhook chat and hides the event until asked', async () => {
     const wrapper = mountCard({
       prompt: { kind: 'webhook', instructions: 'Triage it.', event: 'build failed' },
