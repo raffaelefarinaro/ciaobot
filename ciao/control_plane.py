@@ -194,6 +194,11 @@ McpPrincipal = AgentPrincipal
 # and the SDK mapping in ciao.providers.claude.
 _MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
 
+RELOAD_OWN_NOTE = (
+    "The provider restarts when this turn ends and the conversation continues "
+    "automatically with the reloaded MCP servers, plugins and skills. End your turn "
+    "now; do not ask the user to reconnect anything."
+)
 CODE_MODE_ON_NOTE = (
     "Code mode is on. Follow these repository instructions now; repository skills and "
     "write access load when this turn ends and the conversation continues automatically."
@@ -2606,8 +2611,27 @@ class CiaoControlPlane:
         chat_id: str,
         action: Literal["set", "stop", "try_now"],
         prompt: str = "",
+        kind: str = "",
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
+        if kind:
+            if kind != "network":
+                raise ControlPlaneError("invalid_kind", "kind must be network.")
+            if action != "set":
+                raise ControlPlaneError("invalid_action", "kind=network only works with action=set.")
+            armed: str = self.pcm.arm_network_retry(chat_id, prompt)
+            if armed == "not_found":
+                raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
+            if armed == "no_prompt":
+                raise ControlPlaneError("empty_prompt", "No prompt to retry: pass --prompt with the job to re-run.")
+            if armed == "exhausted":
+                raise ControlPlaneError(
+                    "retry_exhausted",
+                    "The network retry cap is spent and no further retry was armed. "
+                    "Report the failure in your final message.",
+                )
+            chat = self.pcm.get_chat(chat_id)
+            return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
         if action == "set":
             chat = self.pcm.set_chat_retry(chat_id, prompt, image_refs=[], reason="mcp")
             if chat is None:
@@ -2632,6 +2656,32 @@ class CiaoControlPlane:
         if chat is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
         return _ok(chat.to_dict(local=True))
+
+    def chat_reload(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
+        chat_id = self._chat_id(principal, chat_id)
+        if self.pcm.provider_reload_blocked(chat_id):
+            raise ControlPlaneError(
+                "chat_busy",
+                "Background agents or a pending question still use this chat's provider; "
+                "reload after they finish.",
+            )
+        if chat_id == principal.chat_id:
+            if self.pcm.arm_reload_continuation(chat_id):
+                return _ok({"chat_id": chat_id, "reload": "after_turn", "note": RELOAD_OWN_NOTE})
+            return self._defer_until_chat_idle(
+                principal, "chat_reload", lambda: self.pcm.reload_provider(chat_id)
+            )
+        if chat_id in self.pcm.active_chat_ids():
+            raise ControlPlaneError("chat_busy", "That chat is running a turn; reload after it ends.")
+        asyncio.ensure_future(self.pcm.reload_provider(chat_id))
+        return _ok({
+            "chat_id": chat_id,
+            "reload": "next_turn",
+            "note": (
+                "That chat's provider restarts; its next turn resumes the same session "
+                "with the reloaded tools."
+            ),
+        })
 
     def chat_handover(
         self,

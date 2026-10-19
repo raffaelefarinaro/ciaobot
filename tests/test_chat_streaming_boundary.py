@@ -200,6 +200,9 @@ class _DriveHost:
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None:
         del chat, status
 
+    def _settle_schedule_retry(self, chat_id: str, *, succeeded: bool) -> None:
+        del chat_id, succeeded
+
     @staticmethod
     def _result_snippet(text: str, limit: int = 280) -> str:
         return text[:limit]

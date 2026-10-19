@@ -22,7 +22,7 @@ from collections.abc import AsyncGenerator, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from ciao.cli_envelopes import CODE_MODE_CONTINUE_PROMPT
+from ciao.cli_envelopes import CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT
 from ciao.config import CiaoConfig
 from ciao.models import (
     AgentRequest,
@@ -114,6 +114,8 @@ class ChatStreamingHost(Protocol):
     ) -> dict[str, Any] | None: ...
 
     def _get_provider(self, chat_id: str) -> ProviderService: ...
+
+    async def reload_provider(self, chat_id: str) -> bool: ...
 
     def _fallback_steers(
         self, chat_id: str, stream: ChatStream, reason: str
@@ -213,6 +215,7 @@ class ChatStreamingHost(Protocol):
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
+    def _settle_schedule_retry(self, chat_id: str, *, succeeded: bool) -> None: ...
 
     @staticmethod
     def _result_snippet(text: str, limit: int = 280) -> str: ...
@@ -1005,6 +1008,8 @@ class ChatStreaming:
                 # after_turn_index stays aligned.
                 continue_code_mode = stream.code_mode_continue
                 stream.code_mode_continue = False
+                reload_requested = stream.reload_continue
+                stream.reload_continue = False
                 chat_cm = self._host._chats.get(chat_id)
                 if (
                     continue_code_mode
@@ -1024,6 +1029,28 @@ class ChatStreaming:
                     stream.move_in_flight = 0
                     stream.move_succeeded = False
                     continue
+                # `ciao chat reload`: drop the provider so the next turn respawns
+                # it and resumes the same session with the changed MCP servers,
+                # plugins and skills. Consumed whatever happens; a queued user
+                # message runs on the fresh provider instead of a hidden turn.
+                # (A code-mode switch above already respawned it.)
+                if reload_requested and not park_rest:
+                    reloaded = await self._host.reload_provider(chat_id)
+                    if not reloaded:
+                        logger.info(
+                            "Provider reload skipped for chat %s: still in use", chat_id
+                        )
+                    elif next_pending is None and not had_error:
+                        current_prompt = RELOAD_CONTINUE_PROMPT
+                        current_images = None
+                        current_turn_index = None
+                        compact = False
+                        hidden_turn = True
+                        stream.moved_to_background = False
+                        stream.move_epoch += 1
+                        stream.move_in_flight = 0
+                        stream.move_succeeded = False
+                        continue
                 if next_pending is None or had_error or park_rest:
                     stream.accepting_queue = False
                     late = stream.drain_pending()
@@ -1205,7 +1232,7 @@ class ChatStreaming:
                 snippet = self._host._result_snippet(last_assistant_text)
                 chat_now = self._host._chats.get(chat_id)
                 if chat_now is not None:
-                    if chat_now.retry_status == "pending" and is_retry:
+                    if chat_now.retry_status == "pending" and is_retry and not stream.network_retry_armed:
                         self._host._clear_chat_retry(chat_now)
                     chat_now.last_activity_at = chat_service._now_iso()
                     chat_now.last_snippet = snippet
@@ -1229,6 +1256,10 @@ class ChatStreaming:
                         self._host._maybe_archive_proposal_helper(chat_id),
                         f"archive-proposal-helper-{chat_id}",
                     )
+            if (stream.network_retry_turn or is_retry) and not began_compact:
+                self._host._settle_schedule_retry(
+                    chat_id, succeeded=not had_error and bool(last_assistant_text.strip())
+                )
             # A memory pass settles on EVERY terminal turn, not only a clean one.
             # An errored or empty pass is exactly what `attention` is for: left
             # `running`, it holds its workspace slot forever and every pass

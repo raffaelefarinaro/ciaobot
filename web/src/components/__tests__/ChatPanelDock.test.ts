@@ -299,20 +299,21 @@ describe('ChatPanel action dock', () => {
   })
 
   // The count used to render three times in this one view.
-  it('reports background agents on the strip and not as a separate bar', async () => {
+  it('reports background agents in the composer bar, not the dock', async () => {
     const { wrapper } = await mountPanel(store => {
       store.backgroundAgents = { 'chat-1': 3 }
     })
     expect(wrapper.find('.bg-agents-bar').exists()).toBe(false)
-    expect(wrapper.find('.dock-strip').text()).toContain('3 agents running')
+    expect(wrapper.find('.dock-strip').exists()).toBe(false)
+    expect(wrapper.find('.dock-agent-links').exists()).toBe(false)
+    expect(wrapper.getComponent({ name: 'ComposerActivity' }).props('agentCount')).toBe(3)
     wrapper.unmount()
   })
 
-  // A background run is not the user's move, so it is no longer a pill in the
-  // strip's disclosure — which had nothing to disclose for it, leaving a
-  // chevron that flipped and opened nothing. It is a status line naming the
-  // run that opens Chat details, where the run has its log and Stop.
-  it('names a background run on its own line instead of a dead strip pill', async () => {
+  // A background run is not the user's move, so it is not a dock pill and no
+  // longer a line above the composer: the composer bar's activity cluster draws
+  // it, and keeps drawing it while a turn streams.
+  it('hands live runs and a finished outcome to the composer bar', async () => {
     const { wrapper, store } = await mountPanel(s => {
       s.backgroundRuns = {
         'chat-1': [
@@ -322,40 +323,53 @@ describe('ChatPanel action dock', () => {
       }
     })
     expect(wrapper.find('.dock-strip').exists()).toBe(false)
-    const line = wrapper.get('.run-status')
-    expect(line.text()).toContain('Clone rizzo-flow and 1 more')
-    expect(line.get('.run-status-elapsed').text()).toMatch(/^2m/)
-    expect(line.classes()).toContain('run-status--live')
+    expect(wrapper.find('.run-status').exists()).toBe(false)
+    const bar = () => wrapper.getComponent({ name: 'ComposerActivity' })
+    expect(bar().props('runs')).toHaveLength(2)
+    expect(bar().props('finished')).toBeNull()
 
-    // While the turn's own live line shows activity, the run line steps aside.
     store.projectStreaming = { 'chat-1': true }
     await nextTick()
-    expect(wrapper.find('.run-status').exists()).toBe(false)
+    expect(bar().props('runs')).toHaveLength(2)
 
-    // When a run ends, the line says how instead of vanishing.
     store.projectStreaming = {}
     store.backgroundRuns = {}
     store.finishedBackgroundRuns = {
       'chat-1': { run_id: 'r1', label: 'Clone rizzo-flow', cmd: [], started_at: '', status: 'error', exit_code: 128 },
     }
     await nextTick()
-    expect(wrapper.get('.run-status').text()).toBe('Clone rizzo-flow failed (exit 128)')
-    expect(wrapper.get('.run-status').classes()).toContain('run-status--error')
+    expect(bar().props('finished')?.exit_code).toBe(128)
     wrapper.unmount()
   })
 
-  it('opens Chat details at its Running section from the run line on a narrow pane', async () => {
+  it('opens Chat details at its Running section from the composer bar on a narrow pane', async () => {
     const { wrapper } = await mountPanel(s => {
       s.backgroundRuns = {
         'chat-1': [{ run_id: 'r1', label: 'Clone rizzo-flow', cmd: [], started_at: new Date().toISOString(), status: 'running', exit_code: null }],
       }
     })
-    await wrapper.get('.run-status').trigger('click')
-    await nextTick()
+    wrapper.getComponent({ name: 'ComposerActivity' }).vm.$emit('open-details')
+    await flushPromises()
     const panel = wrapper.get('#chat-work-rail .chat-rail-running')
     expect(panel.text()).toContain('Running')
     expect(document.activeElement).toBe(panel.element)
     expect(panel.findComponent({ name: 'BackgroundRunRows' }).exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('passes the larger agent count to the composer bar', async () => {
+    const { wrapper, store } = await mountPanel(s => {
+      s.backgroundAgents = { 'chat-1': 1 }
+    })
+    // Seeded after mount: a pushed count makes the store refetch the poll,
+    // which the mocked API answers with nothing.
+    store.runningSubagents = {
+      'chat-1': [{ agent_id: 'a1', description: 'One' }, { agent_id: 'a2', description: 'Two' }],
+    } as unknown as typeof store.runningSubagents
+    await nextTick()
+    const bar = wrapper.getComponent({ name: 'ComposerActivity' })
+    expect(bar.props('agentCount')).toBe(2)
+    expect(bar.props('agents')).toHaveLength(2)
     wrapper.unmount()
   })
 
@@ -383,7 +397,9 @@ describe('ChatPanel action dock', () => {
   // role and drop aria-expanded.
   it('keeps the strip an operable button for assistive tech', async () => {
     const { wrapper } = await mountPanel(store => {
-      store.backgroundAgents = { 'chat-1': 2 }
+      store.pendingPermissions = {
+        'chat-1': [approval('r1', 'Bash'), approval('r2', 'Write')],
+      } as unknown as typeof store.pendingPermissions
     })
     const strip = wrapper.get('.dock-strip')
     expect(strip.element.tagName).toBe('BUTTON')

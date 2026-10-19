@@ -163,12 +163,23 @@ CODE_MODE_CONTINUE_PROMPT = (
     "[Ciaobot] Code mode is now on: repository instructions, skills and write "
     "access are loaded. Continue the user's request."
 )
-_CODE_MODE_CONTINUE_COLLAPSED = " ".join(CODE_MODE_CONTINUE_PROMPT.split())
+
+#: The hidden turn the drive loop sends after an agent ran `ciao chat reload`:
+#: the provider was dropped at the end of the turn and the session resumed.
+#: Hidden exactly like CODE_MODE_CONTINUE_PROMPT: renderers hide it and turn
+#: counters skip it.
+RELOAD_CONTINUE_PROMPT = (
+    "[Ciaobot] MCP servers, plugins and skills were reloaded and the session "
+    "resumed. Continue the user's request."
+)
+_HIDDEN_CONTINUATIONS = frozenset(
+    " ".join(p.split()) for p in (CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT)
+)
 
 
-def is_code_mode_continuation(content: str) -> bool:
-    """True when `content` (with or without the context capsule) is the hidden continuation prompt."""
-    return " ".join(strip_injected_context(content).split()) == _CODE_MODE_CONTINUE_COLLAPSED
+def is_hidden_continuation(content: str) -> bool:
+    """True when `content` (with or without the context capsule) is a hidden continuation prompt."""
+    return " ".join(strip_injected_context(content).split()) in _HIDDEN_CONTINUATIONS
 
 
 def _flag_on(value: object, name: str) -> bool:

@@ -89,6 +89,7 @@ _CHAT_TARGET_HELP: dict[str, str] = {
     "retry": "Manage a deferred provider-limit retry.",
     "update": "Update chat metadata and model settings.",
     "handover": "Move a chat to a fresh provider session.",
+    "reload": "Restart the chat's provider so changed MCP servers, plugins and skills load.",
 }
 _CHAT_EXPLICIT_HELP: dict[str, str] = {
     "stop": "Stop another chat's active turn.",
@@ -228,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
         if verb == "retry":
             sub.add_argument("--action", default="try_now", choices=["set", "stop", "try_now"])
             sub.add_argument("--prompt", default="")
+            sub.add_argument("--kind", default="", choices=["network"], help="With --action set: re-run this chat's prompt after a network outage (10, 20, 40 min; at most 3 tries).")
         elif verb == "update":
             for flag, _param in _CHAT_UPDATE_FLAGS:
                 sub.add_argument(flag, default=None)
@@ -597,7 +599,10 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
         if verb == "send":
             return "chat_send", {"chat_id": args.chat, "prompt": args.prompt}
         if verb == "retry":
-            return "chat_retry", {"chat_id": args.chat, "action": args.action, "prompt": args.prompt}
+            retry_args: dict[str, Any] = {"chat_id": args.chat, "action": args.action, "prompt": args.prompt}
+            if args.kind:
+                retry_args["kind"] = args.kind
+            return "chat_retry", retry_args
         if verb == "update":
             arguments: dict[str, Any] = {"chat_id": args.chat}
             for flag, param in _CHAT_UPDATE_FLAGS:
@@ -607,6 +612,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             if args.code is not None:
                 arguments["code_mode"] = args.code == "on"
             return "chat_update", arguments
+        if verb == "reload":
+            return "chat_reload", {"chat_id": args.chat}
         if verb == "handover":
             arguments = {"chat_id": args.chat, "provider": args.provider, "model": args.model}
             messages = _handover_messages(args.messages)

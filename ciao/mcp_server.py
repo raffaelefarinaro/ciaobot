@@ -688,13 +688,12 @@ async def _op_chat_continue(service: CiaoMcpService, chat_id: str) -> dict[str, 
     return await service._invoke("chat_continue", lambda cp, p: cp.chat_continue(p, chat_id), mutating=True)
 
 
-async def _op_chat_retry(service: CiaoMcpService, chat_id: str = "", action: str = "try_now", prompt: str = "") -> dict[str, Any]:
-    """Manage a deferred provider-limit retry: set, stop, or (default)
-    immediately try it now."""
+async def _op_chat_retry(service: CiaoMcpService, chat_id: str = "", action: str = "try_now", prompt: str = "", kind: str = "") -> dict[str, Any]:
+    """Manage a deferred retry: set, stop, or (default) immediately try it now. kind=network (with action=set) re-runs this chat's prompt after a network outage."""
     return await service._invoke(
         "chat_retry",
         lambda cp, p: cp.chat_retry_update(
-            p, chat_id, action=action, prompt=prompt  # type: ignore[arg-type]
+            p, chat_id, action=action, prompt=prompt, kind=kind  # type: ignore[arg-type]
         ),
         mutating=True,
     )
@@ -718,6 +717,11 @@ async def _op_chat_handover(service: CiaoMcpService, chat_id: str = "", provider
         )
 
     return await service._invoke("chat_handover", _op, mutating=True)
+
+
+async def _op_chat_reload(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
+    """Restart a chat's provider so changed MCP servers, plugins and skills load; the same session resumes."""
+    return await service._invoke("chat_reload", lambda cp, p: cp.chat_reload(p, chat_id), mutating=True)
 
 
 async def _op_chat_archive(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
@@ -1449,6 +1453,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("chat_continue", _WRITE, _op_chat_continue.__doc__ or "", _op_chat_continue),
     Operation("chat_retry", _WRITE, _op_chat_retry.__doc__ or "", _op_chat_retry),
     Operation("chat_handover", _WRITE, _op_chat_handover.__doc__ or "", _op_chat_handover),
+    Operation("chat_reload", _WRITE, _op_chat_reload.__doc__ or "", _op_chat_reload),
     Operation("chat_archive", _WRITE, _op_chat_archive.__doc__ or "", _op_chat_archive),
     Operation("chat_delete", _DESTRUCTIVE, _op_chat_delete.__doc__ or "", _op_chat_delete),
     Operation("chat_stop", _DESTRUCTIVE, _op_chat_stop.__doc__ or "", _op_chat_stop),

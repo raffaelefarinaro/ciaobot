@@ -113,7 +113,7 @@ def test_chat_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     dispatcher must still run them as `ciao chat …` commands."""
     chat_group = {
         "chats_list", "chat_get", "chat_create", "chat_update", "chat_send",
-        "chat_continue", "chat_retry", "chat_handover", "chat_archive",
+        "chat_continue", "chat_retry", "chat_handover", "chat_reload", "chat_archive",
         "chat_delete", "chat_stop",
     }
     service, _ = _service(tmp_path)
@@ -419,8 +419,10 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         ),
         (["chat", "continue", "--chat", "c3"], ("chat_continue", {"chat_id": "c3"})),
         (["chat", "retry"], ("chat_retry", {"chat_id": "", "action": "try_now", "prompt": ""})),
+        (["chat", "retry", "--action", "set", "--kind", "network"], ("chat_retry", {"chat_id": "", "action": "set", "prompt": "", "kind": "network"})),
         (["chat", "update", "--model", "opus", "--thinking-level", "high"], ("chat_update", {"chat_id": "", "model": "opus", "thinking_level": "high"})),
         (["chat", "handover", "--provider", "opencode"], ("chat_handover", {"chat_id": "", "provider": "opencode", "model": ""})),
+        (["chat", "reload"], ("chat_reload", {"chat_id": ""})),
         (["project", "list", "--include-completed"], ("projects_list", {"include_completed": True})),
         (["project", "get"], ("project_get", {"project_id": ""})),
         (["project", "create", "--name", "Q4", "--context", "ctx"], ("project", {"action": "create", "name": "Q4", "context": "ctx"})),
@@ -705,6 +707,9 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     for name in ("memory_update", "vault_search", "vault_expand", "file_surface", "background_run_start", "MCP tools", "CLAUDE.md`, with"):
         assert name not in append, name
     assert "`AGENTS.md`" in append
+    assert "ciao chat reload" in append
+    # `/mcp` appears only inside the prohibition, never as an instruction.
+    assert append.count("/mcp") == append.count("Never tell the user to run `/mcp`") == 1
 
 
 def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:

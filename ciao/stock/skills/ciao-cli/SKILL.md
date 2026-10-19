@@ -31,6 +31,10 @@ Not for:
 - `schedule create|update --command` sets a shell command that later runs with no permission prompt. Outside bypass mode it returns `command_requires_operator`: create the schedule without it and ask the user to add the command in the schedule's Prompt card. Do not retry.
 - Structured input is the exception, not the rule: only `chat handover --messages @file.json` and `run start -- <cmd> [args...]` take it. Everywhere else, arguments are scalar flags or a constrained enum value. For `run start`, everything after `--` is the literal argv passed to the subprocess — no shell, so `run start -- bash -lc "a && b"` is how you get shell features, and you own that choice.
 
+### Reloading tools
+
+`/mcp`, `/reload-plugins` and the other Claude Code / opencode terminal slash commands do not exist in Ciaobot. When an MCP server, plugin or skill was added or changed, run `ciao chat reload`.
+
 ## Commands
 
 ### Memory
@@ -96,8 +100,9 @@ Top-level commands, outside the `<noun> <verb>` table: plain text output (a `--j
 | `chat update [--chat ID] [--title] [--provider] [--model] [--mode] [--thinking-level] [--project] [--code on\|off]` | Update chat metadata and same-backend model settings. | Omit `--chat` for the calling chat. `--code on` needs a project linked to a repository; the reply then carries `repo_instructions` (follow them now) and a `note`. Your own turn continues automatically once it ends, with the repository's skills and write access loaded; do not ask the user to send another message. Refused in plan mode. |
 | `chat send [--chat ID] --prompt TEXT` | Start or queue a user turn in a chat. | Omit `--chat` for the calling chat; pass it to reach another chat in this workspace. |
 | `chat continue --chat ID` | Continue an archived chat as a new active chat. | — |
-| `chat retry [--chat ID] [--action set\|stop\|try_now] [--prompt TEXT]` | Manage a deferred provider-limit retry. | Default action is `try_now`. |
+| `chat retry [--chat ID] [--action set\|stop\|try_now] [--prompt TEXT] [--kind network]` | Manage a deferred retry. | Default action is `try_now`. `--action set --kind network` (unattended runs whose job could not reach an external service): re-runs this chat's prompt after 10, then 20, then 40 minutes, at most 3 times; a refusal `retry_exhausted` means report the failure. |
 | `chat handover [--chat ID] [--provider P] [--model M] [--messages @file.json]` | Move a chat to a fresh provider session, optionally carrying visible history. | With both `--provider` and `--model` empty, it only clears the current session in place. |
+| `chat reload [--chat ID]` | Restart the provider so MCP servers, plugins and skills added or changed since the chat started are loaded. | Same session, nothing is lost. On the calling chat it runs when the turn ends and the conversation continues automatically: end your turn, never ask the user to reconnect. Refused with `chat_busy` while background agents or a question form hold the provider. Use it after `claude mcp add`/`opencode mcp add`, a redeployed MCP server whose new tools you cannot see, an installed plugin, or a new/edited skill. |
 | `chat archive [--chat ID]` | Archive a chat to the vault and trigger normal post-archive memory extraction. | — |
 | `chat delete [--chat ID]` | Delete a chat. | Destructive; deleting the calling chat itself is deferred until the turn finishes. |
 | `chat stop --chat ID` | Stop another chat's active provider turn. | Destructive; a chat cannot stop its own turn. |

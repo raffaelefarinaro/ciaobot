@@ -136,6 +136,7 @@ from ciao.schedules import (
     ScheduleEntry,
     ScheduleStore,
     publish_automations_changed,
+    settle_retrying_runs,
     settle_runs_for_archived_chat,
 )
 from ciao.sessions import StateStore
@@ -251,6 +252,19 @@ _MAX_QUOTA_RETRIES = 6
 # limit that clears on schedule.
 _TERMINAL_QUOTA_RETRY_INTERVAL_SECONDS = 24 * 60 * 60
 _MAX_TERMINAL_QUOTA_RETRIES = 7
+
+# Agent-armed retry after an external service or the network was unreachable
+# (`ciao chat retry --action set --kind network`, from the unattended
+# guidance). 10, 20, then 40 minutes, at most three retried turns; the cap
+# turns the run's schedule row into "error".
+_NETWORK_RETRY_KIND = "network"
+_NETWORK_RETRY_BASE_SECONDS = 10 * 60
+_MAX_NETWORK_RETRIES = 3
+_NETWORK_RETRY_REASON = "network unreachable"
+
+
+def _network_retry_interval(attempts: int) -> int:
+    return _NETWORK_RETRY_BASE_SECONDS << attempts
 
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 # Coalescing window for background command runs (ciao/background.py): a
@@ -541,7 +555,8 @@ class ChatInfo:
     retry_last_error: str = ""
     retry_attempts: int = 0
     # Kind of the failure that armed the pending retry ("quota",
-    # "quota_terminal", "connection", "startup", "auth"). The attempt counter
+    # "quota_terminal", "connection", "startup", "auth", and "network", which
+    # the agent arms itself). The attempt counter
     # belongs to one kind: arming a retry of a different kind starts that
     # kind's budget at zero.
     retry_kind: str = ""
@@ -3546,7 +3561,7 @@ class ProjectChatManager:
             if turn["user"] is not None:
                 user_content = turn["user"]
                 user_content = re.sub(r'(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*', '', user_content)
-                if user_content.strip() and not cli_envelopes.is_code_mode_continuation(user_content):
+                if user_content.strip() and not cli_envelopes.is_hidden_continuation(user_content):
                     turns_data.append({
                         "role": "user",
                         "content": user_content,
@@ -4002,6 +4017,14 @@ class ProjectChatManager:
             "reason": "user",
         })
         self._notify_chat_ended(chat_id, chat, "deleted")
+        # Deleting the run chat cancels its network retry, so the work never happened.
+        store = getattr(self, "schedule_store", None)
+        if store is not None:
+            try:
+                if settle_retrying_runs(store, chat_id, "error"):
+                    publish_automations_changed(self)
+            except Exception:  # noqa: BLE001 — the row is advisory; never break a delete
+                logger.exception("Could not settle the retrying schedule run for %s", chat_id)
         return True
 
     async def _maybe_archive_proposal_helper(self, chat_id: str) -> bool:
@@ -4378,6 +4401,41 @@ class ProjectChatManager:
             provider = self._pop_provider(chat_id)
             asyncio.ensure_future(self._disconnect_provider(chat_id, provider))
         return evicted
+
+    def provider_reload_blocked(self, chat_id: str) -> bool:
+        """Whether background work or a question form still holds the chat's provider.
+
+        Mirrors ``_provider_is_busy`` minus the live-stream check: the caller
+        of a reload may be the live foreground stream itself.
+        """
+        if chat_id in self.background_agent_counts:
+            return True
+        if chat_id in self._subagents.watching_chat_ids():
+            return True
+        if self._provider_background_busy(chat_id, self._providers.get(chat_id)):
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is not None and self._native_question_request_id(chat.pending_question):
+            return True
+        for tasks in (self._retry_tasks, self._background_wake_tasks):
+            task = tasks.get(chat_id)
+            if task is not None and not task.done():
+                return True
+        return False
+
+    async def reload_provider(self, chat_id: str) -> bool:
+        """Drop the chat's provider so changed MCP servers, plugins and skills load.
+
+        The chat row and ``session_id`` are untouched, so the next turn builds a
+        fresh provider and resumes the same session. False when background work
+        or a question form still holds the provider; True once it is gone (or
+        none was cached).
+        """
+        if self.provider_reload_blocked(chat_id):
+            return False
+        provider = self._pop_provider(chat_id)
+        self._cancel_between_turns_drain(chat_id)
+        return await self._disconnect_provider(chat_id, provider)
 
     # ── Idle provider reaping ────────────────────────────────────────────
 
@@ -5903,6 +5961,18 @@ class ProjectChatManager:
         stream.code_mode_continue = True
         return True
 
+    def arm_reload_continuation(self, chat_id: str) -> bool:
+        """Ask the running foreground turn to reload the provider when it ends.
+
+        False when there is no foreground turn to continue, like
+        ``arm_code_mode_continuation``.
+        """
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.background or not stream.accepting_queue:
+            return False
+        stream.reload_continue = True
+        return True
+
     async def set_queue_delivery(
         self, chat_id: str, entry_ids: list[str], delivery: str
     ) -> bool:
@@ -6133,7 +6203,7 @@ class ProjectChatManager:
             stream.publish({"type": "prompt_cancelled", "turn_index": turn_index})
         # The capsule rode on the prompt that never ran; the resend carries it.
         chat.context_digest = ""
-        if cli_envelopes.is_code_mode_continuation(prompt):
+        if cli_envelopes.is_hidden_continuation(prompt):
             # Our hidden continuation is not something the user typed: never
             # show it as a waiting message.
             self._save()
@@ -6686,7 +6756,74 @@ class ProjectChatManager:
         if chat is None:
             return None
         self._clear_chat_retry(chat, status="stopped")
+        self._settle_schedule_retry(chat_id, succeeded=False)
         return chat
+
+    def arm_network_retry(self, chat_id: str, prompt: str = "") -> str:
+        """Arm or re-arm a deferred re-run of this chat's prompt after a network outage.
+
+        Returns "armed", "exhausted", "no_prompt" or "not_found". With no prompt,
+        re-uses the pending network retry's prompt, else the prompt of the turn in
+        flight (the scheduled prompt, on an automation run).
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived:
+            return "not_found"
+        live = self._broker.get(chat_id)
+        text = (prompt or "").strip()
+        if not text and chat.retry_status == "pending" and chat.retry_kind == _NETWORK_RETRY_KIND:
+            text = chat.retry_prompt
+        if not text and live is not None and not live.background:
+            text = (live.prompt_text or "").strip()
+        if not text:
+            return "no_prompt"
+        if chat.retry_kind != _NETWORK_RETRY_KIND:
+            # Same budget rule as _arm_retry: a new kind starts at zero.
+            chat.retry_kind = _NETWORK_RETRY_KIND
+            chat.retry_attempts = 0
+        if chat.retry_attempts >= _MAX_NETWORK_RETRIES:
+            self._exhaust_network_retry(chat)
+            return "exhausted"
+        armed = self.set_chat_retry(
+            chat_id,
+            text,
+            reason=_NETWORK_RETRY_REASON,
+            interval_seconds=_network_retry_interval(chat.retry_attempts),
+        )
+        if armed is None:
+            return "no_prompt"
+        if live is not None:
+            live.network_retry_armed = True
+        return "armed"
+
+    def _exhaust_network_retry(self, chat: ChatInfo) -> None:
+        logger.warning(
+            "chat %s hit the network retry cap (%d); recording the run as failed",
+            chat.chat_id, _MAX_NETWORK_RETRIES,
+        )
+        self._clear_chat_retry(chat, status="stopped")
+        self._settle_schedule_retry(chat.chat_id, succeeded=False)
+
+    def _settle_schedule_retry(self, chat_id: str, *, succeeded: bool) -> None:
+        """Write ok/error on a schedule row waiting on this chat's network retry.
+
+        No-op while any retry is still pending on the chat. Reads the store only
+        for turns that began with a network retry pending (see
+        ChatStream.network_retry_turn), so ordinary turns cost nothing.
+        """
+        store = getattr(self, "schedule_store", None)
+        if store is None:
+            return
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.retry_status == "pending":
+            return
+        try:
+            changed = settle_retrying_runs(store, chat_id, "ok" if succeeded else "error")
+        except Exception:  # noqa: BLE001 — the row is advisory; never break a turn end
+            logger.exception("Could not settle the retrying schedule run for %s", chat_id)
+            return
+        if changed:
+            publish_automations_changed(self)
 
     def try_chat_retry_now(self, chat_id: str) -> ChatStream | None:
         """Start the saved retry prompt immediately if the chat is idle."""
@@ -6695,8 +6832,14 @@ class ProjectChatManager:
             return None
         if self._broker.get(chat_id) is not None:
             return None
+        network = chat.retry_kind == _NETWORK_RETRY_KIND
+        if network and chat.retry_attempts >= _MAX_NETWORK_RETRIES:
+            self._exhaust_network_retry(chat)
+            return None
         images = self._resolve_retry_images(chat)
         chat.retry_attempts += 1
+        if network:
+            chat.retry_interval_seconds = _network_retry_interval(chat.retry_attempts)
         chat.retry_next_at = chat_service._iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
@@ -6705,6 +6848,7 @@ class ProjectChatManager:
             chat.retry_prompt,
             images=images or None,
             is_retry=True,
+            unattended=network,
         )
 
     def _resolve_retry_images(self, chat: ChatInfo) -> list[ImageAttachment]:
@@ -6946,14 +7090,21 @@ class ProjectChatManager:
             self._cancel_between_turns_drain(chat_id)
             self._broker.clear(chat_id, existing)
 
+        chat_for_retry = self._chats.get(chat_id)
+        network_retry_turn = (
+            not compact
+            and chat_for_retry is not None
+            and chat_for_retry.retry_status == "pending"
+            and chat_for_retry.retry_kind == _NETWORK_RETRY_KIND
+        )
         # A compaction is not the user's next attempt, so it leaves a deferred
         # retry of their failed prompt armed.
         if not is_retry and not compact:
-            chat_for_retry = self._chats.get(chat_id)
             if chat_for_retry is not None and chat_for_retry.retry_status == "pending":
                 self._clear_chat_retry(chat_for_retry)
 
         stream = ChatStream(prompt_text=prompt)
+        stream.network_retry_turn = network_retry_turn
         self._broker.register(chat_id, stream)
         image_refs: list[str] = []
         for img in images or []:
@@ -7271,6 +7422,14 @@ class ProjectChatManager:
             # the owner started: a normal result there is not worth waking them
             # for. Permission and question pushes travel their own paths and are
             # still delivered — that is exactly when a pass needs the owner.
+            return
+        if (
+            chat is not None
+            and chat.retry_status == "pending"
+            and chat.retry_kind == _NETWORK_RETRY_KIND
+        ):
+            # The run is waiting on a network retry; only its final outcome
+            # (success, or the agent's report once the cap is spent) is worth a push.
             return
         if self.notify_result_cb is None:
             return

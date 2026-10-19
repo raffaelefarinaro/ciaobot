@@ -21,6 +21,7 @@
   "chat continue": "chat_continue",
   "chat retry": "chat_retry",
   "chat handover": "chat_handover",
+  "chat reload": "chat_reload",
   "chat archive": "chat_archive",
   "chat delete": "chat_delete",
   "chat stop": "chat_stop",

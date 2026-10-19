@@ -25,6 +25,13 @@ class _FakeControlPlane:
         self.schedule_values = None
         self.schedule_create_values: dict | None = None
         self.schedule_updates: list[tuple[str, dict]] = []
+        self.retry_calls: list[dict] = []
+
+    def chat_retry_update(self, _principal, chat_id, *, action, prompt="", kind=""):
+        self.retry_calls.append(
+            {"chat_id": chat_id, "action": action, "prompt": prompt, "kind": kind}
+        )
+        return {"ok": True, "data": {}}
 
     def chat_mode(self, _principal) -> str:
         return self.mode
@@ -655,6 +662,14 @@ def _dispatcher_call(service: CiaoMcpService, name: str, arguments: dict) -> dic
         AgentDispatcher(service).dispatch(_schedule_token(service), name, arguments)
     )
     return {"status": status, "envelope": envelope}
+
+
+def test_chat_retry_forwards_the_network_kind(tmp_path: Path) -> None:
+    service, control_plane = _service(tmp_path)
+
+    _dispatcher_call(service, "chat_retry", {"action": "set", "kind": "network"})
+
+    assert [c["kind"] for c in control_plane.retry_calls] == ["network"]
 
 
 def test_schedule_update_forwards_values_that_equal_the_create_defaults(

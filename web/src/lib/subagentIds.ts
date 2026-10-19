@@ -31,3 +31,8 @@ export function shortAgentId(agentId: string): string {
   const id = bareAgentId(agentId)
   return id.length > 12 ? `${id.slice(0, 8)}…` : id
 }
+
+/** A running subagent's display name: its dispatch description, else its short id. */
+export function subagentLabel(sub: { agent_id: string; description?: string }): string {
+  return (sub.description || '').trim() || shortAgentId(sub.agent_id)
+}
