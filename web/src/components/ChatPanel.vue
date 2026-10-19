@@ -1275,18 +1275,27 @@
         tabindex="-1"
       >
         <p id="chat-rail-running" class="rail-label">Running</p>
-        <BackgroundRunRows v-if="chatRuns.length" :chat-id="chat.chat_id" :runs="chatRuns" :now="nowTs" />
-        <div v-if="runningSubagents.length" class="rail-list">
-          <router-link
-            v-for="sub in runningSubagents"
-            :key="sub.agent_id"
-            :to="subagentPath(chat.chat_id, sub.agent_id)"
-            class="rail-item"
-          >
-            <span class="chat-rail-subagent">{{ subagentLabel(sub) }}</span>
-            <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
-          </router-link>
-        </div>
+        <!-- Agents first: an agent has a transcript to open, a process only a log. -->
+        <template v-if="runningSubagents.length">
+          <p class="chat-rail-subhead">Agents</p>
+          <div class="rail-list">
+            <router-link
+              v-for="sub in runningSubagents"
+              :key="sub.agent_id"
+              :to="subagentPath(chat.chat_id, sub.agent_id)"
+              class="rail-item chat-rail-agent"
+            >
+              <ActivityGlyph kind="agent" />
+              <span class="chat-rail-subagent">{{ subagentLabel(sub) }}</span>
+              <small v-if="sub.subagent_type">{{ sub.subagent_type }}</small>
+              <span class="chat-rail-agent-arrow" aria-hidden="true">→</span>
+            </router-link>
+          </div>
+        </template>
+        <template v-if="chatRuns.length">
+          <p class="chat-rail-subhead">Processes</p>
+          <BackgroundRunRows :chat-id="chat.chat_id" :runs="chatRuns" :now="nowTs" />
+        </template>
       </section>
       <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
         <p id="chat-rail-tools" class="rail-label">Skills and MCP used</p>
@@ -1383,6 +1392,7 @@ import { formatTime, formatDuration } from '../lib/time'
 import { interleaveCodeModeEvents, isChatCodeModeOn, isCodeModeMarker } from '../lib/codeMode'
 import { backgroundRunElapsed, backgroundRunLabel, backgroundRunOutcome } from '../lib/backgroundRuns'
 import BackgroundRunRows from './BackgroundRunRows.vue'
+import ActivityGlyph from './ActivityGlyph.vue'
 import {
   activityLines,
   buildTurnParts,
@@ -5002,11 +5012,32 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   border-radius: var(--radius-xs);
 }
 .chat-rail-subagent {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.chat-rail-subhead {
+  margin: var(--space-3) 0 var(--space-1);
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.chat-rail-running .rail-label + .chat-rail-subhead { margin-top: var(--space-1); }
+
+/* .rail-item stacks its children; an agent row reads as one line. */
+.chat-rail-agent {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-2);
+}
+.chat-rail-agent small { flex-shrink: 0; font-family: var(--font-mono); }
+.chat-rail-agent-arrow { flex-shrink: 0; margin-left: auto; color: var(--fg3); }
 
 
 .drop-overlay {

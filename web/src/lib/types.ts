@@ -692,7 +692,10 @@ export interface Schedule {
   // retry) — see project_chats._schedule_dispatch_status. 'unfinished' is the
   // case split out of it where background subagents never settled: nothing in
   // the chat is waiting on the user (schedules.RUN_STATUS_UNFINISHED).
-  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'unfinished'
+  // 'retrying' means the agent could not reach an external service and armed a
+  // network retry in the run chat; the retried turn writes 'ok' or 'error'
+  // (schedules.RUN_STATUS_RETRYING).
+  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'unfinished' | 'retrying'
   day_of_month: number | null
   run_at_date: string | null
   web_chat_id: string | null

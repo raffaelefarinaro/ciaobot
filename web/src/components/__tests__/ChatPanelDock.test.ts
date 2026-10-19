@@ -206,6 +206,42 @@ describe('ChatPanel automation origin', () => {
     vi.unstubAllGlobals()
     wrapper.unmount()
   })
+
+  it('splits Running into Agents above Processes in Chat details', async () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    const { wrapper } = await mountPanel(store => {
+      store.runningSubagents = {
+        'chat-1': [{ agent_id: 'a1', description: 'Explore repo layout', subagent_type: 'Explore', status: 'running' }],
+      } as unknown as typeof store.runningSubagents
+      store.backgroundRuns = {
+        'chat-1': [{ run_id: 'r1', label: '', cmd: ['uv', 'sync'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null }],
+      }
+    })
+    observers.forEach(fire => fire())
+    await nextTick()
+
+    const rail = wrapper.get('#chat-work-rail')
+    expect(rail.findAll('.chat-rail-running .chat-rail-subhead').map(t => t.text())).toEqual(['Agents', 'Processes'])
+    const agent = rail.findAllComponents(RouterLinkStub).find((l: { classes: () => string[] }) => l.classes().includes('chat-rail-agent'))!
+    expect(agent.props('to')).toBe('/chat/chat-1/subagent/a1')
+    expect(agent.text()).toContain('Explore repo layout')
+    expect(agent.text()).toContain('Explore')
+    expect(agent.findComponent({ name: 'ActivityGlyph' }).props('kind')).toBe('agent')
+    const runs = rail.findComponent({ name: 'BackgroundRunRows' })
+    expect(runs.exists()).toBe(true)
+    expect(agent.element.compareDocumentPosition(runs.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    vi.unstubAllGlobals()
+    wrapper.unmount()
+  })
 })
 
 describe('ChatPanel action dock', () => {

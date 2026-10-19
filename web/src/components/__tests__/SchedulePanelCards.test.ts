@@ -354,6 +354,17 @@ describe('SchedulePanel property cards', () => {
     expect(rows.some(r => r.includes('last run failed'))).toBe(true)
   })
 
+  it('shows a retrying status row and state for a wall-clock entry', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'daily',
+      daily_time_utc: '08:00',
+      last_status: 'retrying',
+    }))
+    const rows = card(wrapper, 'When').findAll('.prop-row').map(r => r.text())
+    expect(rows.some(r => r.includes('retrying — a service was unreachable'))).toBe(true)
+    expect(wrapper.text()).toContain('Retrying')
+  })
+
   it('hides the status row for a healthy wall-clock entry', async () => {
     const wrapper = await mountPanel(makeSchedule({
       frequency: 'daily',
@@ -615,6 +626,14 @@ describe('SchedulePanel overview', () => {
     expect(row('Subagent sweep').text()).toContain('subagent results never summarised')
     expect(row('Subagent sweep').text()).not.toContain('needs you')
     expect(row('Flaky one').attributes('href')).toBe('/schedules/e')
+  })
+
+  it('keeps a retrying run out of Needs a look', async () => {
+    const wrapper = await mountOverview([
+      makeSchedule({ schedule_id: 'r', title: 'Morning brief', last_status: 'retrying' }),
+    ])
+    const rows = wrapper.get('.page-rail').findAll('a.rail-item')
+    expect(rows.some(r => r.text().includes('Morning brief'))).toBe(false)
   })
 
   it('draws the webhook section under the overview', async () => {
