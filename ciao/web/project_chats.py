@@ -161,6 +161,7 @@ from ciao.web.chat_broker import (
     edit_pending_list,
     remove_pending_list,
     reorder_pending_list,
+    shared_origin,
 )
 from ciao.web.archive_pipeline import ArchivePipeline
 from ciao.web.chat_streaming import ChatStreaming
@@ -6022,7 +6023,8 @@ class ProjectChatManager:
             return True  # a waiting entry is already queued
         # Steer with nothing running sends the waiting entries now, as a new
         # turn: texts joined with a blank line and every image, in list order.
-        # The rest of the waiting queue stays.
+        # The turn keeps an origin only when every entry shares it. The rest of
+        # the waiting queue stays.
         text = "\n\n".join(
             t for t in (str(e.get("text", "")).strip() for e in selected) if t
         )
@@ -6032,13 +6034,14 @@ class ProjectChatManager:
             for attachment in (self.resolve_image_ref(ref) for ref in image_refs)
             if attachment
         ]
+        origin = shared_origin(selected)
         if not text and not images:
             return False  # nothing to send (images gone): entries stay waiting
         sent_ids = {id(e) for e in selected}
         chat.pending_queue = [e for e in chat.pending_queue if id(e) not in sent_ids]
         self._save()
         try:
-            stream = self.start_stream(chat_id, text, images=images or None)
+            stream = self.start_stream(chat_id, text, images=images or None, origin=origin)
         except BaseException:
             # The turn did not start: the entries are still waiting.
             chat.pending_queue = [*selected, *chat.pending_queue]
@@ -6223,7 +6226,11 @@ class ProjectChatManager:
     def on_steer_delivered(
         self, chat_id: str, stream: "ChatStream", steer_id: str
     ) -> None:
-        """A dispatched steer reached the running turn: it is now a user turn."""
+        """A dispatched steer reached the running turn: it is now a user turn.
+
+        The turn keeps an origin only when every steered entry carries the same
+        one (see shared_origin).
+        """
         entries = stream.take_steered(steer_id)
         if not entries:
             if stream.steer_inflight:
@@ -6242,6 +6249,7 @@ class ProjectChatManager:
             t for t in (str(e.get("text", "")).strip() for e in entries) if t
         )
         images = [str(ref) for e in entries for ref in (e.get("images") or [])]
+        origin = shared_origin(entries)
         chat = self._chats.get(chat_id)
         turn_index = -1
         sent_at = chat_service._now_iso()
@@ -6252,6 +6260,8 @@ class ProjectChatManager:
                 chat.user_turn_images[str(turn_index)] = images
             chat.user_turn_timings[str(turn_index)] = {"sent_at": sent_at}
             chat.user_turn_steered[str(turn_index)] = True
+            if origin:
+                chat.user_turn_origin[str(turn_index)] = origin
             running = stream.running_turn_index
             if running is not None and chat.user_turn_unattended.get(str(running)):
                 # The control plane reads the newest turn index to decide
@@ -6262,7 +6272,7 @@ class ProjectChatManager:
             chat.last_read_at = sent_at  # user sending = implicitly read
             self._save()
             stream.steered_turn_indexes.append(turn_index)
-        stream.publish({
+        steered_event: dict = {
             "type": "steered",
             "entry_ids": [str(e["id"]) for e in entries],
             "text": text,
@@ -6270,7 +6280,10 @@ class ProjectChatManager:
             "turn_index": turn_index,
             "sent_at": sent_at,
             "delivery_id": steer_id,
-        })
+        }
+        if origin:
+            steered_event["origin"] = origin
+        stream.publish(steered_event)
         stream.publish_pending()
 
     def reorder_queue(

@@ -5783,6 +5783,7 @@ export const useProjectStore = defineStore('projects', () => {
           images: event.images?.length ? event.images : undefined,
           turn_index: turnIndex,
           steered: true,
+          origin: event.origin || undefined,
         })
         messages.value[chatId] = normalizeMessages([...msgs])
         persistMessages()
