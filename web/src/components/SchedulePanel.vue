@@ -173,7 +173,7 @@
                  5-minute grace, and this row names the failure rather than
                  leaving it to a badge. -->
             <div
-              v-if="isIntervalSchedule(schedule) || schedule.last_status === 'error' || schedule.last_status === 'skipped' || schedule.last_status === 'unfinished'"
+              v-if="isIntervalSchedule(schedule) || schedule.last_status === 'error' || schedule.last_status === 'skipped' || schedule.last_status === 'unfinished' || schedule.last_status === 'retrying'"
               class="prop-row"
             >
               <dt>Status</dt><dd>{{ intervalStatusLabel(schedule) }}</dd>
@@ -974,6 +974,7 @@ function scheduleStateLabel(s: Schedule): string {
   if (s.missed) return 'Missed a run'
   if (!s.enabled) return isIntervalSchedule(s) ? 'Stopped' : 'Paused'
   if (s.last_status === 'running' || showRunning.value) return 'Running'
+  if (s.last_status === 'retrying') return 'Retrying'
   if (scheduleNeedsAttention(s)) return intervalStatusLabel(s).replace(/^./, c => c.toUpperCase())
   if (s.frequency === 'manual') return 'Runs on demand'
   return 'Scheduled'
@@ -1166,6 +1167,8 @@ function intervalStatusLabel(s: Schedule): string {
   // Split out of "skipped" server-side: the run ended with background
   // subagents unsettled, so its chat has no question or approval to answer.
   if (s.last_status === 'unfinished') return 'last run didn’t finish — subagent results never summarised'
+  // schedules.RUN_STATUS_RETRYING: a network retry is armed in the run chat.
+  if (s.last_status === 'retrying') return 'retrying — a service was unreachable, trying again'
   if (s.last_status === 'ok') return 'ok'
   return s.enabled ? 'waiting for first run' : 'never ran'
 }
