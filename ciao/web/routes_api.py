@@ -5614,14 +5614,10 @@ async def list_models(request: Request) -> JSONResponse:
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
     s = app_settings.settings
-    from ciao.critique import critique_models_effective
-
-    critique_effective = critique_models_effective(config)
 
     return {
         # Overrides as stored ("" = automatic default).
         "insights_enabled": config.insights_enabled,
-        "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =
         # provider's own catalog default).
         "provider_default_models": s.provider_default_models or {},
@@ -5636,7 +5632,6 @@ def _routines_payload(config, app_settings) -> dict:
         # Per-provider Session insights models, as stored (missing = that
         # source chat's model).
         "provider_insights_models": s.provider_insights_models or {},
-        "critique_models_effective": critique_effective,
         # Server settings that used to be workspace `.env` variables, as
         # stored ("" = default). The bind address and the log level are read
         # at startup, so a change takes effect after a restart; developer mode

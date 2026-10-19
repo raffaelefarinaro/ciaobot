@@ -7019,21 +7019,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.set_defaults(func=_vault_export_command)
 
-    # Registered for discoverability only; `main` intercepts "critique" before
-    # argparse so the panel's own flags reach `ciao.critique` untouched (the
-    # same reason `gws` is intercepted — argparse eats `--`-prefixed args before
-    # a subparser's REMAINDER can see them). Do not give it a `func`.
-    #
-    # It needs a `ciao` entry point at all because a packaged install puts only
-    # a `ciao` wrapper on PATH: `python3 -m ciao.critique` resolves some external
-    # interpreter that has neither `ciao` nor its dependencies, so /critique
-    # failed for every user who had not installed from source.
-    subparsers.add_parser(
-        "critique",
-        help="Run the multi-model critique panel on an artifact.",
-        add_help=False,
-    )
-
     lint_parser = subparsers.add_parser(
         "vault-lint",
         help="Run vault hygiene checks.",
@@ -8526,42 +8511,6 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
     return gws_auth_helper.main_entry(argv)
 
 
-def _resolve_critique_paths(args: list[str]) -> list[str]:
-    """Make a relative ``--input`` absolute against the caller's directory.
-
-    The bundled launcher `cd`s into the runtime root before exec'ing Python, so
-    a relative path — including the `memory-vault/...` form the command doc
-    explicitly supports — would resolve against the app bundle and be reported
-    missing. The launcher records where
-    the caller actually stood in ``CIAO_INVOCATION_CWD``; from source there is
-    no cd and the current directory is already right.
-    """
-    base = os.environ.get("CIAO_INVOCATION_CWD", "").strip()
-    if not base:
-        return args
-    out = list(args)
-    for index, token in enumerate(out):
-        value = ""
-        if token == "--input" and index + 1 < len(out):
-            target = index + 1
-            value = out[target]
-        elif token.startswith("--input="):
-            target = index
-            value = token.split("=", 1)[1]
-        else:
-            continue
-        # A tilde path is never relative to the caller's directory. Quoted, it
-        # reaches here unexpanded and `Path("~/x").is_absolute()` is False, so
-        # rebasing would produce `<cwd>/~/x` and defeat the `expanduser()` that
-        # `ciao.critique` does later — turning an artifact that resolved fine
-        # into one reported missing. Left alone, that expansion still works.
-        if not value or value.startswith("~") or Path(value).is_absolute():
-            continue
-        resolved = str(Path(base) / value)
-        out[target] = resolved if target != index else f"--input={resolved}"
-    return out
-
-
 def main(argv: list[str] | None = None) -> int:
     use_utf8_stdio()
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
@@ -8585,10 +8534,6 @@ def main(argv: list[str] | None = None) -> int:
         from ciao.engine_update import main as update_main
 
         return update_main(argv_list[1:])
-    if argv_list[:1] == ["critique"]:
-        from ciao.critique import main as critique_main
-
-        return critique_main(_resolve_critique_paths(argv_list[1:]))
     if argv_list[:1] == ["gws"]:
         # Passthrough: forward everything (including leading gws options such as
         # `--version`) untouched, keeping argparse out of the way.

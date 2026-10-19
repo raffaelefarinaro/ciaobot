@@ -204,8 +204,6 @@ class AppSettings:
     backup_last_success_commit: str = ""
     backup_remote: str = ""
 
-    # Comma-separated list of models for the adversarial_review MCP tool.
-    critique_models: str = ""
     # Per-runtime-provider default model for new chats, keyed by provider id.
     # There is no env-backed default: a missing entry means the provider's own
     # catalog default applies.
@@ -346,8 +344,8 @@ class AppSettingsStore:
         self._path = path
         self._explicit_fields: set[str] = set()
         self.settings = self._load()
-        # Env-backed defaults captured on the first apply_to_config() call,
-        # so clearing an override restores the original value.
+        # Per-provider default models captured on the first apply_to_config()
+        # call, so clearing an override restores the original value.
         self._defaults: dict[str, str] | None = None
 
     def _load(self) -> AppSettings:
@@ -530,8 +528,8 @@ class AppSettingsStore:
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
 
-        The first call snapshots the env-backed values so a later call
-        with a cleared (empty) setting restores the original default
+        The first call snapshots the per-provider default models so a later
+        call with a cleared (empty) setting restores the original default
         instead of keeping a stale override.
         """
         if self._defaults is None:
@@ -541,9 +539,7 @@ class AppSettingsStore:
             # running server actually uses.
             config.pwa_host = self.settings.pwa_host or DEFAULT_PWA_HOST
             config.log_level = self.settings.log_level or DEFAULT_LOG_LEVEL
-            self._defaults = {
-                "critique_models": config.critique_models,
-            }
+            self._defaults = {}
             for descriptor in provider_registry.descriptors():
                 # A config object that predates this provider (or a duck-typed
                 # stand-in) simply has no default to snapshot.
@@ -558,7 +554,6 @@ class AppSettingsStore:
         config.insights_enabled = s.insights_enabled
         config.dev_mode = s.dev_mode
         config.app_repo = Path(s.app_repo).expanduser().resolve() if s.app_repo else None
-        config.critique_models = s.critique_models or d["critique_models"]
         # Per-provider default models / thinking / routine models have no
         # env-backed default; absence means "use the provider's own default".
         config.provider_default_models = dict(s.provider_default_models or {})

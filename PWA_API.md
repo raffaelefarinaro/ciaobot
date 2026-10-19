@@ -905,8 +905,8 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 **Routine settings (Settings → General / Models)**
 
 ```bash
-# Read internal-routine settings: the automatic-session-insights switch, the
-# critique model override, and the per-provider default model / mode /
+# Read internal-routine settings: the automatic-session-insights switch and the
+# per-provider default model / mode /
 # thinking / Session insights maps. insights_enabled=false stops the memory
 # pass. provider_insights_models is keyed by the chat's provider; a missing
 # entry means that provider's default chat model reads the session.
@@ -927,7 +927,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # anything else is a 400.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_enabled":false,"provider_insights_models":{"claude":"haiku"},"critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"insights_enabled":false,"provider_insights_models":{"claude":"haiku"},"provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Keyboard settings (Settings → Home → Keyboard shortcuts)**
