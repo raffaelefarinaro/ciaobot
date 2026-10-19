@@ -5631,8 +5631,14 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   white-space: nowrap;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
+  scrollbar-width: none;
   overscroll-behavior-inline: contain;
+}
+/* This strip is the one opt-out from the app's visible thin scrollbars: it
+   still scrolls by wheel, trackpad or touch, but a bar under a reply reads as
+   a rule across the transcript rather than as an affordance. */
+.message-actions .message-meta::-webkit-scrollbar {
+  display: none;
 }
 .message-actions .message-meta > :first-child { margin-left: auto; }
 .message-actions > span.message-meta { justify-content: flex-end; }

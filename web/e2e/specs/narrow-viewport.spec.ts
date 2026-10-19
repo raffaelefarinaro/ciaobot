@@ -100,7 +100,7 @@ test.describe('narrow viewport', () => {
     expect(measured.actionsBottom - measured.nextTop, 'the action row crosses the next turn').toBeLessThanOrEqual(0)
   })
 
-  test('turn facts stay on one line and scroll sideways at 390px', async ({ page }) => {
+  test('turn facts stay on one line and scroll sideways without a scrollbar at 390px', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
     await page.evaluate(() => fetch('/__fixture__/transcript', {
       method: 'POST',
@@ -137,6 +137,7 @@ test.describe('narrow viewport', () => {
         flexWrap: style.flexWrap,
         whiteSpace: style.whiteSpace,
         overflowX: style.overflowX,
+        scrollbarWidth: style.scrollbarWidth,
         centreDelta: Math.abs(
           (metaBox.top + metaBox.bottom) / 2 - (copyBox.top + copyBox.bottom) / 2,
         ),
@@ -156,6 +157,10 @@ test.describe('narrow viewport', () => {
     expect(measured.flexWrap, 'the facts wrap onto their own line').toBe('nowrap')
     expect(measured.whiteSpace).toBe('nowrap')
     expect(measured.overflowX).toBe('auto')
+    // The strip still scrolls; it just must not draw a bar. `scrollbar-width`
+    // is the computed value the engine uses, and `::-webkit-scrollbar` covers
+    // the engines that ignore it.
+    expect(measured.scrollbarWidth, 'the facts strip draws a scrollbar').toBe('none')
     expect(measured.centreDelta, 'the facts do not share the action row').toBeLessThanOrEqual(1)
     expect(
       measured.actionsInsideWrap,
