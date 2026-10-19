@@ -2597,7 +2597,7 @@ export const useProjectStore = defineStore('projects', () => {
   // more eager than the server: this deletes the chat outright, and the two
   // rules disagreeing means deleting something the server would have kept.
   //
-  // The client cannot see `user_turn_count`, so it substitutes the loaded
+  // The draft rule also weighs server-only state, so the client substitutes the loaded
   // messages — which is only sound when they are actually loaded. `messages`
   // is undefined for a chat that was never opened, and reading that as "no
   // user turns" made a real conversation look like a discarded draft.

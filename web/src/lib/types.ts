@@ -204,7 +204,6 @@ export interface RepoLocation {
 }
 
 export type CodeModeActor = 'user' | 'agent'
-export interface CodeModeEvent { code_mode: boolean; actor: CodeModeActor; at: string; after_turn_index: number }
 
 export interface ChatInfo {
   chat_id: string
@@ -312,7 +311,8 @@ export interface ChatInfo {
   repo_location?: Partial<RepoLocation>
   // G1: always sent; optional for older payloads/test stubs.
   code_mode?: boolean
-  code_mode_events?: CodeModeEvent[]
+  // Visible user turns so far; code mode cannot be turned off once above 0.
+  user_turn_count?: number
 }
 
 /**
