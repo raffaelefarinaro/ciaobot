@@ -1,6 +1,6 @@
 ---
 name: html-artifact
-description: "Build a self-contained interactive HTML page (an artifact) that Ciaobot renders live in the pinned panel. Use when the output is easier to look at than to read: dashboards, charts, annotated diffs, side-by-side option comparisons, timelines, interactive mockups, calculators, diagrams drawn as inline SVG, or anything the user wants to make visual, interactive, clickable, or \"a page\". Trigger on \"artifact\", \"dashboard\", \"chart\", \"graph of data\", \"visualize this\", \"make it interactive\", \"build me a page\", \"show it side by side\", \"architecture diagram\", \"flow diagram\". For a plan that needs approval, use visual-plan. Do NOT use for prose reports (.md) or tabular data (.csv)."
+description: "Build a self-contained interactive HTML page (an artifact) that Ciaobot renders live in the pinned panel. Use when the output is easier to look at than to read: dashboards, charts, annotated diffs, side-by-side option comparisons, timelines, interactive mockups, calculators, diagrams drawn as inline SVG, or anything the user wants to make visual, interactive, clickable, or \"a page\". Trigger on \"artifact\", \"dashboard\", \"chart\", \"graph of data\", \"visualize this\", \"make it interactive\", \"build me a page\", \"show it side by side\", \"architecture diagram\", \"flow diagram\". Do NOT use for prose reports (.md) or tabular data (.csv)."
 ---
 
 # HTML artifacts

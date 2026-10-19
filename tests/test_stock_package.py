@@ -85,8 +85,6 @@ def test_baseline_authoring_does_not_ship_as_optional_skills() -> None:
     skills = resources.files("ciao.stock").joinpath("skills")
     assert not skills.joinpath("workspace-authoring/SKILL.md").is_file()
     assert not skills.joinpath("sop-authoring/SKILL.md").is_file()
-    visual_plan = skills.joinpath("visual-plan/SKILL.md").read_text(encoding="utf-8")
-    assert "the core prompt handles those" in visual_plan
 
 
 def test_support_checks_for_a_released_fix_before_new_issue() -> None:
@@ -484,17 +482,10 @@ def _skill_text(name: str, *parts: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def test_visual_plan_and_capabilities_agree_on_plan_mode() -> None:
-    plan = _skill_text("visual-plan")
-    assert "plan_mode_read_only" in plan
-    assert "no longer exists" not in plan
+def test_capabilities_explains_plan_mode() -> None:
     caps = _skill_text("ciao-capabilities", "references", "models-and-extensions.md")
-    assert "Plan mode cannot produce a plan file" not in caps
-    assert "gives the plan in the chat" in caps
-
-
-def test_visual_output_does_not_reinline_html_artifact_rules() -> None:
-    assert "under 2 MB" not in _skill_text("visual-plan", "visual-output.md")
+    assert "Plan mode" in caps
+    assert "give the plan in the chat" in caps
 
 
 def test_html_artifact_shell_count_and_escaped_example() -> None:
@@ -506,10 +497,11 @@ def test_html_artifact_shell_count_and_escaped_example() -> None:
     assert {"Base shell", "Tabbed comparison", "Timeline", "Static SVG diagram"} <= set(titles)
 
 
-def test_html_artifact_triggers_do_not_overlap_visual_plan() -> None:
+def test_html_artifact_description_has_no_plan_handoff() -> None:
     description = _skill_text("html-artifact").split("---")[1]
     assert '\\"architecture\\"' not in description and '\\"sequence\\"' not in description
-    assert "use visual-plan" in description
+    # The deleted skill must not be offered as a handoff target any more.
+    assert "visual-plan" not in description
 
 
 def test_convert_documents_skill_states_when_and_interpreter() -> None:
