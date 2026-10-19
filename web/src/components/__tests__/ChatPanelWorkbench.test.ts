@@ -204,6 +204,31 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
+  it('truncates long file names in Chat details Files', async () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    const long = '2026-09-22_Swiss_Life_health_examination_letter_0B5C7D9E1F.pdf'
+    const wrapper = await mountPanel([
+      { role: 'user', content: 'make it', timestamp: '2026-09-25T10:00:00Z', turn_index: 0 },
+      { role: 'system', tool_name: '_filecard', content: `Workspace/${long}`, file_path: `Workspace/${long}`, action: 'created', timestamp: '2026-09-25T10:00:03Z' },
+      { role: 'assistant', content: 'Saved. See `notes/mentioned_only_in_reply_with_a_very_long_name.md`.', timestamp: '2026-09-25T10:00:05Z', effective_model: 'sonnet' },
+    ])
+    observers.forEach(fire => fire())
+    await nextTick()
+    const files = wrapper.get('#chat-work-rail').findAll('.rail-item.chat-rail-file')
+    expect(files).toHaveLength(2)
+    expect(files[0].attributes('title')).toContain(long)
+    wrapper.unmount()
+  })
+
   it('shows Chat details as a rail on a wide pane, hidden from its heading and reopened from the info tab', async () => {
     // ChatPanel observes more than one element; report a wide pane to all.
     const observers: Array<() => void> = []
