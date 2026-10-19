@@ -162,6 +162,3 @@ def test_release_wheel_bundles_every_stock_skill_file(tmp_path: Path) -> None:
 
     missing = sorted(expected_files - bundled)
     assert not missing, f"wheel is missing stock skill files: {missing}"
-    assert "ciao/stock/skills/visual-plan/SKILL.md" in bundled
-    assert "ciao/stock/skills/visual-plan/plan-template.md" in bundled
-    assert "ciao/stock/skills/visual-plan/visual-output.md" in bundled

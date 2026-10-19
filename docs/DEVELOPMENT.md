@@ -1730,8 +1730,6 @@ No subagents are packaged by default. Attended vault writes and proposal handlin
 
 The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions live in `gws-shared`; only the short profile-wrapper routing rule belongs in the compact core (`ciao/system_prompt.md`).
 
-The stock `visual-plan` skill produces local Markdown plans with an optional self-contained HTML companion, including diagrams drawn as inline SVG. It is the one-stop planning surface for work that needs an approval gate and a cross-session resume contract. Routine working docs (notes, analyses, drafts without an approval gate) use the core prompt's file-routing rules instead; `visual-plan` is reserved for plans that must be approved and survive a provider switch. Visual plans are local Markdown artifacts; only one file is pinned at a time, and Plan mode cannot produce one (the skill refuses and explains instead of failing on the write). Interactive HTML companions are authored by loading the stock `html-artifact` skill. A same-named workspace skill overrides the packaged copy; refresh a workspace with `ciao sync-skills --skip-upstream`, and roll back a future removal at the package level by reverting the stock skill from the next build.
-
 ### Provider context and native memory
 
 Normal chats send one compact provider-neutral context capsule containing the
