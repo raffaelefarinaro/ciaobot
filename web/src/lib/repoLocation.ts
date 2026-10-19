@@ -33,6 +33,23 @@ export function chatRepoTag(repo: Repo, loc: Loc): RepoTag | null {
   }
 }
 
+export interface SidebarBranchChip extends RepoTag { codeOff: boolean }
+
+/**
+ * The sidebar branch chip with code mode folded in. On, it stands in for the
+ * row's `code` tag; off, it says so, because a worktree the agent no longer
+ * works in is a different fact from one it does.
+ */
+export function sidebarBranchChip(repo: Repo, loc: Loc, codeModeOn: boolean): SidebarBranchChip | null {
+  const tag = chatRepoTag(repo, loc)
+  if (!tag) return null
+  return {
+    ...tag,
+    title: codeModeOn ? `Code mode · ${tag.title}` : `${tag.title} (code mode off)`,
+    codeOff: !codeModeOn,
+  }
+}
+
 export interface RepoChip {
   name: string
   branch: string

@@ -2,11 +2,9 @@
   <div class="rail-list bg-runs">
     <div v-for="run in runs" :key="run.run_id" class="bg-run">
       <div class="bg-run-head">
-        <span class="bg-run-pulse" aria-hidden="true" />
+        <ActivityGlyph kind="run" />
         <span class="bg-run-label" :title="`${backgroundRunLabel(run)}\n${commandText(run)}`">{{ backgroundRunLabel(run) }}</span>
         <span class="bg-run-elapsed">{{ backgroundRunElapsed(run, now) }}</span>
-      </div>
-      <div class="bg-run-actions">
         <button
           type="button"
           class="bg-run-action"
@@ -21,6 +19,9 @@
           @click="stop(run.run_id)"
         >{{ stopping.has(run.run_id) ? 'Stopping…' : 'Stop' }}</button>
       </div>
+      <!-- An unnamed run is already labelled by its command; only a named one
+           needs the command spelled out. -->
+      <p v-if="run.label.trim()" class="bg-run-cmd" :title="commandText(run)">{{ commandText(run) }}</p>
       <p v-if="errors[run.run_id]" class="bg-run-error" role="alert">{{ errors[run.run_id] }}</p>
       <div
         v-if="openLog === run.run_id"
@@ -40,6 +41,7 @@ import { reactive, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { backgroundRunElapsed, backgroundRunLabel } from '../lib/backgroundRuns'
 import type { BackgroundRunSummary } from '../lib/types'
+import ActivityGlyph from './ActivityGlyph.vue'
 
 const props = defineProps<{
   chatId: string
@@ -119,19 +121,6 @@ watch(() => props.runs.map(r => r.run_id), (ids) => {
   min-width: 0;
 }
 
-/* The sidebar's run signal, at the same size, so the row reads as the thing
-   the sidebar dot was pointing at. Kept in sync with .activity-spinner in
-   ChatSignals.vue. */
-.bg-run-pulse {
-  position: relative;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  flex-shrink: 0;
-  animation: bg-run-pulse 1.1s ease-in-out infinite;
-}
-
 .bg-run-label {
   flex: 1;
   min-width: 0;
@@ -149,31 +138,43 @@ watch(() => props.runs.map(r => r.run_id), (ids) => {
   font-variant-numeric: tabular-nums;
 }
 
-.bg-run-actions {
-  display: flex;
-  gap: var(--space-1);
-  /* 8px dot + gap, less the buttons' own padding: labels line up under the run's. */
-  margin: 0 0 0 8px;
-}
-
-/* Quiet text buttons, as on a message's action row. The hit area is the full
-   touch height; only the label shows. */
+/* Text actions on the run's own line: no border, a fill on hover and focus,
+   and a full touch height under a coarse pointer. */
 .bg-run-action {
-  min-height: var(--touch);
-  padding: 0 var(--space-2);
+  flex: 0 0 auto;
+  padding: 2px 6px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-xs);
   background: none;
   color: var(--fg2);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
+  font-weight: 500;
   cursor: pointer;
 }
 
-.bg-run-action:hover { background: var(--bg3); color: var(--fg); }
-.bg-run-action:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.bg-run-action--stop:hover { color: var(--error); }
+.bg-run-action:hover,
+.bg-run-action:focus-visible { background: var(--bg3); color: var(--fg); }
+.bg-run-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bg-run-action--stop,
+.bg-run-action--stop:hover,
+.bg-run-action--stop:focus-visible { color: var(--error); }
 .bg-run-action:disabled { color: var(--fg3); cursor: default; background: none; }
+
+@media (pointer: coarse) {
+  .bg-run-action { min-height: var(--touch); padding: 0 10px; }
+}
+
+.bg-run-cmd {
+  margin: 2px 0 0;
+  padding-left: calc(12px + var(--space-2));
+  overflow: hidden;
+  color: var(--fg3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .bg-run-error {
   margin: 0 0 var(--space-1);
@@ -194,14 +195,5 @@ watch(() => props.runs.map(r => r.run_id), (ids) => {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-@keyframes bg-run-pulse {
-  0%, 100% { transform: scale(0.55); opacity: 0.35; }
-  50% { transform: scale(1); opacity: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .bg-run-pulse { animation: none; }
 }
 </style>

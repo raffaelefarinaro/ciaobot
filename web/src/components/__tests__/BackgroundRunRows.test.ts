@@ -53,4 +53,19 @@ describe('BackgroundRunRows', () => {
     expect(stop().text()).toBe('Stopping…')
     expect(stop().attributes('disabled')).toBeDefined()
   })
+
+  it("puts the run glyph, Log and Stop on the run's own line", () => {
+    const wrapper = mount(BackgroundRunRows, { props: { chatId: 'c1', runs: [RUN], now: START } })
+    expect(wrapper.find('.bg-run-head .activity-glyph--run').exists()).toBe(true)
+    expect(wrapper.findAll('.bg-run-head .bg-run-action')).toHaveLength(2)
+    expect(wrapper.find('.bg-run-actions').exists()).toBe(false)
+  })
+
+  it("spells out a named run's command on its own line", () => {
+    const named = mount(BackgroundRunRows, { props: { chatId: 'c1', runs: [{ ...RUN, label: 'Clone' }], now: START } })
+    expect(named.get('.bg-run-cmd').text()).toBe('git clone rizzo-flow')
+    expect(named.get('.bg-run-cmd').attributes('title')).toBe('git clone rizzo-flow')
+    const unnamed = mount(BackgroundRunRows, { props: { chatId: 'c1', runs: [RUN], now: START } })
+    expect(unnamed.find('.bg-run-cmd').exists()).toBe(false)
+  })
 })
