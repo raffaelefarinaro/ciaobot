@@ -85,9 +85,6 @@ def test_import_when_registry_missing_replaces_bootstrap_list(tmp_path: Path) ->
     assert entries["home"]["default_provider"] == "opencode"
     assert entries["home"]["gws_profile"] == "personal"
     assert entries["client"]["disallowed_tools"] == ["Bash"]
-    # None resolved to "every declared server denied" while env-only; keep
-    # that instead of letting the allowlist seed widen it on the next start.
-    assert entries["home"]["allowed_mcp_servers"] == []
     assert (tmp_path / ".runtime" / LEGACY_WORKSPACES_IMPORT_MARKER).is_file()
 
     reloaded = _config(tmp_path, LEGACY)
@@ -97,8 +94,7 @@ def test_import_when_registry_missing_replaces_bootstrap_list(tmp_path: Path) ->
 def test_import_never_overwrites_existing_registry_entries(tmp_path: Path) -> None:
     _write_registry(
         tmp_path,
-        [{"name": "home", "default_provider": "claude", "gws_profile": "work",
-          "allowed_mcp_servers": ["notion"]}],
+        [{"name": "home", "default_provider": "claude", "gws_profile": "work"}],
     )
     config = _config(tmp_path, LEGACY)
 
@@ -109,7 +105,6 @@ def test_import_never_overwrites_existing_registry_entries(tmp_path: Path) -> No
     assert list(entries) == ["home", "client"]
     assert entries["home"]["default_provider"] == "claude"
     assert entries["home"]["gws_profile"] == "work"
-    assert entries["home"]["allowed_mcp_servers"] == ["notion"]
 
 
 def test_import_is_idempotent_and_does_not_resurrect_removed_workspaces(
@@ -192,7 +187,6 @@ def test_setup_rerun_imports_the_variable_before_writing_a_registry(tmp_path: Pa
     entries = {e["name"]: e for e in _registry(tmp_path)}
     assert list(entries) == ["home", "client"]
     assert entries["client"]["disallowed_tools"] == ["Bash"]
-    assert entries["client"]["allowed_mcp_servers"] == []
     assert (tmp_path / ".runtime" / LEGACY_WORKSPACES_IMPORT_MARKER).is_file()
 
 

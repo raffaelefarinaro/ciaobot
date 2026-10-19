@@ -40,7 +40,6 @@ export function restoreConfirmMessage(item: ArchivedWorkspace): string {
   if (item.schedules_dropped) {
     lines.push(`${plural(item.schedules_dropped, 'automation')} in the archive did not pass validation and will not be restored.`)
   }
-  lines.push(`MCP servers allowed: ${listOrNone(item.allowed_mcp_servers, 'none (default)')}`)
   lines.push(`Extra tools denied: ${listOrNone(item.disallowed_tools, 'workspace default')}`)
   lines.push(`Agent CLI/Runtime: ${item.default_provider || 'claude'}`)
   lines.push(`Google account: ${item.gws_profile || 'none'}`)
