@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-  "claude-agent-sdk[otel]==0.2.165",
+  "claude-agent-sdk[otel]==0.2.168",
   # Runtime security pins for transitive dependencies (#953, #1081). `mcp`
   # accepts PyJWT[crypto]>=2.10.1, `pywebpush`->`requests` accepts
   # urllib3>=1.26,<3, and `mcp`->`aiohttp` (3.14.3) accepts
