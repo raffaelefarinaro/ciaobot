@@ -658,7 +658,11 @@ def _summarize_tool_input(tool: str, raw: object) -> str:
     for key in ("filePath", "path", "file", "pattern", "query", "command", "description"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()[:400]
+            # The trace draws one row per line, and V2's `shell` carries no
+            # description, so a heredoc command became a column of fake rows.
+            lines = [line.strip() for line in value.splitlines() if line.strip()]
+            more = f" (+{len(lines) - 1} lines)" if len(lines) > 1 else ""
+            return lines[0][:400] + more
     # An empty map has no summary; returning its json printed a literal "{}"
     # next to the tool name in the activity row.
     return json.dumps(raw, ensure_ascii=False)[:200] if raw else ""
@@ -1818,22 +1822,30 @@ class OpencodeProvider(BaseSDKProvider):
             self._background_changed.set()
         return len(self._background_shells)
 
+    def _set_background_children(self, active: set[str], session_id: str) -> None:
+        """Replace ``_background_children`` with what the server reports running.
+
+        The server process belongs to this chat, so every session executing on
+        it other than the parent is the parent's background work. That covers a
+        child resumed by id, which emits no ``session.created``.
+        """
+        children = active - {session_id}
+        if children != self._background_children:
+            self._background_children = children
+            self._background_changed.set()
+
     async def _reconcile_background(self) -> None:
         """Re-read background shells and subagents at the end of a turn.
 
         A read error leaves the sets as they are and never fails the turn.
         """
-        if not self.has_live_server or not self._session_id:
+        client, session_id = self._client, self._session_id
+        if client is None or not session_id or not self.has_live_server:
             return
         await self.refresh_background_shells()
-        try:
-            tree = await self.read_live_collab_tree()
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
-            return
-        running, _ = opencode_collab_tree_counts(tree)
-        if running == 0 and self._background_children:
-            self._background_children.clear()
-            self._background_changed.set()
+        active = await self._active_or_none(client)
+        if active is not None:
+            self._set_background_children(active, session_id)
 
     async def wait_background_change(self, timeout: float) -> None:
         """Wait up to ``timeout`` for a tracked change, then clear the flag."""
@@ -1921,19 +1933,18 @@ class OpencodeProvider(BaseSDKProvider):
         """Reconcile the background sets over HTTP; True when nothing is left.
 
         A failed read counts as idle, so a broken server cannot keep a drain
-        alive until the horizon.
+        alive until the horizon, but it leaves the sets untouched: the idle
+        reaper reads them once the drain ends, and an emptied set would let it
+        stop a server whose subagents are still running.
         """
         try:
             shells = await _read_running_shells(client, session_id)
-            tree = await self.read_live_collab_tree()
             active = await _read_active_sessions(client)
         except (httpx.HTTPError, ValueError, TypeError, AttributeError, RuntimeError):
             return True
         self._background_shells = shells
-        running_children, _ = opencode_collab_tree_counts(tree)
-        if running_children == 0:
-            self._background_children.clear()
-        return not shells and running_children == 0 and session_id not in active
+        self._set_background_children(active, session_id)
+        return not shells and not self._background_children and session_id not in active
 
     def _wake_result(self, session_id: str, error: str) -> ResultEvent:
         """Terminal event of one follow-up execution."""

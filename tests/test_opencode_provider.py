@@ -3602,6 +3602,14 @@ def test_an_empty_argument_map_summarizes_to_nothing():
     assert _summarize_tool_input("bash", {"command": "ls"}) == "ls"
 
 
+def test_a_multiline_command_summarizes_to_its_first_line():
+    """The trace draws a row per line; a heredoc became a column of fake rows."""
+    from ciao.providers.opencode import _summarize_tool_input
+
+    command = "python3 - <<'PY'\nfrom pathlib import Path\n\nprint(Path.home())\nPY\n"
+    assert _summarize_tool_input("shell", {"command": command}) == "python3 - <<'PY' (+3 lines)"
+
+
 def test_permission_events_match_the_house_convention(tmp_path):
     """opencode permission events use the shared approval-card convention.
 
