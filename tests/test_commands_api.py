@@ -179,6 +179,20 @@ def test_picker_merges_provider_page_skills_and_deduplicates_workspace_skills(
     assert skills[1].description == "Workspace description"
 
 
+def test_picker_lists_opencode_system_skills(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ciao.providers.opencode.opencode_system_skills",
+        lambda env=None: ["loop-engineering"],
+    )
+    commands_module._provider_skills_cache.clear()
+
+    _commands, skills = list_picker_entries(tmp_path, "opencode")
+
+    assert [skill.name for skill in skills] == ["loop-engineering"]
+    assert skills[0].description == "Loaded by opencode"
+    commands_module._provider_skills_cache.clear()
+
+
 def _rerooted_config(tmp_path: Path, workspaces: dict[str, str]) -> CiaoConfig:
     runtime_root = tmp_path / ".runtime"
     write_receipt(runtime_root, {"status": "migrated", "workspaces": list(workspaces)})

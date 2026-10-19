@@ -135,7 +135,9 @@ Before writing a projection, check whether the new CLI already loads
 OpenCode and project only the surfaces it does not discover (commands,
 subagents, MCP). `ciao/web/commands.py` `_provider_command_dir` is the
 slash-command half of that. System skills shown in Settings come from
-the descriptor's `system_skills_path`.
+the descriptor's `system_skills_path`. The function also feeds the slash
+picker's provider skills and must be cheap or cached, since `/api/commands`
+calls it (opencode caches a private-server read for 300 s).
 
 Claude Code hides harness surfaces the PWA already owns (plan mode, its
 own scheduler, notifications). The deny list is `HARNESS_DISABLED_SKILLS`

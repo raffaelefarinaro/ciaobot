@@ -39,6 +39,7 @@ import secrets
 import socket
 import sys
 import tempfile
+import threading
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
@@ -147,6 +148,7 @@ _CATALOG_WARMUP_POLL = 0.25
 # it to finish loading, read three routes. Measured ~0.4s on 2.0.27.
 _INVENTORY_TIMEOUT = 15.0
 _INVENTORY_POLL = 0.1
+_SYSTEM_SKILLS_TTL_SECONDS = 300.0
 
 # Session reads (`read_thread` / `read_collab_tree`) also cost a throwaway
 # `opencode serve`. A chat with a live provider attached reuses that server
@@ -4773,6 +4775,30 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
     )
 
 
+_system_skills_cache: tuple[float, tuple[str, ...]] | None = None
+_system_skills_lock = threading.Lock()
+
+
 def opencode_system_skills(env: Mapping[str, str] | None = None) -> list[str]:
-    """Skills opencode's own CLI loads. It has no separate bundled catalog."""
-    return []
+    """Skills the opencode CLI loads (user, global and built-in), for the slash picker.
+
+    Read from a private server and cached for ``_SYSTEM_SKILLS_TTL_SECONDS``,
+    failures included, so a broken opencode does not stall every picker load.
+    """
+    global _system_skills_cache
+    with _system_skills_lock:
+        now = time.monotonic()
+        cached = _system_skills_cache
+        if cached is not None and now - cached[0] < _SYSTEM_SKILLS_TTL_SECONDS:
+            return list(cached[1])
+        names: list[str] = []
+        try:
+            binary = resolve_opencode_binary(env)
+        except OSError:
+            binary = None
+        if binary:
+            skill_rows, _plugins, _mcps = _fetch_inventory_rows(binary)
+            if skill_rows is not None:
+                names = _row_names(skill_rows)
+        _system_skills_cache = (now, tuple(names))
+        return names
