@@ -308,13 +308,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return _redeem_setup_token(request, setup_token)
 
         protected = (
-            (
-                path.startswith("/api/")
-                and path not in _PUBLIC_API
-                and not path.startswith("/api/open-chat/")
-            )
-            or path.startswith("/ws/")
-        )
+            path.startswith("/api/") and path not in _PUBLIC_API
+        ) or path.startswith("/ws/")
         if not protected:
             return await call_next(request)
         if (

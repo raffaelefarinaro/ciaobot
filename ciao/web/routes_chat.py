@@ -489,7 +489,6 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_unread`             {chat_id, last_read_at}  (marked unread on purpose)
     - `chat_pin_changed`        {chat_id, path, dismissed_paths, revision}
     - `chat_title`              {chat_id, title}
-    - `open_chat`               {chat_id}  (menu-bar deep link into running PWA)
     - `server_restarting`       {message}  (restart drain began; show overlay)
 
     On connect, sends a snapshot of currently-active streams so a fresh client

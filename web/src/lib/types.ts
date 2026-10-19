@@ -606,7 +606,6 @@ export type EventsWsMessage =
   // device). Only a rename carries `from`/`to`; the client refetches
   // /api/workspaces either way.
   | { type: 'workspaces_changed'; from?: string; to?: string }
-  | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'server_restart_cancelled' }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
