@@ -909,14 +909,10 @@
     <p v-if="store.steerNotice[chat.chat_id]" class="steer-notice" role="status">{{ store.steerNotice[chat.chat_id] }}</p>
 
     <!-- Dock strip: one counted line for everything not expanded above, so the
-         dock never grows past one card plus this. Replaces the standalone
-         background-agents bar, which was a third rendering of a count the
-         header pill already shows. Nothing here is unreachable — the strip is a
-         disclosure. -->
-    <!-- Rendered whenever there is anything to collapse OR anything already
-         expanded, so the disclosure works in both directions. Gating purely on
-         dockDeferred made the strip unmount itself on click: every deferred
-         entry except background agents disappears once dockExpanded is true. -->
+         dock never grows past one card plus this. Rendered whenever there is
+         anything to collapse OR anything already expanded, so the disclosure
+         works in both directions. Background agents and runs are not here: they
+         are the composer bar's activity cluster. -->
     <div v-if="dockStripVisible" class="dock-strip-wrap">
       <!-- aria-live sits on an inner span: an explicit role="status" on the
            button would override its implicit button role and drop
@@ -940,45 +936,6 @@
         </span>
       </button>
     </div>
-
-    <!-- Running-agent links, revealed by expanding the dock's "N agent(s)
-         running" pill above. The pill itself sits inside a <button> (can't
-         nest a link there), so the actual links live in this sibling block,
-         same disclosure pattern as queued-messages/questions below. -->
-    <div v-if="dockExpanded && dockAgentsPillShown" class="dock-agent-links">
-      <template v-if="dockRunningAgents.length">
-        <router-link
-          v-for="sub in dockRunningAgents"
-          :key="sub.agent_id"
-          class="dock-agent-link"
-          :to="subagentPath(chat.chat_id, sub.agent_id)"
-        >{{ sub.description || shortAgentId(sub.agent_id) }}</router-link>
-      </template>
-      <span v-else class="dock-agent-link dock-agent-link--pending">details loading…</span>
-    </div>
-
-    <!-- Background command runs: a status line, not a dock pill. Nothing here
-         is the user's move, so it does not join the strip's disclosure; it
-         names the run and how long it has gone, and opens Chat details, where
-         the run has its log and a Stop. Hidden while the turn's own live line
-         is showing activity; it is the quiet gap after the turn that needs it.
-         For a few seconds after a run ends it says how it ended. -->
-    <div v-if="runStatus" class="run-status-wrap">
-      <button
-        type="button"
-        class="run-status"
-        :class="`run-status--${runStatus.tone}`"
-        title="Show in Chat details"
-        :aria-label="`${runStatus.prefix}${runStatus.text}. Show in Chat details`"
-        @click="openRunDetails"
-      >
-        <span class="run-status-dot" aria-hidden="true" />
-        <span class="run-status-text">{{ runStatus.text }}</span>
-        <span v-if="runStatus.elapsed" class="run-status-elapsed">{{ runStatus.elapsed }}</span>
-      </button>
-    </div>
-    <!-- Announces a run starting or ending, never the ticking age. -->
-    <span class="sr-only" role="status" aria-live="polite">{{ runStatus ? `${runStatus.prefix}${runStatus.text}` : '' }}</span>
 
     <!-- @-mention picker (textarea version: inserts plain backend-facing text) -->
     <div v-if="showMentionPicker" class="commands-picker mention-picker" role="listbox" aria-label="Mentions">
@@ -1169,7 +1126,17 @@
               <input type="file" accept="image/*" multiple hidden @change="handleFileSelect" />
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </label>
-            <span class="composer-spacer"></span>
+            <!-- Background work the turn left running: agents and command runs, right
+                 against Send. Fills the bar's free space, so it is also the spacer. -->
+            <ComposerActivity
+              :chat-id="chat.chat_id"
+              :agent-count="composerAgentCount"
+              :agents="runningSubagents"
+              :runs="chatRuns"
+              :finished="store.finishedBackgroundRuns[chat.chat_id] ?? null"
+              :now="nowTs"
+              @open-details="openRunDetails"
+            />
             <span v-if="inputText.trim()" class="composer-kbd" aria-hidden="true"><kbd>{{ sendChordLabel }}</kbd> send</span>
             <button
               v-if="showMoveToBackground"
@@ -1368,7 +1335,7 @@ import { askConfirm } from '../lib/confirm'
 import { recordSentPrompt } from '../lib/chatDrafts'
 import { useModalFocus } from '../composables/useModalFocus'
 import { useArchiveChat } from '../composables/useArchiveChat'
-import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, RunningSubagent, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
+import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, ModelsResponse, ChatMessage, SlashCommand, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
@@ -1390,8 +1357,8 @@ import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { interleaveCodeModeEvents, isChatCodeModeOn, isCodeModeMarker } from '../lib/codeMode'
-import { backgroundRunElapsed, backgroundRunLabel, backgroundRunOutcome } from '../lib/backgroundRuns'
 import BackgroundRunRows from './BackgroundRunRows.vue'
+import ComposerActivity from './ComposerActivity.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
 import {
   activityLines,
@@ -1438,7 +1405,7 @@ import { useTypeToComment } from '../composables/useTypeToComment'
 import { useChatComposer } from '../composables/useChatComposer'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
-import { subagentPath, shortAgentId } from '../lib/subagentIds'
+import { subagentLabel, subagentPath } from '../lib/subagentIds'
 import { handleAppLinkClick } from '../lib/appLinks'
 
 /** The footer facts for one turn: when it landed, how long it took, which
@@ -1917,13 +1884,6 @@ const dockStripVisible = computed(() =>
     || store.currentQueued.length > 0)),
 )
 
-// Whether the strip carries the "N agents running" pill. The links block below
-// is that pill's disclosure, so both read the same condition — otherwise an
-// archived chat with lingering rows renders links no pill ever announced.
-const dockAgentsPillShown = computed(
-  () => store.activeBackgroundAgents > 0 && !chat.value?.archived,
-)
-
 const dockDeferred = computed<DockItem[]>(() => {
   const items: DockItem[] = []
   const extraApprovals = pendingApprovals.value.length - 1
@@ -1937,19 +1897,8 @@ const dockDeferred = computed<DockItem[]>(() => {
     const n = store.currentQueued.length
     items.push({ key: 'queued', label: `${n} queued` })
   }
-  if (dockAgentsPillShown.value) {
-    const n = store.activeBackgroundAgents
-    items.push({ key: 'agents', label: `${n} agent${n === 1 ? '' : 's'} running` })
-  }
   return items
 })
-
-// Backs the "N agent(s) running" dock pill's expanded state: the pill itself
-// only shows a count (it lives inside the strip's toggle button, which can't
-// nest a link), so expanding it reveals these as a separate block of links.
-const dockRunningAgents = computed(() =>
-  chat.value ? store.runningSubagentsFor(chat.value.chat_id) : [],
-)
 
 onMounted(() => {
   taskStore.fetchSchedules().catch(() => {})
@@ -2057,31 +2006,10 @@ function compactContext() {
 
 const runningSubagents = computed(() => (chat.value ? store.runningSubagentsFor(chat.value.chat_id) : []))
 const chatRuns = computed(() => (chat.value?.archived ? [] : store.activeBackgroundRuns))
+// Same rule as the sidebar row (ChatSignals): the watcher's pushed count and
+// the running-subagent poll tick on different clocks, so take the larger.
+const composerAgentCount = computed(() => Math.max(store.activeBackgroundAgents, runningSubagents.value.length))
 
-const runStatus = computed(() => {
-  const current = chat.value
-  if (!current || current.archived) return null
-  // The turn's own live line outranks this one, for a live run and an outcome
-  // alike; and a run still going outranks how another one ended.
-  if (store.isStreaming) return null
-  const runs = chatRuns.value
-  const finished = store.finishedBackgroundRuns[current.chat_id]
-  if (!runs.length && finished) {
-    const outcome = backgroundRunOutcome(finished)
-    return { prefix: 'Background run: ', text: outcome.text, tone: outcome.tone, elapsed: '' }
-  }
-  if (!runs.length) return null
-  const more = runs.length > 1 ? ` and ${runs.length - 1} more` : ''
-  return {
-    prefix: 'Running in the background: ',
-    text: `${backgroundRunLabel(runs[0])}${more}`,
-    tone: 'live' as const,
-    elapsed: backgroundRunElapsed(runs[0], nowTs.value),
-  }
-})
-function subagentLabel(sub: RunningSubagent): string {
-  return (sub.description || '').trim() || shortAgentId(sub.agent_id)
-}
 
 // On a pane wide enough for the rail beside a full reading column, Chat
 // details is shown in place; narrower, the same panel opens over the chat as
@@ -2153,7 +2081,8 @@ function closeDetails() {
 function toggleWorkDetails() {
   showDetails()
 }
-// A finished run's notice can outlive the Running section it points at.
+// The composer bar's activity cluster opens Chat details at Running; a finished
+// run's notice can outlive the section it points at.
 function openRunDetails() {
   showDetails('running')
 }
@@ -6423,115 +6352,11 @@ details[open] > .activity-summary::before {
   background: none;
 }
 
-/* Background run status line: one quiet row in the dock strip's rhythm, the
-   sidebar's pulse at its start. A whole-row button because the whole line
-   means one thing (show me this run); no chevron, since nothing opens here. */
-.run-status-wrap { flex-shrink: 0; }
-
-.run-status {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  min-height: var(--touch);
-  padding: var(--space-2) 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--fg2);
-  font: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-}
-
-.run-status:hover { background: var(--bg2); color: var(--fg); }
-
-.run-status:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
-.run-status-dot {
-  width: 8px;
-  height: 8px;
-  margin-left: 2px;
-  border-radius: 50%;
-  background: var(--fg3);
-  flex-shrink: 0;
-}
-
-.run-status--live .run-status-dot {
-  background: var(--accent);
-  box-shadow: 0 0 4px var(--accent);
-  animation: run-status-pulse 1.1s ease-in-out infinite;
-}
-
-/* Same beat as the sidebar's run signal (ChatSignals.vue). */
-@keyframes run-status-pulse {
-  0%, 100% { transform: scale(0.55); opacity: 0.35; }
-  50% { transform: scale(1); opacity: 1; }
-}
-
-.run-status--ok .run-status-dot { background: var(--success); }
-.run-status--error .run-status-dot { background: var(--error); }
-.run-status--error { color: var(--error); }
-
-.run-status-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.run-status-elapsed {
-  flex-shrink: 0;
-  color: var(--fg3);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .run-status--live .run-status-dot { animation: none; }
-}
-
-/* Focus lands here from the composer's run line; the outline says where. */
+/* Focus lands here from the composer bar's activity cluster; the outline says where. */
 .chat-rail-running:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
   border-radius: var(--radius-xs);
-}
-
-.dock-agent-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  padding: 0 0 var(--space-2);
-  background: var(--bg);
-  border-top: 1px solid var(--border);
-}
-
-.dock-agent-link {
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--bg2);
-  color: var(--accent);
-  font-size: var(--text-xs);
-  text-decoration: none;
-  /* Dispatch descriptions are free text and routinely a full sentence; kept on
-     one line, an unbounded chip pushes the composer into horizontal scroll on
-     a phone. Clip instead. */
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.dock-agent-link:hover { text-decoration: underline; }
-.dock-agent-link--pending {
-  color: var(--fg3);
-  background: none;
 }
 
 .bg-agents-dot {
@@ -6710,8 +6535,6 @@ details[open] > .activity-summary::before {
 .composer-bar:focus { outline: none; }
 .composer-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.composer-spacer { flex: 1; }
-
 .composer-kbd {
   margin-right: 6px;
   flex: none;
@@ -6742,6 +6565,7 @@ details[open] > .activity-summary::before {
 }
 
 .composer-model {
+  flex-shrink: 0;
   min-width: 0;
   height: auto;
 }
@@ -6842,6 +6666,7 @@ details[open] > .activity-summary::before {
 }
 
 .image-btn {
+  flex-shrink: 0;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
