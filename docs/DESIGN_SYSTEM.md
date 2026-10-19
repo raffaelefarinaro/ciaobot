@@ -93,7 +93,6 @@ container. These currently violate it and should collapse into primitive
 variants:
 
 ```
-.critique-picker-header .btn-small     SettingsView.vue:5808
 .settings-card-header-actions .btn-small        :6084
 .asset-actions .btn-small                       :6200
 .workspace-actions .btn-small                   :6384, :6569
