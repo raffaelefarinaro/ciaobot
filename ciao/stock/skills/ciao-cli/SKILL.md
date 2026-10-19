@@ -31,6 +31,10 @@ Not for:
 - `schedule create|update --command` sets a shell command that later runs with no permission prompt. Outside bypass mode it returns `command_requires_operator`: create the schedule without it and ask the user to add the command in the schedule's Prompt card. Do not retry.
 - Structured input is the exception, not the rule: only `chat handover --messages @file.json` and `run start -- <cmd> [args...]` take it. Everywhere else, arguments are scalar flags or a constrained enum value. For `run start`, everything after `--` is the literal argv passed to the subprocess — no shell, so `run start -- bash -lc "a && b"` is how you get shell features, and you own that choice.
 
+### Reloading tools
+
+`/mcp`, `/reload-plugins` and the other Claude Code / opencode terminal slash commands do not exist in Ciaobot. When an MCP server, plugin or skill was added or changed, run `ciao chat reload`.
+
 ## Commands
 
 ### Memory
@@ -98,6 +102,7 @@ Top-level commands, outside the `<noun> <verb>` table: plain text output (a `--j
 | `chat continue --chat ID` | Continue an archived chat as a new active chat. | — |
 | `chat retry [--chat ID] [--action set\|stop\|try_now] [--prompt TEXT]` | Manage a deferred provider-limit retry. | Default action is `try_now`. |
 | `chat handover [--chat ID] [--provider P] [--model M] [--messages @file.json]` | Move a chat to a fresh provider session, optionally carrying visible history. | With both `--provider` and `--model` empty, it only clears the current session in place. |
+| `chat reload [--chat ID]` | Restart the provider so MCP servers, plugins and skills added or changed since the chat started are loaded. | Same session, nothing is lost. On the calling chat it runs when the turn ends and the conversation continues automatically: end your turn, never ask the user to reconnect. Refused with `chat_busy` while background agents or a question form hold the provider. Use it after `claude mcp add`/`opencode mcp add`, a redeployed MCP server whose new tools you cannot see, an installed plugin, or a new/edited skill. |
 | `chat archive [--chat ID]` | Archive a chat to the vault and trigger normal post-archive memory extraction. | — |
 | `chat delete [--chat ID]` | Delete a chat. | Destructive; deleting the calling chat itself is deferred until the turn finishes. |
 | `chat stop --chat ID` | Stop another chat's active provider turn. | Destructive; a chat cannot stop its own turn. |

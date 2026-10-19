@@ -22,7 +22,7 @@ from collections.abc import AsyncGenerator, Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from ciao.cli_envelopes import CODE_MODE_CONTINUE_PROMPT
+from ciao.cli_envelopes import CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT
 from ciao.config import CiaoConfig
 from ciao.models import (
     AgentRequest,
@@ -114,6 +114,8 @@ class ChatStreamingHost(Protocol):
     ) -> dict[str, Any] | None: ...
 
     def _get_provider(self, chat_id: str) -> ProviderService: ...
+
+    async def reload_provider(self, chat_id: str) -> bool: ...
 
     def _fallback_steers(
         self, chat_id: str, stream: ChatStream, reason: str
@@ -1005,6 +1007,8 @@ class ChatStreaming:
                 # after_turn_index stays aligned.
                 continue_code_mode = stream.code_mode_continue
                 stream.code_mode_continue = False
+                reload_requested = stream.reload_continue
+                stream.reload_continue = False
                 chat_cm = self._host._chats.get(chat_id)
                 if (
                     continue_code_mode
@@ -1024,6 +1028,28 @@ class ChatStreaming:
                     stream.move_in_flight = 0
                     stream.move_succeeded = False
                     continue
+                # `ciao chat reload`: drop the provider so the next turn respawns
+                # it and resumes the same session with the changed MCP servers,
+                # plugins and skills. Consumed whatever happens; a queued user
+                # message runs on the fresh provider instead of a hidden turn.
+                # (A code-mode switch above already respawned it.)
+                if reload_requested and not park_rest:
+                    reloaded = await self._host.reload_provider(chat_id)
+                    if not reloaded:
+                        logger.info(
+                            "Provider reload skipped for chat %s: still in use", chat_id
+                        )
+                    elif next_pending is None and not had_error:
+                        current_prompt = RELOAD_CONTINUE_PROMPT
+                        current_images = None
+                        current_turn_index = None
+                        compact = False
+                        hidden_turn = True
+                        stream.moved_to_background = False
+                        stream.move_epoch += 1
+                        stream.move_in_flight = 0
+                        stream.move_succeeded = False
+                        continue
                 if next_pending is None or had_error or park_rest:
                     stream.accepting_queue = False
                     late = stream.drain_pending()

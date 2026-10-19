@@ -3546,7 +3546,7 @@ class ProjectChatManager:
             if turn["user"] is not None:
                 user_content = turn["user"]
                 user_content = re.sub(r'(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*', '', user_content)
-                if user_content.strip() and not cli_envelopes.is_code_mode_continuation(user_content):
+                if user_content.strip() and not cli_envelopes.is_hidden_continuation(user_content):
                     turns_data.append({
                         "role": "user",
                         "content": user_content,
@@ -4378,6 +4378,41 @@ class ProjectChatManager:
             provider = self._pop_provider(chat_id)
             asyncio.ensure_future(self._disconnect_provider(chat_id, provider))
         return evicted
+
+    def provider_reload_blocked(self, chat_id: str) -> bool:
+        """Whether background work or a question form still holds the chat's provider.
+
+        Mirrors ``_provider_is_busy`` minus the live-stream check: the caller
+        of a reload may be the live foreground stream itself.
+        """
+        if chat_id in self.background_agent_counts:
+            return True
+        if chat_id in self._subagents.watching_chat_ids():
+            return True
+        if self._provider_background_busy(chat_id, self._providers.get(chat_id)):
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is not None and self._native_question_request_id(chat.pending_question):
+            return True
+        for tasks in (self._retry_tasks, self._background_wake_tasks):
+            task = tasks.get(chat_id)
+            if task is not None and not task.done():
+                return True
+        return False
+
+    async def reload_provider(self, chat_id: str) -> bool:
+        """Drop the chat's provider so changed MCP servers, plugins and skills load.
+
+        The chat row and ``session_id`` are untouched, so the next turn builds a
+        fresh provider and resumes the same session. False when background work
+        or a question form still holds the provider; True once it is gone (or
+        none was cached).
+        """
+        if self.provider_reload_blocked(chat_id):
+            return False
+        provider = self._pop_provider(chat_id)
+        self._cancel_between_turns_drain(chat_id)
+        return await self._disconnect_provider(chat_id, provider)
 
     # ── Idle provider reaping ────────────────────────────────────────────
 
@@ -5903,6 +5938,18 @@ class ProjectChatManager:
         stream.code_mode_continue = True
         return True
 
+    def arm_reload_continuation(self, chat_id: str) -> bool:
+        """Ask the running foreground turn to reload the provider when it ends.
+
+        False when there is no foreground turn to continue, like
+        ``arm_code_mode_continuation``.
+        """
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.background or not stream.accepting_queue:
+            return False
+        stream.reload_continue = True
+        return True
+
     async def set_queue_delivery(
         self, chat_id: str, entry_ids: list[str], delivery: str
     ) -> bool:
@@ -6133,7 +6180,7 @@ class ProjectChatManager:
             stream.publish({"type": "prompt_cancelled", "turn_index": turn_index})
         # The capsule rode on the prompt that never ran; the resend carries it.
         chat.context_digest = ""
-        if cli_envelopes.is_code_mode_continuation(prompt):
+        if cli_envelopes.is_hidden_continuation(prompt):
             # Our hidden continuation is not something the user typed: never
             # show it as a waiting message.
             self._save()

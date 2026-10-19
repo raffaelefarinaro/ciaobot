@@ -554,6 +554,7 @@ per chat (reclaimed by the idle sweep in
 `ProjectChatManager.reap_idle_providers`). External MCP configuration and
 credentials remain provider-owned; Ciaobot reads native configs and live
 provider status for Settings without editing files or starting MCP servers.
+`ciao chat reload` (`ProjectChatManager.reload_provider`) drops a chat's provider the same way the idle sweep does, so the next turn respawns it and resumes the same session with changed MCP servers, plugins and skills; on the calling chat the drive loop does it when the turn ends and runs one hidden `RELOAD_CONTINUE_PROMPT` turn, and it is refused (`chat_busy`) while background agents or a question form hold the provider.
 Claude workspace allowlists continue to constrain reachability. Self-disconnecting operations
 defer until their caller chat drains. The native file tools are denied `.env`,
 `.runtime/` (by name, plus the resolved `CIAO_RUNTIME_ROOT` path) and

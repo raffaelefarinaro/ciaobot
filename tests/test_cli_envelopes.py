@@ -414,11 +414,14 @@ def test_prose_quoting_a_notification_advances_both_turn_counters(
     assert subagent_tracking._is_countable_user_turn(f"why did this fail?\n{ONE}")
 
 
-def test_code_mode_continuation_is_recognised_with_and_without_the_capsule():
-    prompt = cli_envelopes.CODE_MODE_CONTINUE_PROMPT
+def test_hidden_continuations_are_recognised_with_and_without_the_capsule():
     capsule = "[CIAO_CONTEXT_BEGIN]\nx\n[CIAO_CONTEXT_END]\n\n"
-    assert cli_envelopes.is_code_mode_continuation(prompt)
-    assert cli_envelopes.is_code_mode_continuation(capsule + prompt)
-    assert not cli_envelopes.is_code_mode_continuation("please " + prompt)
-    assert not cli_envelopes.is_code_mode_continuation("ordinary text")
-    assert not subagent_tracking._is_countable_user_turn(capsule + prompt)
+    for prompt in (
+        cli_envelopes.CODE_MODE_CONTINUE_PROMPT,
+        cli_envelopes.RELOAD_CONTINUE_PROMPT,
+    ):
+        assert cli_envelopes.is_hidden_continuation(prompt)
+        assert cli_envelopes.is_hidden_continuation(capsule + prompt)
+        assert not cli_envelopes.is_hidden_continuation("please " + prompt)
+        assert not subagent_tracking._is_countable_user_turn(capsule + prompt)
+    assert not cli_envelopes.is_hidden_continuation("ordinary text")

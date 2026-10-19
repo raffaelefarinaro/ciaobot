@@ -666,6 +666,7 @@ class ChatStream:
         # image-capability pre-flight, resolved via `resolve_capability`.
         "pending_capability",
         "code_mode_continue",
+        "reload_continue",
     )
 
     def __init__(self, prompt_text: str = "", *, background: bool = False) -> None:
@@ -725,6 +726,7 @@ class ChatStream:
         # Set by `arm_code_mode_continuation` when the agent switched this chat
         # into code mode mid-turn; the drive loop consumes it once at turn end.
         self.code_mode_continue: bool = False
+        self.reload_continue: bool = False
 
     def enqueue(
         self,
