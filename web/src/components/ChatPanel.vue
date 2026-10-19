@@ -279,9 +279,17 @@
                 <span class="error-attribution-label">{{ classifyError(item.msg.content).label }}</span>
                 <span>{{ classifyError(item.msg.content).copy }}</span>
               </div>
+            </div>
+            <!-- The reply's own footer: Outputs, Copy, Fork, and the turn's
+                 facts. The row always takes its height; Copy, Fork and the
+                 facts fade in on hover or focus (always shown on touch), so
+                 revealing them never reflows the transcript. -->
+            <div v-if="item.msg.content?.trim() || item.meta || item.outputs?.length" class="message-actions">
               <!-- Outputs: collapsed by default, same disclosure shape as the
-                   Activity summary above (native button, chevron, aria-expanded). -->
-              <div v-if="item.outputs?.length" class="answer-outputs">
+                   Activity summary (native button, chevron, aria-expanded).
+                   It leads the footer row, always visible, and its list
+                   opens on a line of its own under the whole row. -->
+              <div v-if="item.outputs?.length" class="answer-outputs answer-outputs--footer">
                 <button
                   type="button"
                   class="outputs-summary"
@@ -309,12 +317,6 @@
                   </li>
                 </ul>
               </div>
-            </div>
-            <!-- The reply's own footer: Copy, Fork, and the turn's facts. The
-                 row always takes its height and only fades in on hover or
-                 focus (always shown on touch), so revealing it never reflows
-                 the transcript. -->
-            <div v-if="item.msg.content?.trim() || item.meta" class="message-actions">
               <template v-if="item.msg.content?.trim()">
               <button
                 type="button"
@@ -5549,24 +5551,33 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 /* A message's actions and the turn's facts. The row is always laid out, so it
    holds its height whether or not it shows: revealing it on hover never moves
-   the transcript. It fades in while the pointer is over the message or focus
-   is inside it (Tab reaches the buttons, which is what shows them), and on a
-   device with no hover it simply stays visible. */
+   the transcript. Its buttons and facts fade in while the pointer is over the
+   message or focus is inside it (Tab reaches the buttons, which is what shows
+   them), and on a device with no hover they simply stay visible. A reply's
+   Outputs disclosure leads the row and never fades: it is content, not an
+   action. */
 .message-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px 10px;
   margin-top: 6px;
+}
+.message-wrap .message-actions > :is(.message-action-btn, .message-meta) {
   opacity: 0;
   transition: opacity 0.15s;
 }
-.message-wrap:hover .message-actions,
-.message-wrap:focus-within .message-actions {
+.message-wrap:hover .message-actions > :is(.message-action-btn, .message-meta),
+.message-wrap:focus-within .message-actions > :is(.message-action-btn, .message-meta) {
   opacity: 1;
 }
+.message-wrap:hover .message-actions > .message-action-btn:disabled,
+.message-wrap:focus-within .message-actions > .message-action-btn:disabled {
+  opacity: 0.6;
+}
 @media (hover: none) {
-  .message-actions { opacity: 1; }
+  .message-wrap .message-actions > :is(.message-action-btn, .message-meta) { opacity: 1; }
+  .message-wrap .message-actions > .message-action-btn:disabled { opacity: 0.6; }
 }
 
 /* A reply's buttons share the prose's left edge: the quiet button's own
@@ -5609,7 +5620,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 .message-action-btn:disabled {
   cursor: default;
-  opacity: 0.6;
 }
 
 /* Touch: the row keeps its 28px visual but each button grows a 44px hit

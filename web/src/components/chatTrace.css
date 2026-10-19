@@ -117,15 +117,18 @@
   }
 }
 
-/* The step timeline: a hairline rule on the left, one glyph per step. */
+/* The step timeline: a hairline rule on the left, one glyph per step. The
+   rule is a background inside the padding, not a border, so each glyph sits
+   inside the box: a live trace scrolls, and a scroll box clips anything past
+   its padding edge, which used to cut the glyphs' left half off. */
 .trace-body {
   display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  margin: 4px 0 4px 6px;
-  padding: 0 0 0 16px;
-  border-left: 1px solid var(--border);
+  margin: 4px 0 4px -5px;
+  padding: 0 0 0 28px;
+  background: linear-gradient(var(--border), var(--border)) 11px 0 / 1px 100% no-repeat;
 }
 
 .trace-block.live .trace-body {
@@ -278,6 +281,24 @@
 .answer-outputs--trace {
   margin: 4px 0 0;
   border-top: 0;
+}
+/* Under an answer the disclosure joins the reply's footer row: its button
+   sits first, on the Copy/Fork line, and its list wraps onto a line of its
+   own under the whole row. */
+.answer-outputs--footer { display: contents; }
+.answer-outputs--footer .outputs-summary {
+  order: -1;
+  width: auto;
+  min-height: 28px;
+  padding: 0 8px;
+}
+@media (pointer: coarse) {
+  .answer-outputs--footer .outputs-summary { min-height: var(--touch); }
+}
+.answer-outputs--footer .outputs-list {
+  order: 1;
+  flex-basis: 100%;
+  margin-left: 8px;
 }
 .outputs-summary {
   display: flex;
