@@ -22,7 +22,6 @@ async def mcp_status_endpoint(request: Request) -> JSONResponse:
     workspace = requested or config.primary_workspace()
     if config.workspace(workspace) is None:
         return JSONResponse({"error": "unknown workspace"}, status_code=404)
-    workspace_config = config.workspace(workspace)
     agent_root = config.agent_root(workspace)
     manager = getattr(request.app.state, "project_chat_manager", None)
     denied = {
@@ -33,7 +32,6 @@ async def mcp_status_endpoint(request: Request) -> JSONResponse:
     payload = await provider_inventory(
         workspace=workspace,
         agent_root=Path(agent_root),
-        allowed_mcp_servers=set(workspace_config.allowed_mcp_servers or []),
         explicitly_denied=denied,
         manager=manager,
         claude_available=get_bundled_claude_path() is not None,

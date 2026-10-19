@@ -198,7 +198,6 @@ def _registry_entry(config: Any, workspace: WorkspaceConfig) -> dict[str, Any]:
         "vault_root": workspace.vault_root,
         "default_provider": config.default_provider_for_workspace(workspace.name),
         "disallowed_tools": workspace.disallowed_tools,
-        "allowed_mcp_servers": workspace.allowed_mcp_servers,
         "claude_ai_connectors": workspace.claude_ai_connectors,
         "gws_profile": workspace.gws_profile,
         "color": workspace.color,
@@ -466,7 +465,6 @@ def _workspace_entry(metadata: dict[str, Any]) -> dict[str, Any]:
 # rest of it trustworthy. Validation plus a confirmation that shows what will
 # be applied covers both cases.
 
-_MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}$")
 _GWS_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:*()/@-][A-Za-z0-9_.:*()/@ -]{0,199}$")
 
@@ -489,10 +487,9 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
 
     Same rules as ``workspaces.workspace_from_request``. A value that fails
     them falls back to what grants the least, not to the stored value: an
-    unreadable MCP allowlist becomes ``[]`` (reach no server) and an
     unreadable tool deny-list becomes ``None`` (the per-workspace default
     denies). A readable value is kept as it is, which is why the restore
-    confirmation shows the allowlist and deny-list before anything happens.
+    confirmation shows the deny-list before anything happens.
     """
     from ciao import provider_registry  # noqa: PLC0415
     from ciao.config import DEFAULT_WORKSPACE_COLOR, coerce_workspace_color  # noqa: PLC0415
@@ -503,13 +500,6 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
         provider = "claude"
     raw_denied = entry.get("disallowed_tools")
     disallowed = None if raw_denied is None else _string_list(raw_denied, _TOOL_NAME_RE)
-    raw_allowed = entry.get("allowed_mcp_servers")
-    if raw_allowed is None:
-        allowed: list[str] | None = None
-    else:
-        allowed = _string_list(raw_allowed, _MCP_SERVER_NAME_RE)
-        if allowed is None:
-            allowed = []
     # An archive written before the switch existed has no key and restores to
     # the default (on); a stored value that is not a boolean restores off.
     connectors = entry.get("claude_ai_connectors", True)
@@ -527,7 +517,6 @@ def restored_settings(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     return {
         "default_provider": provider,
         "disallowed_tools": disallowed,
-        "allowed_mcp_servers": allowed,
         "claude_ai_connectors": connectors,
         "gws_profile": profile,
         "color": color,
@@ -751,7 +740,6 @@ def list_archives(config: Any) -> list[dict[str, Any]]:
             "default_provider": settings["default_provider"],
             "gws_profile": settings["gws_profile"],
             "disallowed_tools": settings["disallowed_tools"],
-            "allowed_mcp_servers": settings["allowed_mcp_servers"],
             "schedules": len(schedules),
             "schedules_dropped": dropped,
             "restorable": not blocker,
@@ -817,7 +805,6 @@ def register_restored(
         vault_root=vault_root,
         default_provider=settings["default_provider"],
         disallowed_tools=settings["disallowed_tools"],
-        allowed_mcp_servers=settings["allowed_mcp_servers"],
         claude_ai_connectors=settings["claude_ai_connectors"],
         gws_profile=settings["gws_profile"],
         color=settings["color"],

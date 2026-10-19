@@ -1518,8 +1518,7 @@ def _pass_chat(manager: ProjectChatManager) -> ChatInfo:
 
 def test_memory_pass_chat_denies_mcp_and_gws_tools(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
-    # A declared server reaches every workspace whose allowlist does not name
-    # it, so an ordinary chat already denies it; the pass must deny the rest.
+    # A declared server reaches an ordinary chat; the pass must deny it.
     (tmp_path / ".mcp.json").write_text(
         json.dumps({"mcpServers": {"n8n": {"command": "n8n"}}}), encoding="utf-8"
     )
@@ -1536,10 +1535,9 @@ def test_memory_pass_chat_denies_mcp_and_gws_tools(tmp_path: Path) -> None:
     gws = [tool for tool in denied if tool.startswith("Skill(gws-")]
     assert "Skill(gws-gmail)" in gws
 
-    # An ordinary chat is unchanged: no gws deny, and the declared server is
-    # denied for the reachability reason it always was.
+    # An ordinary chat keeps both: no gws deny, and the declared server loads.
     assert not [tool for tool in base if tool.startswith("Skill(gws-")]
-    assert "mcp__n8n" in base
+    assert "mcp__n8n" not in base
 
 
 def test_build_agent_request_marks_only_the_memory_pass(tmp_path: Path) -> None:

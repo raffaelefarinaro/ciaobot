@@ -89,7 +89,6 @@ export interface ArchivedWorkspace {
   // What a restore applies, after server-side validation. `null` means unset:
   // no MCP server is reachable, and the default tool deny-list applies.
   disallowed_tools?: string[] | null
-  allowed_mcp_servers?: string[] | null
   // Valid automations, all restored paused, and how many were rejected.
   schedules: number
   schedules_dropped?: number

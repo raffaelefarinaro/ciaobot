@@ -118,8 +118,8 @@ live status from already running chats in the selected workspace; it does not
 write configuration or credentials, probe a server, or start a provider/MCP
 process. Add and authenticate servers through the provider CLI from the
 workspace directory (`claude mcp add` / `claude mcp login`, or OpenCode V2's
-`opencode mcp add` / `opencode mcp auth`). Claude's workspace allowlist remains
-authoritative and is never expanded by Settings.
+`opencode mcp add` / `opencode mcp auth`). Every server declared for the
+workspace loads; `mcp__<name>` in its `disallowed_tools` blocks one.
 
 Static configuration in an unrelated terminal is intentionally unsupported: the
 token is a live chat capability, not an operator credential. Use Ciaobot's
