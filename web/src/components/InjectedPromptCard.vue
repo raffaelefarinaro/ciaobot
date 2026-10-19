@@ -162,7 +162,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
           type="button"
           class="injected-card-raw-toggle"
           :aria-expanded="rawOpen ? 'true' : 'false'"
-:aria-controls="rawId"
+          :aria-controls="rawId"
           @click="rawOpen = !rawOpen"
         >{{ rawOpen ? 'Hide full prompt' : 'Show full prompt' }}</button>
         <pre v-if="rawOpen" :id="rawId" class="injected-card-raw" tabindex="0">{{ raw }}</pre>
