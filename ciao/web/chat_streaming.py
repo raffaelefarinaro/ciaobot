@@ -1004,8 +1004,7 @@ class ChatStreaming:
                 # roots. Consumed here whatever happens: never after a stop or an
                 # error, and a queued user message supersedes it (that turn
                 # already runs in code mode). No user-turn slot and no user_echo:
-                # the renderers skip this prompt too, so code_mode_events'
-                # after_turn_index stays aligned.
+                # the renderers skip this prompt too.
                 continue_code_mode = stream.code_mode_continue
                 stream.code_mode_continue = False
                 reload_requested = stream.reload_continue
