@@ -3242,6 +3242,83 @@ def test_login_status_without_inventory_starts_no_server(monkeypatch):
     assert "skills" not in status
 
 
+def test_system_skills_lists_every_skill_row(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    skills = [
+        {"name": "loop-engineering", "path": "/Users/x/.claude/skills/loop-engineering/SKILL.md"},
+        {"name": "opencode", "path": "/builtin/opencode"},
+    ]
+    monkeypatch.setattr(
+        mod,
+        "_fetch_inventory_rows",
+        lambda binary, **_k: (skills, [{"id": "review"}], [{"name": "github"}]),
+    )
+
+    assert mod.opencode_system_skills() == ["loop-engineering", "opencode"]
+
+
+def test_system_skills_cached_within_ttl(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    calls = []
+
+    def fetch(binary, **_k):
+        calls.append(binary)
+        return ([{"name": "pdf"}], [], [])
+
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", fetch)
+    start = 1000.0
+    monkeypatch.setattr(mod.time, "monotonic", lambda: start)
+
+    assert mod.opencode_system_skills() == ["pdf"]
+    assert mod.opencode_system_skills() == ["pdf"]
+    assert len(calls) == 1
+
+    monkeypatch.setattr(mod.time, "monotonic", lambda: start + 301)
+    assert mod.opencode_system_skills() == ["pdf"]
+    assert len(calls) == 2
+
+
+def test_system_skills_empty_without_binary_or_server(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    calls = []
+
+    def fetch(binary, **_k):
+        calls.append(binary)
+        return (None, None, None)
+
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", fetch)
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: None)
+    assert mod.opencode_system_skills() == []
+    assert calls == []
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    assert mod.opencode_system_skills() == []
+    assert mod.opencode_system_skills() == []
+    assert len(calls) == 1
+
+
+def test_system_skills_binary_error_is_empty(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    def broken(_env=None):
+        raise OSError("broken")
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", broken)
+
+    assert mod.opencode_system_skills() == []
+
+
 def test_credential_count_is_unknown_when_the_cli_fails(monkeypatch):
     import ciao.providers.opencode as mod
 
