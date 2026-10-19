@@ -206,6 +206,22 @@ describe('ChatPanel Outputs section', () => {
     expect(wrapper.find('.outputs-list').exists()).toBe(false)
   })
 
+  it('leads the reply footer, on the Copy and Fork row', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = turnWithOutputs()
+    await flushPromises()
+
+    const row = wrapper.get('.message-wrap.assistant .message-row > .message-actions')
+    const summary = row.get('.answer-outputs--footer .outputs-summary')
+    expect(summary.text()).toContain('Outputs')
+    expect(row.text()).toContain('Copy')
+    expect(row.text()).toContain('Fork')
+    // Not inside the answer bubble any more.
+    expect(wrapper.find('.message .answer-outputs').exists()).toBe(false)
+    await summary.trigger('click')
+    expect(row.find('.outputs-list').exists()).toBe(true)
+  })
+
   it('expands into one bullet row per file with an action tag', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = turnWithOutputs()
