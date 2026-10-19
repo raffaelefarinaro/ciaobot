@@ -23,6 +23,7 @@ const opening = ref(false)
 const openError = ref('')
 const switchId = useId()
 const hintId = useId()
+const lockedHintId = useId()
 const chip = computed(() => repoChip(props.repo, props.location)!)
 const differs = computed(() => chatLocationDiffers(props.repo, props.location))
 
@@ -80,7 +81,7 @@ watch(() => props.chatId, () => { error.value = ''; openError.value = '' })
           :aria-labelledby="switchId"
           :aria-busy="pending"
           :aria-disabled="pending || codeModeLocked"
-          :aria-describedby="hintId"
+          :aria-describedby="codeModeLocked ? `${hintId} ${lockedHintId}` : hintId"
           @click="toggleCodeMode"
         >
           <span class="switch-word">{{ codeMode ? 'On' : 'Off' }}</span>
@@ -88,7 +89,7 @@ watch(() => props.chatId, () => { error.value = ''; openError.value = '' })
         </button>
       </div>
       <p :id="hintId" class="repo-code-hint">Loads the repository's instructions, skills and write access in this chat.</p>
-      <p v-if="codeModeLocked" class="repo-code-hint repo-code-locked">Code mode stays on for the rest of this chat.</p>
+      <p v-if="codeModeLocked" :id="lockedHintId" class="repo-code-hint repo-code-locked">Code mode stays on for the rest of this chat.</p>
     </template>
     <p v-if="error" class="repo-code-error" role="alert">{{ error }}</p>
     <button

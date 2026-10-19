@@ -183,6 +183,9 @@ describe('ChatPanel code mode rows', () => {
     expect(sw.attributes('aria-disabled')).toBe('true')
     expect(sw.attributes('aria-checked')).toBe('true')
     expect(section.text()).toContain('Code mode stays on for the rest of this chat.')
+    // The reason is announced with the switch, not only shown under it.
+    const lockedHint = section.get('.repo-code-locked')
+    expect(sw.attributes('aria-describedby')?.split(' ')).toContain(lockedHint.attributes('id'))
   })
 })
 
