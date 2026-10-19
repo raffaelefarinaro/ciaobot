@@ -217,7 +217,7 @@ describe('summarizeInjectedPrompt', () => {
   it('summarises one run', () => {
     const p: InjectedPrompt = { kind: 'background_run', count: 1, runs: [run('failed', 3)] }
     expect(summarizeInjectedPrompt(p)).toEqual({
-      label: 'Background run finished', facts: 'job · failed · exit 3', tone: 'failed',
+      label: 'Background run finished', facts: 'job · exit 3', tone: 'failed',
     })
   })
 

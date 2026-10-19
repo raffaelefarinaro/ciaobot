@@ -31,6 +31,7 @@ const rawOpen = ref(false)
 const detailOpen = ref(false)
 const bodyId = useId()
 const detailId = useId()
+const rawId = useId()
 
 const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   background_run: 'activity',
@@ -63,7 +64,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
         <span class="injected-card-kind">{{ summary.label }}</span>
         <span v-if="summary.facts" class="injected-card-facts">· {{ summary.facts }}</span>
         <span v-if="summary.tone" class="injected-pill" :class="`injected-pill--${summary.tone}`">{{ summary.tone }}</span>
-        <span class="injected-card-chevron" :class="{ open }" aria-hidden="true">▸</span>
+        <svg class="injected-card-chevron" :class="{ open }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
       </button>
       <router-link
         v-if="prompt.kind === 'schedule' && schedule?.id"
@@ -161,9 +162,10 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
           type="button"
           class="injected-card-raw-toggle"
           :aria-expanded="rawOpen ? 'true' : 'false'"
+:aria-controls="rawId"
           @click="rawOpen = !rawOpen"
         >{{ rawOpen ? 'Hide full prompt' : 'Show full prompt' }}</button>
-        <pre v-if="rawOpen" class="injected-card-raw" tabindex="0">{{ raw }}</pre>
+        <pre v-if="rawOpen" :id="rawId" class="injected-card-raw" tabindex="0">{{ raw }}</pre>
       </template>
     </div>
   </section>
@@ -223,7 +225,9 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.injected-card-toggle > svg { flex: none; }
 .injected-card-chevron {
+  flex: none;
   margin-left: auto;
   color: var(--fg3);
   transition: transform 0.12s ease;

@@ -184,7 +184,7 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       const runs = prompt.runs
       let facts = ''
       if (runs.length === 1) {
-        facts = `${runs[0].label} · ${runs[0].verdict}`
+        facts = runs[0].label
         if (runs[0].exitCode !== null) facts += ` · exit ${runs[0].exitCode}`
       } else if (runs.length > 1) {
         facts = TONE_ORDER

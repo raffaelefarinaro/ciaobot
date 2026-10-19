@@ -51,6 +51,9 @@ describe('InjectedPromptCard', () => {
     expect(wrapper.find('pre.injected-card-raw').exists()).toBe(false)
     await wrapper.get('.injected-card-raw-toggle').trigger('click')
     expect(wrapper.get('pre.injected-card-raw').text()).toBe('=== raw')
+    const rawId = wrapper.get('pre.injected-card-raw').attributes('id')
+    expect(rawId).toBeTruthy()
+    expect(wrapper.get('.injected-card-raw-toggle').attributes('aria-controls')).toBe(rawId)
   })
 
   it('links an automation turn and keeps command output collapsed', async () => {
