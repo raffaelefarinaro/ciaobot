@@ -43,6 +43,7 @@ describe('scheduleNeedsAttention', () => {
     expect(scheduleNeedsAttention({ ...base, last_status: 'error' })).toBe(true)
     expect(scheduleNeedsAttention({ ...base, enabled: false, last_status: 'error' })).toBe(false)
     expect(scheduleNeedsAttention({ ...base, last_status: 'skipped' })).toBe(false)
+    expect(scheduleNeedsAttention({ ...base, last_status: 'retrying' })).toBe(false)
     expect(scheduleNeedsAttention(base)).toBe(false)
   })
 })
