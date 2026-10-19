@@ -170,7 +170,7 @@ def _drain_provider(
     return provider
 
 
-def _script(monkeypatch, provider, *, shells, tree, active=()):
+def _script(monkeypatch, provider, *, shells, active=((),)):
     """Scripted reads: each list is consumed in order, the last value repeats."""
     def stepper(values):
         remaining = list(values)
@@ -181,11 +181,9 @@ def _script(monkeypatch, provider, *, shells, tree, active=()):
         return _next
 
     shell_read = stepper(shells)
-    tree_read = stepper(tree)
-    active_read = stepper([set(active)])
+    active_read = stepper([set(ids) for ids in active])
     monkeypatch.setattr(opencode_module, "_read_running_shells", shell_read)
     monkeypatch.setattr(opencode_module, "_read_active_sessions", active_read)
-    monkeypatch.setattr(provider, "read_live_collab_tree", tree_read)
 
 
 async def _drain(provider: OpencodeProvider) -> list:
@@ -426,13 +424,41 @@ async def test_turn_end_drops_a_finished_background_child(tmp_path, monkeypatch)
     _attach_live(provider, client, SHELL_SESSION)
     provider._background_children = {"ses_gone"}
 
-    async def no_children():
-        return []
-
-    monkeypatch.setattr(provider, "read_live_collab_tree", no_children)
     await _run_turn(provider, monkeypatch, client, SHELL_SESSION, "ours")
 
     assert provider._background_children == set()
+
+
+@pytest.mark.asyncio
+async def test_turn_end_tracks_a_child_resumed_by_id(tmp_path, monkeypatch):
+    """A `subagent` call with an existing sessionID emits no `session.created`."""
+    provider = OpencodeProvider(tmp_path)
+    client = _TurnClient(_PLAIN_TURN, running={"ses_resumed"}, shells=[])
+    _attach_live(provider, client, SHELL_SESSION)
+
+    await _run_turn(provider, monkeypatch, client, SHELL_SESSION, "ours")
+
+    assert provider._background_children == {"ses_resumed"}
+    assert provider.background_work_outstanding
+
+
+@pytest.mark.asyncio
+async def test_turn_end_keeps_children_when_the_active_read_fails(tmp_path, monkeypatch):
+    provider = OpencodeProvider(tmp_path)
+    _attach_live(provider, SimpleNamespace(), SHELL_SESSION)
+    provider._background_children = {"ses_running"}
+
+    async def no_shells(_client, _session):
+        return set()
+
+    async def broken_active(_client):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(opencode_module, "_read_running_shells", no_shells)
+    monkeypatch.setattr(opencode_module, "_read_active_sessions", broken_active)
+    await provider._reconcile_background()
+
+    assert provider._background_children == {"ses_running"}
 
 
 # ── server restart warning ───────────────────────────────────────────────
@@ -494,7 +520,7 @@ async def test_drain_streams_a_background_shell_wake(tmp_path, monkeypatch):
     _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
     provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
     provider._background_shells = {"sh_bgshell"}
-    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()], tree=[[]])
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
 
     events = await _drain(provider)
 
@@ -515,7 +541,7 @@ async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
     _script(
         monkeypatch, provider,
         shells=[set()],
-        tree=[[{"active": True}], [{"active": False}]],
+        active=[{"ses_bgsub_child"}, ()],
     )
 
     events = await _drain(provider)
@@ -527,11 +553,36 @@ async def test_drain_streams_a_background_subagent_wake(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_drain_counts_children_from_the_active_map(tmp_path, monkeypatch):
+    """A failed child listing reads as an empty tree; it must not end the drain.
+
+    The idle reaper reads the set once the drain ends, so emptying it while the
+    server still runs the child let the reaper stop that server mid-review.
+    """
+    provider = _drain_provider(
+        tmp_path, monkeypatch, SUB_SESSION, [_event("server.connected")]
+    )
+    monkeypatch.setattr(opencode_module, "_OPENCODE_DRAIN_MAX_S", 0.2)
+    _script(monkeypatch, provider, shells=[set()], active=[{"ses_bgsub_child"}])
+
+    async def empty_tree():
+        return []
+
+    monkeypatch.setattr(provider, "read_live_collab_tree", empty_tree)
+    started = asyncio.get_running_loop().time()
+
+    assert await _drain(provider) == []
+    assert asyncio.get_running_loop().time() - started >= 0.15
+    assert provider._background_children == {"ses_bgsub_child"}
+    assert provider.background_work_outstanding
+
+
+@pytest.mark.asyncio
 async def test_drain_returns_when_nothing_is_outstanding(tmp_path, monkeypatch):
     provider = _drain_provider(
         tmp_path, monkeypatch, SHELL_SESSION, [_event("server.connected")]
     )
-    _script(monkeypatch, provider, shells=[set()], tree=[[]])
+    _script(monkeypatch, provider, shells=[set()])
 
     assert await _drain(provider) == []
 
@@ -540,7 +591,7 @@ async def test_drain_returns_when_nothing_is_outstanding(tmp_path, monkeypatch):
 async def test_drain_stops_at_the_horizon(tmp_path, monkeypatch):
     provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, [])
     monkeypatch.setattr(opencode_module, "_OPENCODE_DRAIN_MAX_S", 0.05)
-    _script(monkeypatch, provider, shells=[{"sh"}], tree=[[]])
+    _script(monkeypatch, provider, shells=[{"sh"}])
 
     assert await _drain(provider) == []
 
@@ -549,7 +600,7 @@ async def test_drain_stops_at_the_horizon(tmp_path, monkeypatch):
 async def test_drain_gives_up_on_a_lost_terminal_frame(tmp_path, monkeypatch):
     rest = [_event("session.execution.started", sessionID=SHELL_SESSION)]
     provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
-    _script(monkeypatch, provider, shells=[set()], tree=[[]], active=())
+    _script(monkeypatch, provider, shells=[set()])
 
     assert await _drain(provider) == []
 
@@ -558,7 +609,7 @@ async def test_drain_gives_up_on_a_lost_terminal_frame(tmp_path, monkeypatch):
 async def test_drain_does_not_treat_a_failed_active_read_as_stale(tmp_path, monkeypatch):
     rest = [_event("session.execution.started", sessionID=SHELL_SESSION)]
     provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
-    _script(monkeypatch, provider, shells=[set()], tree=[[]])
+    _script(monkeypatch, provider, shells=[set()])
 
     async def broken_active(_client):
         raise httpx.ConnectError("down")
@@ -582,7 +633,7 @@ async def test_drain_reports_a_failed_wake(tmp_path, monkeypatch):
         ),
     ]
     provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
-    _script(monkeypatch, provider, shells=[set()], tree=[[]])
+    _script(monkeypatch, provider, shells=[set()])
 
     events = await _drain(provider)
 

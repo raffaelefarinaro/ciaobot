@@ -263,7 +263,7 @@ async def test_drain_between_turns_streams_an_opencode_wake(tmp_path, monkeypatc
     _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
     provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
     provider._background_shells = {"sh_bgshell"}
-    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()], tree=[[]])
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
     pcm._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
         provider=provider,
         can_drain=True,
@@ -460,7 +460,7 @@ async def test_opencode_interim_turn_then_wake_announces_once(tmp_path, monkeypa
     _, rest = _split(_fixture_lines("background_shell_wake.jsonl"), SHELL_SESSION)
     provider = _drain_provider(tmp_path, monkeypatch, SHELL_SESSION, rest)
     provider._background_shells = {"sh_bgshell"}
-    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()], tree=[[]])
+    _script(monkeypatch, provider, shells=[{"sh_bgshell"}, set()])
     pcm._providers[chat.chat_id] = SimpleNamespace(  # type: ignore[assignment]
         provider=provider,
         can_drain=True,
