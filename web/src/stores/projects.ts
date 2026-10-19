@@ -5920,11 +5920,11 @@ export const useProjectStore = defineStore('projects', () => {
 
         // Tool calls that fire from inside a subagent arrive with
         // parent_tool_use_id set. They belong to the subagent, which the PWA
-        // already renders in its own "Subagent activity" box (SubagentPanel,
-        // fed by the subagent transcript). Inlining them in the parent trace
+        // already shows as its own trace row (SubagentPanel) linking to the
+        // subagent transcript. Inlining them in the parent trace
         // too double-counts the work and inflates the parent turn's tool-call
-        // total (e.g. parent header shows "15 tool calls" while the box shows
-        // "31"), so we drop them here and let the box own subagent activity.
+        // total (e.g. parent header shows "15 tool calls" while the subagent
+        // ran 31), so we drop them here; the subagent's own view owns them.
         if (event.parent_tool_use_id) break
 
         const line = event.tool_input
@@ -6015,8 +6015,8 @@ export const useProjectStore = defineStore('projects', () => {
 
       case 'thinking':
         // Thinking deltas fired from inside a Task subagent arrive with
-        // parent_tool_use_id set. The subagent's transcript is rendered in its
-        // own "Subagent activity" box (SubagentPanel), so accumulating these
+        // parent_tool_use_id set. The subagent's transcript belongs to its own
+        // read-only view (SubagentPanel links to it), so accumulating these
         // deltas into the parent's thinking buffer would leak the subagent's
         // reasoning into the parent turn's trace and end up in the persisted
         // history as a stray _thinking message long after the subagent ended.
