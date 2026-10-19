@@ -4596,9 +4596,6 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
       }
-      case 'open_chat':
-        void openChatFromDeepLink(msg.chat_id)
-        break
       case 'project_created': {
         const exists = projects.value.some(p => p.project_id === msg.project.project_id)
         if (!exists) projects.value.push(msg.project)

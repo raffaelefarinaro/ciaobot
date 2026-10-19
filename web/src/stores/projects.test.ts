@@ -4557,28 +4557,6 @@ describe('deep-link chat navigation', () => {
     expect(fakeSockets.length).toBeGreaterThan(1)
   })
 
-  test('open_chat event over /ws/events navigates to the target chat', async () => {
-    const store = useProjectStore()
-    store.projects = [
-      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
-    ]
-    store.chats = [
-      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
-      { chat_id: 'c2', project_id: 'p1', title: 'Chat 2', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
-    ]
-    store.activeChatId = 'c1'
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-
-    sock.onmessage?.({
-      data: JSON.stringify({ type: 'open_chat', chat_id: 'c2' }),
-    })
-    await vi.waitFor(() => {
-      expect(store.activeChatId).toBe('c2')
-    })
-    expect(routerPush).toHaveBeenCalledWith('/chat/c2')
-  })
-
   test('chat_archived event over /ws/events marks chat archived and clears active chat', async () => {
     const store = useProjectStore()
     store.projects = [

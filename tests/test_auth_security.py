@@ -438,3 +438,17 @@ def test_cli_restart_gate_request_is_exempt(monkeypatch) -> None:
     assert parts.hostname == "localhost"
     client, _ = _loopback_only_client(f"http://{parts.netloc}")
     assert client.get(parts.path).status_code == 200
+
+
+def test_open_chat_route_is_gone_and_api_is_protected() -> None:
+    from ciao.web import routes_api
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/open-chat/{chat_id}", _ok, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    client = TestClient(app, base_url="https://ciao.example")
+    assert client.get("/api/open-chat/c1").status_code == 401
+    assert not hasattr(routes_api, "open_chat_endpoint")
