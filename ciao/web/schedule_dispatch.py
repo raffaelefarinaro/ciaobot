@@ -373,7 +373,7 @@ class ScheduleDispatcher:
                     provider=classifier_provider,
                     cwd=self._host._config.workspace_root,
                 )
-                from ciao.critique import extract_json
+                from ciao.jsonio import extract_json
 
                 verdict = extract_json(text)
                 if verdict is None:

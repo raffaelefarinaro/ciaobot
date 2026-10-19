@@ -514,7 +514,7 @@ async def test_schedule_attention_classifier_runs_claude_on_haiku_without_overri
 
 
 def test_attention_examples_parse_and_state_their_needs_user() -> None:
-    from ciao.critique import extract_json
+    from ciao.jsonio import extract_json
     from ciao.web.schedule_dispatch import _ATTENTION_EXAMPLES
 
     assert len(_ATTENTION_EXAMPLES) >= 3

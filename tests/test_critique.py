@@ -11,21 +11,6 @@ import pytest
 import ciao.critique as crt
 
 
-def test_extract_json_parses_fenced_object() -> None:
-    raw = '```json\n{"verdict": "revise", "confidence": 3}\n```'
-    parsed = crt.extract_json(raw)
-    assert parsed == {"verdict": "revise", "confidence": 3}
-
-
-def test_extract_json_finds_first_object_in_prose() -> None:
-    parsed = crt.extract_json('Here is my review:\n{"verdict": "ship"}\nThanks.')
-    assert parsed == {"verdict": "ship"}
-
-
-def test_extract_json_returns_none_on_garbage() -> None:
-    assert crt.extract_json("no json here") is None
-
-
 def test_aggregate_counts_verdicts_and_severities() -> None:
     results = [
         crt.ModelResult("a", 1.0, True, review={"verdict": "ship", "confidence": 5, "issues": [{"severity": "minor"}]}),

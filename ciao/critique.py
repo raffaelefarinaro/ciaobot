@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.config import CiaoConfig
+from ciao.jsonio import extract_json
 from ciao.providers.oneshot import run_oneshot
 
 DEFAULT_TIMEOUT = 120  # seconds per model
@@ -226,33 +227,6 @@ class ModelResult:
     review: dict[str, Any] | None = None
     raw_text: str | None = None
     error: str | None = None
-
-
-def extract_json(text: str) -> dict | None:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
-    try:
-        parsed: dict = json.loads(text)
-        return parsed
-    except Exception:
-        pass
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                blob = text[start : i + 1]
-                try:
-                    parsed_blob: dict = json.loads(blob)
-                    return parsed_blob
-                except Exception:
-                    return None
-    return None
 
 
 def _split_provider(model: str) -> tuple[str, str]:
