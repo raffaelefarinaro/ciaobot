@@ -1230,7 +1230,7 @@ class ChatStreaming:
                         self._host._maybe_archive_proposal_helper(chat_id),
                         f"archive-proposal-helper-{chat_id}",
                     )
-            if stream.network_retry_turn and not began_compact:
+            if (stream.network_retry_turn or is_retry) and not began_compact:
                 self._host._settle_schedule_retry(
                     chat_id, succeeded=not had_error and bool(last_assistant_text.strip())
                 )

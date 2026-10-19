@@ -4017,6 +4017,14 @@ class ProjectChatManager:
             "reason": "user",
         })
         self._notify_chat_ended(chat_id, chat, "deleted")
+        # Deleting the run chat cancels its network retry, so the work never happened.
+        store = getattr(self, "schedule_store", None)
+        if store is not None:
+            try:
+                if settle_retrying_runs(store, chat_id, "error"):
+                    publish_automations_changed(self)
+            except Exception:  # noqa: BLE001 — the row is advisory; never break a delete
+                logger.exception("Could not settle the retrying schedule run for %s", chat_id)
         return True
 
     async def _maybe_archive_proposal_helper(self, chat_id: str) -> bool:

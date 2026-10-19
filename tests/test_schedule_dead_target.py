@@ -477,6 +477,66 @@ def test_network_retry_cap_fails_the_run(tmp_path: Path) -> None:
     assert chat.retry_status == "stopped"
 
 
+async def _switched_kind_turn(tmp_path: Path, *, error: bool) -> tuple[object, object]:
+    from ciao.models import ResultEvent
+
+    pcm, store = _dispatch_manager(tmp_path)
+    chat, entry = _retrying_row(pcm, store)
+    chat.retry_status = "pending"
+    chat.retry_kind = "connection"
+    chat.retry_prompt = "brief"
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        if error:
+            # Simulates the cap: the retry is gone by the time the turn ends.
+            pcm._clear_chat_retry(chat, status="stopped")
+        yield ResultEvent(
+            type="result", result="boom" if error else "done", session_id="s",
+            is_error=error, effective_model=chat.model, usage={}, quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    async for _ in stream.subscribe():
+        pass
+    return store, entry
+
+
+def test_switched_kind_retry_turn_settles_the_retrying_row(tmp_path: Path) -> None:
+    import asyncio
+
+    store, entry = asyncio.run(_switched_kind_turn(tmp_path, error=False))
+
+    assert store.get(entry.schedule_id).last_status == "ok"
+
+
+def test_switched_kind_retry_turn_that_errors_after_cap_fails_the_row(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    store, entry = asyncio.run(_switched_kind_turn(tmp_path, error=True))
+
+    assert store.get(entry.schedule_id).last_status == "error"
+
+
+def test_deleting_the_run_chat_fails_a_retrying_run(tmp_path: Path) -> None:
+    import asyncio
+
+    pcm, store = _dispatch_manager(tmp_path)
+
+    async def _go():
+        chat, entry = _retrying_row(pcm, store)
+        assert pcm.delete_chat(chat.chat_id) is True
+        return entry
+
+    entry = asyncio.run(_go())
+
+    assert store.get(entry.schedule_id).last_status == "error"
+
+
 def test_health_stamp_publishes_schedules_changed(tmp_path: Path) -> None:
     """An open sidebar or Automations page refetches only on the
     schedules_changed event; the health write must publish it or the new
