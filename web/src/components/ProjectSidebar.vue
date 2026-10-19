@@ -613,7 +613,7 @@
                   @click="openProject(project.project_id)"
                   title="Open project page"
                 >
-                  {{ project.name }}
+                  <span class="project-name-text">{{ project.name }}</span>
                   <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
                   <!-- Only a collapsed project summarises its chats: expanded,
                        each chat row already carries its own signal. One static
@@ -2465,10 +2465,14 @@ async function confirmDeleteChat(chatId: string) {
   border-left: 1px solid var(--border);
 }
 
+/* A flex row so only the name truncates: the auto chip and the collapsed
+   state marks after it stay visible however long the name runs. */
 .project-name {
+  display: flex;
   flex: 1;
+  align-items: center;
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
   min-height: var(--touch);
@@ -2483,12 +2487,17 @@ async function confirmDeleteChat(chatId: string) {
   letter-spacing: inherit;
 }
 .project-name:hover { color: var(--fg); }
+.project-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.project-name > :not(.project-name-text) { flex-shrink: 0; }
 
-/* The project header is a text button, not a flex row, so the state marks sit
-   flush against the last letter of the name. Space them the same 6px .badge
-   already gives itself, and align them to the text rather than the baseline.
-   Scoped here on purpose: the workspace pill puts the same marks in a flex row
-   with a gap, where a margin would double up. */
+/* The state marks sit flush after the name (the row has no gap), spaced the
+   same 6px .badge already gives itself. Scoped here on purpose: the workspace
+   pill puts the same marks in a flex row with a gap, where a margin would
+   double up. */
 .project-name .rollup-needs-dot,
 .project-name .rollup-ring {
   margin-left: var(--space-2);

@@ -899,6 +899,8 @@ describe('ProjectSidebar accessible context menus', () => {
     const rollup = group().get('.project-run-rollup')
     expect(rollup.attributes('aria-label')).toBe('1 background run in this project')
     expect(rollup.find('.activity-glyph--run').exists()).toBe(true)
+    // Only the name truncates; a long name must not push the mark out of view.
+    expect(group().get('.project-name-text').find('.project-run-rollup').exists()).toBe(false)
     wrapper.unmount()
   })
 })
