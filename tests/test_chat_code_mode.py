@@ -59,9 +59,7 @@ def test_unlinked_chat_persists_without_code_mode_keys(tmp_path: Path) -> None:
     chat = manager.create_chat(project.project_id)
     stored = manager._state_payload()["chats"][chat.chat_id]
     assert "code_mode" not in stored
-    assert "code_mode_events" not in stored
     assert chat.to_dict()["code_mode"] is False
-    assert chat.to_dict()["code_mode_events"] == []
 
 
 def test_code_mode_round_trips_through_a_restart(tmp_path: Path) -> None:
@@ -70,7 +68,6 @@ def test_code_mode_round_trips_through_a_restart(tmp_path: Path) -> None:
     restarted = _build(tmp_path)
     reloaded = restarted._chats[chat.chat_id]
     assert reloaded.code_mode is True
-    assert set(reloaded.code_mode_events[0]) == {"code_mode", "actor", "at", "after_turn_index"}
     restarted.set_code_mode(chat.chat_id, False, actor="user")
     assert "code_mode" not in restarted._state_payload()["chats"][chat.chat_id]
 
@@ -91,7 +88,7 @@ def test_set_code_mode_rejects_unlinked_missing_and_archived(tmp_path: Path) -> 
         manager.set_code_mode(chat.chat_id, True, actor="user")
 
 
-def test_set_code_mode_publishes_once_and_records_marker(
+def test_set_code_mode_publishes_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manager, project, chat, _repo = _linked(tmp_path)
@@ -104,8 +101,6 @@ def test_set_code_mode_publishes_once_and_records_marker(
     assert event["type"] == "chat_code_mode" and event["actor"] == "agent"
     manager.set_code_mode(chat.chat_id, True, actor="agent")
     assert len(published) == 1
-    assert len(chat.code_mode_events) == 1
-    assert chat.code_mode_events[0]["after_turn_index"] == chat.user_turn_count - 1
 
 
 def test_switching_off_clears_repo_location_and_publishes_it(
@@ -152,4 +147,33 @@ def test_moving_a_chat_turns_code_mode_off(tmp_path: Path) -> None:
     other = manager.create_project("Other", workspace="work")
     manager.update_chat(chat.chat_id, project_id=other.project_id)
     assert chat.code_mode is False
-    assert [e["code_mode"] for e in chat.code_mode_events] == [True, False]
+
+
+def test_project_move_still_turns_code_mode_off(tmp_path: Path) -> None:
+    manager, _project, chat, _repo = _linked(tmp_path)
+    manager.set_code_mode(chat.chat_id, True, actor="user")
+    chat.user_turn_count = 3
+    other = manager.create_project("Other", workspace="work")
+    manager.update_chat(chat.chat_id, project_id=other.project_id)
+    assert chat.code_mode is False
+
+
+def test_code_mode_off_refused_after_a_message(tmp_path: Path) -> None:
+    manager, _project, chat, _repo = _linked(tmp_path)
+    manager.set_code_mode(chat.chat_id, True, actor="user")
+    chat.user_turn_count = 1
+    with pytest.raises(ValueError, match="stays on"):
+        manager.set_code_mode(chat.chat_id, False, actor="user")
+    assert chat.code_mode is True
+    assert manager.set_code_mode(chat.chat_id, True, actor="agent") is chat
+    resp = _make_client(manager).patch(f"/api/chats/{chat.chat_id}", json={"code_mode": False})
+    assert resp.status_code == 400
+    assert "stays on" in resp.text
+
+
+def test_code_mode_off_allowed_before_any_message(tmp_path: Path) -> None:
+    manager, _project, chat, _repo = _linked(tmp_path)
+    manager.set_code_mode(chat.chat_id, True, actor="user")
+    assert chat.user_turn_count == 0
+    manager.set_code_mode(chat.chat_id, False, actor="user")
+    assert chat.code_mode is False

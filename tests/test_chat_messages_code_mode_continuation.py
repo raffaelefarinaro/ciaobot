@@ -130,8 +130,6 @@ async def test_hidden_continuation_keeps_code_mode_markers_aligned(
     assert CODE_MODE_CONTINUE_PROMPT not in response.body.decode()
     users = [(m["content"], m["turn_index"]) for m in messages if m["role"] == "user"]
     assert users == [("initial", 0), ("second", 1)]
-    assert chat.code_mode_events[0]["after_turn_index"] == 0
-    assert chat.code_mode_events[-1]["after_turn_index"] == 1
 
 
 def test_opencode_render_skips_the_continuation_without_shifting_turn_index(

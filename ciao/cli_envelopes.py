@@ -157,8 +157,7 @@ def strip_injected_context(content: str) -> str:
 
 #: The hidden turn the drive loop sends after an agent switched its own chat
 #: into code mode mid-turn (`ciao chat update --code on`). Not something the
-#: user typed: renderers hide it and turn counters skip it, so
-#: `code_mode_events[].after_turn_index` keeps matching visible user rows.
+#: user typed: renderers hide it and turn counters skip it.
 CODE_MODE_CONTINUE_PROMPT = (
     "[Ciaobot] Code mode is now on: repository instructions, skills and write "
     "access are loaded. Continue the user's request."

@@ -387,11 +387,6 @@
             @action="retryFromError(i)"
           />
         </div>
-        <!-- A code-mode switch, at the point it happened (lib/codeMode.ts). -->
-        <div v-else-if="item.kind === 'code-mode'" class="transcript-event" role="note">
-          <span class="transcript-event-text">{{ item.msg.content }}</span>
-          <span v-if="item.msg.timestamp" class="transcript-event-time">{{ formatTime(item.msg.timestamp) }}</span>
-        </div>
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
@@ -1219,6 +1214,7 @@
           :location="chat.repo_location ?? null"
           :chat-id="chat.chat_id"
           :code-mode="codeModeOn"
+          :code-mode-locked="codeModeLocked"
           :archived="!!chat.archived"
           @open-file="openInspectorFile"
         />
@@ -1358,7 +1354,7 @@ import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeU
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
-import { interleaveCodeModeEvents, isChatCodeModeOn, isCodeModeMarker } from '../lib/codeMode'
+import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
 import BackgroundRunRows from './BackgroundRunRows.vue'
 import ComposerActivity from './ComposerActivity.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
@@ -1424,7 +1420,6 @@ type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
   | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number; meta?: TurnMeta }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'code-mode'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; turnIndex?: number }
 
 type RenderItem = RenderItemInput & { key: string }
@@ -1433,8 +1428,7 @@ function renderItemKey(item: RenderItemInput): string {
   switch (item.kind) {
     case 'user':
     case 'assistant':
-    case 'system':
-    case 'code-mode': {
+    case 'system': {
       const m = item.msg
       const ts = m.timestamp || ''
       const content = (m.content || '').slice(0, 60)
@@ -1908,6 +1902,11 @@ onMounted(() => {
 
 const project = computed(() => store.activeProject)
 const codeModeOn = computed(() => isChatCodeModeOn(chat.value, project.value?.repo))
+// The chat payload's turn count only refreshes on refetch, so a user row in the
+// loaded transcript locks the switch as soon as the first message is sent.
+const codeModeLocked = computed(() =>
+  isCodeModeLocked(chat.value)
+  || (codeModeOn.value && store.activeMessages.some(m => m.role === 'user')))
 
 // A turn's duration lives on its closing bubble's footer meta. The Activity
 // row sits before that bubble, so look ahead within the same turn.
@@ -3988,17 +3987,7 @@ const renderData = computed<{
     buffer = []
   }
 
-  const rows = interleaveCodeModeEvents(
-    store.activeMessages,
-    store.activeChat?.code_mode_events,
-    { hasOlder: store.activeChatId ? store.canLoadOlder(store.activeChatId) : false },
-  )
-  for (const msg of rows) {
-    if (isCodeModeMarker(msg)) {
-      flushTurn()
-      items.push(withKey({ kind: 'code-mode', msg }))
-      continue
-    }
+  for (const msg of store.activeMessages) {
     if (msg.role === 'user') {
       flushTurn()
       currentTurnIndex = typeof msg.turn_index === 'number'
@@ -4093,8 +4082,7 @@ const renderData = computed<{
 })
 
 const renderItems = computed<RenderItem[]>(() => renderData.value.items)
-// A code-mode switch row alone does not make a transcript: the starters stay.
-const transcriptEmpty = computed(() => renderItems.value.every(item => item.kind === 'code-mode'))
+const transcriptEmpty = computed(() => renderItems.value.length === 0)
 const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
 
 // One consistent full-screen state for "this chat isn't ready to show yet" —
@@ -5598,30 +5586,6 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   font-size: var(--text-sm);
   width: 98%;
   max-width: 98%;
-}
-
-.transcript-event {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-2);
-  width: 100%;
-  color: var(--fg3);
-  font: 600 var(--text-xs) var(--font-mono);
-  letter-spacing: 0.02em;
-}
-.transcript-event::before,
-.transcript-event::after {
-  content: '';
-  flex: 1 1 var(--space-4);
-  min-width: var(--space-4);
-  border-top: 1px solid var(--border);
-}
-.transcript-event-text { flex: 0 1 auto; min-width: 0; text-align: center; overflow-wrap: anywhere; }
-.transcript-event-time { flex: none; font-weight: 400; }
-@media (max-width: 480px) {
-  /* On a phone the timestamp would force a second line; the rules stay. */
-  .transcript-event-time { display: none; }
 }
 
 .retry-btn {

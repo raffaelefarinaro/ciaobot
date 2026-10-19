@@ -184,8 +184,6 @@ logger = logging.getLogger(__name__)
 # a stdin write on Claude, so this only bites on a wedged CLI; it must not hold
 # the chat's socket loop.
 _STEER_DISPATCH_TIMEOUT_S = 10.0
-# Most code-mode switch markers a chat keeps; the oldest are dropped.
-CODE_MODE_EVENTS_MAX = 200
 
 _ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
@@ -656,10 +654,8 @@ class ChatInfo:
     # project (see `repo_location.py`).
     repo_location: dict = field(default_factory=dict)
     # Per-chat code mode (#1450). Persisted only when set, so unlinked or off
-    # chats persist exactly as before. Each event is
-    # {code_mode, actor, at, after_turn_index}.
+    # chats persist exactly as before. One-way once the chat has messages.
     code_mode: bool = False
-    code_mode_events: list[dict] = field(default_factory=list)
     # Set only by the memory-backup setup route (#1328). A workspace-scoped
     # chat with this flag may also read and write the install's data root,
     # the parent of every workspace folder, because a git repository there is
@@ -706,7 +702,7 @@ class ChatInfo:
             "pin_revision": self.pin_revision,
             "repo_location": dict(self.repo_location),
             "code_mode": self.code_mode,
-            "code_mode_events": [dict(e) for e in self.code_mode_events],
+            "user_turn_count": self.user_turn_count,
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -1094,9 +1090,6 @@ class ProjectChatManager:
                     else {}
                 ),
                 code_mode=bool(cd.get("code_mode", False)),
-                code_mode_events=[
-                    dict(e) for e in cd.get("code_mode_events", []) if isinstance(e, dict)
-                ],
                 grants_data_root=bool(cd.get("grants_data_root", False)),
                 # A pipeline recorded as "running" cannot still be running: the
                 # task died with the previous process. Restore it as done so the
@@ -1208,11 +1201,6 @@ class ProjectChatManager:
                     "pin_revision": c.pin_revision,
                     "repo_location": dict(c.repo_location),
                     **({"code_mode": True} if c.code_mode else {}),
-                    **(
-                        {"code_mode_events": [dict(e) for e in c.code_mode_events]}
-                        if c.code_mode_events
-                        else {}
-                    ),
                     "grants_data_root": c.grants_data_root,
                 }
                 for cid, c in self._chats.items()
@@ -3224,7 +3212,8 @@ class ProjectChatManager:
         """Public form of `_is_empty_chat`, for the conditional-delete route.
 
         The PWA needs this verdict to discard an abandoned draft on close, and
-        cannot compute it: `user_turn_count` is not in any payload it receives.
+        cannot compute it: the draft verdict also weighs the session, the title
+        and live streams, which it cannot see.
         """
         chat = self._chats.get(chat_id)
         return chat is not None and self._is_empty_chat(chat)
@@ -3385,13 +3374,17 @@ class ProjectChatManager:
                 "old_project_id": moved_from,
             })
             if chat.code_mode:
-                self.set_code_mode(chat_id, False, actor="user")
+                self.set_code_mode(chat_id, False, actor="user", force=True)
         return chat
 
     def set_code_mode(
-        self, chat_id: str, on: bool, *, actor: Literal["user", "agent"]
+        self, chat_id: str, on: bool, *, actor: Literal["user", "agent"], force: bool = False
     ) -> ChatInfo | None:
-        """Switch the chat's code mode. None for an unknown chat; ValueError when it cannot be on."""
+        """Switch the chat's code mode. None for an unknown chat; ValueError when it cannot be on.
+
+        Code mode is one-way once the chat has messages: turning it off is
+        refused unless ``force`` (a project move, a system transition).
+        """
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
@@ -3399,6 +3392,11 @@ class ProjectChatManager:
             return chat
         if chat.archived:
             raise ValueError("Cannot change code mode of an archived chat")
+        if not on and chat.user_turn_count > 0 and not force:
+            raise ValueError(
+                "Code mode stays on once the chat has messages. "
+                "Start a new chat to work without it."
+            )
         project = self._projects.get(chat.project_id)
         if on:
             raw = project.repo_path if project else ""
@@ -3411,15 +3409,6 @@ class ProjectChatManager:
                 raise ValueError(f"The linked repository is not available on this machine: {raw}")
         at = chat_service._now_iso()
         chat.code_mode = on
-        chat.code_mode_events = [
-            *chat.code_mode_events,
-            {
-                "code_mode": on,
-                "actor": actor,
-                "at": at,
-                "after_turn_index": chat.user_turn_count - 1,
-            },
-        ][-CODE_MODE_EVENTS_MAX:]
         cleared_location = not on and bool(chat.repo_location)
         if cleared_location:
             chat.repo_location = {}
@@ -4329,7 +4318,6 @@ class ProjectChatManager:
         chat.archived = False
         chat.archive_path = ""
         chat.handover_messages = []
-        chat.code_mode_events = []
         chat.handover_context_pending = False
         # A fresh session abandons any question the old one paused on, along
         # with follow-ups parked for that answer turn — they must not leak

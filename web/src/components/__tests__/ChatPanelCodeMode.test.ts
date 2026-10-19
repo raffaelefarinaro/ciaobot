@@ -9,6 +9,7 @@ import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatPanel from '../ChatPanel.vue'
+import ChatRepoSection from '../ChatRepoSection.vue'
 
 const PaneHeaderStub = defineComponent({
   name: 'PaneHeaderStub',
@@ -88,7 +89,7 @@ class MemoryStorage {
   clear(): void { this.values.clear() }
 }
 
-async function mountPanel(): Promise<{ wrapper: VueWrapper }> {
+async function mountPanel(opts: { realRepoSection?: boolean } = {}): Promise<{ wrapper: VueWrapper }> {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
@@ -117,6 +118,7 @@ async function mountPanel(): Promise<{ wrapper: VueWrapper }> {
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
+        ...(opts.realRepoSection ? { ChatRepoSection: false, HostTerminalButton: ChildStub } : {}),
       },
     },
   })
@@ -150,38 +152,40 @@ describe('ChatPanel code mode rows', () => {
     { role: 'assistant' as const, content: 'two', timestamp: '2026-08-30T13:24:10Z' },
   ]
 
-  it('renders a switch row between turns', async () => {
+  it('shows no code mode divider in the transcript', async () => {
     const { wrapper } = await mountPanel()
     const store = useProjectStore()
-    store.chats[0].code_mode_events = [
-      { code_mode: true, actor: 'agent', at: '2026-08-30T13:23:30Z', after_turn_index: 0 },
-    ]
+    store.chats[0].code_mode = true
     store.messages['chat-1'] = turns()
     await flushPromises()
-
-    const row = wrapper.get('.transcript-event')
-    expect(row.text()).toContain('Switched to code mode · by Ciao')
-    expect(wrapper.find('.message.system').exists()).toBe(false)
-
-    const order = Array.from((wrapper.element as HTMLElement).querySelectorAll<HTMLElement>(
-      '.message-wrap.assistant, .message-wrap.user, .transcript-event',
-    )).map((el) => (el.classList.contains('transcript-event') ? 'event' : el.classList.contains('user') ? 'user' : 'assistant'))
-    expect(order).toEqual(['user', 'assistant', 'event', 'user', 'assistant'])
+    expect(wrapper.text()).not.toContain('Switched to code mode')
+    expect(wrapper.text()).not.toContain('Left code mode')
   })
 
-  it("shows a new switch when the chat's events change", async () => {
-    const { wrapper } = await mountPanel()
+  it('locks the switch on with a hint once the chat has messages', async () => {
+    const { wrapper } = await mountPanel({ realRepoSection: true })
     const store = useProjectStore()
-    store.messages['chat-1'] = turns()
-    store.chats[0].code_mode_events = []
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false, instructions: null }
+    store.chats[0].code_mode = true
+    store.chats[0].user_turn_count = 0
     await flushPromises()
-    expect(wrapper.find('.transcript-event').exists()).toBe(false)
+    await wrapper.get('.chat-code-badge').trigger('click')
+    await flushPromises()
+    const section = wrapper.getComponent(ChatRepoSection)
+    expect(section.props('codeModeLocked')).toBe(false)
+    expect(section.get('[role="switch"]').attributes('aria-disabled')).toBe('false')
+    expect(section.text()).not.toContain('Code mode stays on for the rest of this chat.')
 
-    store.chats[0].code_mode_events = [
-      { code_mode: false, actor: 'user', at: '2026-08-30T13:25:00Z', after_turn_index: 1 },
-    ]
+    store.chats[0].user_turn_count = 1
     await flushPromises()
-    expect(wrapper.get('.transcript-event').text()).toContain('Left code mode · by you')
+    expect(section.props('codeModeLocked')).toBe(true)
+    const sw = section.get('[role="switch"]')
+    expect(sw.attributes('aria-disabled')).toBe('true')
+    expect(sw.attributes('aria-checked')).toBe('true')
+    expect(section.text()).toContain('Code mode stays on for the rest of this chat.')
+    // The reason is announced with the switch, not only shown under it.
+    const lockedHint = section.get('.repo-code-locked')
+    expect(sw.attributes('aria-describedby')?.split(' ')).toContain(lockedHint.attributes('id'))
   })
 })
 
