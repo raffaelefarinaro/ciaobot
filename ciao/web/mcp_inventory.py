@@ -184,7 +184,6 @@ def _provider_inventory(
     *,
     provider: str,
     agent_root: Path,
-    allowed_mcp_servers: set[str],
     explicitly_denied: set[str],
     runtime: dict[str, list[dict[str, str]]],
     available: bool,
@@ -227,12 +226,7 @@ def _provider_inventory(
                 continue
             if provider == "claude":
                 kind = _server_kind(provider, raw_config)
-                if name in explicitly_denied:
-                    allowed: bool | None = False
-                elif scope == "project" and source == "project":
-                    allowed = name in allowed_mcp_servers
-                else:
-                    allowed = None
+                allowed: bool | None = False if name in explicitly_denied else None
                 enabled = True
             else:
                 kind = str(raw_config.get("type") or ("remote" if raw_config.get("url") else "local"))
@@ -314,7 +308,6 @@ async def provider_inventory(
     *,
     workspace: str,
     agent_root: Path,
-    allowed_mcp_servers: set[str],
     explicitly_denied: set[str],
     manager: Any,
     claude_available: bool,
@@ -337,7 +330,6 @@ async def provider_inventory(
     claude = _provider_inventory(
         provider="claude",
         agent_root=agent_root,
-        allowed_mcp_servers=allowed_mcp_servers,
         explicitly_denied=explicitly_denied,
         runtime=claude_runtime,
         available=claude_available,
@@ -345,7 +337,6 @@ async def provider_inventory(
     opencode = _provider_inventory(
         provider="opencode",
         agent_root=agent_root,
-        allowed_mcp_servers=allowed_mcp_servers,
         explicitly_denied=explicitly_denied,
         runtime=opencode_runtime,
         available=opencode_available,

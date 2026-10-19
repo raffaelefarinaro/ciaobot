@@ -39,7 +39,7 @@ async def test_status_includes_native_inventory_and_scoped_live_connections(
 
     config = SimpleNamespace(
         primary_workspace=lambda: "personal",
-        workspace=lambda name: SimpleNamespace(allowed_mcp_servers=[]) if name in roots else None,
+        workspace=lambda name: SimpleNamespace() if name in roots else None,
         agent_root=lambda name: roots[name],
         disallowed_tools_for_workspace=lambda name: ["mcp__notion"] if name == "work" else [],
     )

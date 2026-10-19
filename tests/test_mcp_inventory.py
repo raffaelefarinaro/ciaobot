@@ -23,7 +23,7 @@ def test_jsonc_parser_preserves_urls_and_removes_trailing_commas() -> None:
 
 
 @pytest.mark.asyncio
-async def test_provider_inventory_merges_scopes_safely_and_obeys_claude_allowlist(
+async def test_provider_inventory_merges_scopes_safely_and_marks_denied_servers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "workspace"
@@ -53,13 +53,13 @@ async def test_provider_inventory_merges_scopes_safely_and_obeys_claude_allowlis
             }
 
     payload = await provider_inventory(
-        workspace="work", agent_root=root, allowed_mcp_servers={"allowed"},
+        workspace="work", agent_root=root,
         explicitly_denied={"blocked"}, manager=Manager(), claude_available=True,
         opencode_available=False,
     )
     claude, opencode = payload["providers"]
     by_name = {row["name"]: row for row in claude["servers"]}
-    assert by_name["allowed"]["allowed"] is True
+    assert by_name["allowed"]["allowed"] is None
     assert by_name["blocked"]["allowed"] is False
     assert by_name["global"]["allowed"] is None
     assert by_name["session-only"]["scope"] == "account"
@@ -84,7 +84,7 @@ async def test_inventory_marks_invalid_native_config_unknown_and_keeps_unknown_c
             return {"claude": {}, "opencode": {}}
 
     payload = await provider_inventory(
-        workspace="work", agent_root=root, allowed_mcp_servers=set(),
+        workspace="work", agent_root=root,
         explicitly_denied=set(), manager=Manager(), claude_available=False,
         opencode_available=True,
     )
@@ -113,7 +113,7 @@ async def test_inventory_reads_only_the_selected_workspace_root(tmp_path: Path) 
 
     async def names(root: Path) -> set[str]:
         payload = await provider_inventory(
-            workspace=root.name, agent_root=root, allowed_mcp_servers=set(),
+            workspace=root.name, agent_root=root,
             explicitly_denied=set(), manager=Manager(), claude_available=True,
             opencode_available=True,
         )
@@ -145,7 +145,7 @@ async def test_claude_project_local_config_overrides_project_scope(
             return {"claude": {}, "opencode": {}}
 
     payload = await provider_inventory(
-        workspace="work", agent_root=root, allowed_mcp_servers=set(),
+        workspace="work", agent_root=root,
         explicitly_denied=set(), manager=Manager(), claude_available=True,
         opencode_available=True,
     )

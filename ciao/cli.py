@@ -1088,7 +1088,7 @@ def setup_workspace(
         # before the new server first starts, so writing a synthetic
         # single-workspace registry here would make the server's one-time
         # import keep that synthetic entry and drop the variable's real
-        # vault_root / disallowed_tools / allowlist for the same name. Import
+        # vault_root / disallowed_tools for the same name. Import
         # the variable first so the registry setup sees is the real one.
         _import_legacy_workspaces_for_setup(root, existing_env)
     # No registry yet means this folder has never been set up, even when it

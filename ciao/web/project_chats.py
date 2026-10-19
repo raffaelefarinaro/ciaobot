@@ -5080,9 +5080,7 @@ class ProjectChatManager:
 
         Applies the default harness set plus any workspace "extra disallowed
         tools" (the workspace's own `disallowed_tools` in `workspaces.json`, or the PWA
-        field), plus a derived ``mcp__<server>`` deny for every server declared
-        in ``.mcp.json`` that the workspace's ``allowed_mcp_servers`` allowlist
-        does not name.
+        field). Declared MCP servers all load unless that list names them.
 
         It also always carries the unconditional credential/runtime-state file
         denies (``ciao.execution_modes.credential_path_deny_rules``), which no
@@ -5101,8 +5099,7 @@ class ProjectChatManager:
         from its own provider
         (``ciao.providers.opencode.mode_settings``, sharing the patterns in
         ``ciao.execution_modes``). The part that remains Claude-only is the
-        harness denylist and the derived ``mcp__<server>`` allowlist; closing
-        that needs a per-provider mechanism and is out of scope.
+        harness denylist and any ``mcp__<server>`` deny; closing that needs a per-provider mechanism and is out of scope.
         """
         if chat.provider != "claude":
             return []
