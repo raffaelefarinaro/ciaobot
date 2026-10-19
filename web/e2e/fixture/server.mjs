@@ -245,12 +245,10 @@ const GET_ROUTES = {
   // field; an empty object crashed the tab, so the stub mirrors the shape.
   '/api/settings/routines': () => ({
     insights_enabled: true,
-    critique_models: '',
     provider_default_models: {},
     provider_default_modes: {},
     provider_default_thinking: {},
     provider_insights_models: {},
-    critique_models_effective: '',
     pwa_host: '',
     log_level: '',
     dev_mode: false,

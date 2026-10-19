@@ -848,56 +848,10 @@
             <div class="settings-card-header">
               <p class="section-title">Background models</p>
               <p class="hint">
-                The critique panel uses its own model setting, separate from the chat defaults above.
-                "Automatic" keeps the built-in default. Session insights, the model that reads archived
-                chats into memory, names new chats and checks schedule results, is set on each provider above.
-                Automatic uses the chat's own model; choose a model to override it.
+                Session insights, the model that reads archived chats into memory, names new chats
+                and checks schedule results, is set on each provider above. Automatic uses the chat's
+                own model; choose a model to override it.
               </p>
-            </div>
-
-            <div class="routine-row">
-              <div class="routine-info">
-                <span class="routine-name">Critique panel</span>
-                <span class="routine-detail">Ask Ciaobot to review a plan, answer or file with the <code>/critique</code> command or critique skill. Each panel model checks it independently; Ciaobot compares their findings and gives a recommendation.</span>
-                <span class="routine-detail">Automatic combines the distinct model defaults of your configured workspaces: each workspace uses its default provider’s model. Unavailable providers are skipped. Choose models here to use a different panel.</span>
-                <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/models.html#critique" target="_blank" rel="noopener noreferrer">How the critique panel works</a>
-              </div>
-              <div class="critique-model-picker">
-                <!-- One control: the multi-select picker. Picked models show as
-                     removable chips; "Use automatic" clears the list. -->
-                <div v-if="selectedCritiqueModels.length" class="critique-picker-header">
-                  <div class="critique-chip-list">
-                    <button
-                      v-for="model in selectedCritiqueModels"
-                      :key="model"
-                      type="button"
-                      class="critique-chip"
-                      :disabled="routinesSaving"
-                      :title="`Remove ${model}`"
-                      :aria-label="`Remove ${model}`"
-                      @click="removeCritiqueModel(model)"
-                    >
-                      <span>{{ model }}</span>
-                      <span aria-hidden="true">&times;</span>
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    class="set-link set-link--quiet"
-                    :disabled="routinesSaving"
-                    @click="setCritiqueModels([])"
-                  >Use automatic</button>
-                </div>
-                <ModelSelector
-                  multiple
-                  :model-value="selectedCritiqueModels"
-                  :sections="critiqueModelSections"
-                  placeholder="Select critique models"
-                  :empty-placeholder="critiqueDefaultLabel"
-                  :disabled="routinesSaving"
-                  @update:model-value="setCritiqueModels"
-                />
-              </div>
             </div>
           </div>
           <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
@@ -1828,7 +1782,7 @@
             <div>
               <p class="section-title">Commands</p>
               <p class="hint">
-                These are the slash commands of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>commands/</code> folder and shared with Claude Code and opencode. Type <code>/name</code> in a chat to run one, for example <code>/critique</code>.
+                These are the slash commands of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>commands/</code> folder and shared with Claude Code and opencode. Type <code>/name</code> in a chat to run one, for example <code>/interrogation</code>.
               </p>
               <p class="hint">Commands installed directly in a provider can also work in its chats, even if they are not shown here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#commands" target="_blank" rel="noopener noreferrer">How commands work</a></p>
             </div>
@@ -2092,7 +2046,7 @@ import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
-import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import type { ModelSection } from '../lib/modelSections'
 import { isLoopbackHostname } from '../lib/loopback'
 import { settingsTabLabel } from '../lib/settingsNav'
 import { useMcpServers } from '../composables/useMcpServers'
@@ -2459,52 +2413,6 @@ function parseModelList(raw: string): string[] {
     models.push(model)
   }
   return models
-}
-
-function serializeModelList(models: string[]): string {
-  return parseModelList(models.join(',')).join(',')
-}
-
-// A panel entry may name the provider that runs it. Anthropic tiers are bare
-// aliases; opencode entries carry a `<provider>:` prefix, matching
-// what `ciao/critique.py::_split_provider` dispatches on.
-// The same catalog every other picker shows. This used to build its own
-// sections, and the opencode one by prefixing the *Anthropic* tiers — so it
-// offered `opencode:opus` / `opencode:sonnet` / `opencode:haiku`, which are not
-// opencode model ids at all (those are `providerID/modelID`, e.g.
-// `openai/gpt-5.6-luna`), while the real catalog was used only as a presence
-// check. Selecting one produced a panel entry no provider could resolve.
-const critiqueModelSections = computed<ModelSection[]>(() =>
-  sectionsFromModelsResponse(workspaceModels.value).map((section) =>
-    section.key === 'opencode'
-      // The panel routes prefixed entries through opencode's app-server, so the
-      // stored value is namespaced while the label stays the bare model id.
-      ? {
-          ...section,
-          models: section.models.map((m) => `opencode:${m}`),
-          modelLabels: Object.fromEntries(section.models.map((m) => [`opencode:${m}`, m])),
-        }
-      : section,
-  ),
-)
-
-const selectedCritiqueModels = computed(() => parseModelList(routines.value?.critique_models || ''))
-
-// The effective panel arrives comma-joined with no spaces, so it rendered as
-// one unbreakable token that overflowed its box on a phone. Rejoin it with
-// ", " so the summary wraps between models.
-const critiqueDefaultLabel = computed(() =>
-  `Automatic default (${parseModelList(routines.value?.critique_models_effective || '').join(', ')})`,
-)
-
-async function setCritiqueModels(value: string | string[]) {
-  const models = Array.isArray(value) ? value : [value]
-  await saveRoutines({ critique_models: serializeModelList(models) })
-}
-
-function removeCritiqueModel(model: string) {
-  const current = selectedCritiqueModels.value.filter((m) => m !== model)
-  setCritiqueModels(current)
 }
 
 const aliasProviderSections = computed<AliasProviderSection[]>(() => {
@@ -5405,19 +5313,6 @@ a.btn-secondary {
   background: var(--error);
 }
 
-.routine-row {
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(380px, 490px);
-  align-items: start;
-  gap: var(--space-4);
-  padding: 14px 0;
-  border-top: 1px solid var(--border);
-  margin-top: 0;
-}
-.routine-row--flush {
-  border-top: 0;
-  padding-top: 0;
-}
 .routine-detail {
   font-size: var(--text-xs);
   color: var(--fg2);
@@ -5478,110 +5373,6 @@ a.btn-secondary {
   width: min(100%, 430px);
   min-width: 320px;
   flex: 0 0 auto;
-}
-.critique-model-picker {
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.critique-picker-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px;
-  align-items: center;
-  gap: 8px;
-}
-.critique-picker-summary {
-  min-width: 0;
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-.critique-picker-default {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.critique-picker-header .btn-small {
-  width: 100%;
-  min-height: 32px;
-}
-.critique-chip-list {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.critique-chip {
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg3);
-  color: var(--fg);
-  font-size: var(--text-xs);
-  cursor: pointer;
-}
-.critique-chip span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.critique-chip span:last-child {
-  flex: none;
-}
-.critique-chip:disabled {
-  cursor: default;
-  opacity: 0.65;
-}
-.critique-option-groups {
-  max-height: 230px;
-  overflow-y: auto;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg);
-}
-.critique-option-group + .critique-option-group {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-.critique-group-label {
-  margin-bottom: 4px;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
-.critique-option {
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-  color: var(--fg);
-  font-size: var(--text-xs);
-  line-height: 1.3;
-}
-.critique-option input {
-  flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
-}
-.critique-option span {
-  min-width: 0;
-  overflow-wrap: anywhere;
 }
 .tier-provider-section {
   padding-top: var(--space-3);
@@ -5853,10 +5644,7 @@ a.btn-secondary {
   .gws-profile-card .btn-small,
   .gws-profile-card .btn-primary,
   .gws-profile-card .file-upload-btn,
-  .gws-advanced-summary,
-  .critique-picker-header .btn-small,
-  .critique-chip,
-  .routine-row :deep(.model-selector__trigger) {
+  .gws-advanced-summary {
     min-height: var(--touch);
   }
 }
@@ -5880,24 +5668,9 @@ a.btn-secondary {
     min-width: 0;
     width: 100%;
   }
-  .routine-row {
-    grid-template-columns: 1fr;
-    gap: var(--space-3);
-  }
-  .critique-model-picker {
-    max-width: none;
-    min-width: 0;
-    width: 100%;
-  }
   /* The heading takes the full row; status and account actions wrap below. */
   .gws-profile-heading {
     flex: 1 1 100%;
-  }
-  .critique-picker-summary {
-    min-height: 44px;
-  }
-  .critique-option {
-    min-height: 44px;
   }
 }
 

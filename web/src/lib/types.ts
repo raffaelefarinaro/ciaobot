@@ -863,8 +863,6 @@ export interface MoveToBackgroundResponse { moved: boolean }
 export interface RoutineSettings {
   insights_enabled?: boolean
 
-  // Override as stored; empty string = automatic default.
-  critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.
   provider_default_models?: Record<string, string>
@@ -876,7 +874,6 @@ export interface RoutineSettings {
   // Per-provider Session insights models; missing = the source chat's model.
   provider_insights_models?: Record<string, string>
 
-  critique_models_effective: string
   // Server settings that used to be workspace .env variables, as stored
   // ("" = default). The bind address and log level apply at the next start.
   pwa_host?: string
