@@ -4048,10 +4048,25 @@ const renderData = computed<{
     }
   }
   flushTurn(true)
-  // While streaming, subagents nest in the live trace.
+  // Only the latest messages are loaded, so subagents of older turns find no
+  // rendered turn to attach to. A finished one stays out of view until its turn
+  // loads; it must not pile into the live trace or the last turn's trace.
+  let firstRenderedTurn: number | null = null
+  for (const it of items) {
+    if (it.kind === 'user' && typeof it.turnIndex === 'number') { firstRenderedTurn = it.turnIndex; break }
+  }
+  const belongsToUnloadedTurn = (sub: SubagentTranscript): boolean =>
+    sub.status !== 'running'
+    && typeof sub.turn_index === 'number'
+    && firstRenderedTurn !== null
+    && sub.turn_index < firstRenderedTurn
+  // While streaming, the in-flight turn's subagents nest in the live trace,
+  // along with any still running from an earlier turn. Finished agents of
+  // earlier rendered turns were already placed by flushTurn.
   if (store.isStreaming) {
-    const all = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-    return { items, liveSubs: all, liveStandaloneSubs: [] }
+    const live = [...subsByTurn.values()].flat().concat(unanchoredSubs)
+      .filter(sub => !belongsToUnloadedTurn(sub))
+    return { items, liveSubs: live, liveStandaloneSubs: [] }
   }
   // Anything still unplaced (turn not in history yet, or no turn info):
   // attach anchored subagents to their actual user-turn's trace block so a
@@ -4059,6 +4074,7 @@ const renderData = computed<{
   // leftovers still fall back to the last trace block, or a fresh block if
   // there is none.
   const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
+    .filter(sub => !belongsToUnloadedTurn(sub))
   if (leftovers.length) {
     const anchored = new Map<number, SubagentTranscript[]>()
     const unanchored: SubagentTranscript[] = []

@@ -658,7 +658,11 @@ def _summarize_tool_input(tool: str, raw: object) -> str:
     for key in ("filePath", "path", "file", "pattern", "query", "command", "description"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()[:400]
+            # The trace draws one row per line, and V2's `shell` carries no
+            # description, so a heredoc command became a column of fake rows.
+            lines = [line.strip() for line in value.splitlines() if line.strip()]
+            more = f" (+{len(lines) - 1} lines)" if len(lines) > 1 else ""
+            return lines[0][:400] + more
     # An empty map has no summary; returning its json printed a literal "{}"
     # next to the tool name in the activity row.
     return json.dumps(raw, ensure_ascii=False)[:200] if raw else ""
