@@ -1539,6 +1539,12 @@ An automation fires its prompt as an ordinary user turn, so without a marker it 
 - The model gets a matching line inside the injected-context block (stripped from rendered history) telling it the turn is unattended, that nobody is watching, and not to ask questions or wait for approvals.
 - Permission mode for these turns is `bypass`: an escalation would be auto-denied ("Scheduled runs cannot wait for interactive approval"), which silently broke any automation needing network access or a first-time write. Deny rules still apply.
 
+**Injected turns (origin)**
+
+Turns the engine writes into a chat are tagged with who wrote them, persisted in `ChatInfo.user_turn_origin` (`{"<turn_index>": origin}`) and rolled back with the other per-turn records when Stop cancels an unrun prompt. Values: `background_run`, `cli_task_wake`, `schedule`, `task_delegation`, `task_resume`, `webhook`, `update_task`.
+- WS `user_echo` carries optional `origin` (also on a queued wake when it flushes as its own turn); `GET /api/chats/{chat_id}/messages` sets `origin` on the user entry. Absent = typed by the person. `unattended` and `steered` are unchanged and independent.
+- The PWA draws these turns as a collapsed notice card instead of a user bubble. Background-run and lost-CLI-task wakes recorded before this field existed are recognised by their fixed `[Ciaobot] …` first line.
+
 **Automation banner**
 
 The PWA shows a banner at the top of a chat when an automation is bound to it. A project-bound automation is 1:many (it spawns a new chat each run), so the chat carries a durable backlink: `ChatInfo.schedule_id` and `ChatInfo.schedule_title`, stamped in `prepare_schedule_chat` for both the project (new chat) and fixed-chat (`web_chat_id`) branches and included in every chat object via `to_dict()`. The banner filters `GET /api/schedules` where `s.schedule_id === chat.schedule_id` OR `s.web_chat_id === chat.chat_id` (the second arm covers every fixed-chat automation, including the interval entries that replaced loops). Each row links to `/schedules/<id>` (Manage) and offers Pause/Resume (`PATCH {"enabled": bool}`) and Run now (`POST /api/schedule-run/{schedule_id}`). Existing chats predating the field stay empty-string and render no banner.

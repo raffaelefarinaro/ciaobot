@@ -222,7 +222,7 @@ async def test_an_accepted_receipt_launches_one_chat_in_its_pinned_project(
     # ...started with no permission escalation. `unattended=True` is what
     # `_effective_mode_for_chat` turns into `bypass`, and this is the whole
     # reason the flag is not named anywhere in the dispatcher.
-    assert pcm.started[0][1] == {}
+    assert pcm.started[0][1] == {"origin": "webhook"}
     assert "unattended" not in json.dumps(pcm.started[0][1])
 
     # The journal says the same thing, in the order it says it: accepted first,
@@ -523,7 +523,7 @@ async def test_no_sender_input_reaches_model_or_permission_selection(
     # No mode either: the chat takes the operator's new-chat default, and the
     # sender's `bypass` did not reach anything.
     assert pcm.created[0]["mode"] is None
-    assert pcm.started[0][1] == {}
+    assert pcm.started[0][1] == {"origin": "webhook"}
 
     # The payload is quoted as data, after the trigger's instructions, inside a
     # fence it cannot close itself.

@@ -2447,6 +2447,24 @@ describe('chat closing', () => {
 })
 
 describe('queued message replay handling', () => {
+  test('user_echo carries origin onto the pushed bubble', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-origin'
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: '[Ciaobot] 1 background run finished.',
+        turn_index: 0,
+        origin: 'background_run',
+      }),
+    })
+
+    const user = (store.messages[chatId] || []).find(m => m.role === 'user')
+    expect(user?.origin).toBe('background_run')
+  })
+
   test('keeps later queued messages visible when the first follow-up starts', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'

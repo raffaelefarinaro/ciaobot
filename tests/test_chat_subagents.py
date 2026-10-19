@@ -741,11 +741,11 @@ async def test_watcher_wakes_chat_when_cli_owning_a_monitor_task_is_gone(
     )
     monkeypatch.setattr(pcm, "_cli_owner_alive", lambda chat_id: False)
 
-    wakes: list[tuple[object, str, int]] = []
+    wakes: list[tuple[object, str, int, str]] = []
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count, origin)) or "started",
     )
 
     ticks = {"n": 0}
@@ -763,12 +763,13 @@ async def test_watcher_wakes_chat_when_cli_owning_a_monitor_task_is_gone(
         pass
 
     assert len(wakes) == 1
-    _parent, prompt, count = wakes[0]
+    _parent, prompt, count, origin = wakes[0]
     assert count == 1
     assert "bl7dzu4ku" in prompt
     assert "Monitor" in prompt
     assert "ciao run start" in prompt
     assert "tail -f /tmp/adoption_2026-08.log" in prompt
+    assert origin == "cli_task_wake"
 
 
 async def test_watcher_does_not_wake_while_cli_is_alive(
@@ -796,7 +797,7 @@ async def test_watcher_does_not_wake_while_cli_is_alive(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     ticks = {"n": 0}
@@ -844,7 +845,7 @@ async def test_watcher_does_not_wake_for_completed_task(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
@@ -877,7 +878,7 @@ async def test_watcher_grace_needs_two_disconnected_ticks(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     # First tick sees the CLI gone, later ticks see it back (a normal
@@ -930,7 +931,7 @@ async def test_agent_badge_unchanged_with_tasks_tracked(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     published: list[dict] = []
@@ -985,7 +986,7 @@ async def test_sweep_wakes_chat_with_running_cli_task_after_restart(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     async def fake_sleep(seconds: float) -> None:
@@ -1052,7 +1053,7 @@ async def test_sweep_skips_task_already_woken(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     assert pcm.sweep_orphaned_cli_tasks() == 0
@@ -1089,7 +1090,7 @@ async def test_sweep_skips_archived_and_non_claude_chats(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     assert pcm.sweep_orphaned_cli_tasks() == 0
@@ -1125,7 +1126,7 @@ async def test_sweep_skips_chats_idle_for_more_than_a_week(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     assert pcm.sweep_orphaned_cli_tasks() == 0
@@ -1159,7 +1160,7 @@ async def test_sweep_wakes_recently_active_chat(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     async def fake_sleep(seconds: float) -> None:
@@ -1205,7 +1206,7 @@ async def test_task_only_watcher_exits_on_restart_drain(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     async def fail_sleep(seconds: float) -> None:
@@ -1255,7 +1256,7 @@ async def test_cancelled_drain_wakes_dead_cli_task(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     pcm.begin_restart_drain()
@@ -1308,7 +1309,7 @@ async def test_cancelled_drain_does_not_wake_live_cli_owner(
     monkeypatch.setattr(
         pcm,
         "_deliver_wake",
-        lambda parent, prompt, *, count: wakes.append((parent, prompt, count)) or "started",
+        lambda parent, prompt, *, count, origin="": wakes.append((parent, prompt, count)) or "started",
     )
 
     pcm.begin_restart_drain()
@@ -1345,7 +1346,7 @@ async def test_failed_wake_is_not_rearmed(tmp_path: Path, monkeypatch) -> None:
 
     calls: list[tuple[object, str, int]] = []
 
-    def failing_wake(parent, prompt, *, count):
+    def failing_wake(parent, prompt, *, count, origin=""):
         calls.append((parent, prompt, count))
         # Deliberately writes nothing to the JSONL: the wake turn never
         # persists, so nothing marks the task lost.

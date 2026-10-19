@@ -69,6 +69,7 @@ def edit_pending_list(
         if item.get("id") == entry_id:
             item["text"] = text
             item["images"] = list(images or [])
+            item.pop("origin", None)
             return True
     return False
 
@@ -83,6 +84,13 @@ def remove_pending_list(items: list[dict], entry_id: str) -> bool:
 
 
 QUEUE_DELIVERIES = frozenset({"queue", "steer"})
+#: Who the engine wrote an injected user turn for. Recorded per turn in
+#: ``ChatInfo.user_turn_origin`` and sent on ``user_echo`` / ``/messages`` so the
+#: PWA draws a notice card instead of a user bubble. Empty string = typed by the person.
+TURN_ORIGINS = frozenset({
+    "background_run", "cli_task_wake", "schedule", "task_delegation",
+    "task_resume", "webhook", "update_task",
+})
 # ``steer_id`` of an entry handed to ``steer_turn`` whose delivery id is not
 # known yet. It locks the entry (no edit, remove or re-dispatch) meanwhile.
 STEER_DISPATCHING = "dispatching"
@@ -94,11 +102,14 @@ def _flushed_entry(entry: dict) -> dict:
     Anything leaving the live queue is a plain follow-up. In-flight steer state
     never outlives the live queue (``_fallback_steers`` reverts it first).
     """
-    return {
+    flushed = {
         "id": entry.get("id", ""),
         "text": entry.get("text", ""),
         "images": list(entry.get("images") or []),
     }
+    if entry.get("origin"):
+        flushed["origin"] = str(entry["origin"])
+    return flushed
 
 
 def public_queue(entries: list[dict], waiting: list[dict] | None = None) -> list[dict]:
@@ -743,6 +754,7 @@ class ChatStream:
         images: list[str] | None = None,
         entry_id: str | None = None,
         delivery: str = "queue",
+        origin: str = "",
     ) -> str:
         """Queue a user message to flush after this stream finishes.
 
@@ -756,13 +768,16 @@ class ChatStream:
         """
         self._pending_id_seq += 1
         resolved_id = entry_id or f"q-{self._pending_id_seq}-{uuid.uuid4().hex[:8]}"
-        self._pending.append({
+        entry: dict = {
             "id": resolved_id,
             "text": text,
             "images": list(images or []),
             "delivery": delivery,
             "steer_id": "",
-        })
+        }
+        if origin:
+            entry["origin"] = origin
+        self._pending.append(entry)
         return resolved_id
 
     def drain_one(self) -> dict | None:
@@ -807,16 +822,18 @@ class ChatStream:
 
         They were queued earlier, so list order puts them first.
         """
-        adopted = [
-            {
+        adopted: list[dict] = []
+        for entry in entries:
+            d: dict = {
                 "id": entry.get("id", ""),
                 "text": entry.get("text", ""),
                 "images": list(entry.get("images") or []),
                 "delivery": delivery,
                 "steer_id": "",
             }
-            for entry in entries
-        ]
+            if entry.get("origin"):
+                d["origin"] = entry["origin"]
+            adopted.append(d)
         self._pending = [*adopted, *self._pending]
 
     def set_delivery(self, entry_ids: list[str], delivery: str) -> bool:

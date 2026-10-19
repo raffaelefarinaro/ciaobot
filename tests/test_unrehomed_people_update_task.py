@@ -1219,5 +1219,5 @@ class _FakeChatManager:
     def get_chat(self, chat_id: str) -> _Chat | None:
         return self.chats.get(chat_id)
 
-    def start_stream(self, chat_id: str, prompt: str) -> None:
+    def start_stream(self, chat_id: str, prompt: str, *, origin: str = "") -> None:
         self.dispatched.append((chat_id, prompt))

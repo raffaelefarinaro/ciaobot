@@ -1067,6 +1067,7 @@ class ChatStreaming:
                     break
 
                 combined_text = next_pending.get("text", "").strip()
+                turn_origin = str(next_pending.get("origin") or "")
                 merged_image_refs: list[str] = list(next_pending.get("images") or [])
                 merged_images: list[ImageAttachment] = []
                 for ref in merged_image_refs:
@@ -1107,6 +1108,8 @@ class ChatStreaming:
                     chat_meta2.user_turn_timings[str(turn_index2)] = {
                         "sent_at": sent_at_iso2,
                     }
+                    if turn_origin:
+                        chat_meta2.user_turn_origin[str(turn_index2)] = turn_origin
                     self.start_turn_perf(chat_id, turn_index2)
                     self._host._save()
 
@@ -1120,6 +1123,8 @@ class ChatStreaming:
                     followup_echo["turn_index"] = turn_index2
                 if sent_at_iso2:
                     followup_echo["sent_at"] = sent_at_iso2
+                if turn_origin:
+                    followup_echo["origin"] = turn_origin
                 stream.publish(followup_echo)
 
                 current_prompt = combined_text

@@ -5,7 +5,7 @@ decisions only the service can make, and the four properties the plan binds:
 
 - **No implicit bypass.** Delegation calls ``pcm.start_stream(chat_id, prompt)``
   and never names ``unattended``. The recording fake asserts the call carries
-  *exactly* chat and prompt — so an approval card the delegated turn raises is an
+  *exactly* chat, prompt and its ``origin`` — so an approval card the delegated turn raises is an
   ordinary Needs-you card, and a later "just this once" cannot add the flag
   quietly.
 - **Durable before the side effect.** The attempt and the task's linkage are both
@@ -490,10 +490,12 @@ async def test_start_stream_is_called_with_no_unattended_and_nothing_else(
     _delegate(plane, task)
 
     assert len(pcm.start_stream_kwargs) == 1
-    assert pcm.start_stream_kwargs[0] == {"args": ()}, pcm.start_stream_kwargs
-    assert [call for call in pcm.calls if call[0] == "start_stream"][0][2] == {}, (
-        "start_stream was given keyword arguments"
+    assert pcm.start_stream_kwargs[0] == {"args": (), "origin": "task_delegation"}, (
+        pcm.start_stream_kwargs
     )
+    assert [call for call in pcm.calls if call[0] == "start_stream"][0][2] == {
+        "origin": "task_delegation"
+    }, "start_stream was given keyword arguments other than origin"
 
 
 async def test_the_prompt_is_built_from_the_record_and_carries_no_caller_text(
@@ -898,7 +900,7 @@ async def test_an_interrupted_attempt_is_resumable_in_its_own_chat(
     assert len(_creates(pcm)) == 2
     assert len(_starts(pcm)) == 3
     # And the resumed turn is ordinary too: no `unattended` on it either.
-    assert pcm.start_stream_kwargs[-1] == {"args": ()}
+    assert pcm.start_stream_kwargs[-1] == {"args": (), "origin": "task_resume"}
 
 
 async def test_an_unknown_attempt_is_not_found_and_an_unknown_verb_is_invalid(

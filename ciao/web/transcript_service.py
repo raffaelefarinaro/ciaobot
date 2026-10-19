@@ -685,7 +685,7 @@ def _render_opencode_thread(
     ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
     payload; each message is ``{"info": {role, ...}, "parts": [...]}``.
 
-    ``metadata`` overlays ``chat``'s per-turn images/timings/unattended flags
+    ``metadata`` overlays ``chat``'s per-turn images/timings/unattended/origin flags
     onto the rows. Pass ``False`` when ``thread`` is a *child* session: its
     turn numbering restarts at 0, so the parent chat's turn metadata does not
     apply to it.
@@ -754,6 +754,9 @@ def _render_opencode_thread(
                     entry["steered"] = True
                 elif chat.user_turn_unattended.get(str(user_idx)):
                     entry["unattended"] = True
+                origin = chat.user_turn_origin.get(str(user_idx))
+                if origin:
+                    entry["origin"] = origin
             result.append(entry)
             user_idx += 1
             continue
@@ -1392,6 +1395,9 @@ async def _assemble_chat_messages(
                 entry["steered"] = True
             elif chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
                 entry["unattended"] = True
+            origin = chat.user_turn_origin.get(str(user_idx)) or chat.user_turn_origin.get(user_idx)
+            if origin:
+                entry["origin"] = origin
             user_idx += 1
         result.append(entry)
     # Stitch the durable transcript's per-turn metadata (token usage with the

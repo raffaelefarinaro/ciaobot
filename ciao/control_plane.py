@@ -4058,7 +4058,7 @@ class CiaoControlPlane:
             workspace,
             lambda store: store.bind_revision(attempt.attempt_id, linked.revision),
         )
-        stream, refusal = self._launch_turn(chat.chat_id, prompt)
+        stream, refusal = self._launch_turn(chat.chat_id, prompt, origin="task_delegation")
         if stream is not None:
             self._note_updates_seen(workspace, attempt.attempt_id, document.body)
         if stream is None:
@@ -4270,7 +4270,7 @@ class CiaoControlPlane:
         except Exception:  # noqa: BLE001 — an archive must never fail on this
             logger.exception("delegation: could not settle the attempt for %s chat %s", how, chat_id)
 
-    def _launch_turn(self, chat_id: str, prompt: str) -> tuple[Any, str]:
+    def _launch_turn(self, chat_id: str, prompt: str, *, origin: str = "") -> tuple[Any, str]:
         """``start_stream`` with the default attendance: the stream, or ``(None, why)``.
 
         The single call site for a delegated turn, and the reason this block is
@@ -4278,14 +4278,14 @@ class CiaoControlPlane:
         ``ProjectChatManager._effective_mode_for_chat`` cannot force ``bypass`` and
         an approval card raised by the turn surfaces as an ordinary Needs-you card.
         The recording fake in ``tests/test_task_delegation.py`` asserts the kwargs
-        are empty, so a later "just this once" cannot add the flag quietly.
+        are exactly ``origin``, so a later "just this once" cannot add the flag quietly.
 
         The refusal's own text is returned rather than swallowed, because it is what
         the ``interrupted`` record's detail has to carry: "the turn could not be
         started" on its own tells the operator nothing about which turn or why.
         """
         try:
-            return self.pcm.start_stream(chat_id, prompt), ""
+            return self.pcm.start_stream(chat_id, prompt, origin=origin), ""
         except Exception as exc:  # noqa: BLE001 — a failed launch is an outcome
             logger.exception("delegation: could not start the turn in chat %s", chat_id)
             return None, str(exc) or type(exc).__name__
@@ -4973,7 +4973,7 @@ class CiaoControlPlane:
         running = self._attempt_call(
             workspace, lambda store: store.reopen(attempt.attempt_id)
         )
-        stream, refusal = self._launch_turn(attempt.chat_id, prompt)
+        stream, refusal = self._launch_turn(attempt.chat_id, prompt, origin="task_resume")
         if stream is None:
             self._settle_interrupted(
                 workspace,

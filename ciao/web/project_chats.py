@@ -154,6 +154,7 @@ from ciao.web import chat_service
 from ciao.web.chat_broker import (
     QUEUE_DELIVERIES,
     STEER_DISPATCHING,
+    TURN_ORIGINS,
     ChatStream,
     ChatStreamBroker,
     EventsHub,
@@ -537,6 +538,11 @@ class ChatInfo:
     # turn (#1392). The provider transcripts do not say so, so history reads
     # this back to mark the bubble. Absent key = an ordinary turn.
     user_turn_steered: dict = field(default_factory=dict)
+    # Map of user-turn index (as str) → TURN_ORIGINS value for turns the engine
+    # wrote (wakes, automation runs, task resumes, webhooks, update tasks). The
+    # provider transcripts store them as ordinary user messages; history reads
+    # this back so the PWA draws a notice card. Absent key = typed by the person.
+    user_turn_origin: dict = field(default_factory=dict)
     # Relative workspace path to the archived markdown transcript.
     # Set when archive_chat() succeeds; cleared on new_session().
     archive_path: str = ""
@@ -1051,6 +1057,7 @@ class ProjectChatManager:
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 user_turn_steered=dict(cd.get("user_turn_steered", {})),
+                user_turn_origin=dict(cd.get("user_turn_origin", {})),
                 archive_path=cd.get("archive_path", ""),
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
                 retry_prompt=cd.get("retry_prompt", ""),
@@ -1171,6 +1178,7 @@ class ProjectChatManager:
                     "user_turn_timings": c.user_turn_timings,
                     "user_turn_unattended": c.user_turn_unattended,
                     "user_turn_steered": c.user_turn_steered,
+                    "user_turn_origin": c.user_turn_origin,
                     "archive_path": c.archive_path,
                     "retry_status": c.retry_status,
                     "retry_prompt": c.retry_prompt,
@@ -5902,15 +5910,19 @@ class ProjectChatManager:
         images: list[ImageAttachment] | None = None,
         entry_id: str | None = None,
         delivery: str = "queue",
+        origin: str = "",
     ) -> bool:
         """Append a user message to the active stream's pending queue.
 
         ``delivery="steer"`` marks it for injection into the running turn; the
-        caller then awaits ``steer_queue`` to dispatch it.
+        caller then awaits ``steer_queue`` to dispatch it. ``origin`` tags an
+        engine-written message (see ``start_stream``); it rides on the entry.
 
         Returns True if queued, False if there's no active stream (caller
         should fall through to `start_stream`).
         """
+        if origin and origin not in TURN_ORIGINS:
+            raise ValueError(f"unknown turn origin {origin!r}")
         stream = self._broker.get(chat_id)
         if stream is None or stream.background or not stream.accepting_queue:
             # Background drain streams have no drive loop to flush a queue;
@@ -5926,7 +5938,9 @@ class ProjectChatManager:
                 image_refs.append(str(ref))
         if delivery not in QUEUE_DELIVERIES:
             delivery = "queue"
-        resolved_id = stream.enqueue(text, image_refs, entry_id=entry_id, delivery=delivery)
+        resolved_id = stream.enqueue(
+            text, image_refs, entry_id=entry_id, delivery=delivery, origin=origin
+        )
         stream.publish({
             "type": "queued",
             "id": resolved_id,
@@ -6173,6 +6187,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return
+        cancelled_origin = ""
         if turn_index is not None:
             if chat.user_turn_count == turn_index + 1:
                 chat.user_turn_count = turn_index
@@ -6181,6 +6196,7 @@ class ProjectChatManager:
                 chat.user_turn_images.pop(key, None)
                 chat.user_turn_unattended.pop(key, None)
                 chat.user_turn_steered.pop(key, None)
+                cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
                 self._streaming.discard_turn_perf(chat_id, turn_index)
             else:
                 logger.warning(
@@ -6201,6 +6217,8 @@ class ProjectChatManager:
             "text": prompt,
             "images": self._image_refs(images),
         }
+        if cancelled_origin:
+            entry["origin"] = cancelled_origin
         chat.pending_queue = [*chat.pending_queue, entry]
         self._save()
         stream.publish_queue_state(chat.pending_queue)
@@ -7050,6 +7068,7 @@ class ProjectChatManager:
         is_retry: bool = False,
         unattended: bool = False,
         compact: bool = False,
+        origin: str = "",
     ) -> ChatStream:
         """Start (or return the in-flight) ChatStream for this chat.
 
@@ -7064,7 +7083,12 @@ class ProjectChatManager:
 
         ``compact`` starts a context compaction instead of a user turn: it
         takes no user-turn slot, echoes no user bubble and never auto-titles.
+
+        ``origin`` (a ``TURN_ORIGINS`` value) tags a turn the engine wrote, so
+        history and the echo let the PWA draw a notice card, not a user bubble.
         """
+        if origin and origin not in TURN_ORIGINS:
+            raise ValueError(f"unknown turn origin {origin!r}")
         existing = self._broker.get(chat_id)
         if existing is not None and not existing.background:
             logger.debug("Chat %s already has an active stream; reusing", chat_id)
@@ -7182,6 +7206,8 @@ class ProjectChatManager:
                 # this back because the SDK session file has no notion of who
                 # sent a turn.
                 chat_meta.user_turn_unattended[str(turn_index)] = True
+            if origin:
+                chat_meta.user_turn_origin[str(turn_index)] = origin
             self._streaming.start_turn_perf(chat_id, turn_index)
 
         # First buffered event: echo the user prompt so any client subscribing
@@ -7195,6 +7221,8 @@ class ProjectChatManager:
         }
         if unattended:
             echo_payload["unattended"] = True
+        if origin:
+            echo_payload["origin"] = origin
         if turn_index is not None:
             echo_payload["turn_index"] = turn_index
         if sent_at_iso:
@@ -7616,7 +7644,7 @@ class ProjectChatManager:
         return provider_service.cli_connected
 
 
-    def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int) -> str:
+    def _deliver_wake(self, parent: ChatInfo, prompt: str, *, count: int, origin: str) -> str:
         """Deliver one background-run wake turn into *parent* and announce it.
 
         queue_message covers the two live cases in one call: it appends to the
@@ -7625,14 +7653,17 @@ class ProjectChatManager:
         handles the idle case, including a cold chat whose provider session
         died in a restart, since a script can finish hours after the turn that
         launched it.
+
+        ``origin`` tags the turn (``background_run`` / ``cli_task_wake``) so the
+        PWA draws a notice card.
         """
-        if self.queue_message(parent.chat_id, prompt):
+        if self.queue_message(parent.chat_id, prompt, origin=origin):
             delivery = "queued"
         else:
             # Deliberately NOT unattended: that flag forces bypass mode, and a
             # chat waking up to merge branches or act on a finished script
             # should still raise approval cards. The user may well be watching.
-            self.start_stream(parent.chat_id, prompt)
+            self.start_stream(parent.chat_id, prompt, origin=origin)
             delivery = "started"
         self._events.publish({
             "type": "chat_runs_reported",
@@ -7707,7 +7738,7 @@ class ProjectChatManager:
             if parent is None or parent.archived:
                 return
             prompt = self._build_background_wake_prompt(finished)
-            self._deliver_wake(parent, prompt, count=len(finished))
+            self._deliver_wake(parent, prompt, count=len(finished), origin="background_run")
         except RestartDrainingError:
             # The server is draining for restart and providers are already
             # gone, so this wake can never be delivered. Mark its runs so the

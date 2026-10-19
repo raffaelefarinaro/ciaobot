@@ -154,8 +154,8 @@ class WebhookDispatchHost(Protocol):
         a dispatch that tries to pick them.
         """
 
-    def start_stream(self, chat_id: str, prompt: str) -> ChatStream:
-        """Start the turn. No ``unattended``: see the module docstring."""
+    def start_stream(self, chat_id: str, prompt: str, *, origin: str = ...) -> ChatStream:
+        """Start the turn. No ``unattended``: see the module docstring. ``origin`` only tags the turn for history."""
 
 
 class _TargetRefusal(Exception):
@@ -429,7 +429,7 @@ async def _dispatch_claimed(
         # Deliberately not unattended: see the module docstring. A webhook event
         # is not permission to escalate, and an approval card raised here is
         # answered in the ordinary chat like any other.
-        pcm.start_stream(chat.chat_id, prompt)
+        pcm.start_stream(chat.chat_id, prompt, origin="webhook")
     except Exception as exc:  # noqa: BLE001 — any refusal is a failed launch
         return await _settle_failed(
             receiver, receipt.id, f"the turn could not be started ({exc})"
