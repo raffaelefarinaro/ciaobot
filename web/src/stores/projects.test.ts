@@ -7376,6 +7376,16 @@ describe('queue delivery: queue or steer', () => {
     expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['b'])
   })
 
+  it('steered event carries origin onto the message', async () => {
+    const { store, socket } = await setup()
+    store.messages[chatId] = []
+    emit(socket, { type: 'steered', entry_ids: ['w'], text: '[Ciaobot] 1 background run finished.', turn_index: 4, sent_at: '2026-10-19T10:00:00Z', delivery_id: 'd1', origin: 'background_run' })
+    emit(socket, { type: 'steered', entry_ids: ['t'], text: 'typed', turn_index: 5, sent_at: '2026-10-19T10:00:01Z', delivery_id: 'd2' })
+    const msgs = store.messages[chatId] || []
+    expect(msgs.find(m => m.role === 'user' && m.turn_index === 4)).toMatchObject({ steered: true, origin: 'background_run' })
+    expect(msgs.find(m => m.role === 'user' && m.turn_index === 5)?.origin).toBeUndefined()
+  })
+
   it('steer_fallback flips chips to queue and sets a notice', async () => {
     const { store, socket } = await setup()
     emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })

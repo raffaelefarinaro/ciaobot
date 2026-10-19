@@ -315,6 +315,16 @@ describe('ChatPanel aligned layout', () => {
       wrapper.unmount()
     })
 
+    it('draws a steered wake as a card without the steered mark', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: WAKE, timestamp: at, turn_index: 0, origin: 'background_run', steered: true },
+      ])
+      expect(wrapper.getComponent({ name: 'InjectedPromptCard' }).props('prompt').kind).toBe('background_run')
+      expect(wrapper.find('.steered-mark').exists()).toBe(false)
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(0)
+      wrapper.unmount()
+    })
+
     it('draws a legacy background wake without origin as a card', async () => {
       const wrapper = await mountPanel([
         { role: 'user', content: WAKE, timestamp: at, turn_index: 0 },
