@@ -86,7 +86,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ciao.critique import extract_json
 from ciao.import_decouple import (
     EXTERNAL,
     ProvenanceNotExternal,
@@ -94,6 +93,7 @@ from ciao.import_decouple import (
     classify_session,
 )
 from ciao.import_sources.contract import NormalizedMessage, NormalizedSession
+from ciao.jsonio import extract_json
 from ciao.memory_proposals import (
     DESTINATIONS,
     MemoryProposal,

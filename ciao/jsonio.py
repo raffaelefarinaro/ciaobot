@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -34,3 +35,31 @@ def write_private_text(path: Path, text: str) -> None:
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
         f.write(text)
     make_private(path)
+
+
+def extract_json(text: str) -> dict | None:
+    """Return the first JSON object in model text, ignoring fences and prose around it."""
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
+    try:
+        parsed: dict = json.loads(text)
+        return parsed
+    except Exception:
+        pass
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                blob = text[start : i + 1]
+                try:
+                    parsed_blob: dict = json.loads(blob)
+                    return parsed_blob
+                except Exception:
+                    return None
+    return None
