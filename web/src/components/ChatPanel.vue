@@ -6565,7 +6565,6 @@ details[open] > .activity-summary::before {
 }
 
 .composer-model {
-  flex-shrink: 0;
   min-width: 0;
   height: auto;
 }

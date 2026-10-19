@@ -151,22 +151,72 @@ describe('ComposerActivity', () => {
     wrapper.unmount()
   })
 
-  it('folds to glyph and count on a narrow bar', async () => {
+  // The stub reports the width of whatever element is observed; the component
+  // must observe the bar (its parent), not itself.
+  function stubBarWidth(width: number, observed: Element[] = []) {
     vi.stubGlobal('ResizeObserver', class {
       private cb: ResizeObserverCallback
       constructor(cb: ResizeObserverCallback) { this.cb = cb }
-      observe() { this.cb([{ contentRect: { width: 150 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver) }
+      observe(el: Element) {
+        observed.push(el)
+        this.cb([{ contentRect: { width } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver)
+      }
       disconnect() {}
       unobserve() {}
     })
-    const wrapper = mountBar({
-      agentCount: 2,
-      runs: [run('r1', 'one', 1000), run('r2', 'two', 1000), run('r3', 'three', 1000)],
-    })
+  }
+  const threeRuns = () => [run('r1', 'one', 1000), run('r2', 'two', 1000), run('r3', 'three', 1000)]
+
+  it('folds to glyph and count on a narrow bar', async () => {
+    const observed: Element[] = []
+    stubBarWidth(340, observed)
+    const wrapper = mountBar({ agentCount: 2, runs: threeRuns() })
     await nextTick()
+    expect(observed[0]).toBe(wrapper.get('.composer-activity').element.parentElement)
     expect(wrapper.find('.composer-activity-label').exists()).toBe(false)
     expect(wrapper.findAll('.composer-activity-count').map(c => c.text())).toEqual(['2', '3'])
     expect(wrapper.get('.composer-activity-seg--runs').attributes('title')).toBe('3 background runs')
+    expect(wrapper.get('.composer-activity').classes()).toContain('composer-activity--compact')
+    wrapper.unmount()
+  })
+
+  it('keeps the labels on a wide bar', async () => {
+    stubBarWidth(900)
+    const wrapper = mountBar({ agentCount: 2, runs: threeRuns() })
+    await nextTick()
+    expect(wrapper.get('.composer-activity').classes()).not.toContain('composer-activity--compact')
+    expect(wrapper.findAll('.composer-activity-seg--run')).toHaveLength(3)
+    expect(wrapper.get('.composer-activity-seg--agents .composer-activity-label').text()).toBe('2 agents')
+    wrapper.unmount()
+  })
+
+  it('closes without moving focus when the part that opened it goes away', async () => {
+    const wrapper = mountBar({ runs: [run('r1', 'one', 1000), run('r2', 'two', 1000)] })
+    const first = wrapper.findAll('.composer-activity-seg--run')[0]
+    await first.trigger('click')
+    await flushPromises()
+    expect(popover()).not.toBeNull()
+    const other = document.createElement('button')
+    document.body.appendChild(other)
+    other.focus()
+
+    await wrapper.setProps({ runs: [run('r2', 'two', 1000)] })
+    await flushPromises()
+    expect(popover()).toBeNull()
+    expect(document.activeElement).toBe(other)
+    wrapper.unmount()
+  })
+
+  it('leaves Escape alone while the popover is closed', () => {
+    const seen: boolean[] = []
+    const onKey = (e: KeyboardEvent) => seen.push(e.defaultPrevented)
+    window.addEventListener('keydown', onKey)
+    const wrapper = mountBar({ agentCount: 1, agents: [AGENT] })
+    wrapper.get('.composer-activity').element.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    )
+    window.removeEventListener('keydown', onKey)
+    expect(seen).toEqual([false])
     wrapper.unmount()
   })
 

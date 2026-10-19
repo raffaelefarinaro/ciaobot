@@ -150,9 +150,10 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'open-details': [] }>()
 
-// Below this the parts fold to glyph + count. Measured on the cluster, which
-// is whatever the bar has left after the model chip, attach and Send.
-const COMPACT_BELOW_PX = 200
+// Below this composer-bar width the parts fold to glyph + count. The bar is
+// measured, not the cluster: the cluster's own width depends on the mode, which
+// would lock it in compact.
+const COMPACT_BAR_BELOW_PX = 560
 
 const rootEl = ref<HTMLElement | null>(null)
 const compact = ref(false)
@@ -223,16 +224,28 @@ function onInteractOutside(e: CustomEvent<{ originalEvent: Event }>) {
 }
 
 watch(hasActivity, (active) => { if (!active) close(false) })
+
+// The part that opened the popover can vanish (run ended, wide/compact switch,
+// agents gone). Close without moving focus: there is nothing to return it to.
+const openerRendered = computed(() => {
+  const key = openedBy.value
+  if (key === null) return true
+  if (key === 'agents') return props.agentCount > 0
+  if (key === 'runs') return compact.value && props.runs.length > 0
+  return !compact.value && props.runs.some(r => r.run_id === key)
+})
+watch(openerRendered, (ok) => { if (!ok) close(false) })
 watch(() => props.chatId, () => close(false))
 
 let observer: ResizeObserver | null = null
 onMounted(() => {
-  if (typeof ResizeObserver === 'undefined' || !rootEl.value) return
+  const bar = rootEl.value?.parentElement
+  if (typeof ResizeObserver === 'undefined' || !bar) return
   observer = new ResizeObserver(entries => {
     const width = entries[0]?.contentRect.width
-    if (typeof width === 'number') compact.value = width < COMPACT_BELOW_PX
+    if (typeof width === 'number') compact.value = width < COMPACT_BAR_BELOW_PX
   })
-  observer.observe(rootEl.value)
+  observer.observe(bar)
 })
 onBeforeUnmount(() => { observer?.disconnect() })
 </script>
@@ -241,11 +254,15 @@ onBeforeUnmount(() => { observer?.disconnect() })
 .composer-activity {
   position: relative;
   display: flex;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   align-items: center;
   justify-content: flex-end;
   min-width: 0;
 }
+
+/* Compact parts claim their width; the model chip shrinks instead. */
+.composer-activity--compact { flex: 0 0 auto; }
+.composer-activity--compact .composer-activity-segs { overflow: visible; }
 
 .composer-activity-segs {
   display: flex;
