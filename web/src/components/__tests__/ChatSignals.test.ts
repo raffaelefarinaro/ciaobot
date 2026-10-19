@@ -50,7 +50,7 @@ describe('ChatSignals', () => {
     store.projectStreaming = { 'chat-1': true }
     const working = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(working.find('.chat-signal--working').exists()).toBe(true)
-    expect(working.find('.chat-signal--working .activity-spinner').exists()).toBe(true)
+    expect(working.find('.chat-signal--working .activity-glyph--working').exists()).toBe(true)
     expect(working.text()).toBe('')
     expect(working.find('.chat-signal--working').attributes('aria-label')).toBe('Working')
   })
@@ -64,7 +64,7 @@ describe('ChatSignals', () => {
     store.backgroundRuns = { 'chat-1': [run('r1', 'Clone rizzo-flow')] }
     const one = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
     expect(one.find('.chat-signal--runs').exists()).toBe(true)
-    expect(one.find('.chat-signal--runs .activity-spinner').exists()).toBe(true)
+    expect(one.find('.chat-signal--runs .activity-glyph--run').exists()).toBe(true)
     expect(one.find('.chat-signal--runs').attributes('aria-label')).toBe('Background run: Clone rizzo-flow')
     // One run needs no number, the same rule the agents chip follows.
     expect(one.find('.chat-signal-count').exists()).toBe(false)
@@ -75,15 +75,30 @@ describe('ChatSignals', () => {
     expect(many.find('.chat-signal--runs').attributes('aria-label')).toBe('3 background runs')
   })
 
-  it('prefers the agents chip over runs when a chat has both', () => {
-    // An agent has a transcript to open; a run has only a count and a log, so
-    // the agent is the more useful thing to point at.
+  it('shows the run marker beside the agents chip when a chat has both', () => {
     const { store } = seed()
     store.backgroundAgents = { 'chat-1': 1 }
     store.backgroundRuns = { 'chat-1': [run('r1'), run('r2')] }
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'card' } })
-    expect(wrapper.find('.chat-signal--agents').exists()).toBe(true)
-    expect(wrapper.find('.chat-signal--runs').exists()).toBe(false)
+    expect(wrapper.find('.chat-signal--agents .activity-glyph--agent').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--runs').exists()).toBe(true)
+    expect(wrapper.find('.chat-signal--runs .chat-signal-count').text()).toBe('2')
+  })
+
+  it('keeps the run marker beside needs-you and working', () => {
+    const { store } = seed()
+    store.backgroundRuns = { 'chat-1': [run('r1', 'Clone rizzo-flow')] }
+    store.chats[0].pending_question = JSON.stringify({ questions: [{ question: 'Which option?' }] })
+    const needs = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(needs.find('.chat-signal--needs').exists()).toBe(true)
+    expect(needs.find('.chat-signal--runs').exists()).toBe(true)
+
+    store.chats[0].pending_question = undefined
+    store.projectStreaming = { 'chat-1': true }
+    const working = mount(ChatSignals, { props: { chatId: 'chat-1', density: 'row' } })
+    expect(working.find('.chat-signal--working').exists()).toBe(true)
+    expect(working.find('.chat-signal--runs').exists()).toBe(true)
+    expect(working.find('.chat-signal--runs').attributes('aria-label')).toBe('Background run: Clone rizzo-flow')
   })
 
   it('shows a count only when more than one agent is running', () => {
@@ -223,7 +238,7 @@ describe('ChatSignals', () => {
     const { store } = seed()
     store.projectStreaming = { 'chat-1': true }
     const wrapper = mount(ChatSignals, { props: { chatId: 'chat-1' } })
-    // .activity-spinner is the element the prefers-reduced-motion block targets.
-    expect(wrapper.find('.activity-spinner').exists()).toBe(true)
+    // .activity-glyph--working is the element ActivityGlyph's prefers-reduced-motion block targets.
+    expect(wrapper.find('.activity-glyph--working').exists()).toBe(true)
   })
 })

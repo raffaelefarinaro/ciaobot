@@ -824,7 +824,7 @@ describe('ProjectSidebar accessible context menus', () => {
     const tags = wrapper.findAll('.chat-repo-tag')
     expect(tags).toHaveLength(1)
     expect(tags[0].text()).toBe('⑂ feat-x')
-    expect(tags[0].attributes('title')).toBe('Worktree: /r/app-wt')
+    expect(tags[0].attributes('title')).toBe('Worktree: /r/app-wt (code mode off)')
     wrapper.unmount()
   })
 
@@ -843,5 +843,62 @@ describe('ProjectSidebar accessible context menus', () => {
     await flushPromises()
     expect(unlinked.find('.chat-code-tag').exists()).toBe(false)
     unlinked.unmount()
+  })
+
+  function worktreeChat(codeMode: boolean) {
+    const store = useProjectStore()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
+    store.chats[0].code_mode = codeMode
+    store.chats[0].repo_location = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
+  }
+
+  it('lets the branch chip stand in for code when both apply', async () => {
+    worktreeChat(true)
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
+    const chip = wrapper.get('.chat-repo-tag')
+    expect(chip.attributes('title')).toBe('Code mode · Worktree: /r/app-wt')
+    expect(chip.classes()).not.toContain('chat-repo-tag--code-off')
+    wrapper.unmount()
+  })
+
+  it('dims the branch chip of a chat whose code mode is off', async () => {
+    worktreeChat(false)
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    expect(wrapper.get('.chat-repo-tag').classes()).toContain('chat-repo-tag--code-off')
+    wrapper.unmount()
+  })
+
+  it('rolls background runs up onto a collapsed project header', async () => {
+    const store = useProjectStore()
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+    await nextTick()
+    const projectId = store.chats[0].project_id
+    const group = () => wrapper.findAll('.project-group').find(g => g.find('.project-name').text().includes(
+      store.projects.find(p => p.project_id === projectId)!.name,
+    ))!
+    const chevron = () => group().get('.project-icon')
+    store.backgroundRuns = {
+      [store.chats[0].chat_id]: [{ run_id: 'r1', label: '', cmd: ['uv', 'sync'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null }],
+    }
+    if (chevron().attributes('aria-expanded') !== 'true') await chevron().trigger('click')
+    expect(group().find('.project-run-rollup').exists()).toBe(false)
+    await chevron().trigger('click')
+    const rollup = group().get('.project-run-rollup')
+    expect(rollup.attributes('aria-label')).toBe('1 background run in this project')
+    expect(rollup.find('.activity-glyph--run').exists()).toBe(true)
+    wrapper.unmount()
   })
 })

@@ -3,6 +3,7 @@ import {
   chatLocationDiffers,
   chatRepoTag,
   repoChip,
+  sidebarBranchChip,
 } from './repoLocation'
 import type { ProjectRepo, RepoLocation } from './types'
 
@@ -57,5 +58,17 @@ describe('repoLocation', () => {
     const chip = repoChip({ ...repo, missing: true }, {})
     expect(chip).toMatchObject({ missing: true, dirty: null, name: 'app' })
     expect(repoChip(null, here)).toBeNull()
+  })
+
+  it('folds code mode into the sidebar branch chip', () => {
+    const wt = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
+    const on = sidebarBranchChip(repo, wt, true)
+    expect(on?.title).toBe('Code mode · Worktree: /r/app-wt')
+    expect(on?.codeOff).toBe(false)
+    const off = sidebarBranchChip(repo, wt, false)
+    expect(off?.title).toBe('Worktree: /r/app-wt (code mode off)')
+    expect(off?.codeOff).toBe(true)
+    expect(sidebarBranchChip(repo, here, true)).toBeNull()
+    expect(sidebarBranchChip(repo, { ...wt, exists: false }, true)?.removed).toBe(true)
   })
 })
