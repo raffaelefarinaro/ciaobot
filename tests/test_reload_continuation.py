@@ -119,3 +119,25 @@ async def test_code_mode_and_reload_together_run_one_hidden_turn(tmp_path: Path)
     _, _, _, turn_calls, _, _ = await _run(tmp_path, first)
     assert len(turn_calls) == 2
     assert RELOAD_CONTINUE_PROMPT not in turn_calls
+
+
+async def test_a_stop_during_the_reload_runs_no_hidden_turn(tmp_path: Path) -> None:
+    """Stop pressed while the provider disconnects: the between-turns stop check (#1109) runs no hidden turn."""
+    holder: dict = {}
+
+    def first(pcm, cid):
+        _arm(pcm, cid)
+        stream = pcm.get_active_stream(cid)
+        holder["stream"] = stream
+        provider = pcm._providers[cid]
+
+        async def stopping_disconnect() -> None:
+            provider.disconnected = True
+            stream.user_stopped = True
+
+        provider.disconnect = stopping_disconnect
+
+    _, _, provider, turn_calls, _, _ = await _run(tmp_path, first)
+    assert turn_calls == ["initial"]
+    assert provider.disconnected is True
+    assert holder["stream"].user_stopped is False
