@@ -419,6 +419,7 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         ),
         (["chat", "continue", "--chat", "c3"], ("chat_continue", {"chat_id": "c3"})),
         (["chat", "retry"], ("chat_retry", {"chat_id": "", "action": "try_now", "prompt": ""})),
+        (["chat", "retry", "--action", "set", "--kind", "network"], ("chat_retry", {"chat_id": "", "action": "set", "prompt": "", "kind": "network"})),
         (["chat", "update", "--model", "opus", "--thinking-level", "high"], ("chat_update", {"chat_id": "", "model": "opus", "thinking_level": "high"})),
         (["chat", "handover", "--provider", "opencode"], ("chat_handover", {"chat_id": "", "provider": "opencode", "model": ""})),
         (["project", "list", "--include-completed"], ("projects_list", {"include_completed": True})),

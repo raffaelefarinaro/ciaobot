@@ -960,3 +960,20 @@ async def test_opencode_effective_model_is_persisted_for_model_less_chat(
 
     assert chat.model == "opencode/big-pickle"
     assert _persisted_chats(tmp_path)[chat.chat_id]["model"] == "opencode/big-pickle"
+
+
+async def test_network_retry_kind_and_interval_survive_reload(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Net", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    assert manager.arm_network_retry(chat.chat_id, "job") == "armed"
+
+    second = _make_manager(tmp_path)
+    reloaded = second.get_chat(chat.chat_id)
+
+    assert reloaded is not None
+    assert reloaded.retry_kind == "network"
+    assert reloaded.retry_interval_seconds == 600
+    assert reloaded.retry_status == "pending"
+    manager.stop_chat_retry(chat.chat_id)
+    second.stop_chat_retry(chat.chat_id)

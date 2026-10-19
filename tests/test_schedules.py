@@ -1307,6 +1307,59 @@ async def test_catch_up_recovers_an_interrupted_weekly_run(store: ScheduleStore)
     assert dispatched == [entry.schedule_id]
 
 
+def test_enrich_schedule_does_not_flag_a_retrying_run_as_missed():
+    from ciao.web.routes_api import _enrich_schedule
+
+    enriched = _enrich_schedule(
+        _interrupted_entry(last_status="retrying"), now=_AFTER_THE_SLOT
+    )
+
+    assert enriched["missed"] is False
+
+
+def test_settle_retrying_runs_only_touches_this_chats_retrying_rows(
+    store: ScheduleStore,
+):
+    from ciao.schedules import settle_retrying_runs
+
+    rows = []
+    for status, chat in (("retrying", "chat-a"), ("retrying", "chat-b"), ("skipped", "chat-a")):
+        e = store.create(
+            daily_time_utc="08:00", prompt=f"p {status} {chat}", model="sonnet",
+            mode="bypass", chat_id=0, frequency="daily", timezone_name="UTC",
+        )
+        e.last_status = status
+        e.last_run_chat_id = chat
+        e.last_dispatch_id = "2026-06-15#abc"
+        store.replace(e)
+        rows.append(e.schedule_id)
+
+    assert settle_retrying_runs(store, "chat-a", "ok") is True
+
+    got = [store.get(i) for i in rows]
+    assert [g.last_status for g in got] == ["ok", "retrying", "skipped"]
+    assert got[0].last_completed_on == "2026-06-15"
+
+
+def test_archiving_the_run_chat_fails_a_retrying_run(store: ScheduleStore):
+    from ciao.schedules import settle_runs_for_archived_chat
+
+    ids = []
+    for status in ("retrying", "skipped"):
+        e = store.create(
+            daily_time_utc="08:00", prompt=f"p {status}", model="sonnet",
+            mode="bypass", chat_id=0, frequency="daily", timezone_name="UTC",
+        )
+        e.last_status = status
+        e.last_run_chat_id = "chat-x"
+        store.replace(e)
+        ids.append(e.schedule_id)
+
+    assert settle_runs_for_archived_chat(store, "chat-x") is True
+
+    assert [store.get(i).last_status for i in ids] == ["error", "ok"]
+
+
 async def test_catch_up_never_refires_a_completed_run(store: ScheduleStore):
     """The double-fire guard. A run that reached a clean terminal state — or
     one that is only waiting on the user or the provider — is served, and no
@@ -1314,7 +1367,7 @@ async def test_catch_up_never_refires_a_completed_run(store: ScheduleStore):
     restart that stamp can only belong to a turn that never finished, which
     `test_restart_turns_an_unfinished_run_into_a_recoverable_miss` covers.)
     """
-    for status in ("ok", "skipped", ""):
+    for status in ("ok", "skipped", "retrying", ""):
         store_dir = store  # one store per status keeps the ids distinct
         entry = store_dir.create(
             daily_time_utc="08:00",

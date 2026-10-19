@@ -213,6 +213,7 @@ class ChatStreamingHost(Protocol):
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None: ...
 
     def _clear_chat_retry(self, chat: ChatInfo, *, status: str = "") -> None: ...
+    def _settle_schedule_retry(self, chat_id: str, *, succeeded: bool) -> None: ...
 
     @staticmethod
     def _result_snippet(text: str, limit: int = 280) -> str: ...
@@ -1205,7 +1206,7 @@ class ChatStreaming:
                 snippet = self._host._result_snippet(last_assistant_text)
                 chat_now = self._host._chats.get(chat_id)
                 if chat_now is not None:
-                    if chat_now.retry_status == "pending" and is_retry:
+                    if chat_now.retry_status == "pending" and is_retry and not stream.network_retry_armed:
                         self._host._clear_chat_retry(chat_now)
                     chat_now.last_activity_at = chat_service._now_iso()
                     chat_now.last_snippet = snippet
@@ -1229,6 +1230,10 @@ class ChatStreaming:
                         self._host._maybe_archive_proposal_helper(chat_id),
                         f"archive-proposal-helper-{chat_id}",
                     )
+            if stream.network_retry_turn and not began_compact:
+                self._host._settle_schedule_retry(
+                    chat_id, succeeded=not had_error and bool(last_assistant_text.strip())
+                )
             # A memory pass settles on EVERY terminal turn, not only a clean one.
             # An errored or empty pass is exactly what `attention` is for: left
             # `running`, it holds its workspace slot forever and every pass

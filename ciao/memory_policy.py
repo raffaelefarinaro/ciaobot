@@ -309,6 +309,10 @@ UNATTENDED_CAPSULE_GUIDANCE = (
     "editing application source code, hand-editing `.runtime/` state files, and "
     "public or destructive git actions. Never print secret values (env files, "
     "tokens, provider configs) into the conversation."
+    " If the job cannot finish because an external service or the network is "
+    "unreachable (timeouts, DNS or connection errors), change nothing, run "
+    "`ciao chat retry --action set --kind network` so Ciaobot re-runs this prompt "
+    "later, and end the turn with one line saying so."
 )
 """The unattended marker the context capsule injects, in one place.
 
