@@ -2364,7 +2364,7 @@ function isInteractiveTraceChild(target: EventTarget | null): boolean {
   if (target.closest('a')) return true
   if (target.closest('button, [role="button"]')) return true
   if (target.closest('.file-card, .answer-outputs')) return true
-  if (target.closest('.subagent-panel')) return true
+  if (target.closest('.subagent-rows')) return true
   if (target.closest('code, pre, kbd')) return true
   return false
 }

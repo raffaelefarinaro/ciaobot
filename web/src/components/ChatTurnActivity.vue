@@ -164,7 +164,7 @@ defineProps<{
   outputsId: string
   /** Whether the body is expanded. Owned by ChatPanel. */
   open: boolean
-  /** Chat the turn belongs to; SubagentPanel needs it to fetch transcripts. */
+  /** Chat the turn belongs to; links each subagent row to its transcript. */
   chatId: string
   /** Shared "show thinking" preference. Owned by ChatPanel. */
   thinkingExpanded: boolean
