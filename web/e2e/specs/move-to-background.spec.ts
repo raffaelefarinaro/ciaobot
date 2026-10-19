@@ -78,6 +78,11 @@ async function expectTapTargetBesideStop(page: Page) {
   const chipMiddle = chip!.y + chip!.height / 2
   expect(chipMiddle).toBeGreaterThan(stop!.y)
   expect(chipMiddle).toBeLessThan(stop!.y + stop!.height)
+  // ...and Stop against the bar's right edge. The compact activity cluster is
+  // the bar's spacer; when it stopped growing, chip and Stop slid left to sit
+  // beside the attach button.
+  const bar = await page.locator('.composer-bar').boundingBox()
+  expect(bar!.x + bar!.width - (stop!.x + stop!.width)).toBeLessThanOrEqual(4)
 }
 
 /**
@@ -353,6 +358,23 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
 
   test(`a call that ends while the move is out does not steal ${DRAFT_FOCUS.what}`, async ({ page }) => {
     await expectMoveLeavesFocusAlone(page, DRAFT_FOCUS)
+  })
+})
+
+test.describe('move a running call to the background (#1413), in a narrow window', () => {
+  // A composer bar under 560px with room to spare: the compact activity cluster
+  // is the bar's only spacer here, so this is where Send drifted left.
+  test.use({ viewport: { width: 560, height: 900 } })
+
+  test('the chip and Stop stay against the bar\'s right edge', async ({ page }) => {
+    await boot(page, CHAT_PATH, COMPOSER)
+    await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', true)])
+    await expect(page.locator(CHIP)).toBeVisible({ timeout: 8_000 })
+
+    const bar = await page.locator('.composer-bar').boundingBox()
+    expect(bar!.width).toBeLessThan(560)
+    await expectTapTargetBesideStop(page)
+    await page.screenshot({ path: 'test-results/move-bg-narrow.png' })
   })
 })
 

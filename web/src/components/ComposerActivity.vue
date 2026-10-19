@@ -260,8 +260,9 @@ onBeforeUnmount(() => { observer?.disconnect() })
   min-width: 0;
 }
 
-/* Compact parts claim their width; the model chip shrinks instead. */
-.composer-activity--compact { flex: 0 0 auto; }
+/* Compact parts claim their width; the model chip shrinks instead. The cluster
+   still grows: it is the bar's spacer, which keeps Send against the right edge. */
+.composer-activity--compact { flex: 1 0 auto; }
 .composer-activity--compact .composer-activity-segs { overflow: visible; }
 
 .composer-activity-segs {
@@ -328,6 +329,9 @@ onBeforeUnmount(() => { observer?.disconnect() })
   /* Popper supplies the fixed placement; this is only the surface. */
   z-index: 300;
   display: grid;
+  /* minmax(0, …): a long agent name truncates instead of widening its row past
+     the popover and pushing the type tag out of it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
   width: min(280px, calc(100vw - 32px));
   padding: var(--space-1);
@@ -354,6 +358,8 @@ onBeforeUnmount(() => { observer?.disconnect() })
   align-items: center;
   gap: var(--space-2);
   width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   min-height: 36px;
   padding: 0 var(--space-2);
   border: 0;
