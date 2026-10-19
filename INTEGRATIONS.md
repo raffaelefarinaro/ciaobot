@@ -343,8 +343,8 @@ bring-your-own-provider, so Ollama, OpenRouter, LM Studio, or any
 OpenAI-compatible endpoint is configured *in opencode* — see its own docs — and
 Ciaobot picks it up automatically: `GET /api/models` lists whatever opencode
 reports as connected, so its models appear in the chat picker, workspace
-defaults, title generation, insights, schedules, and the critique
-panel with no Ciaobot configuration at all.
+defaults, title generation, insights, and schedules with no Ciaobot
+configuration at all.
 
 This replaces three earlier mechanisms — `CIAO_OLLAMA_*` routing, an
 `OPENROUTER_API_KEY` backend, and user-registered "custom compatible providers"

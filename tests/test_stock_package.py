@@ -9,7 +9,6 @@ from pathlib import Path
 
 
 EXPECTED_COMMANDS = {
-    "critique.md",
     "interrogation.md",
     "remember.md",
 }

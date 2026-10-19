@@ -85,14 +85,6 @@ STOCK_COMMAND_MARKER_SUFFIX = ".ciao-stock-command"
 # edit a stock command, append the digest of the NEW text here too;
 # test_stock_command_revision_registry_is_current enforces that.
 SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
-    "critique.md": frozenset({
-        "00297ec3eb4e0ccef147fc7743a8003b3fe0293d2c2203dd1c8616ca233a56f5",
-        "315453a65b19d645a23c56de38d3add0b5821e1080059f9b2aac9078986a1ede",
-        "56971efa173bba88750a503ce20a7e40eb64f02617091699777a83da50e25a83",
-        "6038402836157566e160d42de5663867e1e9da299d1d61b306af7d7558f8ccd7",
-        "69383c6953f305eccf13abbe123ede51bff09f3b8632cfbd149199522b3ef779",
-        "887906f04ac45fde5666fd68c5dfdfd3f6c0b145c6bdd6cf49b9eab97013cd7f",
-    }),
     "interrogation.md": frozenset({
         "d5bc95ee0fdcaf0e89be1b3c6a48d603cbea3b1fda0868adaa9a548ace6c38f9",
         "11d35c9c49bffe7b37a01b7097a2b59f13ffa9c55cbd3911303a19ba063ecbfb",

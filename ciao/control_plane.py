@@ -6253,8 +6253,6 @@ class CiaoControlPlane:
                 stream_state = "active"
         return viewers, stream_state
 
-    # ---- adversarial review ---------------------------------------------
-
     async def sync_skills(self, principal: AgentPrincipal) -> dict[str, Any]:
         self._workspace(principal)
         from ciao.sync_skills import sync_workspace_skills

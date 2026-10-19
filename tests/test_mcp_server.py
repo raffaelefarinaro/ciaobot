@@ -286,7 +286,6 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "workspace_update",
             "workspace_delete",
             "project_files_list",
-            "adversarial_review",
             # Deleted rather than migrated to the CLI (D-03): never called,
             # and the PWA owns both (POST /api/workspaces, /api/chats/{id}/fork).
             "vault_expand",

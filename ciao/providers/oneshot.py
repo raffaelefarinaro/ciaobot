@@ -4,7 +4,7 @@
 ``opencode``.
 
 Calls are intentionally bare: custom system prompt, no filesystem
-settings/skills, no tools, no MCP discovery. Titles, insights, critique,
+settings/skills, no tools, no MCP discovery. Titles, insights,
 and similar routines never need the agent tool surface.
 """
 
@@ -136,7 +136,7 @@ async def _run_claude_oneshot(
     max_turns: int = 2,
     options_hook: Callable[[ClaudeAgentOptions], None] | None = None,
 ) -> str:
-    # Titles / doc folds / critique never need agent tooling. Leaving
+    # Titles / doc folds never need agent tooling. Leaving
     # ``tools`` unset keeps the CLI's default Claude Code tool schemas in
     # the prompt (Bash/Read/Edit/…), which burns tokens for no benefit.
     # ``tools=[]`` maps to ``--tools ""``; ``strict_mcp_config`` with the
@@ -159,7 +159,7 @@ async def _run_claude_oneshot(
         # model occasionally emits under ``tools=[]`` — a known SDK quirk
         # where the model starts to call a tool, gets nothing back, and the
         # SDK aborts the turn. With 2 turns the model recovers and returns
-        # the actual text on the next iteration. Title / critique callers
+        # the actual text on the next iteration. Title callers
         # never loop, so this is one extra API call at most. A caller that
         # counts billable attempts (the behavioral eval's budget) passes
         # ``max_turns=1`` so one reserved slot is one provider call.

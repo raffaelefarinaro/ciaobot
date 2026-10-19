@@ -110,8 +110,7 @@ arm.
 | Native title read returns `None`. | The chat keeps the deterministic title, then the one-shot titler. The poll window is Claude's instant poll only when the id is `claude`; every other id waits out the OpenCode delays first. | `ProjectChatManager._native_chat_title`. |
 | Transcript reload uses the local markdown only. | The chat bubble history still renders from Ciaobot's own transcript. Provider-side history that never landed there does not. | `ciao/web/transcript_service.py`. |
 | Stop escalation disconnects only Claude. | A wedged CLI is not torn down on Stop unless `ActiveHandle.stop` already did it. | `ProjectChatManager` force-stop. |
-| One-shot raises `Unknown one-shot provider`. | Titles, critique, doc folding, and routine-model calls fail. | `ciao/providers/oneshot.py`. This is a separate no-tools call, not `run_streaming`. |
-| Critique's availability map has no entry. | The review panel skips the provider. | `ciao/critique.py` `default_critique_panel`. |
+| One-shot raises `Unknown one-shot provider`. | Titles, doc folding, and routine-model calls fail. | `ciao/providers/oneshot.py`. This is a separate no-tools call, not `run_streaming`. |
 | Connect has no `<id>-login` action. | Settings → Connect answers 404. | `ACTION_IDS` and `action_command` in `ciao/host_terminal.py`; `tests/test_provider_connect_route.py::test_every_provider_has_a_login_action` fails until it is added. |
 | Logout assumes `auth_command` is `[binary, auth, login]`. | Settings → Logout runs `[binary, auth, logout]`. A CLI with a different shape signs nobody out and can still exit 0. | `provider_connection_action` in `ciao/web/routes_api.py`. |
 | `ciao auth --print-only` has a missing-binary fallback only for OpenCode. | The printed command errors when the binary is not installed. | `ciao/cli.py`. |
@@ -201,6 +200,6 @@ Before pushing, run the gates in `AGENTS.md`: `mypy ciao`,
 3. Add permission replies, question replies, and Stop. Wire the skip-list
    rows whose feature you claim to support, and leave the others
    explicitly unsupported in `ProviderCapabilities`.
-4. Add the one-shot path so titles and critique work.
+4. Add the one-shot path so titles and doc folds work.
 5. Decide asset discovery versus projection.
 6. Replay fixtures, then run one real turn.

@@ -1576,7 +1576,7 @@ class OpencodeProvider(BaseSDKProvider):
         super().__init__(workspace_root, config=config)
         # ``None`` means a normal Ciaobot chat and receives the compact shared
         # core below. A supplied string is an explicit one-shot instruction
-        # (titles, doc folds, critique) and remains isolated from chat policy.
+        # (titles, doc folds) and remains isolated from chat policy.
         self._developer_instructions = (
             None if developer_instructions is None else developer_instructions.strip()
         )

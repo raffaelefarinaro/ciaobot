@@ -678,10 +678,6 @@ class CiaoConfig:
     insights_model: str = "sonnet"
     insights_enabled: bool = True
 
-    # Comma-separated list of models for the adversarial_review MCP tool.
-    # Empty string defaults to the script's built-in panel.
-    critique_models: str = ""
-
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
         self.state_path = Path(self.state_path).expanduser().resolve()

@@ -226,9 +226,9 @@ def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path:
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    for name in ("remember", "critique", "interrogation"):
+    for name in ("remember", "interrogation"):
         assert (workspace / "commands" / f"{name}.md").is_file()
-    assert result.commands_installed >= 3
+    assert result.commands_installed >= 2
 
 
 def test_sync_workspace_skills_migrates_legacy_stock_commands(tmp_path: Path) -> None:
@@ -269,7 +269,7 @@ def test_stock_command_seed_writes_marker(tmp_path: Path) -> None:
     assert marker.read_text(encoding="utf-8").strip() == hashlib.sha256(
         canonical.read_bytes()
     ).hexdigest()
-    assert result.stock_commands_seeded == 3
+    assert result.stock_commands_seeded == 2
 
 
 def test_unmodified_stock_command_is_refreshed(tmp_path: Path) -> None:
@@ -324,7 +324,7 @@ def test_pre_existing_identical_copy_is_adopted(tmp_path: Path) -> None:
 
     marker = workspace / "commands" / "remember.md.ciao-stock-command"
     assert marker.is_file()
-    assert result.stock_commands_seeded == 2
+    assert result.stock_commands_seeded == 1
     assert result.stock_commands_refreshed == 0
 
 
