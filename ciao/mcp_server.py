@@ -719,6 +719,11 @@ async def _op_chat_handover(service: CiaoMcpService, chat_id: str = "", provider
     return await service._invoke("chat_handover", _op, mutating=True)
 
 
+async def _op_chat_reload(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
+    """Restart a chat's provider so changed MCP servers, plugins and skills load; the same session resumes."""
+    return await service._invoke("chat_reload", lambda cp, p: cp.chat_reload(p, chat_id), mutating=True)
+
+
 async def _op_chat_archive(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
     """Archive a chat to the vault and trigger normal post-archive processing.
 
@@ -1448,6 +1453,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("chat_continue", _WRITE, _op_chat_continue.__doc__ or "", _op_chat_continue),
     Operation("chat_retry", _WRITE, _op_chat_retry.__doc__ or "", _op_chat_retry),
     Operation("chat_handover", _WRITE, _op_chat_handover.__doc__ or "", _op_chat_handover),
+    Operation("chat_reload", _WRITE, _op_chat_reload.__doc__ or "", _op_chat_reload),
     Operation("chat_archive", _WRITE, _op_chat_archive.__doc__ or "", _op_chat_archive),
     Operation("chat_delete", _DESTRUCTIVE, _op_chat_delete.__doc__ or "", _op_chat_delete),
     Operation("chat_stop", _DESTRUCTIVE, _op_chat_stop.__doc__ or "", _op_chat_stop),

@@ -89,6 +89,7 @@ _CHAT_TARGET_HELP: dict[str, str] = {
     "retry": "Manage a deferred provider-limit retry.",
     "update": "Update chat metadata and model settings.",
     "handover": "Move a chat to a fresh provider session.",
+    "reload": "Restart the chat's provider so changed MCP servers, plugins and skills load.",
 }
 _CHAT_EXPLICIT_HELP: dict[str, str] = {
     "stop": "Stop another chat's active turn.",
@@ -611,6 +612,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             if args.code is not None:
                 arguments["code_mode"] = args.code == "on"
             return "chat_update", arguments
+        if verb == "reload":
+            return "chat_reload", {"chat_id": args.chat}
         if verb == "handover":
             arguments = {"chat_id": args.chat, "provider": args.provider, "model": args.model}
             messages = _handover_messages(args.messages)

@@ -733,7 +733,7 @@ def _render_opencode_thread(
                 continue
             # Hidden code-mode continuation: skipped before user_idx += 1 so
             # markers keep their turn_index.
-            if cli_envelopes.is_code_mode_continuation(content):
+            if cli_envelopes.is_hidden_continuation(content):
                 continue
             entry: dict = {
                 "role": "user",
@@ -1319,10 +1319,10 @@ async def _assemble_chat_messages(
         # this exact content to keep the parent-uuid chain valid.
         if m.type == "user" and _is_no_response_sentinel(content):
             continue
-        # Our hidden code-mode continuation (cli_envelopes.CODE_MODE_CONTINUE_PROMPT):
+        # Our hidden continuations (cli_envelopes.CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT):
         # hidden outright; G3's code-mode event row already shows the switch. Skip
         # without incrementing user_idx so markers keep their turn_index.
-        if m.type == "user" and cli_envelopes.is_code_mode_continuation(content):
+        if m.type == "user" and cli_envelopes.is_hidden_continuation(content):
             continue
         # CLI-synthesized user envelopes (subagent completions, bash output,
         # slash-command echoes). Promote <task-notification> to a clean system

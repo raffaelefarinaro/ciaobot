@@ -666,6 +666,7 @@ class ChatStream:
         # image-capability pre-flight, resolved via `resolve_capability`.
         "pending_capability",
         "code_mode_continue",
+        "reload_continue",
         "network_retry_turn",
         "network_retry_armed",
     )
@@ -727,6 +728,7 @@ class ChatStream:
         # Set by `arm_code_mode_continuation` when the agent switched this chat
         # into code mode mid-turn; the drive loop consumes it once at turn end.
         self.code_mode_continue: bool = False
+        self.reload_continue: bool = False
         # True when this turn began with a network retry pending on the chat: the
         # retried turn itself, or a user turn that just cleared it. Its end settles
         # the schedule row (ProjectChatManager._settle_schedule_retry).
