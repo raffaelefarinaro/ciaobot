@@ -26,6 +26,14 @@ availability-only), fixed in 6.9.1. It is reached at runtime through ``mcp``
 pin, this one guards no reproduced Ciaobot behaviour: it is pinned for
 reachability, and the test asserts the installed floor rather than an app
 invariant.
+
+``aiohttp`` 3.14.3 carries GHSA-2g87-pp6c-29x5 / CVE-2026-111064 (high:
+unbounded memory/CPU and no initial request/header timeout) plus
+CVE-2026-111063 (low), both fixed in 3.14.4. ``mcp`` 1.29.0 carries
+CVE-2026-59951 (availability: unbounded session accumulation in the
+StreamableHTTP transport), fixed in 1.30.0. Both are runtime dependencies of
+the MCP server SDK, so they are pinned and asserted for the same reachability
+reason as ``multidict``.
 """
 
 from __future__ import annotations
@@ -84,4 +92,23 @@ def test_multidict_floor_covers_cve_2026_104874() -> None:
         f"multidict {version} predates the CVE-2026-104874 fix in 6.9.1; the "
         "runtime pin exists because a wheel install resolves the declared "
         "dependency, not uv.lock (#1081)"
+    )
+
+
+def test_aiohttp_floor_covers_the_2026_advisories() -> None:
+    version = metadata.version("aiohttp")
+    assert _as_version(version) >= _as_version("3.14.4"), (
+        f"aiohttp {version} predates the 3.14.4 fix for GHSA-2g87-pp6c-29x5 / "
+        "CVE-2026-111064 (high) and CVE-2026-111063 (low); the runtime pin "
+        "exists because a wheel install resolves the declared dependency, not "
+        "uv.lock"
+    )
+
+
+def test_mcp_floor_covers_cve_2026_59951() -> None:
+    version = metadata.version("mcp")
+    assert _as_version(version) >= _as_version("1.30.0"), (
+        f"mcp {version} predates the 1.30.0 fix for CVE-2026-59951; the "
+        "runtime pin exists because a wheel install resolves the declared "
+        "dependency, not uv.lock"
     )
