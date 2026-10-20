@@ -17,8 +17,12 @@ STREAM_KEEPALIVE_SECONDS cadence.
 from __future__ import annotations
 
 import asyncio
+import logging
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import WebSocketRoute
 from starlette.testclient import TestClient
@@ -26,8 +30,12 @@ from starlette.websockets import WebSocketDisconnect
 
 from itsdangerous import URLSafeTimedSerializer
 
+from ciao.config import CiaoConfig
+from ciao.sessions import StateStore
+from ciao.transcripts import TranscriptStore
 from ciao.web import routes_chat
 from ciao.web.chat_broker import ChatStream
+from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_chat import ws_chat
 from tests.session import signed_in
 
@@ -35,12 +43,16 @@ from tests.session import signed_in
 def _app(started: list[tuple[str, str]]) -> Starlette:
     """A minimal app around ws_chat with a recording manager."""
 
-    def start_stream(chat_id: str, text: str, images=None) -> None:
+    def start_stream(
+        chat_id: str, text: str, images=None, *, send_id: str = ""
+    ) -> None:
         started.append((chat_id, text))
 
     manager = SimpleNamespace(
         get_chat=lambda _cid: SimpleNamespace(archived=False),
         get_active_stream=lambda _cid: None,
+        find_turn_by_send_id=lambda _cid, _sid: None,
+        has_pending_send=lambda _cid, _sid: False,
         start_stream=start_stream,
     )
     app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
@@ -92,7 +104,8 @@ def test_ws_message_queues_image_only_follow_up() -> None:
         return SimpleNamespace(original_filename=ref)
 
     def queue_message(
-        chat_id: str, text: str, images=None, entry_id=None, delivery="queue"
+        chat_id: str, text: str, images=None, entry_id=None, delivery="queue",
+        send_id: str = "",
     ) -> bool:
         queued.append((text, [img.original_filename for img in images or []]))
         return True
@@ -103,6 +116,8 @@ def test_ws_message_queues_image_only_follow_up() -> None:
         get_chat=lambda _cid: SimpleNamespace(archived=False),
         get_active_stream=lambda _cid: stream,
         resolve_image_ref=resolve_image_ref,
+        find_turn_by_send_id=lambda _cid, _sid: None,
+        has_pending_send=lambda _cid, _sid: False,
         queue_message=queue_message,
         start_stream=lambda *_a, **_k: None,
     )
@@ -121,12 +136,14 @@ def test_ws_message_queues_image_only_follow_up() -> None:
 def test_archived_chat_is_rejected_without_starting_a_stream() ->  None:
     started: list[tuple[str, str]] = []
 
-    def start_stream(chat_id: str, text: str, images=None) -> None:
+    def start_stream(chat_id: str, text: str, images=None, **kwargs) -> None:
         started.append((chat_id, text))
 
     manager = SimpleNamespace(
         get_chat=lambda _cid: SimpleNamespace(archived=True),
         get_active_stream=lambda _cid: None,
+        find_turn_by_send_id=lambda _cid, _sid: None,
+        has_pending_send=lambda _cid, _sid: False,
         start_stream=start_stream,
     )
     app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
@@ -175,7 +192,7 @@ def _steer_app(calls: list, stream: ChatStream | None) -> Starlette:
         calls.append(("set_queue_delivery", chat_id, entry_ids, delivery))
         return True
 
-    def queue_message(chat_id, text, images=None, entry_id=None, delivery="queue") -> bool:
+    def queue_message(chat_id, text, images=None, entry_id=None, delivery="queue", **kwargs) -> bool:
         calls.append(("queue_message", text, entry_id, delivery))
         return True
 
@@ -183,6 +200,8 @@ def _steer_app(calls: list, stream: ChatStream | None) -> Starlette:
         get_chat=lambda _cid: SimpleNamespace(archived=False),
         get_active_stream=lambda _cid: stream,
         resolve_image_ref=lambda ref: None,
+        find_turn_by_send_id=lambda _cid, _sid: None,
+        has_pending_send=lambda _cid, _sid: False,
         queue_message=queue_message,
         steer_queue=steer_queue,
         set_queue_delivery=set_queue_delivery,
@@ -264,3 +283,261 @@ def test_queue_set_delivery_failure_is_an_error_frame_not_a_crash() -> None:
     with client.websocket_connect("/ws/chat/chat-1") as ws:
         ws.send_text('{"type":"queue_set_delivery","entry_ids":["e1"],"delivery":"steer"}')
         assert ws.receive_json() == {"type": "error", "message": "This chat has been archived."}
+
+
+# ── Idempotent sends: one logical send, one turn ─────────────────────────
+#
+# A recovery resend of a message the engine already owns used to start a
+# second turn: the client could not prove delivery, and nothing on the wire
+# told the server the frame was a repeat. The client now mints a send id per
+# logical send and puts it on the frame; the engine records it per user turn
+# and answers a repeat with a duplicate echo.
+
+
+def _duplicate_app(started: list[dict]) -> Starlette:
+    """A manager that records the sends and owns one recorded turn."""
+
+    turns: dict[str, dict] = {}
+
+    def find_turn_by_send_id(chat_id: str, send_id: str):
+        return turns.get(send_id)
+
+    def start_stream(chat_id: str, text: str, images=None, send_id: str = "") -> None:
+        started.append({"chat_id": chat_id, "text": text, "send_id": send_id})
+        if send_id:
+            turns[send_id] = {"turn_index": 7, "sent_at": "2026-10-20T12:20:40Z"}
+
+    manager = SimpleNamespace(
+        get_chat=lambda _cid: SimpleNamespace(archived=False),
+        get_active_stream=lambda _cid: None,
+        find_turn_by_send_id=find_turn_by_send_id,
+        has_pending_send=lambda _cid, _sid: False,
+        start_stream=start_stream,
+    )
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = manager
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+    return app
+
+
+def test_duplicate_send_id_does_not_start_a_second_turn() -> None:
+    started: list[dict] = []
+    client = signed_in(TestClient(_duplicate_app(started)))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"message","text":"hello","send_id":"s-1"}')
+        assert ws.receive_json() == {"type": "status", "message": "thinking"}
+        # The same logical send arrives a second time (a recovery resend).
+        ws.send_text('{"type":"message","text":"hello","send_id":"s-1"}')
+        echo = ws.receive_json()
+
+    # Only the first frame started a turn.
+    assert len(started) == 1
+    assert started[0]["send_id"] == "s-1"
+    # The second one is answered with a duplicate echo naming the turn the
+    # send id already owns.
+    assert echo["type"] == "user_echo"
+    assert echo["duplicate"] is True
+    assert echo["send_id"] == "s-1"
+    assert echo["turn_index"] == 7
+
+
+def test_every_send_frame_is_logged_with_its_send_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A send frame leaves a trace: who sent what, and was it a duplicate.
+
+    Without it, a duplicated turn cannot be attributed to a frame afterwards:
+    the ws frames were never written down.
+    """
+    started: list[dict] = []
+    with caplog.at_level(logging.DEBUG, logger="ciao.web.routes_chat"):
+        client = signed_in(TestClient(_duplicate_app(started)))
+        with client.websocket_connect("/ws/chat/chat-1") as ws:
+            ws.send_text('{"type":"message","text":"hello there","send_id":"s-1"}')
+            assert ws.receive_json() == {"type": "status", "message": "thinking"}
+
+    send_lines = [
+        rec.getMessage() for rec in caplog.records
+        if rec.name == "ciao.web.routes_chat" and "ws send" in rec.getMessage()
+    ]
+    assert len(send_lines) == 1, caplog.records
+    line = send_lines[0]
+    assert "chat-1" in line, line
+    assert "s-1" in line, line
+    # The text length, not the text: the message itself never reaches a log.
+    assert "len=11" in line, line
+    assert "duplicate=False" in line, line
+    assert "hello there" not in line, line
+
+
+def test_a_send_id_with_unsafe_characters_is_sanitized(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A send id is written to a log line and to chat metadata.
+
+    It is therefore reduced to a token alphabet: whitespace and control
+    characters are stripped, so no log record can be forged with a newline
+    and the id the engine records is the sanitized one.
+    """
+    started: list[dict] = []
+    with caplog.at_level(logging.DEBUG, logger="ciao.web.routes_chat"):
+        client = signed_in(TestClient(_duplicate_app(started)))
+        with client.websocket_connect("/ws/chat/chat-1") as ws:
+            ws.send_text('{"type":"message","text":"hello","send_id":"a b\\nc"}')
+            assert ws.receive_json() == {"type": "status", "message": "thinking"}
+
+    assert started[0]["send_id"] == "abc", started
+    # No log record carries a newline out of the id.
+    for rec in caplog.records:
+        assert "\n" not in rec.getMessage(), rec.getMessage()
+    send_lines = [
+        rec.getMessage() for rec in caplog.records
+        if rec.name == "ciao.web.routes_chat" and "ws send" in rec.getMessage()
+    ]
+    assert len(send_lines) == 1, caplog.records
+    assert "abc" in send_lines[0], send_lines[0]
+
+
+def _make_manager(tmp_path: Path) -> ProjectChatManager:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+    )
+    return ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+
+
+async def test_send_id_survives_a_metadata_reload(tmp_path: Path) -> None:
+    """The recorded send id is engine state, not request state.
+
+    A recovery resend arrives after the engine wrote its metadata to disk, so
+    the id has to be found again from the reloaded registry — otherwise the
+    repeat starts a second turn.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("sendids", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="send-id")
+
+    pcm.start_stream(chat.chat_id, "hello", send_id="s-1")
+    found = pcm.find_turn_by_send_id(chat.chat_id, "s-1")
+    assert found is not None
+    assert found["turn_index"] == 0
+
+    # A fresh manager over the same registry, as an engine restart would.
+    config = pcm._config
+    reloaded = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(
+            Path(config.state_path).parent,
+            Path(config.state_path).parent / "transcripts",
+        ),
+        path=pcm._path,
+    )
+    found_again = reloaded.find_turn_by_send_id(chat.chat_id, "s-1")
+    assert found_again is not None
+    assert found_again["turn_index"] == 0
+    # An unknown id owns no turn.
+    assert reloaded.find_turn_by_send_id(chat.chat_id, "s-unknown") is None
+
+
+async def test_the_history_row_does_not_carry_the_send_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The history row must not claim the client's send id.
+
+    The id marks the client's OWN optimistic bubble, so a recovery can tell
+    it from the server's copy of the same turn. A history row that carried
+    the id would be indistinguishable from the optimistic copy, and the
+    delivery proof would never fire.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("sendids", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="send-id")
+    pcm.start_stream(chat.chat_id, "hello", send_id="s-1")
+    chat.session_id = "sess-a"
+    pcm._save()
+    monkeypatch.setitem(
+        sys.modules,
+        "claude_agent_sdk",
+        SimpleNamespace(
+            get_session_messages=lambda session_id, directory: [
+                SimpleNamespace(
+                    type="user",
+                    message={"role": "user", "content": "hello"},
+                ),
+            ]
+        ),
+    )
+
+    from ciao.web import transcript_service
+
+    rows = await transcript_service._assemble_chat_messages(
+        pcm, pcm._config, pcm.get_chat(chat.chat_id)
+    )
+    user_rows = [r for r in rows if r.get("role") == "user"]
+    assert user_rows, rows
+    assert not any(r.get("send_id") for r in user_rows), rows
+
+
+def test_a_duplicate_send_id_is_not_queued_twice() -> None:
+    """With a turn in flight, two frames with one send id leave one entry.
+
+    The duplicate check belongs to the route, not to the queue: the route
+    sees the pending id before it queues anything, so the second frame is
+    answered with a duplicate echo and never reaches the queue. `start_stream`
+    is never reached either — a second turn for one logical send is the
+    duplicate this issue is about.
+    """
+    queued_ids: list[str] = []
+    started: list[dict] = []
+
+    def queue_message(
+        chat_id: str, text: str, images=None, entry_id=None, delivery="queue",
+        send_id: str = "",
+    ) -> bool:
+        queued_ids.append(send_id)
+        return True
+
+    def start_stream(chat_id: str, text: str, images=None, send_id: str = "") -> None:
+        started.append({"chat_id": chat_id, "text": text, "send_id": send_id})
+
+    manager = SimpleNamespace(
+        get_chat=lambda _cid: SimpleNamespace(archived=False),
+        get_active_stream=lambda _cid: ChatStream("chat-1"),
+        resolve_image_ref=lambda ref: None,
+        find_turn_by_send_id=lambda _cid, _sid: None,
+        has_pending_send=lambda _cid, send_id: send_id in queued_ids,
+        queue_message=queue_message,
+        start_stream=start_stream,
+    )
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = manager
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+
+    client = signed_in(TestClient(app))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"message","text":"hello","send_id":"s-1"}')
+        # The same logical send arrives a second time (a recovery resend).
+        ws.send_text('{"type":"message","text":"hello","send_id":"s-1"}')
+        echo = ws.receive_json()
+
+    # Only one queue entry: the second frame was refused at the route.
+    assert queued_ids == ["s-1"], queued_ids
+    # The second frame is answered with the duplicate echo.
+    assert echo["type"] == "user_echo"
+    assert echo["duplicate"] is True
+    assert echo["send_id"] == "s-1"
+    # And no turn was started for it.
+    assert started == [], started
+
