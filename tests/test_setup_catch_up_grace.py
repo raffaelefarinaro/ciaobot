@@ -20,8 +20,11 @@ from ciao.web.routes_api import _enrich_schedule
 from ciao.setup_marker import (
     SETUP_CATCH_UP_GRACE,
     catch_up_grace_active,
+    clear_welcome_pending,
     read_setup_marker,
+    welcome_pending,
     write_setup_marker,
+    write_welcome_pending,
 )
 
 
@@ -52,6 +55,16 @@ def test_setup_marker_round_trip(tmp_path: Path) -> None:
     assert read_setup_marker(runtime_root) == datetime(
         2026, 8, 28, 12, 0, tzinfo=UTC
     )
+
+
+def test_welcome_pending_round_trip(tmp_path: Path) -> None:
+    runtime_root = tmp_path / ".runtime"
+    assert welcome_pending(runtime_root) is False
+    write_welcome_pending(runtime_root)
+    assert welcome_pending(runtime_root) is True
+    clear_welcome_pending(runtime_root)
+    assert welcome_pending(runtime_root) is False
+    clear_welcome_pending(runtime_root)
 
 
 def test_setup_marker_ignores_corrupt_content(tmp_path: Path) -> None:
