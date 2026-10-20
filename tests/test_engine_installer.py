@@ -3527,6 +3527,14 @@ def _hold_port(harness: dict[str, Any]) -> int:
     A wildcard bind is what the engine does, so that is what is held. The
     fake engine is moved off the port, so the port is held by a foreign
     listener and not by Ciaobot's own engine.
+
+    The wildcard address is load-bearing here, and not an accident: the
+    engine binds ``0.0.0.0`` (``DEFAULT_PWA_HOST``), and a listener on
+    ``127.0.0.1`` does **not** block a wildcard bind - the probe would
+    succeed and the port would look free. Only a wildcard listener makes
+    the engine's own bind fail, which is the case under test. The socket
+    listens on an ephemeral port for the length of one installer run and
+    accepts nothing.
     """
     import socket
 
@@ -3628,6 +3636,77 @@ def test_installer_accepts_a_port_ciaobots_own_engine_holds(
 
     assert result.returncode == 0, result.stderr
     assert "already in use" not in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_the_port_owner_name_cannot_smuggle_terminal_escapes(
+    tmp_path: Path,
+) -> None:
+    """The name of the program holding the port is printed to a terminal.
+
+    It is the name the holding process chose for itself, so it can carry a
+    carriage return or an ANSI escape. Either would reach the operator's
+    terminal verbatim and could rewrite the line the message appears on, so
+    only printable bytes survive.
+    """
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    port = _hold_port(harness)
+    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _write_exec(
+        harness["fakebin"] / "lsof",
+        "#!/bin/sh\n"
+        "printf 'COMMAND  PID  USER  FD  TYPE  DEVICE  SIZE/OFF  NODE  NAME\\n'\n"
+        f"printf 'evil\\033[2K\\r  418  root  9u  IPv4  0x1  0t0  TCP *:{port} (LISTEN)\\n'\n"
+        "exit 0\n",
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1, result.stdout
+    assert str(port) in result.stderr
+    # The escape and the carriage return are gone; the name is still there.
+    assert "\033" not in result.stderr
+    assert "\r" not in result.stderr
+    assert "evil" in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_process_that_merely_answers_on_the_port_is_not_the_engine(
+    tmp_path: Path,
+) -> None:
+    """The exemption is for Ciaobot's own engine, not for anything that answers.
+
+    A hostile process holding the port could answer the health check with
+    anything. The engine's startup status carries a "version" field, so a
+    response without one is not the engine and the install is refused.
+    """
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    port = _hold_port(harness)
+    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _write_exec(
+        harness["fakebin"] / "curl",
+        "#!/bin/sh\n"
+        "printf 'curl %s\\n' \"$*\" >> \"$HOME/trace.log\"\n"
+        "case \"$*\" in\n"
+        "    */api/startup-status)\n"
+        "        # Something is listening, and it answers - but it is not the\n"
+        "        # engine: no version field.\n"
+        "        printf 'hello\\n'\n"
+        "        exit 0\n"
+        "        ;;\n"
+        "esac\n"
+        f'exec "{shutil.which("curl") or "curl"}" "$@"\n',
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1, result.stdout
+    assert str(port) in result.stderr
+    assert "already in use" in result.stderr
 
 
 @runs_the_sh_installer

@@ -617,10 +617,16 @@ def port_in_use_reason(
 
     The engine records the reason where a reader outside it can find it
     (see :mod:`ciao.port_in_use`), because an engine that cannot bind
-    cannot serve the endpoint that would report it. The launchd job's last
-    exit code says the same thing from the other side: the engine left
-    with the port-in-use code, so a job that last exited that way failed
-    for this reason and not for another.
+    cannot serve the endpoint that would report it. The record is the
+    signal that matters: it is written by the engine that failed and
+    cleared by the next successful bind.
+
+    The launchd job's last exit code is a second, weaker signal. It only
+    fires when the engine itself was the process launchd saw exit with the
+    port-in-use code - and the supervisor *holds* the job on that code
+    instead of exiting, so a held run leaves an exit code of 0 and this
+    branch does not fire. It is kept for the case where the engine ran
+    without a supervisor, and it is not what a reader should rely on.
 
     ``None`` when neither says so — the engine may not have run at all, it
     may be running fine, or it may have failed for another reason.

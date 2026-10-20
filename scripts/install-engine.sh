@@ -1041,8 +1041,17 @@ port_owner() {
     # The programs listening on <port>, one name per line; nothing when the
     # port is free or lsof is not installed. `lsof` is the only lister macOS
     # and Linux both ship, so its absence costs the owner, never the port.
+    #
+    # The name is what the holding process chose for itself, so it is
+    # sanitised before it is ever printed: a carriage return or an ANSI
+    # escape in it would otherwise reach the operator's terminal verbatim and
+    # could rewrite the line it appears on. Only printable bytes survive.
     command -v lsof >/dev/null 2>&1 || return 0
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { print $1 }' | sort -u
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null \
+        | awk 'NR > 1 { print $1 }' \
+        | tr -c '[:print:]' ' ' \
+        | tr '\n' ' ' \
+        | sed 's/  */ /g; s/^ //; s/ $//'
 }
 
 python_probe_port() {
@@ -1084,14 +1093,20 @@ check_port_available() {
         0) return 0 ;;
         2) return 0 ;;
     esac
-    if [ -n "$CURL" ] && "$CURL" -fsS -m 2 "http://localhost:$port/api/startup-status" >/dev/null 2>&1; then
-        # Something is answering on that port: Ciaobot's own engine.
-        return 0
+    if [ -n "$CURL" ]; then
+        # Something is answering on that port. It has to *look* like
+        # Ciaobot's own engine, not merely answer: a hostile process on the
+        # port could answer anything, and the exemption is what lets the
+        # install continue. The engine's startup status carries a "version"
+        # field, so a response that does not is not the engine.
+        status=$("$CURL" -fsS -m 2 "http://localhost:$port/api/startup-status" 2>/dev/null || true)
+        case "$status" in
+            *'"version"'*) return 0 ;;
+        esac
     fi
     owner=$(port_owner "$port")
     if [ -n "$owner" ]; then
-        held=$(printf '%s' "$owner" | tr '\n' ' ')
-        fail "port $port is already in use by $held. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port"
+        fail "port $port is already in use by $owner. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port"
     fi
     fail "port $port is already in use by another program. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port"
 }
@@ -1639,8 +1654,7 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
         # that cannot work is worse than no link.
         owner=$(port_owner "$port")
         if [ -n "$owner" ]; then
-            held=$(printf '%s' "$owner" | tr '\n' ' ')
-            echo "Ciaobot engine installer: port $port is already in use by $held. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port" >&2
+            echo "Ciaobot engine installer: port $port is already in use by $owner. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port" >&2
         else
             echo "Ciaobot engine installer: port $port is already in use by another program. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port" >&2
         fi
