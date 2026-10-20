@@ -35,7 +35,7 @@ APP_NAME = "Ciaobot Server.app"
 BUNDLE_ID = "local.ciaobot.server"
 DISPLAY_NAME = "Ciaobot Server"
 EXECUTABLE_NAME = "Ciaobot Server"
-HOST_REVISION = 2
+HOST_REVISION = 3
 MACOS_DEPLOYMENT_TARGET = "13.0"
 ARM_TARGET = f"arm64-apple-macosx{MACOS_DEPLOYMENT_TARGET}"
 INTEL_TARGET = f"x86_64-apple-macosx{MACOS_DEPLOYMENT_TARGET}"
@@ -45,7 +45,7 @@ ARCHIVE_NAME = "ciaobot-server-host-macos-universal-v1.tar.gz"
 
 # The custom plist key the host-aware service contract will read (#1008 child B).
 HOST_PROTOCOL_KEY = "CiaobotServerHostProtocol"
-HOST_PROTOCOL_REVISION = 1
+HOST_PROTOCOL_REVISION = 2
 
 # Honest descriptions: the host runs whatever tools the user invokes, not only
 # read-only probes. They describe the capability, not a promise that every tool
@@ -59,6 +59,24 @@ ACCESSIBILITY_USAGE = (
     "Ciaobot Server asks for Accessibility so the tools you invoke can control "
     "applications on your behalf. Ciaobot itself never reads, clicks, types, or "
     "scripts your desktop; a tool you ran does, when you ask it to."
+)
+
+# The three folders macOS can gate behind a prompt (#1659). macOS shows the
+# explanation line it is given: with no key for a folder, the prompt appears
+# with an empty line. Each string says who asks, names the folder, and says
+# the access is scoped to a workspace the user chose - it is not a blanket
+# claim about the folder.
+DESKTOP_FOLDER_USAGE = (
+    "Ciaobot Server needs access to your Desktop folder only when you ask it "
+    "to keep a Ciaobot workspace there."
+)
+DOCUMENTS_FOLDER_USAGE = (
+    "Ciaobot Server needs access to your Documents folder only when you ask "
+    "it to keep a Ciaobot workspace there."
+)
+DOWNLOADS_FOLDER_USAGE = (
+    "Ciaobot Server needs access to your Downloads folder only when you ask "
+    "it to keep a Ciaobot workspace there."
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -89,6 +107,9 @@ def bundle_info() -> dict[str, object]:
         "LSUIElement": True,
         "NSAppleEventsUsageDescription": APPLE_EVENTS_USAGE,
         "NSAccessibilityUsageDescription": ACCESSIBILITY_USAGE,
+        "NSDesktopFolderUsageDescription": DESKTOP_FOLDER_USAGE,
+        "NSDocumentsFolderUsageDescription": DOCUMENTS_FOLDER_USAGE,
+        "NSDownloadsFolderUsageDescription": DOWNLOADS_FOLDER_USAGE,
     }
 
 

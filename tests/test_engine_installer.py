@@ -773,6 +773,66 @@ def test_a_first_host_install_does_not_warn_about_permissions(tmp_path: Path) ->
 
 @runs_the_sh_installer
 @needs_local_tools
+def test_replacing_a_revision_two_host_warns_about_permissions(
+    tmp_path: Path,
+) -> None:
+    # A revision-2 host is replaced by the new one (#1659). The replacement
+    # changes the signed bytes macOS granted Accessibility/Automation to, so the
+    # user is told once that macOS will ask again.
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    _write_host_plist(harness["home"], "2")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "Ciaobot Server host installed and recorded." in result.stdout
+    assert "Accessibility" in result.stderr
+    assert "Automation" in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_current_revision_host_does_not_warn_about_permissions(
+    tmp_path: Path,
+) -> None:
+    # A host that is already the current revision is not replaced, so nothing
+    # changed and nothing is warned about.
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    _write_host_plist(harness["home"], "3")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "Ciaobot Server host installed and recorded." in result.stdout
+    assert "Accessibility" not in result.stderr
+
+
+def _write_host_plist(home: Path, revision: str) -> Path:
+    """A host bundle's Info.plist, with the given host revision."""
+    installed = home / "Applications" / "Ciaobot Server.app" / "Contents"
+    installed.mkdir(parents=True, exist_ok=True)
+    plist = installed / "Info.plist"
+    with plist.open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "local.ciaobot.server",
+                "CFBundleExecutable": "Ciaobot Server",
+                "CFBundleVersion": revision,
+                "CFBundleShortVersionString": revision,
+            },
+            handle,
+        )
+    return plist
+
+
+@runs_the_sh_installer
+@needs_local_tools
 def test_a_host_release_verifies_and_installs_the_host(tmp_path: Path) -> None:
     # A signed server-host entry: the archive is downloaded from the release
     # under the manifest's name, and the verified wheel's module is asked to

@@ -26,6 +26,16 @@ The steps are deliberately ordered so a refusal leaves nothing installed:
 5. :func:`ciao.server_host.verify_owned_host` must accept the installed bundle
    and the record.
 
+A **superseded** host — the one revision this engine replaces — is the one
+bundle that may already be at the target: :func:`ciao.server_host.verify_superseded_host`
+proves it is ours from the same private record, and the install then moves it
+aside, writes the new record, and renames the new bundle in. Without that path
+a host revision bump would silently de-install the host on every existing Mac:
+the revision-2 record is refused, the installer says "a host already exists",
+and the engine install continues with no host at all (#1659). The replaced host
+and its old record are put back if anything fails, so a failed replacement
+leaves the Mac exactly as it was.
+
 The record is written **before** the rename on purpose: the window between the
 rename and a record write contains a full native re-inspection (seconds), and a
 process killed there would leave ``~/Applications/Ciaobot Server.app`` with no
@@ -90,6 +100,7 @@ from ciao.server_host import (
     default_ownership_path,
     inspect_host_bundle,
     verify_owned_host,
+    verify_superseded_host,
 )
 
 __all__ = [
@@ -422,29 +433,43 @@ def _write_ownership_record(snapshot: HostOwnership, path: Path) -> None:
 
 def _existing_host(
     bundle: Path, record_path: Path, runner: Runner
-) -> HostOwnership | None:
-    """The verified existing host, or None when there is nothing at the target.
+) -> tuple[HostOwnership | None, bool]:
+    """The verified existing host, and whether a superseded one is there.
+
+    The first value is the current host the record proves, or ``None`` when
+    there is nothing at the target. The second is ``True`` when the target
+    holds the **superseded** host this installer may replace.
 
     A target that is a symlink is never followed. Anything else already there is
     only this installer's to leave alone when an existing private record proves
     it is ours; a foreign, tampered or recordless bundle is a refusal rather than
     something to replace, because replacing it would overwrite a host the user
     may be running.
+
+    A **superseded** host — one of the revision this engine replaces, whose own
+    record proves it ours (#1659) — is not the host this engine speaks to, so it
+    answers ``(None, True)``: the caller replaces it. It is the only bundle
+    that may leave the target occupied, and only because a private record names
+    it, names the superseded revision and matches its bytes exactly.
     """
     if os.path.islink(bundle):
         raise ServerHostInstallError(
             f"the host bundle must not be a symlink: {bundle}", code=TARGET_UNSAFE
         )
     if not os.path.lexists(bundle):
-        return None
+        return None, False
     try:
-        return verify_owned_host(bundle, ownership_path=record_path, runner=runner)
-    except ServerHostError as exc:
-        raise ServerHostInstallError(
-            f"there is already a host at {bundle} that this installer cannot "
-            f"prove it owns ({exc}); it is left untouched",
-            code=HOST_EXISTS,
-        ) from exc
+        return verify_owned_host(bundle, ownership_path=record_path, runner=runner), False
+    except ServerHostError as current_error:
+        try:
+            verify_superseded_host(bundle, ownership_path=record_path, runner=runner)
+        except ServerHostError as exc:
+            raise ServerHostInstallError(
+                f"there is already a host at {bundle} that this installer cannot "
+                f"prove it owns ({current_error}); it is left untouched",
+                code=HOST_EXISTS,
+            ) from exc
+        return None, True
 
 
 def install_server_host(
@@ -464,14 +489,20 @@ def install_server_host(
     :func:`ciao.server_host.default_ownership_path`.
 
     An existing, verified host is returned untouched (a no-op); an existing
-    bundle this installer cannot prove it owns is refused. On a fresh install the
+    bundle this installer cannot prove it owns is refused. The one exception is
+    a superseded host its own record proves ours (#1659): it is replaced by the
+    current revision, and restored with its record if the replacement fails. On
+    a fresh install the
     staged bundle is inspected before the record is written and before the
     rename, so a foreign or tampered archive never reaches ``~/Applications``.
     The record is written *before* the rename, from the staged snapshot with the
     canonical target path, so a process killed after the rename leaves a
     consistent, verified host rather than a bundle no record vouches for; a
     Python failure removes both the bundle this run renamed into place and the
-    record it wrote. No service, launchd, plist or permission surface is touched.
+    record it wrote. When putting a replaced superseded host back fails, the
+    rollback stops there: the staging copy and the record are kept and the error
+    names where the host is. No service, launchd, plist or permission surface is
+    touched.
     """
     _require_macos()
     path = Path(archive_path)
@@ -490,9 +521,11 @@ def install_server_host(
             f"the host bundle must be named {APP_NAME!r}: {bundle}", code=INSTALL_FAILED
         )
 
-    existing = _existing_host(bundle, record_path, runner)
+    existing, superseding = _existing_host(bundle, record_path, runner)
     if existing is not None:
         return existing
+    # Only a superseded host this installer can prove is ours may leave the
+    # target occupied below. It is re-proven right before it is moved aside.
 
     parent = bundle.parent
     try:
@@ -507,6 +540,10 @@ def install_server_host(
     renamed = False
     recorded = False
     keep_record = False
+    superseded_record: HostOwnership | None = None
+    moved_aside = False
+    keep_stage = False
+    aside = stage / "superseded"
     try:
         staged_app = extract_host_archive(path, stage)
         # Prove the bytes before they reach ~/Applications. This runs the plist
@@ -514,12 +551,26 @@ def install_server_host(
         # bundle is refused here, with the target still untouched.
         staged = inspect_host_bundle(staged_app, runner=runner)
         if os.path.lexists(bundle):
-            # Lost the race with another installer between the check above and
-            # the rename. Refuse rather than replace what appeared.
-            raise ServerHostInstallError(
-                f"a host bundle appeared at {bundle} while this install was staging",
-                code=HOST_EXISTS,
-            )
+            if not superseding:
+                # Lost the race with another installer between the check above and
+                # the rename. Refuse rather than replace what appeared.
+                raise ServerHostInstallError(
+                    f"a host bundle appeared at {bundle} while this install was staging",
+                    code=HOST_EXISTS,
+                )
+            # The superseded host is replaced, so its record and bytes are proven
+            # again right before it is moved aside. Its record is kept in memory
+            # so a failed replacement can put it back.
+            try:
+                superseded_record = verify_superseded_host(
+                    bundle, ownership_path=record_path, runner=runner
+                )
+            except ServerHostError as exc:
+                raise ServerHostInstallError(
+                    f"the host at {bundle} changed while this install was staging "
+                    f"and is no longer proven ours ({exc}); it is left untouched",
+                    code=HOST_EXISTS,
+                ) from exc
         # The record names the canonical target, not the staging directory, and
         # is written before the rename. A crash before the rename leaves a record
         # with no bundle (the next fresh install overwrites it); a crash after
@@ -533,6 +584,18 @@ def install_server_host(
         canonical = os.path.join(os.path.realpath(parent), APP_NAME)
         record_snapshot = dataclasses.replace(staged, bundle_path=canonical)
         _fsync_tree(staged_app)
+        if superseded_record is not None:
+            # Move the superseded bundle out of the way first: a crash after this
+            # leaves no bundle, and the next run installs fresh. It lives inside
+            # the staging directory, so the cleanup below removes it on success.
+            try:
+                os.rename(bundle, aside)
+            except OSError as exc:
+                raise ServerHostInstallError(
+                    f"the superseded host at {bundle} could not be moved aside: {exc}",
+                    code=INSTALL_FAILED,
+                ) from exc
+            moved_aside = True
         _write_ownership_record(record_snapshot, record_path)
         recorded = True
         try:
@@ -562,7 +625,7 @@ def install_server_host(
         _fsync_dir(parent)
 
         return verify_owned_host(bundle, ownership_path=record_path, runner=runner)
-    except BaseException:
+    except BaseException as failure:
         # Nothing of this run survives a failure: the staging directory is
         # removed either way, and a bundle that was renamed into place is taken
         # away again so a recordless host is never left behind, together with a
@@ -571,16 +634,57 @@ def install_server_host(
         # run put it there" from "this run found it" - and `keep_record` is the
         # fact that separates a concurrent creation (where the record verifies
         # the winner's identical host) from an install failure this run caused.
+        #
+        # A superseded host that was moved aside is put back, with its old
+        # record, so a failed replacement leaves the Mac exactly as it was.
+        # The rollback stops at its first failure: whatever it could not put
+        # back stays where it is - the superseded bundle in the staging
+        # directory, the record as it is - and the error says exactly where.
+        problem = ""
         if renamed:
             shutil.rmtree(bundle, ignore_errors=True)
-        if recorded and not keep_record:
+        if moved_aside:
+            if os.path.lexists(bundle):
+                problem = (
+                    f"the new host could not be removed from {bundle}; the "
+                    f"superseded host is kept at {aside}"
+                )
+            else:
+                try:
+                    os.rename(aside, bundle)
+                except OSError as exc:
+                    problem = (
+                        f"the superseded host could not be moved back to {bundle} "
+                        f"({exc}); it is kept at {aside}"
+                    )
+            if problem:
+                keep_stage = True
+            elif superseded_record is not None and recorded and not keep_record:
+                try:
+                    _write_ownership_record(superseded_record, record_path)
+                    recorded = False
+                except OSError as exc:
+                    problem = (
+                        f"the superseded host was restored at {bundle}, but its "
+                        f"ownership record could not be written back to "
+                        f"{record_path} ({exc})"
+                    )
+        if recorded and not keep_record and not problem:
             try:
                 record_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        if problem and isinstance(failure, Exception):
+            raise ServerHostInstallError(
+                f"{problem}; the install failed first: {failure}",
+                code=INSTALL_FAILED,
+            ) from failure
+        if problem:
+            failure.add_note(problem)
         raise
     finally:
-        shutil.rmtree(stage, ignore_errors=True)
+        if not keep_stage:
+            shutil.rmtree(stage, ignore_errors=True)
 
 
 def main(argv: list[str] | None = None) -> int:

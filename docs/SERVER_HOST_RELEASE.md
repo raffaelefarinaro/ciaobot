@@ -26,17 +26,17 @@ engine version:
 | `arch` | `universal` |
 | `filename` | `ciaobot-server-host-macos-universal-v1.tar.gz` |
 | `bundle_id` | `local.ciaobot.server` |
-| `host_revision` | `2` |
-| `host_protocol` | `1` |
+| `host_revision` | `3` |
+| `host_protocol` | `2` |
 
 `host_revision` and `host_protocol` are the host's own revision, never the
 engine release version. `publish.yml` currently rebuilds the archive on every
 release, so its `sha256` and `size` (computed from the bytes that release
 serves) and the host's CDHash can differ between releases that share revision
-`2`; whether to reuse one archive across releases is still open. The selector
+`3`; whether to reuse one archive across releases is still open. The selector
 accepts a host entry only when the platform, arch, filename, bundle id,
 revision, protocol and positive size all match exactly; `host_revision`/`host_protocol` reject a boolean, so `True`
-cannot stand in for revision `2`.
+cannot stand in for revision `3`.
 
 ## Wheel-only releases remain supported
 
@@ -113,6 +113,16 @@ Automation grants are tied to the exact signed bytes, so any rebuild changes the
 CDHash and can require the user to reapprove the prompt.
 
 Revision 2 (#1249) names the executable `Ciaobot Server`, so the Login Items row reads "Ciaobot Server".
+
+Revision 3 (#1659) adds the three folder usage descriptions
+(`NSDesktopFolderUsageDescription`, `NSDocumentsFolderUsageDescription`,
+`NSDownloadsFolderUsageDescription`), so the macOS prompt for each folder shows
+an explanation line instead of a blank one. Those keys are part of the sealed
+plist, so the revision moved with them, and the installer can now replace a
+revision-2 host it can prove is ours (`ciao/server_host_install.py`), restoring
+the old bundle and the old record if the replacement fails. The installer warns
+once that macOS will ask again for Accessibility and Automation, because those
+grants are tied to the exact signed bytes.
 
 ## What this does not do
 
