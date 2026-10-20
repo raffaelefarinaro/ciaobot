@@ -514,6 +514,7 @@ def test_main_skip_dependency_check_aligns_and_stages_lock(
             "--no-branch",
             "--skip-dep-check",
             "--skip-gws-skills",
+            "--skip-provider-versions",
             "--skip-checks",
         ]
     )
@@ -700,3 +701,236 @@ def test_release_commit_guard_is_skipped_under_allow_dirty(
     # weakened.
     with pytest.raises(release_mod.ReleaseError, match="left modified tracked files"):
         release_mod._ensure_nothing_left_behind(tmp_path, allow_dirty=False)
+
+
+def _oc(**kw) -> release_mod.ProviderProbe:
+    base = dict(
+        provider="opencode",
+        installed="2.1.0",
+        latest="2.1.0",
+        published=True,
+        note="",
+    )
+    base.update(kw)
+    return release_mod.ProviderProbe(**base)
+
+
+def _claude(**kw) -> release_mod.ProviderProbe:
+    base = dict(
+        provider="claude",
+        installed="2.1.301",
+        latest=None,
+        published=None,
+        note="",
+        source="claude-agent-sdk 0.2.168",
+    )
+    base.update(kw)
+    return release_mod.ProviderProbe(**base)
+
+
+def _build(opencode, claude, untested=()) -> dict:
+    return release_mod.build_provider_record(
+        version="1.6.1",
+        release_date=date(2026, 10, 20),
+        opencode=opencode,
+        claude=claude,
+        untested=set(untested),
+    )
+
+
+def test_build_provider_record_tested() -> None:
+    record = _build(_oc(), _claude())
+    assert record["providers"]["opencode"]["status"] == "tested"
+    assert record["providers"]["opencode"]["version"] == "2.1.0"
+    assert record["providers"]["claude"]["status"] == "tested"
+    assert record["providers"]["claude"]["version"] == "2.1.301"
+    assert record["ciaobot"] == "1.6.1"
+    assert record["recorded"] == "2026-10-20"
+
+
+def test_build_provider_record_refuses_missing_opencode() -> None:
+    with pytest.raises(ReleaseError, match="--untested-provider opencode"):
+        _build(_oc(installed=None, published=None), _claude())
+    record = _build(
+        _oc(installed=None, published=None), _claude(), untested={"opencode"}
+    )
+    assert record["providers"]["opencode"] == {
+        "status": "untested",
+        "reason": "not_installed",
+    }
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        _oc(installed="0.0.0-dev-1"),
+        _oc(installed="2.1.0-beta.1"),
+        _oc(published=False),
+        _oc(published=None),
+        _oc(installed="1.14.0"),
+        _oc(installed="3.0.0"),
+    ],
+)
+def test_build_provider_record_refuses_dev_unpublished_and_unsupported(probe) -> None:
+    with pytest.raises(ReleaseError, match="--untested-provider opencode"):
+        _build(probe, _claude())
+    record = _build(probe, _claude(), untested={"opencode"})
+    entry = record["providers"]["opencode"]
+    assert entry["status"] == "untested"
+    assert "version" not in entry
+
+
+def test_build_provider_record_refuses_sdk_pin_mismatch() -> None:
+    with pytest.raises(ReleaseError):
+        _build(
+            _oc(),
+            _claude(note="installed SDK 0.2.1 != pin 0.2.168"),
+            untested={"opencode"},
+        )
+
+
+def test_pr_body_lists_provider_versions() -> None:
+    record = _build(_oc(), _claude())
+    body = release_mod._pr_body("1.6.1", "notes", ["pytest"], provider_record=record)
+    assert "## Provider versions tested" in body
+    assert "OpenCode" in body
+    assert "2.1.0" in body
+    skipped = release_mod._pr_body("1.6.1", "notes", [], provider_record=None)
+    assert "Not re-recorded" in skipped
+
+
+def test_main_apply_writes_and_stages_provider_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_release_tree(tmp_path)
+    (tmp_path / "ciao" / "stock").mkdir()
+    (tmp_path / "web" / "package.json").write_text(
+        '{\n  "name": "ciaobot-pwa",\n  "version": "0.2.0"\n}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "web" / "package-lock.json").write_text(
+        '{\n  "name": "ciaobot-pwa",\n  "version": "0.2.0",\n'
+        '  "packages": {\n    "": {\n      "name": "ciaobot-pwa",\n'
+        '      "version": "0.2.0"\n    }\n  }\n}\n',
+        encoding="utf-8",
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        release_mod, "_run", lambda cmd, **kwargs: commands.append(list(cmd)) or ""
+    )
+    monkeypatch.setattr(
+        release_mod,
+        "_git",
+        lambda root, args, check=False: "release/v0.3.0"
+        if args == ["branch", "--show-current"]
+        else "",
+    )
+    monkeypatch.setattr(release_mod, "_probe_opencode", lambda: _oc())
+    monkeypatch.setattr(release_mod, "_probe_bundled_claude", lambda root: _claude())
+
+    result = release_mod.main(
+        [
+            str(tmp_path),
+            "--bump",
+            "minor",
+            "--apply",
+            "--commit",
+            "--no-branch",
+            "--skip-dep-check",
+            "--skip-gws-skills",
+            "--skip-checks",
+        ]
+    )
+
+    assert result == 0
+    add_commands = [cmd for cmd in commands if cmd[:2] == ["git", "add"]]
+    assert len(add_commands) == 1
+    assert str(release_mod.PROVIDER_RECORD_RELPATH) in add_commands[0][2:]
+    import json
+
+    from ciao.provider_versions import validate_record
+
+    record = validate_record(
+        json.loads(
+            (tmp_path / "ciao" / "stock" / "provider-versions.json").read_text(
+                encoding="utf-8"
+            )
+        )
+    )
+    assert record["ciaobot"] == "0.3.0"
+    assert record["providers"]["opencode"]["version"] == "2.1.0"
+
+
+def test_probe_bundled_claude_reads_fresh_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import subprocess
+    import sys
+    import types
+
+    # Stale modules already imported in this process must be ignored.
+    for name, attr in (
+        ("claude_agent_sdk._version", "__version__"),
+        ("claude_agent_sdk._cli_version", "__cli_version__"),
+    ):
+        fake = types.ModuleType(name)
+        setattr(fake, attr, "0.0.1")
+        monkeypatch.setitem(sys.modules, name, fake)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "ciao"\nversion = "0.2.0"\n'
+        'dependencies = ["claude-agent-sdk[otel]==0.2.168"]\n',
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, **kwargs):
+        out = (
+            json.dumps({"sdk": "0.2.168", "cli": "2.1.301"})
+            if "-c" in cmd
+            else "2.1.301 (Claude Code)"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude"
+    )
+    monkeypatch.setattr(
+        "ciao.dependency_updates.get_latest_npm_version", lambda name: None
+    )
+
+    probe = release_mod._probe_bundled_claude(tmp_path)
+
+    assert probe.installed == "2.1.301"
+    assert probe.note == ""
+    assert probe.source == "claude-agent-sdk 0.2.168"
+
+
+def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        release_mod.main(
+            [
+                str(tmp_path),
+                "--refresh-provider-versions",
+                "--skip-provider-versions",
+            ]
+        )
+
+
+@pytest.mark.parametrize("failure", ["rc1", "timeout"])
+def test_probe_bundled_claude_reports_unreadable_sdk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import subprocess
+
+    def fake_run(cmd, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 30)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
+
+    probe = release_mod._probe_bundled_claude(tmp_path)
+
+    assert probe.installed is None
+    assert probe.note.startswith("claude_agent_sdk unreadable")

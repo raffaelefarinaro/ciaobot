@@ -6,6 +6,8 @@ import { askConfirm } from '../lib/confirm'
 import type { OperatorAction, UpdateTaskRow } from '../lib/types'
 import { renderMarkdown } from '../lib/safeMarkdown'
 import HomeNoticeWindow from './HomeNoticeWindow.vue'
+import HostTerminalButton from './HostTerminalButton.vue'
+import { useCommandCopy } from '../composables/useCommandCopy'
 import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
 
 const housekeeping = useHousekeepingStore()
@@ -13,6 +15,7 @@ const projectStore = useProjectStore()
 const noticeWindows = useHomeNoticeWindows()
 
 const chatBusy = ref(false)
+const commandCopy = useCommandCopy()
 
 /** Actions grouped by the workspace they concern, shared ones first.
  *
@@ -540,6 +543,11 @@ watch(
        <div class="housekeeping-body">
          <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
          <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
+         <p v-if="action.command" class="housekeeping-command">
+           <code>{{ action.command }}</code>
+           <button type="button" class="btn-small btn-chip" @click="commandCopy.copy(action.id, action.command)">{{ commandCopy.stateOf(action.id) === 'copied' ? 'Copied' : 'Copy' }}</button>
+           <span v-if="commandCopy.stateOf(action.id) === 'failed'" class="housekeeping-command-note" role="status">Copy failed; select the command above.</span>
+         </p>
       </div>
       <div class="housekeeping-actions">
         <!-- A view-led tile (the update tile) puts its view button first and
@@ -552,10 +560,19 @@ watch(
         >
           {{ action.view_label || 'Open' }}
         </button>
+        <HostTerminalButton
+          v-if="action.terminal_action"
+          :action="action.terminal_action"
+          variant="small"
+          label="Update in Terminal"
+          :aria-label="`${action.title} in Terminal`"
+          @not-applicable="housekeeping.refresh()"
+        />
         <button
           v-if="action.run_label"
           type="button"
-          class="btn-small btn-primary"
+          class="btn-small"
+          :class="action.terminal_action ? 'btn-chip' : 'btn-primary'"
           :disabled="housekeeping.runningIds.has(action.id)"
           @click="runAction(action)"
         >
@@ -780,6 +797,22 @@ watch(
   margin: 0;
   font-size: var(--text-sm);
   color: var(--fg2);
+}
+
+.housekeeping-command {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+}
+.housekeeping-command-note { color: var(--fg3); }
+.housekeeping-command code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  color: var(--fg);
 }
 
 .housekeeping-detail :deep(a) {

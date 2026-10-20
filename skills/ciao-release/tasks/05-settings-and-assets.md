@@ -36,6 +36,10 @@ current tab rendered (`tocItems` in `web/src/components/SettingsView.vue`), so
 it lists the sections of *that* route, not the seven Settings sections on one
 scroll. A rail that names another route's cards is a finding.
 
+On `/settings/models`, compare each provider row's version (OpenCode and Claude)
+with `ciao/stock/provider-versions.json` on the release branch. A mismatch is a
+release blocker: report it, do not fix it here.
+
 **Every section must load without hanging.** A section that never resolves is a
 finding; do not wait on it more than once.
 
