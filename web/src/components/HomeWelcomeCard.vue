@@ -24,12 +24,15 @@ const busy = ref<'' | 'show' | 'copy' | 'folder'>('')
 const copied = ref(false)
 const error = ref('')
 let copiedTimer: number | undefined
+/** Bumped on close and unmount: a password fetch that settles later is dropped. */
+let generation = 0
 
 const visible = computed(() => status.value?.pending === true)
 watch(visible, shown => noticeWindows.setAvailable('welcome', shown ? [NOTICE_KEY] : []), { immediate: true })
 
 onMounted(ensureStatus)
 onBeforeUnmount(() => {
+  generation++
   noticeWindows.clearAvailable('welcome')
   password.value = ''
   window.clearTimeout(copiedTimer)
@@ -42,8 +45,21 @@ const folderLabel = computed(() => {
   return 'Open folder'
 })
 
-async function ensurePassword(): Promise<void> {
-  if (!password.value) password.value = await fetchPassword()
+const PASSWORD_ERROR = 'Could not get the password. Check that Ciaobot is running and try again.'
+
+function passwordError(e: unknown): string {
+  // The engine's own wording for a browser that is not on the host.
+  return (e as { status?: number } | null)?.status === 403 ? errorMessage(e, PASSWORD_ERROR) : PASSWORD_ERROR
+}
+
+/** True when the password is held and the card is still the one that asked. */
+async function ensurePassword(): Promise<boolean> {
+  if (password.value) return true
+  const started = generation
+  const fetched = await fetchPassword()
+  if (started !== generation || !visible.value || !fetched) return false
+  password.value = fetched
+  return true
 }
 
 async function toggleShow() {
@@ -54,10 +70,9 @@ async function toggleShow() {
   }
   busy.value = 'show'
   try {
-    await ensurePassword()
-    revealed.value = true
+    if (await ensurePassword()) revealed.value = true
   } catch (e) {
-    error.value = errorMessage(e)
+    error.value = passwordError(e)
   } finally {
     busy.value = ''
   }
@@ -67,7 +82,7 @@ async function copy() {
   error.value = ''
   busy.value = 'copy'
   try {
-    await ensurePassword()
+    if (!(await ensurePassword())) return
     if (await writeClipboard(password.value)) {
       copied.value = true
       window.clearTimeout(copiedTimer)
@@ -76,7 +91,7 @@ async function copy() {
       error.value = 'Could not copy. Select the password and copy it instead.'
     }
   } catch (e) {
-    error.value = errorMessage(e)
+    error.value = passwordError(e)
   } finally {
     busy.value = ''
   }
@@ -95,6 +110,7 @@ async function reveal() {
 }
 
 async function close() {
+  generation++
   password.value = ''
   revealed.value = false
   await dismiss()
@@ -116,7 +132,10 @@ async function close() {
         <div class="home-welcome-row">
           <dt>Password</dt>
           <dd v-if="status.on_host">
-            <code class="home-welcome-secret" :aria-label="revealed ? undefined : 'Password hidden'">{{ revealed ? password : '••••••••••••' }}</code>
+            <code class="home-welcome-secret">
+              <template v-if="revealed">{{ password }}</template>
+              <template v-else><span aria-hidden="true">••••••••••••</span><span class="sr-only">Password hidden</span></template>
+            </code>
             <span class="hint">Save it in your password manager — you need it to sign in from other devices.</span>
           </dd>
           <dd v-else><span class="hint">The password is shown on the computer running Ciaobot.</span></dd>
@@ -157,6 +176,7 @@ async function close() {
 .home-welcome-row dd {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 2px;
   margin: 0;
   min-width: 0;

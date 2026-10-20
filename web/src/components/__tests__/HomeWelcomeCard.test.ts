@@ -14,6 +14,11 @@ vi.mock('../../lib/codeCopy', async (orig) => ({
   writeClipboard: vi.fn(async () => true),
 }))
 
+/** Same shape as lib/api's ApiError (not exported): a message and a status. */
+function apiError(message: string, status: number): Error {
+  return Object.assign(new Error(message), { status })
+}
+
 const get = vi.mocked(api.get)
 const post = vi.mocked(api.post)
 
@@ -154,5 +159,95 @@ describe('HomeWelcomeCard', () => {
     const again = await mountCard()
     expect(get).not.toHaveBeenCalled()
     expect(again.text()).not.toContain('Your Ciaobot')
+  })
+
+  it('hides the card without an error when the password route answers 404', async () => {
+    answer(pending())
+    const view = await mountCard()
+    get.mockImplementation(async (path: string) => {
+      if (path === '/api/welcome/password') throw apiError('nothing to show', 404)
+      return {}
+    })
+    await button(view, 'Show').trigger('click')
+    await flushPromises()
+    expect(view.text()).not.toContain('Your Ciaobot')
+    expect(view.text()).not.toContain('nothing to show')
+  })
+
+  it('shows a generic error when the password cannot be fetched, the server text for not_on_host', async () => {
+    answer(pending())
+    const view = await mountCard()
+    get.mockImplementation(async () => { throw new TypeError('Failed to fetch') })
+    await button(view, 'Show').trigger('click')
+    await flushPromises()
+    expect(view.find('[role="alert"]').text()).toBe('Could not get the password. Check that Ciaobot is running and try again.')
+    get.mockImplementation(async () => {
+      throw apiError('The password is shown on the computer running Ciaobot.', 403)
+    })
+    await button(view, 'Show').trigger('click')
+    await flushPromises()
+    expect(view.find('[role="alert"]').text()).toBe('The password is shown on the computer running Ciaobot.')
+  })
+
+  it('discards a password that arrives after Close', async () => {
+    answer(pending())
+    const view = await mountCard()
+    let release: (v: { password: string }) => void = () => {}
+    get.mockImplementation(() => new Promise((r) => { release = r as typeof release }))
+    await button(view, 'Copy').trigger('click')
+    await view.find('button[aria-label="Dismiss this card on every device"]').trigger('click')
+    await flushPromises()
+    release({ password: 'p4ss-w0rd' })
+    await flushPromises()
+    expect(writeClipboard).not.toHaveBeenCalled()
+    expect(view.text()).not.toContain('p4ss-w0rd')
+    expect(view.html()).not.toContain('p4ss-w0rd')
+  })
+
+  it('discards a password that arrives after unmount', async () => {
+    answer(pending())
+    const view = await mountCard()
+    let release: (v: { password: string }) => void = () => {}
+    get.mockImplementation(() => new Promise((r) => { release = r as typeof release }))
+    await button(view, 'Copy').trigger('click')
+    view.unmount()
+    wrapper = null
+    release({ password: 'p4ss-w0rd' })
+    await flushPromises()
+    expect(writeClipboard).not.toHaveBeenCalled()
+  })
+
+  it('a re-shown card needs a new fetch after the password was hidden by a remount', async () => {
+    answer(pending())
+    let view = await mountCard()
+    await button(view, 'Show').trigger('click')
+    await flushPromises()
+    expect(view.text()).toContain('p4ss-w0rd')
+    view.unmount()
+    wrapper = null
+    view = await mountCard()
+    expect(view.text()).not.toContain('p4ss-w0rd')
+    get.mockClear()
+    await button(view, 'Show').trigger('click')
+    await flushPromises()
+    expect(get.mock.calls.map((c) => c[0])).toEqual(['/api/welcome/password'])
+  })
+
+  it('shows the copy failure alert when the clipboard refuses', async () => {
+    answer(pending())
+    vi.mocked(writeClipboard).mockResolvedValueOnce(false)
+    const view = await mountCard()
+    await button(view, 'Copy').trigger('click')
+    await flushPromises()
+    expect(view.find('[role="alert"]').text()).toBe('Could not copy. Select the password and copy it instead.')
+    expect(hasButton(view, 'Copied')).toBe(false)
+  })
+
+  it('masks with hidden bullets and a screen-reader label', async () => {
+    answer(pending())
+    const view = await mountCard()
+    expect(view.find('.home-welcome-secret [aria-hidden="true"]').text()).toBe('••••••••••••')
+    expect(view.find('.home-welcome-secret .sr-only').text()).toBe('Password hidden')
+    expect(view.find('.home-welcome-secret').attributes('aria-label')).toBeUndefined()
   })
 })

@@ -43,8 +43,17 @@ export function useWelcome() {
   }
 
   async function fetchPassword(): Promise<string> {
-    const res = await api.get<{ password?: unknown }>('/api/welcome/password')
-    return typeof res?.password === 'string' ? res.password : ''
+    try {
+      const res = await api.get<{ password?: unknown }>('/api/welcome/password')
+      return typeof res?.password === 'string' ? res.password : ''
+    } catch (e) {
+      // 404: the card was dismissed on another device. Nothing is left to show.
+      if ((e as { status?: number } | null)?.status === 404) {
+        status.value = { ...NOT_PENDING }
+        return ''
+      }
+      throw e
+    }
   }
 
   async function openFolder(): Promise<void> {
