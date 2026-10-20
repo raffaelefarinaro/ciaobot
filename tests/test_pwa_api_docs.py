@@ -13,6 +13,10 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
         "loopback Host), takes an action id or a chat/project id, never a command or a path"
     ),
     "/api/auth": "browser login flow; the recipe's auth step covers this",
+    "/api/auth/host-sign-in": (
+        "browser login page 'Sign in on this computer'; loopback-only, opens a one-time "
+        "sign-in tab on the host, returns no credential"
+    ),
     "/api/auth/logout": "browser logout; clears the session cookie",
     "/api/chats/{chat_id}/background-runs/{run_id}/cancel": (
         "Chat details Stop button; agents cancel their own runs through "

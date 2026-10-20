@@ -5,6 +5,8 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import logging
+import os
+import secrets
 from pathlib import Path
 
 from itsdangerous import URLSafeTimedSerializer, BadSignature
@@ -12,6 +14,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.websockets import WebSocket
+
+from ciao.os_support.private import open_private
 
 
 logger = logging.getLogger(__name__)
@@ -51,12 +55,14 @@ _PUBLIC_API = {
 # `/api/admin/drain` and `/api/admin/drain/cancel` are the update coordinator's own drain handshake,
 # driven by `ciao update apply` before it bootstraps the detached updater job.
 # `/api/admin/restart-blockers` is the `ciao service` restart/stop gate (reason-tagged).
+# `/api/auth/host-sign-in` mints a one-time setup token and opens it in the host's own browser; it returns no credential.
 # All are gated on the peer address plus a loopback `Host` and, when present, a same-origin `Origin`/`Referer`: the peer makes a caller local, and the Host check refuses a DNS-rebound page, whose Host is the attacker's name. A request that fails takes the normal session path.
 _LOOPBACK_ONLY_API = {
     "/api/menubar-chats",
     "/api/admin/drain",
     "/api/admin/drain/cancel",
     "/api/admin/restart-blockers",
+    "/api/auth/host-sign-in",
 }
 
 # The names local callers use for the engine (`http://localhost:<port>`).
@@ -259,6 +265,19 @@ def _setup_token_path(request: Request) -> Path | None:
     if workspace_root is None:
         return None
     return Path(workspace_root).expanduser() / ".runtime" / "setup-token"
+
+
+def mint_setup_token(request: Request) -> str | None:
+    """Write a fresh one-time ``.runtime/setup-token`` (owner-only) and return it; None without a workspace."""
+    token_path = _setup_token_path(request)
+    if token_path is None:
+        return None
+    token = secrets.token_urlsafe(24)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = open_private(token_path, os.O_WRONLY | os.O_TRUNC)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write(token + "\n")
+    return token
 
 
 def _redeem_setup_token(request: Request, token: str):
