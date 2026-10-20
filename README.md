@@ -18,9 +18,15 @@ Ciaobot is your **second brain and personal assistant**: a persistent personal w
 curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh
 ```
 
-Installs the engine with uv, starts it as a LaunchAgent, and prints a one-time link. Open `http://localhost:8443` and follow the setup wizard. It will help you choose or create your workspace, set a dashboard password, and connect the provider you want to use.
+Installs the engine with uv, starts it as a LaunchAgent, and opens Ciaobot in your browser already signed in, through a one-time link it also prints. There is nothing to fill in: the installer puts your workspace in `~/Ciaobot`, generates a password and uses Claude Code as the AI tool. The first time you open Ciaobot, Home shows the folder and the password on the computer running it (the password is also `PWA_AUTH_TOKEN` in the folder's `.env`). Change the AI tool in **Settings → Workspaces** and the password in **Settings → General**.
 
-During setup you choose the folder where Ciaobot keeps your notes and memory: a new folder, or an existing one such as an Obsidian vault. It stays yours, in plain Markdown, usable with any other tool.
+To use another folder, such as a notes folder you already have, pass `--workspace`:
+
+```bash
+curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --workspace ~/MyNotes
+```
+
+The folder stays yours, in plain Markdown, usable with any other tool. Keep it out of iCloud Drive, Dropbox, Google Drive and OneDrive; [Before you start](https://www.raffaelefarinaro.com/ciaobot/guide.html#before-you-start) explains why, and what Ciaobot does with Git in it.
 
 **Windows 11 (x64 or ARM64), preview:**
 
@@ -28,13 +34,13 @@ During setup you choose the folder where Ciaobot keeps your notes and memory: a 
 irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex
 ```
 
-No administrator rights needed. Open the printed link and follow the setup wizard. See the [Windows guide](docs/WINDOWS.md) for requirements, install options, updates, uninstalling, and troubleshooting.
+No administrator rights needed. It opens Ciaobot signed in, with your workspace in `%USERPROFILE%\Ciaobot` (`-Workspace` picks another folder). See the [Windows guide](docs/WINDOWS.md) for requirements, install options, updates, uninstalling, and troubleshooting.
 
 ### Connect your agent
 
 Ciaobot has no model account of its own. It drives a CLI you have already signed in to:
 
-- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`, then add `~/.local/bin` to your `PATH` if needed) and run `claude auth login`. On Windows, install it with `irm https://claude.ai/install.ps1 | iex` instead.
+- **Claude:** install [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (`curl -fsSL https://claude.ai/install.sh | bash`) and run `claude auth login`. If its installer says `~/.local/bin` is not in your `PATH`, Ciaobot still finds Claude Code; for the login, run the command it prints or use `~/.local/bin/claude auth login`. On Windows, install it with `irm https://claude.ai/install.ps1 | iex` instead.
 - **OpenAI, OpenRouter, Ollama and others:** install [OpenCode 2.0.16+](https://opencode.ai/v2/docs/) (`npm install -g @opencode/cli`; see [INTEGRATIONS.md](INTEGRATIONS.md#opencode) for other routes) and authenticate the provider there. Its models appear in Ciaobot's model picker.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for current commands. Contributors running from a git checkout: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).

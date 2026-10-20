@@ -45,6 +45,17 @@
       <p class="lead">About 15 minutes. You don't need to be technical, but you'll paste a command into the Terminal app.</p>
     </section>
 
+    <section id="before-you-start">
+      <h2>Before you start</h2>
+      <p>Four things that trip people up:</p>
+      <ul>
+        <li><strong>"~/.local/bin is not in your PATH."</strong> Claude Code's installer may print this. Ciaobot finds Claude Code anyway; only your Terminal can't. To run <code>claude auth login</code>, first run the command the installer printed and open a new Terminal window, or type the full path instead: <code>~/.local/bin/claude auth login</code>.</li>
+        <li><strong>Hidden files.</strong> On a Mac, files whose name starts with a dot, such as <code>.env</code>, are hidden. In Finder, press <kbd>Cmd</kbd> <kbd>Shift</kbd> <kbd>.</kbd> to show them, and again to hide them.</li>
+        <li><strong>Ciaobot keeps a history of your folder.</strong> It uses Git, the tool programmers use to track changes, so earlier versions of your notes can be brought back and the folder can be <a href="memory.html#backup">backed up</a> to a private GitHub repository. You never need to use Git yourself. If the folder is already inside a Git repository (a code project, for example), Ciaobot uses that repository instead of making a new one, so its history and backup cover the whole repository: give Ciaobot a folder of its own. Git repositories inside your folder keep their own history, and Ciaobot's history and backup do not include their files.</li>
+        <li><strong>Keep the folder out of iCloud Drive, Dropbox, Google Drive and OneDrive.</strong> Ciaobot writes to its files all the time, and sync apps can then make "conflicted copies", bring back an older version of a file or break the Git history. Ciaobot shows a warning if you pick a folder inside one of them. For a copy somewhere else, use the backup instead. On a Mac, <em>Desktop</em>, <em>Documents</em> and <em>Downloads</em> don't work either: macOS blocks background apps from reading them.</li>
+      </ul>
+    </section>
+
     <section>
       <h2>Set up</h2>
       <ol class="steps">
@@ -58,6 +69,7 @@
               <pre><code>curl -fsSL https://claude.ai/install.sh | bash
 claude auth login</code></pre>
               <p>On Windows, in PowerShell: <code>irm https://claude.ai/install.ps1 | iex</code>, then <code>claude auth login</code>.</p>
+              <p>If it says <code>~/.local/bin</code> is not in your PATH, see <a href="#before-you-start">Before you start</a>.</p>
               <p><a href="https://docs.anthropic.com/en/docs/claude-code/overview">Claude Code docs →</a></p>
             </div>
             <div class="card">
@@ -92,16 +104,22 @@ opencode auth login</code></pre>
             <noscript><p class="install-note">On Windows 11, in PowerShell: <code>irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.ps1 | iex</code> (preview, <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md">Windows guide</a>)</p></noscript>
           </div>
           <p>This installs the Ciaobot engine and starts it in the background. Hosting it on a Linux server instead? See <a href="remote.html#vps">Run it on a server</a>.</p>
+          <p>Your notes go in a folder called <code>Ciaobot</code> in your home folder. To use a different folder, for example a notes folder you already have, add <code>--workspace</code> when you install: <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh -s -- --workspace ~/MyNotes</code>. On Windows, see <a href="https://github.com/raffaelefarinaro/ciaobot/blob/main/docs/WINDOWS.md#install">install options</a>.</p>
         </li>
-        <li>
-          <h3>Follow the setup wizard</h3>
-          <p>The Ciaobot app opens by itself (you can also go to <a href="http://localhost:8443">http://localhost:8443</a>). The wizard asks for three things:</p>
+        <li id="first-run">
+          <h3>Open Ciaobot</h3>
+          <p>When the install finishes, Ciaobot opens in your browser and you are already signed in. The Terminal also shows a one-time sign-in link: it works once, so don't share it. Later, open <a href="http://localhost:8443">http://localhost:8443</a> on this computer.</p>
+          <p>The installer chose three things for you, so there is nothing to fill in:</p>
           <ul>
-            <li><strong>A folder</strong> where Ciaobot keeps your notes and memory. A new, empty folder is fine. If you already keep notes in a folder (for example an Obsidian vault), you can point it there.</li>
-            <li><strong>A password</strong> for the dashboard. You'll need it to open Ciaobot from other devices.</li>
-            <li><strong>Your AI tool</strong>: Claude Code or opencode.</li>
+            <li><strong>Your folder</strong>: <code>~/Ciaobot</code> (<code>%USERPROFILE%\Ciaobot</code> on Windows), unless you picked another one. Your notes and memory live there as plain files.</li>
+            <li><strong>Your password</strong>, made up for you. You need it to open Ciaobot on your phone or another computer.</li>
+            <li><strong>Your AI tool</strong>: Claude Code.</li>
           </ul>
-          <p>Once it's done, Ciaobot opens a welcome chat and can give you a tour. Just say yes.</p>
+          <p>The installer does not print the password. It tells you the password is shown in the app: the first time you open Ciaobot, a card called <strong>Your Ciaobot</strong> on Home shows your folder (with a button to show it in Finder or Explorer), your password (<strong>Show</strong> and <strong>Copy</strong>) and your AI tool. Save the password in your password manager: you need it to sign in from other devices. Close the card when you are done. It then disappears on every device, and on other devices it only says that the password is shown on the computer running Ciaobot. The password is also kept in the file <code>.env</code> in your folder (see <a href="#password">I forgot my password</a>).</p>
+          <p>Home also has a <strong>Set up this device</strong> card with a <strong>Use on your phone</strong> row that takes you to <strong>Settings → Other devices</strong>.</p>
+          <p>You can change all three later: the AI tool per workspace in <strong>Settings → Workspaces → Edit</strong>, the password in <strong>Settings → General → PWA password</strong>, and the folder with <strong>Settings → General → Main workspace → Move…</strong>.</p>
+          <p>Ciaobot then opens a welcome chat and can give you a tour. Just say yes.</p>
+          <p>A setup wizard that asks for the folder, a password and the AI tool appears only if you start Ciaobot by hand with <code>ciao run</code> before it has been set up, for example from a copy of the source code. The installers never show it.</p>
         </li>
       </ol>
     </section>
