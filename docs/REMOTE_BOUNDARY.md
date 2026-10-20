@@ -65,6 +65,8 @@ carried by the session.
   /api/auth/settings` reports `on_host` from the same predicate so the card can
   hide the field. A `tailscale serve` or other proxied caller is not the host.
   An SSH local forward counts as the host; that caller can already read `.env`.
+  Any password change re-keys the session signer, so every other device is
+  signed out and must sign in with the new password.
 - Model-authored HTML is served from `/api/workspace-html` under a sandboxing
   CSP (`sandbox allow-scripts`, no `allow-same-origin`, `connect-src 'none'`,
   `form-action 'none'`), so an artifact cannot reach the API or the local-only

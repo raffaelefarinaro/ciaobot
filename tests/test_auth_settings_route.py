@@ -9,9 +9,9 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.web.auth import SESSION_COOKIE, AuthMiddleware, make_serializer
-from tests.test_auth_security import _TAILSCALE_SERVE_HEADERS
 from ciao.web.routes_auth import auth_settings_get, auth_settings_update
 from ciao.os_support.private import is_private
+from tests.test_auth_security import _TAILSCALE_SERVE_HEADERS
 
 
 def _app(tmp_path: Path, *, token: str = "old-secret") -> Starlette:
