@@ -4451,10 +4451,12 @@ async function saveAuthSettings() {
     authSettingsResult.value = 'Password saved. Other devices have to log in again.'
   } catch (e) {
     const code = (e as { payload?: { code?: unknown } } | null)?.payload?.code
-    if (code === 'wrong_current_password' || code === 'current_password_required') {
+    if (code === 'wrong_current_password' || code === 'current_password_required' || code === 'rate_limited') {
       authCurrentPasswordError.value = code === 'wrong_current_password'
         ? 'Current password is incorrect.'
-        : 'Enter your current password.'
+        : code === 'rate_limited'
+          ? apiErrorMessage(e, 'Too many wrong attempts. Wait a few minutes and try again.')
+          : 'Enter your current password.'
       authSettingsSaving.value = false
       await nextTick()
       document.getElementById('auth-current-password')?.focus()

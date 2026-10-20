@@ -66,6 +66,21 @@ it('shows "Current password is incorrect." inline and keeps the new password', a
   }
 })
 
+it('shows the rate-limit message inline under the current password', async () => {
+  const wrapper = await mountSettings()
+  try {
+    const message = 'Too many wrong attempts. Wait a few minutes and try again.'
+    vi.spyOn(api, 'post').mockRejectedValue(
+      Object.assign(new Error(message), { status: 429, payload: { error: message, code: 'rate_limited' } }),
+    )
+    await fillAndSave(wrapper)
+    expect(wrapper.find('#auth-current-password-error').text()).toBe(message)
+    expect(cardResult(wrapper)).toBeNull()
+  } finally {
+    wrapper.unmount()
+  }
+})
+
 it('reports other failures in the result line', async () => {
   const wrapper = await mountSettings()
   try {
