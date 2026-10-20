@@ -1372,8 +1372,11 @@ if [ -n "$host_entry" ]; then
             2>/dev/null || true
     )
     if [ -n "$superseded_revision" ] && [ -f "$host_superseded_plist" ]; then
+        # `plutil` is looked up on PATH, not by its absolute path: the
+        # installer is exercised on Linux CI too, where macOS's own plutil is
+        # not there. A missing plutil only means "not a superseded host".
         host_revision=$(
-            /usr/bin/plutil -extract CFBundleVersion raw -o - \
+            plutil -extract CFBundleVersion raw -o - \
                 "$host_superseded_plist" 2>/dev/null || true
         )
         if [ "$host_revision" = "$superseded_revision" ]; then

@@ -576,6 +576,29 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         'exit 0\n',
     )
     _write_exec(fakebin / "osascript", "#!/bin/sh\nexit 1\n")
+    # `plutil` reads one key out of a plist. The installer asks it for the
+    # installed host's bundle version, so the stub answers with the version
+    # the test wrote into the plist, the way the real tool does. It is a
+    # script, not a binary, so it works on the Linux CI runner too.
+    _write_exec(
+        fakebin / "plutil",
+        "#!/bin/sh\n"
+        "# `plutil -extract CFBundleVersion raw -o - <plist>`\n"
+        'plist=""\n'
+        'for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        '        -*) continue ;;\n'
+        '        *) plist="$arg" ;;\n'
+        '    esac\n'
+        'done\n'
+        'if [ -f "$plist" ]; then\n'
+        f'    exec "{sys.executable}" -c '
+        "'import plistlib,sys; "
+        "print(plistlib.load(open(sys.argv[1],\"rb\")).get(\"CFBundleVersion\",\"\"))' "
+        '"$plist"\n'
+        'fi\n'
+        'exit 1\n',
+    )
     _write_exec(
         fakebin / "pgrep",
         '#!/bin/sh\n'
