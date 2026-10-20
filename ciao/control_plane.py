@@ -5300,8 +5300,14 @@ class CiaoControlPlane:
         """Permanently remove one task in the calling chat's workspace.
 
         Only the task record goes; its chats and running work stay where they
-        are. The store still requires the revision the caller read.
+        are. The store still requires the revision the caller read. Deletion is
+        attended-only: an unattended scheduled turn cannot permanently remove
+        the user's record.
         """
+        if self._unattended_turn(principal):
+            raise ControlPlaneError(
+                "unattended_forbidden", "Task deletion requires an attended turn."
+            )
         return _ok(
             self.workspace_task_delete(
                 self._workspace(principal),

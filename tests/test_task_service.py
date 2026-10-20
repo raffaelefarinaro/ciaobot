@@ -50,7 +50,11 @@ class _Pcm:
         }
         self.chats = {
             "chat-1": SimpleNamespace(
-                chat_id="chat-1", project_id="project-home", archived=False
+                chat_id="chat-1",
+                project_id="project-home",
+                archived=False,
+                user_turn_count=1,
+                user_turn_unattended={},
             )
         }
 
@@ -551,6 +555,32 @@ def test_agent_task_delete_removes_only_the_requested_record(tmp_path: Path) -> 
     # The deletion is task-only: the linked chat record is untouched.
     assert plane.pcm.get_chat("chat-1") is chat
     assert chat.archived is False
+
+
+def test_agent_task_delete_refuses_an_unattended_turn(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Not from a schedule")["data"]
+    path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
+    before = path.read_bytes()
+    chat = plane.pcm.get_chat("chat-1")
+    chat.user_turn_count = 2
+    chat.user_turn_unattended = {"1": True}
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_delete(
+            principal, created["id"], expected_revision=created["revision"]
+        )
+    assert excinfo.value.code == "unattended_forbidden"
+    assert path.read_bytes() == before
+
+    # The guard reads the current turn: an attended turn may still delete.
+    chat.user_turn_unattended = {}
+    removed = plane.task_delete(
+        principal, created["id"], expected_revision=created["revision"]
+    )
+    assert removed["data"] == {"id": created["id"], "deleted": True}
+    assert not path.exists()
 
 
 def test_agent_task_delete_is_workspace_scoped(tmp_path: Path) -> None:

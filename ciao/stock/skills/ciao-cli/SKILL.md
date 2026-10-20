@@ -127,7 +127,7 @@ Top-level commands, outside the `<noun> <verb>` table: plain text output (a `--j
 | `task get TASK_ID` | Get one task, description/links body included. | Read-only. |
 | `task create --title TITLE [--body-file FILE.md] [--project P] [--due YYYY-MM-DD]` | File a task. `--project` takes an id or a name and must belong to this workspace; `--due` is a calendar day, never an instant. | The body is Markdown prose, so it travels as a file — never as a shell argument. A project in another workspace is `project_not_found`. |
 | `task update TASK_ID --revision REV [--title T] [--body-file FILE.md] [--due D] [--assignee user\|agent] [--status STATUS]` | Edit one task; only the fields passed change. `REV` is the `revision` you read. | `task_revision_conflict` (retryable) means the file moved: re-read and re-plan, never resend the same revision. An unknown field is refused. |
-| `task delete TASK_ID --revision REV` | Permanently remove one task, at the revision you read. Only that record goes, including the description and any updates, delegation log and completion history stored inside its file. | Destructive, with no trash: the file cannot be restored. Only when the user asks you to delete a task, and tell them the removal is permanent. Chats, running turns and attempt history are left alone — this is neither `chat delete` nor task completion. Delete only by the task's 32-hex id: never by title or chat id; run `task list`/`task get` first, and ask if the target is ambiguous. A stale `REV` removes nothing (`task_revision_conflict`). |
+| `task delete TASK_ID --revision REV` | Permanently remove one task, at the revision you read. Only that record goes, including the description and any updates, delegation log and completion history stored inside its file. | Destructive, with no trash: the file cannot be restored. Attended only: a scheduled or otherwise unattended turn is refused (`unattended_forbidden`); ask the user to run the deletion. Only when the user asks you to delete a task, and tell them the removal is permanent. Chats, running turns and attempt history are left alone — this is neither `chat delete` nor task completion. Delete only by the task's 32-hex id: never by title or chat id; run `task list`/`task get` first, and ask if the target is ambiguous. A stale `REV` removes nothing (`task_revision_conflict`). |
 | `task move TASK_ID --to STATUS --revision REV` | Set the column: `backlog` (To do), `in_progress`, `in_review`, `done`. A delegated task reaches `in_review` through your `task report --outcome done`. | Same revision guard. `--to done` is refused exactly like `complete` — see below. |
 | `task complete TASK_ID --revision REV` | Ask to mark a task done. | **Always refused to you** with `task_completion_requires_user`: the user closes their own tasks. Report the finished work and let them complete it; never look for another route to the same status. |
 | `task delegate TASK_ID --revision REV [--project P]` | Hand a task to the agent as one ordinary chat. The chat runs in `--project` (or the task's own project, else General) and the prompt is the task's own description — there is no prompt argument. | The turn is **attended**: an approval card it raises is an ordinary Needs-you card in that chat, answered the ordinary way. One live attempt per task: a second call returns the attempt already running and starts nothing. Delegating is not completing — a finished turn puts the task in front of the user for review. |
@@ -141,13 +141,15 @@ a task, run `task delegate` rather than doing the work in this turn. When you wo
 a task yourself, `task link-chat` it to this chat, `task add-update` a milestone
 (not a chat dump), then `task move` it to `in_review`.
 
-Deleting a task is a user decision you may carry out on their request. Read it
-first with `task get` and pass that exact `revision`; say plainly that the
-record is permanently removed. A chat id or title is not a task id — resolve it
-through `task list`/`task get`, and ask the user which task they mean if more
-than one could match. Deletion removes only the task record: it does not
-delete or archive linked chats, stop a running turn, discard attempt history,
-or complete the task.
+Deleting a task is a user decision you may carry out on their request, in an
+attended turn. A scheduled turn is refused (`unattended_forbidden`): report
+that the user must ask for the deletion themselves rather than looking for
+another route. Read the task first with `task get` and pass that exact
+`revision`; say plainly that the record is permanently removed. A chat id or
+title is not a task id — resolve it through `task list`/`task get`, and ask the
+user which task they mean if more than one could match. Deletion removes only
+the task record: it does not delete or archive linked chats, stop a running
+turn, discard attempt history, or complete the task.
 
 To point the user at a task — in a reply, a daily log, any vault note — link it
 as `[Reply to Ivo](/tasks/<id>)` with the full 32-hex `id` from `task list`.

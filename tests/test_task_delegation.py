@@ -174,6 +174,8 @@ class _RecordingPcm:
             helper=helper or {},
             pending_question="",
             pending_permission="",
+            user_turn_count=1,
+            user_turn_unattended={},
         )
         self.chats[chat_id] = chat
         self.calls.append(
@@ -966,9 +968,15 @@ async def test_a_deleted_task_is_not_recreated_when_its_linked_turn_ends(
     current = _get_task(plane, task["id"])
     assert path.is_file()
 
-    plane.workspace_task_delete(
-        "personal", task["id"], expected_revision=current["revision"]
+    # The agent wrapper, not the lower PWA service: the deletion has to hold
+    # against the live attempt that still points at this task.
+    removed = plane.task_delete(
+        _principal(), task["id"], expected_revision=current["revision"]
     )
+    assert removed == {
+        "ok": True,
+        "data": {"id": task["id"], "deleted": True},
+    }
     assert not path.exists()
 
     # A follow-up turn in the delegated chat re-attaches through the same
@@ -976,7 +984,12 @@ async def test_a_deleted_task_is_not_recreated_when_its_linked_turn_ends(
     pcm.answer_in_chat("chat-1", "Follow-up after deletion")
     assert not path.exists()
 
-    await _end_turns(pcm)
+    # End both turns and await the watcher task itself, rather than yielding a
+    # fixed number of times: gather surfaces any callback exception instead of
+    # leaving it to be reported as an unobserved task warning.
+    for stream in pcm.streams:
+        stream.finish.set()
+    await asyncio.gather(*plane._watchers)
 
     assert not path.exists(), "a watcher recreated the deleted task"
     assert plane.workspace_task_list("personal") == []
@@ -991,6 +1004,13 @@ async def test_a_deleted_task_is_not_recreated_when_its_linked_turn_ends(
     # and the follow-up this test started itself.
     assert len(_creates(pcm)) == 1
     assert len(_starts(pcm)) == 2
+    # Deletion is task-only: it stopped no turn, archived no chat and removed
+    # no chat record. The fake records Stop, so an accidental cascade is visible.
+    assert pcm.stop_awaited == 0
+    assert [
+        call for call in pcm.calls
+        if call[0] in {"stop_chat", "archive_chat", "delete_chat"}
+    ] == []
 
 
 async def test_a_finished_turn_without_a_report_ignores_a_leftover_permission_card(

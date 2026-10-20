@@ -199,7 +199,9 @@ def _task_service(tmp_path: Path, *, mode: str = "auto"):
         """Only what the task service reads: one chat's mode, and the roots."""
 
         def __init__(self) -> None:
-            self.chat = SimpleNamespace(mode=mode)
+            self.chat = SimpleNamespace(
+                mode=mode, user_turn_count=1, user_turn_unattended={}
+            )
 
         def _workspace_vault_root(self, workspace: str) -> Path:
             return config.workspace_vault_root(workspace)
@@ -225,23 +227,26 @@ def _task_service(tmp_path: Path, *, mode: str = "auto"):
     return service
 
 
-def test_task_operations_register_as_two_reads_and_three_writes(tmp_path: Path) -> None:
-    """Reads are `_READ`, every write is `_WRITE` and mutating.
+def test_task_operations_register_reads_writes_and_destructive_delete(
+    tmp_path: Path,
+) -> None:
+    """Reads are `_READ`, ordinary writes `_WRITE`, permanent deletion `_DESTRUCTIVE`.
 
     The annotations are what the plan-mode gate and the approval split read, so
     a `_READ` entry on a write would let a plan-mode chat file a task. And
     `task_action` is `_WRITE`, not `_DESTRUCTIVE`: the store refuses an agent's
     completion outright, so it carries no reachable destructive effect.
-    `task_attempt_action` is the exception among the delegation pair and *is*
-    `_DESTRUCTIVE`, because its `stop` ends a turn irreversibly — the same reason
-    `chat_stop` is ask-class.
+    `task_delete` *is* `_DESTRUCTIVE`, because it unlinks the user's record with
+    no trash; the control plane separately refuses it on an unattended turn.
+    `task_attempt_action` is also `_DESTRUCTIVE`, because its `stop` ends a turn
+    irreversibly — the same reason `chat_stop` is ask-class.
     """
     from ciao import mcp_server
 
     service = _task_service(tmp_path)
     assert {
-        "task_list", "task_get", "task_create", "task_update", "task_action",
-        "task_delegate", "task_attempt_action",
+        "task_list", "task_get", "task_create", "task_update", "task_delete",
+        "task_action", "task_delegate", "task_attempt_action",
     } <= set(service.operation_table)
     for name in ("task_list", "task_get"):
         assert mcp_server.OPERATIONS_BY_NAME[name].annotations == mcp_server._READ
@@ -249,10 +254,11 @@ def test_task_operations_register_as_two_reads_and_three_writes(tmp_path: Path) 
         annotations = mcp_server.OPERATIONS_BY_NAME[name].annotations
         assert annotations == mcp_server._WRITE, name
         assert annotations.readOnlyHint is False
-    assert (
-        mcp_server.OPERATIONS_BY_NAME["task_attempt_action"].annotations
-        == mcp_server._DESTRUCTIVE
-    )
+    for name in ("task_delete", "task_attempt_action"):
+        assert (
+            mcp_server.OPERATIONS_BY_NAME[name].annotations
+            == mcp_server._DESTRUCTIVE
+        ), name
 
 
 def test_an_agent_can_file_and_move_a_task_but_never_complete_one(tmp_path: Path) -> None:
@@ -399,6 +405,49 @@ def test_task_delete_is_destructive_and_mutating(tmp_path: Path) -> None:
         gone = _post(client, token, "task_get", {"task_id": created["id"]})
     assert gone.status_code == 422
     assert gone.json()["error"]["code"] == "task_not_found"
+
+
+def test_an_unattended_turn_cannot_delete_task(tmp_path: Path) -> None:
+    """A scheduled turn may not permanently remove a task; the current turn decides.
+
+    Only an attended request can authorize deleting the user's record. Once the
+    same chat's current turn is attended again, deletion is available.
+    """
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Not from a schedule"}).json()["data"]
+        path = (
+            service.control_plane.config.workspace_vault_root("personal")
+            / "Workspace"
+            / "Tasks"
+            / f"{created['id']}.md"
+        )
+        before = path.read_bytes()
+        service.control_plane.pcm.chat.user_turn_count = 2
+        service.control_plane.pcm.chat.user_turn_unattended = {"1": True}
+
+        refused = _post(
+            client,
+            token,
+            "task_delete",
+            {"task_id": created["id"], "expected_revision": created["revision"]},
+        )
+        assert refused.status_code == 422
+        assert refused.json()["error"]["code"] == "unattended_forbidden"
+        assert path.read_bytes() == before
+
+        # Turn 1 was the unattended one; the current turn is attended again.
+        service.control_plane.pcm.chat.user_turn_unattended = {}
+        allowed = _post(
+            client,
+            token,
+            "task_delete",
+            {"task_id": created["id"], "expected_revision": created["revision"]},
+        )
+        assert allowed.status_code == 200, allowed.text
+        assert allowed.json()["data"] == {"id": created["id"], "deleted": True}
+        assert not path.exists()
 
 
 def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:

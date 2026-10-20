@@ -1123,7 +1123,9 @@ async def _op_task_delete(service: CiaoMcpService, task_id: str,
     delegation log stored inside it. It does not delete or archive linked
     chats, stop a running turn, discard attempt history, or complete the
     task. Deletion is permanent and has no trash: do it only at the user's
-    request, and tell them the record is gone for good.
+    request, and tell them the record is gone for good. It is attended-only:
+    a scheduled or otherwise unattended turn is refused
+    (`unattended_forbidden`) and must ask the user to run it.
     """
     return await service._invoke(
         "task_delete",
