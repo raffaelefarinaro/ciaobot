@@ -41,6 +41,7 @@ from ciao.server_host import (
     SCHEMA_VERSION,
     HostOwnership,
     ServerHostError,
+    host_move_argv,
     host_service_argv,
     inspect_host_bundle,
     parse_service_command,
@@ -117,6 +118,16 @@ def test_constants_agree_with_the_swift_host() -> None:
     match = re.search(r"^let STOP_GRACE_SECONDS = ([0-9.]+)$", source, re.MULTILINE)
     assert match is not None
     assert float(match.group(1)) == server_host.STOP_GRACE_SECONDS
+
+
+def test_the_protocol_carrying_the_move_operation_is_the_host_protocol() -> None:
+    # The Swift host has one protocol revision, and the ``run-move`` operation
+    # belongs to it. The engine refuses a host below MOVE_HOST_PROTOCOL, so the
+    # two must not drift apart: a host that speaks the current protocol
+    # carries the move.
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+    assert "case runMove(" in source
+    assert server_host.MOVE_HOST_PROTOCOL == server_host.HOST_PROTOCOL
 
 
 def test_the_hosted_child_is_an_accepted_direct_supervise_command() -> None:
@@ -443,6 +454,61 @@ def test_host_service_argv_rejects_strict_absent_inputs(
 ) -> None:
     with pytest.raises(ServerHostError) as caught:
         host_service_argv(PurePosixPath(bundle), PurePosixPath(python))
+    assert caught.value.code == server_host.INVALID_COMMAND
+
+
+# ── syntax: host_move_argv ──────────────────────────────────────────────────
+
+
+def test_host_move_argv_round_trips_through_the_parser() -> None:
+    argv = host_move_argv(
+        PurePosixPath(POSIX_BUNDLE),
+        PurePosixPath("/usr/bin/python3"),
+        "op-1234",
+        PurePosixPath("/Users/x/.local/state/ciaobot/workspace-move"),
+    )
+    assert argv == (
+        f"{POSIX_BUNDLE}/Contents/MacOS/{EXECUTABLE_NAME}",
+        "run-move",
+        "--python",
+        "/usr/bin/python3",
+        "--operation",
+        "op-1234",
+        "--state-dir",
+        "/Users/x/.local/state/ciaobot/workspace-move",
+    )
+    parsed = parse_service_command(list(argv))
+    assert parsed.mode == "hosted"
+    assert parsed.python == "/usr/bin/python3"
+
+
+@pytest.mark.parametrize(
+    "bundle, python, operation, state_dir",
+    [
+        # A bundle the host does not own, an interpreter it would refuse.
+        ("Applications/" + APP_NAME, "/usr/bin/python3", "op-1", "/state"),
+        (POSIX_BUNDLE, "python3", "op-1", "/state"),
+        (POSIX_BUNDLE, "/bin/sh", "op-1", "/state"),
+        # An operation id that is not a plain identifier: the host's own
+        # parser reads a leading dash as an option.
+        (POSIX_BUNDLE, "/usr/bin/python3", "--state-dir", "/state"),
+        (POSIX_BUNDLE, "/usr/bin/python3", "", "/state"),
+        (POSIX_BUNDLE, "/usr/bin/python3", "op/1", "/state"),
+        # A state directory that is not absolute and normalized.
+        (POSIX_BUNDLE, "/usr/bin/python3", "op-1", "relative/state"),
+        (POSIX_BUNDLE, "/usr/bin/python3", "op-1", "/Users/x/../state"),
+    ],
+)
+def test_host_move_argv_rejects_strict_absent_inputs(
+    bundle: str, python: str, operation: str, state_dir: str
+) -> None:
+    with pytest.raises(ServerHostError) as caught:
+        host_move_argv(
+            PurePosixPath(bundle),
+            PurePosixPath(python),
+            operation,
+            PurePosixPath(state_dir),
+        )
     assert caught.value.code == server_host.INVALID_COMMAND
 
 

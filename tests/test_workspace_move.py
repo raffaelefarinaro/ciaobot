@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import io
@@ -18,6 +19,14 @@ from starlette.testclient import TestClient
 
 from ciao import workspace_move
 from ciao.agent_paths import claude_project_slug
+from ciao.server_host import (
+    BUNDLE_ID,
+    HOST_PROTOCOL,
+    HOST_REVISION,
+    REQUIRED_BUNDLE_FILES,
+    SCHEMA_VERSION,
+    HostOwnership,
+)
 from ciao.web.routes_api import (
     workspace_move_dirs_endpoint,
     workspace_move_plan_endpoint,
@@ -34,7 +43,10 @@ def _workspace(root: Path) -> Path:
 def _plan(source: Path, target: Path | str, **kwargs: Any) -> workspace_move.MovePlan:
     defaults: dict[str, Any] = {
         "registered": source,
-        "python": "/opt/ciao/bin/python",
+        # A real, executable python: the host checks that the interpreter it
+        # is given exists and is runnable, so the plan checks the same thing
+        # before it lifts a refusal.
+        "python": sys.executable,
         "platform": "darwin",
         "state_dir": source.parent / "state",
     }
@@ -44,7 +56,7 @@ def _plan(source: Path, target: Path | str, **kwargs: Any) -> workspace_move.Mov
 # ── plan ─────────────────────────────────────────────────────────────
 
 
-def test_plan_refuses_a_protected_destination_or_source(
+def test_plan_refuses_a_protected_destination_or_source_without_a_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
@@ -54,14 +66,100 @@ def test_plan_refuses_a_protected_destination_or_source(
     monkeypatch.setattr("ciao.setup_status.sys.platform", "darwin")
 
     plain = _workspace(home / "old")
-    result = _plan(plain, home / "Documents" / "new")
+    result = _plan(plain, home / "Documents" / "new", host=None)
     assert any("background job" in r for r in result.refusals)
 
     protected = _workspace(home / "Desktop" / "old")
-    result = _plan(protected, home / "new")
+    result = _plan(protected, home / "new", host=None)
     assert any(r.startswith("The workspace is inside ~/Desktop") for r in result.refusals)
 
-    assert not any("background job" in r for r in _plan(plain, home / "new").refusals)
+    assert not any("background job" in r for r in _plan(plain, home / "new", host=None).refusals)
+
+
+def test_plan_warns_and_allows_a_protected_folder_through_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    (home / "Desktop").mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr("ciao.setup_status.sys.platform", "darwin")
+
+    plain = _workspace(home / "old")
+    result = _plan(plain, home / "Documents" / "new", host=_verified_host())
+    assert result.ok, result.refusals
+    assert any(
+        "Documents" in w and "Allow" in w for w in result.warnings
+    ), result.warnings
+
+    protected = _workspace(home / "Desktop" / "old")
+    result = _plan(protected, home / "new", host=_verified_host())
+    assert result.ok, result.refusals
+    assert any(
+        "Desktop" in w and "Allow" in w for w in result.warnings
+    ), result.warnings
+
+
+def test_plan_refuses_a_protected_folder_for_a_host_without_the_move_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr("ciao.setup_status.sys.platform", "darwin")
+
+    plain = _workspace(home / "old")
+    result = _plan(plain, home / "Documents" / "new", host=_verified_host(host_protocol=1))
+    assert not result.ok
+    assert any("background job" in r for r in result.refusals), result.refusals
+
+
+def test_plan_refuses_a_protected_folder_for_an_interpreter_the_host_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The host's own parser demands a python executable, so an interpreter it
+    # would refuse cannot run the move: the plan and the job must agree.
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr("ciao.setup_status.sys.platform", "darwin")
+
+    plain = _workspace(home / "old")
+    result = _plan(
+        plain,
+        home / "Documents" / "new",
+        host=_verified_host(),
+        python="/opt/ciao/bin/ciao",
+    )
+    assert not result.ok
+    assert any("background job" in r for r in result.refusals), result.refusals
+
+
+def test_plan_refuses_a_protected_folder_for_an_interpreter_that_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The host refuses a python that is not there to run, so the plan must
+    # keep refusing too: a plan that lifted the refusal for a move the host
+    # would refuse to launch sends the operator to a prompt that never
+    # appears.
+    #
+    # The path is named like a python on purpose: a name the host's *name*
+    # rule would accept, so the refusal can only come from the check that the
+    # file is there and runnable.
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr("ciao.setup_status.sys.platform", "darwin")
+
+    plain = _workspace(home / "old")
+    result = _plan(
+        plain,
+        home / "Documents" / "new",
+        host=_verified_host(),
+        python=str(tmp_path / "bin" / "python"),
+    )
+    assert not result.ok
+    assert any("background job" in r for r in result.refusals), result.refusals
 
 
 def test_plan_accepts_a_new_folder_and_an_empty_one(tmp_path: Path) -> None:
@@ -343,6 +441,7 @@ def _run(
     service_type: type[_Service] = _Service,
     prepare: Any = None,
     post_override: Callable[[str], dict[str, Any]] | None = None,
+    platform: str | None = None,
 ) -> tuple[workspace_move.MoveOperation, _Service, list[str]]:
     source = _workspace(tmp_path / "old")
     if prepare is not None:
@@ -374,6 +473,7 @@ def _run(
         sleep=lambda _s: None,
         clock=lambda: float(next(clock)),
         claude_home=tmp_path / "home",
+        platform=platform,
     )
     return result, service, posts
 
@@ -884,6 +984,214 @@ def test_the_mac_move_job_shares_the_engine_bundle_ids(tmp_path: Path, monkeypat
     job = plistlib.loads((tmp_path / workspace_move.JOB_PLIST_NAME).read_bytes())
     assert job["AssociatedBundleIdentifiers"] == ["local.ciaobot.server"]
     assert calls[-1][0] == "bootstrap"
+
+
+# ── the move runs through the verified host ──────────────────────────
+
+
+#: The host the move runs under. The bundle path is a POSIX path, because the
+#: host's own argv rules are POSIX paths and a Windows ``tmp_path`` is not one.
+_HOST_BUNDLE = "/Users/me/Applications/Ciaobot Server.app"
+#: The interpreter the host would run. It has to be a real, executable python:
+#: the host's own parser checks that, so a path that does not exist would be
+#: refused at launch - and the move checks the same thing before it lifts the
+#: refusal, so the plan and the job can never disagree.
+_HOST_PYTHON = sys.executable
+
+
+def _verified_host(*, host_protocol: int = HOST_PROTOCOL) -> HostOwnership:
+    """A snapshot as ``verify_owned_host`` would return it."""
+    digest = "a" * 64
+    return HostOwnership(
+        schema=SCHEMA_VERSION,
+        bundle_path=_HOST_BUNDLE,
+        bundle_id=BUNDLE_ID,
+        host_revision=HOST_REVISION,
+        host_protocol=host_protocol,
+        executable_sha256=digest,
+        per_arch_cdhashes={"arm64": "b" * 40, "x86_64": "c" * 40},
+        bundle_files={name: digest for name in sorted(REQUIRED_BUNDLE_FILES)},
+    )
+
+
+def _spawn_mac_job_plist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, op: workspace_move.MoveOperation
+) -> dict[str, Any]:
+    """Spawn the macOS move job and read back the plist launchd was handed."""
+    import plistlib
+
+    from ciao import macos_service
+
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    monkeypatch.setattr(macos_service, "default_launch_agents_dir", lambda: agents)
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, **_kw: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
+    workspace_move._spawn_mac_job(op, tmp_path)
+    job: dict[str, Any] = plistlib.loads(
+        (tmp_path / workspace_move.JOB_PLIST_NAME).read_bytes()
+    )
+    return job
+
+
+def test_the_mac_move_job_runs_through_the_verified_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workspace_move, "_verified_host_if_installed", lambda: _verified_host())
+    op = workspace_move.MoveOperation(
+        "op1", "queued", "/a", "/b", "", "", port=8443, python=_HOST_PYTHON
+    )
+
+    job = _spawn_mac_job_plist(tmp_path, monkeypatch, op)
+
+    assert job["ProgramArguments"] == [
+        f"{_HOST_BUNDLE}/Contents/MacOS/Ciaobot Server",
+        "run-move",
+        "--python",
+        _HOST_PYTHON,
+        "--operation",
+        "op1",
+        "--state-dir",
+        str(tmp_path),
+    ]
+
+
+def test_the_mac_move_job_stays_a_bare_interpreter_without_a_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(workspace_move, "_verified_host_if_installed", lambda: None)
+    op = workspace_move.MoveOperation(
+        "op1", "queued", "/a", "/b", "", "", port=8443, python=_HOST_PYTHON
+    )
+
+    job = _spawn_mac_job_plist(tmp_path, monkeypatch, op)
+
+    assert job["ProgramArguments"] == [
+        _HOST_PYTHON,
+        "-I",
+        "-m",
+        "ciao.workspace_move",
+        "run",
+        "--operation",
+        "op1",
+        "--state-dir",
+        str(tmp_path),
+    ]
+
+
+def test_the_mac_move_job_stays_a_bare_interpreter_for_an_old_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A host too old to speak protocol 2 has no ``run-move`` operation.
+    monkeypatch.setattr(
+        workspace_move, "_verified_host_if_installed", lambda: _verified_host(host_protocol=1)
+    )
+    op = workspace_move.MoveOperation(
+        "op1", "queued", "/a", "/b", "", "", port=8443, python=_HOST_PYTHON
+    )
+
+    job = _spawn_mac_job_plist(tmp_path, monkeypatch, op)
+
+    assert job["ProgramArguments"][0] == _HOST_PYTHON
+    assert "run-move" not in job["ProgramArguments"]
+
+
+# ── a denied folder is a first-class outcome ─────────────────────────
+
+
+def test_a_denied_folder_is_recorded_and_named_in_the_move_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import workspace_access
+
+    record = tmp_path / "denied.txt"
+    monkeypatch.setattr(workspace_access, "denial_path", lambda: record)
+    real_rename = os.rename
+
+    def rename(src: Any, dst: Any) -> None:
+        if Path(dst) == tmp_path / "new":
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(workspace_move.os, "rename", rename)
+    result, _service, _posts = _run(tmp_path, _Host(), platform="darwin")
+
+    assert result.phase == "rolled_back", result.error
+    # The folder is named, and the refusal is not a bare traceback.
+    assert str(tmp_path / "new") in result.error
+    assert "Traceback" not in result.error
+    # The denial is recorded where `ciao service status` reads it.
+    recorded = record.read_text(encoding="utf-8")
+    assert str(tmp_path / "new") in recorded
+    assert "Files and Folders" in recorded
+    # And the record says it was a denial, not a failed move.
+    assert result.denied is True
+    assert workspace_move.read_operation(tmp_path / "state").denied is True
+
+
+def test_a_denied_move_exits_with_the_denial_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ciao import workspace_access
+    from ciao.workspace_access import ACCESS_DENIED_EXIT
+
+    record = tmp_path / "denied.txt"
+    monkeypatch.setattr(workspace_access, "denial_path", lambda: record)
+    real_rename = os.rename
+
+    def rename(src: Any, dst: Any) -> None:
+        if Path(dst) == tmp_path / "new":
+            raise PermissionError(errno.EPERM, "Operation not permitted")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(workspace_move.os, "rename", rename)
+    state = tmp_path / "state"
+    state.mkdir()
+    source = _workspace(tmp_path / "old")
+    op = workspace_move.MoveOperation(
+        "op1", "queued", str(source), str(tmp_path / "new"), "", "", port=8443
+    )
+    workspace_move.write_operation(op, state)
+    monkeypatch.setattr(workspace_move, "current_service_definition", lambda: _Service(tmp_path / "definition", source))
+    monkeypatch.setattr(workspace_move, "current_engine_host", lambda _ws: _Host())
+    monkeypatch.setattr(
+        workspace_move,
+        "run_move",
+        lambda recorded, **_kw: workspace_move.MoveOperation(
+            recorded.id, "rolled_back", recorded.source, recorded.target, "", "",
+            error="macOS denied Ciaobot Server access", denied=True,
+        ),
+    )
+
+    assert workspace_move.main(["run", "--operation", "op1", "--state-dir", str(state)]) == ACCESS_DENIED_EXIT
+
+
+def test_a_plain_permission_error_is_not_a_privacy_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # EACCES is an ordinary mode-bit denial, not a privacy grant the user
+    # refused: it is reported as itself and nothing is recorded.
+    from ciao import workspace_access
+
+    record = tmp_path / "denied.txt"
+    monkeypatch.setattr(workspace_access, "denial_path", lambda: record)
+    real_rename = os.rename
+
+    def rename(src: Any, dst: Any) -> None:
+        if Path(dst) == tmp_path / "new":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(workspace_move.os, "rename", rename)
+    result, _service, _posts = _run(tmp_path, _Host(), platform="darwin")
+
+    assert result.phase == "rolled_back", result.error
+    assert "Permission denied" in result.error
+    assert not record.exists()
 
 
 def test_plan_warns_about_a_cloud_synced_destination(tmp_path: Path) -> None:

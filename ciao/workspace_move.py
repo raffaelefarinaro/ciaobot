@@ -28,6 +28,7 @@ There is no separate undo: moving the folder back is the same operation.
 from __future__ import annotations
 
 import argparse
+import errno
 import http.client
 import json
 import os
@@ -41,12 +42,19 @@ import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import IO, Any, Callable, Protocol
 
 from ciao.os_support.locks import lock_exclusive, unlock
 from ciao.os_support.private import make_private, mkstemp_private
+from ciao.server_host import (
+    MOVE_HOST_PROTOCOL,
+    HostOwnership,
+    ServerHostError,
+    host_interpreter,
+    host_move_argv,
+)
 
 OPERATION_NAME = "operation.json"
 LOCK_NAME = "move.lock"
@@ -180,6 +188,9 @@ class MoveOperation:
     error: str = ""
     port: int = 0
     python: str = ""
+    #: A macOS privacy denial, not a failure of the move itself: the folder is
+    #: named in ``error`` and the job exits with ``ACCESS_DENIED_EXIT``.
+    denied: bool = False
 
 
 def _now() -> str:
@@ -206,6 +217,7 @@ def read_operation(state_dir: Path | None = None) -> MoveOperation | None:
             error=str(parsed.get("error", "")),
             port=int(parsed.get("port", 0) or 0),
             python=str(parsed.get("python", "")),
+            denied=parsed.get("denied") is True,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -357,12 +369,18 @@ def plan(
     admin: bool | None = None,
     service_can_reach: Callable[[Path], bool] | None = None,
     state_dir: Path | None = None,
+    host: HostOwnership | None = None,
 ) -> MovePlan:
     """Whether ``source`` can move to ``target_raw``, and what to know first.
 
     ``registered`` is the workspace the service definition serves: the move
     repoints that definition, so a definition for another folder, or none, is a
     refusal rather than something to guess around.
+
+    ``host`` is this machine's *verified* server host, or ``None`` when there
+    is none. The move job runs under that host, so a macOS folder grant the
+    user gave the host covers the move too; without a host the job is a bare
+    interpreter macOS never prompts for, and a protected folder stays refused.
     """
     platform = platform or sys.platform
     source = source.expanduser().resolve()
@@ -426,9 +444,29 @@ def plan(
     if platform == "darwin":
         from ciao.setup_status import tcc_protected_location
 
+        # The move job runs under the branded host when one is verified, so the
+        # grant the user gives the host covers the move too (#1658). Without
+        # one the job is a bare interpreter macOS never prompts for: the
+        # folder stays refused.
+        #
+        # The plan and the spawn each verify the host for themselves, so a
+        # host that stops verifying between the two leaves the plan warning
+        # and the job running as a bare interpreter. That fails closed: the
+        # move cannot reach a protected folder without the host, and the
+        # denial path below reports it.
+        through_host = _host_can_run_move(host, python)
         for label, path in (("destination", target), ("workspace", source)):
             protected = tcc_protected_location(path)
-            if protected:
+            if not protected:
+                continue
+            if through_host:
+                result.warnings.append(
+                    f"The {label} is inside ~/{protected}. The move runs as the Ciaobot "
+                    f"Server app, and macOS asks once for access to your {protected} "
+                    "folder: choose Allow, or the move cannot finish. You can change it "
+                    "later in System Settings → Privacy & Security → Files and Folders."
+                )
+            else:
                 result.refusals.append(
                     f"The {label} is inside ~/{protected}. The move runs as a background job "
                     "that macOS privacy protection keeps out of that folder, so Ciaobot cannot "
@@ -1057,7 +1095,77 @@ def start(
     return op
 
 
-def _job_argv(op: MoveOperation, state_dir: Path) -> list[str]:
+def _verified_host_if_installed() -> HostOwnership | None:
+    """This machine's verified server host, or ``None`` when there is none.
+
+    The one proof the move job's program is rendered from: a snapshot from
+    :func:`ciao.server_host.verify_owned_host` (via
+    :func:`ciao.cli._verified_host_if_installed`), never a raw path. A missing
+    record, a foreign or tampered bundle and every non-macOS platform read as
+    "no host", and the move job then stays a bare interpreter.
+    """
+    from ciao.cli import _verified_host_if_installed as verified
+
+    return verified()
+
+
+def _host_can_run_move(host: HostOwnership | None, python: str) -> bool:
+    """Whether ``host`` is a host the move can run under.
+
+    Only a host that speaks the protocol with the ``run-move`` operation can
+    run the move: an older host has no such operation, and the move job would
+    be told to run something the host refuses. The interpreter must also be
+    one the host would accept, so this answer and the rendered command can
+    never disagree.
+
+    The host's own parser checks that the interpreter *exists* and is
+    executable, not only that its name looks like a python. This checks the
+    same thing, so the plan never lifts the refusal for a move the host
+    would refuse to launch.
+    """
+    if host is None or host.host_protocol < MOVE_HOST_PROTOCOL:
+        return False
+    try:
+        interpreter = host_interpreter(PurePosixPath(python))
+    except ServerHostError:
+        return False
+    try:
+        candidate = Path(interpreter)
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def _job_argv(op: MoveOperation, state_dir: Path, host: HostOwnership | None = None) -> list[str]:
+    """The move job's argv: the host's ``run-move``, or the bare interpreter.
+
+    The move must run as a descendant of the branded ``Ciaobot Server`` host,
+    so a macOS folder grant the user gave the host covers the move too. The
+    hosted argv is rendered from a *verified* snapshot, never from a raw path:
+    :func:`ciao.server_host.host_move_argv` is syntax only, and the caller
+    must prove ownership first.
+    """
+    if _host_can_run_move(host, op.python):
+        assert host is not None
+        try:
+            return list(
+                host_move_argv(
+                    PurePosixPath(host.bundle_path),
+                    PurePosixPath(op.python),
+                    op.id,
+                    PurePosixPath(str(state_dir)),
+                )
+            )
+        except ServerHostError as exc:
+            # The host is ours and the interpreter is one it accepts, so this
+            # can only be the operation id or the state directory. Both are
+            # minted here; a refusal means the move cannot be described to the
+            # host, and it must not be started as a bare interpreter instead.
+            raise MoveError(
+                f"the Ciaobot Server host cannot run the workspace move: {exc}"
+            ) from exc
     return [
         op.python,
         "-I",
@@ -1119,7 +1227,9 @@ def _spawn_mac_job(op: MoveOperation, state_dir: Path) -> None:
     log = str(state_dir / JOB_LOG_NAME)
     job: dict[str, Any] = {
         "Label": JOB_LABEL,
-        "ProgramArguments": _job_argv(op, state_dir),
+        # The move runs under the branded host when one is verified, so a macOS
+        # folder grant the user gave the host covers the move too (#1658).
+        "ProgramArguments": _job_argv(op, state_dir, _verified_host_if_installed()),
         "WorkingDirectory": str(state_dir),
         "RunAtLoad": True,
         "KeepAlive": False,
@@ -1251,6 +1361,63 @@ def _lock(state_dir: Path) -> IO[str]:
     return handle
 
 
+def _is_privacy_denial(exc: BaseException, platform: str | None = None) -> bool:
+    """Whether ``exc`` is macOS refusing a folder, not a plain mode-bit denial.
+
+    The same rule the engine's own probe applies
+    (:func:`ciao.workspace_access.check_workspace_access`): a privacy denial
+    is ``EPERM`` on macOS, while ``EACCES`` is an ordinary permission error
+    that has nothing to do with a privacy grant.
+
+    ``EPERM`` is not exclusively a TCC refusal on macOS - a sticky-bit or
+    immutable-flag rename can raise it too. The convention is deliberately the
+    engine's own: a refusal is reported as a denial with the folder named
+    and the place to allow it, which is the actionable answer in the case
+    that actually happens here (the move touching a protected home folder),
+    and a rare non-TCC ``EPERM`` still ends in the same rollback.
+    """
+    return (
+        (platform or sys.platform) == "darwin"
+        and isinstance(exc, PermissionError)
+        and exc.errno == errno.EPERM
+    )
+
+
+def _record_denied_folder(folder: Path) -> str:
+    """Record a macOS privacy denial of ``folder`` and name it for the operator.
+
+    The move runs under the branded host, so a folder the user answered
+    *Don't Allow* to is a first-class outcome, not a crash: the denial is
+    recorded through the same machinery the engine's own probe uses, where
+    ``ciao service status`` reads it, and the move's own record names the
+    folder and the place to allow it.
+    """
+    from ciao.workspace_access import record_denial
+
+    message = (
+        f"macOS denied Ciaobot Server access to {folder}: allow it in System Settings "
+        "→ Privacy & Security → Files and Folders (Ciaobot Server), then move the "
+        "workspace again."
+    )
+    record_denial(message)
+    return message
+
+
+def _denied_folder(source: Path, target: Path) -> Path:
+    """The folder macOS refused: the protected one, else the destination.
+
+    A rename touches both ends, and the refusal names neither. The protected
+    home folder is the one macOS actually keeps the move out of, so it wins;
+    without one, the destination is the folder the move was going into.
+    """
+    from ciao.setup_status import tcc_protected_location
+
+    for folder in (source, target):
+        if tcc_protected_location(folder):
+            return folder
+    return target
+
+
 def run_move(
     op: MoveOperation,
     *,
@@ -1262,6 +1429,7 @@ def run_move(
     sleep: Sleep = time.sleep,
     clock: Clock = time.monotonic,
     claude_home: Path | None = None,
+    platform: str | None = None,
 ) -> MoveOperation:
     """Perform ``op``: the detached half. Returns the final record."""
     source, target = Path(op.source), Path(op.target)
@@ -1377,6 +1545,12 @@ def run_move(
             raise MoveError(f"the engine did not become ready within {int(_READY_TIMEOUT)}s")
     except Exception as exc:  # noqa: BLE001 — every failure rolls back
         reason = str(exc) or exc.__class__.__name__
+        if _is_privacy_denial(exc, platform):
+            # A folder the user did not allow is a first-class outcome: the
+            # denial is recorded where `ciao service status` reads it, and the
+            # move's own record names the folder and where to allow it.
+            reason = _record_denied_folder(_denied_folder(source, target))
+            op.denied = True
         advance("rolling_back", reason)
         try:
             stopped = host.stop_engine(wait=wait_until_unreachable)
@@ -1490,6 +1664,9 @@ def plan_for(source: Path, target_raw: str) -> MovePlan:
         update_in_flight=update_in_flight(),
         engine_running=engine_running(),
         service_can_reach=_linux_service_can_reach(),
+        # The move job runs under this machine's verified host, so the plan
+        # knows whether a protected folder can be moved into or out of (#1658).
+        host=_verified_host_if_installed(),
     )
     if sys.platform.startswith("linux"):
         for conf in LinuxServiceDefinition().drop_ins_naming(source.expanduser().resolve()):
@@ -1536,6 +1713,13 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"{result.phase}: {result.error}" if result.error else result.phase)
+    if result.denied:
+        # The same code the engine's own probe uses for a macOS privacy
+        # denial, so the host passes it through unchanged and the log says
+        # "denied" rather than "crashed".
+        from ciao.workspace_access import ACCESS_DENIED_EXIT
+
+        return ACCESS_DENIED_EXIT
     return 0 if result.phase == "done" else 1
 
 
