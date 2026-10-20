@@ -103,6 +103,46 @@
           </p>
         </section>
 
+        <section v-if="showRepoSection" class="project-section project-repo" aria-labelledby="project-repo-title">
+          <div class="section-head">
+            <h3 id="project-repo-title">Repository</h3>
+            <div class="section-actions">
+              <template v-if="project.repo">
+                <button type="button" class="text-action" aria-haspopup="dialog" :disabled="repoBusy" @click="openRepoPicker">Change</button>
+                <button type="button" class="text-action" aria-haspopup="dialog" :disabled="repoBusy" @click="unlinkRepo">Unlink</button>
+              </template>
+              <button v-else type="button" class="text-action" aria-haspopup="dialog" @click="openRepoPicker">Link</button>
+            </div>
+          </div>
+          <template v-if="project.repo">
+            <p class="repo-path"><code>{{ project.repo.path }}</code></p>
+            <p v-if="project.repo.missing" class="repo-missing" role="status">
+              This folder is missing or is no longer a git repository. Change or unlink it.
+            </p>
+            <p v-else class="repo-meta">
+              <span class="repo-branch"><span aria-hidden="true">⑂</span> {{ branchLabel(project.repo.branch) }}</span>
+              <span v-if="project.repo.dirty" class="repo-dirty"><span class="repo-dirty-dot" aria-hidden="true"></span>uncommitted changes</span>
+              <span v-else class="repo-clean">clean</span>
+              <button
+                type="button"
+                class="text-action"
+                title="Opens AGENTS.md, or CLAUDE.md when the repository has no AGENTS.md"
+                :disabled="repoBusy"
+                @click="openRepoInstructions"
+              >Open AGENTS.md</button>
+              <HostTerminalButton :project-id="project.project_id" />
+            </p>
+          </template>
+          <p v-else class="empty-row">No repository linked. Link one to give this project's chats the repository's agent instructions and skills.</p>
+          <p v-if="repoError" class="repo-error" role="alert">{{ repoError }}</p>
+          <RepoPickerDialog
+            :open="repoPickerOpen"
+            :project-id="project.project_id"
+            :current-path="project.repo?.path ?? null"
+            @close="repoPickerOpen = false"
+          />
+        </section>
+
         <section class="project-section" aria-labelledby="project-chats-title">
           <div class="section-head">
             <h3 id="project-chats-title">Chats</h3>
@@ -395,6 +435,9 @@ import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
+import HostTerminalButton from './HostTerminalButton.vue'
+import RepoPickerDialog from './RepoPickerDialog.vue'
+import { branchLabel, findRepoInstructions } from '../lib/repo'
 import ChatSignals from './ChatSignals.vue'
 import AppIcon from './AppIcon.vue'
 import type { ChatInfo, ChatArchivePage, Schedule } from '../lib/types'
@@ -708,6 +751,59 @@ async function saveContext() {
     if (project.value?.project_id === projectId) contextStatus.value = 'error'
   } finally {
     contextSaving.value = false
+  }
+}
+
+// ── Repository ─────────────────────────────────────────────────────────
+const repoPickerOpen = ref(false)
+const repoBusy = ref(false)
+const repoError = ref('')
+// Auto-managed projects only show the section when something (the CLI) linked one.
+const showRepoSection = computed(() => Boolean(project.value && (!project.value.is_auto || project.value.repo)))
+
+watch(() => props.projectId, () => {
+  repoPickerOpen.value = false
+  repoError.value = ''
+})
+
+function openRepoPicker() {
+  repoError.value = ''
+  repoPickerOpen.value = true
+}
+
+async function unlinkRepo() {
+  if (!project.value?.repo || repoBusy.value) return
+  const projectId = project.value.project_id
+  if (!await askConfirm(
+    "Chats in this project stop getting the repository's agent instructions and skills. The folder itself is not changed.",
+    { title: 'Unlink repository', confirmLabel: 'Unlink' },
+  )) return
+  repoBusy.value = true
+  repoError.value = ''
+  try {
+    await store.updateProject(projectId, { repo_path: '' })
+  } catch (e) {
+    if (project.value?.project_id === projectId) {
+      repoError.value = e instanceof Error ? e.message : 'Could not unlink the repository.'
+    }
+  } finally {
+    repoBusy.value = false
+  }
+}
+
+async function openRepoInstructions() {
+  const repo = project.value?.repo
+  if (!repo || repoBusy.value) return
+  repoBusy.value = true
+  repoError.value = ''
+  try {
+    const path = await findRepoInstructions(repo.path)
+    if (path) await fileViewer.open(path)
+    else repoError.value = 'This repository has no AGENTS.md or CLAUDE.md yet.'
+  } catch (e) {
+    repoError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    repoBusy.value = false
   }
 }
 
@@ -1163,6 +1259,9 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   text-underline-offset: 3px;
 }
 
+.repo-meta :deep(.host-terminal-link) { color: var(--accent); font-size: var(--text-sm); min-height: 32px; text-decoration: none; }
+.repo-meta :deep(.host-terminal-link:hover:not(:disabled)) { text-decoration: underline; text-underline-offset: 3px; }
+
 .text-action:disabled {
   cursor: default;
   opacity: 0.55;
@@ -1212,6 +1311,16 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
   color: var(--fg2);
   text-decoration: underline;
 }
+
+.repo-path { margin: 0; overflow-wrap: anywhere; }
+.repo-path code { color: var(--fg); font-family: var(--font-mono); font-size: var(--text-sm); }
+.repo-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); margin: var(--space-1) 0 0; color: var(--fg2); font-size: var(--text-sm); }
+.repo-branch { font-family: var(--font-mono); }
+.repo-dirty { display: inline-flex; align-items: center; gap: var(--space-1); }
+.repo-dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
+.repo-clean { color: var(--fg3); }
+.repo-missing { margin: var(--space-1) 0 0; color: var(--warning); font-size: var(--text-sm); }
+.repo-error { margin: var(--space-2) 0 0; color: var(--error); font-size: var(--text-sm); }
 
 .chat-list,
 .automation-list {
@@ -1548,7 +1657,8 @@ watch(() => [props.projectId, project.value?.vault_folder], async () => {
 }
 
 @media (pointer: coarse) {
-  .text-action { min-height: var(--touch); }
+  .text-action,
+  .repo-meta :deep(.host-terminal-link) { min-height: var(--touch); min-width: var(--touch); }
 }
 
 @media (max-width: 768px) {

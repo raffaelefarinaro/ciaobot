@@ -89,6 +89,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.entity_types import EntityTypeRegistry, load_entity_types
+from ciao.frontmatter import split_frontmatter
 from ciao.memory_proposals import MemoryProposal, append_proposals
 from ciao.vault_index import (
     DIR_TYPE_MAP,
@@ -733,14 +734,12 @@ def _linked_counterpart(
 
 def _frontmatter_related_refs(text: str) -> list[str]:
     """``related`` values from a note's frontmatter, block or inline form."""
-    if not text.startswith("---"):
-        return []
-    chunks = text.split("---", 2)
-    if len(chunks) < 3:
+    chunks = split_frontmatter(text)
+    if chunks is None:
         return []
     refs: list[str] = []
     in_block = False
-    for line in chunks[1].splitlines():
+    for line in chunks[0].splitlines():
         inline = re.match(r"^related:\s*\[(.*)\]\s*$", line)
         if inline:
             refs += [part.strip() for part in inline.group(1).split(",") if part.strip()]

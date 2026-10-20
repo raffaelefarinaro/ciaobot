@@ -74,7 +74,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
-import { colorForWorkspace } from '../lib/workspaceColors'
+import { activeWorkspaceAccent } from '../lib/workspaceColors'
 import { useProjectStore } from '../stores/projects'
 
 type ComposeAnchor = { top: number; left: number }
@@ -107,14 +107,13 @@ const images = computed(() => props.images ?? [])
 const inputEl = ref<HTMLTextAreaElement>()
 
 // The accent preset lives on #ciao-app as an inherited custom property, so a
-// popover teleported to <body> loses it and renders the default pink whatever
+// popover teleported to <body> loses it and renders the default accent whatever
 // workspace is open. Carry the workspace's identity on the box itself: the same
 // global rules then apply here, in the teleported placement and in the inline
 // one inside a dialog alike.
 const projects = useProjectStore()
-const workspaceColor = computed(() => colorForWorkspace(
-  projects.workspaces.find(workspace => workspace.name === projects.activeWorkspace),
-))
+const workspaceColor = computed(() =>
+  activeWorkspaceAccent(projects.workspaces, projects.activeWorkspace))
 
 // Measured size, once rendered. Null until then, so the first paint uses the
 // COMPOSE_H estimate rather than jumping.

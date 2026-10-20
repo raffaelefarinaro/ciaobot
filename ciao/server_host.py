@@ -65,8 +65,6 @@ __all__ = [
     "HOST_PROTOCOL_KEY",
     "HOST_REVISION",
     "ICON_NAME",
-    "LEGACY_EXECUTABLE_NAME",
-    "LEGACY_HOST_REVISION",
     "MINIMUM_SYSTEM_VERSION",
     "NATIVE_TIMEOUT_SECONDS",
     "SCHEMA_VERSION",
@@ -81,7 +79,6 @@ __all__ = [
     "parse_service_command",
     "read_host_ownership",
     "verify_owned_host",
-    "verify_superseded_host",
 ]
 
 #: The fixed bundle identity. These must agree with ``scripts/build-server-host.py``
@@ -95,19 +92,6 @@ HOST_REVISION = 2
 HOST_PROTOCOL_KEY = "CiaobotServerHostProtocol"
 HOST_PROTOCOL = 1
 MINIMUM_SYSTEM_VERSION = "13.0"
-
-# MIGRATION (#1249), delete when no install can still hold it. Host revision 1
-# shipped the executable as ``CiaobotServerHost``; revision 2 renames it so the
-# macOS Login Items row reads "Ciaobot Server". The only reader of these values
-# is :func:`verify_superseded_host`, which the installer and the in-app update
-# call to prove an existing revision-1 bundle is ours before replacing it.
-# Nothing else accepts the old name (``accept_legacy_host`` is the one opt-in,
-# and only the two LaunchAgent readers pass it). Delete these two constants,
-# :func:`verify_superseded_host` and its callers, and the flag, once no
-# supported install can still hold a revision-1 bundle, i.e. after a release
-# that ships revision 2 has been out for a full release cycle.
-LEGACY_EXECUTABLE_NAME = "CiaobotServerHost"
-LEGACY_HOST_REVISION = 1
 
 #: The host's own stop grace and the launchd ``ExitTimeOut`` a service plist must
 #: exceed so launchd does not sweep the job group out from under the host's stop.
@@ -162,38 +146,17 @@ _CDHASH_RE = re.compile(r"^[0-9a-f]{40}$")
 _PYTHON_RE = re.compile(r"^python(?:3(?:\.\d+)?)?$")
 
 _PLIST_REL = "Contents/Info.plist"
+_EXECUTABLE_REL = f"Contents/MacOS/{EXECUTABLE_NAME}"
 _ICON_REL = f"Contents/Resources/{ICON_NAME}"
 _CODESIGN_REL = "Contents/_CodeSignature/CodeResources"
-
-
-@dataclass(frozen=True)
-class _Layout:
-    """The bundle layout one host revision seals: its executable and its revision."""
-
-    executable_name: str
-    host_revision: int
-
-    @property
-    def executable_rel(self) -> str:
-        return f"Contents/MacOS/{self.executable_name}"
-
-    @property
-    def required_files(self) -> frozenset[str]:
-        """Exactly the files ``scripts/build-server-host.py`` seals for this revision."""
-        return frozenset({_PLIST_REL, self.executable_rel, _ICON_REL, _CODESIGN_REL})
-
-
-_CURRENT_LAYOUT = _Layout(EXECUTABLE_NAME, HOST_REVISION)
-# MIGRATION (#1249): see LEGACY_EXECUTABLE_NAME above.
-_LEGACY_LAYOUT = _Layout(LEGACY_EXECUTABLE_NAME, LEGACY_HOST_REVISION)
-
-_EXECUTABLE_REL = _CURRENT_LAYOUT.executable_rel
 
 #: Exactly the files ``scripts/build-server-host.py`` seals into a host bundle.
 #: An inspected bundle and a record's mapping must both name this set and
 #: nothing else: any other file is a thin staging product, a stray config,
 #: bundled Python or tampering. A new resource is a new host revision.
-REQUIRED_BUNDLE_FILES = _CURRENT_LAYOUT.required_files
+REQUIRED_BUNDLE_FILES = frozenset(
+    {_PLIST_REL, _EXECUTABLE_REL, _ICON_REL, _CODESIGN_REL}
+)
 
 #: The directories a host bundle contains: the bundle root, ``Contents`` and the
 #: parents of the sealed files. Any other directory is refused.
@@ -329,9 +292,7 @@ def _parse_direct(program: str, argv: tuple[str, ...]) -> ServiceCommand:
     )
 
 
-def parse_service_command(
-    arguments: object, *, accept_legacy_host: bool = False
-) -> ServiceCommand:
+def parse_service_command(arguments: object) -> ServiceCommand:
     """Parse a service invocation strictly into a :class:`ServiceCommand`.
 
     Accepts exactly the two shapes the service actually uses:
@@ -364,15 +325,7 @@ def parse_service_command(
         host = _absolute_posix(
             argv[0], what="the host executable", code=INVALID_COMMAND
         )
-        # MIGRATION (#1249): only the two runtime consumers that must read a
-        # revision-1 LaunchAgent pass accept_legacy_host; every other caller gets
-        # the strict current name.
-        allowed = (
-            (EXECUTABLE_NAME, LEGACY_EXECUTABLE_NAME)
-            if accept_legacy_host
-            else (EXECUTABLE_NAME,)
-        )
-        if PurePosixPath(host).name not in allowed:
+        if PurePosixPath(host).name != EXECUTABLE_NAME:
             raise ServerHostError(
                 f"the hosted executable must be {EXECUTABLE_NAME!r}, not "
                 f"{PurePosixPath(host).name!r}",
@@ -484,7 +437,7 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _decode_record(raw: str, *, path: Path, layout: _Layout) -> HostOwnership:
+def _decode_record(raw: str, *, path: Path) -> HostOwnership:
     try:
         document: Any = json.loads(raw, object_pairs_hook=_reject_duplicate_pairs)
     except ServerHostError:
@@ -528,10 +481,10 @@ def _decode_record(raw: str, *, path: Path, layout: _Layout) -> HostOwnership:
         )
     if (
         not _strict_int(document["host_revision"])
-        or document["host_revision"] != layout.host_revision
+        or document["host_revision"] != HOST_REVISION
     ):
         raise ServerHostError(
-            f"the ownership record at {path.name} is not host revision {layout.host_revision}",
+            f"the ownership record at {path.name} is not host revision {HOST_REVISION}",
             code=INVALID_OWNERSHIP,
         )
     if (
@@ -571,17 +524,17 @@ def _decode_record(raw: str, *, path: Path, layout: _Layout) -> HostOwnership:
     # Exactly the sealed set: an absolute, traversing, backslashed or otherwise
     # unexpected name is simply not one of these four.
     files = document["bundle_files"]
-    if not isinstance(files, dict) or set(files) != layout.required_files:
+    if not isinstance(files, dict) or set(files) != REQUIRED_BUNDLE_FILES:
         raise ServerHostError(
             f"the ownership record at {path.name} must map exactly "
-            f"{sorted(layout.required_files)}",
+            f"{sorted(REQUIRED_BUNDLE_FILES)}",
             code=INVALID_OWNERSHIP,
         )
     bundle_files = {
         name: _require_sha256(files[name], what=f"the digest of {name}")
-        for name in sorted(layout.required_files)
+        for name in sorted(REQUIRED_BUNDLE_FILES)
     }
-    if bundle_files[layout.executable_rel] != executable_sha256:
+    if bundle_files[_EXECUTABLE_REL] != executable_sha256:
         raise ServerHostError(
             f"the ownership record at {path.name} gives two executable digests",
             code=INVALID_OWNERSHIP,
@@ -591,7 +544,7 @@ def _decode_record(raw: str, *, path: Path, layout: _Layout) -> HostOwnership:
         schema=SCHEMA_VERSION,
         bundle_path=bundle_path,
         bundle_id=BUNDLE_ID,
-        host_revision=layout.host_revision,
+        host_revision=HOST_REVISION,
         host_protocol=HOST_PROTOCOL,
         executable_sha256=executable_sha256,
         per_arch_cdhashes=per_arch,
@@ -623,7 +576,7 @@ def _read_same_file(path: Path, checked: os.stat_result) -> bytes:
         return handle.read()
 
 
-def _read_ownership(path: Path, layout: _Layout) -> HostOwnership:
+def read_host_ownership(path: Path) -> HostOwnership:
     """Read the owner-only ownership record a verified installation wrote.
 
     Strict throughout: missing file, symlink, non-regular file, malformed JSON,
@@ -674,7 +627,7 @@ def _read_ownership(path: Path, layout: _Layout) -> HostOwnership:
             f"the host ownership record at {record} is unreadable",
             code=INVALID_OWNERSHIP,
         ) from exc
-    ownership = _decode_record(raw, path=record, layout=layout)
+    ownership = _decode_record(raw, path=record)
     # The record must not live inside the bundle it vouches for. Both sides are
     # resolved, so a symlinked ancestor on either path cannot hide the overlap.
     if Path(os.path.realpath(record)).is_relative_to(
@@ -685,19 +638,6 @@ def _read_ownership(path: Path, layout: _Layout) -> HostOwnership:
             code=INVALID_OWNERSHIP,
         )
     return ownership
-
-
-def read_host_ownership(path: Path) -> HostOwnership:
-    """Read the owner-only ownership record a verified installation wrote.
-
-    Strict throughout: missing file, symlink, non-regular file, malformed JSON,
-    a duplicate key, an unknown schema, a wrong identity or revision, a bad hash,
-    a file mapping other than exactly the sealed set and a record living inside
-    the bundle it describes (both paths resolved) are all refusals. Values are
-    never coerced and no file is written. On macOS the record's owner must be this uid
-    and its mode must grant nothing to group or other.
-    """
-    return _read_ownership(Path(path), _CURRENT_LAYOUT)
 
 
 # ── Identity: inspecting the installed bundle ───────────────────────────────
@@ -735,9 +675,7 @@ def _refuse_unreadable(error: OSError) -> None:
     ) from error
 
 
-def _collect_sealed_files(
-    bundle: Path, layout: _Layout
-) -> tuple[dict[str, str], bytes]:
+def _collect_sealed_files(bundle: Path) -> tuple[dict[str, str], bytes]:
     """Digest every regular file, refusing a symlink, special file or stray entry.
 
     Returns the digests and the ``Info.plist`` bytes that were digested, so the
@@ -767,7 +705,7 @@ def _collect_sealed_files(
         for name in sorted(names):
             entry = current_path / name
             relative = _relative_name(bundle, entry)
-            if relative not in layout.required_files:
+            if relative not in REQUIRED_BUNDLE_FILES:
                 raise ServerHostError(
                     f"the host bundle contains an unexpected file: {relative}",
                     code=INSPECTION_FAILED,
@@ -795,7 +733,7 @@ def _collect_sealed_files(
                     f"the host bundle contains a special file: {relative}",
                     code=INSPECTION_FAILED,
                 )
-    absent = sorted(layout.required_files - set(files))
+    absent = sorted(REQUIRED_BUNDLE_FILES - set(files))
     if absent:
         raise ServerHostError(
             f"the host bundle does not seal {absent}", code=INSPECTION_FAILED
@@ -803,7 +741,7 @@ def _collect_sealed_files(
     return files, plist
 
 
-def _check_bundle_plist(raw: bytes, layout: _Layout) -> None:
+def _check_bundle_plist(raw: bytes) -> None:
     try:
         info: Any = plistlib.loads(raw)
     except Exception as exc:
@@ -825,9 +763,9 @@ def _check_bundle_plist(raw: bytes, layout: _Layout) -> None:
         raise ServerHostError(
             f"the host bundle is not {BUNDLE_ID!r}", code=INSPECTION_FAILED
         )
-    if info.get("CFBundleExecutable") != layout.executable_name:
+    if info.get("CFBundleExecutable") != EXECUTABLE_NAME:
         raise ServerHostError(
-            f"the host bundle's executable is not {layout.executable_name!r}",
+            f"the host bundle's executable is not {EXECUTABLE_NAME!r}",
             code=INSPECTION_FAILED,
         )
     protocol = info.get(HOST_PROTOCOL_KEY)
@@ -835,14 +773,13 @@ def _check_bundle_plist(raw: bytes, layout: _Layout) -> None:
         raise ServerHostError(
             f"the host bundle is not protocol {HOST_PROTOCOL}", code=INSPECTION_FAILED
         )
-    revision = str(layout.host_revision)
+    revision = str(HOST_REVISION)
     if (
         info.get("CFBundleVersion") != revision
         or info.get("CFBundleShortVersionString") != revision
     ):
         raise ServerHostError(
-            f"the host bundle is not revision {layout.host_revision}",
-            code=INSPECTION_FAILED,
+            f"the host bundle is not revision {HOST_REVISION}", code=INSPECTION_FAILED
         )
     if info.get("LSMinimumSystemVersion") != MINIMUM_SYSTEM_VERSION:
         raise ServerHostError(
@@ -912,8 +849,8 @@ def _per_arch_cdhashes(executable: Path, runner: Runner) -> dict[str, str]:
     return hashes
 
 
-def _inspect_bundle(
-    bundle_path: Path, runner: Runner, layout: _Layout
+def inspect_host_bundle(
+    bundle_path: Path, *, runner: Runner = subprocess.run
 ) -> HostOwnership:
     """Snapshot an installed macOS host bundle's identity and bytes.
 
@@ -957,8 +894,8 @@ def _inspect_bundle(
     bundle = Path(os.path.realpath(supplied))
 
     # The walk refuses a symlinked `Contents` and a missing sealed file.
-    files, plist = _collect_sealed_files(bundle, layout)
-    _check_bundle_plist(plist, layout)
+    files, plist = _collect_sealed_files(bundle)
+    _check_bundle_plist(plist)
 
     # Verification covers every architecture of a universal binary by default.
     verify = _run_native(runner, [CODESIGN, "--verify", "--strict", os.fspath(bundle)])
@@ -968,15 +905,15 @@ def _inspect_bundle(
             code=INSPECTION_FAILED,
         )
     _require_signed_universal(bundle, runner)
-    cdhashes = _per_arch_cdhashes(bundle / layout.executable_rel, runner)
+    cdhashes = _per_arch_cdhashes(bundle / _EXECUTABLE_REL, runner)
 
     return HostOwnership(
         schema=SCHEMA_VERSION,
         bundle_path=os.fspath(bundle),
         bundle_id=BUNDLE_ID,
-        host_revision=layout.host_revision,
+        host_revision=HOST_REVISION,
         host_protocol=HOST_PROTOCOL,
-        executable_sha256=files[layout.executable_rel],
+        executable_sha256=files[_EXECUTABLE_REL],
         per_arch_cdhashes=cdhashes,
         bundle_files=files,
     )
@@ -985,11 +922,11 @@ def _inspect_bundle(
 # ── Ownership: the record is the only proof ─────────────────────────────────
 
 
-def _verify_owned(
+def verify_owned_host(
     bundle_path: Path,
-    ownership_path: Path | None,
-    runner: Runner,
-    layout: _Layout,
+    *,
+    ownership_path: Path | None = None,
+    runner: Runner = subprocess.run,
 ) -> HostOwnership:
     """Prove a bundle is this machine's host by matching an existing record.
 
@@ -1004,8 +941,8 @@ def _verify_owned(
     record_path = (
         default_ownership_path() if ownership_path is None else Path(ownership_path)
     )
-    record = _read_ownership(record_path, layout)
-    inspected = _inspect_bundle(bundle_path, runner, layout)
+    record = read_host_ownership(record_path)
+    inspected = inspect_host_bundle(bundle_path, runner=runner)
 
     if record.bundle_path != inspected.bundle_path:
         raise ServerHostError(
@@ -1021,52 +958,3 @@ def _verify_owned(
             code=NOT_OWNED,
         )
     return inspected
-
-
-# ── Public entry points ─────────────────────────────────────────────────────
-
-
-def inspect_host_bundle(
-    bundle_path: Path, *, runner: Runner = subprocess.run
-) -> HostOwnership:
-    """Snapshot an installed host bundle's identity and bytes (see :func:`_inspect_bundle`).
-
-    Only the current host revision is accepted. A snapshot is a well-formed host,
-    **not** proof that this machine installed it: :func:`verify_owned_host` is
-    the only answer to that.
-    """
-    return _inspect_bundle(Path(bundle_path), runner, _CURRENT_LAYOUT)
-
-
-def verify_owned_host(
-    bundle_path: Path,
-    *,
-    ownership_path: Path | None = None,
-    runner: Runner = subprocess.run,
-) -> HostOwnership:
-    """Prove a current-revision bundle is this machine's host against its record.
-
-    Reads the owner-only record (default :func:`default_ownership_path`), inspects
-    the bundle and requires them to match exactly. A missing record is a refusal;
-    there is no direct-engine fallback. Nothing is signed, launched, chmodded,
-    deleted or written. A revision-1 bundle is refused here: it is replaced by
-    the installer through :func:`verify_superseded_host`, never accepted.
-    """
-    return _verify_owned(bundle_path, ownership_path, runner, _CURRENT_LAYOUT)
-
-
-def verify_superseded_host(
-    bundle_path: Path,
-    *,
-    ownership_path: Path | None = None,
-    runner: Runner = subprocess.run,
-) -> HostOwnership:
-    """MIGRATION (#1249): prove an existing revision-1 ``CiaobotServerHost`` bundle is ours.
-
-    The same exact record-and-bundle match as :func:`verify_owned_host`, against
-    the revision-1 layout (:data:`LEGACY_EXECUTABLE_NAME`). It exists for one
-    caller only: the installer, which replaces such a bundle with the current
-    revision and records it again. Callers must never use it to accept the old
-    name for anything else.
-    """
-    return _verify_owned(bundle_path, ownership_path, runner, _LEGACY_LAYOUT)

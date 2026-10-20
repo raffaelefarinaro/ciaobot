@@ -13,6 +13,7 @@
  *   GET  /__fixture__/ws-count                       sockets opened so far
  *   POST /__fixture__/transcript                     give this session a chat history
  *   POST /__fixture__/update-tasks                   give this session update tasks
+ *   POST /__fixture__/chat-frame                     speak on a chat's own socket
  */
 import http from 'node:http'
 import fs from 'node:fs'
@@ -61,7 +62,6 @@ const TASK = {
   attempt_summary: '',
   attempt_detail: '',
   live_attempt_id: '',
-  changed_since_delegated: false,
 }
 const TASK_LINK_TRANSCRIPT = [
   { role: 'user', content: 'What is left from yesterday?', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
@@ -100,6 +100,24 @@ const TRANSCRIPT = [
     effective_model: 'synthetic-model',
     usage: { input_tokens: 18, output_tokens: 6478, context_pct: '39.2%' },
     turn_index: 1,
+  },
+]
+
+/**
+ * One turn whose facts are wider than a phone: a long model name and six-digit
+ * token counts, so the footer strip has to scroll sideways rather than wrap or
+ * clip. Guards the action row's facts staying on the buttons' line at 390px.
+ */
+const TURN_FACTS_TRANSCRIPT = [
+  { role: 'user', content: 'Summarise the release.', sent_at: '2026-01-01T09:50:00Z', turn_index: 0 },
+  {
+    role: 'assistant',
+    content: 'The release is ready.',
+    sent_at: '2026-01-01T09:51:23Z',
+    duration_ms: 83000,
+    effective_model: 'claude-opus-5-5-with-a-deliberately-long-model-name',
+    usage: { input_tokens: 123456, output_tokens: 987654, context_pct: '99.9%' },
+    turn_index: 0,
   },
 ]
 
@@ -157,7 +175,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), connections: 0, transcript: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null }
     sessions.set(id, state)
   }
   return state
@@ -227,12 +245,10 @@ const GET_ROUTES = {
   // field; an empty object crashed the tab, so the stub mirrors the shape.
   '/api/settings/routines': () => ({
     insights_enabled: true,
-    critique_models: '',
     provider_default_models: {},
     provider_default_modes: {},
     provider_default_thinking: {},
     provider_insights_models: {},
-    critique_models_effective: '',
     pwa_host: '',
     log_level: '',
     dev_mode: false,
@@ -418,7 +434,9 @@ const server = http.createServer(async (req, res) => {
           ? COMMENT_TRANSCRIPT
           : body?.shape === 'task-link'
             ? TASK_LINK_TRANSCRIPT
-            : TRANSCRIPT
+            : body?.shape === 'turn-facts'
+              ? TURN_FACTS_TRANSCRIPT
+              : TRANSCRIPT
       return sendJson(res, { ok: true, turns: state.transcript.length })
     }
     if (pathname === '/__fixture__/update-tasks') {
@@ -428,6 +446,28 @@ const server = http.createServer(async (req, res) => {
       // beside it, which assert the Home they already know.
       state.updateTasks = true
       return sendJson(res, { ok: true, tasks: UPDATE_TASKS.length })
+    }
+    if (pathname === '/__fixture__/chat-frame') {
+      // Speak on a chat's own socket. The fixture is otherwise silent there,
+      // and #1413's move chip needs the frames a broker would send for an
+      // OpenCode foreground shell: a `tool_use` carrying `backgroundable`, then
+      // the `tool_result` and `result` that end it. Frames are just delivered,
+      // in order — what they mean is the spec's business. Held for the socket
+      // that opens next when none is up yet, so a spec may opt in before it
+      // navigates.
+      const body = await readBody(req)
+      const chatId = String(body?.chat_id || '')
+      const frames = Array.isArray(body?.frames) ? body.frames : []
+      if (!chatId || !frames.length) {
+        return sendJson(res, { error: 'chat_id and a non-empty frames array are required' }, 400)
+      }
+      const open = state.chatSockets.get(chatId)
+      if (open?.size) {
+        for (const ws of open) for (const frame of frames) ws.send(frame)
+      } else {
+        state.pendingChatFrames.set(chatId, [...(state.pendingChatFrames.get(chatId) || []), ...frames])
+      }
+      return sendJson(res, { ok: true, delivered: open?.size || 0 })
     }
     return sendJson(res, { error: 'unknown fixture route' }, 404)
   }
@@ -460,7 +500,19 @@ server.on('upgrade', (req, socket) => {
   const { pathname } = new URL(req.url, `http://127.0.0.1:${PORT}`)
   const ws = acceptUpgrade(req, socket, pathname)
   if (!ws) return
-  if (pathname !== '/ws/events') return // per-chat sockets: accept and stay quiet
+  if (pathname !== '/ws/events') {
+    // Per-chat sockets: quiet, except for the frames a spec asked for. Holding
+    // them in the session state lets a spec deliver a call to the socket that
+    // opens after the request (see /__fixture__/chat-frame).
+    const chatId = decodeURIComponent(pathname.replace('/ws/chat/', ''))
+    const state = sessionOf(req)
+    if (!state.chatSockets.has(chatId)) state.chatSockets.set(chatId, new Set())
+    state.chatSockets.get(chatId).add(ws)
+    socket.on('close', () => state.chatSockets.get(chatId)?.delete(ws))
+    for (const frame of state.pendingChatFrames.get(chatId) || []) ws.send(frame)
+    state.pendingChatFrames.delete(chatId)
+    return
+  }
   const state = sessionOf(req)
   state.connections += 1
   state.sockets.add(ws)

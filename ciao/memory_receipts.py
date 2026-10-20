@@ -91,7 +91,9 @@ _TERMINAL = frozenset({APPLIED, FAILED, ROLLED_BACK, CONFLICT, UNDONE})
 #
 # A note apply (`ciao/note_receipts.py`) is one file, so it uses the ordinary
 # before/after pair like a region does. Its reverse write is *not* here: undo is
-# not offered for undo, so a `note_undo` row stays view-only.
+# not offered for undo, so a `note_undo` row stays view-only. A repo AGENTS.md
+# append is one file outside the vault, journaled in the vault, see
+# `note_receipts.append_repo_doc_item`.
 UNDOABLE_KINDS = frozenset(
     {
         "region_apply",
@@ -101,6 +103,7 @@ UNDOABLE_KINDS = frozenset(
         "prune_expired",
         "category_apply",
         "note_apply",
+        "repo_doc_apply",
     }
 )
 

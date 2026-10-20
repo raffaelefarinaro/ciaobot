@@ -174,14 +174,16 @@ describe('ChatPanel turn footer placement', () => {
     ]
     await flushPromises()
 
+    // Only the closing reply is a bubble; the earlier text is in the trace (#1395).
     const bubbles = wrapper.findAll('.message-wrap.assistant')
-    expect(bubbles.length).toBe(2)
-    expect(bubbles[0].find('.message-meta').exists()).toBe(false)
+    expect(bubbles.length).toBe(1)
+    expect(bubbles[0].text()).toContain('The language allocation is already correct.')
+    expect(bubbles[0].text()).not.toContain('Here is the corrected language allocation')
 
-    const footer = bubbles[1].find('.message-meta')
+    const footer = bubbles[0].find('.message-meta')
     expect(footer.exists()).toBe(true)
     // Every fact the turn produced, on the bubble that closes it — except the
-    // context-window occupancy, which the Work details rail states as a meter
+    // context-window occupancy, which the Chat details rail states as a meter
     // against the window's size. The footer reports cost, not occupancy.
     expect(footer.text()).toContain('openai/gpt-5.6-luna')
     expect(footer.text()).toContain('23s')

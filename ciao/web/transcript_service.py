@@ -685,7 +685,7 @@ def _render_opencode_thread(
     ``thread`` is :meth:`OpencodeProvider.read_thread`'s ``{"info", "messages"}``
     payload; each message is ``{"info": {role, ...}, "parts": [...]}``.
 
-    ``metadata`` overlays ``chat``'s per-turn images/timings/unattended flags
+    ``metadata`` overlays ``chat``'s per-turn images/timings/unattended/origin flags
     onto the rows. Pass ``False`` when ``thread`` is a *child* session: its
     turn numbering restarts at 0, so the parent chat's turn metadata does not
     apply to it.
@@ -731,6 +731,10 @@ def _render_opencode_thread(
             content = _strip_injected_context(raw_prompt).strip()
             if not content:
                 continue
+            # Hidden code-mode continuation: skipped before user_idx += 1 so
+            # markers keep their turn_index.
+            if cli_envelopes.is_hidden_continuation(content):
+                continue
             entry: dict = {
                 "role": "user",
                 "content": content,
@@ -743,8 +747,16 @@ def _render_opencode_thread(
                 timing = chat.user_turn_timings.get(str(user_idx)) or {}
                 if timing.get("sent_at"):
                     entry["sent_at"] = timing["sent_at"]
-                if chat.user_turn_unattended.get(str(user_idx)):
+                if chat.user_turn_steered.get(str(user_idx)):
+                    # A steered index inherits the running turn's unattended
+                    # flag for the control plane's guards; the bubble is still
+                    # something the person typed.
+                    entry["steered"] = True
+                elif chat.user_turn_unattended.get(str(user_idx)):
                     entry["unattended"] = True
+                origin = chat.user_turn_origin.get(str(user_idx))
+                if origin:
+                    entry["origin"] = origin
             result.append(entry)
             user_idx += 1
             continue
@@ -1310,6 +1322,11 @@ async def _assemble_chat_messages(
         # this exact content to keep the parent-uuid chain valid.
         if m.type == "user" and _is_no_response_sentinel(content):
             continue
+        # Our hidden continuations (cli_envelopes.CODE_MODE_CONTINUE_PROMPT, RELOAD_CONTINUE_PROMPT):
+        # hidden outright; G3's code-mode event row already shows the switch. Skip
+        # without incrementing user_idx so markers keep their turn_index.
+        if m.type == "user" and cli_envelopes.is_hidden_continuation(content):
+            continue
         # CLI-synthesized user envelopes (subagent completions, bash output,
         # slash-command echoes). Promote <task-notification> to a clean system
         # bubble so subagent completions stay visible; hide the rest. Skip
@@ -1374,8 +1391,13 @@ async def _assemble_chat_messages(
                 entry["sent_at"] = timing["sent_at"]
             # Loop/schedule ticks are user turns in the session file too, so the
             # flag has to come from our own per-turn record.
-            if chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
+            if chat.user_turn_steered.get(str(user_idx)) or chat.user_turn_steered.get(user_idx):
+                entry["steered"] = True
+            elif chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
                 entry["unattended"] = True
+            origin = chat.user_turn_origin.get(str(user_idx)) or chat.user_turn_origin.get(user_idx)
+            if origin:
+                entry["origin"] = origin
             user_idx += 1
         result.append(entry)
     # Stitch the durable transcript's per-turn metadata (token usage with the

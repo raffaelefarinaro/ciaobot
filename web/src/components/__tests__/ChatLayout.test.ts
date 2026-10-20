@@ -190,6 +190,133 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 
+  describe('Home alerts placement', () => {
+    const originalObserver = globalThis.ResizeObserver
+
+    afterEach(() => {
+      globalThis.ResizeObserver = originalObserver
+    })
+
+    const disconnect = vi.fn()
+
+    async function mountHome(paneWidth: number | null) {
+      disconnect.mockReset()
+      if (paneWidth === null) {
+        // jsdom has none; the pane width stays unknown and `isMobile` decides.
+        ;(globalThis as { ResizeObserver?: unknown }).ResizeObserver = undefined
+      } else {
+        globalThis.ResizeObserver = class {
+          constructor(private readonly cb: ResizeObserverCallback) {}
+          observe() {
+            this.cb([{ contentRect: { width: paneWidth } } as ResizeObserverEntry], this as unknown as ResizeObserver)
+          }
+          unobserve() {}
+          disconnect() { disconnect() }
+        } as unknown as typeof ResizeObserver
+      }
+
+      const router = createRouter({
+        history: createMemoryHistory(),
+        routes: [{ path: '/', component: EmptyStub }],
+      })
+      await router.push('/')
+      await router.isReady()
+
+      const store = useProjectStore()
+      store.projects = [{
+        project_id: 'project-1',
+        name: 'General',
+        workspace: 'personal',
+      }] as unknown as typeof store.projects
+      store.chats = []
+      store.activeChatId = null
+      store.bootstrapped = true
+      vi.spyOn(store, 'fetchAll').mockResolvedValue()
+      vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+
+      useHousekeepingStore().actions = [{
+        id: 'a',
+        kind: 'test',
+        severity: 10,
+        title: 'A condition needs you',
+        detail: 'It can be fixed.',
+        glyph: '▲',
+        workspace: 'personal',
+        run_label: '',
+        chat_label: '',
+        chat_prompt: '',
+        view_label: '',
+        blocking: false,
+        view_route: '',
+      }]
+
+      const { default: ChatLayout } = await import('../ChatLayout.vue')
+      const wrapper = mount(ChatLayout, {
+        global: {
+          plugins: [router],
+          stubs: {
+            ChatPanel: ChatPanelStub,
+            ProjectSidebar: EmptyStub,
+            ProjectView: EmptyStub,
+            SchedulePanel: EmptyStub,
+            SettingsView: EmptyStub,
+            FileViewerModal: EmptyStub,
+            PinnedFilePanel: EmptyStub,
+            PaneHeader: EmptyStub,
+            HomeRecentChats: EmptyStub,
+          },
+        },
+      })
+      await flushPromises()
+      return wrapper
+    }
+
+    it("puts Home's alerts in the rail when the pane is wide", async () => {
+      const wrapper = await mountHome(1200)
+      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(true)
+      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(false)
+      const rail = wrapper.get('.home-rail').html()
+      expect(rail.indexOf('class="housekeeping"')).toBeGreaterThan(-1)
+      expect(rail.indexOf('class="housekeeping"')).toBeLessThan(rail.indexOf('home-review-summary'))
+      wrapper.unmount()
+    })
+
+    it("keeps Home's alerts under the composer when the pane is narrow", async () => {
+      const wrapper = await mountHome(600)
+      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(true)
+      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('puts the alerts in the rail at 941px and under the composer at 940px', async () => {
+      // `@container chat-pane (max-width: 940px)` is inclusive.
+      const edge = await mountHome(940)
+      expect(edge.find('.home-main .housekeeping').exists()).toBe(true)
+      expect(edge.find('.home-rail .housekeeping').exists()).toBe(false)
+      edge.unmount()
+
+      const over = await mountHome(941)
+      expect(over.find('.home-rail .housekeeping').exists()).toBe(true)
+      expect(over.find('.home-main .housekeeping').exists()).toBe(false)
+      over.unmount()
+    })
+
+    it('stops observing the pane on unmount', async () => {
+      const wrapper = await mountHome(1200)
+      expect(disconnect).not.toHaveBeenCalled()
+      wrapper.unmount()
+      expect(disconnect).toHaveBeenCalled()
+    })
+
+    it('falls back to the viewport width without a ResizeObserver', async () => {
+      // beforeEach sets innerWidth to 390, so `isMobile` is true.
+      const wrapper = await mountHome(null)
+      expect(wrapper.find('.home-main .housekeeping').exists()).toBe(true)
+      expect(wrapper.find('.home-rail .housekeeping').exists()).toBe(false)
+      wrapper.unmount()
+    })
+  })
+
   it('reports post-archive memory work in the home attention summary', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
@@ -251,9 +378,9 @@ describe('ChatLayout', () => {
   it('keeps the mobile sidebar closed when the chat close button is clicked', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -658,9 +785,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -714,9 +841,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -829,9 +956,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -887,9 +1014,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -945,9 +1072,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1145,9 +1272,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1192,9 +1319,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1238,9 +1365,9 @@ describe('ChatLayout', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()
@@ -1375,6 +1502,16 @@ describe('ChatLayout Home navigation clears the selected chat', () => {
     expect(store.activeChatId).toBe('chat-1')
     expect(wrapper.find('[data-testid="close-chat"]').exists()).toBe(true)
     expect(wrapper.find('.chat-split').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('a reload of Home does not reopen the chat restored from storage', async () => {
+    // The store restores `ciao-active-chat` when it is created, before the
+    // layout mounts, so a reload of `/` mounts with that chat selected.
+    const { wrapper, store } = await mountWithSelection('/')
+    expect(wrapper.find('.empty-shell').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="close-chat"]').exists()).toBe(false)
+    expect(store.activeChatId).toBeNull()
     wrapper.unmount()
   })
 
@@ -1794,6 +1931,82 @@ describe('ChatLayout shared chat pin', () => {
     expect(wrapper.find('.chat-split').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  async function mountPinned(firstPanelBusy: boolean) {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
+    })
+    await router.push('/chat/chat-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Chat one' }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    vi.spyOn(store, 'clearActiveChatView').mockImplementation(() => { store.activeChatId = null })
+    vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+
+    // Each mount is its own panel: only the first one holds unsaved work, as a
+    // real remount (the panel is keyed by the route's chat) starts clean.
+    let mounts = 0
+    const PanelStub = defineComponent({
+      name: 'PinnedFilePanel',
+      props: ['filePath'],
+      setup(_, { expose }) {
+        expose({ isBusyAuthoring: firstPanelBusy && mounts++ === 0 })
+        return () => h('div', { class: 'pinned-panel-stub' })
+      },
+    })
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: PanelStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    store.applyChatPinState('chat-1', { path: 'notes/draft.md', dismissed_paths: [], revision: 1 }, { source: 'event' })
+    await nextTick()
+    expect(wrapper.find('.chat-split').exists()).toBe(true)
+    return { wrapper, store, router }
+  }
+
+  it('drops the pinned page when the chat is no longer on screen, though the route still names it', async () => {
+    const { wrapper, store } = await mountPinned(false)
+    // Archive, delete and a refresh that no longer lists the chat all clear the
+    // selection without a navigation: the screen falls back to Home, and the
+    // chat's pinned page must not stay beside it.
+    store.activeChatId = null
+    await flushPromises()
+    expect(wrapper.find('.chat-split').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('closes the pinned page on the way Home even while it holds unsaved work', async () => {
+    const { wrapper, router } = await mountPinned(true)
+    await router.push('/')
+    await flushPromises()
+    expect(wrapper.find('.chat-split').exists()).toBe(false)
+    wrapper.unmount()
+  })
 })
 
 describe('ChatLayout home arrow navigation', () => {
@@ -2186,9 +2399,9 @@ describe('ChatLayout PWA Option/Alt chords', () => {
   async function mountWebLayout() {
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', component: EmptyStub }],
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
     })
-    await router.push('/')
+    await router.push('/chat/chat-1')
     await router.isReady()
 
     const store = useProjectStore()

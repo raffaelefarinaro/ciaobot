@@ -48,7 +48,7 @@ because the rule reads as an over-broad name match without it (#734):
 - **A bare top-level durable root is not covered.** :data:`DURABLE_ROOTS` is
   emitted under a scope *base* and nowhere else, and the bases are the
   configured vault, the workspace agent roots and the archived workspaces. So
-  ``commands/critique.md`` is refused where ``work/commands/critique.md`` is
+  ``commands/remember.md`` is refused where ``work/commands/remember.md`` is
   not, and that is the answer rather than an omission: making the data root a
   base would put ``skills/``, ``subagents/`` and ``commands/`` at the top of
   *every* repository in scope, including the developer checkout where a

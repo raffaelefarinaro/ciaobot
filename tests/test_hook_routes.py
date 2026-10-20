@@ -470,7 +470,7 @@ def test_the_receiver_answers_202_without_waiting_for_the_launch(
     assert [name for name, _target, _kwargs in calls] == ["create_chat", "start_stream"]
     # No `unattended`: the turn is an ordinary one, so an approval card raised in
     # it is an ordinary approval card.
-    assert calls[1][2] == {}
+    assert calls[1][2] == {"origin": "webhook"}
 
 
 def test_a_retry_is_answered_with_the_same_receipt(tmp_path: Path, monkeypatch) -> None:

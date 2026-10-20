@@ -21,7 +21,7 @@
       aria-hidden="true"
       @click="sidebarCollapsed = true"
     />
-    <div class="chat-main" :class="{ 'chat-split': !!panelPath }">
+    <div ref="chatMainEl" class="chat-main" :class="{ 'chat-split': !!panelPath }">
       <!-- Split view when a file is pinned -->
       <template v-if="panelPath">
         <div
@@ -45,7 +45,7 @@
             :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" file-pinned @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
@@ -110,8 +110,10 @@
               <div class="home-workbench">
                 <div class="home-main">
                   <HomeIntake />
-                  <HomeNoticeReopen />
-                  <HousekeepingStrip />
+                  <template v-if="!homeAlertsInRail">
+                    <HomeNoticeReopen />
+                    <HousekeepingStrip />
+                  </template>
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                   <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -128,6 +130,10 @@
                   </div>
                 </div>
                 <div class="home-rail">
+                  <template v-if="homeAlertsInRail">
+                    <HomeNoticeReopen />
+                    <HousekeepingStrip />
+                  </template>
                   <HomeReviewSummary />
                 </div>
               </div>
@@ -265,8 +271,10 @@
             <div class="home-workbench">
               <div class="home-main">
                 <HomeIntake />
-                <HomeNoticeReopen />
-                <HousekeepingStrip />
+                <template v-if="!homeAlertsInRail">
+                  <HomeNoticeReopen />
+                  <HousekeepingStrip />
+                </template>
                 <HomeSetupCard />
                 <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                 <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -283,6 +291,10 @@
                 </div>
               </div>
               <div class="home-rail">
+                <template v-if="homeAlertsInRail">
+                  <HomeNoticeReopen />
+                  <HousekeepingStrip />
+                </template>
                 <HomeReviewSummary />
               </div>
             </div>
@@ -389,9 +401,9 @@ const SIDEBAR_SNAP_THRESHOLD = 15 // px
 const DEFAULT_SPLIT_RATIO = 0.5
 const MIN_CHAT_PANE_WIDTH = 240
 const MIN_SIDE_PANE_WIDTH = 240
-// Gutter + the tile's right inset (both --space-2): width the docked file tile
-// occupies beyond its own box.
-const SIDE_TILE_CHROME = 16
+// Gutter (--space-2) + the tile's right inset (--space-4): width the docked
+// file tile occupies beyond its own box.
+const SIDE_TILE_CHROME = 24
 const SPLIT_SNAP_THRESHOLD = 15 // px
 const LATEST_STATUS_SYNC_MS = 15000
 
@@ -614,6 +626,18 @@ const shortcutsActive = computed(() =>
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
+
+/** Mirrors `@container chat-pane (max-width: 940px)` in the styles below: the
+ *  same element (.chat-main), the same box (content inline size), the same
+ *  threshold. Home's alerts sit in the rail only while the rail is beside the
+ *  column; stacked, they stay under the composer instead of below every chat. */
+const HOME_RAIL_MIN_PANE_PX = 940
+const chatMainEl = ref<HTMLElement | null>(null)
+const chatPaneWidth = ref<number | null>(null)
+const homeAlertsInRail = computed(() => chatPaneWidth.value === null
+  ? !isMobile.value
+  : chatPaneWidth.value > HOME_RAIL_MIN_PANE_PX)
+let chatPaneObserver: ResizeObserver | null = null
 let latestStatusSyncTimer: ReturnType<typeof setInterval> | null = null
 
 // Only for the true empty state. Every lane carries its own "+ new" and lanes
@@ -711,9 +735,23 @@ const activePinKey = computed(() => {
   // Tasks, Memory and the project routes read as before (they carry neither
   // param). Coming back to the chat restores that chat's pin, because the pin
   // is looked up under the chat the route names.
+  //
+  // A chat route shows that chat only while it is the one selected: archiving
+  // or deleting it, or a refresh that no longer lists it, clears the selection
+  // without a navigation, and the screen falls back to Home. The pin follows
+  // what is on screen, so Home never carries a chat's page beside it.
   if (projectIdParam.value) return projectIdParam.value
-  return (route.params.chatId as string) || ''
+  const chatId = (route.params.chatId as string) || ''
+  return chatId && store.activeChat?.chat_id === chatId ? chatId : ''
 })
+// A file opened while the split view is available docks beside the chat or
+// project on screen instead of opening the viewer (stores/fileViewer.ts).
+watch(
+  [activePinKey, isMobile],
+  ([key, mobile]) => fileViewer.setDockTarget(mobile ? '' : key),
+  { immediate: true },
+)
+onBeforeUnmount(() => fileViewer.setDockTarget(''))
 const pinnedFilePath = computed(() => {
   if (isMobile.value) return ''
   return activePinKey.value ? store.pinnedFileFor(activePinKey.value) || '' : ''
@@ -821,12 +859,6 @@ function clearRetainedChatView() {
 }
 
 onMounted(async () => {
-  // `fetchAll()` is a boot *and* a refresh, and its first step is
-  // `restoreState()`, which re-applies `ciao-active-chat` from localStorage.
-  // Remembering the selection across that await is what separates a chat the
-  // store just restored from one the session already had open: only the
-  // former may be reconciled away below.
-  const selectedBeforeFetch = store.activeChatId
   await store.fetchAll()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
@@ -836,12 +868,10 @@ onMounted(async () => {
   // so a chat route is resolved against where the router actually is now.
   const chatId = (route.params.chatId as string) || ''
   if (isHomeRoute(route.path)) {
-    // Home alone: no conversation, no pinned page. Only the id that came back
-    // from storage is cleared, so a selection this session made before the
-    // layout existed is left to the route watcher above to own.
-    if (store.activeChatId && store.activeChatId !== selectedBeforeFetch) {
-      store.clearActiveChatView()
-    }
+    // Home alone: no conversation, no pinned page. The store restores
+    // `ciao-active-chat` from localStorage when it is created, before this
+    // layout mounts, so a reload of `/` arrives here with that chat selected.
+    clearRetainedChatView()
   } else if (chatId && store.activeChatId !== chatId) {
     await store.openChatFromDeepLink(chatId)
   }
@@ -1272,6 +1302,13 @@ function onTouchEnd(e: TouchEvent) {
 }
 
 onMounted(() => {
+  if (chatMainEl.value && typeof ResizeObserver !== 'undefined') {
+    chatPaneObserver = new ResizeObserver(entries => {
+      const entry = entries[entries.length - 1]
+      if (entry) chatPaneWidth.value = entry.contentRect.width
+    })
+    chatPaneObserver.observe(chatMainEl.value)
+  }
   window.addEventListener('touchstart', onTouchStart, { passive: true })
   window.addEventListener('touchend', onTouchEnd, { passive: true })
   window.addEventListener('touchcancel', onTouchEnd, { passive: true })
@@ -1281,6 +1318,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  chatPaneObserver?.disconnect()
   stopLatestStatusSync()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
@@ -1621,7 +1659,8 @@ onBeforeUnmount(() => {
 
 /* Workbench composition (prototype A): the request column keeps the readable
    measure, and the memory pulse sits in a quiet side rail on wide panes
-   instead of stacking another full-width band under the prompt. */
+   instead of stacking another full-width band under the prompt. The rail holds
+   Home's alerts (operator notices, update tasks) above At a glance. */
 .home-workbench {
   box-sizing: border-box;
   width: 100%;
@@ -1658,7 +1697,10 @@ onBeforeUnmount(() => {
 .home-main > :deep(.update-tasks),
 .home-main > :deep(.home-setup),
 .home-main > :deep(.home-notice-reopen),
-.home-main > :deep(.home-recent) {
+.home-main > :deep(.home-recent),
+.home-rail > :deep(.housekeeping),
+.home-rail > :deep(.update-tasks),
+.home-rail > :deep(.home-notice-reopen) {
   margin-block: 0;
 }
 
@@ -1668,17 +1710,30 @@ onBeforeUnmount(() => {
   max-width: none;
 }
 
+/* Not sticky itself: a rail taller than the viewport would hide its own
+   bottom (At a glance) until the end of the page. It stretches to the row
+   height instead, and only the glance stays pinned. */
 .home-rail {
-  position: sticky;
-  top: var(--space-2);
   width: 100%;
   min-width: 0;
   margin: 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+/* Notices scroll away, the glance stays. */
+.home-rail > :deep(.home-review-summary) {
+  position: sticky;
+  top: var(--space-2);
 }
 
 /* Keyed to the pane, not the viewport: with the resizable sidebar open, a
    1280px window leaves the pane well under 980px, and a viewport query kept
-   the rail beside a request column too narrow for its own chips. */
+   the rail beside a request column too narrow for its own chips. The 940px
+   here and HOME_RAIL_MIN_PANE_PX in the script decide together where Home's
+   alerts live: keep them in sync. */
 @container chat-pane (max-width: 940px) {
   .home-workbench {
     grid-template-columns: minmax(0, 1fr);
@@ -1686,7 +1741,7 @@ onBeforeUnmount(() => {
     padding: var(--space-5) var(--page-gutter) var(--space-4);
   }
 
-  .home-rail {
+  .home-rail > :deep(.home-review-summary) {
     position: static;
   }
 }
@@ -1763,11 +1818,14 @@ onBeforeUnmount(() => {
 }
 /* The pinned file is a window docked inside the pane, not a second flat
    column: inset from the pane edges, in the sidebar's tone (--bg2), so the
-   sidebar and the file read as one layer and the chat is the canvas between. */
+   sidebar and the file read as one layer and the chat is the canvas between.
+   The inset is Chat details' and the composer's 16px, so every docked window
+   keeps the same distance from the pane's edge; with the 44px title bar
+   (PinnedFilePanel) the bar's rule lands on the chat header's. */
 .chat-split-side {
   flex: 1 1 0;
   min-width: 240px;
-  margin: var(--space-2) var(--space-2) var(--space-2) 0;
+  margin: var(--space-4) var(--space-4) var(--space-4) 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;

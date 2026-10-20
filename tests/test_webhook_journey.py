@@ -286,7 +286,7 @@ async def test_one_configured_event_becomes_one_ordinary_chat(
         assert len(pcm.started) == 1
         chat_id, prompt, kwargs = pcm.started[0]
         assert chat_id == "chat-webhook-1"
-        assert kwargs == {}
+        assert kwargs == {"origin": "webhook"}
         assert "unattended" not in prompt
         # The sender's text is data inside a fence, after the operator's
         # instructions — a sender can describe an event, not add one.

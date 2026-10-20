@@ -244,6 +244,15 @@ export const PROPOSAL_KINDS: Record<string, ProposalKindDescriptor> = {
     discussLabel: () => 'a `user` proposal',
   },
 
+  repo: {
+    label: 'repo',
+    destination: (row) => (row.target ? `${row.target}/AGENTS.md` : 'no repository named'),
+    consequence: () => 'Added to the repository’s AGENTS.md, where coding agents read it',
+    canAccept: (row) => Boolean(row.target),
+    fallback: null,
+    discussLabel: () => 'a `repo` proposal',
+  },
+
   people: {
     label: 'people',
     destination: (row) => `People/${row.target || '?'}.md`,

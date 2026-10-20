@@ -8,10 +8,14 @@ from pathlib import Path
 # in PWA_API.md → Agent recipes. Each entry needs a one-line reason so future
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
+    "/api/host/terminal": (
+        "browser Open/Run in Terminal button; host-only (session + loopback peer + "
+        "loopback Host), takes an action id or a chat/project id, never a command or a path"
+    ),
     "/api/auth": "browser login flow; the recipe's auth step covers this",
     "/api/auth/logout": "browser logout; clears the session cookie",
     "/api/chats/{chat_id}/background-runs/{run_id}/cancel": (
-        "Work details Stop button; agents cancel their own runs through "
+        "Chat details Stop button; agents cancel their own runs through "
         "background_run_cancel on the agent surface"
     ),
     "/api/auth/settings": "browser Settings auth form; enable/disable or change PWA password",
@@ -36,8 +40,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/admin/drain": "update coordinator drain (loopback-only CLI)",
     "/api/admin/drain/cancel": "update coordinator drain (loopback-only CLI)",
     "/api/package/update": "browser update action; production engine updates through the signed one-line installer",
-    "/api/update/stage": "browser Settings update card; stages a release for an installer-managed engine in the background",
-    "/api/update/apply": "browser Settings update card; applies the staged release (drain, detached swap, rollback) in the background",
+    "/api/update/start": "browser Settings update card; stages then applies a release for an installer-managed engine in one background job",
     "/api/workspace-health/fix": "browser Settings health Fix button; creates missing scaffold files and re-links skills",
     "/api/workspace-open": "browser file-viewer Open-in-default-app button; hidden and refused unless the PWA runs on the engine's own machine",
     "/api/workspaces": "browser workspaces list config",

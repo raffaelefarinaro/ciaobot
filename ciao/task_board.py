@@ -139,6 +139,10 @@ _ID_RE = re.compile(r"[0-9a-f]{32}")
 
 _DUE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+#: Chats that worked on a task outside delegation (#1334). No lifecycle meaning.
+MAX_LINKED_CHATS = 20
+_LINKED_CHAT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+
 # Key order for freshly rendered files. Fixed so two renders of one record
 # are byte-identical; hand-edited files may carry any order.
 _FIELD_ORDER = (
@@ -153,6 +157,7 @@ _FIELD_ORDER = (
     "updated_at",
     "chat_id",
     "attempt_id",
+    "linked_chats",
 )
 
 # Fields a managed ``update`` accepts through ``changes``. ``schema``,
@@ -167,6 +172,9 @@ _EDITABLE_FIELDS = frozenset(
 #: The two linkage fields, editable only through :meth:`TaskBoardStore.link` and
 #: :meth:`TaskBoardStore.unlink`. See :func:`_check_editable`.
 _EDITABLE_LINKAGE_FIELDS = frozenset({"chat_id", "attempt_id"})
+
+#: The linked-chats set, written only through :meth:`TaskBoardStore.set_linked_chats`.
+_LINKED_CHATS_FIELD = "linked_chats"
 
 _REQUIRED_FIELDS = (
     "schema",
@@ -229,6 +237,11 @@ class TaskRecord:
     ``attempt_id`` are nullable strings this foundation stores but never
     validates against a live registry: project membership and linkage
     mutation belong to later children.
+
+    ``linked_chats`` are the chats that worked on the task outside
+    delegation (#1334). They carry no lifecycle meaning: they never block
+    completion, start or stop a turn, or stand in for an attempt. Empty when
+    the key is absent or null.
     """
 
     schema: int
@@ -242,6 +255,7 @@ class TaskRecord:
     updated_at: datetime
     chat_id: str | None
     attempt_id: str | None
+    linked_chats: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -407,6 +421,32 @@ def _coerce_optional_id(value: Any, name: str) -> str | None:
         )
     _reject_non_roundtrip_controls(value, name)
     return value
+
+
+def _coerce_linked_chats(value: Any) -> tuple[str, ...]:
+    """The stored ``linked_chats`` string as an ordered, de-duplicated tuple.
+
+    The key holds one single-line string of space-separated chat ids, so the
+    managed patcher can splice it like any other scalar. Absent or null reads
+    as empty. Duplicates keep their first position.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, str):
+        raise TaskBoardError(
+            "invalid_task", f"linked_chats must be a string or null, not {value!r}"
+        )
+    chats: list[str] = []
+    for chat_id in value.split():
+        if not _LINKED_CHAT_RE.fullmatch(chat_id):
+            raise TaskBoardError("invalid_task", f"linked chat id {chat_id!r} is not valid")
+        if chat_id not in chats:
+            chats.append(chat_id)
+    if len(chats) > MAX_LINKED_CHATS:
+        raise TaskBoardError(
+            "invalid_task", f"a task links at most {MAX_LINKED_CHATS} chats"
+        )
+    return tuple(chats)
 
 
 def _coerce_title(value: Any) -> str:
@@ -722,6 +762,7 @@ def _build_record(data: Mapping[str, Any], expected_id: str) -> TaskRecord:
         updated_at=updated_at,
         chat_id=_coerce_optional_id(data.get("chat_id"), "chat_id"),
         attempt_id=_coerce_optional_id(data.get("attempt_id"), "attempt_id"),
+        linked_chats=_coerce_linked_chats(data.get("linked_chats")),
     )
 
 
@@ -786,6 +827,8 @@ def _render_field_value(key: str, record: TaskRecord) -> str:
     value: Any = getattr(record, key)
     if key == "schema":
         return str(SCHEMA_VERSION)
+    if key == _LINKED_CHATS_FIELD:
+        return _render_string(" ".join(value)) if value else "null"
     if value is None:
         return "null"
     if isinstance(value, datetime):
@@ -819,7 +862,10 @@ def render_new_task(record: TaskRecord, body: str) -> bytes:
 
 
 def _check_editable(
-    changes: Mapping[str, object], *, allow_linkage: bool = False
+    changes: Mapping[str, object],
+    *,
+    allow_linkage: bool = False,
+    allow_linked_chats: bool = False,
 ) -> None:
     """Refuse non-editable and unknown patch fields explicitly.
 
@@ -829,10 +875,19 @@ def _check_editable(
     claiming a delegation it never made — but it is not immutable either, or the
     board could never be pointed at a turn. So it is a separate door rather than
     a field any caller may pass.
+
+    ``allow_linked_chats`` is the same kind of door for :meth:`TaskBoardStore.set_linked_chats`.
     """
     for key in changes:
         if key in _EDITABLE_FIELDS or key == "updated_at":
             continue
+        if key == _LINKED_CHATS_FIELD:
+            if allow_linked_chats:
+                continue
+            raise TaskBoardError(
+                "invalid_task",
+                "linked_chats is written by set_linked_chats, not by a field patch",
+            )
         if key in _EDITABLE_LINKAGE_FIELDS:
             if allow_linkage:
                 continue
@@ -874,6 +929,15 @@ def _normalize_change(key: str, value: object) -> Union[str, datetime, None]:
         return _coerce_optional_id(value, key)
     if key in _EDITABLE_LINKAGE_FIELDS:
         return _coerce_optional_id(value, key)
+    if key == _LINKED_CHATS_FIELD:
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple)) or not all(
+            isinstance(item, str) and _LINKED_CHAT_RE.fullmatch(item) for item in value
+        ):
+            raise TaskBoardError("invalid_task", "linked_chats must be a list of chat ids")
+        chats = _coerce_linked_chats(" ".join(value))
+        return " ".join(chats) or None
     if key == "due":
         return _coerce_due(value)
     if key == "updated_at":
@@ -894,6 +958,8 @@ def _current_normalized(key: str, record: TaskRecord) -> Union[str, datetime, No
     """The record's current value in the same normalized form as a change."""
     if key == "updated_at":
         return record.updated_at
+    if key == _LINKED_CHATS_FIELD:
+        return " ".join(record.linked_chats) or None
     value: str | None = getattr(record, key)
     return value
 
@@ -937,12 +1003,16 @@ def _patch(
     *,
     body: str | None = None,
     allow_linkage: bool = False,
+    allow_linked_chats: bool = False,
 ) -> bytes:
     """:func:`patch_task`, with the linkage door opened only for the delegation
-    child's two store methods."""
+    child's two store methods, and the linked-chats door only for
+    :meth:`TaskBoardStore.set_linked_chats`."""
     if body is not None and not isinstance(body, str):
         raise TaskBoardError("invalid_task", "task body must be a string or None")
-    _check_editable(changes, allow_linkage=allow_linkage)
+    _check_editable(
+        changes, allow_linkage=allow_linkage, allow_linked_chats=allow_linked_chats
+    )
     normalized: dict[str, Union[str, datetime, None]] = {
         key: _normalize_change(key, value) for key, value in changes.items()
     }
@@ -972,7 +1042,7 @@ def _patch(
             if pending[key] is None:
                 # Absent already means null for the optional fields.
                 continue
-            if key not in _OPTIONAL_NULLABLE_FIELDS and key != "updated_at":
+            if key not in _OPTIONAL_NULLABLE_FIELDS and key not in ("updated_at", _LINKED_CHATS_FIELD):
                 # Required fields are always present in a parsed document.
                 raise TaskBoardError(
                     "invalid_task", f"cannot add missing required field {key!r}"
@@ -1918,6 +1988,68 @@ class TaskBoardStore:
                 raise TaskBoardError(
                     "revision_conflict",
                     "the task changed while the detach was being prepared; nothing was written",
+                )
+            self._atomic_write(path, new_raw, existing=path)
+            return parse_task(new_raw, expected_id=task_id)
+
+    def set_linked_chats(
+        self, task_id: str, *, expected_revision: str, add: str = "", remove: str = ""
+    ) -> TaskDocument:
+        """Add one chat to, or remove one from, the task's linked chats.
+
+        Exactly one of ``add``/``remove`` is set. Adding a chat already linked,
+        or removing one that is not, returns the document unchanged (no write).
+        Any status is allowed: linking never changes status, assignee or the
+        delegation linkage.
+
+        Same protocol as :meth:`unlink`: revision required, rechecked under the
+        lock, nothing written on a conflict or a parse failure.
+        """
+        path = self._task_path(task_id)
+        expected = str(expected_revision or "").strip()
+        if not expected:
+            raise TaskBoardError(
+                "invalid_task",
+                "an expected revision is required; this store never links a task it has not read",
+            )
+        if bool(add) == bool(remove):
+            raise TaskBoardError("invalid_task", "exactly one of add or remove is required")
+        chat_id = str(add or remove).strip()
+        if not _LINKED_CHAT_RE.fullmatch(chat_id):
+            raise TaskBoardError("invalid_task", f"linked chat id {chat_id!r} is not valid")
+        with _workspace_lock(self._workspace, self._runtime_dir):
+            current_raw = self._read_file_bytes(path, task_id)
+            if _revision(current_raw) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed since these linked chats were planned; nothing was written",
+                )
+            document = parse_task(current_raw, expected_id=task_id)
+            current = list(document.record.linked_chats)
+            if add:
+                if chat_id in current:
+                    return document
+                if len(current) >= MAX_LINKED_CHATS:
+                    raise TaskBoardError(
+                        "invalid_task", f"a task links at most {MAX_LINKED_CHATS} chats"
+                    )
+                current.append(chat_id)
+            else:
+                if chat_id not in current:
+                    return document
+                current.remove(chat_id)
+            changes: dict[str, object] = {
+                _LINKED_CHATS_FIELD: current or None,
+                "updated_at": self._now(),
+            }
+            new_raw = _patch(document, changes, allow_linked_chats=True)
+            if new_raw == current_raw:
+                return document
+            reread = self._read_file_bytes(path, task_id)
+            if _revision(reread) != expected:
+                raise TaskBoardError(
+                    "revision_conflict",
+                    "the task changed while the linked chats were being prepared; nothing was written",
                 )
             self._atomic_write(path, new_raw, existing=path)
             return parse_task(new_raw, expected_id=task_id)

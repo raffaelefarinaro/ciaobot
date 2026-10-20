@@ -1,5 +1,60 @@
 # Changelog
 
+## v1.6.0 - 2026-10-20
+
+**Heads up:**
+- **The critique panel is gone.** `/critique`, `ciao critique` and the Settings → Models & providers → Critique panel were removed ([#1552](https://github.com/raffaelefarinaro/ciaobot/issues/1552)). The bundled `/critique` command is removed from your workspace on the next sync; a copy you edited yourself stays and will no longer run. Ask Ciaobot for a second opinion in chat instead.
+- **The bundled `visual-plan` skill is gone** ([#1553](https://github.com/raffaelefarinaro/ciaobot/issues/1553)). Plans are still written as local Markdown; use a workspace skill if you want the old approval-gate workflow.
+- **The task board no longer has "Changed since delegated" or Send update** ([#1365](https://github.com/raffaelefarinaro/ciaobot/issues/1365)). A task the agent reports done goes straight to review, and done tasks are never shown as overdue.
+
+### New features
+- **Link a project to a local git repository:** the project page links a checkout, and chats in that project then know its branch, uncommitted changes and `AGENTS.md`.
+- **Code mode:** a chip beside the chat title loads the linked repository's skills, instructions and write access. It stays on once the chat has messages, and the agent can switch it on itself and continue the turn.
+- **Steer a running turn:** queue a message while Ciaobot is working, then choose Queue or Steer. A steered message reaches the running turn; Send now releases waiting messages after a Stop.
+- **Move a running OpenCode call to the background:** the composer control keeps a long tool call or subagent running after the turn ends.
+- **One-click engine update:** Settings → General replaces Stage then Apply with Update & restart.
+- **Link a chat to a task** from the CLI or the board; archiving a delegated chat asks whether the task is complete.
+- **Open in Terminal on the host:** Run and Open in Terminal buttons for a browser on the computer running Ciaobot.
+- **Automations retry a transient network outage** instead of recording a failure, and show Retrying until the next attempt ([#1525](https://github.com/raffaelefarinaro/ciaobot/issues/1525)).
+- **Home rail:** alerts sit beside the composer, and failing automations appear in At a glance.
+- **A new orange default accent**, with a yellow warning color and a neutral accent while a chat loads.
+
+### Improvements
+- **One Chat details panel at every width**, with repository, code mode and "Always loaded" context in one place, and turn facts on one line under each reply.
+- A chat shows only the final reply: the live Activity stays open while the turn runs and collapses to "Worked for…" when it lands.
+- Background agents and shell runs get distinct glyphs, one composer status, and their own rows; subagents appear as one trace row each.
+- The task board uses fixed 310px lanes with Done behind a tab, calmer cards with a project · date line and one agent action, and a near-full-screen editor with in-place description and note bubbles.
+- The Settings pane header names the current tab, and touch targets across menus, dialogs and detail pages meet 44px.
+- OpenCode chats stop re-sending the 12K Ciaobot instructions after an engine restart or idle reclaim ([#1428](https://github.com/raffaelefarinaro/ciaobot/issues/1428)).
+- The Claude CLI now stays alive between turns, so reconnects no longer stall for up to a minute or lose context usage ([#1402](https://github.com/raffaelefarinaro/ciaobot/issues/1402)).
+- `ciao chat reload` restarts the provider, so changed MCP servers, plugins and skills actually load ([#1531](https://github.com/raffaelefarinaro/ciaobot/issues/1531)).
+- Google Workspace skills now confirm before sending a reply or forwarding, mark mail and files as untrusted, and drop the dead `--sanitize` and `gmail-watch` commands ([#1468](https://github.com/raffaelefarinaro/ciaobot/issues/1468)).
+- A workspace with no linked Google account no longer reaches the personal account ([#1467](https://github.com/raffaelefarinaro/ciaobot/issues/1467)), and `ciao gws` in a chat is locked to that workspace's account ([#1483](https://github.com/raffaelefarinaro/ciaobot/issues/1483)).
+- Shipped prompts now agree on memory writes, categories, `updated:`, schedule targets and the local API, so the assistant stops giving conflicting instructions ([#1461](https://github.com/raffaelefarinaro/ciaobot/issues/1461)).
+- `ciao-capabilities` is now an index with reference files, so "what can it do?" answers stay current ([#1472](https://github.com/raffaelefarinaro/ciaobot/issues/1472)).
+- Archived chats in a linked project can file repository-scoped facts and learnings.
+
+### Bug fixes
+- The file panel no longer reports success when you dismissed the file ([#1425](https://github.com/raffaelefarinaro/ciaobot/issues/1425)).
+- `ciao project create` now scaffolds the project's vault note ([#1350](https://github.com/raffaelefarinaro/ciaobot/issues/1350)).
+- Frontmatter containing `---` no longer truncates a note, and writes emit valid YAML ([#1352](https://github.com/raffaelefarinaro/ciaobot/issues/1352)).
+- A native permission or question form whose provider died no longer leaves the chat deadlocked ([#1513](https://github.com/raffaelefarinaro/ciaobot/issues/1513), [#1516](https://github.com/raffaelefarinaro/ciaobot/issues/1516)).
+- Restart and Stop now count chats holding an open question or permission card ([#1512](https://github.com/raffaelefarinaro/ciaobot/issues/1512)).
+- Scheduled runs that hit a transient network outage recorded "ok"; they now retry ([#1525](https://github.com/raffaelefarinaro/ciaobot/issues/1525)).
+- An automation failure in one workspace no longer turns the sidebar icon yellow in another ([#1376](https://github.com/raffaelefarinaro/ciaobot/issues/1376)).
+- Moving a workspace now rewrites vault paths in schedule prompts ([#1414](https://github.com/raffaelefarinaro/ciaobot/issues/1414)).
+- The stale-`.env` tile no longer asks the agent for values it cannot read ([#1457](https://github.com/raffaelefarinaro/ciaobot/issues/1457)).
+- Startup triage no longer proposes public GitHub issues from unattended runs ([#1455](https://github.com/raffaelefarinaro/ciaobot/issues/1455)).
+- Skill-proposal decisions no longer suppress later unrelated findings ([#1380](https://github.com/raffaelefarinaro/ciaobot/issues/1380)).
+- The system automation model picker now loads its catalog ([#1383](https://github.com/raffaelefarinaro/ciaobot/issues/1383)).
+- Debug logging no longer writes the session cookie to the server log ([#1388](https://github.com/raffaelefarinaro/ciaobot/issues/1388)).
+- An unauthenticated local route (`/api/open-chat/{id}`) is gone ([#1520](https://github.com/raffaelefarinaro/ciaobot/issues/1520)); loopback-only routes now check the Host and same-origin ([#1518](https://github.com/raffaelefarinaro/ciaobot/issues/1518)); Settings → Connect only opens a terminal for a browser on the engine's computer ([#1508](https://github.com/raffaelefarinaro/ciaobot/issues/1508)).
+- OpenCode tool results no longer appear twice, and failed tools are marked failed ([#1416](https://github.com/raffaelefarinaro/ciaobot/issues/1416)).
+- OpenCode 2.x inventory reads no longer go through a shared background service that can be an older version ([#1393](https://github.com/raffaelefarinaro/ciaobot/issues/1393)).
+- Home stays on reload and when switching workspace.
+
+[Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.5.0...v1.6.0)
+
 ## v1.5.0 - 2026-10-12
 
 **Heads up:**

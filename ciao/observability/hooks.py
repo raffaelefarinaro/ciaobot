@@ -105,11 +105,14 @@ def _looks_detached(command: str) -> bool:
 def build_foreground_bash_hook():
     """Return a PreToolUse callback that keeps Bash inside the active turn.
 
-    Claude Code's background Bash process is owned by the managed CLI
-    subprocess. If the model ends the turn after dispatch, the process is
-    stopped and its ``<task-notification>`` is only written when a later turn
-    resumes the session. Rewriting the call keeps the provider stream open
-    until Bash returns a real result that the model can report.
+    A background Bash process (``run_in_background``) belongs to the managed
+    CLI subprocess. While the SDK client stays connected it keeps running
+    after the turn ends, and its completion makes the CLI start a follow-up
+    turn by itself (verified 2026-10-15, #1394). It does not outlive that
+    subprocess: an idle reap, a reconnect or an engine restart kills it, and
+    then no completion is delivered beyond the dead-CLI wake reporting it
+    lost. Rewriting the call to the foreground keeps the result in the turn
+    that asked for it; long jobs belong in ``ciao run start -- …``.
 
     The same callback denies detached invocations (``nohup … &``, a bare
     trailing ``&``, ``setsid``/``disown``): those belong to the CLI
@@ -117,8 +120,9 @@ def build_foreground_bash_hook():
     delivered to the chat. The deny reason points at the managed
     ``ciao run start -- …`` command instead of rewriting the command.
 
-    Background ``Agent`` calls are intentionally untouched. Ciaobot has a
-    separate durable watcher and UI state for those.
+    Background ``Agent`` calls are intentionally untouched: their completion
+    arrives as a native follow-up turn that the between-turns drain streams,
+    and the subagent watcher tracks the running count.
     """
 
     async def on_pre_tool_use(

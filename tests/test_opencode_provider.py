@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
 
 import pytest
 
@@ -55,6 +58,74 @@ from ciao.providers.opencode import (
     workspace_config_placeholder_problems,
 )
 
+
+def test_shell_and_subagent_calls_are_backgroundable(tmp_path: Path) -> None:
+    provider = OpencodeProvider(tmp_path)
+    for tool in ("shell", "subagent"):
+        event = _convert(provider, "session.tool.called", {"id": "c1", "name": tool, "input": {}})[0]
+        assert isinstance(event, ToolUseEvent) and event.backgroundable is True
+    event = _convert(provider, "session.tool.called", {"id": "c2", "name": "read", "input": {}})[0]
+    assert isinstance(event, ToolUseEvent) and event.backgroundable is False
+
+
+def test_tool_result_is_never_backgroundable(tmp_path: Path) -> None:
+    provider = OpencodeProvider(tmp_path)
+    _convert(provider, "session.tool.called", {"id": "c1", "name": "shell", "input": {}})
+    event = _convert(provider, "session.tool.success", {"id": "c1"})[0]
+    assert isinstance(event, ToolUseEvent) and event.type == "tool_result" and not event.backgroundable
+
+
+def test_recovered_running_shell_part_is_backgroundable(tmp_path: Path) -> None:
+    provider = OpencodeProvider(tmp_path)
+    event = provider._tool_part({"callID": "c1", "tool": "shell", "state": {"status": "running", "input": {"command": "sleep 1"}}})[0]
+    assert isinstance(event, ToolUseEvent) and event.backgroundable
+
+
+def _background_provider(tmp_path: Path, post) -> tuple[OpencodeProvider, list[str]]:
+    provider = OpencodeProvider(tmp_path)
+    paths: list[str] = []
+    async def fake_post(path, json=None, timeout=None):
+        paths.append(path)
+        return await post(path, json, timeout)
+    provider._client = SimpleNamespace(post=fake_post)
+    provider._process = SimpleNamespace(returncode=None)
+    provider._session_id = "ses_s"
+    return provider, paths
+
+
+@pytest.mark.asyncio
+async def test_move_to_background_posts_and_reports_a_running_shell(tmp_path: Path) -> None:
+    async def post(*args): return SimpleNamespace(status_code=204, text="")
+    provider, paths = _background_provider(tmp_path, post)
+    provider._tool_calls = {"c1": "shell"}
+    assert await provider.move_to_background() == "moved"
+    assert paths == ["/api/session/ses_s/background"]
+
+
+@pytest.mark.asyncio
+async def test_move_to_background_with_only_other_tools_is_nothing(tmp_path: Path) -> None:
+    async def post(*args): return SimpleNamespace(status_code=204, text="")
+    provider, paths = _background_provider(tmp_path, post)
+    provider._tool_calls = {"c1": "read"}
+    assert await provider.move_to_background() == "nothing"
+    assert paths == ["/api/session/ses_s/background"]
+
+
+@pytest.mark.asyncio
+async def test_move_to_background_without_a_live_server_is_not_running(tmp_path: Path) -> None:
+    provider = OpencodeProvider(tmp_path)
+    assert await provider.move_to_background() == "not_running"
+
+
+@pytest.mark.asyncio
+async def test_move_to_background_reports_a_refusal_as_failed(tmp_path: Path) -> None:
+    async def refused(*args): return SimpleNamespace(status_code=404, text='{"_tag":"SessionNotFoundError"}')
+    provider, _ = _background_provider(tmp_path, refused)
+    assert await provider.move_to_background() == "failed"
+    async def broken(*args): raise httpx.ConnectError("x")
+    provider, _ = _background_provider(tmp_path, broken)
+    assert await provider.move_to_background() == "failed"
+
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
 
 
@@ -89,17 +160,6 @@ def test_background_subagents_are_supported():
     """Child sessions carry parentID, so background agents are inspectable."""
     assert OpencodeProvider.capabilities.background_subagents is True
     assert OpencodeProvider.capabilities.subagent_messages is True
-
-
-@pytest.mark.asyncio
-async def test_steer_never_sends_a_second_prompt(tmp_path):
-    """Returning False keeps the message in the next-turn queue.
-
-    Sending a second prompt instead would either queue it out of order or
-    abort the active turn; neither is steering.
-    """
-    provider = _provider(tmp_path)
-    assert await provider.steer(object()) is False  # type: ignore[arg-type]
 
 
 # ── contract verification ───────────────────────────────────────────────
@@ -200,7 +260,7 @@ def test_compose_system_is_empty_when_both_halves_are():
 def test_normal_opencode_chat_uses_core_without_memory_duplication(tmp_path):
     provider = OpencodeProvider(tmp_path)
     instructions = provider._chat_system_instructions()
-    assert "Ciaobot core instructions" in instructions
+    assert "<ciaobot_core>" in instructions
     assert "native workspace guide" in instructions
     assert "MEMORY (your personal notes)" not in instructions
 
@@ -576,6 +636,70 @@ def test_prompt_body_uses_v2_text_files_and_queue_delivery(tmp_path):
         "delivery": "queue",
         "resume": True,
     }
+
+
+from ciao.providers.opencode import _strip_prompt_context as _strip_context  # noqa: E402
+
+
+def test_prompt_body_joins_core_and_capsule_in_one_envelope(tmp_path):
+    provider = _provider(tmp_path)
+    request = AgentRequest(
+        prompt="[CIAO_CONTEXT_BEGIN]\n<ciao-context>capsule</ciao-context>\n[CIAO_CONTEXT_END]\n\nHello",
+        model="",
+        mode="bypass",
+        provider="opencode",
+    )
+    text = provider._prompt_body(request, system="Core instructions")["text"]
+    assert text.count("[CIAO_CONTEXT_BEGIN]") == 1
+    assert text.count("[CIAO_CONTEXT_END]") == 1
+    assert text.index("Core instructions") < text.index("<ciao-context>")
+    assert _strip_context(text) == "Hello"
+
+
+def test_prompt_body_without_a_capsule_emits_one_pair_and_strips_to_the_prompt(tmp_path):
+    provider = _provider(tmp_path)
+    request = AgentRequest(prompt="Hello", model="", mode="bypass", provider="opencode")
+    text = provider._prompt_body(request, system="Core instructions")["text"]
+    assert text.count("[CIAO_CONTEXT_BEGIN]") == 1
+    assert text.count("[CIAO_CONTEXT_END]") == 1
+    assert _strip_context(text) == "Hello"
+
+
+def test_strip_prompt_context_handles_an_old_two_envelope_session():
+    old = (
+        "[CIAO_CONTEXT_BEGIN]\nCore instructions\n[CIAO_CONTEXT_END]\n\n"
+        "[CIAO_CONTEXT_BEGIN]\n<ciao-context>capsule</ciao-context>\n[CIAO_CONTEXT_END]\n\nHello"
+    )
+    assert _strip_context(old) == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_new_session_turn_sends_one_envelope_per_v2_fixture_turn(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+    client._lines = _turn_lines("ses_one_envelope")
+
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return "ses_one_envelope"
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    request = AgentRequest(
+        prompt="[CIAO_CONTEXT_BEGIN]\n<ciao-context>capsule</ciao-context>\n[CIAO_CONTEXT_END]\n\nhi",
+        model="",
+        mode="bypass",
+        provider="opencode",
+    )
+    events = [e async for e in provider.run_streaming(request, lambda _h: None)]
+    assert events[-1].type == "result" and not events[-1].is_error
+    text = client.bodies[0]["text"]
+    assert _CORE_MARKER in text and "capsule" in text
+    assert text.count("[CIAO_CONTEXT_BEGIN]") == 1
+    assert text.count("[CIAO_CONTEXT_END]") == 1
+    assert _strip_context(text) == "hi"
 
 
 @pytest.mark.asyncio
@@ -1976,7 +2100,7 @@ class _PromptRecordingClient(_FakeServerClient):
         return await super().post(path, json=json)
 
 
-_CORE_MARKER = "Ciaobot core instructions"
+_CORE_MARKER = "<ciaobot_core>"
 
 
 _FIXTURE_SESSION = "ses_003133027ffeJooFKUT3slZ0al"
@@ -1992,7 +2116,15 @@ def _turn_lines(session_id: str) -> list[str]:
     ]
 
 
-async def _run_recorded_turn(provider, monkeypatch, client, session_id: str):
+async def _run_recorded_turn(
+    provider,
+    monkeypatch,
+    client,
+    session_id: str,
+    *,
+    context_primed: bool = False,
+    resume_session: str | None = None,
+):
     from ciao.models import AgentRequest
 
     client._lines = _turn_lines(session_id)
@@ -2005,7 +2137,14 @@ async def _run_recorded_turn(provider, monkeypatch, client, session_id: str):
 
     monkeypatch.setattr(provider, "_ensure_server", fake_server)
     monkeypatch.setattr(provider, "_ensure_session", fake_session)
-    request = AgentRequest(prompt="hi", model="", mode="bypass", provider="opencode")
+    request = AgentRequest(
+        prompt="hi",
+        model="",
+        mode="bypass",
+        provider="opencode",
+        context_primed=context_primed,
+        resume_session=resume_session,
+    )
     return [
         event
         async for event in provider.run_streaming(request, lambda _handle: None)
@@ -2035,7 +2174,8 @@ async def test_core_is_sent_again_after_compaction(tmp_path, monkeypatch, kind):
     client = _PromptRecordingClient()
 
     await _run_recorded_turn(provider, monkeypatch, client, "ses_core_compact")
-    assert provider._event_to_stream({"type": kind, "data": {}}) == []
+    events = provider._event_to_stream({"type": kind, "data": {}})
+    assert [e.status for e in events] == ["Compacted context"]
     await _run_recorded_turn(provider, monkeypatch, client, "ses_core_compact")
     await _run_recorded_turn(provider, monkeypatch, client, "ses_core_compact")
 
@@ -2206,6 +2346,91 @@ async def test_core_is_sent_with_session_handover_context(tmp_path, monkeypatch)
     assert "User: Earlier request" in handover_text
     # The handover is consumed by the accepted prompt, so the next turn is lean.
     assert _CORE_MARKER not in client.bodies[2]["text"]
+
+
+@pytest.mark.asyncio
+async def test_primed_request_on_a_fresh_provider_skips_the_core(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    await _run_recorded_turn(
+        provider,
+        monkeypatch,
+        client,
+        "ses_x",
+        context_primed=True,
+        resume_session="ses_x",
+    )
+
+    assert _CORE_MARKER not in client.bodies[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_primed_request_for_a_different_session_still_sends_the_core(
+    tmp_path, monkeypatch
+):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    await _run_recorded_turn(
+        provider,
+        monkeypatch,
+        client,
+        "ses_new",
+        context_primed=True,
+        resume_session="ses_x",
+    )
+
+    assert _CORE_MARKER in client.bodies[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_primed_request_after_compaction_still_sends_the_core(
+    tmp_path, monkeypatch
+):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+
+    events = provider._event_to_stream({"type": "session.compacted", "data": {}})
+    assert [(e.type, e.status) for e in events] == [("system", "Compacted context")]
+    for _ in range(2):
+        await _run_recorded_turn(
+            provider,
+            monkeypatch,
+            client,
+            "ses_x",
+            context_primed=True,
+            resume_session="ses_x",
+        )
+
+    assert _CORE_MARKER in client.bodies[0]["text"]
+    assert _CORE_MARKER not in client.bodies[1]["text"]
+
+
+def test_compaction_event_reports_a_system_status(tmp_path):
+    events = _provider(tmp_path)._event_to_stream(
+        {"type": "session.compacted", "data": {}}
+    )
+
+    assert [(e.type, e.status) for e in events] == [("system", "Compacted context")]
+
+
+@pytest.mark.asyncio
+async def test_primed_request_with_handover_still_sends_the_core(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    client = _PromptRecordingClient()
+    provider._session_handover_context = "User: Earlier request"
+
+    await _run_recorded_turn(
+        provider,
+        monkeypatch,
+        client,
+        "ses_x",
+        context_primed=True,
+        resume_session="ses_x",
+    )
+
+    assert _CORE_MARKER in client.bodies[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -2805,7 +3030,7 @@ def test_credential_count_reads_the_v2_json_listing(monkeypatch):
 
     monkeypatch.setattr("subprocess.run", fake_run)
     assert mod._credential_count("/bin/opencode", timeout=1.0) == 2
-    assert calls == [["/bin/opencode", "auth", "list", "--format", "json"]]
+    assert calls == [["/bin/opencode", "auth", "list", "--format", "json", "--standalone"]]
 
     monkeypatch.setattr(
         "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="[]", returncode=0)
@@ -2816,7 +3041,6 @@ def test_credential_count_reads_the_v2_json_listing(monkeypatch):
 def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
     """Settings lists what the opencode CLI brings; the V2 server's list routes
     are the source, minus built-in and failed plugins."""
-    import json as _json
     from types import SimpleNamespace
 
     import ciao.providers.opencode as mod
@@ -2831,41 +3055,44 @@ def test_status_reports_skills_plugins_and_mcps_from_the_server(monkeypatch):
         "/api/mcp": [{"name": "github"}],
     }
 
+    run_calls = []
+
     def fake_run(cmd, *a, **k):
-        if cmd[1:3] == ["api", "GET"]:
-            return SimpleNamespace(stdout=_json.dumps({"data": routes[cmd[3]]}), returncode=0)
+        run_calls.append(cmd)
         if cmd[1] == "--version":
             return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
         return SimpleNamespace(stdout="[]", returncode=0)
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        mod,
+        "_fetch_inventory_rows",
+        lambda binary, **_k: (routes["/api/skill"], routes["/api/plugin"], routes["/api/mcp"]),
+    )
 
     status = mod.opencode_login_status()
 
     assert status["skills"] == ["pdf", "review"]
     assert status["bundled_skills"] == ["opencode"]
     assert status["mcps"] == ["github"]
+    assert not any(len(cmd) > 1 and cmd[1] == "api" for cmd in run_calls)
 
 
 def test_status_leaves_out_lists_the_server_could_not_report(monkeypatch):
     """A failed list route must not read as "nothing installed"."""
-    import json as _json
     from types import SimpleNamespace
 
     import ciao.providers.opencode as mod
 
     def fake_run(cmd, *a, **k):
-        if cmd[1:4] == ["api", "GET", "/api/skill"]:
-            return SimpleNamespace(stdout="", returncode=1)
-        if cmd[1:3] == ["api", "GET"]:
-            return SimpleNamespace(stdout=_json.dumps({"data": []}), returncode=0)
         if cmd[1] == "--version":
             return SimpleNamespace(stdout="opencode v2.0.16\n", returncode=0)
         return SimpleNamespace(stdout="[]", returncode=0)
 
     monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", lambda binary, **_k: (None, [], []))
 
     status = mod.opencode_login_status()
 
@@ -2873,6 +3100,223 @@ def test_status_leaves_out_lists_the_server_could_not_report(monkeypatch):
     assert "skills" not in status
     assert "bundled_skills" not in status
     assert status["mcps"] == []
+
+
+def _inventory_client(handler):
+    import httpx
+
+    return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://t")
+
+
+def test_inventory_waits_until_plugins_load(monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    import httpx
+
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_INVENTORY_POLL", 0)
+    seen: list[httpx.Request] = []
+    plugin_calls = 0
+    builtin = {"id": "opencode", "path": "/builtin/opencode.md"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal plugin_calls
+        seen.append(request)
+        if request.url.path == "/api/plugin":
+            plugin_calls += 1
+            if plugin_calls <= 2:
+                return httpx.Response(200, json={"data": []})
+            return httpx.Response(200, json={"data": [
+                {"id": "opencode.x", "source": {"type": "builtin"}, "state": {"status": "active"}}
+            ]})
+        if request.url.path == "/api/skill":
+            if plugin_calls <= 2:
+                return httpx.Response(200, json={"data": [builtin, {"id": "opencode2"}]})
+            return httpx.Response(200, json={"data": [builtin, {"id": "pdf"}]})
+        return httpx.Response(200, json={"data": [{"name": "github"}]})
+
+    with _inventory_client(handler) as client:
+        skills, plugins, mcps = mod._read_loaded_inventory(
+            client, SimpleNamespace(poll=lambda: None),
+            deadline=time.monotonic() + 5, location="/home/x",
+        )
+
+    assert any(row["id"] == "pdf" for row in skills)
+    assert len(plugins) == 1
+    assert mcps == [{"name": "github"}]
+    assert all(r.url.params["location[directory]"] == "/home/x" for r in seen)
+    assert sum(1 for r in seen if r.url.path == "/api/plugin") == 3
+
+
+def test_inventory_is_unknown_when_the_server_never_loads(monkeypatch):
+    import time
+    from types import SimpleNamespace
+
+    import httpx
+
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_INVENTORY_POLL", 0.01)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": []})
+
+    with _inventory_client(handler) as client:
+        rows = mod._read_loaded_inventory(
+            client, SimpleNamespace(poll=lambda: None),
+            deadline=time.monotonic() + 0.05, location="/home/x",
+        )
+
+    assert rows == (None, None, None)
+
+
+def test_inventory_is_unknown_when_the_server_exits():
+    import time
+    from types import SimpleNamespace
+
+    import httpx
+
+    import ciao.providers.opencode as mod
+
+    called = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    with _inventory_client(handler) as client:
+        rows = mod._read_loaded_inventory(
+            client, SimpleNamespace(poll=lambda: 1),
+            deadline=time.monotonic() + 5, location="/home/x",
+        )
+
+    assert rows == (None, None, None)
+    assert called == []
+
+
+def test_inventory_spawns_a_private_server_in_home_not_the_service(monkeypatch):
+    import subprocess
+
+    import ciao.providers.opencode as mod
+
+    recorded = []
+
+    def fake_popen(argv, **kwargs):
+        recorded.append((argv, kwargs))
+        raise OSError("no spawn in tests")
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    assert mod._fetch_inventory_rows("/bin/opencode") == (None, None, None)
+
+    argv, kwargs = recorded[0]
+    assert argv[:2] == ["/bin/opencode", "serve"]
+    assert "--port" in argv
+    assert argv[-2:] == ["--hostname", "127.0.0.1"]
+    assert "api" not in argv
+    assert "--service" not in argv
+    assert kwargs["cwd"] == str(Path.home())
+    assert "OPENCODE_SERVER_PASSWORD" in kwargs["env"]
+
+
+def test_login_status_without_inventory_starts_no_server(monkeypatch):
+    from types import SimpleNamespace
+
+    import ciao.providers.opencode as mod
+
+    def no_server(*_a, **_k):
+        raise AssertionError("inventory=False must not start a server")
+
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.0.27\n", returncode=0)
+    )
+    monkeypatch.setattr(mod, "_credential_count", lambda *a, **k: 1)
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", no_server)
+
+    status = mod.opencode_login_status(inventory=False)
+
+    assert status["ok"] is True
+    assert "skills" not in status
+
+
+def test_system_skills_lists_every_skill_row(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    skills = [
+        {"name": "loop-engineering", "path": "/Users/x/.claude/skills/loop-engineering/SKILL.md"},
+        {"name": "opencode", "path": "/builtin/opencode"},
+    ]
+    monkeypatch.setattr(
+        mod,
+        "_fetch_inventory_rows",
+        lambda binary, **_k: (skills, [{"id": "review"}], [{"name": "github"}]),
+    )
+
+    assert mod.opencode_system_skills() == ["loop-engineering", "opencode"]
+
+
+def test_system_skills_cached_within_ttl(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    calls = []
+
+    def fetch(binary, **_k):
+        calls.append(binary)
+        return ([{"name": "pdf"}], [], [])
+
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", fetch)
+    start = 1000.0
+    monkeypatch.setattr(mod.time, "monotonic", lambda: start)
+
+    assert mod.opencode_system_skills() == ["pdf"]
+    assert mod.opencode_system_skills() == ["pdf"]
+    assert len(calls) == 1
+
+    monkeypatch.setattr(mod.time, "monotonic", lambda: start + 301)
+    assert mod.opencode_system_skills() == ["pdf"]
+    assert len(calls) == 2
+
+
+def test_system_skills_empty_without_binary_or_server(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    calls = []
+
+    def fetch(binary, **_k):
+        calls.append(binary)
+        return (None, None, None)
+
+    monkeypatch.setattr(mod, "_fetch_inventory_rows", fetch)
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: None)
+    assert mod.opencode_system_skills() == []
+    assert calls == []
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", lambda _env=None: "/bin/opencode")
+    assert mod.opencode_system_skills() == []
+    assert mod.opencode_system_skills() == []
+    assert len(calls) == 1
+
+
+def test_system_skills_binary_error_is_empty(monkeypatch):
+    import ciao.providers.opencode as mod
+
+    def broken(_env=None):
+        raise OSError("broken")
+
+    monkeypatch.setattr(mod, "_system_skills_cache", None)
+    monkeypatch.setattr(mod, "resolve_opencode_binary", broken)
+
+    assert mod.opencode_system_skills() == []
 
 
 def test_credential_count_is_unknown_when_the_cli_fails(monkeypatch):
@@ -3233,6 +3677,14 @@ def test_an_empty_argument_map_summarizes_to_nothing():
 
     assert _summarize_tool_input("bash", {}) == ""
     assert _summarize_tool_input("bash", {"command": "ls"}) == "ls"
+
+
+def test_a_multiline_command_summarizes_to_its_first_line():
+    """The trace draws a row per line; a heredoc became a column of fake rows."""
+    from ciao.providers.opencode import _summarize_tool_input
+
+    command = "python3 - <<'PY'\nfrom pathlib import Path\n\nprint(Path.home())\nPY\n"
+    assert _summarize_tool_input("shell", {"command": command}) == "python3 - <<'PY' (+3 lines)"
 
 
 def test_permission_events_match_the_house_convention(tmp_path):
@@ -3635,3 +4087,747 @@ async def test_live_mcp_status_uses_v2_contract_and_is_bounded(tmp_path, failure
             "notion": "failed", "linear": "connected", "disabled": "disabled"
         }
     assert calls == [("/api/mcp", 2.0)]
+
+
+# ── #1392 B: steering a running turn ─────────────────────────────────────
+#
+# `steer_turn.jsonl` and `steer_new_execution.jsonl` are sanitized 2.0.27
+# captures of a `delivery: "steer"` prompt joining a running execution and
+# starting a new one. Ids are shortened: `msg_ours` is the turn's prompt and
+# `msg_steer` the steered message.
+
+
+class _SteerStream(_FakeEventStream):
+    """A turn stream whose ``lines`` may hold async hooks run between frames."""
+
+    async def aiter_bytes(self):
+        for line in self._lines:
+            if callable(line):
+                await line()
+            else:
+                yield line.encode("utf-8")
+
+
+class _SteerClient(_FakeServerClient):
+    """Records prompt, steer and inbox-cancel calls."""
+
+    def __init__(self, lines, steer_failure: Exception | None = None) -> None:
+        super().__init__(lines)
+        self.posts: list[tuple[str, dict]] = []
+        self.deletes: list[str] = []
+        self.steer_failure = steer_failure
+
+    def stream(self, _method: str, _path: str) -> _SteerStream:
+        return _SteerStream(self._lines)
+
+    async def post(self, path: str, json=None, timeout=None):
+        body = dict(json or {})
+        self.posts.append((path, body))
+        if body.get("delivery") == "steer":
+            self.steer_timeout = timeout
+            if self.steer_failure is not None:
+                raise self.steer_failure
+        return await super().post(path, json=json)
+
+    async def delete(self, path: str, timeout=None):
+        self.deletes.append(path)
+
+        class _Gone:
+            status_code = 204
+            text = ""
+
+        return _Gone()
+
+
+def _steer_lines(name: str) -> list[str]:
+    return [
+        line
+        for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _steer_frames(
+    lines: list[str], hook, *, before: str | None = None, after: str | None = None
+) -> list:
+    """Frame the fixture lines, running ``hook`` before/after the first ``kind``."""
+    frames: list = []
+    placed = False
+    for line in lines:
+        kind = json.loads(line)["type"]
+        if before and kind == before and not placed:
+            frames.append(hook)
+            placed = True
+        frames.append(f"data: {line}\n\n")
+        if after and kind == after and not placed:
+            frames.append(hook)
+            placed = True
+    assert placed
+    return frames
+
+
+def _tokens(monkeypatch, *names: str) -> None:
+    from ciao.providers import opencode as module
+
+    queue = list(names)
+    monkeypatch.setattr(module.secrets, "token_hex", lambda _n: queue.pop(0))
+
+
+async def _steered_turn(provider, monkeypatch, client, session: str):
+    """Run a turn; the hook in ``client`` frames calls ``steer_turn``."""
+    async def fake_server(_request):
+        return client
+
+    async def fake_session(_request):
+        return session
+
+    monkeypatch.setattr(provider, "_ensure_server", fake_server)
+    monkeypatch.setattr(provider, "_ensure_session", fake_session)
+    provider._client = client
+    provider._session_id = session
+    request = AgentRequest(prompt="go", model="", mode="bypass", provider="opencode")
+    return [
+        event async for event in provider.run_streaming(request, lambda _handle: None)
+    ]
+
+
+def _hook(provider, results: list, text: str = "Also, say PINEAPPLE."):
+    async def steer() -> None:
+        results.append(
+            await provider.steer_turn(
+                AgentRequest(prompt=text, model="", mode="bypass", provider="opencode")
+            )
+        )
+
+    return steer
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_refused_before_own_delivery(tmp_path):
+    provider = _provider(tmp_path)
+    client = _SteerClient([])
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._turn_open = True
+    provider._owned_delivery_seen = False
+
+    request = AgentRequest(prompt="x", model="", mode="bypass", provider="opencode")
+    assert await provider.steer_turn(request) is None
+    assert client.posts == []
+    assert provider._steer_ids_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_refused_without_an_open_turn_or_after_stop(tmp_path):
+    provider = _provider(tmp_path)
+    client = _SteerClient([])
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._owned_delivery_seen = True
+    request = AgentRequest(prompt="x", model="", mode="bypass", provider="opencode")
+
+    assert await provider.steer_turn(request) is None
+    provider._turn_open = True
+    provider._stop_requested = "ses_1"
+    assert await provider.steer_turn(request) is None
+    assert client.posts == []
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_posts_steer_delivery_with_our_id(tmp_path):
+    import re
+
+    provider = _provider(tmp_path)
+    client = _SteerClient([])
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+
+    request = AgentRequest(prompt="Also PINEAPPLE", model="", mode="bypass", provider="opencode")
+    delivery_id = await provider.steer_turn(request)
+
+    (path, body), = client.posts
+    assert path == "/api/session/ses_1/prompt"
+    assert body["delivery"] == "steer"
+    assert re.fullmatch(r"msg_[0-9a-f]{24}", body["id"])
+    assert delivery_id == body["id"]
+    assert "Also PINEAPPLE" in body["text"]
+    assert provider._steer_ids_pending == {delivery_id}
+    assert client.steer_timeout is not None
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_sends_images_as_files(tmp_path):
+    from ciao.models import ImageAttachment
+
+    image = tmp_path / "red.png"
+    image.write_bytes(b"png")
+    provider = _provider(tmp_path)
+    client = _SteerClient([])
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+    request = AgentRequest(
+        prompt="what colour?", model="", mode="bypass", provider="opencode",
+        images=[ImageAttachment(path=image, mime_type="image/png", original_filename="red.png")],
+    )
+
+    assert await provider.steer_turn(request) is not None
+    (_path, body), = client.posts
+    assert body["files"] == [{"uri": image.resolve().as_uri(), "name": "red.png"}]
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_timeout_returns_none_and_cancels_the_item(tmp_path):
+    import httpx
+
+    provider = _provider(tmp_path)
+    client = _SteerClient([], steer_failure=httpx.ReadTimeout("slow"))
+    provider._client = client
+    provider._session_id = "ses_1"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+    request = AgentRequest(prompt="x", model="", mode="bypass", provider="opencode")
+
+    assert await provider.steer_turn(request) is None
+    assert provider._steer_ids_pending == set()
+    sent_id = client.posts[0][1]["id"]
+    # The request may have landed server-side: do not leave a ghost steer.
+    assert client.deletes == [f"/api/session/ses_1/inbox/{sent_id}"]
+
+
+@pytest.mark.asyncio
+async def test_steered_item_joins_running_execution(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent, SteerDeliveredEvent
+
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(
+        _steer_lines("steer_turn.jsonl"), _hook(provider, results),
+        after="session.tool.called",
+    )
+    client = _SteerClient(frames)
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, client, "ses_steer_turn")
+
+    assert results == ["msg_steer"]
+    steered = [e for e in events if isinstance(e, SteerDeliveredEvent)]
+    assert [e.delivery_id for e in steered] == ["msg_steer"]
+    final_text = next(
+        i for i, e in enumerate(events) if e.type == "text" and "PINEAPPLE" in e.text
+    )
+    assert events.index(steered[0]) < final_text
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert "PINEAPPLE" in result.result and not result.is_error
+    assert provider._steer_ids_pending == set()
+    assert provider._turn_open is False
+
+
+@pytest.mark.asyncio
+async def test_steer_after_terminal_keeps_pump_open(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent, SteerDeliveredEvent
+
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(
+        _steer_lines("steer_new_execution.jsonl"), _hook(provider, results),
+        before="session.execution.succeeded",
+    )
+    client = _SteerClient(frames)
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, client, "ses_steer_idle")
+
+    assert results == ["msg_steer"]
+    assert [e.delivery_id for e in events if isinstance(e, SteerDeliveredEvent)] == [
+        "msg_steer"
+    ]
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert "HI PINEAPPLE" in result.result and not result.is_error
+    assert result.result.startswith("HI")
+
+
+@pytest.mark.asyncio
+async def test_foreign_wake_during_steer_wait_is_not_ours(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent, SteerDeliveredEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_w", **data}})
+
+    def text(message: str, body: str) -> str:
+        return ev("session.text.ended", assistantMessageID=message, ordinal=0, text=body)
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        text("msg_a1", "FIRST "),
+        ev("session.execution.succeeded"),
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_wake"),
+        text("msg_wake_a", "BGDONE"),
+        ev("session.execution.succeeded"),
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_steer"),
+        text("msg_a2", "ANSWER"),
+        ev("session.execution.succeeded"),
+    ]
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(lines, _hook(provider, results), before="session.execution.succeeded")
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, _SteerClient(frames), "ses_w")
+
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert result.result.split() == ["FIRST", "ANSWER"]
+    assert "BGDONE" not in result.result
+    assert len([e for e in events if isinstance(e, SteerDeliveredEvent)]) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_clears_pending_steers(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent, SteerDeliveredEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_f", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.failed", error={"message": "boom"}),
+    ]
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(lines, _hook(provider, results), after="session.inbox.delivered")
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, _SteerClient(frames), "ses_f")
+
+    assert results == ["msg_steer"]
+    assert provider._steer_ids_pending == set()
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert result.is_error
+    assert not any(isinstance(e, SteerDeliveredEvent) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_failed_steer_post_after_terminal_does_not_hang_the_pump(tmp_path, monkeypatch):
+    """A steer whose POST fails after the terminal was skipped must not wait forever."""
+    import httpx
+
+    from ciao.models import ResultEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_h", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.succeeded"),
+        ev("session.usage.updated", cost=0, tokens={}),
+    ]
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(lines, _hook(provider, results), before="session.execution.succeeded")
+    client = _SteerClient(frames, steer_failure=httpx.ReadTimeout("slow"))
+    _tokens(monkeypatch, "ours", "steer")
+    events = await asyncio.wait_for(
+        _steered_turn(provider, monkeypatch, client, "ses_h"), timeout=5
+    )
+
+    assert results == [None]
+    assert [e for e in events if isinstance(e, ResultEvent)]
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_steers_before_interrupting(tmp_path):
+    provider = _provider(tmp_path)
+    order: list[str] = []
+
+    class Client(_SteerClient):
+        async def post(self, path, json=None, timeout=None):
+            order.append(f"POST {path}")
+
+            class _Ok:
+                status_code = 204
+                text = ""
+
+            return _Ok()
+
+        async def delete(self, path, timeout=None):
+            order.append(f"DELETE {path}")
+
+            class _Ok:
+                status_code = 204
+                text = ""
+
+            return _Ok()
+
+    provider._client = Client([])
+    provider._session_id = "ses_s"
+    provider._steer_ids_pending = {"msg_steer"}
+    provider._steer_ids_owned = {"msg_steer"}
+
+    await provider.abort_session("ses_s")
+
+    assert order == [
+        "DELETE /api/session/ses_s/inbox/msg_steer",
+        "POST /api/session/ses_s/interrupt",
+    ]
+    assert provider._steer_ids_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_stop_still_interrupts_when_the_cancel_hangs(tmp_path, monkeypatch):
+    from ciao.providers import opencode as module
+
+    monkeypatch.setattr(module, "_OPENCODE_STEER_CANCEL_TIMEOUT_S", 0.05)
+    provider = _provider(tmp_path)
+    posts: list[str] = []
+
+    class Client(_SteerClient):
+        async def post(self, path, json=None, timeout=None):
+            posts.append(path)
+
+        async def delete(self, path, timeout=None):
+            await asyncio.Event().wait()
+
+    provider._client = Client([])
+    provider._session_id = "ses_s"
+    provider._steer_ids_pending = {"msg_steer"}
+
+    await asyncio.wait_for(provider.abort_session("ses_s"), timeout=2)
+
+    assert posts == ["/api/session/ses_s/interrupt"]
+
+
+# ── #1392 B review round 1: lifecycle edges ──────────────────────────────
+
+
+class _HeldSteerClient(_SteerClient):
+    """A steer POST that stays in flight until ``release`` is set."""
+
+    def __init__(self, lines) -> None:
+        super().__init__(lines)
+        self.release = asyncio.Event()
+        self.posted = asyncio.Event()
+
+    async def post(self, path: str, json=None, timeout=None):
+        if (json or {}).get("delivery") == "steer":
+            self.posts.append((path, dict(json)))
+            self.posted.set()
+            await self.release.wait()
+            return await _FakeServerClient.post(self, path, json=json)
+        return await super().post(path, json=json, timeout=timeout)
+
+
+def _steer_request(text: str = "steer me") -> AgentRequest:
+    return AgentRequest(prompt=text, model="", mode="bypass", provider="opencode")
+
+
+@pytest.mark.asyncio
+async def test_steer_in_flight_when_stop_is_pressed_is_cancelled(tmp_path):
+    provider = _provider(tmp_path)
+    client = _HeldSteerClient([])
+    provider._client = client
+    provider._session_id = "ses_s"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+
+    task = asyncio.create_task(provider.steer_turn(_steer_request()))
+    await asyncio.wait_for(client.posted.wait(), 2)
+    provider._stop_requested = "ses_s"
+    await provider.abort_session("ses_s")
+    client.release.set()
+
+    assert await task is None
+    sent = client.posts[0][1]["id"]
+    # Once before the interrupt, and again for a POST that landed after it.
+    assert client.deletes == [f"/api/session/ses_s/inbox/{sent}"] * 2
+
+
+@pytest.mark.asyncio
+async def test_steer_in_flight_when_the_turn_ends_is_cancelled(tmp_path, monkeypatch):
+    from ciao.models import ResultEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_e", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.failed", error={"message": "boom"}),
+    ]
+    provider = _provider(tmp_path)
+    tasks: list = []
+
+    async def start_steer() -> None:
+        tasks.append(asyncio.create_task(provider.steer_turn(_steer_request())))
+        await asyncio.wait_for(client.posted.wait(), 2)
+
+    client = _HeldSteerClient(
+        _steer_frames(lines, start_steer, after="session.inbox.delivered")
+    )
+    _tokens(monkeypatch, "ours", "steer")
+    events = await _steered_turn(provider, monkeypatch, client, "ses_e")
+    assert [e for e in events if isinstance(e, ResultEvent)]
+    assert provider._turn_open is False
+    client.release.set()
+
+    assert await tasks[0] is None
+    # The turn-end cancel, then the one for the POST that landed afterwards.
+    assert client.deletes == ["/api/session/ses_e/inbox/msg_steer"] * 2
+
+
+@pytest.mark.asyncio
+async def test_refused_steer_does_not_leave_the_pump_waiting(tmp_path, monkeypatch):
+    """The terminal was skipped for an in-flight steer that then fails.
+
+    No further SSE event arrives, and the pump must still end.
+    """
+    import httpx
+
+    from ciao.models import ResultEvent
+
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_q", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.succeeded"),
+    ]
+    provider = _provider(tmp_path)
+    tasks: list = []
+
+    async def start_steer() -> None:
+        tasks.append(asyncio.create_task(provider.steer_turn(_steer_request())))
+        await asyncio.wait_for(client.posted.wait(), 2)
+
+    async def fail_the_post_then_idle() -> None:
+        client.release.set()
+        await asyncio.Event().wait()
+
+    class Client(_HeldSteerClient):
+        async def post(self, path, json=None, timeout=None):
+            if (json or {}).get("delivery") == "steer":
+                self.posted.set()
+                await self.release.wait()
+                raise httpx.ReadTimeout("slow")
+            return await super().post(path, json=json, timeout=timeout)
+
+    frames = _steer_frames(lines, start_steer, before="session.execution.succeeded")
+    frames.append(fail_the_post_then_idle)
+    client = Client(frames)
+    opened = 0
+    plain_stream = client.stream
+
+    def counting_stream(method: str, path: str):
+        nonlocal opened
+        opened += 1
+        return plain_stream(method, path)
+
+    client.stream = counting_stream  # type: ignore[method-assign]
+    _tokens(monkeypatch, "ours", "steer")
+    events = await asyncio.wait_for(
+        _steered_turn(provider, monkeypatch, client, "ses_q"), timeout=5
+    )
+
+    assert await tasks[0] is None
+    (result,) = [e for e in events if isinstance(e, ResultEvent)]
+    assert opened == 1
+    assert not result.is_error and not result.fallback_final
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_cancels_the_pending_steer_on_the_server(tmp_path, monkeypatch):
+    def ev(kind: str, **data) -> str:
+        return json.dumps({"id": f"e_{kind}", "type": kind, "data": {"sessionID": "ses_x", **data}})
+
+    lines = [
+        ev("session.execution.started"),
+        ev("session.inbox.delivered", inboxID="msg_ours"),
+        ev("session.execution.failed", error={"message": "boom"}),
+    ]
+    provider = _provider(tmp_path)
+    results: list = []
+    frames = _steer_frames(lines, _hook(provider, results), after="session.inbox.delivered")
+    client = _SteerClient(frames)
+    _tokens(monkeypatch, "ours", "steer")
+    await _steered_turn(provider, monkeypatch, client, "ses_x")
+
+    assert results == ["msg_steer"]
+    assert client.deletes == ["/api/session/ses_x/inbox/msg_steer"]
+    assert provider._steer_ids_pending == set()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_post_failure_after_delivery_returns_the_id(tmp_path):
+    import httpx
+
+    provider = _provider(tmp_path)
+
+    class Client(_SteerClient):
+        async def post(self, path, json=None, timeout=None):
+            # The reply is lost, but the execution already delivered the item.
+            sent = (json or {})["id"]
+            provider._steer_ids_pending.discard(sent)
+            provider._steer_ids_delivered.add(sent)
+            raise httpx.ReadTimeout("slow")
+
+    client = Client([])
+    provider._client = client
+    provider._session_id = "ses_a"
+    provider._turn_open = True
+    provider._owned_delivery_seen = True
+
+    delivery_id = await provider.steer_turn(_steer_request())
+
+    assert delivery_id is not None and delivery_id.startswith("msg_")
+    assert client.deletes == []
+
+
+@pytest.mark.asyncio
+async def test_frames_until_cancel_leaves_no_pending_tasks():
+    from ciao.providers.opencode import _frames_until
+
+    async def never():
+        await asyncio.Event().wait()
+        yield b""
+
+    wake = asyncio.Event()
+    before = asyncio.all_tasks()
+
+    async def consume() -> None:
+        async for _frame in _frames_until(never(), wake, lambda: False):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert asyncio.all_tasks() - before == set()
+
+
+def test_linked_repo_config_content_lists_existing_skill_dirs(tmp_path):
+    from ciao.providers.opencode import linked_repo_config_content
+
+    repo = tmp_path / "repo"
+    (repo / ".claude" / "skills").mkdir(parents=True)
+    (repo / ".opencode" / "skills").mkdir(parents=True)
+    bare = tmp_path / "bare"
+    bare.mkdir()
+
+    paths = json.loads(linked_repo_config_content(str(repo)))["skills"]["paths"]
+
+    assert paths == [str(repo / ".claude" / "skills"), str(repo / ".opencode" / "skills")]
+    assert linked_repo_config_content("") == ""
+    assert linked_repo_config_content(str(bare)) == ""
+
+
+def test_linked_repo_config_content_merges_an_existing_value(tmp_path):
+    from ciao.providers.opencode import linked_repo_config_content
+
+    repo = tmp_path / "repo"
+    (repo / ".agents" / "skills").mkdir(parents=True)
+
+    merged = json.loads(
+        linked_repo_config_content(
+            str(repo), '{"skills":{"paths":["/x"]},"theme":"y"}'
+        )
+    )
+
+    assert merged["theme"] == "y"
+    assert merged["skills"]["paths"] == ["/x", str(repo / ".agents" / "skills")]
+    assert linked_repo_config_content(str(repo), "not json") == ""
+    assert linked_repo_config_content(str(repo), '{"skills": ["x"]}') == ""
+    assert linked_repo_config_content(str(repo), '{"skills": {"paths": "x"}}') == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("live_repo", "expect_restart"), [("/r/old", True), ("/r/new", False)]
+)
+async def test_a_changed_linked_repo_restarts_the_opencode_server(
+    tmp_path, monkeypatch, live_repo, expect_restart
+):
+    from ciao.models import provider_reuse_key
+
+    provider = _provider(tmp_path)
+    live_client = object()
+    provider._client = live_client  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)  # type: ignore[assignment]
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        linked_repo = "/r/new"
+
+    request = Request()
+    provider._mcp_token = provider_reuse_key(request)  # type: ignore[arg-type]
+    provider._fs_scope_key = ("machine", ())
+    provider._linked_repo = live_repo
+    stopped: list[bool] = []
+
+    async def fake_disconnect() -> None:
+        stopped.append(True)
+        provider._client = None
+        provider._process = None
+
+    monkeypatch.setattr(provider, "disconnect", fake_disconnect)
+    monkeypatch.setattr("ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: None)
+
+    if expect_restart:
+        with pytest.raises(FileNotFoundError):
+            await provider._ensure_server(request)  # type: ignore[arg-type]
+        assert stopped == [True]
+    else:
+        assert await provider._ensure_server(request) is live_client  # type: ignore[arg-type]
+        assert stopped == []
+
+
+@pytest.mark.asyncio
+async def test_the_server_env_carries_the_linked_repo_skills(tmp_path, monkeypatch):
+    provider = _provider(tmp_path)
+    repo = tmp_path / "repo"
+    (repo / ".claude" / "skills").mkdir(parents=True)
+    captured: dict = {}
+
+    class FakeProcess:
+        returncode = None
+        pid = 4242
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*_args, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    async def healthy(self):
+        return None
+
+    _no_op_trees(monkeypatch)
+    monkeypatch.setattr(
+        "ciao.providers.opencode.resolve_opencode_binary", lambda _env=None: "/bin/opencode"
+    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(OpencodeProvider, "_await_health", healthy)
+    monkeypatch.setattr(OpencodeProvider, "_verify_contract", healthy)
+
+    class Request:
+        extra_env: dict = {}
+        mcp_token = ""
+        agent_fs_scope = "machine"
+        agent_roots: tuple = ()
+        linked_repo = str(repo)
+
+    await provider._ensure_server(Request())  # type: ignore[arg-type]
+
+    paths = json.loads(captured["env"]["OPENCODE_CONFIG_CONTENT"])["skills"]["paths"]
+    assert paths == [str(repo / ".claude" / "skills")]
+    provider._client = None

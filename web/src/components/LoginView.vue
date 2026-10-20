@@ -203,6 +203,11 @@
               >
                 {{ copyLabel(setupStatus.providers[provider].command || '') }}
               </button>
+              <HostTerminalButton
+                v-if="setupStatus.providers[provider].terminal_action"
+                :action="setupStatus.providers[provider].terminal_action"
+                variant="small"
+              />
             </div>
             <!-- The CLI installer drops `claude` in ~/.local/bin, which a
                  default macOS PATH does not include, so the very next command
@@ -428,6 +433,7 @@ import type { SetupStatus } from '../lib/types'
 import { errorMessage } from '../lib/errorMessage'
 import { api } from '../lib/api'
 import { writeClipboard } from '../lib/codeCopy'
+import HostTerminalButton from './HostTerminalButton.vue'
 
 const auth = useAuthStore()
 const token = ref('')

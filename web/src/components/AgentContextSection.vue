@@ -1,6 +1,6 @@
 <template>
   <!-- What the agent is given for this chat, each with when it is sent. Shared
-       by the Work details rail and the narrow-pane drawer. -->
+       by the Chat details rail and the narrow-pane drawer. -->
   <section class="rail-section agent-context" aria-labelledby="agent-context-label">
     <p id="agent-context-label" class="rail-label">Agent context</p>
     <template v-if="contextPct != null">
@@ -25,8 +25,8 @@
           @click="emit('compact')"
         >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
       </div>
-      <p class="rail-note agent-context-meter-note">of the model's context window, as of the last reply.</p>
     </template>
+    <p class="agent-context-sub">Always loaded</p>
     <div class="rail-list">
       <button
         v-if="guide.path"
@@ -61,6 +61,20 @@
           v-html="contextHtml"
         ></p>
       </div>
+      <button v-if="repoInstr" type="button" class="rail-item agent-context-row agent-context-repo"
+        :title="`Open ${repoInstrPath}`" @click="emit('open-file', repoInstrPath)">
+        <span class="agent-context-row-top">
+          <span class="agent-context-name">{{ repoInstrLabel }}</span>
+          <span class="agent-context-meta">{{ formatTokens(tokensFor(repoInstr.chars)) }} tokens</span>
+        </span>
+        <small>Repository instructions</small>
+      </button>
+      <div v-else-if="repoInstr === null" class="rail-item agent-context-row agent-context-repo" role="status">
+        <span class="agent-context-row-top">
+          <span class="agent-context-name">Repository instructions</span>
+          <span class="agent-context-meta">not found</span>
+        </span>
+      </div>
     </div>
   </section>
 </template>
@@ -69,6 +83,7 @@
 import { computed, ref, watch } from 'vue'
 import type { ProjectInfo } from '../lib/types'
 import { linkifyText } from '../lib/filePaths'
+import { joinRepoPath, repoName } from '../lib/repo'
 import { fetchWorkspaceGuide, formatTokens, tokensFor, type WorkspaceGuide } from '../lib/workspaceGuide'
 
 const props = defineProps<{
@@ -79,6 +94,8 @@ const props = defineProps<{
   compacting: boolean
   /** The chat is streaming or a compact request is in flight. */
   compactDisabled: boolean
+  /** Code mode is effectively on (chat.code_mode and a linked repo). */
+  codeMode?: boolean
 }>()
 const emit = defineEmits<{ 'open-file': [path: string]; compact: [] }>()
 
@@ -114,6 +131,11 @@ const briefText = computed(() => {
 })
 const briefTokens = computed(() => tokensFor(briefText.value.length))
 
+// undefined = no row; null = code mode is on but the repo has no instructions.
+const repoInstr = computed(() => (props.codeMode && props.project?.repo) ? (props.project.repo.instructions ?? null) : undefined)
+const repoInstrPath = computed(() => repoInstr.value && props.project?.repo ? joinRepoPath(props.project.repo.path, repoInstr.value.name) : '')
+const repoInstrLabel = computed(() => repoInstr.value && props.project?.repo ? `${repoName(props.project.repo.path)}/${repoInstr.value.name}` : '')
+
 // Plain text is escaped by the shared linker; a canonical filename resolves
 // to its full path without adding another copy below the description.
 const contextHtml = computed(() => linkifyText(
@@ -138,11 +160,12 @@ const contextPctLabel = computed(() => {
 </script>
 
 <style scoped>
+.agent-context-sub { margin: var(--space-3) 0 var(--space-1); color: var(--fg3); font-size: var(--text-xs); }
 .agent-context-meter-row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin: 4px 0 0;
+  margin: 4px 0 10px;
 }
 .agent-context-meter {
   flex: 1;
@@ -154,6 +177,9 @@ const contextPctLabel = computed(() => {
 .agent-context-compact { flex: none; white-space: nowrap; }
 @media (pointer: coarse) {
   .agent-context-compact { min-height: 44px; min-width: 44px; }
+  /* A flex item, so line-height gives the 44px box and the ellipsis still works
+     (inline-flex would put the text in an anonymous item that cannot truncate). */
+  a.agent-context-name { line-height: var(--touch); }
 }
 .agent-context-track {
   flex: 1;
@@ -170,7 +196,6 @@ const contextPctLabel = computed(() => {
   background: var(--fg2);
 }
 .agent-context-meter strong { font-variant-numeric: tabular-nums; }
-.agent-context-meter-note { margin: 2px 0 10px; }
 .agent-context-row { gap: 1px; }
 .agent-context-row-top {
   display: flex;
@@ -195,6 +220,8 @@ const contextPctLabel = computed(() => {
 .agent-context-row small { line-height: 1.4; }
 .agent-context-brief { cursor: default; }
 .agent-context-brief:hover { color: var(--fg); }
+.agent-context-repo[role='status'] { cursor: default; }
+.agent-context-repo[role='status']:hover { color: var(--fg); }
 .agent-context-description {
   margin: 4px 0 0;
   color: var(--fg2);
@@ -222,6 +249,10 @@ const contextPctLabel = computed(() => {
 .agent-context-description :deep(a.file-link:hover) { text-decoration-color: currentColor; }
 .agent-context-link:hover,
 .agent-context-project:hover { text-decoration-color: currentColor; }
+@media (pointer: coarse) {
+  /* Below the base .agent-context-link rule it overrides. */
+  .agent-context-link { min-height: var(--touch); min-width: var(--touch); }
+}
 .agent-context-project {
   color: var(--fg);
   text-decoration: underline;

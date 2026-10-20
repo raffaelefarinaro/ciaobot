@@ -18,7 +18,6 @@ import type {
   TaskListResponse,
   TaskResolutionReviewResponse,
   TaskRow,
-  TaskSendUpdateResponse,
   TaskStatus,
 } from '../lib/types'
 
@@ -514,6 +513,40 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     }
   }
 
+  /**
+   * Link a chat to the task, or unlink it (`remove`). A linked chat is a record
+   * that it worked on the task, not a delegation: status and assignee never move.
+   */
+  async function linkChat(
+    workspace: string,
+    taskId: string,
+    expectedRevision: string,
+    chatId: string,
+    remove = false,
+  ): Promise<TaskDetail | null> {
+    if (!workspace || !taskId || !expectedRevision || !chatId) return null
+    descriptionSeq++
+    saving.value = true
+    error.value = ''
+    try {
+      const data = await api.post<{ task?: unknown }>(`${taskUrl(taskId)}/chats`, {
+        workspace,
+        expected_revision: expectedRevision,
+        chat_id: chatId,
+        remove,
+      })
+      if (!drawingWorkspace(workspace)) return null
+      const task = adopt(data?.task)
+      if (task.id && described.value?.id === task.id) described.value = task
+      return task
+    } catch (e) {
+      error.value = taskApiErrorMessage(e, 'Could not update the linked chats')
+      return null
+    } finally {
+      saving.value = false
+    }
+  }
+
   /** Reword one progress note. Its author and recorded time stay. */
   async function editUpdate(
     workspace: string,
@@ -715,68 +748,6 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     }
   }
 
-  /**
-   * Send the edited task into one attempt's own chat, and rebind that attempt.
-   *
-   * A **Send update**, and it goes through the board rather than the composer's
-   * `sendMessage` for one reason the composer's send cannot serve: the server has
-   * to rebind the attempt to the revision the update was made at, or
-   * `changed_since_delegated` stays true and the control offers the same update
-   * for ever. One message, one chat, one attempt — this is not a second
-   * delegation, and nothing here mints anything.
-   *
-   * `message` is what the user was shown in the preview, sent as approved: it is
-   * an ordinary attended message into a conversation, not an instruction the
-   * board is trusted to compose. What the server checks is `expectedRevision`,
-   * which is the revision the prose was read at.
-   *
-   * `null` comes back from a refusal *and* from a workspace switch made while
-   * the POST was in flight; see {@link drawingWorkspace}. A refusal is a `null`
-   * rather than a thrown error so the sheet stays open with the server's
-   * sentence: the control has to survive it, or a failed send would read as a
-   * delivered one.
-   */
-  async function sendUpdate(
-    workspace: string,
-    taskId: string,
-    attemptId: string,
-    expectedRevision: string,
-    message: string,
-  ): Promise<TaskAttempt | null> {
-    if (!workspace || !taskId || !attemptId || !expectedRevision || !message.trim()) return null
-    // This write's answer is about to be the newest record the board holds.
-    const seq = ++descriptionSeq
-    const current = () => seq === descriptionSeq && drawingWorkspace(workspace)
-    saving.value = true
-    error.value = ''
-    try {
-      const data = await api.post<TaskSendUpdateResponse | null>(
-        `/api/tasks/${encodeURIComponent(taskId)}/attempt/${encodeURIComponent(attemptId)}/update`,
-        { workspace, expected_revision: expectedRevision, message },
-      )
-      // The board moved to another workspace while this was in flight: the attempt
-      // and its chat belong to the one that was left, and adopting them here would
-      // draw this workspace's linkage under the new name. See
-      // {@link drawingWorkspace}.
-      if (!current()) return null
-      // The rebind changed the attempt's own record, so the history a reader would
-      // draw is out of date the moment this lands.
-      invalidateAttempts()
-      if (data?.task) {
-        const task = adopt(data.task)
-        if (task.id && described.value?.id === task.id) described.value = task
-      }
-      const attempt = taskAttemptFrom(data?.attempt)
-      return attempt.attempt_id ? attempt : null
-    } catch (e) {
-      if (!current()) return null
-      error.value = taskApiErrorMessage(e, 'Could not send the update')
-      return null
-    } finally {
-      if (current()) saving.value = false
-    }
-  }
-
   /** Drop a message a dismissed dialog is done with. */
   function clearError(): void {
     error.value = ''
@@ -786,8 +757,8 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     rows, loadedWorkspace, loading, loadError, error, saving, described,
     attempts, attemptsTaskId, attemptsLoading, attemptsLoaded, attemptsError,
     reload, revisionOf, get,
-    create, update, complete, addUpdate, editUpdate, reviewResolution, remove, clearError,
-    delegate, attemptAction, sendUpdate,
+    create, update, complete, addUpdate, linkChat, editUpdate, reviewResolution, remove, clearError,
+    delegate, attemptAction,
     ensureAttempts, invalidateAttempts, resetAttempts,
   }
 })

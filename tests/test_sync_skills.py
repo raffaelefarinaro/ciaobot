@@ -226,9 +226,9 @@ def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path:
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    for name in ("remember", "critique", "interrogation"):
+    for name in ("remember", "interrogation"):
         assert (workspace / "commands" / f"{name}.md").is_file()
-    assert result.commands_installed >= 3
+    assert result.commands_installed >= 2
 
 
 def test_sync_workspace_skills_migrates_legacy_stock_commands(tmp_path: Path) -> None:
@@ -269,7 +269,7 @@ def test_stock_command_seed_writes_marker(tmp_path: Path) -> None:
     assert marker.read_text(encoding="utf-8").strip() == hashlib.sha256(
         canonical.read_bytes()
     ).hexdigest()
-    assert result.stock_commands_seeded == 3
+    assert result.stock_commands_seeded == 2
 
 
 def test_unmodified_stock_command_is_refreshed(tmp_path: Path) -> None:
@@ -324,7 +324,7 @@ def test_pre_existing_identical_copy_is_adopted(tmp_path: Path) -> None:
 
     marker = workspace / "commands" / "remember.md.ciao-stock-command"
     assert marker.is_file()
-    assert result.stock_commands_seeded == 2
+    assert result.stock_commands_seeded == 1
     assert result.stock_commands_refreshed == 0
 
 
@@ -712,3 +712,37 @@ def test_main_returns_zero_on_the_normal_path(
 
     assert rc == 0
     assert "Warning" not in capsys.readouterr().err
+
+
+def test_unlinked_workspace_gets_no_gws_skills_even_when_personal_exists(tmp_path: Path) -> None:
+    """The gate resolves through ``workspace_gws_profile``: an unlinked
+    workspace is not handed the ``personal`` account just because one exists."""
+    from types import SimpleNamespace
+
+    from ciao import gws_auth
+
+    install = tmp_path / "install"
+    (install / ".runtime").mkdir(parents=True)
+    creds = install / "secrets" / "gws-personal"
+    creds.mkdir(parents=True)
+    (creds / "client_secret.json").write_text("{}", encoding="utf-8")
+    workspace = install / "work"
+    workspace.mkdir()
+    config = SimpleNamespace(
+        workspace_root=install,
+        state_path=install / ".runtime" / "state.json",
+        workspaces={"work": SimpleNamespace(name="work", gws_profile="")},
+        _workspace_registry_changed=False,
+        agent_root=lambda name: workspace,
+        workspace=lambda name: config.workspaces.get(name),
+    )
+    assert "personal" in gws_auth.known_profiles(config)
+
+    gate = sync_skills.resolve_workspace_skills_gws_gate(config, workspace, "work")
+    assert gate == ""
+
+    sync_skills.sync_workspace_skills(
+        workspace, refresh_upstream=False, gws_profile=gate, workspace_name="work"
+    )
+    installed = {p.name for p in (workspace / ".claude" / "skills").iterdir()}
+    assert not any(name.startswith("gws-") for name in installed)

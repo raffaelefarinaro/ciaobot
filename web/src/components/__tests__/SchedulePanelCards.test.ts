@@ -14,6 +14,10 @@ const confirmMock = vi.fn(async (_message: string) => true)
 vi.mock('../../lib/confirm', () => ({ askConfirm: (message: string) => confirmMock(message) }))
 
 const Stub = defineComponent({ render: () => h('div') })
+const ModelSelectorStub = defineComponent({
+  props: ['modelValue', 'sections', 'placeholder', 'emptyPlaceholder'],
+  render() { return h('div') },
+})
 
 function makeSchedule(overrides: Partial<Schedule> = {}): Schedule {
   return {
@@ -83,7 +87,7 @@ async function mountPanel(schedule = makeSchedule()): Promise<VueWrapper> {
 
   const { default: SchedulePanel } = await import('../SchedulePanel.vue')
   const wrapper = mount(SchedulePanel, {
-    global: { plugins: [router], stubs: { ModelSelector: Stub, PaneHeader: false } },
+    global: { plugins: [router], stubs: { ModelSelector: ModelSelectorStub, PaneHeader: false } },
   })
   await flushPromises()
   mounted.push(wrapper)
@@ -249,6 +253,69 @@ describe('SchedulePanel property cards', () => {
     // …but the system workspace switcher is still reachable.
     expect(card(wrapper, 'Where it runs').find('.system-workspace-control').exists()).toBe(true)
   })
+
+  it('loads a cold model catalog when editing a system routine and gives it to the picker', async () => {
+    const wrapper = await mountPanel(makeSchedule({ scope: 'system' }))
+    const store = useTaskStore()
+    const models = {
+      models: ['claude-sonnet-4-5'],
+      default: 'claude-sonnet-4-5',
+      provider_models: { claude: ['claude-sonnet-4-5'] },
+      provider_defaults: { claude: 'claude-sonnet-4-5' },
+    }
+    store.fetchModels = vi.fn(async () => { store.models = models })
+
+    await card(wrapper, 'Model').find('.card-edit').trigger('click')
+    await flushPromises()
+
+    expect(store.fetchModels).toHaveBeenCalledOnce()
+    const selector = wrapper.findComponent(ModelSelectorStub)
+    expect(selector.exists()).toBe(true)
+    expect(selector.props('sections')).toEqual([
+      expect.objectContaining({ models: ['claude-sonnet-4-5'] }),
+    ])
+  })
+
+  it('fetches a cold model catalog for an ordinary schedule Model edit', async () => {
+    const wrapper = await mountPanel()
+    const store = useTaskStore()
+    store.fetchModels = vi.fn(async () => {})
+
+    await card(wrapper, 'Model').find('.card-edit').trigger('click')
+
+    expect(store.fetchModels).toHaveBeenCalledOnce()
+  })
+
+  it('reuses a cached model catalog for a Model edit', async () => {
+    const wrapper = await mountPanel()
+    const store = useTaskStore()
+    store.models = {
+      models: ['claude-sonnet-4-5'],
+      default: 'claude-sonnet-4-5',
+      provider_models: { claude: ['claude-sonnet-4-5'] },
+      provider_defaults: { claude: 'claude-sonnet-4-5' },
+    }
+    store.fetchModels = vi.fn(async () => {})
+
+    await card(wrapper, 'Model').find('.card-edit').trigger('click')
+
+    expect(store.fetchModels).not.toHaveBeenCalled()
+  })
+
+  it('does not fetch models for a chat-bound interval Model edit', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'interval',
+      interval_minutes: 10,
+      web_chat_id: 'chat-1',
+      web_project_id: null,
+    }))
+    const store = useTaskStore()
+    store.fetchModels = vi.fn(async () => {})
+
+    await card(wrapper, 'Model').find('.card-edit').trigger('click')
+
+    expect(store.fetchModels).not.toHaveBeenCalled()
+  })
   // ── Interval cadence (the primitive that replaced loops) ──
 
   it('shows the cadence and a status row instead of a time of day', async () => {
@@ -285,6 +352,17 @@ describe('SchedulePanel property cards', () => {
     }))
     const rows = card(wrapper, 'When').findAll('.prop-row').map(r => r.text())
     expect(rows.some(r => r.includes('last run failed'))).toBe(true)
+  })
+
+  it('shows a retrying status row and state for a wall-clock entry', async () => {
+    const wrapper = await mountPanel(makeSchedule({
+      frequency: 'daily',
+      daily_time_utc: '08:00',
+      last_status: 'retrying',
+    }))
+    const rows = card(wrapper, 'When').findAll('.prop-row').map(r => r.text())
+    expect(rows.some(r => r.includes('retrying — a service was unreachable'))).toBe(true)
+    expect(wrapper.text()).toContain('Retrying')
   })
 
   it('hides the status row for a healthy wall-clock entry', async () => {
@@ -548,6 +626,14 @@ describe('SchedulePanel overview', () => {
     expect(row('Subagent sweep').text()).toContain('subagent results never summarised')
     expect(row('Subagent sweep').text()).not.toContain('needs you')
     expect(row('Flaky one').attributes('href')).toBe('/schedules/e')
+  })
+
+  it('keeps a retrying run out of Needs a look', async () => {
+    const wrapper = await mountOverview([
+      makeSchedule({ schedule_id: 'r', title: 'Morning brief', last_status: 'retrying' }),
+    ])
+    const rows = wrapper.get('.page-rail').findAll('a.rail-item')
+    expect(rows.some(r => r.text().includes('Morning brief'))).toBe(false)
   })
 
   it('draws the webhook section under the overview', async () => {

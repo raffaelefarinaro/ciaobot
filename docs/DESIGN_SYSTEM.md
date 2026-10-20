@@ -80,7 +80,7 @@ if you genuinely need an off-scale size.
 **Rule L0.3** — No hardcoded `border-radius` or spacing. Use `--radius*` and `--space-*`.
 **Rule L0.4** — Do not write a token fallback that differs from the token's real
 value. `var(--warning, #b7791f)` in `SettingsView.vue` is wrong twice over: the
-token is `#ff9800`, and the fallback can never fire.
+token is `#facc15`, and the fallback can never fire.
 
 ### L1 — Primitives (`web/src/App.vue`, the global `<style>` block)
 
@@ -93,7 +93,6 @@ container. These currently violate it and should collapse into primitive
 variants:
 
 ```
-.critique-picker-header .btn-small     SettingsView.vue:5808
 .settings-card-header-actions .btn-small        :6084
 .asset-actions .btn-small                       :6200
 .workspace-actions .btn-small                   :6384, :6569
@@ -117,7 +116,7 @@ Anything else (`.fv-btn-sm`, `.pfp-btn-sm`, `.csv-tool-btn`, `.fix-btn`, …) is
 migration target, not a precedent. Do not add to that list.
 
 **Rule L1.3** — Interactive elements meet `--touch` (44px) on touch devices, per
-`CLAUDE.md`. Current known failure: the queued-message glyph buttons in
+`AGENTS.md`. Current known failure: the queued-message glyph buttons in
 `ChatPanel.vue` (`▲ ▼ ✎ ✓ ✕ ×`).
 
 ### L2 — Components
@@ -146,6 +145,7 @@ Existing and wanted:
 | Component | Owns | Status |
 |---|---|---|
 | `ChatSignals` | chat state marks (needs-you / working / unread / loop / quiet) | **exists, all 5 call sites** |
+| `ActivityGlyph` | the shape of live work: working pulse, subagent orbit, shell-run prompt `›_` | **exists: ChatSignals, BackgroundRunRows, Chat details rail, sidebar project rollup, composer activity cluster** |
 | `AppIcon` | the SVG icon set (see Rule S4) | **exists** |
 | `TabBar` | a tablist: tab styling, count pills, and the roving-tabindex keyboard contract | **exists, all 3 call sites** |
 | `TierLabel` | a priority tier heading with its hairline rule | wanted |
@@ -180,7 +180,8 @@ survives 60 items, colour blindness, and the light theme.
 
 **Rule S3 — Semantic colour is not the accent.**
 `--success` / `--warning` / `--error` express outcome. `--accent` expresses
-workspace identity. A workspace whose accent is pink must not make errors
+workspace identity. The default accent is orange and warning is yellow so the
+two never read alike; a workspace whose accent is pink must not make errors
 invisible; never use `--accent` to mean "bad" or `--error` to mean "Work".
 
 **Rule S4 — Emoji are not icons.**

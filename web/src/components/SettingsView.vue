@@ -28,7 +28,7 @@
         :error="engineUpdateOperation?.error"
       />
     </div>
-    <PaneHeader page-tag="Settings" @open-sidebar="emit('open-sidebar')" />
+    <PaneHeader :page-tag="settingsTabLabel(route.path)" @open-sidebar="emit('open-sidebar')" />
     <div ref="bodyEl" class="pane-body" @scroll.passive="onBodyScroll">
       <div class="page-grid settings-grid">
       <div ref="mainEl" class="page-main settings-main">
@@ -48,8 +48,8 @@
                   <code>curl -fsSL https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install.sh | sh</code>
                 </template>
                 <template v-else-if="packageStatus?.mode === 'installer' && engineUpdateEnabled">
-                  Installed with the Ciaobot engine installer. Stage a release below, then apply it;
-                  applying restarts Ciaobot once.
+                  Installed with the Ciaobot engine installer. Updating downloads and verifies the release
+                  while Ciaobot keeps running, then restarts it once.
                 </template>
                 <template v-else-if="packageStatus?.mode === 'installer'">
                   Installed with the Ciaobot engine installer. To update, run it again:
@@ -137,29 +137,17 @@
                 Back on v{{ engineUpdateOperation.from_version }}.
               </p>
               <div class="action-row settings-actions">
-                <!-- The action has to be the one the record allows. A `staged`
-                     record is not terminal, so `/api/update/stage` refuses it
-                     with a 409 by design (`_update_refusal`), forever: a panel
-                     that answered a refusal with Stage alone could never apply
-                     the release it had already downloaded, and the parked
-                     reason lives on the server, so a reload kept it. Apply is
-                     what a `staged` record allows; a terminal record, or no
-                     record at all, is where a new run may be started. -->
+                <!-- One action whatever the record is: `/api/update/start` applies
+                     a `staged` record itself and stages a terminal or absent one,
+                     so the panel never has to pick the half. The parked reason
+                     lives on the server, so a reload keeps it; the button is the
+                     way out of it. -->
                 <button
-                  v-if="engineUpdateStage === 'staged'"
                   class="btn-primary"
-                  @click="doEngineUpdateApply"
+                  @click="doEngineUpdate"
                   :disabled="updateActionPending || updatePolling"
                 >
-                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
-                </button>
-                <button
-                  v-else
-                  class="btn-primary"
-                  @click="doEngineUpdateStage"
-                  :disabled="updateActionPending || updatePolling"
-                >
-                  {{ updateActionPending ? 'Staging…' : (packageStatus?.update_available ? 'Stage update' : 'Try again') }}
+                  {{ updateActionPending ? 'Updating…' : (packageStatus?.update_available || engineUpdateStage === 'staged' ? 'Update & restart' : 'Try again') }}
                 </button>
               </div>
             </template>
@@ -184,19 +172,17 @@
               {{ engineUpdatePhaseText }}<template v-if="engineUpdateOperation"> · v{{ engineUpdateOperation.to_version }}</template>
             </p>
 
-            <!-- Staged is not a failure and not a second chance: `/api/update/
-                 stage` refuses a non-terminal record with a 409 by design, so
-                 the only way forward from here is Apply. Staging again is
-                 offered from the terminal failure phases, where a new record
-                 may be written. -->
+            <!-- Staged is not a failure: a release left downloaded and verified
+                 (by an older engine, or a run whose apply refused). The same
+                 button applies it. -->
             <template v-else-if="engineUpdateStage === 'staged'">
               <p class="hint hint--spaced">
                 v{{ engineUpdateOperation?.to_version || packageStatus?.latest_version }} is downloaded and verified.
-                Applying it restarts Ciaobot.
+                Updating restarts Ciaobot.
               </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateApply" :disabled="updateActionPending || updatePolling">
-                  {{ updateActionPending ? 'Applying…' : 'Apply update' }}
+                <button class="btn-primary" @click="doEngineUpdate" :disabled="updateActionPending || updatePolling">
+                  {{ updateActionPending ? 'Updating…' : 'Update & restart' }}
                 </button>
               </div>
             </template>
@@ -204,7 +190,7 @@
             <!-- Applied, and still the newest release: the record stays on disk
                  after a successful apply, so an engine that has updated once
                  would answer every later release with "up to date" and never
-                 offer a Stage again. -->
+                 offer an update again. -->
             <template v-else-if="engineUpdateStage === 'done' && !engineUpdateStaleApplied">
               <p class="hint hint--spaced">ciaobot is up to date.</p>
             </template>
@@ -215,20 +201,20 @@
                 Back on v{{ engineUpdateOperation.from_version }}.
               </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling">
-                  {{ updateActionPending ? 'Staging…' : (engineUpdateStage === 'rolled_back' ? 'Stage again' : 'Retry') }}
+                <button class="btn-primary" @click="doEngineUpdate" :disabled="updateActionPending || updatePolling">
+                  {{ updateActionPending ? 'Updating…' : (engineUpdateStage === 'rolled_back' ? 'Try again' : 'Retry') }}
                 </button>
               </div>
             </template>
 
             <template v-else-if="packageStatus?.update_available">
               <p class="hint hint--spaced">
-                v{{ packageStatus.latest_version }} is available. Staging downloads and verifies it without
-                restarting Ciaobot.
+                v{{ packageStatus.latest_version }} is available. Ciaobot keeps running while it downloads,
+                then restarts once.
               </p>
               <div class="action-row settings-actions">
-                <button class="btn-primary" @click="doEngineUpdateStage" :disabled="updateActionPending || updatePolling">
-                  {{ updateActionPending ? 'Staging…' : 'Stage update' }}
+                <button class="btn-primary" @click="doEngineUpdate" :disabled="updateActionPending || updatePolling">
+                  {{ updateActionPending ? 'Updating…' : 'Update & restart' }}
                 </button>
               </div>
             </template>
@@ -467,7 +453,7 @@
                 Ciaobot is always password-protected — this is the password you type to open it,
                 and the one another device needs to sign in.
                 <a
-                  class="set-link"
+                  class="settings-help-link"
                   href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
                   target="_blank"
                   rel="noopener noreferrer"
@@ -606,7 +592,7 @@
                   is the chat's own model: a closed project uses its last-active chat, and a task resolution or
                   a project closed with no chats uses the workspace's default model.
                   <a
-                    class="set-link"
+                    class="settings-help-link"
                     href="https://www.raffaelefarinaro.com/ciaobot/models.html"
                     target="_blank"
                     rel="noopener noreferrer"
@@ -638,6 +624,14 @@
                         target="_blank"
                         rel="noopener noreferrer"
                       >installation guide ↗</a>
+                    </p>
+                    <p v-if="(conn.auth === 'not_installed' || conn.auth === 'unsupported_version') && conn.terminal_action" class="set-row-sub">
+                      <HostTerminalButton
+                        :action="conn.terminal_action"
+                        variant="small"
+                        :aria-label="`Install ${conn.label || connKey} in Terminal`"
+                        label="Install in Terminal"
+                      />
                     </p>
                     <p
                       v-if="conn.auth !== 'not_installed' && conn.path_command"
@@ -854,56 +848,10 @@
             <div class="settings-card-header">
               <p class="section-title">Background models</p>
               <p class="hint">
-                The critique panel uses its own model setting, separate from the chat defaults above.
-                "Automatic" keeps the built-in default. Session insights, the model that reads archived
-                chats into memory, names new chats and checks schedule results, is set on each provider above.
-                Automatic uses the chat's own model; choose a model to override it.
+                Session insights, the model that reads archived chats into memory, names new chats
+                and checks schedule results, is set on each provider above. Automatic uses the chat's
+                own model; choose a model to override it.
               </p>
-            </div>
-
-            <div class="routine-row">
-              <div class="routine-info">
-                <span class="routine-name">Critique panel</span>
-                <span class="routine-detail">Ask Ciaobot to review a plan, answer or file with the <code>/critique</code> command or critique skill. Each panel model checks it independently; Ciaobot compares their findings and gives a recommendation.</span>
-                <span class="routine-detail">Automatic combines the distinct model defaults of your configured workspaces: each workspace uses its default provider’s model. Unavailable providers are skipped. Choose models here to use a different panel.</span>
-                <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/models.html#critique" target="_blank" rel="noopener noreferrer">How the critique panel works</a>
-              </div>
-              <div class="critique-model-picker">
-                <!-- One control: the multi-select picker. Picked models show as
-                     removable chips; "Use automatic" clears the list. -->
-                <div v-if="selectedCritiqueModels.length" class="critique-picker-header">
-                  <div class="critique-chip-list">
-                    <button
-                      v-for="model in selectedCritiqueModels"
-                      :key="model"
-                      type="button"
-                      class="critique-chip"
-                      :disabled="routinesSaving"
-                      :title="`Remove ${model}`"
-                      :aria-label="`Remove ${model}`"
-                      @click="removeCritiqueModel(model)"
-                    >
-                      <span>{{ model }}</span>
-                      <span aria-hidden="true">&times;</span>
-                    </button>
-                  </div>
-                  <button
-                    type="button"
-                    class="set-link set-link--quiet"
-                    :disabled="routinesSaving"
-                    @click="setCritiqueModels([])"
-                  >Use automatic</button>
-                </div>
-                <ModelSelector
-                  multiple
-                  :model-value="selectedCritiqueModels"
-                  :sections="critiqueModelSections"
-                  placeholder="Select critique models"
-                  :empty-placeholder="critiqueDefaultLabel"
-                  :disabled="routinesSaving"
-                  @update:model-value="setCritiqueModels"
-                />
-              </div>
             </div>
           </div>
           <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
@@ -995,7 +943,7 @@
                     </details>
                   </div>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
-                    <option value="">{{ gwsUnlinkedOptionLabel }}</option>
+                    <option value="">No Google account</option>
                     <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
                       {{ profile.label }} ({{ profile.email || profile.name }})
                     </option>
@@ -1135,7 +1083,7 @@
                   <label class="settings-field set-subrow">
                     <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
                     <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
-                      <option value="">{{ gwsUnlinkedOptionLabel }}</option>
+                      <option value="">No Google account</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
                       </option>
@@ -1270,6 +1218,7 @@
                 </p>
                 <div class="action-row">
                   <button class="btn-primary btn-small" @click="installGwsInChat">Install in Chat</button>
+                  <HostTerminalButton action="gws-install" variant="small" label="Install in Terminal" />
                 </div>
                 <p class="hint hint--compact">Opens a chat that walks through <code>npm install -g @googleworkspace/cli</code> with you — Ciaobot does not run package installs on its own.</p>
               </div>
@@ -1586,7 +1535,7 @@
               <p class="hint">
                 These are the skills of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>skills/</code> folder or included with the app. Ask for one in chat, or invoke it by name with <code>/name</code> when your provider supports skill commands. Workspace git sync carries your own skills to other machines.
               </p>
-              <p class="hint">Skills installed directly in Claude Code or opencode can also be used in chats run by that provider, even if they are not listed here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#skills" target="_blank" rel="noopener noreferrer">How skills work</a></p>
+              <p class="hint">Skills installed directly in Claude Code or opencode can also be used in chats run by that provider, even if they are not listed here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#skills" target="_blank" rel="noopener noreferrer">How skills work</a> <HostTerminalButton action="skills-update" label="Update skills in Terminal" /></p>
             </div>
             <div class="settings-card-header-actions">
               <button class="set-link set-link--quiet" type="button" @click="createSkillViaChat">Ask Ciao to write one</button>
@@ -1833,7 +1782,7 @@
             <div>
               <p class="section-title">Commands</p>
               <p class="hint">
-                These are the slash commands of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>commands/</code> folder and shared with Claude Code and opencode. Type <code>/name</code> in a chat to run one, for example <code>/critique</code>.
+                These are the slash commands of the <strong>{{ assetWorkspaceLabel }}</strong> workspace, saved in its own <code>commands/</code> folder and shared with Claude Code and opencode. Type <code>/name</code> in a chat to run one, for example <code>/interrogation</code>.
               </p>
               <p class="hint">Commands installed directly in a provider can also work in its chats, even if they are not shown here. <a class="settings-help-link" href="https://www.raffaelefarinaro.com/ciaobot/builtin.html#commands" target="_blank" rel="noopener noreferrer">How commands work</a></p>
             </div>
@@ -2024,6 +1973,7 @@ import { formatConnectorLabel } from '../lib/mcpLabels'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
+import { describeInterruptedCards, type RestartBlocker } from '../lib/restartBlockers'
 import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import {
   DEFAULT_FONT_SCALE,
@@ -2081,6 +2031,7 @@ import {
   DropdownMenuTrigger,
 } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
+import HostTerminalButton from './HostTerminalButton.vue'
 import UpdateProgressView from './UpdateProgressView.vue'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -2095,8 +2046,9 @@ import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
-import { sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import type { ModelSection } from '../lib/modelSections'
 import { isLoopbackHostname } from '../lib/loopback'
+import { settingsTabLabel } from '../lib/settingsNav'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
@@ -2463,52 +2415,6 @@ function parseModelList(raw: string): string[] {
   return models
 }
 
-function serializeModelList(models: string[]): string {
-  return parseModelList(models.join(',')).join(',')
-}
-
-// A panel entry may name the provider that runs it. Anthropic tiers are bare
-// aliases; opencode entries carry a `<provider>:` prefix, matching
-// what `ciao/critique.py::_split_provider` dispatches on.
-// The same catalog every other picker shows. This used to build its own
-// sections, and the opencode one by prefixing the *Anthropic* tiers — so it
-// offered `opencode:opus` / `opencode:sonnet` / `opencode:haiku`, which are not
-// opencode model ids at all (those are `providerID/modelID`, e.g.
-// `openai/gpt-5.6-luna`), while the real catalog was used only as a presence
-// check. Selecting one produced a panel entry no provider could resolve.
-const critiqueModelSections = computed<ModelSection[]>(() =>
-  sectionsFromModelsResponse(workspaceModels.value).map((section) =>
-    section.key === 'opencode'
-      // The panel routes prefixed entries through opencode's app-server, so the
-      // stored value is namespaced while the label stays the bare model id.
-      ? {
-          ...section,
-          models: section.models.map((m) => `opencode:${m}`),
-          modelLabels: Object.fromEntries(section.models.map((m) => [`opencode:${m}`, m])),
-        }
-      : section,
-  ),
-)
-
-const selectedCritiqueModels = computed(() => parseModelList(routines.value?.critique_models || ''))
-
-// The effective panel arrives comma-joined with no spaces, so it rendered as
-// one unbreakable token that overflowed its box on a phone. Rejoin it with
-// ", " so the summary wraps between models.
-const critiqueDefaultLabel = computed(() =>
-  `Automatic default (${parseModelList(routines.value?.critique_models_effective || '').join(', ')})`,
-)
-
-async function setCritiqueModels(value: string | string[]) {
-  const models = Array.isArray(value) ? value : [value]
-  await saveRoutines({ critique_models: serializeModelList(models) })
-}
-
-function removeCritiqueModel(model: string) {
-  const current = selectedCritiqueModels.value.filter((m) => m !== model)
-  setCritiqueModels(current)
-}
-
 const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   const settings = routines.value
   if (!settings) return []
@@ -2730,8 +2636,6 @@ function gwsProfileBadgeClass(profile: GwsProfile): string {
   return 'badge--error'
 }
 
-const defaultGwsProfileName = computed(() => gwsIntegration.value?.default_profile || '')
-
 // Only the accounts this install actually has. No built-in personal/work pair:
 // a fresh install has none until the user adds one below.
 const gwsProfileOptions = computed(() =>
@@ -2740,12 +2644,6 @@ const gwsProfileOptions = computed(() =>
     label: profile.label,
     email: profile.email,
   })),
-)
-
-const gwsUnlinkedOptionLabel = computed(() =>
-  defaultGwsProfileName.value
-    ? `Default (${defaultGwsProfileName.value})`
-    : 'No Google account',
 )
 
 function workspaceCustomGwsProfile(profile: string): boolean {
@@ -3154,9 +3052,8 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
   try {
     const result = await api.post<ProviderActionResult>(`/api/settings/providers/${provider}/${action}`)
     if (action === 'connect') {
-      providerConnectionResult.value = result.opened
-        ? `Opened ${provider === 'opencode' ? 'opencode' : 'Claude Code'} login in Terminal.`
-        : `Run ${result.command} in Terminal.`
+      const providerName = provider === 'opencode' ? 'opencode' : 'Claude Code'
+      providerConnectionResult.value = `Opened the ${providerName} sign-in in ${result.launched || 'a terminal'}.`
     } else if (action === 'logout') {
       providerConnectionResult.value = 'Logged out.'
     } else {
@@ -3164,7 +3061,12 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
     }
     await fetchProviderKeys()
   } catch (e) {
-    providerConnectionResult.value = `Error: ${errorMessage(e)}`
+    // Connect answers a browser that is not on the engine's computer (or a host that
+    // cannot open a terminal) with the command to run there: guidance, not an error.
+    const command = errorPayload(e)?.command
+    providerConnectionResult.value = typeof command === 'string' && command
+      ? errorMessage(e)
+      : `Error: ${errorMessage(e)}`
   } finally {
     providerConnectionPending.value = ''
   }
@@ -4227,7 +4129,11 @@ async function doDeploy(confirmWarnings = false) {
   const confirmation = restartOnly
     ? 'Restart the installed server? Active chats will finish before it restarts.'
     : 'Restart? This will pull latest, rebuild, and restart.'
-  if (!confirmWarnings && !await askConfirm(confirmation, {
+  let cardNote = ''
+  try {
+    cardNote = describeInterruptedCards((await api.get<{ restart_blockers: RestartBlocker[] }>('/api/admin/restart-blockers')).restart_blockers || [])
+  } catch { /* best effort: confirmation text falls back */ }
+  if (!confirmWarnings && !await askConfirm(cardNote ? `${confirmation}\n\n${cardNote}` : confirmation, {
     title: restartOnly ? 'Restart server' : 'Restart and redeploy',
     confirmLabel: 'Restart',
   })) return
@@ -4556,6 +4462,10 @@ let updatePollTimer: number | null = null
 // previous run's outcome and this one's, and a poll that cannot tell them apart
 // ends a run that is still going.
 let updateRunStarted = false
+// The restart overlay is requested once per run, when the record first shows
+// the applying half. The server chains both halves, so the click that started
+// the run is long past by then.
+let updateRestartRequested = false
 let updateRunSeenInFlight = false
 let updateRunStartedAt = 0
 // The refusal the card was already holding when it asked for this run. A parked
@@ -4574,7 +4484,7 @@ const engineUpdateOperation = computed(() => updateStatus.value?.operation ?? nu
 const engineUpdateStage = computed(() => updateStage(engineUpdateOperation.value))
 // `applied` is the last run's outcome, not a job: nothing ever unlinks the
 // record, so a machine that has updated once would answer every later release
-// with "up to date" and never offer a Stage again. The release page and the
+// with "up to date" and never offer an update again. The release page and the
 // installed version are read independently of it, so a newer release is
 // exactly the signal that the record is history rather than the answer.
 const engineUpdateStaleApplied = computed(
@@ -4651,6 +4561,9 @@ function reconcileUpdatePoll() {
   }
   const status = updateStatus.value
   if (!status) return
+  // The job is between its halves (the record sits on the non-in-flight
+  // `staged` phase) or before its first record: it is not over, so keep polling.
+  if (status.running) return
   // A served error is this run's own answer only if it is not the one the card
   // was already holding when it asked: a parked reason is served for as long as
   // the record it was parked against is unchanged, so the previous run's refusal
@@ -4702,6 +4615,7 @@ function beginUpdateRun() {
   updateRunStarted = true
   updateRunStartedAt = Date.now()
   updateRunSeenInFlight = false
+  updateRestartRequested = false
   updateRunErrorAtStart = updateStatus.value?.error || ''
 }
 
@@ -4719,7 +4633,7 @@ function startUpdatePoll() {
   updatePollTimer = window.setInterval(() => { void fetchUpdateStatus() }, UPDATE_POLL_MS)
 }
 
-async function doEngineUpdateStage() {
+async function doEngineUpdate() {
   // A run the coordinator already owns: the 202 has not become a record yet, so
   // the record alone cannot say the job is over. The backend refuses a second
   // run with a 409, and the button is already disabled; both say the same thing.
@@ -4727,48 +4641,36 @@ async function doEngineUpdateStage() {
   updateActionPending.value = true
   packageResult.value = ''
   try {
-    await api.post('/api/update/stage')
-    // 202: the coordinator owns the run from here and the record is its progress.
+    await api.post('/api/update/start')
+    // 202: the server owns both halves from here and the record is its progress.
     // Its first record is written only after the lock, the release lookup and
     // the removal of any previous staged environment, so the reads that follow
     // can still be serving the last run's outcome; `beginUpdateRun` is what
     // keeps the poll alive across them.
     startUpdatePoll()
     beginUpdateRun()
-    packageResult.value = 'Staging the update. Ciaobot keeps running until it is ready to apply.'
+    packageResult.value = 'Updating. Ciaobot keeps running while the release downloads, then restarts once.'
   } catch (e) {
-    // One action, one line. The 400/409 that stage and apply answer with is a
-    // reason to read, not a stream of toasts.
-    packageResult.value = `Could not stage the update: ${apiErrorMessage(e, 'unknown error')}`
+    // One action, one line. The 400/409 the route answers with is a reason to
+    // read, not a stream of toasts.
+    packageResult.value = `Could not update: ${apiErrorMessage(e, 'unknown error')}`
     await fetchUpdateStatus()
   } finally {
     updateActionPending.value = false
   }
 }
 
-async function doEngineUpdateApply() {
-  if (updatePolling.value) return
-  updateActionPending.value = true
-  packageResult.value = ''
-  try {
-    await api.post('/api/update/apply')
-    // The apply drains and reboots the engine, so the restart overlay is the
-    // one a Settings restart already uses: it covers the downtime and reloads
-    // the tab onto the new version. A drain the engine gives up on cancels it
-    // through `server_restart_cancelled`, and the card re-reads the record.
-    restartAndReload('Updating Ciaobot… the engine will restart')
-    startUpdatePoll()
-    // Same pre-record window as a stage: `apply_update` writes `draining` from
-    // its own thread, so the first read can still be serving the `staged` record.
-    beginUpdateRun()
-    packageResult.value = 'Applying the update. Ciaobot restarts once it is ready.'
-  } catch (e) {
-    packageResult.value = `Could not apply the update: ${apiErrorMessage(e, 'unknown error')}`
-    await fetchUpdateStatus()
-  } finally {
-    updateActionPending.value = false
-  }
-}
+// The apply drains and reboots the engine, so the restart overlay is the one a
+// Settings restart already uses: it covers the downtime and reloads the tab onto
+// the new version. A drain the engine gives up on cancels it through
+// `server_restart_cancelled`, and the card re-reads the record. Only a run this
+// session started asks for it, so a run begun on the CLI or another device does
+// not reload this tab.
+watch(engineUpdateStage, (stage) => {
+  if (stage !== 'applying' || !updateRunStarted || updateRestartRequested) return
+  updateRestartRequested = true
+  restartAndReload('Updating Ciaobot… the engine will restart')
+})
 
 // Poll only while a run is in flight, and only on the tab that shows the card:
 // a Settings tab left open on an idle engine must not poll forever. A run this
@@ -4843,7 +4745,7 @@ watch(engineUpdateStagingNow, async (staging) => {
 })
 
 // Focus comes back to the card when the overlay closes. What the run produced is
-// what the card now offers — Apply for a staged release, Retry for a failure —
+// what the card now offers — Update & restart for a staged release, Retry for a failure —
 // so that is where focus goes: never onto a control the record has replaced,
 // and never onto nothing at all. An `applied` record offers no control, so the
 // panel itself is the target — it carries `tabindex="-1"` and states its own
@@ -4880,7 +4782,7 @@ function reclaimEngineUpdatePanelFocus() {
 // Applied: the record says the new version is running, so the package status is
 // re-read too and its "Up to date" is the engine's own answer.
 watch(() => engineUpdateStage.value, (stage, previous) => {
-  // "Staging…"/"Applying…" describes a run that is in flight. Once the record
+  // "Updating…" describes a run that is in flight. Once the record
   // settles it is the last thing that happened rather than the state, and would
   // otherwise sit under the panel that replaced it.
   if (updateStageInFlight(previous) && !updateStageInFlight(stage)) packageResult.value = ''
@@ -5075,27 +4977,6 @@ onUnmounted(stopUpdatePoll)
 @container chat-pane (max-width: 760px) {
   .settings-grid { grid-template-columns: minmax(0, 1fr); }
   .settings-rail { display: none; }
-}
-
-.settings-disclosure {
-  align-self: flex-start;
-  min-height: 32px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--accent);
-  font: inherit;
-  font-size: var(--text-sm);
-  cursor: pointer;
-}
-
-.settings-disclosure:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-@media (pointer: coarse) {
-  .settings-disclosure { min-height: var(--touch); }
 }
 /* Open-source card with the star ask still live: the pixel face sits on the
    right, out of the prose's flow. Without the nudge the card has no class and
@@ -5432,19 +5313,6 @@ a.btn-secondary {
   background: var(--error);
 }
 
-.routine-row {
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(380px, 490px);
-  align-items: start;
-  gap: var(--space-4);
-  padding: 14px 0;
-  border-top: 1px solid var(--border);
-  margin-top: 0;
-}
-.routine-row--flush {
-  border-top: 0;
-  padding-top: 0;
-}
 .routine-detail {
   font-size: var(--text-xs);
   color: var(--fg2);
@@ -5505,110 +5373,6 @@ a.btn-secondary {
   width: min(100%, 430px);
   min-width: 320px;
   flex: 0 0 auto;
-}
-.critique-model-picker {
-  width: 100%;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.critique-picker-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px;
-  align-items: center;
-  gap: 8px;
-}
-.critique-picker-summary {
-  min-width: 0;
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg);
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-.critique-picker-default {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.critique-picker-header .btn-small {
-  width: 100%;
-  min-height: 32px;
-}
-.critique-chip-list {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.critique-chip {
-  max-width: 100%;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg3);
-  color: var(--fg);
-  font-size: var(--text-xs);
-  cursor: pointer;
-}
-.critique-chip span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.critique-chip span:last-child {
-  flex: none;
-}
-.critique-chip:disabled {
-  cursor: default;
-  opacity: 0.65;
-}
-.critique-option-groups {
-  max-height: 230px;
-  overflow-y: auto;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg);
-}
-.critique-option-group + .critique-option-group {
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-.critique-group-label {
-  margin-bottom: 4px;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
-.critique-option {
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 0;
-  color: var(--fg);
-  font-size: var(--text-xs);
-  line-height: 1.3;
-}
-.critique-option input {
-  flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
-}
-.critique-option span {
-  min-width: 0;
-  overflow-wrap: anywhere;
 }
 .tier-provider-section {
   padding-top: var(--space-3);
@@ -5880,10 +5644,7 @@ a.btn-secondary {
   .gws-profile-card .btn-small,
   .gws-profile-card .btn-primary,
   .gws-profile-card .file-upload-btn,
-  .gws-advanced-summary,
-  .critique-picker-header .btn-small,
-  .critique-chip,
-  .routine-row :deep(.model-selector__trigger) {
+  .gws-advanced-summary {
     min-height: var(--touch);
   }
 }
@@ -5907,24 +5668,9 @@ a.btn-secondary {
     min-width: 0;
     width: 100%;
   }
-  .routine-row {
-    grid-template-columns: 1fr;
-    gap: var(--space-3);
-  }
-  .critique-model-picker {
-    max-width: none;
-    min-width: 0;
-    width: 100%;
-  }
   /* The heading takes the full row; status and account actions wrap below. */
   .gws-profile-heading {
     flex: 1 1 100%;
-  }
-  .critique-picker-summary {
-    min-height: 44px;
-  }
-  .critique-option {
-    min-height: 44px;
   }
 }
 
@@ -6228,6 +5974,45 @@ a.btn-secondary {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, var(--bg));
 }
+/* Touch: the 20px glyph stays, inside a 44px hit area. */
+@media (pointer: coarse) {
+  .field-info summary {
+    width: var(--touch);
+    height: var(--touch);
+    border: 0;
+    background: none;
+    position: relative;
+    isolation: isolate;
+  }
+  .field-info[open] summary,
+  .field-info summary:hover {
+    border: 0;
+    background: none;
+  }
+  /* The panel anchors to its label row, not to the glyph, so it opens inside the
+     viewport wherever the glyph sits. Doubled class: the base .field-info-panel
+     rule comes later in the file. */
+  .settings-label-row { position: relative; }
+  .field-info { position: static; }
+  .field-info .field-info-panel {
+    top: calc(100% - 6px);
+    width: min(360px, 100%);
+  }
+  .field-info summary::before {
+    content: '';
+    position: absolute;
+    inset: 12px;
+    z-index: -1;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: var(--bg);
+  }
+  .field-info[open] summary::before,
+  .field-info summary:hover::before {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+  }
+}
 .field-info-panel {
   position: absolute;
   z-index: 30;
@@ -6290,6 +6075,8 @@ a.btn-secondary {
   opacity: 0.6;
   cursor: not-allowed;
 }
+/* Must stay below the base .workspace-select rule: this block is scoped after settingsPanels.css. */
+@media (pointer: coarse) { .workspace-select { min-height: var(--touch); } }
 .settings-advanced {
   padding: var(--space-2);
   border: 1px solid var(--border);

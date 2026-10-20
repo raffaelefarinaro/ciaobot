@@ -85,15 +85,8 @@ STOCK_COMMAND_MARKER_SUFFIX = ".ciao-stock-command"
 # edit a stock command, append the digest of the NEW text here too;
 # test_stock_command_revision_registry_is_current enforces that.
 SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
-    "critique.md": frozenset({
-        "00297ec3eb4e0ccef147fc7743a8003b3fe0293d2c2203dd1c8616ca233a56f5",
-        "315453a65b19d645a23c56de38d3add0b5821e1080059f9b2aac9078986a1ede",
-        "56971efa173bba88750a503ce20a7e40eb64f02617091699777a83da50e25a83",
-        "6038402836157566e160d42de5663867e1e9da299d1d61b306af7d7558f8ccd7",
-        "69383c6953f305eccf13abbe123ede51bff09f3b8632cfbd149199522b3ef779",
-        "887906f04ac45fde5666fd68c5dfdfd3f6c0b145c6bdd6cf49b9eab97013cd7f",
-    }),
     "interrogation.md": frozenset({
+        "d5bc95ee0fdcaf0e89be1b3c6a48d603cbea3b1fda0868adaa9a548ace6c38f9",
         "11d35c9c49bffe7b37a01b7097a2b59f13ffa9c55cbd3911303a19ba063ecbfb",
         "17600a45d0fd58b5f79a6f865c57243f4bda134aeb31f2f89078223c2449ef71",
         "39fe04830f698d88980d2e90b564c2ebbb0f0cd0809ea68ceb299f1ed883c3f3",
@@ -101,6 +94,7 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
         "efcc5d781e3d4fb04657ba6505b833c56bb07851bac28d7d34f634a745fe7408",
     }),
     "remember.md": frozenset({
+        "11c15259ef073e84101bbe41d1dfa480cb625711551e1b2b1b25e04e3831a62b",
         "015aee7694fcd85eb27475e84b030c6f871c9da217f7bbaf04cd4caabf8770e0",
         "3d56ae540d634af504816743fd8725db5aa7cea152d29bcf0918c80fcb4ef94b",
         "524564ef06129f6f59af473851fc738dbc9aa72013dd0cef2f637a2170930ebb",
@@ -115,6 +109,9 @@ SHIPPED_STOCK_COMMAND_DIGESTS: dict[str, frozenset[str]] = {
         "d7d8eb94dd11a6f84b9bb329c4f7ed6c5050d79a6fd2fa20fd1e7369c361ce6c",
         "e89dbfdda0580280fdced71cabf50fad529c9824fb275104f60969b000ebb012",
         "f0124b04d973b243b87f63cea957132deefd3022c1018637b71ca702208b1e2e",
+        "b8c7661aed39132e0695763e387e3d25f29663a4041f42af3b5516cd82aa23a9",
+        "cedf37b07894a9f16c5ed7d34f82e2961d4b5c4c49bab42d92a4d57fde010a5f",
+        "6aa41918b80e9c579e17d745743856b24f348b3947ab9b15e060d3bbf1fa47fb",
     }),
 }
 CODEX_WRAPPER_MARKER = ".ciao-codex-wrapper"

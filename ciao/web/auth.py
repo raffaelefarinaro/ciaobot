@@ -39,7 +39,6 @@ _PUBLIC_API = {
     "/api/auth",
     "/api/auth/check",
     "/api/startup-status",
-    "/api/active-chats",
     "/api/setup-status",
     "/api/setup/finish",
     "/api/setup/list-dirs",
@@ -51,13 +50,17 @@ _PUBLIC_API = {
 # `/api/menubar-chats` is how the tray reads chat titles (it holds no cookie).
 # `/api/admin/drain` and `/api/admin/drain/cancel` are the update coordinator's own drain handshake,
 # driven by `ciao update apply` before it bootstraps the detached updater job.
-# All are gated on the peer address rather than the Host header, which a caller
-# controls.
+# `/api/admin/restart-blockers` is the `ciao service` restart/stop gate (reason-tagged).
+# All are gated on the peer address plus a loopback `Host` and, when present, a same-origin `Origin`/`Referer`: the peer makes a caller local, and the Host check refuses a DNS-rebound page, whose Host is the attacker's name. A request that fails takes the normal session path.
 _LOOPBACK_ONLY_API = {
     "/api/menubar-chats",
     "/api/admin/drain",
     "/api/admin/drain/cancel",
+    "/api/admin/restart-blockers",
 }
+
+# The names local callers use for the engine (`http://localhost:<port>`).
+LOOPBACK_HOST_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def make_serializer(secret: str) -> URLSafeTimedSerializer:
@@ -183,6 +186,20 @@ def _state_change_origin_allowed(request: Request) -> bool:
     return True
 
 
+def _loopback_host_header(request: Request) -> bool:
+    """True when the Host header names this machine; a rebound page carries its own name."""
+    host, _port = _split_host(request.headers.get("host", ""))
+    if not host:
+        host = (request.url.hostname or "").lower()
+    return host.rstrip(".") in LOOPBACK_HOST_NAMES
+
+
+def _same_origin_source(request: Request) -> bool:
+    """Origin (else Referer), when sent, must be this exact origin; checked for every method."""
+    source = request.headers.get("origin") or request.headers.get("referer")
+    return not source or _same_origin(request, source)
+
+
 async def authorize_websocket(websocket: WebSocket) -> bool:
     """Handshake gate for `/ws/*`, mirroring the HTTP policy in AuthMiddleware.
 
@@ -291,17 +308,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return _redeem_setup_token(request, setup_token)
 
         protected = (
-            (
-                path.startswith("/api/")
-                and path not in _PUBLIC_API
-                and not path.startswith("/api/open-chat/")
-            )
-            or path.startswith("/ws/")
-        )
+            path.startswith("/api/") and path not in _PUBLIC_API
+        ) or path.startswith("/ws/")
         if not protected:
             return await call_next(request)
-        if path in _LOOPBACK_ONLY_API and is_loopback_client(request):
-            if not _state_change_origin_allowed(request):
+        if (
+            path in _LOOPBACK_ONLY_API
+            and is_loopback_client(request)
+            and _loopback_host_header(request)
+        ):
+            if not _same_origin_source(request):
                 return JSONResponse({"error": "forbidden origin"}, status_code=403)
             return await call_next(request)
         if not verify_session(request, self._serializer_now(request)):

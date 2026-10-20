@@ -3,6 +3,7 @@ import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { buildFixPrompt } from '../lib/fixError'
 import { isPlausibleFilePath } from '../lib/filePaths'
+import { activityLines } from '../lib/chatActivity'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
@@ -11,7 +12,8 @@ import {
   restartMessageForDisplay,
 } from '../lib/serverRestart'
 import { errorMessage } from '../lib/errorMessage'
-import { applyKeyboardSettings } from '../composables/useKeyboardSettings'
+import { nextBackgroundableCalls, type BackgroundableCalls } from '../lib/moveToBackground'
+import { applyKeyboardSettings, useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { clearChatDraft, readChatDraft, readOrphanCandidates, writeChatDraft, type OrphanDraft } from '../lib/chatDrafts'
 import { isMemoryProject, isMemoryPassChat, memoryPassNeedsAttention as memoryPassNeedsAttentionFor } from '../lib/memoryPass'
 import { memoryInsights, type MemoryInsight } from '../lib/memoryInsights'
@@ -26,10 +28,13 @@ import type {
   ChatMessage,
   RunningSubagent,
   RunningSubagentsResponse,
+  MoveToBackgroundResponse,
   BackgroundRunLog,
   BackgroundRunSummary,
   SubagentTranscript,
   WsEvent,
+  QueueDelivery,
+  SteerFallbackReason,
   EventsWsMessage,
   InAppToast,
   PackageStatus,
@@ -252,7 +257,10 @@ export const useProjectStore = defineStore('projects', () => {
   // It breaks contiguous 'tool' groups so the PWA can render a standalone
   // clickable card with a preview link instead of folding it into _activity.
   type StreamEntry =
-    | { kind: 'tool'; content: string }
+    // `tool_use_ids` / `failed` carry one slot per activity line, kept aligned
+    // with `content`'s lines by `_pushToolLine`; a `tool_result` frame for an
+    // id sets its slot's `failed` (#1416).
+    | { kind: 'tool'; content: string; tool_use_ids?: Array<string | undefined>; failed?: boolean[] }
     | { kind: 'thinking'; content: string }
     | { kind: 'text'; content: string; phase?: ChatMessage['phase'] }
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string; tool_use_id?: string }
@@ -304,7 +312,15 @@ export const useProjectStore = defineStore('projects', () => {
   // signal on the per-chat socket when a send is rejected mid-drain).
   const serverRestarting = ref(false)
   const serverRestartMessage = ref('')
-  type QueuedMessage = { id: string; text: string; images?: string[] }
+  // `delivery` is what the message will do; `steering` means it was handed to
+  // the running turn and is locked until the provider confirms delivery.
+  const STEER_FALLBACK_NOTICE: Record<SteerFallbackReason, string> = {
+    finished: 'Steering missed the reply, so it was queued instead.',
+    not_running: 'Nothing was running to steer into, so it was queued instead.',
+    no_turn: 'Nothing was running to steer into, so it was queued instead.',
+    stopped: 'Stopped before it was steered. It stays in the queue.',
+  }
+  type QueuedMessage = { id: string; text: string; images?: string[]; delivery: QueueDelivery; steering?: boolean; waiting?: boolean }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
       return crypto.randomUUID()
@@ -315,6 +331,46 @@ export const useProjectStore = defineStore('projects', () => {
   // streaming). Cleared when the server echoes them back as a user_echo at
   // flush time, or on result when the queue ends up empty.
   const queuedMessages = ref<Record<string, QueuedMessage[]>>({})
+  // One-line dock notice per chat after a steer fell back to the queue.
+  const steerNotice = ref<Record<string, string>>({})
+  // The server answers every steer with steered, steer_fallback or a
+  // queue_state; this only guards a lock the server never answers (a race, a
+  // background stream, ids that are gone), so it cannot stick forever.
+  const STEER_LOCK_TIMEOUT_MS = 15000
+  const STEER_NOTICE_MS = 8000
+  const steerLockTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const steerNoticeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  function clearSteerLockTimer(chatId: string) {
+    cancelTimer(steerLockTimers.get(chatId))
+    steerLockTimers.delete(chatId)
+  }
+  function setSteerNotice(chatId: string, text: string) {
+    steerNotice.value[chatId] = text
+    cancelTimer(steerNoticeTimers.get(chatId))
+    steerNoticeTimers.set(chatId, scheduleTimer(() => {
+      delete steerNotice.value[chatId]
+      steerNoticeTimers.delete(chatId)
+    }, STEER_NOTICE_MS))
+  }
+  function clearSteerNotice(chatId: string) {
+    cancelTimer(steerNoticeTimers.get(chatId))
+    steerNoticeTimers.delete(chatId)
+    delete steerNotice.value[chatId]
+  }
+  function armSteerLockTimer(chatId: string) {
+    clearSteerLockTimer(chatId)
+    steerLockTimers.set(chatId, scheduleTimer(() => {
+      steerLockTimers.delete(chatId)
+      let reverted = false
+      for (const q of queuedMessages.value[chatId] || []) {
+        if (!q.steering) continue
+        q.delivery = 'queue'
+        q.steering = false
+        reverted = true
+      }
+      if (reverted) setSteerNotice(chatId, 'The steer was not confirmed, so it was queued instead.')
+    }, STEER_LOCK_TIMEOUT_MS))
+  }
   // Pending Auto-mode permission prompts keyed by chat_id. The chat bubble
   // renders Approve/Deny buttons for each entry; clicking sends a
   // `permission_response` on the per-chat WS and waits for the provider ack.
@@ -372,6 +428,7 @@ export const useProjectStore = defineStore('projects', () => {
   // active until an acknowledged reply/cancel; legacy cards without a request
   // id are cleared by the next ordinary message.
   const activeQuestions = ref<Record<string, ActiveQuestion[]>>({})
+  const questionBlockToastIds: Record<string, number> = {}
   type QuestionResponse = {
     requestId: string
     sessionId: string
@@ -685,7 +742,11 @@ export const useProjectStore = defineStore('projects', () => {
     // server snapshot that hasn't caught up yet.
     if (resolvedQuestions.value[chatId]?.has(questionsSignature(qs))) return
     const current = activeQuestions.value[chatId]
-    if (current && questionsSignature(current) === questionsSignature(qs)) return
+    if (current && questionsSignature(current) === questionsSignature(qs)) {
+      const stale = qs.some(q => q.stale)
+      if (stale && !current.some(q => q.stale)) for (const q of current) q.stale = true
+      return
+    }
     activeQuestions.value[chatId] = qs
   }
 
@@ -885,7 +946,7 @@ export const useProjectStore = defineStore('projects', () => {
       .filter(p => p.workspace === activeWorkspace.value)
       // The Memory project is app-owned (memory passes run in it) and hidden
       // here, the one point every list agrees: sidebar, move-to menu, reorder,
-      // selectFirstChat and the Home "new chat" fallback all read this.
+      // transitionToFirstChat and the Home "new chat" fallback all read this.
       .filter(p => !isMemoryProject(p))
       .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name))
   )
@@ -956,6 +1017,10 @@ export const useProjectStore = defineStore('projects', () => {
 
   const activeBackgroundRuns = computed<BackgroundRunSummary[]>(() =>
     backgroundRuns.value[activeChatId.value || ''] || []
+  )
+  const backgroundableCalls = ref<Record<string, BackgroundableCalls>>({})
+  const activeBackgroundableCalls = computed<BackgroundableCalls>(() =>
+    backgroundableCalls.value[activeChatId.value || ''] || {}
   )
 
   // Paused while the read-only subagent view is open for this chat: that
@@ -1890,23 +1955,36 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   /**
-   * Parked follow-ups live on the chat record once the stream that queued them
-   * has torn down. A non-empty `pending_queue` replaces that chat's chips. An
-   * empty one on an idle chat drops chips that came from a parked list (a
-   * remove on another client). An empty one while the chat is streaming must
-   * not: `start_stream` clears `pending_queue` when it re-seeds the live queue,
-   * and those chips arrive on `queue_state`.
+   * Parked (waiting) follow-ups live on the chat record once the stream that
+   * queued them has torn down, and only an explicit action takes them off it
+   * (Send now, edit, remove, reorder). On an idle chat a non-empty
+   * `pending_queue` replaces that chat's chips and an empty one drops them (a
+   * remove on another client). While the chat is streaming `queue_state` is
+   * authoritative and lists the waiting entries first, so the parked ones are
+   * only added when missing and an empty list changes nothing.
    */
   function hydrateParkedQueues(nextChats: ChatInfo[]) {
     for (const chat of nextChats) {
       const parked = chat.pending_queue
       if (!Array.isArray(parked)) continue
       if (parked.length) {
-        queuedMessages.value[chat.chat_id] = parked.map(entry => ({
+        const waiting: QueuedMessage[] = parked.map(entry => ({
           id: entry.id || makeQueuedId(),
           text: (entry.text || '').trim(),
           images: entry.images?.length ? [...entry.images] : undefined,
+          delivery: 'queue',
+          steering: false,
+          waiting: true,
         }))
+        if (isChatStreaming(chat.chat_id)) {
+          const live = queuedMessages.value[chat.chat_id] || []
+          const known = new Set(live.map(q => q.id))
+          const parkedIds = new Set(waiting.map(q => q.id))
+          for (const q of live) if (parkedIds.has(q.id)) q.waiting = true
+          queuedMessages.value[chat.chat_id] = [...waiting.filter(q => !known.has(q.id)), ...live]
+        } else {
+          queuedMessages.value[chat.chat_id] = waiting
+        }
         continue
       }
       if (isChatStreaming(chat.chat_id)) continue
@@ -2038,6 +2116,7 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function clearStreamingState(chatId: string) {
+    delete backgroundableCalls.value[chatId]
     streaming.value[chatId] = false
     streamingText.value[chatId] = ''
     streamingThinking.value[chatId] = ''
@@ -2146,18 +2225,6 @@ export const useProjectStore = defineStore('projects', () => {
     // resolved). Handles the cold-boot race where fetchAll completes before
     // controller is ever set.
     void navigator.serviceWorker.ready.then(() => postUnreadSync())
-  }
-
-  function selectFirstChat() {
-    const wsProjects = workspaceProjects.value
-    for (const p of wsProjects) {
-      const pChats = projectChats(p.project_id)
-      if (pChats.length > 0) {
-        activeChatId.value = pChats[0].chat_id
-        return
-      }
-    }
-    activeChatId.value = null
   }
 
   async function transitionToFirstChat() {
@@ -2304,7 +2371,7 @@ export const useProjectStore = defineStore('projects', () => {
     return p
   }
 
-  async function updateProject(projectId: string, updates: { name?: string; context?: string }) {
+  async function updateProject(projectId: string, updates: { name?: string; context?: string; repo_path?: string }) {
     const p = await api.patch<ProjectInfo>(`/api/projects/${projectId}`, updates)
     const idx = projects.value.findIndex(x => x.project_id === projectId)
     if (idx >= 0) projects.value[idx] = p
@@ -2445,12 +2512,18 @@ export const useProjectStore = defineStore('projects', () => {
       mode?: string
       provider?: RuntimeProvider
       thinking_level?: string
+      code_mode?: boolean
     },
   ) {
     const c = await api.patch<ChatInfo>(`/api/chats/${chatId}`, updates)
     const idx = chats.value.findIndex(x => x.chat_id === chatId)
     if (idx >= 0) chats.value[idx] = c
     applyChatPinFromChatInfo(c)
+  }
+
+  /** PATCH a chat's code mode. Throws the ApiError so the chip can show the engine's message. */
+  async function setChatCodeMode(chatId: string, on: boolean): Promise<void> {
+    await updateChat(chatId, { code_mode: on })
   }
 
   async function handoverChat(
@@ -2524,7 +2597,7 @@ export const useProjectStore = defineStore('projects', () => {
   // more eager than the server: this deletes the chat outright, and the two
   // rules disagreeing means deleting something the server would have kept.
   //
-  // The client cannot see `user_turn_count`, so it substitutes the loaded
+  // The draft rule also weighs server-only state, so the client substitutes the loaded
   // messages — which is only sound when they are actually loaded. `messages`
   // is undefined for a chat that was never opened, and reading that as "no
   // user turns" made a real conversation look like a discarded draft.
@@ -3652,18 +3725,16 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeWorkspace.value === ws) return
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
+    // A workspace switch expresses scope, not a request to open an arbitrary
+    // conversation. Selecting the first chat here also made the switch (and
+    // cross-workspace "new chat") wait for that chat's complete transcript
+    // before the home screen could render. Without a transition the caller
+    // stays on its own view (schedules, tasks, memory, settings).
+    activeChatId.value = null
+    persistState()
     if (transition) {
-      // A workspace pill expresses scope, not a request to open an arbitrary
-      // conversation. Selecting the first chat here also made the switch (and
-      // cross-workspace "new chat") wait for that chat's complete transcript
-      // before the home screen could render.
-      activeChatId.value = null
-      persistState()
       const { router } = await import('../router')
       await router.push('/')
-    } else {
-      selectFirstChat()
-      persistState()
     }
   }
 
@@ -4164,10 +4235,11 @@ export const useProjectStore = defineStore('projects', () => {
   function handleEventsMessage(msg: EventsWsMessage) {
     switch (msg.type) {
       case 'snapshot': {
-        if (msg.keyboard_shortcuts || msg.keyboard_send_mode) {
+        if (msg.keyboard_shortcuts || msg.keyboard_send_mode || msg.mid_turn_delivery) {
           applyKeyboardSettings({
             keyboard_shortcuts: msg.keyboard_shortcuts,
             keyboard_send_mode: msg.keyboard_send_mode,
+            mid_turn_delivery: msg.mid_turn_delivery,
             revision: msg.keyboard_revision,
           })
         }
@@ -4238,6 +4310,7 @@ export const useProjectStore = defineStore('projects', () => {
         delete projectStreaming.value[msg.chat_id]
         const doneChat = chats.value.find(c => c.chat_id === msg.chat_id)
         if (doneChat) doneChat.last_error = msg.last_error || ''
+        if (doneChat && msg.repo_location) doneChat.repo_location = msg.repo_location
         // The per-chat WS may have missed the `result` event for this
         // turn (WS flap mid-stream, or the broker stream finished and
         // was cleared between the disconnect and reconnect, leaving no
@@ -4469,6 +4542,24 @@ export const useProjectStore = defineStore('projects', () => {
         if (chat) chat.postprocess = msg.postprocess || null
         break
       }
+      case 'chat_repo_location': {
+        const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
+        if (c) c.repo_location = msg.repo_location
+        break
+      }
+      case 'chat_code_mode': {
+        const c = chats.value.find(ch => ch.chat_id === msg.chat_id)
+        if (!c) break
+        c.code_mode = msg.code_mode
+        // A switch made from this client also gets the PATCH response, so this is a
+        // second fetch of the same chat. Harmless; keep it, the agent's switches need it.
+        // The event has no after_turn_index; the server's ChatInfo does. Refetch
+        // rather than guess the anchor (an optimistic user row has no turn_index yet).
+        void api.get<ChatInfo>(`/api/chats/${encodeURIComponent(msg.chat_id)}`)
+          .then((fresh) => { replaceChat(fresh) })
+          .catch(() => { /* next chats load heals it */ })
+        break
+      }
       case 'chat_pin_changed': {
         // A pin/replace/unpin happened on another device. Apply server truth and
         // nothing else: this must not select or navigate the chat, mark it read,
@@ -4496,6 +4587,8 @@ export const useProjectStore = defineStore('projects', () => {
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
         if (streamingText.value[msg.chat_id]) delete streamingText.value[msg.chat_id]
         delete streamingTextPhase.value[msg.chat_id]
+        clearSteerLockTimer(msg.chat_id)
+        clearSteerNotice(msg.chat_id)
         if (queuedMessages.value[msg.chat_id]) delete queuedMessages.value[msg.chat_id]
         if (unread.value[msg.chat_id]) {
           delete unread.value[msg.chat_id]
@@ -4503,9 +4596,6 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
       }
-      case 'open_chat':
-        void openChatFromDeepLink(msg.chat_id)
-        break
       case 'project_created': {
         const exists = projects.value.some(p => p.project_id === msg.project.project_id)
         if (!exists) projects.value.push(msg.project)
@@ -4691,6 +4781,36 @@ export const useProjectStore = defineStore('projects', () => {
     messages.value[chatId].splice(idx, 1)
   }
 
+  function revealQuestionCard() {
+    if (typeof document === 'undefined') return
+    const card = document.querySelector<HTMLElement>('.question-card')
+    card?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    card?.querySelector<HTMLElement>('.question-option, .question-other')?.focus()
+  }
+
+  // A native form whose provider is gone (engine restart, or the last reply came back
+  // retryable while nothing is running) no longer owns the turn: the composer may supersede it.
+  function nativeQuestionIsDead(chatId: string): boolean {
+    const qs = activeQuestions.value[chatId]
+    if (!qs?.some(q => q.requestId)) return false
+    if (isChatStreaming(chatId)) return false
+    if (qs.some(q => q.stale)) return true
+    const sub = questionSubmissions.value[chatId]
+    return Boolean(sub && !sub.pending && sub.retryable && sub.error)
+  }
+
+  function toastQuestionBlocksSend(chatId: string) {
+    const existing = questionBlockToastIds[chatId]
+    if (existing && toasts.value.some(t => t.id === existing)) return
+    questionBlockToastIds[chatId] = pushToast({
+      chat_id: chatId,
+      title: 'Answer the open question first',
+      body: 'The model is waiting for the question above before it can continue.',
+      actionLabel: 'Show question',
+      onAction: revealQuestionCard,
+    }).id
+  }
+
   function sendMessage(
     chatId: string,
     text: string,
@@ -4700,17 +4820,12 @@ export const useProjectStore = defineStore('projects', () => {
   ): boolean {
     // A native V2 form owns the turn until its reply/cancel is acknowledged.
     // Do not silently dismiss it by sending an unrelated composer message.
-    if (activeQuestions.value[chatId]?.some(q => q.requestId)) {
-      pushToast({
-        chat_id: chatId,
-        title: 'Answer the open question first',
-        body: 'The model is waiting for the highlighted question before it can continue.',
-        variant: 'error',
-      })
+    if (activeQuestions.value[chatId]?.some(q => q.requestId) && !nativeQuestionIsDead(chatId)) {
+      toastQuestionBlocksSend(chatId)
       return false
     }
-    // Claude's legacy picker has no request id and is intentionally dismissed
-    // by the next ordinary message.
+    // Legacy pickers and dead native forms are superseded by the next ordinary message;
+    // the server clears a dead form in start_stream.
     if (activeQuestions.value[chatId]) {
       clearQuestion(chatId)
     }
@@ -4799,8 +4914,15 @@ export const useProjectStore = defineStore('projects', () => {
       }
       if (!queuedMessages.value[chatId]) queuedMessages.value[chatId] = []
       const queueId = makeQueuedId()
-      queuedMessages.value[chatId].push({ id: queueId, text: composed, images: imageRefs })
-      const payload: Record<string, unknown> = { type: 'message', text: composed, mode: 'queue' }
+      // The Settings default decides whether a mid-turn message waits for the
+      // next turn or is steered into the running one. Images steer too.
+      const delivery: QueueDelivery = useKeyboardSettings().settings.value.mid_turn_delivery
+      queuedMessages.value[chatId].push({
+        id: queueId, text: composed, images: imageRefs, delivery, steering: delivery === 'steer',
+      })
+      clearSteerNotice(chatId)
+      if (delivery === 'steer') armSteerLockTimer(chatId)
+      const payload: Record<string, unknown> = { type: 'message', text: composed, mode: 'queue', delivery }
       if (imageRefs) payload.images = imageRefs
       payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
@@ -4862,6 +4984,15 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  function removeQueuedByIds(chatId: string, entryIds: string[] | undefined) {
+    const list = queuedMessages.value[chatId]
+    if (!list || !entryIds?.length) return
+    const gone = new Set(entryIds)
+    const remaining = list.filter(q => !gone.has(q.id))
+    if (remaining.length) queuedMessages.value[chatId] = remaining
+    else delete queuedMessages.value[chatId]
+  }
+
   function removeQueuedById(chatId: string, entryId: string) {
     const list = queuedMessages.value[chatId]
     if (!list) return
@@ -4914,7 +5045,45 @@ export const useProjectStore = defineStore('projects', () => {
     return true
   }
 
+  /**
+   * Switch queued entries between Queue and Steer with one frame. Steer sends
+   * them now, combined in list order (the order the ids are sent in). With a
+   * turn running the chips lock as "Steering…" until the server confirms (or a
+   * 15 s timer gives up); with nothing running this is "Send now" on waiting
+   * entries, which starts a turn and removes them through `user_echo`, so
+   * nothing is changed or locked optimistically.
+   */
+  function setQueuedDelivery(chatId: string, entryIds: string[], delivery: QueueDelivery) {
+    const list = queuedMessages.value[chatId]
+    const ws = sockets.value[chatId]
+    if (!list?.length || ws?.readyState !== WebSocket.OPEN) return
+    const wanted = new Set(entryIds)
+    const chosen = list.filter(q => wanted.has(q.id) && !q.steering)
+    if (!chosen.length) return
+    // Only while a turn runs is the change optimistic. Idle, "Send now"
+    // starts a turn and the echo removes the entries; a server that does
+    // nothing leaves the chips exactly as they were.
+    if (isChatStreaming(chatId)) {
+      for (const entry of chosen) {
+        entry.delivery = delivery
+        if (delivery === 'steer') {
+          entry.steering = true
+          entry.waiting = false
+        }
+      }
+      if (delivery === 'steer') armSteerLockTimer(chatId)
+    }
+    clearSteerNotice(chatId)
+    ws.send(JSON.stringify({
+      type: 'queue_set_delivery',
+      entry_ids: chosen.map(q => q.id),
+      delivery,
+    }))
+  }
+
   function clearQueued(chatId: string) {
+    clearSteerLockTimer(chatId)
+    clearSteerNotice(chatId)
     delete queuedMessages.value[chatId]
   }
 
@@ -4929,6 +5098,20 @@ export const useProjectStore = defineStore('projects', () => {
     // no way to retry from here. Fall back to the HTTP route so Stop always
     // reaches the server even while the socket is unusable.
     void api.post(`/api/chats/${chatId}/stop`, {})
+  }
+
+  // OpenCode's Ctrl+B (#1413). Resolves true when something moved.
+  async function moveChatToBackground(chatId: string): Promise<boolean> {
+    try {
+      const r = await api.post<MoveToBackgroundResponse>(`/api/chats/${chatId}/move-to-background`, {})
+      if (!r.moved) {
+        pushToast({ chat_id: chatId, title: 'Nothing to move', body: 'No shell command or subagent is running in the foreground.' })
+      }
+      return r.moved
+    } catch (e) {
+      pushErrorToast('Could not move to background', errorMessage(e))
+      return false
+    }
   }
 
   // Compact requests in flight, per chat. The Compact button reads this while
@@ -5306,24 +5489,61 @@ export const useProjectStore = defineStore('projects', () => {
     streamingThinking.value[chatId] = ''
   }
 
-  function _pushToolLine(chatId: string, line: string) {
+  function _pushToolLine(chatId: string, line: string, toolUseId?: string) {
     if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
     const arr = streamingTimeline.value[chatId]
     const last = arr[arr.length - 1]
-    if (last && last.kind === 'tool') {
-      // Dedupe within the same tool block: replace if same tool name with more detail; append otherwise.
-      const lastLines = last.content.split('\n')
-      const lastLine = lastLines[lastLines.length - 1]
-      const toolName = line.split(' ')[1]
-      if (lastLine && lastLine.split(' ')[1] === toolName && line.length > lastLine.length) {
-        lastLines[lastLines.length - 1] = line
-        last.content = lastLines.join('\n')
-      } else if (lastLine !== line) {
-        last.content = last.content + '\n' + line
+    // One slot per *rendered* line. The template renders `activityLines(content)`,
+    // which trims and drops blanks, so normalise the same way here — a raw
+    // split('\n') desyncs the moment a tool input carries a newline (#1416).
+    const added = activityLines(line)
+    if (!added.length) return
+    if (last && last.kind === 'tool' && last.tool_use_ids && last.failed) {
+      const owned = activityLines(last.content)
+      const ids = last.tool_use_ids
+      const flags = last.failed
+      const lastOwned = owned[owned.length - 1]
+      const lastId = ids[ids.length - 1]
+      const toolName = added[0].split(' ')[1]
+      // A provider can re-announce one call with a fuller summary, reusing its
+      // tool_use_id: replace that call's lines instead of stacking a duplicate.
+      // Frames without an id keep the old heuristic (same tool name, longer
+      // line replaces) — the permission line is built that way.
+      const sameCall = toolUseId !== undefined && lastId === toolUseId
+      const grew = toolUseId === undefined
+        && lastOwned !== undefined
+        && lastOwned.split(' ')[1] === toolName
+        && line.trim().length > lastOwned.length
+      if (sameCall || grew) {
+        let start = ids.length
+        if (sameCall) {
+          // Drop the whole trailing run owned by this call, not just one line.
+          while (start > 0 && ids[start - 1] === toolUseId) start--
+        } else {
+          start = Math.max(0, start - 1)
+        }
+        last.content = owned.slice(0, start).concat(added).join('\n')
+        last.tool_use_ids = ids.slice(0, start).concat(added.map(() => toolUseId))
+        last.failed = flags.slice(0, start).concat(added.map(() => false))
+        return
       }
-    } else {
-      arr.push({ kind: 'tool', content: line })
+      // A repeated id-less frame — the permission line re-announcing the same
+      // request — is the same line, not a new one (the pre-#1416 behaviour).
+      // Id-bearing calls are never deduped this way: two identical calls are two
+      // calls (#1416 review round 2), and an id-bearing call is never swallowed
+      // by an identical id-less line above it (round 3).
+      if (toolUseId === undefined && lastId === undefined && added.join('\n') === lastOwned) return
+      last.content = last.content + '\n' + added.join('\n')
+      last.tool_use_ids = ids.concat(added.map(() => toolUseId))
+      last.failed = flags.concat(added.map(() => false))
+      return
     }
+    arr.push({
+      kind: 'tool',
+      content: added.join('\n'),
+      tool_use_ids: added.map(() => toolUseId),
+      failed: added.map(() => false),
+    })
   }
 
   function _pushStatusLine(chatId: string, text: string) {
@@ -5425,6 +5645,7 @@ export const useProjectStore = defineStore('projects', () => {
             // previous receipt of the same echo). Don't push a duplicate, but
             // do reflect the implied streaming state.
             if (event.unattended) existingWithTurn.unattended = true
+            if (event.origin) existingWithTurn.origin = event.origin
             if (!streaming.value[chatId]) streaming.value[chatId] = true
             break
           }
@@ -5457,6 +5678,7 @@ export const useProjectStore = defineStore('projects', () => {
               }
               m.turn_index = turnIndex
               if (event.unattended) m.unattended = true
+              if (event.origin) m.origin = event.origin
               upgraded = true
               break
             }
@@ -5481,6 +5703,7 @@ export const useProjectStore = defineStore('projects', () => {
           // Loop/schedule tick: marked so the bubble reads as self-driven
           // rather than something the user typed.
           unattended: event.unattended || undefined,
+          origin: event.origin || undefined,
         })
         messages.value[chatId] = normalizeMessages([...msgs])
         // Flushed turn = we're streaming again. Make sure the flag reflects it.
@@ -5504,6 +5727,7 @@ export const useProjectStore = defineStore('projects', () => {
           if (existing) {
             existing.text = trimmed
             existing.images = event.images?.length ? event.images : undefined
+            if (event.delivery) existing.delivery = event.delivery
           }
           break
         }
@@ -5512,6 +5736,9 @@ export const useProjectStore = defineStore('projects', () => {
           id: entryId || makeQueuedId(),
           text: trimmed,
           images: event.images?.length ? event.images : undefined,
+          delivery: event.delivery === 'steer' ? 'steer' : 'queue',
+          steering: false,
+          waiting: Boolean(event.waiting),
         })
         queuedMessages.value[chatId] = list
         break
@@ -5521,6 +5748,7 @@ export const useProjectStore = defineStore('projects', () => {
         // Authoritative queue order from the backend (e.g. after a reorder/edit
         // from another client, or on reconnect). Rebuild local chips to match.
         const incoming = event.queue || []
+        clearSteerLockTimer(chatId)
         if (!incoming.length) {
           delete queuedMessages.value[chatId]
           break
@@ -5529,7 +5757,66 @@ export const useProjectStore = defineStore('projects', () => {
           id: q.id || makeQueuedId(),
           text: (q.text || '').trim(),
           images: q.images?.length ? q.images : undefined,
+          delivery: q.delivery === 'steer' ? 'steer' : 'queue',
+          steering: Boolean(q.steering),
+          waiting: Boolean(q.waiting) && !q.steering,
         }))
+        break
+      }
+
+      case 'steered': {
+        // The provider took the steer: the entries leave the queue and the
+        // message is its own user turn. Replays dedup by turn_index.
+        _commitStreamingTextToTimeline(chatId)
+        clearSteerLockTimer(chatId)
+        removeQueuedByIds(chatId, event.entry_ids)
+        const trimmed = (event.text || '').trim()
+        if (!trimmed) break
+        const turnIndex = event.turn_index
+        if (turnIndex != null && msgs.some(m => m.role === 'user' && m.turn_index === turnIndex)) break
+        const last = msgs[msgs.length - 1]
+        if (turnIndex == null && last && last.role === 'user' && last.content === trimmed) break
+        msgs.push({
+          role: 'user',
+          content: trimmed,
+          timestamp: event.sent_at || new Date().toISOString(),
+          images: event.images?.length ? event.images : undefined,
+          turn_index: turnIndex,
+          steered: true,
+          origin: event.origin || undefined,
+        })
+        messages.value[chatId] = normalizeMessages([...msgs])
+        persistMessages()
+        break
+      }
+
+      case 'prompt_cancelled': {
+        // The turn never started: drop its optimistic bubble and any partial.
+        // The prompt returns as a waiting chip through queue_state.
+        const kept = msgs.filter(m => !(m.role === 'user' && m.turn_index === event.turn_index))
+        if (kept.length !== msgs.length) {
+          messages.value[chatId] = normalizeMessages(kept)
+          persistMessages()
+        }
+        streamingText.value[chatId] = ''
+        streamingThinking.value[chatId] = ''
+        streamingTimeline.value[chatId] = []
+        delete streamingTextPhase.value[chatId]
+        break
+      }
+
+      case 'steer_fallback': {
+        // A steer could not be delivered: the entries are plain queued
+        // messages again. Say so, because nothing else on screen changed.
+        const ids = new Set(event.entry_ids || [])
+        for (const q of queuedMessages.value[chatId] || []) {
+          if (!ids.has(q.id)) continue
+          q.delivery = 'queue'
+          q.steering = false
+          q.waiting = false
+        }
+        clearSteerLockTimer(chatId)
+        setSteerNotice(chatId, STEER_FALLBACK_NOTICE[event.reason] || STEER_FALLBACK_NOTICE.not_running)
         break
       }
 
@@ -5552,6 +5839,7 @@ export const useProjectStore = defineStore('projects', () => {
         break
 
       case 'tool_use': {
+        backgroundableCalls.value[chatId] = nextBackgroundableCalls(backgroundableCalls.value[chatId], event, Date.now())
         // AskUserQuestion is rendered as an interactive picker above the
         // composer, not as a trace line. The headless CLI auto-cancels the
         // call with empty answers; the user's next message implicitly
@@ -5632,18 +5920,39 @@ export const useProjectStore = defineStore('projects', () => {
 
         // Tool calls that fire from inside a subagent arrive with
         // parent_tool_use_id set. They belong to the subagent, which the PWA
-        // already renders in its own "Subagent activity" box (SubagentPanel,
-        // fed by the subagent transcript). Inlining them in the parent trace
+        // already shows as its own trace row (SubagentPanel) linking to the
+        // subagent transcript. Inlining them in the parent trace
         // too double-counts the work and inflates the parent turn's tool-call
-        // total (e.g. parent header shows "15 tool calls" while the box shows
-        // "31"), so we drop them here and let the box own subagent activity.
+        // total (e.g. parent header shows "15 tool calls" while the subagent
+        // ran 31), so we drop them here; the subagent's own view owns them.
         if (event.parent_tool_use_id) break
 
         const line = event.tool_input
           ? `${toolIcon(event.tool_name)} ${event.tool_name} ${event.tool_input}`
           : `${toolIcon(event.tool_name)} ${event.tool_name}`
 
-        _pushToolLine(chatId, line)
+        _pushToolLine(chatId, line, event.tool_use_id)
+        break
+      }
+
+      case 'tool_result': {
+        backgroundableCalls.value[chatId] = nextBackgroundableCalls(backgroundableCalls.value[chatId], event, Date.now())
+        // A call's completion arrives as its own frame. Mark the line the call
+        // already painted; never push a second one (#1416). A success needs no
+        // mark, so only `is_error` does anything. Claude sends no such frame.
+        if (!event.is_error || !event.tool_use_id) break
+        const entries = streamingTimeline.value[chatId]
+        if (!entries) break
+        const wanted = event.tool_use_id
+        for (const entry of entries) {
+          if (entry.kind !== 'tool' || !entry.tool_use_ids || !entry.failed) continue
+          const ids = entry.tool_use_ids
+          const flags = entry.failed
+          for (let at = 0; at < ids.length; at++) {
+            if (ids[at] === wanted) flags[at] = true
+          }
+          if (ids.includes(wanted)) break
+        }
         break
       }
 
@@ -5677,6 +5986,10 @@ export const useProjectStore = defineStore('projects', () => {
         )
         if (event.ok) {
           clearQuestion(chatId, event.request_id, responseSession)
+          if (event.delivered_as_message) {
+            // The engine started a turn carrying the answer; its user_echo brings the bubble.
+            streaming.value[chatId] = true
+          }
         } else {
           questionSubmissions.value[chatId] = {
             ...submission,
@@ -5702,8 +6015,8 @@ export const useProjectStore = defineStore('projects', () => {
 
       case 'thinking':
         // Thinking deltas fired from inside a Task subagent arrive with
-        // parent_tool_use_id set. The subagent's transcript is rendered in its
-        // own "Subagent activity" box (SubagentPanel), so accumulating these
+        // parent_tool_use_id set. The subagent's transcript belongs to its own
+        // read-only view (SubagentPanel links to it), so accumulating these
         // deltas into the parent's thinking buffer would leak the subagent's
         // reasoning into the parent turn's trace and end up in the persisted
         // history as a stray _thinking message long after the subagent ended.
@@ -5770,6 +6083,8 @@ export const useProjectStore = defineStore('projects', () => {
         break
 
       case 'result': {
+        delete backgroundableCalls.value[chatId]
+        clearSteerLockTimer(chatId)
         // Final flush before the result event is materialized: lock any
         // trailing thinking/text deltas into the timeline so they render
         // in the correct order.
@@ -5921,6 +6236,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       case 'error': {
+        delete backgroundableCalls.value[chatId]
         if (isRestartDrainMessage(event.message)) {
           undoOptimisticSend(chatId)
           beginServerRestart(event.message)
@@ -5967,6 +6283,14 @@ export const useProjectStore = defineStore('projects', () => {
         )
         if (event.ok) {
           clearPermission(chatId, event.request_id, responseSession)
+          if (event.expired && submission.approved) {
+            // The turn that asked is gone (engine restart): the approval could not be applied.
+            pushToast({
+              chat_id: chatId,
+              title: 'Approval not applied',
+              body: 'That request belonged to a turn that is no longer running, so the tool did not run. Send a message to continue.',
+            })
+          }
         } else {
           permissionSubmissions.value[chatId] = {
             ...submission,
@@ -6059,29 +6383,30 @@ export const useProjectStore = defineStore('projects', () => {
   return {
     // State
     projects, chats, workspaces, workspaceProviderOptions, activeWorkspace, activeChatId, bootstrapped, messages, messageHistoryLoading, subagents, unread, lastResultSnippet, lastResultSnippetAt, lastResultSnippetNeedsRebase,
-    streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
+    streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages, backgroundableCalls, steerNotice,
     projectStreaming, backgroundAgents, backgroundRuns, finishedBackgroundRuns, runningSubagents, toasts, pendingPermissions, permissionSubmissions, activeQuestions, questionSubmissions, activeCapabilityQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, activeBackgroundableCalls, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,
     memoryPassNeedsAttention, memoryInsightRows,
     archivingChats, isArchiving,
     // Actions
+    setQueuedDelivery,
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace,
     archiveWorkspace, fetchArchivedWorkspaces, restoreArchivedWorkspace,
     workspaceRegistryRevision, refreshWorkspaceRegistry,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     generalProject,
-    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
-    sendMessage, stopChat, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

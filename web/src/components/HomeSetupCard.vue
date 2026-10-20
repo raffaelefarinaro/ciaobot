@@ -192,6 +192,9 @@ function hide() {
 }
 .home-setup-step[data-done="true"] strong { color: var(--fg3); }
 .home-setup-link { white-space: nowrap; }
+@media (pointer: coarse) {
+  .home-setup-link { display: inline-flex; align-items: center; min-height: var(--touch); }
+}
 @container (max-width: 560px) {
   .home-setup-step > button { width: 100%; min-height: 44px; }
 }

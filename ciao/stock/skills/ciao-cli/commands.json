@@ -11,6 +11,7 @@
   "vault review restore-completed": "vault_review",
   "vault review delete": "vault_review",
   "note verify": "verify_note",
+  "note related": "note_related",
   "file surface": "file_surface",
   "chat list": "chats_list",
   "chat get": "chat_get",
@@ -20,6 +21,7 @@
   "chat continue": "chat_continue",
   "chat retry": "chat_retry",
   "chat handover": "chat_handover",
+  "chat reload": "chat_reload",
   "chat archive": "chat_archive",
   "chat delete": "chat_delete",
   "chat stop": "chat_stop",
@@ -55,8 +57,10 @@
   "context get": "context_get",
   "gws status": "gws_status",
   "workspace list": "workspaces_list",
+  "repo candidates": "repo_candidates",
   "task delegate": "task_delegate",
   "task add-update": "task_add_update",
+  "task link-chat": "task_link_chat",
   "task report": "task_report",
   "task attempt": "task_attempt_action"
 }

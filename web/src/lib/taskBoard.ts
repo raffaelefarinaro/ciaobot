@@ -160,6 +160,9 @@ function taskFrom(raw: Partial<Task> | null | undefined): Task {
     assignee: row.assignee === 'agent' ? 'agent' : 'user',
     chat_id: asString(row.chat_id),
     attempt_id: asString(row.attempt_id),
+    linked_chats: Array.isArray(row.linked_chats)
+      ? row.linked_chats.filter((id): id is string => typeof id === 'string' && id !== '')
+      : [],
     created_at: asString(row.created_at),
     updated_at: asString(row.updated_at),
     revision: asString(row.revision),
@@ -172,7 +175,6 @@ function taskFrom(raw: Partial<Task> | null | undefined): Task {
     attempt_summary: asString(row.attempt_summary),
     attempt_detail: asString(row.attempt_detail),
     live_attempt_id: asString(row.live_attempt_id),
-    changed_since_delegated: row.changed_since_delegated === true,
     chat_archived: row.chat_archived === true,
     completed_at: row.completed_at ? asString(row.completed_at) : null,
     has_resolution: row.has_resolution === true,
@@ -312,6 +314,7 @@ export function toTaskListRow(detail: TaskDetail | Task): Task {
     assignee: detail.assignee,
     chat_id: detail.chat_id,
     attempt_id: detail.attempt_id,
+    linked_chats: detail.linked_chats,
     created_at: detail.created_at,
     updated_at: detail.updated_at,
     revision: detail.revision,
@@ -321,7 +324,6 @@ export function toTaskListRow(detail: TaskDetail | Task): Task {
     attempt_summary: detail.attempt_summary,
     attempt_detail: detail.attempt_detail,
     live_attempt_id: detail.live_attempt_id,
-    changed_since_delegated: detail.changed_since_delegated,
     chat_archived: detail.chat_archived === true,
     completed_at: detail.completed_at,
     has_resolution: detail.has_resolution,
@@ -521,41 +523,6 @@ export function taskAttemptSummary(attempt: TaskAttempt): string {
   return attempt.detail ? `${head} — ${attempt.detail}` : head
 }
 
-/**
- * The message a **Send update** hands to the delegated chat.
- *
- * `chat_send`-shaped rather than a second delegation, and that is the whole
- * contract: it is one ordinary turn inside the attempt's own chat, so the answer
- * that comes back belongs to the attempt already on the card and the linkage,
- * the revision binding and the history all stay exactly as they are. Delegating
- * again instead would mint a second attempt, re-quote the description from
- * scratch and leave the first one's result looking abandoned — the silent
- * re-delegation the card's own words rule out.
- *
- * It carries the task as it stands now — title, column, project, date and the
- * current description — because the agent is holding an older one, and a message
- * that said only "this changed" would leave it to guess what.
- */
-export function buildTaskUpdateMessage(task: Task, body: string): string {
-  const facts = [
-    `Title: ${task.title}`,
-    `Column: ${taskStatusLabel(task.status)}`,
-    task.project_id ? `Project: ${task.project_id}` : '',
-    formatTaskDue(task.due) ? `Due: ${formatTaskDue(task.due)}` : '',
-  ].filter(Boolean)
-  const prose = body.trim()
-  return [
-    `The task "${task.title}" changed after you were handed it. Work from this, not`
-    + ' from the version you were given.',
-    '',
-    ...facts,
-    '',
-    prose || '(the description is now empty)',
-    '',
-    'Carry on with the same work in this chat rather than starting over.',
-  ].join('\n')
-}
-
 // ── Filters ───────────────────────────────────────────────────────────────
 
 export const TASK_DUE_FILTERS = [
@@ -598,9 +565,9 @@ function addDays(day: string, delta: number): string {
   return localDateKey(date)
 }
 
-/** True for a task dated before today. An undated task is never overdue. */
-export function isOverdue(task: Pick<Task, 'due'>, today: string = localDateKey()): boolean {
-  return isDueDate(task.due) && task.due < today
+/** True for an open task dated before today. An undated or done task is never overdue. */
+export function isOverdue(task: Pick<Task, 'due' | 'status'>, today: string = localDateKey()): boolean {
+  return task.status !== 'done' && isDueDate(task.due) && task.due < today
 }
 
 /** The due date as a card reads it, or `''` when there is none. */
@@ -609,6 +576,50 @@ export function formatTaskDue(due: unknown): string {
   const date = new Date(`${due}T00:00:00`)
   if (Number.isNaN(date.getTime())) return ''
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+/** The due date as a card's meta line reads it: Today, Tomorrow, otherwise the short date. */
+export function formatCardDue(due: unknown, today: string = localDateKey()): string {
+  if (!isDueDate(due)) return ''
+  if (due === today) return 'Today'
+  if (due === addDays(today, 1)) return 'Tomorrow'
+  return formatTaskDue(due)
+}
+
+/** An ISO timestamp as a short date (`Oct 31`), or `''` for none or an unreadable one. */
+export function formatShortDate(iso: string | null): string {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+export type CardAgentTone = 'running' | 'needs' | 'review' | 'settled'
+
+/**
+ * What a card's agent band says: the status word and its tone, or `null` when the
+ * card has no band (a done task, or one never delegated).
+ */
+export function cardAgentStatus(
+  task: Pick<Task, 'status' | 'attempt_state'>,
+): { word: string; tone: CardAgentTone } | null {
+  if (task.status === 'done') return null
+  switch (task.attempt_state) {
+    case 'running':
+      return { word: 'Agent working', tone: 'running' }
+    case 'needs_you':
+      return { word: 'Needs you', tone: 'needs' }
+    case 'ready_for_review':
+      return { word: 'Ready to review', tone: 'review' }
+    case 'failed':
+      return { word: 'Agent failed', tone: 'settled' }
+    case 'interrupted':
+      return { word: 'Agent interrupted', tone: 'settled' }
+    case 'stopped':
+      return { word: 'Agent stopped', tone: 'settled' }
+    default:
+      return null
+  }
 }
 
 /** The project filter's value for General: "filed under no project". */

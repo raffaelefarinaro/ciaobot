@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-forward
-description: "Gmail: Forward a message to new recipients."
+description: "Use to forward an existing message to new recipients."
 metadata:
   version: 0.22.5
 ---
@@ -56,3 +56,6 @@ ciao gws "$GWS_PROFILE" gmail +forward --message-id 18f1a2b3c4d --to dave@exampl
 - Combined size of original and user attachments is limited to 25MB.
 - With --html, the forwarded block uses Gmail's gmail_quote CSS classes and preserves HTML formatting. Use fragment tags (<p>, <b>, <a>, etc.) — no <html>/<body> wrapper needed.
 - Use --draft to save the forward as a draft instead of sending it immediately.
+
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing. Show the recipients, subject and body before sending, and use `--draft` unless the user asked to send.

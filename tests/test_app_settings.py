@@ -16,7 +16,6 @@ class FakeConfig:
     def __init__(self) -> None:
         self.insights_model = "sonnet"
         self.insights_enabled = True
-        self.critique_models = ""
         # Per-provider default models / thinking / routine models; no
         # env-backed defaults.
         self.provider_default_models: dict[str, str] = {}
@@ -100,7 +99,6 @@ def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
         json.dumps(
             {
                 "bogus": "x",
-                "critique_models": 42,
                 "insights_enabled": "false",
                 # Retired with trajectory capture: an old file still carries it.
                 "trajectories_enabled": "false",
@@ -108,7 +106,6 @@ def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
         )
     )
     store = AppSettingsStore(path)
-    assert store.settings.critique_models == ""
     assert store.settings.insights_enabled is True
     assert not hasattr(store.settings, "trajectories_enabled")
 
@@ -122,15 +119,14 @@ def test_load_corrupt_file_gives_defaults(tmp_path):
 def test_update_persists_and_roundtrips(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)
-    store.update({"critique_models": "opus,haiku", "ignored": "x"})
+    store.update({"insights_enabled": False, "ignored": "x"})
     assert json.loads(path.read_text()) == {
-        "insights_enabled": True,
+        "insights_enabled": False,
         "backup_enabled": True,
         "backup_paused": False,
-        "critique_models": "opus,haiku",
     }
     # Fresh instance sees the persisted value.
-    assert AppSettingsStore(path).settings.critique_models == "opus,haiku"
+    assert AppSettingsStore(path).settings.insights_enabled is False
 
 
 def test_update_rejects_a_non_string_value(tmp_path):
@@ -138,7 +134,7 @@ def test_update_rejects_a_non_string_value(tmp_path):
     # Engine-value validation went with the cloud engines; type checking is
     # what is left.
     with pytest.raises(ValueError):
-        store.update({"critique_models": 3})
+        store.update({"pwa_host": 3})
 
 
 @pytest.mark.parametrize(
@@ -177,20 +173,9 @@ def test_global_insights_model_moves_to_its_provider(tmp_path, legacy, existing,
 
 def test_a_file_without_the_global_insights_model_is_not_rewritten(tmp_path):
     path = tmp_path / "app_settings.json"
-    path.write_text('{"critique_models": "opus"}')
+    path.write_text('{"insights_enabled": false}')
     AppSettingsStore(path)
-    assert path.read_text() == '{"critique_models": "opus"}'
-
-
-def test_critique_models_override_applies(tmp_path):
-    store = AppSettingsStore(tmp_path / "app_settings.json")
-    config = FakeConfig()
-    store.update({"critique_models": "opus,opencode:fable"})
-    store.apply_to_config(config)
-    assert config.critique_models == "opus,opencode:fable"
-    store.update({"critique_models": ""})
-    store.apply_to_config(config)
-    assert config.critique_models == ""
+    assert path.read_text() == '{"insights_enabled": false}'
 
 
 def test_provider_routine_models_persist_and_apply(tmp_path):
@@ -426,3 +411,38 @@ def test_read_app_settings_writes_nothing(tmp_path):
     assert settings.pwa_host == "127.0.0.1"
     assert path.read_text() == before
     assert read_app_settings(tmp_path / "missing.json") == AppSettings()
+
+
+def test_mid_turn_delivery_roundtrip_and_validation(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.settings.mid_turn_delivery == ""
+
+    store.update({"mid_turn_delivery": "steer"})
+    assert AppSettingsStore(path).settings.mid_turn_delivery == "steer"
+
+    store.update({"mid_turn_delivery": "queue"})
+    assert AppSettingsStore(path).settings.mid_turn_delivery == ""
+
+    with pytest.raises(ValueError, match="mid_turn_delivery must be queue or steer"):
+        store.update({"mid_turn_delivery": "sometimes"})
+
+
+def test_mid_turn_delivery_garbage_on_disk_loads_as_queue(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({"mid_turn_delivery": "sometimes"}))
+    assert AppSettingsStore(path).settings.mid_turn_delivery == ""
+
+
+@pytest.mark.parametrize("key", ["mid_turn_delivery", "keyboard_send_mode"])
+@pytest.mark.parametrize("value", [[], {}, ["steer"], 5, None])
+def test_non_string_composer_preferences_are_a_value_error(tmp_path, key, value):
+    with pytest.raises(ValueError):
+        AppSettingsStore(tmp_path / "app_settings.json").update({key: value})
+
+
+@pytest.mark.parametrize("key", ["mid_turn_delivery", "keyboard_send_mode"])
+def test_non_string_composer_preferences_on_disk_load_as_default(tmp_path, key):
+    path = tmp_path / "app_settings.json"
+    path.write_text(json.dumps({key: ["steer"]}))
+    assert getattr(AppSettingsStore(path).settings, key) == ""

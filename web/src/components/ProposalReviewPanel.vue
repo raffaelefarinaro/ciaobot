@@ -2669,7 +2669,7 @@ watch(
 .pr-menu button[data-highlighted] { background: var(--bg3); outline: none; }
 .pr-menu button[data-disabled] { opacity: 0.45; cursor: default; }
 @media (pointer: coarse) {
-  .pr-text-btn { min-height: var(--touch); }
+  .pr-text-btn { min-height: var(--touch); min-width: var(--touch); justify-content: center; }
   .pr-menu button { min-height: var(--touch); }
 }
 

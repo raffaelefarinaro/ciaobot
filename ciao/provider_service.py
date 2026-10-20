@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 import logging
+import math
 from pathlib import Path
 
 from ciao import provider_registry
 from ciao.config import BridgeConfig
 from ciao.models import AgentRequest, StreamEvent
 from ciao.memory_tool import prune_expired_entries
-from ciao.providers.base import ActiveHandle, BaseProvider, ProviderCapabilities
+from ciao.providers.base import (
+    ActiveHandle, BaseProvider, MoveToBackgroundOutcome, ProviderCapabilities,
+)
 from ciao.workspace_guide import guide_path
 
 ProviderImpl = BaseProvider
@@ -131,7 +134,15 @@ class ProviderService:
                 # Native guide content is loaded when the provider process or
                 # session starts. Reconnect before resuming so the current
                 # turn cannot keep a just-expired fact in its native snapshot.
-                if self._provider is not None:
+                if self._provider is not None and self.background_work_outstanding:
+                    # Reconnecting would kill background shells/subagents the
+                    # provider process still owns (#1391). The pruned guide
+                    # loads at the next reconnect, which an idle reconnect or
+                    # reap may reach before the next turn.
+                    logger.info(
+                        "Deferring the memory-prune reconnect: background work is running"
+                    )
+                elif self._provider is not None:
                     await self.disconnect()
         except Exception:  # noqa: BLE001 - memory hygiene must not block a turn
             logger.warning("Could not prune expired workspace memory", exc_info=True)
@@ -139,10 +150,36 @@ class ProviderService:
         async for event in provider.run_streaming(request, self._register_handle):
             yield event
 
+    async def steer_turn(self, request: AgentRequest) -> str | None:
+        """Inject a user message into the live foreground turn; None = cannot."""
+        if self._provider is None:
+            return None
+        delivery_id: str | None = await self._provider.steer_turn(request)
+        return delivery_id
+
+    async def move_to_background(self) -> MoveToBackgroundOutcome:
+        """Background the live turn's foreground tools; ``not_running`` without a provider."""
+        if self._provider is None:
+            return "not_running"
+        outcome: MoveToBackgroundOutcome = await self._provider.move_to_background()
+        return outcome
+
     @property
     def can_drain(self) -> bool:
         """True when the provider has a live client to drain between turns."""
         return bool(self._provider is not None and getattr(self._provider, "can_drain", False))
+
+    @property
+    def background_work_outstanding(self) -> bool:
+        """True while the provider reports background work its process owns."""
+        return self._provider is not None and self._provider.background_work_outstanding
+
+    @property
+    def background_activity_age(self) -> float:
+        """Seconds since the provider last saw server activity (inf if unknown)."""
+        if self._provider is None:
+            return math.inf
+        return self._provider.seconds_since_activity
 
     @property
     def cli_connected(self) -> bool:
@@ -156,7 +193,7 @@ class ProviderService:
         return bool(getattr(self._provider, "cli_connected", True))
 
     async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
-        """Yield between-turns provider events (see ClaudeProvider.drain_events)."""
+        """Yield between-turns provider events (see ClaudeProvider.drain_events / OpencodeProvider.drain_events)."""
         if self._provider is None:
             return
         drain = getattr(self._provider, "drain_events", None)
@@ -164,23 +201,6 @@ class ProviderService:
             return
         async for event in drain():
             yield event
-
-    async def steer(self, request: AgentRequest) -> bool:
-        """Inject a user message into the provider's active turn (internal).
-
-        Used only by the background-subagent synthesis nudge
-        (``ProjectChatManager._nudge_synthesis_after_subagents``) to resume
-        the parent turn via the between-turns drain. User-facing same-turn
-        steering was removed in 8ede8fab — this remains so the nudge has a
-        ``ProviderService``-level entry point without reaching into
-        ``provider.provider``.
-        """
-        if self._provider is None:
-            return False
-        steer = getattr(self._provider, "steer", None)
-        if not callable(steer):
-            return False
-        return bool(await steer(request))
 
     @property
     def provider(self) -> ProviderImpl | None:

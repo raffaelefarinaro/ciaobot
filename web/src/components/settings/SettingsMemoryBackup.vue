@@ -61,7 +61,7 @@
           it is connected to a private GitHub repository, it syncs on its own. Ciao can do the
           connection for you here, or you can copy the same instructions to any agent.
           <a
-            class="set-link"
+            class="settings-help-link"
             href="https://www.raffaelefarinaro.com/ciaobot/memory.html#backup"
             target="_blank"
             rel="noopener noreferrer"

@@ -26,6 +26,7 @@ export function isUsageLimitError(errorText: string): boolean {
     || /\b(?:reached|hit) your\b[^.]*\blimit\b/.test(text)
     || /\brate limit (?:exceeded|reached|hit|exhausted)\b/.test(text)
     || /\b(?:anthropic|claude|codex|opencode|openai|ollama) quota (?:exceeded|reached|exhausted)\b/.test(text)
+    || /\b(?:exceeded|reached|exhausted) your (?:current )?quota\b/.test(text)
     // A 429 only counts with a limit noun, as in `_is_retryable_quota_error`.
     || ((/\b429\b/.test(text) || text.includes('too many requests'))
       && /\b(usage limit|rate limit|quota|session)\b/.test(text))
@@ -61,4 +62,22 @@ export function classifyError(errorText: string): ErrorAttribution {
     return { kind: 'provider', label: 'Provider error', copy: 'The selected AI provider could not complete the request.' }
   }
   return { kind: 'unknown', label: 'Unknown error', copy: 'The operation did not complete.' }
+}
+
+export type ErrorQuickAction = 'retry-hourly' | 'switch-model' | 'sign-in' | 'fix'
+
+// The model is unknown to the provider, or cannot take what the turn sent.
+// Picking another model is the fix; a diagnosis chat would only say so.
+function isModelMismatchError(text: string): boolean {
+  return /\bmodel not found\b|\b(?:unknown|invalid|unsupported) model\b|\bdoes not support image input/.test(text)
+}
+
+// The one action an error bubble offers next to Retry. Errors with a known
+// cause get that cause's fix; only the rest open a "Fix this error" chat.
+export function errorQuickAction(errorText: string): ErrorQuickAction {
+  const text = (errorText || '').toLowerCase()
+  if (isProviderAuthError(text)) return 'sign-in'
+  if (isUsageLimitError(text)) return 'retry-hourly'
+  if (isModelMismatchError(text)) return 'switch-model'
+  return 'fix'
 }

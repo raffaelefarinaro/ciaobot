@@ -41,9 +41,9 @@ from ciao.web.routes_tasks import (
     task_delegate,
     task_delete,
     task_get,
+    task_link_chat,
     task_list,
     task_resolution_review,
-    task_send_update,
     task_update,
 )
 
@@ -147,7 +147,7 @@ class _Pcm:
         """
         return False
 
-    async def stop_chat(self, chat_id: str, *, park_queue: bool = False):
+    async def stop_chat(self, chat_id: str):
         """The manager's Stop, which is `async` as the real one is.
 
         The recording happens inside the coroutine, so `stopped` is empty unless the
@@ -205,13 +205,9 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 task_resolution_review,
                 methods=["POST"],
             ),
+            Route("/api/tasks/{task_id}/chats", task_link_chat, methods=["POST"]),
             Route("/api/tasks/{task_id}/delegate", task_delegate, methods=["POST"]),
             Route("/api/tasks/{task_id}/attempts", task_attempts, methods=["GET"]),
-            Route(
-                "/api/tasks/{task_id}/attempt/{attempt_id}/update",
-                task_send_update,
-                methods=["POST"],
-            ),
             Route(
                 "/api/tasks/{task_id}/attempt/{attempt_id}/{action}",
                 task_attempt_action,
@@ -951,11 +947,10 @@ async def test_delegation_launches_one_attended_chat_and_no_prompt_body(
     # The task row comes back with the attempt facts a board draws from one answer.
     assert payload["task"]["attempt_state"] == "running"
     assert payload["task"]["live_attempt_id"] == payload["attempt"]["attempt_id"]
-    assert payload["task"]["changed_since_delegated"] is False
 
     assert len(pcm.create_chat_calls) == 1
     assert len(pcm.start_stream_calls) == 1
-    assert pcm.start_stream_kwargs == [{"args": ()}], pcm.start_stream_kwargs
+    assert pcm.start_stream_kwargs == [{"args": (), "origin": "task_delegation"}], pcm.start_stream_kwargs
     _chat_id, prompt = pcm.start_stream_calls[0]
     assert "Draft the runbook" in prompt
     assert "Steps and links." in prompt
@@ -1212,114 +1207,26 @@ async def test_an_unknown_attempt_verb_or_id_is_refused(world) -> None:
     assert unscoped.json()["error"]["code"] == "workspace_required"
 
 
-async def test_a_send_update_posts_one_message_and_rebinds_the_attempt(world) -> None:
-    """The transport half of **Send update** (#1047).
-
-    One ordinary message into the attempt's own chat and a rebind, over HTTP: the
-    revision is presented because the message claims to carry the task as it stands,
-    and no second chat, no second attempt and no keyword on the launch.
-    """
+async def test_the_send_update_route_is_gone(world) -> None:
+    """There is no `update` verb on an attempt any more: the request falls through
+    to the `{action}` route, which refuses an unknown verb."""
     client, cookies, _config, pcm = world
-    task = _create(client, cookies, title="Edited under the agent", body="Original.")
+    task = _create(client, cookies, title="No update route")
     delegated = _delegate(client, cookies, task, pcm).json()
-    settled = _settle(client, cookies, pcm, task["id"])
-    edited = client.patch(
-        f"/api/tasks/{task['id']}",
-        json={
-            "workspace": "personal",
-            "expected_revision": settled["revision"],
-            "body": "A different scope.",
-        },
-        cookies=cookies,
-    ).json()["task"]
-    assert edited["changed_since_delegated"] is True
+    turns = len(pcm.start_stream_calls)
 
     response = client.post(
         f"/api/tasks/{task['id']}/attempt/{delegated['attempt']['attempt_id']}/update",
         json={
             "workspace": "personal",
-            "expected_revision": edited["revision"],
-            "message": "The task now reads differently.",
-        },
-        cookies=cookies,
-    )
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["updated"] is True
-    assert body["queued"] is False, "no turn was running, so one was started"
-    assert body["chat_id"] == delegated["chat_id"]
-    assert body["task"]["changed_since_delegated"] is False, (
-        "the rebind is what retires the flag the button reads"
-    )
-    # One ordinary attended message in the attempt's own chat — and nothing else.
-    assert pcm.start_stream_calls[-1] == (delegated["chat_id"], "The task now reads differently.")
-    assert pcm.start_stream_kwargs[-1] == {"args": ()}, pcm.start_stream_kwargs
-    assert len(pcm.create_chat_calls) == 1
-
-
-async def test_a_send_update_needs_the_revision_the_message_and_the_session(world) -> None:
-    client, cookies, _config, pcm = world
-    task = _create(client, cookies, title="Guarded")
-    attempt_id = _delegate(client, cookies, task, pcm).json()["attempt"]["attempt_id"]
-    turns = len(pcm.start_stream_calls)
-    url = f"/api/tasks/{task['id']}/attempt/{attempt_id}/update"
-
-    def _post(**body):
-        return client.post(url, json=body, cookies=cookies)
-
-    assert _post(workspace="personal", message="No revision.").status_code == 400
-    assert _post(workspace="personal", expected_revision=task["revision"]).status_code == 400
-    assert _post(
-        workspace="personal", expected_revision=task["revision"], message="  "
-    ).status_code == 400
-    assert _post(
-        workspace="personal", expected_revision="0" * 64, message="Stale."
-    ).status_code == 409
-    # An attempt id sent under another task's URL, and an unknown one, are 404s: the
-    # update acts on nothing rather than on a card the URL did not name.
-    other = _create(client, cookies, title="Not this one")
-    assert client.post(
-        f"/api/tasks/{other['id']}/attempt/{attempt_id}/update",
-        json={"workspace": "personal", "expected_revision": other["revision"], "message": "x"},
-        cookies=cookies,
-    ).status_code == 404
-    assert client.post(
-        f"/api/tasks/{task['id']}/attempt/{'f' * 32}/update",
-        json={
-            "workspace": "personal",
-            "expected_revision": client.get(
-                f"/api/tasks/{task['id']}?workspace=personal", cookies=cookies
-            ).json()["task"]["revision"],
+            "expected_revision": delegated["task"]["revision"],
             "message": "x",
         },
         cookies=cookies,
-    ).status_code == 404
-    # Nothing reached the chat through any of them.
-    assert len(pcm.start_stream_calls) == turns
+    )
 
-
-async def test_a_send_update_carries_only_its_own_body_keys(world) -> None:
-    """A typo in a body is not reported as a broken task, and a request cannot
-    smuggle a task field, a prompt or a delegation in through this route."""
-    client, cookies, _config, pcm = world
-    task = _create(client, cookies, title="Strict")
-    attempt_id = _delegate(client, cookies, task, pcm).json()["attempt"]["attempt_id"]
-    turns = len(pcm.start_stream_calls)
-
-    for extra in ({"status": "done"}, {"chat_id": "chat-9"}, {"prompt": "do this"}):
-        response = client.post(
-            f"/api/tasks/{task['id']}/attempt/{attempt_id}/update",
-            json={
-                "workspace": "personal",
-                "expected_revision": task["revision"],
-                "message": "The task now reads differently.",
-                **extra,
-            },
-            cookies=cookies,
-        )
-        assert response.status_code == 400, extra
-        assert response.json()["error"]["code"] == "invalid_task_field"
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_action"
     assert len(pcm.start_stream_calls) == turns
 
 
@@ -1509,60 +1416,6 @@ async def test_the_attempt_history_reads_the_whole_story(world) -> None:
     ).status_code == 401
 
 
-async def test_an_edit_after_delegation_is_reported_on_the_row(world) -> None:
-    """The flag has to survive the round trip the board actually makes: read the
-    task, edit it, and the answer says the description the agent was handed is no
-    longer the one on disk."""
-    client, cookies, _config, pcm = world
-    task = _create(client, cookies, title="Edited after", body="Original scope of the work.")
-    delegated = _delegate(client, cookies, task, pcm).json()
-
-    edited = client.patch(
-        f"/api/tasks/{task['id']}",
-        json={
-            "workspace": "personal",
-            "expected_revision": delegated["task"]["revision"],
-            "body": "A different scope.",
-        },
-        cookies=cookies,
-    )
-
-    assert edited.status_code == 200, edited.text
-    row = edited.json()["task"]
-    assert row["attempt_state"] == "running"
-    assert row["changed_since_delegated"] is True
-    # And the list row agrees, so the badge and the warning cannot disagree.
-    listed = client.get("/api/tasks?workspace=personal", cookies=cookies).json()
-    assert listed["tasks"][0]["changed_since_delegated"] is True
-
-
-async def test_a_detach_clears_the_warning_it_itself_would_have_raised(world) -> None:
-    """A detach clears the linkage, and clearing it moves the task's revision.
-
-    Comparing the attempt's revision against the record unconditionally would
-    therefore make the gesture the user just performed read as "the result was
-    reached against an older description" — on the very card that has just stopped
-    delegating anything. An unlinked task says nothing about it.
-    """
-    client, cookies, _config, pcm = world
-    task = _create(client, cookies, title="Let go")
-    delegated = _delegate(client, cookies, task, pcm).json()
-    assert delegated["task"]["changed_since_delegated"] is False
-
-    detached = client.post(
-        f"/api/tasks/{task['id']}/attempt/{delegated['attempt']['attempt_id']}/detach",
-        json={"workspace": "personal"},
-        cookies=cookies,
-    )
-
-    assert detached.status_code == 200, detached.text
-    row = detached.json()["task"]
-    assert row["attempt_id"] is None
-    assert row["changed_since_delegated"] is False
-    listed = client.get("/api/tasks?workspace=personal", cookies=cookies).json()
-    assert listed["tasks"][0]["changed_since_delegated"] is False
-
-
 async def test_a_delegated_task_cannot_be_completed_while_the_attempt_is_live(
     world,
 ) -> None:
@@ -1697,3 +1550,37 @@ def test_resolution_review_queues_and_complete_still_succeeds_when_enqueue_raise
         thread.join(timeout=5)
         loop.close()
 
+
+def test_link_chat_route_links_and_unlinks(world) -> None:
+    """`POST /api/tasks/{id}/chats` records a linked chat and removes it again (#1334)."""
+    client, cookies, _config, pcm = world
+    pcm.chats["chat-user"] = SimpleNamespace(
+        chat_id="chat-user", project_id="project-home", title="Working chat", archived=False
+    )
+    created = _create(client, cookies, title="Linked from a chat")
+
+    linked = client.post(
+        f"/api/tasks/{created['id']}/chats",
+        json={
+            "workspace": "personal",
+            "expected_revision": created["revision"],
+            "chat_id": "chat-user",
+        },
+        cookies=cookies,
+    )
+    assert linked.status_code == 200, linked.text
+    assert linked.json()["task"]["linked_chats"] == ["chat-user"]
+    assert linked.json()["task"]["status"] == created["status"]
+
+    unlinked = client.post(
+        f"/api/tasks/{created['id']}/chats",
+        json={
+            "workspace": "personal",
+            "expected_revision": linked.json()["task"]["revision"],
+            "chat_id": "chat-user",
+            "remove": True,
+        },
+        cookies=cookies,
+    )
+    assert unlinked.status_code == 200, unlinked.text
+    assert unlinked.json()["task"]["linked_chats"] == []

@@ -92,7 +92,7 @@ async function mountLayout(
     history: createMemoryHistory(),
     routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId', component: EmptyStub }],
   })
-  await router.push('/')
+  await router.push(`/chat/${CHAT_ID}`)
   await router.isReady()
 
   const store = useProjectStore()
@@ -205,10 +205,11 @@ describe('composer focus on opening a chat', () => {
 
     await wrapper.get('.chat-empty-knowledge').trigger('click')
     await nextTick()
-    const inspector = wrapper.get('.chat-work-inspector')
-    expect(inspector.get('#work-panel-context').text()).toContain('Agent context')
+    const context = wrapper.get('#chat-work-rail .chat-rail-agent-context')
+    expect(context.text()).toContain('Agent context')
+    expect(document.activeElement).toBe(context.element)
     // General with no description or doc sends no brief, so there is no row.
-    expect(inspector.get('#work-panel-context').text()).not.toContain('Project brief')
+    expect(context.text()).not.toContain('Project brief')
     wrapper.unmount()
   })
   test('keeps a persisted unsent draft instead of offering starter prompts', async () => {
@@ -229,30 +230,20 @@ describe('composer focus on opening a chat', () => {
 
     await wrapper.get('.work-inspector-trigger').trigger('click')
     await nextTick()
-    const inspector = wrapper.get('.chat-work-inspector')
-    expect(inspector.attributes('role')).toBe('dialog')
-    expect(inspector.get('button[aria-label="Close work details"]').element).toBe(document.activeElement)
-
-    const tabs = inspector.findAll('[role="tab"]')
-    const contextTab = tabs[0].element as HTMLElement
-    contextTab.focus()
-    await tabs[0].trigger('keydown', { key: 'ArrowRight' })
-    await nextTick()
-    expect(inspector.get('#work-panel-activity').text()).toContain('Running')
-    expect(document.activeElement).toBe(inspector.findAll('[role="tab"]')[1].element)
-
-    await inspector.findAll('[role="tab"]')[1].trigger('keydown', { key: 'End' })
-    await nextTick()
-    expect(inspector.get('#work-panel-output').text()).toContain('No files yet')
-    expect(document.activeElement).toBe(inspector.findAll('[role="tab"]')[2].element)
-
-    await inspector.findAll('[role="tab"]')[2].trigger('keydown', { key: 'Home' })
-    await nextTick()
-    expect(inspector.find('#work-panel-context').exists()).toBe(true)
+    // One panel, the rail's markup, opened as a drawer: every section stacked
+    // and read by scrolling, no tabs.
+    const drawer = wrapper.get('#chat-work-rail')
+    expect(drawer.classes()).toContain('chat-rail--drawer')
+    expect(drawer.attributes('role')).toBe('dialog')
+    expect(drawer.attributes('aria-modal')).toBe('true')
+    expect(drawer.get('button[aria-label="Hide chat details"]').element).toBe(document.activeElement)
+    expect(drawer.find('[role="tab"]').exists()).toBe(false)
+    expect(drawer.text()).toContain('Agent context')
+    expect(drawer.text()).toContain('Files')
 
     pressKey('Escape')
     await flushPromises()
-    expect(wrapper.find('.chat-work-inspector').exists()).toBe(false)
+    expect(wrapper.find('#chat-work-rail').exists()).toBe(false)
     expect(document.activeElement).toBe(wrapper.get('.work-inspector-trigger').element)
     wrapper.unmount()
   })

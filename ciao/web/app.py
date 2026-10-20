@@ -51,6 +51,7 @@ from ciao.web.routes_api import (
     admin_deploy,
     admin_drain,
     admin_drain_cancel,
+    admin_restart_blockers,
     admin_restart,
     admin_snapshot,
     admin_skills,
@@ -72,6 +73,7 @@ from ciao.web.routes_api import (
     chat_compact,
     chat_prompt,
     chat_stop,
+    chat_move_to_background,
     chat_background_run_cancel,
     chat_background_run_log,
     chat_new_session,
@@ -146,6 +148,7 @@ from ciao.web.routes_api import (
     project_restore,
     project_files_list,
     project_files_upload,
+    repo_candidates,
     dismiss_older_than,
     memory_receipt_undo,
     memory_receipt_detail,
@@ -159,9 +162,7 @@ from ciao.web.routes_api import (
     run_schedule_now,
     schedule_detail,
     startup_status_endpoint,
-    active_chats_endpoint,
     menubar_chats_endpoint,
-    open_chat_endpoint,
     status_endpoint,
     upsert_workspace_setting,
     vault_backlinks,
@@ -181,8 +182,7 @@ from ciao.web.routes_node import (
     package_changelog_endpoint,
     package_status_endpoint,
     package_update_endpoint,
-    update_apply_endpoint,
-    update_stage_endpoint,
+    update_start_endpoint,
     update_status_endpoint,
 )
 from ciao.web.routes_push import (
@@ -193,6 +193,7 @@ from ciao.web.routes_push import (
     push_unsubscribe,
 )
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
+from ciao.web.routes_host_terminal import host_terminal_launch, host_terminal_status
 from ciao.web.routes_import import (
     import_batch_cancel,
     import_batch_delete,
@@ -209,13 +210,13 @@ from ciao.web.routes_tasks import (
     task_attempts,
     task_complete,
     task_edit_update,
+    task_link_chat,
     task_resolution_review,
     task_create,
     task_delegate,
     task_delete,
     task_get,
     task_list,
-    task_send_update,
     task_update,
 )
 from ciao.web.routes_webhooks import (
@@ -411,6 +412,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/projects/{project_id}/chats", create_project_chat, methods=["POST"]),
         Route("/api/projects/{project_id}/files", project_files_list, methods=["GET"]),
         Route("/api/projects/{project_id}/files", project_files_upload, methods=["POST"]),
+        Route("/api/repos/candidates", repo_candidates, methods=["GET"]),
         Route("/api/desktop-drop", desktop_drop_import, methods=["POST"]),
         # Chats
         Route("/api/chats", list_all_chats, methods=["GET"]),
@@ -427,6 +429,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/unread", chat_mark_unread, methods=["POST"]),
         Route("/api/chats/{chat_id}/retry", chat_retry, methods=["POST"]),
         Route("/api/chats/{chat_id}/stop", chat_stop, methods=["POST"]),
+        Route("/api/chats/{chat_id}/move-to-background", chat_move_to_background, methods=["POST"]),
         Route(
             "/api/chats/{chat_id}/background-runs/{run_id}/log",
             chat_background_run_log,
@@ -461,6 +464,9 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspace-image", workspace_image, methods=["GET"]),
         Route("/api/workspace-binary", workspace_binary, methods=["GET"]),
         Route("/api/workspace-open", workspace_open, methods=["POST"]),
+        # host-only: session + host_browser_request; never in _LOOPBACK_ONLY_API
+        Route("/api/host/terminal", host_terminal_status, methods=["GET"]),
+        Route("/api/host/terminal", host_terminal_launch, methods=["POST"]),
         Route("/api/libreoffice-status", libreoffice_status_endpoint, methods=["GET"]),
         # File snapshots — History and Diff tabs in the file viewer.
         Route("/api/file-history", file_history, methods=["GET"]),
@@ -483,6 +489,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # read as a task id.
         Route("/api/tasks/{task_id}/complete", task_complete, methods=["POST"]),
         Route("/api/tasks/{task_id}/updates", task_add_update, methods=["POST"]),
+        Route("/api/tasks/{task_id}/chats", task_link_chat, methods=["POST"]),
         Route(
             "/api/tasks/{task_id}/updates/{update_id}",
             task_edit_update,
@@ -500,14 +507,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # pattern so they are not read as an action name.
         Route("/api/tasks/{task_id}/delegate", task_delegate, methods=["POST"]),
         Route("/api/tasks/{task_id}/attempts", task_attempts, methods=["GET"]),
-        # Send update: one ordinary message into the attempt's own chat, then the
-        # attempt is rebound to the revision it was made at. Literal `update` before
-        # the `{action}` pattern, like `complete`, so it is not read as an action name.
-        Route(
-            "/api/tasks/{task_id}/attempt/{attempt_id}/update",
-            task_send_update,
-            methods=["POST"],
-        ),
         Route(
             "/api/tasks/{task_id}/attempt/{attempt_id}/{action}",
             task_attempt_action,
@@ -584,9 +583,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/integrations/gws/relogin/cancel", gws_relogin_cancel, methods=["POST"]),
         Route("/api/status", status_endpoint, methods=["GET", "PATCH"]),
         Route("/api/startup-status", startup_status_endpoint, methods=["GET"]),
-        Route("/api/active-chats", active_chats_endpoint, methods=["GET"]),
         Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"]),
-        Route("/api/open-chat/{chat_id}", open_chat_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
         Route("/api/addresses", addresses_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
@@ -595,11 +592,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # The Settings update card driving the installer-only engine update job.
         # Session-protected rather than loopback-only: a logged-in operator may
         # start an update from a browser, exactly as they may
-        # POST /api/admin/restart. Both halves run in the background; the card
-        # polls the status route.
+        # POST /api/admin/restart. Stage and apply run chained in one background
+        # job; the card polls the status route.
         Route("/api/update/status", update_status_endpoint, methods=["GET"]),
-        Route("/api/update/stage", update_stage_endpoint, methods=["POST"]),
-        Route("/api/update/apply", update_apply_endpoint, methods=["POST"]),
+        Route("/api/update/start", update_start_endpoint, methods=["POST"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
         Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
@@ -688,6 +684,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/admin/restart", admin_restart, methods=["POST"]),
         Route("/api/admin/drain", admin_drain, methods=["POST"]),
         Route("/api/admin/drain/cancel", admin_drain_cancel, methods=["POST"]),
+        Route("/api/admin/restart-blockers", admin_restart_blockers, methods=["GET"]),
         Route("/api/admin/status", admin_status, methods=["GET"]),
         # The engine's verified start-at-sign-in state, and the switch for it.
         # Session-protected like every other /api route, and deliberately not

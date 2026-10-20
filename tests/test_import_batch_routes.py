@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -638,6 +639,11 @@ def test_a_run_of_a_done_batch_is_a_conflict_not_a_second_attempt(
     assert len(started) == 1
 
 
+#: How long the real-runner test waits for the scheduled run to return. Generous
+#: on purpose: it bounds a hang, it is not a timing assumption.
+RUNNER_SETTLE_TIMEOUT_S = 30.0
+
+
 def test_the_route_and_the_runner_share_one_begin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -701,9 +707,25 @@ def test_the_route_and_the_runner_share_one_begin(
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_run_oneshot)
 
+    # Wrap, do not replace, the real runner: the route resolves the name on
+    # `ciao.import_run` inside the scheduled coroutine, so the wrapper is what
+    # it runs, and the event fires only once the real run has returned, which
+    # is after it has settled the batch on the store.
+    import ciao.import_run as import_run
+
+    real_run_import_batch = import_run.run_import_batch
+    runner_returned = threading.Event()
+
+    async def run_and_signal(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await real_run_import_batch(*args, **kwargs)
+        finally:
+            runner_returned.set()
+
+    monkeypatch.setattr("ciao.import_run.run_import_batch", run_and_signal)
+
     from ciao.memory_proposals import list_proposals
 
-    settled: dict[str, Any] = {}
     with client:
         assert (
             client.post(
@@ -713,20 +735,21 @@ def test_the_route_and_the_runner_share_one_begin(
             ).status_code
             == 202
         )
-        # Poll through the app itself: every request yields to the event loop the
-        # runner is scheduled on, so the extraction actually progresses. A sleep
-        # here would block the very loop it is waiting for.
-        for _ in range(400):
-            response = client.get(
-                "/api/import/batches",
-                params={"workspace": "personal"},
-                cookies=cookies,
-            )
-            assert response.status_code == 200, (response.status_code, response.text)
-            listed = response.json()["batches"]
-            settled = next(row for row in listed if row["batch_id"] == batch["batch_id"])
-            if settled["status"] != "running":
-                break
+        # The app's event loop runs on the TestClient portal's thread, so
+        # blocking this thread on the event does not stall the runner. Wait on
+        # the runner's own completion, not on a count of polls: a slow runner
+        # (Windows CI) outlasts any fixed number of requests (#1412).
+        assert runner_returned.wait(timeout=RUNNER_SETTLE_TIMEOUT_S), (
+            f"the runner did not return within {RUNNER_SETTLE_TIMEOUT_S}s"
+        )
+        response = client.get(
+            "/api/import/batches",
+            params={"workspace": "personal"},
+            cookies=cookies,
+        )
+        assert response.status_code == 200, (response.status_code, response.text)
+        listed = response.json()["batches"]
+        settled = next(row for row in listed if row["batch_id"] == batch["batch_id"])
 
     config = client.app.state.config
     assert settled["status"] == "done", settled

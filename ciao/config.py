@@ -312,14 +312,15 @@ def _vault_evidence_score(path: Path) -> int:
     return score
 
 
-# Accent presets for the PWA. Missing/unknown values resolve to pink
-# (Ciao brand). Only accents shift; canvas tokens stay stable.
-WORKSPACE_COLOR_IDS = ("pink", "cyan", "amber", "emerald", "violet")
-DEFAULT_WORKSPACE_COLOR = "pink"
+# Accent presets for the PWA. Missing/unknown values resolve to amber (Ciao
+# orange; the old pink default read as an error). Only accents shift; canvas
+# tokens stay stable.
+WORKSPACE_COLOR_IDS = ("amber", "pink", "cyan", "emerald", "violet")
+DEFAULT_WORKSPACE_COLOR = "amber"
 
 
 def coerce_workspace_color(raw: object) -> str:
-    """Normalize a workspace accent id. Empty/missing → pink."""
+    """Normalize a workspace accent id. Empty/missing → amber."""
     if raw is None:
         return DEFAULT_WORKSPACE_COLOR
     cleaned = str(raw).strip().lower()
@@ -366,21 +367,13 @@ class WorkspaceConfig:
     # Extra tools to deny (e.g. ``mcp__n8n_mcp``, ``Bash``). ``None`` = use
     # the per-workspace default extras; ``[]`` = explicit opt-out (no extras).
     disallowed_tools: list[str] | None = None
-    # The ``.mcp.json`` servers this workspace may reach, by name. A list names
-    # exactly those servers; every other declared server is denied. ``[]`` means
-    # reach nothing. ``None`` means "not yet decided" and, after the load-time
-    # migration seeds existing workspaces, only happens for a workspace created
-    # since — and ``None`` denies every declared server, the fail-closed default
-    # for anything new. ``mcp__<server>`` deny entries are derived from this at
-    # request time; this field is the source, not the deny list.
-    allowed_mcp_servers: list[str] | None = None
     # Whether this workspace's Claude chats load the Claude account's claude.ai
     # connectors (remote MCP servers). Off sets ENABLE_CLAUDEAI_MCP_SERVERS=false
     # on the spawned Claude Code process. True keeps the behavior from before
     # this switch existed, so a workspace that never set it is unchanged.
     claude_ai_connectors: bool = True
     gws_profile: str = ""
-    # PWA accent preset id. Defaults to Ciao pink.
+    # PWA accent preset id. Defaults to Ciao orange (amber).
     color: str = DEFAULT_WORKSPACE_COLOR
     # Filesystem scope for agent tool execution: "workspace" confines the agent
     # and its shell to the workspace; "machine" is the whole-machine escape
@@ -399,18 +392,6 @@ def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
         return None
     if isinstance(raw, str):
         return _parse_disallowed_tools(raw)
-    if isinstance(raw, list):
-        return [str(item).strip() for item in raw if str(item).strip()]
-    return None
-
-
-def _coerce_allowed_mcp_servers(raw: object) -> list[str] | None:
-    if raw is None:
-        return None
-    if isinstance(raw, str):
-        # A CSV list, like the disallowed-tools env var, so the field round-trips
-        # through a string form as easily as a JSON list.
-        return _split_csv(raw)
     if isinstance(raw, list):
         return [str(item).strip() for item in raw if str(item).strip()]
     return None
@@ -442,9 +423,6 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         vault_root=vault_root,
         default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
-        allowed_mcp_servers=_coerce_allowed_mcp_servers(
-            data.get("allowed_mcp_servers")
-        ),
         claude_ai_connectors=_coerce_claude_ai_connectors(
             data.get("claude_ai_connectors")
         ),
@@ -700,10 +678,6 @@ class CiaoConfig:
     insights_model: str = "sonnet"
     insights_enabled: bool = True
 
-    # Comma-separated list of models for the adversarial_review MCP tool.
-    # Empty string defaults to the script's built-in panel.
-    critique_models: str = ""
-
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
         self.state_path = Path(self.state_path).expanduser().resolve()
@@ -715,12 +689,6 @@ class CiaoConfig:
         if not self.workspaces:
             self.workspaces = _bootstrap_registry(self.vault_root)
         self._workspace_registry_changed = self._normalize_workspace_vault_roots()
-        # Migrate pre-existing workspaces onto the allowlist now, so deny
-        # resolution never sees a ``None`` allowlist on a workspace that existed
-        # before this field. Runs only when the registry actually exists on
-        # disk, so a brand-new install (legacy fallback, no file) keeps its
-        # ``None`` fail-closed default for anything created since.
-        self._seed_allowed_mcp_servers()
 
     def workspace(self, name: str | None) -> WorkspaceConfig | None:
         if not name:
@@ -1122,7 +1090,6 @@ class CiaoConfig:
                     workspace.name
                 ),
                 "disallowed_tools": workspace.disallowed_tools,
-                "allowed_mcp_servers": workspace.allowed_mcp_servers,
                 "claude_ai_connectors": workspace.claude_ai_connectors,
                 "gws_profile": workspace.gws_profile,
                 "color": workspace.color,
@@ -1177,12 +1144,6 @@ class CiaoConfig:
         removed even while the variable is still in ``.env``. Every start that
         still sees the variable logs a warning saying it is ignored.
 
-        An imported workspace with no ``allowed_mcp_servers`` is stored with an
-        explicit empty allowlist. That is what ``None`` resolved to while the
-        entry lived only in the environment (every declared server denied);
-        leaving it ``None`` in the file would let ``_seed_allowed_mcp_servers``
-        widen it to every declared server on the next start.
-
         Returns the names of the imported workspaces. The caller must hold the
         workspace instance lock, since this writes the registry.
         """
@@ -1226,9 +1187,6 @@ class CiaoConfig:
             imported = dict(legacy)
             if imported:
                 self.workspaces = dict(imported)
-        for workspace_config in imported.values():
-            if workspace_config.allowed_mcp_servers is None:
-                workspace_config.allowed_mcp_servers = []
         if imported:
             self._normalize_workspace_vault_roots()
             self.persist_workspace_registry()
@@ -1421,31 +1379,15 @@ class CiaoConfig:
             return cast(BridgeMode, mode)
         return self.claude_mode
 
-    def _declared_mcp_server_names(self, workspace: str | None = None) -> list[str] | None:
-        """Names of servers declared in the project ``.mcp.json``.
+    def _declared_mcp_server_names(self, workspace: str | None = None) -> list[str]:
+        """Names of servers declared in the project ``.mcp.json`` files.
 
         Returns the union of server names across the same candidate files the
-        MCP status panel discovers, ``[]`` when no ``.mcp.json`` exists (nothing
-        is declared, so nothing to deny), and ``None`` when a file exists but
-        cannot be parsed. A parse failure cannot be mapped to names, so the
-        caller fails closed against the known allowlist universe instead.
-
-        ``workspace`` adds that workspace's AGENT ROOT to the candidates, and
-        passing it is not cosmetic. A chat runs with its agent root as cwd and a
-        project-scoped ``.mcp.json`` is read from that cwd, so after the
-        re-rooting the file that actually grants servers to a chat is
-        ``<install>/<name>/.mcp.json`` — which is exactly what
-        ``operator_actions._detect_mcp_uncomposed`` tells the operator to write,
-        while deleting the shared one. Looking only under the install root and
-        its parent therefore returned ``[]`` on every composed install, so
-        :meth:`disallowed_tools_for_workspace` emitted no deny entry at all and
-        the per-workspace allowlist was silently inert: a workspace restricted
-        to two servers could reach every server its root declares.
-
-        Omitted, it returns the shared files only; no production caller omits
-        it now (seeding passes each workspace's name). Every caller therefore
-        resolves the declaration from the same file the chat reads, which is
-        also the rule seeding writes an allowlist from.
+        MCP status panel discovers, with ``workspace``'s agent root first: a
+        chat runs with its agent root as cwd, so ``<install>/<name>/.mcp.json``
+        is the file that actually grants servers to it. A file that cannot be
+        parsed contributes no names; Claude Code cannot load servers from it
+        either.
         """
         workspace_root = self.workspace_root
         candidates = [
@@ -1457,9 +1399,8 @@ class CiaoConfig:
             try:
                 agent_root = self.agent_root(workspace)
             except ValueError:
-                # An unusable workspace name names no root. The shared
-                # candidates still apply, and an unregistered workspace still
-                # gets the fail-closed allowlist default from the caller.
+                # An unusable workspace name names no root; the shared
+                # candidates still apply.
                 agent_root = workspace_root
             if agent_root != workspace_root:
                 candidates.insert(0, agent_root / ".mcp.json")
@@ -1471,12 +1412,12 @@ class CiaoConfig:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError, TypeError):
-                return None
+                continue
             if not isinstance(data, dict):
-                return None
+                continue
             mcp_dict = data.get("mcpServers") or data.get("mcp_servers") or {}
             if not isinstance(mcp_dict, dict):
-                return None
+                continue
             for raw_name in mcp_dict:
                 name = str(raw_name)
                 if name and name not in seen:
@@ -1484,33 +1425,17 @@ class CiaoConfig:
                     names.append(name)
         return names
 
-    def _known_mcp_server_names(self) -> list[str]:
-        """Every server name any workspace's allowlist can reach.
-
-        This is the known universe of servers on this install, used to fail
-        closed by name when ``.mcp.json`` is unreadable. The limitation is
-        honest: a server that was never seeded and lives only in the corrupt
-        file cannot be denied here, because nothing knows it exists.
-        """
-        known: list[str] = []
-        for workspace_config in self.workspaces.values():
-            for name in workspace_config.allowed_mcp_servers or ():
-                if name and name not in known:
-                    known.append(name)
-        return known
-
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:
         """Tools to deny for a chat in this workspace.
 
         The effective denylist is the workspace's extra tools
         (``disallowed_tools``), which defaults to the harness set
-        (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every workspace, plus a
-        derived ``mcp__<server>`` deny for every server declared in ``.mcp.json``
-        that the workspace's ``allowed_mcp_servers`` does not name. Every chat
+        (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every workspace. Every chat
         blocks the PWA-irrelevant harness tools (plan mode, cron, /loop wakeup,
-        routine trigger, push, notebook edit, design-system sync). A workspace
-        that predates the allowlist is seeded at load; a brand new one has
-        ``None``, which denies every declared server (the fail-closed default).
+        routine trigger, push, notebook edit, design-system sync). MCP servers
+        are scoped by where they are declared — each workspace's own agent-root
+        ``.mcp.json`` and the provider's local scope — and every declared server
+        loads; an ``mcp__<server>`` entry in ``disallowed_tools`` blocks one.
 
         Prepended to all of it, unconditionally, is
         :func:`credential_path_deny_rules` — the ``.env`` / ``.runtime`` /
@@ -1519,20 +1444,12 @@ class CiaoConfig:
         literal ``none``) still gets them. See that function for what they do
         and do not cover.
 
-        Two limits stated plainly. First, this scopes REACHABILITY, not
-        authority: a shared account behind a reachable server still holds that
-        account's full authority. Second, ``disallowed_tools`` is only applied
-        when the chat's provider is ``claude`` (see the ``if chat.provider !=
-        "claude": return []`` guard in project_chats). opencode is constrained
-        by the equivalent session permission rules its own provider builds
+        ``disallowed_tools`` is only applied when the chat's provider is
+        ``claude`` (see the ``if chat.provider != "claude": return []`` guard in
+        project_chats). opencode is constrained by the equivalent session
+        permission rules its own provider builds
         (``ciao/providers/opencode.py::mode_settings``), not by this list, so
-        the credential denies above exist in both places and must stay in
-        sync; the MCP-server allowlist below is still Claude-only.
-
-        When ``.mcp.json`` exists but cannot be parsed, every server any
-        workspace's allowlist names is denied by explicit name: the known
-        universe of servers on this install, which fails closed with names the
-        SDK can actually match instead of a glob it may ignore.
+        the credential denies above exist in both places and must stay in sync.
 
         An unregistered workspace name — a stale reference, or a renamed or
         deleted workspace — gets the defaults rather than an empty denylist. It
@@ -1542,28 +1459,11 @@ class CiaoConfig:
         extras = workspace_config.disallowed_tools if workspace_config else None
         if extras is None:
             extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
-        allowlist = (
-            workspace_config.allowed_mcp_servers
-            if workspace_config is not None
-            else None
-        )
-        allow_set = set(allowlist or ())
-        # Resolved from this workspace's agent root, not just the install root:
-        # after the re-rooting the declaration a chat actually reads lives in
-        # its own root, and reading only the install root made every allowlist
-        # a no-op (see _declared_mcp_server_names).
-        declared = self._declared_mcp_server_names(workspace)
-        if declared is None:
-            denied = [f"mcp__{name}" for name in self._known_mcp_server_names()]
-        else:
-            denied = [
-                f"mcp__{name}" for name in declared if name not in allow_set
-            ]
         # The resolved runtime root, not just the `**/.runtime/**` name: an
         # operator who moved it with `CIAO_RUNTIME_ROOT` must not lose the
         # guard on the stores it holds.
         fixed = credential_path_deny_rules(self.state_path.parent)
-        return list(dict.fromkeys([*fixed, *extras, *denied]))
+        return list(dict.fromkeys([*fixed, *extras]))
 
     def memory_pass_denied_tools(self, workspace: str | None) -> list[str]:
         """Tool denies carried only by the end-of-conversation memory pass.
@@ -1571,88 +1471,18 @@ class CiaoConfig:
         Additive to :meth:`disallowed_tools_for_workspace`, not a replacement
         for it: the pass keeps every workspace deny and adds two blocks a pass
         must never have. First, all MCP — every ``mcp__<server>`` for every
-        server ``.mcp.json`` declares, with the same fail-closed-by-name
-        fallback to :meth:`_known_mcp_server_names` when that file cannot be
-        parsed. Second, all shipped ``gws-*`` skills, as ``Skill(<name>)``
-        denies, so the pass cannot reach Google Workspace.
+        server ``.mcp.json`` declares. Second, all shipped ``gws-*`` skills, as
+        ``Skill(<name>)`` denies, so the pass cannot reach Google Workspace.
 
         The skill set is read from the packaged stock skills on disk, so a
         newly shipped gws skill is denied without a code change.
         """
         from ciao.gws_skills import shipped_gws_skills
 
-        declared = self._declared_mcp_server_names(workspace)
-        if declared is None:
-            mcp = [f"mcp__{name}" for name in self._known_mcp_server_names()]
-        else:
-            mcp = [f"mcp__{name}" for name in declared]
+        mcp = [f"mcp__{name}" for name in self._declared_mcp_server_names(workspace)]
         stock = Path(__file__).resolve().parent / "stock" / "skills"
         skills = [f"Skill({name})" for name in shipped_gws_skills(stock)]
         return list(dict.fromkeys([*mcp, *skills]))
-
-    def _seed_allowed_mcp_servers(self) -> None:
-        """Migrate pre-existing workspaces onto the allowlist, losslessly.
-
-        Auto-apply under decision D1 of the agent-roots work order: the change
-        is confined to metadata Ciaobot generates (the workspace registry), and
-        there is exactly one correct outcome per workspace — what it can reach
-        right now. A registered workspace whose allowlist is ``None`` and that
-        exists in the registry file is seeded with every server declared for that
-        workspace (its own agent-root ``.mcp.json`` first, then the shared
-        files, as :meth:`_declared_mcp_server_names` resolves them) that its
-        ``disallowed_tools`` does not already deny. A brand-new workspace
-        created in code (legacy fallback, no file) is not touched and keeps its
-        ``None`` fail-closed default.
-
-        This reads and rewrites the raw file so unrelated or unknown keys (e.g.
-        a future field this release does not know) survive; the normal
-        ``persist_workspace_registry`` path intentionally rewrites a clean
-        payload and would drop them. The write is atomic (tmp then replace), the
-        same discipline as the regular persistence path.
-        """
-        path = self.state_path.parent / "workspaces.json"
-        if not path.is_file():
-            return
-        try:
-            entries = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return
-        if not isinstance(entries, list):
-            return
-        changed = False
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("name", "")).strip()
-            workspace_config = self.workspace(name)
-            if workspace_config is None or workspace_config.allowed_mcp_servers is not None:
-                continue
-            # Resolved per entry, from this workspace's own agent root first:
-            # on a composed install that file is the only declaration there is,
-            # so one global (install-level only) read found nothing and left
-            # every ``None`` allowlist unmigrated and fail-closed.
-            declared = self._declared_mcp_server_names(name)
-            if declared is None:
-                # A corrupt .mcp.json cannot be mapped to names; leave this
-                # allowlist untouched and let deny resolution fail closed by
-                # name against the known universe instead.
-                continue
-            if not declared:
-                # Nothing is declared for this workspace, so the effective set is
-                # empty and ``None`` already fails closed. Persisting ``[]`` would
-                # rewrite the registry on every fresh install and break a
-                # setup-rerun's idempotency for no behavioural change.
-                continue
-            denied = set(workspace_config.disallowed_tools or ())
-            seed = [s for s in declared if f"mcp__{s}" not in denied]
-            entry["allowed_mcp_servers"] = seed
-            workspace_config.allowed_mcp_servers = seed
-            changed = True
-        if not changed:
-            return
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8", newline="")
-        tmp.replace(path)
 
     @classmethod
     def from_env(

@@ -20,10 +20,6 @@ vi.mock('../../lib/api', () => {
   let routineSettings = {
     insights_enabled: true,
 
-    critique_models: '',
-
-    critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
-
     model_options: {
       anthropic: ['haiku', 'sonnet', 'opus', 'fable'],
     },
@@ -38,7 +34,6 @@ vi.mock('../../lib/api', () => {
     '/api/integrations/gws': {
       installed: false,
       binary_path: '',
-      default_profile: '',
       cli_available: false,
       profiles: [],
     },
@@ -575,61 +570,6 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView saves multiple critique models from the picker', async () => {
-    const router = makeRouter()
-    await router.push('/settings/models')
-    await router.isReady()
-    const mod = await import('../SettingsView.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router], stubs: { Teleport: true } },
-    })
-    await flushPromises()
-    await nextTick()
-
-    // The effective panel arrives comma-joined with no spaces. It is shown
-    // rejoined with ", " as the picker's placeholder, and the ellipsized
-    // trigger carries the full value as its title. With nothing picked there
-    // is no second summary control beside it.
-    const defaultLabel = 'Automatic default (anthropic/claude-sonnet-4.5, anthropic/claude-haiku-4.5)'
-    expect(wrapper.find('.critique-picker-default').exists()).toBe(false)
-    expect(
-      wrapper.find('.critique-model-picker .model-selector__trigger').attributes('title'),
-    ).toBe(defaultLabel)
-
-    // The critique picker is now a searchable ModelSelector.
-    const critiqueSelector = wrapper.find('.critique-model-picker .model-selector')
-    expect(critiqueSelector.exists()).toBe(true)
-    await critiqueSelector.find('.model-selector__trigger').trigger('click')
-    await flushPromises()
-    await nextTick()
-
-    // The panel is one voice per vendor: a bare tier is Anthropic, a prefixed
-    // entry routes to that provider's app-server. The opencode section lists
-    // that account's real catalog (`providerID/modelID`) — it used to show the
-    // Anthropic tiers prefixed, i.e. `opencode:opus`, which is not a model.
-    const opusOption = critiqueSelector.findAll('.model-selector__item')
-      .find((el) => el.text() === 'opus')
-    const opencodeOption = critiqueSelector.findAll('.model-selector__item')
-      .find((el) => el.text() === 'openai/gpt-5.6-luna')
-    expect(opusOption).toBeTruthy()
-    expect(opencodeOption).toBeTruthy()
-
-    await opusOption!.trigger('click')
-    await flushPromises()
-    await opencodeOption!.trigger('click')
-    await flushPromises()
-
-    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      critique_models: 'opus,opencode:openai/gpt-5.6-luna',
-    })
-    expect(wrapper.text()).toContain('opencode:openai/gpt-5.6-luna')
-    // Chip text ellipsizes, so the remove button names the model it removes.
-    expect(
-      wrapper.findAll('.critique-chip').map((chip) => chip.attributes('aria-label')),
-    ).toContain('Remove opencode:openai/gpt-5.6-luna')
-    wrapper.unmount()
-  })
-
   it('SettingsView renders configured workspace providers', async () => {
     const router = makeRouter()
     await router.push('/settings/workspaces')
@@ -901,6 +841,60 @@ describe('component mount smoke', () => {
     expect(opencodeRow.text()).toContain('Not connected')
     const actions = opencodeRow.findAll('.provider-connection-actions button').map((b) => b.text())
     expect(actions).toEqual(['Connect', 'Verify'])
+    wrapper.unmount()
+  })
+
+  it('SettingsView Connect reports the terminal it opened', async () => {
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    vi.mocked(api.post).mockResolvedValueOnce({ ok: true, launched: 'Terminal', command: 'opencode auth login' })
+
+    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
+    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
+    await connect.trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.find('.action-result').text()).toBe('Opened the opencode sign-in in Terminal.')
+    wrapper.unmount()
+  })
+
+  it('SettingsView Connect on a remote browser shows the command to run on the host', async () => {
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const hint = 'Opening a terminal is only available in a browser on the computer running Ciaobot. Run this in a terminal on the computer running Ciaobot: opencode auth login'
+    vi.mocked(api.post).mockRejectedValueOnce(
+      Object.assign(new Error(hint), {
+        status: 403,
+        payload: { ok: false, reason: 'not_on_host', command: 'opencode auth login', error: hint },
+      }),
+    )
+
+    const opencodeRow = wrapper.findAll('.provider-connections .credential-row')[1]!
+    const connect = opencodeRow.findAll('.provider-connection-actions button').find((b) => b.text() === 'Connect')!
+    await connect.trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    const text = wrapper.find('.action-result').text()
+    expect(text).toContain('opencode auth login')
+    expect(text.startsWith('Error:')).toBe(false)
     wrapper.unmount()
   })
 

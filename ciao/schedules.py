@@ -765,7 +765,8 @@ def was_dispatched_since(entry: "ScheduleEntry", when: datetime) -> bool:
 # is still expected to finish (a quota-deferred retry, an approval card, an
 # AskUserQuestion, unsettled background subagents), and re-running that would
 # duplicate a turn nobody abandoned. "busy" and "missing-chat" belong to the
-# interval path, which has no expected slot to satisfy.
+# interval path, which has no expected slot to satisfy. "retrying" is in
+# neither set: the slot is still being worked on.
 FAILED_RUN_STATUSES = frozenset({"error"})
 
 # The mirror image: a dispatch whose run reached one of these needs no replay.
@@ -781,6 +782,13 @@ COMPLETED_RUN_STATUSES = frozenset({"ok", "skipped", "unfinished"})
 # you — check the chat" and the chat had no question or approval to answer.
 # The job-run log still records these as "skipped".
 RUN_STATUS_UNFINISHED = "unfinished"
+
+# Row status for a run whose agent found an external service unreachable and
+# armed a network retry in its chat (`ciao chat retry --action set --kind
+# network`). Neither failed nor completed: catch_up must not re-dispatch it and
+# the Missed list must not show it. The retry turn's end writes "ok", or "error"
+# once the retry cap is spent (ProjectChatManager._settle_schedule_retry).
+RUN_STATUS_RETRYING = "retrying"
 
 # Row statuses that point the operator at the run's chat.
 CHAT_ATTENTION_RUN_STATUSES = frozenset({"skipped", RUN_STATUS_UNFINISHED})
@@ -925,6 +933,23 @@ def stamp_run_outcome(
     return changed
 
 
+def settle_retrying_runs(store: "ScheduleStore", chat_id: str, status: str) -> bool:
+    """Write a network-retried run's final outcome. True when any row changed.
+
+    Only rows still saying "retrying" for this run chat are touched. A newer
+    dispatch overwrites "retrying" with "running", so a row in that state still
+    names the dispatch that armed the retry, and its own id is passed through.
+    """
+    changed = False
+    for entry in store.list_entries():
+        if entry.last_run_chat_id != chat_id or entry.last_status != RUN_STATUS_RETRYING:
+            continue
+        if stamp_run_outcome(entry, entry.last_dispatch_id, status):
+            store.replace(entry)
+            changed = True
+    return changed
+
+
 def settle_runs_for_archived_chat(store: "ScheduleStore", chat_id: str) -> bool:
     """Clear the chat-attention flag on every entry whose run chat was archived.
 
@@ -935,18 +960,23 @@ def settle_runs_for_archived_chat(store: "ScheduleStore", chat_id: str) -> bool:
     Automations page at an archived chat until the next run replaced it (a
     weekly entry stayed flagged for a week). The occurrence already counts as
     served (``COMPLETED_RUN_STATUSES``), so "ok" changes no catch-up decision.
+    A "retrying" run becomes "error": archiving cancels the retry and the work
+    never happened.
 
     True when any entry changed; the caller publishes the refetch nudge.
     """
     changed = False
     for entry in store.list_entries():
-        if (
-            entry.last_run_chat_id == chat_id
-            and entry.last_status in CHAT_ATTENTION_RUN_STATUSES
-        ):
+        if entry.last_run_chat_id != chat_id:
+            continue
+        if entry.last_status in CHAT_ATTENTION_RUN_STATUSES:
             entry.last_status = "ok"
-            store.replace(entry)
-            changed = True
+        elif entry.last_status == RUN_STATUS_RETRYING:
+            entry.last_status = "error"
+        else:
+            continue
+        store.replace(entry)
+        changed = True
     return changed
 
 
@@ -990,7 +1020,8 @@ class ScheduleEntry:
     # "ok", "error", "busy" (skipped, the target chat had a turn in flight),
     # "missing-chat" (target gone and unrecoverable; the entry was disabled),
     # "skipped" (stopped on an approval, a question or a deferred retry) or
-    # "unfinished" (ended before its subagents' results were synthesized).
+    # "unfinished" (ended before its subagents' results were synthesized) or
+    # "retrying" (waiting on a network retry in the run chat).
     # Wall-clock entries also carry it: "running" from their own dispatch, then
     # the run's outcome written back by the dispatch pipeline, which is what
     # tells an attended slot apart from one whose turn died mid-flight.

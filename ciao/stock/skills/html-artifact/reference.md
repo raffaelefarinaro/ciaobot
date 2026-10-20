@@ -1,6 +1,6 @@
 # Artifact starting shells
 
-Three shells that already satisfy the CSP and the panel constraints. Copy one, replace the data and the content, delete what you do not use. Do not re-derive this scaffolding.
+Four shells that already satisfy the CSP and the panel constraints. Copy one, replace the data and the content, delete what you do not use. Do not re-derive this scaffolding.
 
 Every shell assumes:
 
@@ -138,11 +138,13 @@ Filtering or toggling is a few lines of vanilla JS. Render from an array, re-ren
 
 <script>
 const rows = document.getElementById('rows');
+const esc = (s) =>
+  String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 function render(filter = '') {
   const f = filter.trim().toLowerCase();
   rows.innerHTML = DATA
     .filter(d => !f || d.label.toLowerCase().includes(f))
-    .map(d => `<tr><td>${d.label}</td><td class="num">${d.value}</td></tr>`)
+    .map(d => `<tr><td>${esc(d.label)}</td><td class="num">${esc(d.value)}</td></tr>`)
     .join('') || '<tr><td colspan="2">No matches.</td></tr>';
 }
 document.getElementById('q').addEventListener('input', e => render(e.target.value));
@@ -150,7 +152,7 @@ render();
 </script>
 ```
 
-Building HTML with a template string is fine here because the data is yours, baked into the page at author time. If any string could come from somewhere else, set `textContent` instead.
+Escape every interpolated value with `esc()`: artifacts often show email subjects or document text, and an unescaped `<` in a label becomes markup. Setting `textContent` is the alternative when you build nodes one by one.
 
 ## Static SVG diagram
 

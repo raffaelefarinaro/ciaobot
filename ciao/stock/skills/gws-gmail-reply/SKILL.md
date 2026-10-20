@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-reply
-description: "Gmail: Reply to a message (handles threading automatically)."
+description: "Use to reply only to the sender of a message, keeping the thread; needs the message ID (find it with gws-gmail-triage)."
 metadata:
   version: 0.22.5
 ---
@@ -53,3 +53,6 @@ ciao gws "$GWS_PROFILE" gmail +reply --message-id 18f1a2b3c4d --body 'Draft repl
 - With --html, inline images in the quoted message are preserved via cid: references.
 - Use --draft to save the reply as a draft instead of sending it immediately.
 - For reply-all, use +reply-all instead.
+
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing. Show the recipients, subject and body before sending, and use `--draft` unless the user asked to send.

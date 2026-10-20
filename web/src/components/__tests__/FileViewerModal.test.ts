@@ -82,7 +82,9 @@ describe('FileViewerModal', () => {
     expect(dialog.attributes('aria-labelledby')).toBe(title.attributes('id'))
     expect(dialog.attributes('aria-describedby')).toBe(description.attributes('id'))
     expect(title.text()).toBe('today.md')
-    expect(description.text()).toBe('notes/today.md')
+    // The folder is shown; the full path is what a screen reader hears.
+    expect(description.get('[aria-hidden="true"]').text()).toBe('notes')
+    expect(description.get('.sr-only').text()).toBe('notes/today.md')
     expect(document.activeElement).toBe(dialog.element)
   })
 
@@ -121,36 +123,22 @@ describe('FileViewerModal', () => {
     expect(related.attributes('title')).toBe('notes/related-note.md')
   })
 
-  it('keeps the viewer open after an automatic pin failure', async () => {
-    vi.stubGlobal('innerWidth', 1280)
+  it('pins from the viewer to the chat on screen and closes', async () => {
     const projects = useProjectStore()
-    projects.activeChatId = 'chat-1'
-    vi.spyOn(projects, 'pinFile').mockResolvedValue(false)
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
     const store = openViewer()
-    await flushPromises()
-    expect(projects.pinFile).toHaveBeenCalledWith('chat-1', 'notes/today.md')
-    expect(store.isOpen).toBe(true)
-    expect(store.content).toBe('Hello')
+    store.setDockTarget('chat-1')
+    await settle()
     await wrapper!.get('button[aria-label="Pin to sidebar"]').trigger('click')
     await flushPromises()
-    expect(store.isOpen).toBe(true)
-    expect(projects.pinFile).toHaveBeenCalledTimes(2)
+    expect(projects.pinFile).toHaveBeenCalledWith('chat-1', 'notes/today.md')
+    expect(store.isOpen).toBe(false)
   })
 
-  it('a slow successful pin never closes a newer file', async () => {
-    vi.stubGlobal('innerWidth', 1280)
-    const projects = useProjectStore()
-    projects.activeChatId = 'chat-1'
-    let finish!: (success: boolean) => void
-    vi.spyOn(projects, 'pinFile').mockImplementation(() => new Promise(resolve => { finish = resolve }))
-    const store = openViewer()
-    await nextTick()
-    store.path = 'notes/newer.md'
-    store.loadToken++
-    finish(true)
-    await flushPromises()
-    expect(store.isOpen).toBe(true)
-    expect(store.path).toBe('notes/newer.md')
+  it('offers no pin where there is no split view', async () => {
+    openViewer()
+    await settle()
+    expect(wrapper!.find('button[aria-label="Pin to sidebar"]').exists()).toBe(false)
   })
 
   it('offers a user-triggered native share of the opened text file', async () => {

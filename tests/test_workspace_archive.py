@@ -1214,7 +1214,6 @@ def test_restore_rebuilds_settings_and_never_widens_access(tmp_path):
     def _edit(metadata):
         metadata["workspace"].update({
             "default_provider": "evil-cli",
-            "allowed_mcp_servers": ["github", {"all": True}],
             "disallowed_tools": "Bash",
             "gws_profile": "../../secrets",
             "color": "ultraviolet",
@@ -1222,7 +1221,6 @@ def test_restore_rebuilds_settings_and_never_widens_access(tmp_path):
 
     _tamper(config, archived["id"], _edit)
     preview = client.get("/api/workspaces/archived").json()["archived"][0]
-    assert preview["allowed_mcp_servers"] == []
     assert preview["disallowed_tools"] is None
     assert preview["default_provider"] == "claude"
     assert preview["gws_profile"] == ""
@@ -1232,23 +1230,20 @@ def test_restore_rebuilds_settings_and_never_widens_access(tmp_path):
     assert restored.status_code == 200, restored.json()
     work = config.workspaces["work"]
     assert work.default_provider == "claude"
-    assert work.allowed_mcp_servers == [], "an unreadable allowlist must deny all"
     assert work.disallowed_tools is None
     assert work.gws_profile == ""
-    assert work.color == "pink"
+    assert work.color == "amber"
     assert work.vault_root == "work/memory-vault"
 
 
-def test_restore_preview_shows_a_valid_allowlist_and_deny_list(tmp_path):
+def test_restore_preview_shows_a_valid_deny_list(tmp_path):
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
-    config.workspaces["work"].allowed_mcp_servers = ["github", "n8n_mcp"]
     config.workspaces["work"].disallowed_tools = ["Bash"]
     archived = client.post("/api/workspaces/work/archive").json()["archived"]
 
     preview = client.get("/api/workspaces/archived").json()["archived"][0]
 
     assert preview["id"] == archived["id"]
-    assert preview["allowed_mcp_servers"] == ["github", "n8n_mcp"]
     assert preview["disallowed_tools"] == ["Bash"]
 
 

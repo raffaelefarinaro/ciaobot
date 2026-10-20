@@ -211,10 +211,10 @@ class TaskAttempt:
     """One delegation attempt, as this store understands it.
 
     ``task_revision`` is the revision of the task record the attempt was minted
-    against, which is what makes "changed since delegated" answerable without
-    re-reading history: a live attempt whose ``task_revision`` differs from the
-    task's current revision means somebody edited the task after the agent was
-    handed it.
+    against, re-stamped by :meth:`TaskAttemptStore.bind_revision` when an
+    engine-owned write (linkage, review badge, log line, migration, progress
+    note) moves the record. A user edit never moves it. It is part of the
+    attempt's history row.
 
     ``released`` is the marker that says the task no longer belongs to this
     attempt, set by :meth:`TaskAttemptStore.release` when the user approves a
@@ -815,8 +815,7 @@ class TaskAttemptStore:
         ``created``.
 
         ``task_revision`` is the revision of the task record this attempt reads,
-        which is what lets a later reader say "changed since delegated" without
-        reconstructing history. ``chat_id`` is required: an attempt with no chat
+        kept as part of the attempt's history. ``chat_id`` is required: an attempt with no chat
         has nothing a ``resume`` could continue, so storing one would manufacture
         a record that no gesture can act on.
 
@@ -884,16 +883,11 @@ class TaskAttemptStore:
 
         Delegation hands the attempt the revision it *read*, and then writes the
         linkage into the task file — which necessarily moves the revision, because
-        the attempt id and chat id are now part of the record. Without this the
-        attempt would be permanently "changed since delegated" the instant it was
-        made, and the flag would mean nothing.
-
-        So the delegation service rebinds the attempt to the revision the linkage
-        write left behind. That is the honest binding: the attempt belongs to the
-        task as it stands after the hand-off (title, body and description
-        untouched — only status, assignee, linkage and ``updated_at`` changed), and
-        any *later* edit moves the revision again, which is exactly what
-        ``changed_since_delegated`` reports.
+        the attempt id and chat id are now part of the record. The delegation
+        service rebinds the attempt to the revision that engine-owned write left
+        behind (and likewise after the review badge, a log line, a migration or a
+        progress note), so the binding follows the engine's own writes and never a
+        user edit.
         """
         clean = _check_revision(task_revision)
         now = self._now()
@@ -1446,9 +1440,7 @@ def build_prompt(
 
     The record's own fields, the instruction above, and the Markdown body quoted
     inside the fence. ``task_revision`` travels in the header because it is the
-    revision the agent is being handed: if somebody edits the task after this, the
-    attempt says so and the user is told the result was reached against an older
-    description — which is the whole of "changed since delegated".
+    revision the agent is being handed.
 
     Everything here is already bounded (a task file is at most 64 KiB, of which
     the body is the bulk), so nothing is re-bounded or repaired.

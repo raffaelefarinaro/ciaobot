@@ -234,3 +234,86 @@ def test_the_grant_on_a_per_root_install_reaches_the_parent_of_every_workspace(
         assert Path(request.agent_roots[-1]) == tmp_path.resolve()
     finally:
         reset_reroot_cache()
+
+
+def _linked_repo_manager(tmp_path: Path, scope: str, *, repo: Path):
+    manager = _make_manager(tmp_path)
+    config = manager._config
+    workspace = config.workspace("personal")
+    assert workspace is not None
+    config.workspaces["personal"] = dataclasses.replace(workspace, agent_fs_scope=scope)
+    project = manager.create_project("linked", workspace="personal")
+    project.repo_path = str(repo)
+    chat = manager.create_chat(project.project_id, provider="claude")
+    chat.code_mode = True
+    return manager, chat
+
+
+def test_a_linked_repo_is_a_workspace_root_and_on_the_request(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager, chat = _linked_repo_manager(tmp_path, "workspace", repo=repo)
+    config = manager._config
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    agent_root = config.agent_root("personal").resolve()
+    vault_root = config.workspace_vault_root("personal").resolve()
+    expected = tuple(dict.fromkeys((str(agent_root), str(vault_root), str(repo.resolve()))))
+    assert request.agent_roots == expected
+    assert request.agent_roots[-1] == str(repo.resolve())
+    assert request.linked_repo == str(repo.resolve())
+
+
+def test_a_linked_repo_reaches_a_machine_scope_request(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager, chat = _linked_repo_manager(tmp_path, "machine", repo=repo)
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.agent_roots == ()
+    assert request.linked_repo == str(repo.resolve())
+
+
+def test_a_missing_linked_repo_is_not_granted(tmp_path: Path) -> None:
+    manager, chat = _linked_repo_manager(tmp_path, "workspace", repo=tmp_path / "gone")
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.linked_repo == ""
+    assert all("gone" not in root for root in request.agent_roots)
+
+
+def test_a_memory_pass_chat_is_not_granted_the_linked_repo(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager, _ = _linked_repo_manager(tmp_path, "workspace", repo=repo)
+    project = manager._memory_pass.ensure_project("personal")
+    project.repo_path = str(repo)
+    chat = manager.create_chat(
+        project.project_id,
+        provider="claude",
+        helper={
+            "kind": "memory_pass",
+            "source_chat_id": "chat-1",
+            "archive_policy": "when_clean",
+        },
+    )
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.linked_repo == ""
+    assert str(repo.resolve()) not in request.agent_roots
+
+
+def test_a_linked_repo_with_code_mode_off_is_not_granted(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    manager, chat = _linked_repo_manager(tmp_path, "workspace", repo=repo)
+    chat.code_mode = False
+
+    request = manager.build_agent_request(chat, prompt="hi")
+
+    assert request.linked_repo == ""
+    assert str(repo.resolve()) not in request.agent_roots

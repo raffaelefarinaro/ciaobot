@@ -42,6 +42,7 @@ from ciao.memory_tool import (
     resolve_region,
     update_region,
 )
+from ciao.note_related import RELATED_NOTES_LIMIT
 from ciao.schedule_command import normalize_schedule_command
 from ciao.schedules import (
     DEFAULT_INTERVAL_MINUTES,
@@ -192,6 +193,23 @@ McpPrincipal = AgentPrincipal
 # defaults, ``bypass`` skips approvals. Mirrors ``BridgeMode`` in ciao.models
 # and the SDK mapping in ciao.providers.claude.
 _MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
+
+RELOAD_OWN_NOTE = (
+    "The provider restarts when this turn ends and the conversation continues "
+    "automatically with the reloaded MCP servers, plugins and skills. End your turn "
+    "now; do not ask the user to reconnect anything."
+)
+CODE_MODE_ON_NOTE = (
+    "Code mode is on. Follow these repository instructions now; repository skills and "
+    "write access load when this turn ends and the conversation continues automatically."
+)
+CODE_MODE_ON_OWN_NEXT_TURN_NOTE = (
+    "Code mode is on. Follow these repository instructions now; repository skills and "
+    "write access load on your next turn."
+)
+CODE_MODE_ON_NEXT_TURN_NOTE = (
+    "Code mode is on. Repository instructions, skills and write access load on that chat's next turn."
+)
 
 
 class ControlPlaneError(ValueError):
@@ -391,7 +409,7 @@ def _task_row_with_attempt(
     *,
     include_body: bool = False,
 ) -> dict[str, Any]:
-    """One task as a board row, plus the three delegation facts it draws.
+    """One task as a board row, plus the delegation facts it draws.
 
     A free function taking the two attempt lookups separately, because the board
     reads them once for a whole workspace and the single-task path reads them for
@@ -403,18 +421,9 @@ def _task_row_with_attempt(
     states the user has to see, and a board showing only live attempts would go
     blank the moment a turn ended. ``live_attempt_id`` is non-empty only while an
     attempt actually holds the task, which is what tells the board whether stop and
-    detach are available. ``changed_since_delegated`` compares the revision the
-    attempt was handed against the record now — the attempt was rebound to the
-    revision the hand-off left behind, so only a *later* edit trips this.
-
-    An unlinked task never reports it, and that guard is not cosmetic: a
-    ``detach`` clears the linkage and *that* moves the revision, so comparing
-    unconditionally would make the gesture the user just performed read as "the
-    result was reached against an older description" on the very card that has no
-    longer delegated anything.
+    detach are available.
     """
     payload = _task_payload(document, include_body=include_body)
-    linked = document.record.attempt_id is not None
     payload["attempt_state"] = current.state if current is not None else ""
     # The agent's own word on the current attempt (#1064), and the engine's note
     # when it gave none: what the card says under its badge.
@@ -422,9 +431,6 @@ def _task_row_with_attempt(
     payload["attempt_summary"] = current.summary if current is not None else ""
     payload["attempt_detail"] = current.detail if current is not None else ""
     payload["live_attempt_id"] = live.attempt_id if live is not None else ""
-    payload["changed_since_delegated"] = bool(
-        linked and current is not None and current.task_revision != document.revision
-    )
     return payload
 
 
@@ -552,6 +558,7 @@ def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict
         "assignee": record.assignee,
         "chat_id": record.chat_id,
         "attempt_id": record.attempt_id,
+        "linked_chats": list(record.linked_chats),
         "created_at": record.created_at.isoformat(),
         "updated_at": record.updated_at.isoformat(),
         "revision": document.revision,
@@ -1519,26 +1526,16 @@ class CiaoControlPlane:
         """Report Google Workspace connection status for the active workspace.
 
         Resolves the workspace's linked ``gws_profile`` the same way the runtime
-        does (the operator-level default only counts when it names an account
-        that actually exists), then reports whether credentials are present and
-        whether the periodic health monitor's last reading says the token is
-        valid. Read-only and cheap: it never runs ``gws auth status`` itself, so
-        the agent can answer "is Google connected?" without a subprocess.
+        does (only an explicit link naming an existing account counts), then
+        reports whether credentials are present and whether the periodic health
+        monitor's last reading says the token is valid. Read-only and cheap: it
+        never runs ``gws auth status`` itself, so the agent can answer "is
+        Google connected?" without a subprocess.
         """
         workspace = self._workspace(principal)
         from ciao import gws_auth
 
-        profile = str(
-            getattr(self.config.workspace(workspace), "gws_profile", "") or ""
-        ).strip()
-        if not profile:
-            from ciao.config import GWS_DEFAULT_PROFILE
-
-            profile = (
-                GWS_DEFAULT_PROFILE
-                if GWS_DEFAULT_PROFILE in gws_auth.known_profiles(self.config)
-                else ""
-            )
+        profile = gws_auth.workspace_gws_profile(self.config, workspace)
         if not profile:
             return _ok(
                 {
@@ -1653,6 +1650,34 @@ class CiaoControlPlane:
         return _ok(result)
 
     # ---- note verification ---------------------------------------------
+
+    async def note_related(
+        self, principal: AgentPrincipal, *, path: str = "", limit: int = RELATED_NOTES_LIMIT
+    ) -> dict[str, Any]:
+        """The notes connected to one note in this workspace's vault.
+
+        Read-only and model-free: it scans the vault itself rather than the FTS
+        index, so it records no retrieval hits. Each related note carries the
+        ``revision`` and ``due`` flag a ``verify_note`` payload for it needs.
+        """
+        from ciao import memory_receipts as mr
+        from ciao.note_related import find_related_notes
+
+        if not str(path or "").strip():
+            raise ControlPlaneError("note_related_invalid", "A note path is required.")
+        workspace = self._workspace(principal)
+        root = Path(self.config.workspace_vault_root(workspace))
+        today = date.today()
+
+        def _run() -> dict[str, Any]:
+            try:
+                found = find_related_notes(root, path, workspace=workspace, today=today, limit=limit)
+            except mr.MemoryReceiptError as exc:
+                raise ControlPlaneError("note_related_invalid", str(exc)) from exc
+            return found.as_dict()
+
+        reported: dict[str, Any] = await run_read(f"note_related:{root}:{path}:{limit}", _run)
+        return _ok(reported)
 
     async def verify_note(self, principal: AgentPrincipal, *, payload_file: str = "") -> dict[str, Any]:
         """Record one stale note's verdict through the managed verification service.
@@ -1990,6 +2015,12 @@ class CiaoControlPlane:
             {"workspaces": [workspace_to_dict(item, self.config) for item in self.config.workspaces.values()]}
         )
 
+    def repo_candidates(self, principal: AgentPrincipal) -> dict[str, Any]:
+        """Git checkouts on this machine a project can be linked to (read-only)."""
+        from ciao import repo_link
+
+        return _ok(repo_link.candidates_payload())
+
     # ---- vault ---------------------------------------------------------
 
     def _entity_index_root(self, principal: AgentPrincipal) -> Path:
@@ -2268,12 +2299,18 @@ class CiaoControlPlane:
         project = self._resolve_project(principal, project_id)
         return _ok(project.to_dict())
 
-    def project_create(self, principal: AgentPrincipal, name: str, context: str = "") -> dict[str, Any]:
+    def project_create(
+        self, principal: AgentPrincipal, name: str, context: str = "", repo_path: str = ""
+    ) -> dict[str, Any]:
         workspace = self._workspace(principal)
         clean_name = name.strip()
         if not clean_name:
             raise ControlPlaneError("invalid_name", "Project name is required.")
-        return _ok(self.pcm.create_project(clean_name, workspace, context).to_dict())
+        return _ok(
+            self.pcm.create_project(
+                clean_name, workspace, context, scaffold=True, repo_path=repo_path
+            ).to_dict()
+        )
 
     def project_update(
         self,
@@ -2283,10 +2320,15 @@ class CiaoControlPlane:
         name: str | None = None,
         context: str | None = None,
         vault_folder: str | None = None,
+        repo_path: str | None = None,
     ) -> dict[str, Any]:
         project = self._resolve_project(principal, project_id)
         item = self.pcm.update_project(
-            project.project_id, name=name, context=context, vault_folder=vault_folder
+            project.project_id,
+            name=name,
+            context=context,
+            vault_folder=vault_folder,
+            repo_path=repo_path,
         )
         if item is None:
             raise ControlPlaneError("project_not_found", f"Project '{project.project_id}' was not found.")
@@ -2471,6 +2513,7 @@ class CiaoControlPlane:
         mode: str | None = None,
         thinking_level: str | None = None,
         project_id: str | None = None,
+        code_mode: bool | None = None,
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
@@ -2495,10 +2538,48 @@ class CiaoControlPlane:
         )
         if updated is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
+        turned_on = False
+        continues = False
+        if code_mode is not None:
+            # Read after update_chat: moving a chat to another project turns
+            # code mode off there, so the switch below is judged against that.
+            before = self.pcm.get_chat(chat_id)
+            was_on = bool(getattr(before, "code_mode", False))
+            try:
+                switched = self.pcm.set_code_mode(chat_id, code_mode, actor="agent")
+            except ControlPlaneError:
+                raise
+            except ValueError as exc:
+                raise ControlPlaneError("code_mode_unavailable", str(exc)) from exc
+            if switched is None:
+                raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
+            updated = switched
+            turned_on = code_mode and not was_on
+            continues = bool(
+                turned_on
+                and chat_id == principal.chat_id
+                and self.pcm.arm_code_mode_continuation(chat_id)
+            )
         result = updated.to_dict(local=self.pcm.is_session_local(updated))
         if requested_mode and requested_mode != mode:
             result["mode_clamped"] = True
             result["requested_mode"] = requested_mode
+        if turned_on:
+            from ciao import repo_link
+
+            project = self.pcm.get_project(updated.project_id)
+            ins = repo_link.read_repo_instructions(project.repo_path)
+            result["repo_instructions"] = {
+                "name": ins.name,
+                "text": ins.text,
+                "truncated": ins.truncated,
+            }
+            if continues:
+                result["note"] = CODE_MODE_ON_NOTE
+            elif chat_id == principal.chat_id:
+                result["note"] = CODE_MODE_ON_OWN_NEXT_TURN_NOTE
+            else:
+                result["note"] = CODE_MODE_ON_NEXT_TURN_NOTE
         return _ok(result)
 
     def chat_send(self, principal: AgentPrincipal, chat_id: str, prompt: str) -> dict[str, Any]:
@@ -2530,8 +2611,27 @@ class CiaoControlPlane:
         chat_id: str,
         action: Literal["set", "stop", "try_now"],
         prompt: str = "",
+        kind: str = "",
     ) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
+        if kind:
+            if kind != "network":
+                raise ControlPlaneError("invalid_kind", "kind must be network.")
+            if action != "set":
+                raise ControlPlaneError("invalid_action", "kind=network only works with action=set.")
+            armed: str = self.pcm.arm_network_retry(chat_id, prompt)
+            if armed == "not_found":
+                raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
+            if armed == "no_prompt":
+                raise ControlPlaneError("empty_prompt", "No prompt to retry: pass --prompt with the job to re-run.")
+            if armed == "exhausted":
+                raise ControlPlaneError(
+                    "retry_exhausted",
+                    "The network retry cap is spent and no further retry was armed. "
+                    "Report the failure in your final message.",
+                )
+            chat = self.pcm.get_chat(chat_id)
+            return _ok(chat.to_dict(local=self.pcm.is_session_local(chat)))
         if action == "set":
             chat = self.pcm.set_chat_retry(chat_id, prompt, image_refs=[], reason="mcp")
             if chat is None:
@@ -2556,6 +2656,32 @@ class CiaoControlPlane:
         if chat is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
         return _ok(chat.to_dict(local=True))
+
+    def chat_reload(self, principal: AgentPrincipal, chat_id: str) -> dict[str, Any]:
+        chat_id = self._chat_id(principal, chat_id)
+        if self.pcm.provider_reload_blocked(chat_id):
+            raise ControlPlaneError(
+                "chat_busy",
+                "Background agents or a pending question still use this chat's provider; "
+                "reload after they finish.",
+            )
+        if chat_id == principal.chat_id:
+            if self.pcm.arm_reload_continuation(chat_id):
+                return _ok({"chat_id": chat_id, "reload": "after_turn", "note": RELOAD_OWN_NOTE})
+            return self._defer_until_chat_idle(
+                principal, "chat_reload", lambda: self.pcm.reload_provider(chat_id)
+            )
+        if chat_id in self.pcm.active_chat_ids():
+            raise ControlPlaneError("chat_busy", "That chat is running a turn; reload after it ends.")
+        asyncio.ensure_future(self.pcm.reload_provider(chat_id))
+        return _ok({
+            "chat_id": chat_id,
+            "reload": "next_turn",
+            "note": (
+                "That chat's provider restarts; its next turn resumes the same session "
+                "with the reloaded tools."
+            ),
+        })
 
     def chat_handover(
         self,
@@ -2739,8 +2865,8 @@ class CiaoControlPlane:
 
         The first task call for a workspace does it (#1069), so a board is never
         read in the old shape. An attempt bound to a file's old bytes follows the
-        rewrite: the migration is not an edit to the task, and leaving the binding
-        behind would read as "changed since delegated". Best effort; a file it
+        rewrite: the migration is not an edit to the task, so the binding follows it.
+        Best effort; a file it
         cannot upgrade lists as an unsupported-schema row that says why.
         """
         done: set[str] = self.__dict__.setdefault("_task_schema_checked", set())
@@ -2906,9 +3032,7 @@ class CiaoControlPlane:
         a write that leaves the task open, or on a done task with no completion
         record to reword, is refused rather than dropped.
 
-        The answer carries the attempt facts, because an edit is exactly what can
-        make a delegated task ``changed_since_delegated``: the user editing a task
-        the agent is working on is the case that flag exists for.
+        The answer carries the attempt facts, so a board can redraw the card from it.
         """
         if resolution is not None:
             if actor != "user":
@@ -2981,8 +3105,8 @@ class CiaoControlPlane:
         """Append one progress note, and optionally send it to the live attempt.
 
         A note is not an edit of the description. When the live attempt was
-        bound to the revision this write read, it follows the new revision so
-        the note does not read as "changed since delegated". A description
+        bound to the revision this write read, it follows the new revision,
+        because a note is not an edit. A description
         edit that was already pending stays pending.
 
         ``send`` delivers the note as one ordinary message in the attempt's
@@ -3005,14 +3129,21 @@ class CiaoControlPlane:
         if actor == "agent":
             # Same gate as `task report`: an agent note is that agent's word about
             # its own work, so only the chat holding a live attempt may write one.
-            if live is None or live.chat_id != chat_id:
+            # A chat linked to the task with `task link-chat` may also write one,
+            # stamped with that chat and no attempt (#1334).
+            holds_live = live is not None and live.chat_id == chat_id
+            linked = bool(chat_id) and chat_id in document.record.linked_chats
+            if live is not None and holds_live:
+                attempt_id = live.attempt_id
+                linked_chat = live.chat_id
+            elif linked:
+                linked_chat = chat_id
+            else:
                 raise ControlPlaneError(
                     "task_report_not_holder",
-                    "only the chat working on this task can add a progress note to it; "
-                    "this chat does not hold a live attempt for it.",
+                    "only the chat working on this task, or a chat linked to it with "
+                    "`task link-chat`, can add a progress note to it.",
                 )
-            attempt_id = live.attempt_id
-            linked_chat = live.chat_id
         if send and (live is None or not live.is_live):
             raise ControlPlaneError(
                 "invalid_action",
@@ -3045,6 +3176,43 @@ class CiaoControlPlane:
         task = self._task_with_attempt(workspace, written, include_body=True)
         task["update_sent"] = sent
         return task
+
+    def workspace_task_link_chat(
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        chat_id: str,
+        remove: bool = False,
+    ) -> dict[str, Any]:
+        """Record that a chat worked on the task, or unlink it. Not a delegation.
+
+        A linked chat has no lifecycle meaning: it never completes, moves or
+        assigns the task, and it never touches ``chat_id``/``attempt_id``. It may
+        add progress notes (:meth:`workspace_task_add_update`). Linking requires
+        the chat to exist in this workspace; unlinking does not, so a deleted
+        chat can still be removed from the list.
+        """
+        clean = str(task_id or "").strip()
+        chat = str(chat_id or "").strip()
+        if not chat:
+            raise ControlPlaneError("invalid_task", "a chat id is required")
+        if not remove:
+            found = self.pcm.get_chat(chat)
+            project = self.pcm.get_project(found.project_id) if found is not None else None
+            if found is None or project is None or project.workspace != workspace:
+                raise ControlPlaneError("chat_not_found", f"Chat '{chat}' was not found.")
+        written = self._task_call(
+            workspace,
+            lambda store: store.set_linked_chats(
+                clean,
+                expected_revision=expected_revision,
+                add="" if remove else chat,
+                remove=chat if remove else "",
+            ),
+        )
+        return self._task_with_attempt(workspace, written, include_body=True)
 
     def workspace_task_edit_update(
         self,
@@ -3519,8 +3687,7 @@ class CiaoControlPlane:
 
         The attempt is rebound to the revision the re-link left behind, for the same
         reason the review badge is followed by a rebind: the write moved the task's
-        revision, and an attempt left pointing at the older one would report "changed
-        since delegated" on a description nobody edited. Best effort, like the badge's.
+        revision, and the attempt follows the engine's own writes. Best effort, like the badge's.
 
         Best effort for the refusal itself too: it is being raised to the caller
         either way, and a second failure here must not replace the one that explains
@@ -3797,9 +3964,6 @@ class CiaoControlPlane:
                 ),
                 "created": False,
                 "project_id": document.record.project_id or "",
-                "changed_since_delegated": bool(
-                    existing.task_revision != document.revision
-                ),
             }
         record = document.record
         project, origin = self._delegation_project(workspace, project_id, record.project_id)
@@ -3862,9 +4026,6 @@ class CiaoControlPlane:
                 ),
                 "created": False,
                 "project_id": document.record.project_id or "",
-                "changed_since_delegated": bool(
-                    attempt.task_revision != document.revision
-                ),
             }
         # The chat's provenance was stamped at creation with the attempt id minted
         # above, so it names the attempt that ended up owning it — there is no
@@ -3891,16 +4052,13 @@ class CiaoControlPlane:
             )
             raise
         # The linkage write moved the task's revision, so the attempt is rebound
-        # to the revision the record now stands at. Without this the attempt would
-        # read as "changed since delegated" the instant it was made, and the flag
-        # would carry no information at all. What the hand-off changed — status,
-        # assignee, linkage — is not what that flag is about; the body and title
-        # the agent was handed are untouched by it.
+        # to the revision the record now stands at: the attempt's binding follows
+        # the engine's own writes (status, assignee, linkage), never a user edit.
         bound = self._attempt_call(
             workspace,
             lambda store: store.bind_revision(attempt.attempt_id, linked.revision),
         )
-        stream, refusal = self._launch_turn(chat.chat_id, prompt)
+        stream, refusal = self._launch_turn(chat.chat_id, prompt, origin="task_delegation")
         if stream is not None:
             self._note_updates_seen(workspace, attempt.attempt_id, document.body)
         if stream is None:
@@ -3923,10 +4081,8 @@ class CiaoControlPlane:
         if logged is not None:
             linked, bound = logged
         return {
-            # `bound`, not `attempt`: the reply must carry the revision the record
-            # now stands at, or a caller that stored this payload would compare it
-            # against the task and read "changed since delegated" on an attempt that
-            # was made a moment ago.
+            # `bound`, not `attempt`: the reply carries the revision the record now
+            # stands at.
             **_attempt_payload(bound, self._task_with_attempt(workspace, linked)),
             "project_id": project,
             "project_origin": origin,
@@ -3986,8 +4142,8 @@ class CiaoControlPlane:
         The write is the engine's, made as ``user`` the way the review flag is,
         and it moves the task's revision. The attempt follows that revision only
         when it was bound to the one this write read: a log line is not an edit to
-        the task, but an edit the user made before it still is, and rebinding over
-        it would erase "changed since delegated". One retry on a conflict, because
+        the task, but an edit the user made before it still is, and the binding
+        never follows a user edit. One retry on a conflict, because
         the user saving the description at the same moment is the likely cause.
         """
         for _ in range(2):
@@ -4114,7 +4270,7 @@ class CiaoControlPlane:
         except Exception:  # noqa: BLE001 — an archive must never fail on this
             logger.exception("delegation: could not settle the attempt for %s chat %s", how, chat_id)
 
-    def _launch_turn(self, chat_id: str, prompt: str) -> tuple[Any, str]:
+    def _launch_turn(self, chat_id: str, prompt: str, *, origin: str = "") -> tuple[Any, str]:
         """``start_stream`` with the default attendance: the stream, or ``(None, why)``.
 
         The single call site for a delegated turn, and the reason this block is
@@ -4122,14 +4278,14 @@ class CiaoControlPlane:
         ``ProjectChatManager._effective_mode_for_chat`` cannot force ``bypass`` and
         an approval card raised by the turn surfaces as an ordinary Needs-you card.
         The recording fake in ``tests/test_task_delegation.py`` asserts the kwargs
-        are empty, so a later "just this once" cannot add the flag quietly.
+        are exactly ``origin``, so a later "just this once" cannot add the flag quietly.
 
         The refusal's own text is returned rather than swallowed, because it is what
         the ``interrupted`` record's detail has to carry: "the turn could not be
         started" on its own tells the operator nothing about which turn or why.
         """
         try:
-            return self.pcm.start_stream(chat_id, prompt), ""
+            return self.pcm.start_stream(chat_id, prompt, origin=origin), ""
         except Exception as exc:  # noqa: BLE001 — a failed launch is an outcome
             logger.exception("delegation: could not start the turn in chat %s", chat_id)
             return None, str(exc) or type(exc).__name__
@@ -4223,7 +4379,7 @@ class CiaoControlPlane:
 
         The one place the board learns that a delegated chat went on without it:
         the user answering an approval card in the composer, or typing a follow-up
-        into a chat a **Send update** was just sent in. Both start a turn the
+        into a delegated chat. Both start a turn the
         delegation's own watcher knows nothing about, and both are the same event —
         "the conversation in this delegated chat continued" — so they are answered
         by one subscription rather than one special case each.
@@ -4519,11 +4675,8 @@ class CiaoControlPlane:
           superseded would be writing to a card it no longer owns — flagging the
           new attempt's work for review, or a task nobody delegated any more.
         * **The badge write moves the task's revision, and the attempt has to
-          follow it.** ``changed_since_delegated`` compares the revision the
-          attempt was handed against the record now, so a review flag the watcher
-          wrote itself would otherwise make *every* finished turn read "changed
-          since delegated" — which is a warning that must mean the user edited the
-          task under the agent, and there is no edit here.
+          follow it.** The attempt's binding follows the engine's own writes and
+          never a user edit, and the review flag is the engine's write.
 
         Best effort by design: a write that fails here must not turn a finished
         turn into an error, and the attempt's own state already says the result is
@@ -4648,140 +4801,6 @@ class CiaoControlPlane:
             "attempts": [self._with_chat_archived(attempt.to_dict()) for attempt in history],
         }
 
-    def workspace_task_send_update(
-        self,
-        workspace: str,
-        task_id: str,
-        attempt_id: str,
-        *,
-        expected_revision: str,
-        message: str,
-    ) -> dict[str, Any]:
-        """Hand the edited task to the attempt's own chat, and rebind the attempt.
-
-        The **Send update** gesture, and the two things it owes the card afterwards.
-        Both matter, and the second is the one a composer send cannot do:
-
-        1. **One ordinary message in the attempt's own chat.** Never a second
-           delegation: that would mint a new attempt, re-quote the description from
-           scratch and leave the result waiting for review looking abandoned. Sent
-           through :meth:`_launch_turn`, so ``unattended`` is not named here either
-           and an approval card the turn raises is an ordinary Needs-you card.
-        2. **The rebind.** The attempt is re-stamped to the revision this message
-           was made at, exactly as the delegation path re-stamps it after its
-           linkage write. That is what makes ``changed_since_delegated`` return to
-           ``false`` and the button retire instead of offering the same update for
-           ever. **The order is the contract:** a send that was refused rebinds
-           nothing, because a cleared flag over an update the agent never saw is the
-           one thing this gesture must not be able to say.
-
-        ``expected_revision`` is required and checked before anything is sent. The
-        message claims to carry the task as it stands, and a description edited
-        since the preview was read is not that — so a stale board is refused with
-        the ordinary 409 and nothing goes to the agent.
-
-        Only an attempt that still holds the task may be updated. A settled one is
-        refused: continuing a turn that did not finish is ``resume`` and replacing
-        it is ``retry``, and a keystroke in a chat is neither. An attempt id sent
-        under another task's URL is ``task_attempt_not_found``, the same answer as
-        one nobody has.
-
-        **Queuing is the ordinary case, not an edge.** An edit made *under* a
-        running agent is what this gesture exists for, so a turn is usually already
-        in flight in that chat — and ``start_stream`` hands back a turn already
-        running rather than dropping the message on the floor, which would leave the
-        rebind claiming an update nobody received. So the message is queued into the
-        running turn exactly as the composer queues it, and that turn runs it as its
-        own follow-up and ends only afterwards: which is what settles the attempt
-        with the answer to the update in it. A queued follow-up needs no watcher of
-        its own; a turn this call started is attached through
-        :meth:`_watch_turn` like any other.
-
-        The message text travels with the request rather than being rebuilt here. It
-        is an ordinary attended message the user composed and was shown in full
-        before sending, so what is sent is what was approved; what this method
-        checks is the revision it was made at.
-        """
-        clean_task = str(task_id or "").strip()
-        clean_attempt = str(attempt_id or "").strip()
-        text = str(message or "").strip()
-        if not text:
-            raise ControlPlaneError("invalid_task", "An update must carry a message.")
-        document = self._task_call(workspace, lambda store: store.get(clean_task))
-        if str(expected_revision or "").strip() != document.revision:
-            raise ControlPlaneError(
-                "task_revision_conflict",
-                "the task changed since this update was planned; nothing was sent",
-                retryable=True,
-            )
-        attempt = self._attempt_call(workspace, lambda store: store.get(clean_attempt))
-        if attempt.task_id != clean_task:
-            raise ControlPlaneError(
-                "task_attempt_not_found",
-                f"no delegation attempt {clean_attempt} on task {clean_task}",
-            )
-        if not attempt.is_live:
-            raise ControlPlaneError(
-                "invalid_action",
-                f"attempt {attempt.attempt_id} is {attempt.state!r} and no longer holds "
-                "this task; resume or retry it rather than sending it an update.",
-            )
-        if document.record.attempt_id != attempt.attempt_id:
-            # The store's live set and the record's linkage disagree, so the task
-            # belongs to some other attempt now. Answered like `resume` answers it:
-            # the update is not the way to take a card back.
-            raise ControlPlaneError(
-                "task_revision_conflict",
-                "the task is linked to a different attempt now; retry it instead.",
-                retryable=True,
-            )
-        queued = bool(self.pcm.queue_message(attempt.chat_id, text))
-        started: Any = None
-        if not queued:
-            active = self.pcm.get_active_stream(attempt.chat_id)
-            stream, refusal = self._launch_turn(attempt.chat_id, text)
-            if stream is None:
-                raise ControlPlaneError(
-                    "task_launch_failed",
-                    f"the update could not be sent to the delegated chat ({refusal}); "
-                    "nothing was sent, and the task still reads as changed since delegated.",
-                    retryable=True,
-                )
-            if stream is active:
-                # `start_stream` returned the turn already running instead of
-                # starting one, which it does before it queues anything: the message
-                # went nowhere. Refusing here is what keeps a rebind from claiming an
-                # update the agent never saw.
-                raise ControlPlaneError(
-                    "task_update_busy",
-                    "the delegated chat is finishing a turn and cannot take the update "
-                    "yet; send it again once that turn has settled.",
-                    retryable=True,
-                )
-            started = stream
-        turn_revision = document.revision
-        if started is not None:
-            turn_revision = self._watch_turn(
-                workspace, attempt.attempt_id, clean_task, attempt.chat_id, started
-            ) or document.revision
-            # Starting the continuation retires the previous review badge, a
-            # revision-safe service write that the accepted update also carries.
-            document = self._task_call(workspace, lambda store: store.get(clean_task))
-        bound = self._attempt_call(
-            workspace,
-            lambda store: store.bind_revision(attempt.attempt_id, turn_revision),
-        )
-        return {
-            # `bound`, for the same reason the delegation reply carries `bound`: the
-            # answer's `changed_since_delegated` has to be the one this call just made
-            # false, not the one the row carried a moment ago.
-            **_attempt_payload(bound, self._task_with_attempt(workspace, document)),
-            "updated": True,
-            # Which of the two it was, so a caller can say what it did: the message is
-            # accepted either way, but a queued one is still waiting behind a turn.
-            "queued": queued,
-        }
-
     async def workspace_task_attempt_action(
         self,
         workspace: str,
@@ -4877,16 +4896,15 @@ class CiaoControlPlane:
         and the turn's own end settles it again. Losing the manager would be the
         wrong trade for the record, so this is logged rather than raised.
 
-        Queued follow-ups are parked on the chat rather than run (``park_queue``):
-        a board Stop or Detach ends the delegated work, while a composer Stop
-        does not (#1103).
+        Every Stop parks the queued follow-ups on the chat rather than running
+        them, so a stopped delegated task stops working (#1103).
         """
         stop = getattr(self.pcm, "stop_chat", None)
         if not callable(stop):
             logger.warning("delegation: the chat manager cannot stop chat %s", chat_id)
             return
         try:
-            await stop(chat_id, park_queue=True)
+            await stop(chat_id)
         except Exception:  # noqa: BLE001 — a failed stop is not a failed gesture
             logger.exception("delegation: could not stop the turn in chat %s", chat_id)
 
@@ -4955,7 +4973,7 @@ class CiaoControlPlane:
         running = self._attempt_call(
             workspace, lambda store: store.reopen(attempt.attempt_id)
         )
-        stream, refusal = self._launch_turn(attempt.chat_id, prompt)
+        stream, refusal = self._launch_turn(attempt.chat_id, prompt, origin="task_resume")
         if stream is None:
             self._settle_interrupted(
                 workspace,
@@ -5218,6 +5236,34 @@ class CiaoControlPlane:
                 text=text,
                 actor="agent",
                 chat_id=principal.chat_id,
+            )
+        )
+
+    def task_link_chat(
+        self,
+        principal: AgentPrincipal,
+        task_id: str,
+        *,
+        expected_revision: str,
+        chat_id: str | None = None,
+        remove: bool = False,
+    ) -> dict[str, Any]:
+        """Link a chat (default: this one) to a task, or unlink it. Not a delegation."""
+        workspace = self._workspace(principal)
+        try:
+            resolved = self._chat_id(principal, chat_id)
+        except ControlPlaneError as exc:
+            # A deleted chat can still be unlinked by its id; linking needs it to exist.
+            if not (remove and chat_id and exc.code == "chat_not_found"):
+                raise
+            resolved = str(chat_id).strip()
+        return _ok(
+            self.workspace_task_link_chat(
+                workspace,
+                task_id,
+                expected_revision=expected_revision,
+                chat_id=resolved,
+                remove=remove,
             )
         )
 
@@ -5619,7 +5665,9 @@ class CiaoControlPlane:
     ) -> dict[str, Any]:
         run = self._owned_run(principal, run_id)
         try:
-            updated: BackgroundRun = await self._background_runner().cancel(run.run_id)
+            updated: BackgroundRun = await self._background_runner().cancel(
+                run.run_id, wake_owner=False
+            )
         except BackgroundRunError as exc:
             raise ControlPlaneError(exc.code, str(exc)) from exc
         return _ok(
@@ -6082,6 +6130,11 @@ class CiaoControlPlane:
         up to three nearest existing paths under the workspace root, ranked by
         basename similarity to the requested path — so the caller can offer a
         correction instead of guessing.
+
+        ``pinned`` is whether this chat's pin now names the file. ``dismissed``
+        is true when the user closed this exact path in this chat earlier, so
+        the surface was skipped on purpose; the user re-arms it by pinning the
+        file themselves from the file viewer.
         """
         workspace = self._workspace(principal)
         # Root at the principal's own agent root, not the install root: sibling
@@ -6100,21 +6153,27 @@ class CiaoControlPlane:
             raise
         if not target.is_file():
             raise ControlPlaneError("unsupported_file", "Only an existing file can be surfaced.")
+        pinned = False
+        dismissed = False
         if principal.chat_id:
             # Only a chat-scoped principal can pin: an unscoped one validates
             # and reports, and must not pick a chat on the model's behalf.
             # Recorded after both checks above, so what is stored is a path this
             # principal was allowed to name, resolved the same way a manual pin
             # resolves it so the two writers produce the same identity key.
-            self.pcm.surface_chat_file(
-                principal.chat_id, target.resolve().as_posix()
-            )
+            canonical = target.resolve().as_posix()
+            pin = self.pcm.surface_chat_file(principal.chat_id, canonical)
+            if isinstance(pin, dict):
+                pinned = pin.get("path") == canonical
+                dismissed = canonical in (pin.get("dismissed_paths") or [])
         viewers, stream_state = self._file_surface_signal(principal.chat_id)
         return _ok(
             {
                 "path": target.relative_to(root).as_posix(),
                 "viewers": viewers,
                 "stream_state": stream_state,
+                "pinned": pinned,
+                "dismissed": dismissed,
             }
         )
 
@@ -6193,8 +6252,6 @@ class CiaoControlPlane:
             if stream is not None:
                 stream_state = "active"
         return viewers, stream_state
-
-    # ---- adversarial review ---------------------------------------------
 
     async def sync_skills(self, principal: AgentPrincipal) -> dict[str, Any]:
         self._workspace(principal)

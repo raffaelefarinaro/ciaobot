@@ -35,6 +35,17 @@ def _stock(relative: str) -> str:
     return resources.files("ciao.stock").joinpath(relative).read_text(encoding="utf-8")
 
 
+def _capabilities() -> str:
+    """The capabilities index plus every reference file, as one string."""
+    root = resources.files("ciao.stock").joinpath("skills", "ciao-capabilities")
+    parts = [root.joinpath("SKILL.md").read_text(encoding="utf-8")]
+    parts += [
+        f.read_text(encoding="utf-8")
+        for f in sorted(root.joinpath("references").iterdir(), key=lambda f: f.name)
+    ]
+    return "\n".join(parts)
+
+
 def test_every_policy_row_declares_advisory_caps_only() -> None:
     """Acceptance: no shipped instruction claims a hard cap while it is advisory."""
     assert mp.CAP_SEMANTICS_ADVISORY == "advisory"
@@ -112,6 +123,15 @@ def test_capsule_unattended_guidance_defers_approval_requiring_work() -> None:
     assert "Do not ask questions or wait for approval" in text
     assert "do not route around the absent reviewer" in text
     assert "Defer and report" in text
+
+
+def test_capsule_unattended_guidance_arms_a_network_retry() -> None:
+    text = mp.UNATTENDED_CAPSULE_GUIDANCE
+    assert "ciao chat retry --action set --kind network" in text
+    assert "Do not ask questions or wait for approval" in text
+    assert "do not route around the absent reviewer" in text
+    assert "Defer and report" in text
+    assert "Never print secret values (env files, tokens, provider configs) into the conversation." in text
 
 
 def test_capsule_unattended_guidance_defers_source_and_runtime_edits() -> None:
@@ -251,8 +271,20 @@ def test_curation_schedule_defers_and_never_hard_caps() -> None:
     assert "Workspace/Memory-Consolidations.md" in skill
 
 
+def test_care_report_makes_unresolved_audit_findings_locatable() -> None:
+    # A care run once reported only "findings remain" with a total, and the
+    # operator had to ask for the items. The prompt (which owns the run's
+    # report; the skill defers to it) must ask for categories plus the affected
+    # note, and separate a finished scan from resolved findings.
+    prompt = _care_prompt()
+    assert "List unresolved audit findings grouped by category, each naming its note" in prompt
+    assert "a bare count is not actionable" in prompt
+    assert "say separately that the scan finished and how many findings remain" in prompt
+    assert "with its category and the affected note's vault-relative path" in prompt
+
+
 def test_capabilities_skill_does_not_claim_nothing_is_durable_without_approval() -> None:
-    skill = _stock("skills/ciao-capabilities/SKILL.md")
+    skill = _capabilities()
     assert "nothing becomes durable without approval" not in skill
     assert "no unattended run promotes a new always-loaded fact" in skill
 
@@ -305,17 +337,13 @@ def test_the_care_schedule_no_longer_instructs_unattended_promotion_or_settlemen
     destination nor rejection, so each of those is now a filed proposal a
     person decides.
     """
-    prompt = next(
-        entry["prompt"]
-        for entry in json.loads(_stock("schedules.json"))["schedules"]
-        if entry["schedule_id"] == "system-memory-curation"
-    )
+    prompt = _care_prompt()
     assert "into canonical guidance (the AGENTS.md body or the relevant skill/doc)" not in prompt
     assert "belongs here as a standing instruction, citing its sources" not in prompt
     assert "Only settle a proposal after its change is actually in place" not in prompt
     # And each is replaced by the routed proposal, named with the commands.
-    assert "**Route** an entry at x3 or more" in prompt
-    assert "a priority order and not a licence to edit" in prompt
+    assert "Route an entry at x3 or more" in prompt
+    assert "An x3 is a priority order, not permission to edit" in prompt
     assert "You never edit a skill or this workspace's guide body" in prompt
     assert "you never settle a proposal" in prompt
     assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
@@ -400,7 +428,7 @@ def test_the_remember_command_states_the_provenance_rule() -> None:
 def test_the_capabilities_catalog_describes_the_memory_backup() -> None:
     """The catalog has to name the three entry points a user will look for in
     Settings, and say that the engine then runs on its own."""
-    skill = " ".join(_stock("skills/ciao-capabilities/SKILL.md").split())
+    skill = " ".join(_stock("skills/ciao-capabilities/references/memory.md").split())
     assert "**Memory backup** (Settings → General → Memory backup)" in skill
     assert "**Set up in Ciaobot**" in skill
     assert "**Copy setup prompt**" in skill
@@ -415,7 +443,7 @@ def test_the_capabilities_catalog_describes_the_routing_without_overclaiming() -
     that the unattended run prepares rather than acts — otherwise the two
     surfaces tell a person opposite things about the same nightly run.
     """
-    skill = _stock("skills/ciao-capabilities/SKILL.md")
+    skill = _stock("skills/ciao-capabilities/references/models-and-extensions.md")
     assert "A reusable lesson in `Workspace/Learnings.md` routes the same way" in skill
     assert "an inventory match is a candidate, not proof" in skill
     assert "the issue body is sanitized" in skill
@@ -470,10 +498,15 @@ def test_the_development_doc_covers_the_draft_commands() -> None:
 
 
 def _care_prompt() -> str:
-    return next(
+    """The schedule prompt plus the `ciao-memory` curation references it points at (#1462)."""
+    prompt = next(
         entry["prompt"]
         for entry in json.loads(_stock("schedules.json"))["schedules"]
         if entry["schedule_id"] == "system-memory-curation"
+    )
+    refs = resources.files("ciao.stock").joinpath("skills", "ciao-memory", "references")
+    return "\n\n".join(
+        [prompt, *(item.read_text(encoding="utf-8") for item in sorted(refs.iterdir(), key=lambda i: i.name) if item.name.endswith(".md"))]
     )
 
 
@@ -544,3 +577,7 @@ def test_every_noun_verb_in_the_unattended_care_prompt_is_a_real_agent_cli_verb(
         with pytest.raises(SystemExit) as excinfo:
             parser.parse_args(argv)
         assert excinfo.value.code == 0, f"`ciao {noun} {verb}` is not a command"
+
+
+def test_stock_memory_assets_route_repo_facts() -> None:
+    assert "`repo`" in _stock("commands/remember.md")

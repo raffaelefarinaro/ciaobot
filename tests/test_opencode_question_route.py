@@ -181,3 +181,52 @@ def test_question_response_still_answers_when_no_control_plane_is_bound() -> Non
         result = ws.receive_json()
 
     assert result["ok"] is True
+
+
+def test_question_response_reports_delivered_as_message() -> None:
+    class _DeadFormManager(_Manager):
+        async def respond_question(self, _chat_id: str, **payload):
+            self.calls.append(payload)
+            return QuestionResponseResult(True, delivered_as_message=True)
+
+    manager = _DeadFormManager()
+    with signed_in(TestClient(_app(manager))).websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_json({
+            "type": "question_response",
+            "request_id": "form-1",
+            "action": "reply",
+            "answers": {"choice": ["yes"]},
+        })
+        result = ws.receive_json()
+
+    assert result["delivered_as_message"] is True
+    assert result["ok"] is True
+
+
+def test_delivered_as_message_does_not_resettle_the_attempt() -> None:
+    """A dead form's reply starts a turn, whose own result settles the attempt."""
+
+    class _DeadFormManager(_Manager):
+        async def respond_question(self, _chat_id: str, **payload):
+            self.calls.append(payload)
+            return QuestionResponseResult(True, delivered_as_message=True)
+
+    resettled: list[str] = []
+    app = _app(_DeadFormManager())
+    app.state.mcp_service = SimpleNamespace(
+        control_plane=SimpleNamespace(
+            resettle_after_question_answer=lambda chat_id: resettled.append(chat_id) or True
+        )
+    )
+    with signed_in(TestClient(app)).websocket_connect("/ws/chat/chat-1") as ws:
+        for _ in range(2):
+            # The second round trip proves the first was fully handled.
+            ws.send_json({
+                "type": "question_response",
+                "request_id": "form-1",
+                "action": "reply",
+                "answers": {"choice": ["yes"]},
+            })
+            assert ws.receive_json()["delivered_as_message"] is True
+
+    assert resettled == []

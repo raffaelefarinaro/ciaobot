@@ -1,6 +1,6 @@
 ---
 name: gws-gmail
-description: "Gmail: Send, read, and manage email."
+description: "Use when you need the raw Gmail API (labels, drafts, threads, history, settings); for send, reply, forward, read or search use the + helper skills instead."
 metadata:
   version: 0.22.5
 ---
@@ -23,15 +23,14 @@ ciao gws "$GWS_PROFILE" gmail <resource> <method> [flags]
 | [`+reply-all`](../gws-gmail-reply-all/SKILL.md) | Reply-all to a message (handles threading automatically) |
 | [`+forward`](../gws-gmail-forward/SKILL.md) | Forward a message to new recipients |
 | [`+read`](../gws-gmail-read/SKILL.md) | Read a message and extract its body or headers |
-| [`+watch`](../gws-gmail-watch/SKILL.md) | Watch for new emails and stream them as NDJSON |
 
 ## API Resources
 
 ### users
 
   - `getProfile` — Gets the current user's Gmail profile.
-  - `stop` — Turn off push notification delivery for the given user mailbox. For more information, see [Configure push notifications in Gmail API](https://developers.google.com/workspace/gmail/api/guides/push).
-  - `watch` — Set up or update a push notification watch on the given user mailbox. For more information, see [Configure push notifications in Gmail API](https://developers.google.com/workspace/gmail/api/guides/push).
+  - `stop` — Turn off push notification delivery for the given user mailbox.
+  - `watch` — Set up or update a push notification watch on the given user mailbox.
   - `drafts` — Operations on the 'drafts' resource
   - `history` — Operations on the 'history' resource
   - `labels` — Operations on the 'labels' resource
@@ -41,14 +40,4 @@ ciao gws "$GWS_PROFILE" gmail <resource> <method> [flags]
 
 ## Discovering Commands
 
-Before calling any API method, inspect it:
-
-```bash
-# Browse resources and methods
-ciao gws "$GWS_PROFILE" gmail --help
-
-# Inspect a method's required params, types, and defaults
-ciao gws "$GWS_PROFILE" schema gmail.<resource>.<method>
-```
-
-Use `gws schema` output to build your `--params` and `--json` flags.
+Browse a service with `ciao gws "$GWS_PROFILE" <service> --help`. Before calling an API method, run `ciao gws "$GWS_PROFILE" schema <service>.<resource>.<method>` and build `--params` and `--json` from its output.

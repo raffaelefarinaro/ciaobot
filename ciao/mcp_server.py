@@ -446,6 +446,30 @@ async def _op_verify_note(service: CiaoMcpService, payload_file: str = "") -> di
     )
 
 
+async def _op_note_related(service: CiaoMcpService, path: str = "", limit: int = 15) -> dict[str, Any]:
+    """List the notes connected to one vault note, before giving a verdict on it.
+
+    `path` is the note, vault-relative (`People/Sofia.md`). Returns its title
+    and `revision`, and `related`: the notes it links to (`links_to`), the notes
+    linking to it (`linked_from`) and the notes whose body names its title or an
+    alias (`mentions`), link relations first, at most `limit` (default 15,
+    1-50) with the overflow counted in `truncated`. Read each related note's
+    claims about the same subject: one that disagrees is evidence to cite.
+
+    Each related note carries its own `revision` and a `due` flag. Those are
+    what a `verify_note` payload for that note needs as `expected_revision`, and
+    `due: false` means a check already settles it, so a verdict would come back
+    `already_checked`. Reading a note is not checking it: only send a verdict
+    for a related note whose facts you checked against a real source.
+
+    Read-only. It records no search hits and does not touch the search index.
+    """
+    return await service._invoke(
+        "note_related",
+        lambda cp, p: cp.note_related(p, path=path, limit=limit),
+    )
+
+
 async def _op_gws_status(service: CiaoMcpService) -> dict[str, Any]:
     """Report whether the active workspace's Google Workspace account is
     connected and its token is valid.
@@ -469,7 +493,8 @@ async def _op_project_get(service: CiaoMcpService, project_id: str = "") -> dict
 
 
 async def _op_project(service: CiaoMcpService, action: str, name: str = "", context: str = "",
-                      vault_folder: str | None = None, project_id: str = "", stem: str = "") -> dict[str, Any]:
+                      vault_folder: str | None = None, repo_path: str | None = None,
+                      project_id: str = "", stem: str = "") -> dict[str, Any]:
     """Create, update, or restore a project in the active workspace.
 
     action:
@@ -488,6 +513,9 @@ async def _op_project(service: CiaoMcpService, action: str, name: str = "", cont
         context: (create/update) Optional project context string.
         vault_folder: (update) Safe vault-folder binding, or None to
             keep the current value.
+        repo_path: (create/update) Absolute path of a local git checkout to
+            link (must be its top level). (update) "" unlinks; None keeps
+            the current link.
         project_id: (update) Project id or case-insensitive name. Omit
             for the active project.
         stem: (restore) The completed-project stem to restore.
@@ -495,7 +523,7 @@ async def _op_project(service: CiaoMcpService, action: str, name: str = "", cont
     if action == "create":
         return await service._invoke(
             "project",
-            lambda cp, p: cp.project_create(p, name, context),
+            lambda cp, p: cp.project_create(p, name, context, repo_path or ""),
             mutating=True,
         )
     if action == "update":
@@ -503,7 +531,7 @@ async def _op_project(service: CiaoMcpService, action: str, name: str = "", cont
             "project",
             lambda cp, p: cp.project_update(
                 p, project_id, name=name or None, context=context or None,
-                vault_folder=vault_folder,
+                vault_folder=vault_folder, repo_path=repo_path,
             ),
             mutating=True,
         )
@@ -545,6 +573,13 @@ async def _op_workspaces_list(service: CiaoMcpService) -> dict[str, Any]:
     """List all configured logical workspaces — names, vault roots, and
     defaults — not just the active one."""
     return await service._invoke("workspaces_list", lambda cp, p: cp.workspaces_list(p))
+
+
+async def _op_repo_candidates(service: CiaoMcpService) -> dict[str, Any]:
+    """List git checkouts one level under ~/repos, ~/code, ~/src, ~/dev,
+    ~/Developer and ~/projects, as {roots, candidates: [{path, name, root}]}.
+    Read-only; link one with the project operation's repo_path."""
+    return await service._invoke("repo_candidates", lambda cp, p: cp.repo_candidates(p))
 
 
 async def _op_chats_list(
@@ -619,8 +654,13 @@ async def _op_chat_create(service: CiaoMcpService, project_id: str | None = None
 async def _op_chat_update(service: CiaoMcpService, chat_id: str = "", title: str | None = None,
                           provider: str | None = None, model: str | None = None,
                           mode: str | None = None, thinking_level: str | None = None,
-                          project_id: str | None = None) -> dict[str, Any]:
-    """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
+                          project_id: str | None = None,
+                          code_mode: bool | None = None) -> dict[str, Any]:
+    """Update chat metadata and same-backend model settings. Omit chat_id for calling chat.
+
+    ``code_mode`` switches code mode for a chat in a project linked to a
+    repository; turning it on returns ``repo_instructions`` and a ``note``.
+    """
     return await service._invoke(
         "chat_update",
         lambda cp, p: cp.chat_update(
@@ -632,6 +672,7 @@ async def _op_chat_update(service: CiaoMcpService, chat_id: str = "", title: str
             mode=mode,
             thinking_level=thinking_level,
             project_id=project_id,
+            code_mode=code_mode,
         ),
         mutating=True,
     )
@@ -647,13 +688,12 @@ async def _op_chat_continue(service: CiaoMcpService, chat_id: str) -> dict[str, 
     return await service._invoke("chat_continue", lambda cp, p: cp.chat_continue(p, chat_id), mutating=True)
 
 
-async def _op_chat_retry(service: CiaoMcpService, chat_id: str = "", action: str = "try_now", prompt: str = "") -> dict[str, Any]:
-    """Manage a deferred provider-limit retry: set, stop, or (default)
-    immediately try it now."""
+async def _op_chat_retry(service: CiaoMcpService, chat_id: str = "", action: str = "try_now", prompt: str = "", kind: str = "") -> dict[str, Any]:
+    """Manage a deferred retry: set, stop, or (default) immediately try it now. kind=network (with action=set) re-runs this chat's prompt after a network outage."""
     return await service._invoke(
         "chat_retry",
         lambda cp, p: cp.chat_retry_update(
-            p, chat_id, action=action, prompt=prompt  # type: ignore[arg-type]
+            p, chat_id, action=action, prompt=prompt, kind=kind  # type: ignore[arg-type]
         ),
         mutating=True,
     )
@@ -677,6 +717,11 @@ async def _op_chat_handover(service: CiaoMcpService, chat_id: str = "", provider
         )
 
     return await service._invoke("chat_handover", _op, mutating=True)
+
+
+async def _op_chat_reload(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
+    """Restart a chat's provider so changed MCP servers, plugins and skills load; the same session resumes."""
+    return await service._invoke("chat_reload", lambda cp, p: cp.chat_reload(p, chat_id), mutating=True)
 
 
 async def _op_chat_archive(service: CiaoMcpService, chat_id: str = "") -> dict[str, Any]:
@@ -1120,6 +1165,31 @@ async def _op_task_add_update(service: CiaoMcpService, task_id: str,
     )
 
 
+async def _op_task_link_chat(service: CiaoMcpService, task_id: str,
+                             expected_revision: str, chat_id: str = "",
+                             remove: bool = False) -> dict[str, Any]:
+    """Record that a chat worked on a task, or unlink it. This is not a
+    delegation: it does not complete, move or assign the task.
+
+    A linked chat may add progress notes with task_add_update. Read the task
+    first and pass the revision that read returned.
+
+    Args:
+        task_id: The task's 32-hex id.
+        expected_revision: The `revision` you just read.
+        chat_id: The chat to link, by id or exact title. Empty links this chat.
+        remove: Unlink the chat instead of linking it.
+    """
+    return await service._invoke(
+        "task_link_chat",
+        lambda cp, p: cp.task_link_chat(
+            p, task_id, expected_revision=expected_revision,
+            chat_id=chat_id or None, remove=remove,
+        ),
+        mutating=True,
+    )
+
+
 async def _op_task_report(service: CiaoMcpService, task_id: str, outcome: str,
                           summary: str) -> dict[str, Any]:
     """Report how far you got on the task this chat was handed. Call it once,
@@ -1350,7 +1420,12 @@ async def _op_file_surface(service: CiaoMcpService, path: str) -> dict[str, Any]
     currently streaming for this chat, nothing about the panel. Never
     read either field as proof the panel opened or failed to open: say
     you called file_surface, and if the user reports nothing happened,
-    do not claim you already confirmed it failed."""
+    do not claim you already confirmed it failed.
+
+    ``pinned`` says whether the chat's pin now names this file.
+    ``dismissed: true`` means the user closed this file's panel earlier, so
+    the surface was skipped: tell the user it did not open and that they can
+    pin it from the file viewer's ⋯ menu."""
     return await service._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
 
 
@@ -1362,12 +1437,14 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("vault_search", _READ, _op_vault_search.__doc__ or "", _op_vault_search),
     Operation("vault_review", _DESTRUCTIVE, _op_vault_review.__doc__ or "", _op_vault_review),
     Operation("verify_note", _WRITE, _op_verify_note.__doc__ or "", _op_verify_note),
+    Operation("note_related", _READ, _op_note_related.__doc__ or "", _op_note_related),
     Operation("gws_status", _READ, _op_gws_status.__doc__ or "", _op_gws_status),
     Operation("projects_list", _READ, _op_projects_list.__doc__ or "", _op_projects_list),
     Operation("project_get", _READ, _op_project_get.__doc__ or "", _op_project_get),
     Operation("project", _WRITE, _op_project.__doc__ or "", _op_project),
     Operation("project_action", _DESTRUCTIVE, _op_project_action.__doc__ or "", _op_project_action),
     Operation("workspaces_list", _READ, _op_workspaces_list.__doc__ or "", _op_workspaces_list),
+    Operation("repo_candidates", _READ, _op_repo_candidates.__doc__ or "", _op_repo_candidates),
     Operation("chats_list", _READ, _op_chats_list.__doc__ or "", _op_chats_list),
     Operation("chat_get", _READ, _op_chat_get.__doc__ or "", _op_chat_get),
     Operation("chat_create", _WRITE, _op_chat_create.__doc__ or "", _op_chat_create),
@@ -1376,6 +1453,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("chat_continue", _WRITE, _op_chat_continue.__doc__ or "", _op_chat_continue),
     Operation("chat_retry", _WRITE, _op_chat_retry.__doc__ or "", _op_chat_retry),
     Operation("chat_handover", _WRITE, _op_chat_handover.__doc__ or "", _op_chat_handover),
+    Operation("chat_reload", _WRITE, _op_chat_reload.__doc__ or "", _op_chat_reload),
     Operation("chat_archive", _WRITE, _op_chat_archive.__doc__ or "", _op_chat_archive),
     Operation("chat_delete", _DESTRUCTIVE, _op_chat_delete.__doc__ or "", _op_chat_delete),
     Operation("chat_stop", _DESTRUCTIVE, _op_chat_stop.__doc__ or "", _op_chat_stop),
@@ -1395,6 +1473,7 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("task_action", _WRITE, _op_task_action.__doc__ or "", _op_task_action),
     Operation("task_delegate", _WRITE, _op_task_delegate.__doc__ or "", _op_task_delegate),
     Operation("task_add_update", _WRITE, _op_task_add_update.__doc__ or "", _op_task_add_update),
+    Operation("task_link_chat", _WRITE, _op_task_link_chat.__doc__ or "", _op_task_link_chat),
     Operation("task_report", _WRITE, _op_task_report.__doc__ or "", _op_task_report),
     # `_DESTRUCTIVE`, because `stop` ends a turn irreversibly: an ask-class
     # operation, where every other task write is allow-class.

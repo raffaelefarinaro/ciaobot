@@ -44,7 +44,7 @@ function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
   }
 }
 
-async function mountSidebar() {
+async function mountSidebar(mode: 'chat' | 'memory' | 'proposals' = 'proposals') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/', component: { template: '<div />' } }],
@@ -53,7 +53,7 @@ async function mountSidebar() {
   await router.isReady()
   return mount(ProjectSidebar, {
     attachTo: document.body,
-    props: { collapsed: false, mode: 'proposals' },
+    props: { collapsed: false, mode },
     global: { plugins: [router] },
   })
 }
@@ -69,12 +69,10 @@ describe('ProjectSidebar review section', () => {
     expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review'))).toBe(false)
 
     store.bootstrapped = true
-    await nextTick()
-    await new Promise(resolve => setTimeout(resolve, 50))
-    await nextTick()
-
-    expect(apiGet).toHaveBeenCalledWith('/api/proposals')
-    expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review?workspace=personal'))).toBe(true)
+    await vi.waitFor(() => {
+      expect(apiGet).toHaveBeenCalledWith('/api/proposals')
+      expect(apiGet.mock.calls.some(([path]) => path.startsWith('/api/vault/review?workspace=personal'))).toBe(true)
+    }, { timeout: 2000 })
     wrapper.unmount()
   })
 
@@ -137,6 +135,21 @@ describe('ProjectSidebar review section', () => {
     const create = wrapper.get('.workspace-scope-new')
     expect(create.text()).toContain('New workspace')
     expect(create.attributes('href')).toBe('/settings/workspaces#new-workspace')
+  })
+
+  it.each([
+    ['chat', true],
+    ['memory', false],
+  ] as const)('switches workspace from the %s view with transition %s', async (mode, transition) => {
+    const store = useProjectStore()
+    const switchWorkspace = vi.spyOn(store, 'switchWorkspace').mockResolvedValue()
+    const wrapper = await mountSidebar(mode)
+    await wrapper.get('.workspace-scope-trigger').trigger('click')
+    await wrapper.findAll('.workspace-scope-option')[1].trigger('click')
+    // From a chat the switch lands on the new workspace's Home; a view with
+    // no chat to leave stays put. Neither opens one of its chats.
+    expect(switchWorkspace).toHaveBeenCalledWith('work', { transition })
+    wrapper.unmount()
   })
 
   it('opens the workspace scope as a keyboard menu and restores focus', async () => {

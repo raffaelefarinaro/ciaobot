@@ -97,9 +97,19 @@ logger = logging.getLogger(__name__)
 NOTE_APPLY = "note_apply"
 NOTE_UNDO = "note_undo"
 
+# The one narrow exception to "vault notes only": a `[repo <path>]` accept
+# appends a bullet to a linked repository's AGENTS.md. The receipt is journaled
+# in the workspace vault, and the repo root is recorded in its provenance and
+# re-validated by `repo_doc_root` on every recovery and undo.
+REPO_DOC_APPLY = "repo_doc_apply"
+REPO_DOC_UNDO = "repo_doc_undo"
+REPO_DOC_KINDS = frozenset({REPO_DOC_APPLY, REPO_DOC_UNDO})
+REPO_DOC_NAME = "AGENTS.md"
+REPO_DOC_SECTION = "Agent learnings"
+
 # The kinds this protocol owns. `memory_receipts` imports this module lazily to
 # route them, so the pair of modules does not import in a cycle.
-NOTE_KINDS = frozenset({NOTE_APPLY, NOTE_UNDO})
+NOTE_KINDS = frozenset({NOTE_APPLY, NOTE_UNDO, REPO_DOC_APPLY, REPO_DOC_UNDO})
 
 
 class NoteTargetRefused(mr.MemoryReceiptError):
@@ -962,6 +972,33 @@ def _compose_note_append(text: str, section: str, item: str) -> str:
     return text[:insert] + item + newline + text[insert:]
 
 
+def _check_one_new_item(item: str, *, stored_path: str, workspace: str) -> None:
+    """Refuse an ``item`` that is not exactly one supported list item."""
+    document = ne.parse_note_entries(
+        item, note_path=stored_path, workspace=workspace
+    )
+    if len(document.entries) != 1 or document.entries[0].start != 0:
+        raise mr.MemoryReceiptError(
+            f"the new bullet holds {len(document.entries)} list items rather "
+            "than one, so it is not a single fact; nothing was composed"
+        )
+    only = document.entries[0]
+    if only.end != len(item) or document.uncovered:
+        # Same reading as a replacement: a trailing newline, a paragraph or a
+        # heading beside the bullet is content the caller did not ask to write.
+        raise mr.MemoryReceiptError(
+            f"the new bullet holds {len(item) - only.end} character(s) "
+            "beside its one list item — a trailing newline, a paragraph or a "
+            "heading is not part of the fact being filed; nothing was composed"
+        )
+    if not only.supported:
+        raise mr.MemoryReceiptError(
+            "the new bullet carries a construct this entry model does not "
+            "describe (a nested block, a second block, or nothing but a stamp); "
+            "nothing was composed"
+        )
+
+
 def append_list_item(
     *,
     vault_root: Path,
@@ -1004,29 +1041,7 @@ def append_list_item(
             f"a fold may only append under {', '.join(APPEND_SECTIONS)}; "
             f"{section!r} is not one of them, so nothing was composed"
         )
-    document = ne.parse_note_entries(
-        str(item), note_path=stored_path, workspace=workspace
-    )
-    if len(document.entries) != 1 or document.entries[0].start != 0:
-        raise mr.MemoryReceiptError(
-            f"the new bullet holds {len(document.entries)} list items rather "
-            "than one, so it is not a single fact; nothing was composed"
-        )
-    only = document.entries[0]
-    if only.end != len(item) or document.uncovered:
-        # Same reading as a replacement: a trailing newline, a paragraph or a
-        # heading beside the bullet is content the caller did not ask to write.
-        raise mr.MemoryReceiptError(
-            f"the new bullet holds {len(str(item)) - only.end} character(s) "
-            "beside its one list item — a trailing newline, a paragraph or a "
-            "heading is not part of the fact being filed; nothing was composed"
-        )
-    if not only.supported:
-        raise mr.MemoryReceiptError(
-            "the new bullet carries a construct this entry model does not "
-            "describe (a nested block, a second block, or nothing but a stamp); "
-            "nothing was composed"
-        )
+    _check_one_new_item(str(item), stored_path=stored_path, workspace=workspace)
     with mr.queue_lock(target):
         text = _read_note_text(target)
         current = mr.content_revision(text)
@@ -1047,6 +1062,89 @@ def append_list_item(
         source=source,
         workspace=workspace,
     )
+
+
+def repo_doc_root(repo_root: Path | str) -> Path:
+    """The resolved root of a git checkout that holds a writable ``AGENTS.md``.
+
+    Refuses anything that is not an existing directory with a ``.git`` entry,
+    and an ``AGENTS.md`` that is missing, a symlink or not a regular file
+    (:func:`resolve_note_path` follows no link).
+    """
+    root = Path(repo_root).resolve()
+    if not root.is_dir():
+        raise NoteTargetRefused(f"repository root is not a directory: {repo_root}")
+    if not (root / ".git").exists():
+        raise NoteTargetRefused(f"{root} is not a git checkout")
+    target = resolve_note_path(root, REPO_DOC_NAME)
+    if target.name != REPO_DOC_NAME:
+        raise NoteTargetRefused(
+            f"{target.name} is not spelled {REPO_DOC_NAME}; a repository write "
+            "names that exact file"
+        )
+    return root
+
+
+def compose_repo_doc_append(text: str, item: str) -> str:
+    """``text`` with ``item`` filed under ``## Agent learnings``."""
+    return _compose_note_append(text, REPO_DOC_SECTION, item)
+
+
+def append_repo_doc_item(
+    *,
+    vault_root: Path,
+    repo_root: Path | str,
+    expected_revision: str,
+    item: str,
+    actor: str,
+    source: str,
+    workspace: str = "",
+) -> dict[str, Any]:
+    """File one bullet in a linked repository's AGENTS.md, journaled in the vault.
+
+    The write is the vault note protocol with ``root`` set to the repository,
+    so it is revision-checked, undoable and recoverable; the receipt lands in
+    the workspace vault's journal and names the repository in its provenance.
+    """
+    root = repo_doc_root(repo_root)
+    vroot = canonical_vault(vault_root)
+    target = resolve_note_path(root, REPO_DOC_NAME)
+    expected = str(expected_revision or "").strip()
+    if not expected:
+        raise mr.MemoryReceiptError(
+            "an expected revision is required; this primitive never overwrites a "
+            "note it has not read"
+        )
+    _check_one_new_item(item, stored_path=REPO_DOC_NAME, workspace=workspace)
+    with mr.queue_lock(target):
+        text = _read_note_text(target)
+        if mr.content_revision(text) != expected:
+            raise mr.RevisionConflict(
+                "the note changed since this append was planned; nothing was "
+                "written"
+            )
+        after_text = compose_repo_doc_append(text, item)
+        return _commit_note_change(
+            root=root,
+            relative_path=REPO_DOC_NAME,
+            expected_revision=expected,
+            after_text=after_text,
+            actor=actor,
+            source=source,
+            workspace=workspace,
+            provenance={"repo_root": str(root)},
+            kind=REPO_DOC_APPLY,
+            undo_of="",
+            journal=mr.journal_path(vroot, None),
+        )
+
+
+def _repo_root_from_receipt(receipt: dict[str, Any]) -> Path:
+    """The repository a repo-doc receipt names, re-validated, or a refusal."""
+    raw = str((receipt.get("provenance") or {}).get("repo_root") or "").strip()
+    if not raw or receipt.get("relative_path") != REPO_DOC_NAME:
+        raise NoteTargetRefused("the receipt does not name a repository AGENTS.md")
+    return repo_doc_root(raw)
 
 
 def _settle_quietly(
@@ -1105,15 +1203,21 @@ def reconcile_note_receipt(
     """
     if str(receipt.get("kind", "")) not in NOTE_KINDS:
         return None
-    root = vault_for_journal(journal)
-    if root is None:
-        return mr._settle(
-            journal,
-            receipt,
-            mr.CONFLICT,
-            "the journal is not inside a vault, so the note target cannot be resolved",
-        )
+    root: Path | None
+    if str(receipt.get("kind", "")) in REPO_DOC_KINDS:
+        root = None
+    else:
+        root = vault_for_journal(journal)
+        if root is None:
+            return mr._settle(
+                journal,
+                receipt,
+                mr.CONFLICT,
+                "the journal is not inside a vault, so the note target cannot be resolved",
+            )
     try:
+        if root is None:
+            root = _repo_root_from_receipt(receipt)
         target = resolve_note_path(root, str(receipt.get("relative_path", "")))
     except mr.MemoryReceiptError as exc:
         return mr._settle(
@@ -1233,7 +1337,8 @@ def undo_note_receipt(
     be appended, this raises :class:`ciao.memory_receipts.MemoryReceiptError`
     saying so: the undo is done, and the caller must re-read rather than retry.
     """
-    if str(receipt.get("kind", "")) != NOTE_APPLY:
+    kind = str(receipt.get("kind", ""))
+    if kind not in (NOTE_APPLY, REPO_DOC_APPLY):
         raise mr.UndoUnsupported("only a note apply can be undone")
     # The no-op write is journaled with both images, so it passes every image
     # and revision check below and the reverse write would put the note's own
@@ -1280,6 +1385,17 @@ def undo_note_receipt(
         raise mr.UndoUnsupported(
             "the vault this receipt belongs to could not be resolved"
         )
+    reverse_kind = NOTE_UNDO
+    reverse_provenance = {"undo_of": str(receipt.get("id", ""))}
+    if kind == REPO_DOC_APPLY:
+        try:
+            root = _repo_root_from_receipt(receipt)
+        except NoteTargetRefused as exc:
+            raise mr.RevisionConflict(
+                "the repository's AGENTS.md is no longer a writable checkout file"
+            ) from exc
+        reverse_kind = REPO_DOC_UNDO
+        reverse_provenance["repo_root"] = str(root)
     try:
         target = resolve_note_path(root, str(receipt.get("relative_path", "")))
     except NoteTargetRefused as exc:
@@ -1310,8 +1426,8 @@ def undo_note_receipt(
             actor=actor,
             source=source,
             workspace=str(receipt.get("workspace", "")),
-            provenance={"undo_of": str(receipt.get("id", ""))},
-            kind=NOTE_UNDO,
+            provenance=reverse_provenance,
+            kind=reverse_kind,
             undo_of=str(receipt.get("id", "")),
             journal=journal,
         )

@@ -25,7 +25,7 @@ def test_windows_doc_exists_and_is_linked_from_the_hub_and_readme() -> None:
 def test_every_surface_names_the_same_windows_one_liner() -> None:
     for relative in ("README.md", "docs/WINDOWS.md", "INTEGRATIONS.md"):
         assert ONE_LINER in _read(relative), relative
-    assert ONE_LINER in _read("ciao/stock/skills/ciao-capabilities/SKILL.md")
+    assert ONE_LINER in _read("ciao/stock/skills/ciao-capabilities/references/install-and-settings.md")
     assert ONE_LINER in _read("skills/ciao-release/SKILL.md")
 
 
@@ -69,7 +69,8 @@ def test_the_update_section_names_the_tasks_and_commands_the_updater_uses() -> N
     assert windows_service.RECOVER_TASK_NAME in section  # \Ciaobot\Recover
     for command in ("ciao update stage", "ciao update apply", "ciao update status"):
         assert command in section, command
-    assert "#857" not in _read("ciao/stock/skills/ciao-capabilities/SKILL.md")
+    for path in (Path(ROOT) / "ciao/stock/skills/ciao-capabilities").rglob("*.md"):
+        assert "#857" not in path.read_text(encoding="utf-8"), path
 
 
 def test_architecture_describes_the_windows_lifecycle() -> None:

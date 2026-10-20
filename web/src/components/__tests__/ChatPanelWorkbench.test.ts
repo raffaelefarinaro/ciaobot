@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // The aligned chat layout: the model trigger in the composer, the per-message
-// action row, and Work details shown as a rail on a wide pane.
+// action row, and Chat details shown as a rail on a wide pane.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -204,7 +204,32 @@ describe('ChatPanel aligned layout', () => {
     wrapper.unmount()
   })
 
-  it('shows Work details as a rail on a wide pane, hidden from its heading and reopened from the info tab', async () => {
+  it('truncates long file names in Chat details Files', async () => {
+    const observers: Array<() => void> = []
+    vi.stubGlobal('ResizeObserver', class {
+      private cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe() {
+        observers.push(() => this.cb([{ contentRect: { width: 1200 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+      }
+      disconnect() {}
+      unobserve() {}
+    })
+    const long = '2026-09-22_Swiss_Life_health_examination_letter_0B5C7D9E1F.pdf'
+    const wrapper = await mountPanel([
+      { role: 'user', content: 'make it', timestamp: '2026-09-25T10:00:00Z', turn_index: 0 },
+      { role: 'system', tool_name: '_filecard', content: `Workspace/${long}`, file_path: `Workspace/${long}`, action: 'created', timestamp: '2026-09-25T10:00:03Z' },
+      { role: 'assistant', content: 'Saved. See `notes/mentioned_only_in_reply_with_a_very_long_name.md`.', timestamp: '2026-09-25T10:00:05Z', effective_model: 'sonnet' },
+    ])
+    observers.forEach(fire => fire())
+    await nextTick()
+    const files = wrapper.get('#chat-work-rail').findAll('.rail-item.chat-rail-file')
+    expect(files).toHaveLength(2)
+    expect(files[0].attributes('title')).toContain(long)
+    wrapper.unmount()
+  })
+
+  it('shows Chat details as a rail on a wide pane, hidden from its heading and reopened from the info tab', async () => {
     // ChatPanel observes more than one element; report a wide pane to all.
     const observers: Array<() => void> = []
     vi.stubGlobal('ResizeObserver', class {
@@ -228,10 +253,11 @@ describe('ChatPanel aligned layout', () => {
     expect(rail.text()).not.toContain('Current state')
     // The task origin note sits in the rail, and only there, while it shows.
     const origins = wrapper.findAllComponents({ name: 'TaskOriginNote' })
-    expect(origins.map(o => o.props('variant'))).toEqual(['rail'])
+    expect(origins).toHaveLength(1)
+    expect(rail.findComponent({ name: 'TaskOriginNote' }).exists()).toBe(true)
 
     // The header carries Archive only, as an icon button (labelled on wide
-    // panes, icon-only on narrow); the toggle lives with Work details.
+    // panes, icon-only on narrow); the toggle lives with Chat details.
     const actions = wrapper.get('.pane-header .header-actions')
     expect(actions.findAll('button').map(b => b.text())).toEqual(['Archive'])
     expect(actions.get('button').classes()).toContain('btn-icon')
@@ -248,7 +274,7 @@ describe('ChatPanel aligned layout', () => {
     await reopen.trigger('click')
     expect(wrapper.find('#chat-work-rail').exists()).toBe(true)
     // The drawer is the narrow-pane form; it does not open on a wide pane.
-    expect(wrapper.find('.chat-work-inspector').exists()).toBe(false)
+    expect(wrapper.find('.chat-rail--drawer').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -291,11 +317,94 @@ describe('ChatPanel aligned layout', () => {
       wrapper.unmount()
     })
 
-    it('puts the task origin note above the transcript while the rail is hidden', async () => {
+    it('keeps the task origin out of the transcript and in Chat details', async () => {
+      const observers: Array<() => void> = []
+      vi.stubGlobal('ResizeObserver', class {
+        private cb: ResizeObserverCallback
+        constructor(cb: ResizeObserverCallback) { this.cb = cb }
+        observe() {
+          observers.push(() => this.cb([{ contentRect: { width: 600 } } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver))
+        }
+        disconnect() {}
+        unobserve() {}
+      })
       const wrapper = await mountPanel(DELEGATED_TURNS, DELEGATION)
-      const note = wrapper.getComponent({ name: 'TaskOriginNote' })
-      expect(note.props('variant')).toBe('note')
-      expect(note.props('chat')).toMatchObject({ chat_id: 'chat-1', helper: DELEGATION.helper })
+      observers.forEach(fire => fire())
+      await nextTick()
+
+      expect(wrapper.find('.chat-rail--drawer').exists()).toBe(false)
+      expect(wrapper.findAllComponents({ name: 'TaskOriginNote' })).toHaveLength(0)
+
+      await wrapper.get('.work-inspector-trigger').trigger('click')
+      await nextTick()
+      const drawer = wrapper.get('#chat-work-rail.chat-rail--drawer')
+      const origins = drawer.findAllComponents({ name: 'TaskOriginNote' })
+      expect(origins).toHaveLength(1)
+      expect(origins[0].props('chat')).toMatchObject({ chat_id: 'chat-1', helper: DELEGATION.helper })
+      wrapper.unmount()
+    })
+  })
+
+  describe('engine-injected turns', () => {
+    const WAKE = '[Ciaobot] 1 background run finished.\n\n\u2014 nightly (bg-1, FAILED, exit 3)\nlog: /logs/bg-1.log\n(no output)'
+    const at = '2026-09-25T10:00:00Z'
+
+    it('draws an origin turn as a notice card, not a user bubble', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: WAKE, timestamp: at, turn_index: 0, origin: 'background_run' },
+      ])
+      const card = wrapper.getComponent({ name: 'InjectedPromptCard' })
+      expect(card.props('prompt').kind).toBe('background_run')
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(0)
+      expect(wrapper.find('.injected-prompt-wrap[data-msg-role="user"]').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('draws a steered wake as a card without the steered mark', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: WAKE, timestamp: at, turn_index: 0, origin: 'background_run', steered: true },
+      ])
+      expect(wrapper.getComponent({ name: 'InjectedPromptCard' }).props('prompt').kind).toBe('background_run')
+      expect(wrapper.find('.steered-mark').exists()).toBe(false)
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(0)
+      wrapper.unmount()
+    })
+
+    it('draws a legacy background wake without origin as a card', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: WAKE, timestamp: at, turn_index: 0 },
+      ])
+      expect(wrapper.getComponent({ name: 'InjectedPromptCard' }).props('prompt').kind).toBe('background_run')
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(0)
+      wrapper.unmount()
+    })
+
+    it("links an automation turn to the chat's automation", async () => {
+      const wrapper = await mountPanel(
+        [{ role: 'user', content: 'Run the digest.', timestamp: at, turn_index: 0, origin: 'schedule', unattended: true }],
+        { schedule_id: 'sched-1', schedule_title: 'Nightly digest' },
+      )
+      const card = wrapper.getComponent({ name: 'InjectedPromptCard' })
+      expect(card.props('schedule')).toEqual({ id: 'sched-1', title: 'Nightly digest' })
+      expect(wrapper.find('.unattended-mark').exists()).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('keeps the auto mark for an unattended turn with no origin', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: 'tick', timestamp: at, turn_index: 0, unattended: true },
+      ])
+      expect(wrapper.findComponent({ name: 'InjectedPromptCard' }).exists()).toBe(false)
+      expect(wrapper.find('.unattended-mark').exists()).toBe(true)
+      wrapper.unmount()
+    })
+
+    it('leaves typed text that merely starts with [Ciaobot] as a bubble', async () => {
+      const wrapper = await mountPanel([
+        { role: 'user', content: '[Ciaobot] is a nice name', timestamp: at, turn_index: 0 },
+      ])
+      expect(wrapper.findComponent({ name: 'InjectedPromptCard' }).exists()).toBe(false)
+      expect(wrapper.findAll('.message-wrap.user')).toHaveLength(1)
       wrapper.unmount()
     })
   })

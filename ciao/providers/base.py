@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import base64
+import math
 import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, AsyncIterable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ciao.models import (
     AgentRequest,
@@ -51,6 +52,10 @@ class ProviderCapabilities:
     subagent_messages: bool = False
     session_history: bool = False
     schedule_unattended: bool = False
+
+
+# Outcome of a "move to background" request (#1413).
+MoveToBackgroundOutcome = Literal["moved", "nothing", "unsupported", "not_running", "failed"]
 
 
 def build_prompt(request: AgentRequest) -> str:
@@ -102,11 +107,16 @@ def build_claude_message_stream(
     request: AgentRequest,
     *,
     session_id: str = "default",
+    uuid: str = "",
 ) -> AsyncIterable[dict[str, Any]]:
-    """Build a one-message async stream for Claude structured input."""
+    """Build a one-message async stream for Claude structured input.
+
+    ``uuid`` tags the message so the CLI's user-message replay echoes it back
+    unchanged (the delivery signal for ``steer_turn``).
+    """
 
     async def _stream() -> AsyncGenerator[dict[str, Any], None]:
-        yield {
+        message: dict[str, Any] = {
             "type": "user",
             "message": {
                 "role": "user",
@@ -115,6 +125,9 @@ def build_claude_message_stream(
             "parent_tool_use_id": None,
             "session_id": session_id,
         }
+        if uuid:
+            message["uuid"] = uuid
+        yield message
 
     return _stream()
 
@@ -221,8 +234,36 @@ class BaseProvider(ABC):
         """
         ...
 
+    async def steer_turn(self, request: AgentRequest) -> str | None:
+        """Inject a user message into the running foreground turn.
+
+        Returns a delivery id, or None when the provider cannot steer now.
+        """
+        return None
+
+    async def move_to_background(self) -> MoveToBackgroundOutcome:
+        """Move the running turn's foreground tools to the background (OpenCode's Ctrl+B).
+
+        ``moved``: a backgroundable call was running and the provider accepted
+        the request; ``nothing``: accepted, but nothing was running that could
+        move; ``not_running``: no live session; ``failed``: the provider
+        refused or could not be reached. Providers without the feature (Claude)
+        answer ``unsupported``.
+        """
+        return "unsupported"
+
     async def disconnect(self) -> None:
         """Discard any provider-side connection state."""
+
+    @property
+    def background_work_outstanding(self) -> bool:
+        """True while background work this provider's process owns is running."""
+        return False
+
+    @property
+    def seconds_since_activity(self) -> float:
+        """Seconds since the provider last heard from its server."""
+        return math.inf
 
 
 class BaseSDKProvider(BaseProvider):

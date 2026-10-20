@@ -11,10 +11,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
-- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, and it only answers in bootstrap mode.) All `/ws/*` routes require the signed session cookie.
+- All `/api/*` routes except `POST /api/auth`, `GET /api/auth/check`, `GET /api/startup-status`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. (`GET /api/setup/inspect-folder` is not middleware-exempt, and it only answers in bootstrap mode.) All `/ws/*` routes require the signed session cookie.
 - Node mode is gone: there is one engine per install and a browser either talks to it directly or not at all. There is no second origin, no local-control capability header, and no session bridge between origins. `docs/REMOTE_BOUNDARY.md` records what replaced the old model.
 - `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), `password` (required — the dashboard password, at least 4 characters; setup always enables protection), plus optional `vault_mode`, `workspace_name`, `push_contact`, `port`, `python`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace. When the chosen folder already contains nested workspace directories (`memory-vault/<name>/` with a `MEMORY.md` inside), those are adopted as the workspace registry and `workspace_name` is ignored.
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
+- `/api/host/terminal` takes the normal session path (it is in neither the public nor the loopback-only allowlist, so a local process without a session gets 401) and then requires a browser on the engine's computer: loopback TCP peer, loopback `Host`, same-host `Origin`/`Referer`. The body carries an action id or a chat/project id, never a command or a path.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 - `POST /agent/v1/{op}` is the agent CLI's loopback transport (`ciao <noun> <verb>` inside a managed provider shell, see `docs/ARCHITECTURE.md` → `agent_surface.py` and `docs/AGENT_CLI.md`). It takes a scoped bearer capability (`CIAO_AGENT_TOKEN`) in an `Authorization: Bearer` header, runs the registered control-plane operation, and returns the same JSON envelope; it is not a browser or curl API and does not accept the session cookie.
@@ -30,20 +31,21 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
 | GET, POST | `/api/auth/settings` | Read whether a password is configured, or change the PWA password (`current_password` required) |
-| GET | `/api/projects` | List projects |
-| POST | `/api/projects` | Create project |
-| PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project |
+| GET | `/api/projects` | List projects. Each carries `repo_path` and `repo`: `{path, branch, dirty, missing, instructions}` or `null` when unlinked. `instructions` is `{name, chars}` for the AGENTS.md (CLAUDE.md when there is no AGENTS.md) that code mode injects, `chars` being the injected text's length after the 20,000-character cap, or `null` when there is none or the folder is missing |
+| POST | `/api/projects` | Create project. Optional `repo_path` links a local git checkout (absolute path to its top level; 400 with the reason otherwise) |
+| PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project. PATCH accepts `repo_path` (`""` unlinks) |
 | POST | `/api/projects/reorder` | Reorder a workspace's projects (drag-to-reorder) |
 | POST | `/api/projects/{project_id}/complete` | Close a vault-backed project. Body `{"outcome": "completed"\|"stopped", "note": "..."}`; both fields optional (`completed` and an empty note when omitted). The note is written into the project document before the folder moves to `completed/`. Chats are archived. Open tasks stay on the board |
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
 | GET, POST | `/api/projects/{project_id}/chats` | List or create project chats. `?archived=1&offset=0&limit=10` returns a paginated compact archive catalog |
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
+| GET | `/api/repos/candidates` | Git checkouts one level under ~/repos, ~/code, ~/src, ~/dev, ~/Developer, ~/projects: `{roots, candidates: [{path, name, root}]}` |
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant; returns bounded opaque file references |
 | GET | `/api/chats` | List all chats; `?active_only=1` returns only active chats plus compact memory-pass source metadata for Home |
 | GET | `/api/menubar-chats` | Compact chat list for the loopback-only local feed (legacy route name, no native client) |
 | POST | `/api/chats/read-all` | Mark all chats read |
-| GET, PATCH, DELETE | `/api/chats/{chat_id}` | Read compact chat metadata (including archived chats), update, or delete chat. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it); see **Chat pins** below |
+| GET, PATCH, DELETE | `/api/chats/{chat_id}` | Read compact chat metadata (including archived chats), update, or delete chat. A PATCH body of `{"pin": {"path": "...", "expected_revision": N}}` sets the chat's pinned file instead (`path: ""` closes it); see **Chat pins** below. A PATCH body may carry `code_mode: bool` (linked projects only; 400 when the project is unlinked or its repo is missing). `code_mode: false` is refused with 400 once the chat has messages (`ChatInfo.user_turn_count > 0`): code mode is one-way per chat, and only a project move turns it off afterwards |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
 | POST | `/api/chats/{chat_id}/handover` | Continue chat on a fresh provider session |
 | POST | `/api/chats/{chat_id}/fork` | Fork chat continuing from a completed turn |
@@ -54,8 +56,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/compact` | Compact the chat's provider session to shrink its context window (the Compact button beside the context meter). Runs as a stream like a turn, so status and result events arrive on the chat socket. 404 unknown chat; 409 `{error:"chat is archived", archived:true}`, `{error:"chat is busy"}` while a turn runs, the open-question error while a native question awaits an answer, or `{error:"nothing to compact yet"}` before the chat has a provider session |
 | POST | `/api/chats/{chat_id}/stop` | Stop an in-flight turn; HTTP fallback for the websocket `stop` message, for when that chat's socket is disconnected or mid-reconnect |
+| POST | `/api/chats/{chat_id}/move-to-background` | OpenCode's Ctrl+B: move the running turn's foreground shell or subagent to the background. `{moved: bool}`; 409 `{"error":"unsupported"|"not_running"}`, 502 when OpenCode refused. The turn then ends normally and the work finishes as a background wake |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
-| GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/messages/part` | Fetch one full history row by absolute index (lazy expansion) |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts. `?agent_id=` narrows to one agent (bare or `agent-`-prefixed) and skips reading the siblings — what the read-only subagent view polls |
@@ -72,6 +74,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/libreoffice-status` | Whether LibreOffice (`soffice`) is available to render `.pptx` previews |
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
 | POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
+| GET | `/api/host/terminal` | Can this browser open a terminal on the engine's machine: {available, platform, reason, terminal, actions}; a non-host browser gets available:false, reason:"not_on_host" |
+| POST | `/api/host/terminal` | Open a terminal on the engine's machine: {"action": <id>} runs one allowlisted command, {"open":"folder", chat_id?\|project_id?} opens the chat's code-mode worktree, the project repo or the workspace agent root; 200 {ok, platform, launched}; 403 not_on_host; 409 unavailable_headless / no_terminal_found / unsupported_platform / folder_missing; 400 unknown_action |
 | GET | `/api/file-history` | List snapshots for a `(chat_id, file_path)` |
 | GET | `/api/file-content` | Read one snapshot's content |
 | GET | `/api/vault-markdown-paths` | List workspace-relative markdown paths (file viewer resolves Obsidian wikilinks) |
@@ -91,11 +95,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/tasks/{task_id}/complete` | Mark one task `done` at `expected_revision` (required). Optional `resolution` is the user's completion note and lands in the same write. This is the signed-in user's own session, so completion is theirs to make here; the same operation through the agent CLI is refused `completion_requires_user`. A task linked to a live chat or attempt is refused too — detach it first |
 | POST | `/api/tasks/{task_id}/updates` | Append one progress note: `{"workspace", "expected_revision", "text", "send"}`. Allowed while the task is `in_progress` or `in_review`. `send: true` also delivers the note to the live attempt's chat and is refused when nothing is live. A note is not a description edit and does not complete the task. A stale revision is a 409 and writes nothing |
 | PATCH | `/api/tasks/{task_id}/updates/{update_id}` | Reword one progress note at `expected_revision`: `{"workspace", "expected_revision", "text"}`. The author and recorded time stay. A stale revision is a 409 |
+| POST | `/api/tasks/{task_id}/chats` | Record that a chat worked on the task outside delegation, or unlink it with `"remove": true`: `{"workspace", "expected_revision", "chat_id", "remove"}`. Not a delegation: it never moves, assigns or completes the task, in any status. A stale revision is a 409 and writes nothing. |
 | POST | `/api/tasks/{task_id}/resolution-review` | Ask for a learning pass over the task's **saved** resolution: `{"workspace", "expected_revision"}`. Editing a resolution never queues a pass by itself; this is the explicit ask. The same text on the same completion is not extracted twice. Answers `{workspace, queued, completion_id, memory_chat_id}`, or `{queued: false, reason: "session insights off"}` when Session insights is off. A task with no saved resolution is a 400, a resolution holding the closing fence token is a 400, and a stale revision is a 409 |
-| POST | `/api/tasks/{task_id}/delegate` | Hand one task to the agent as **one ordinary chat**, at `expected_revision` (required): `{"workspace", "expected_revision", "project_id"}` and nothing else — there is no body key for prompt text, because the prompt is built server-side from the record's own fields. `project_id` takes an id or a name in this workspace and overrides where the chat is hosted; omit it to use the task's own project, or the workspace's General. The turn runs with the **default** attendance — never `unattended`, so an approval card it raises is an ordinary Needs-you card. Answers 200 with `{workspace, created, attempt, chat_id, project_id, project_origin, task, changed_since_delegated}`; `created: false` means a live attempt already existed and nothing was created or sent |
+| POST | `/api/tasks/{task_id}/delegate` | Hand one task to the agent as **one ordinary chat**, at `expected_revision` (required): `{"workspace", "expected_revision", "project_id"}` and nothing else — there is no body key for prompt text, because the prompt is built server-side from the record's own fields. `project_id` takes an id or a name in this workspace and overrides where the chat is hosted; omit it to use the task's own project, or the workspace's General. The turn runs with the **default** attendance — never `unattended`, so an approval card it raises is an ordinary Needs-you card. Answers 200 with `{workspace, created, attempt, chat_id, project_id, project_origin, task}`; `created: false` means a live attempt already existed and nothing was created or sent |
 | GET | `/api/tasks/{task_id}/attempts?workspace=` | One task's whole attempt history, the live attempt first. A row is `{attempt_id, task_id, task_revision, chat_id, state, created_at, updated_at, ended_at, detail, live}`, plus `chat_archived` when `chat_id` is set (the `task` carries the same flag); `state` is one of `running`, `needs_you`, `failed`, `interrupted`, `ready_for_review`, `stopped` |
 | POST | `/api/tasks/{task_id}/attempt/{attempt_id}/{action}` | One lifecycle gesture on one attempt; `{"workspace"}` is the only body key, because the gesture acts on an attempt rather than editing a record (there is no field to present a revision at). `action` is `stop` (ends the turn irreversibly; the task keeps its linkage and stays uncompletable), `resume` (continues the **same** chat under the **same** attempt; only an attempt that did not finish is resumable), `retry` (starts a **new** attempt in a new chat, leaving the previous one as history) or `detach` (stops the turn if running and clears the linkage, which is what makes the task completable again). An unknown verb is a 400 `invalid_action`; an unknown attempt id is a 404 |
-| POST | `/api/tasks/{task_id}/attempt/{attempt_id}/update` | **Send update**: `{"workspace", "expected_revision", "message"}` and nothing else. Sends one ordinary attended message into that attempt's own chat — no second chat, no second attempt, the linkage untouched, and the turn watched so the agent's answer advances the card — and then rebinds the attempt to `expected_revision`, so `changed_since_delegated` comes back `false` and the control retires. `message` is the text the board previewed, so it travels with the request; the revision is what the server checks, and a stale one is a **409** with nothing sent. A turn already running in that chat gets the message queued into it and the answer is `queued: true`; a chat that will not take it yet is a **409** `task_update_busy`, also with nothing sent and nothing rebound. An attempt that no longer holds the task is a 400 `invalid_action` — continuing a dead turn is `resume`, not this |
 | GET | `/api/webhooks?workspace=` | List a workspace's webhook triggers (public records only, never secrets) |
 | POST | `/api/webhooks` | Create a webhook trigger; returns the trigger plus its one-time secret |
 | GET | `/api/webhooks/receipts?workspace=` | A workspace's recorded webhook events across every trigger, newest first, at most `limit` rows (#1044). A row is `{receipt_id, trigger_id, trigger_name, status, chat_id, event_text, created_at, updated_at, detail}`; `status` is `accepted`/`launching`/`launched`/`failed`/`interrupted`, `chat_id` is the chat a `launched` event became (`null` otherwise), and a receipt whose trigger has since been deleted is still listed — it is filtered on its own `workspace`. Never a verifier, an idempotency key or a body digest |
@@ -135,14 +139,12 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/mcp/status` | Read-only provider-native MCP inventory for `?workspace=<name>` (or the primary workspace). Returns `{workspace, agent_root, providers}`. Each provider row has `{provider, available, inventory_state, servers, setup}`. Server rows contain safe metadata `{name, scope, source, kind, enabled, allowed, connections}`; connections are per-chat `{chat_id, state, error?}` with state `connected`, `failed`, `disabled`, `needs_auth`, or `unknown`. `allowed` is `false` when Claude workspace policy blocks the server, `true` when a project server is permitted, and `null` when policy is not applicable/known. No running session produces an empty connections array. Invalid native config yields `inventory_state: "unknown"`; secrets, endpoint URLs, arguments and raw provider errors are never returned. The route does not start providers or MCP servers. Use the provider's own CLI to add/authenticate servers; `setup.add` and `setup.authenticate` give workspace-specific instructions |
 | GET | `/api/mcp/usage` | Agent surface per-operation call/error counters, plus a `window` object naming the aggregation window (lifetime totals vs. the retained detail records behind them) (no credentials) |
 | GET | `/api/startup-status` | Read startup phase progress |
-| GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); guards a drain before an engine restart |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
 | POST | `/api/package/update` | Return update guidance for the installed package; production engine updates go through the signed one-line installer or Settings → Home |
-| GET | `/api/update/status` | Installed-engine update job: install mode, whether it can update, and the persisted operation record; `error` carries a stage/apply that was refused before it could record one (unreachable latest release, already on that version), or a record that could not be read |
-| POST | `/api/update/stage` | Start staging a release for an installer-managed engine (background; poll status) |
-| POST | `/api/update/apply` | Apply the staged release: drain, detached swap, restart, rollback (background; poll status) |
+| GET | `/api/update/status` | Installed-engine update job: install mode, whether it can update, the persisted operation record, and `running` (the background job is alive); `error` carries a stage/apply that was refused before it could record one (unreachable latest release, already on that version), or a record that could not be read |
+| POST | `/api/update/start` | Update an installer-managed engine: stage the release, then apply it (drain, detached swap, restart, rollback) in one background job; applies an already-staged release directly (poll status) |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |
@@ -157,10 +159,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | POST | `/api/workspaces/{name}/archive` | Archive a workspace: unregister it, archive its chats, take its user schedules, and move its folder intact into `<install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/`. Refuses the primary or last workspace, a workspace with a running chat, and layouts it cannot move safely (409) |
 | DELETE | `/api/workspaces/{name}` | Alias of `POST /api/workspaces/{name}/archive`, kept for existing scripts; it no longer deletes anything |
-| GET | `/api/workspaces/archived` | List archived workspaces, newest first: `{archived: [{id, name, archived_at, path, layout, color, default_provider, gws_profile, disallowed_tools, allowed_mcp_servers, schedules, schedules_dropped, restorable, blocked_reason}]}`. The settings and `schedules` count are what a restore would apply after validation (`archive.json` syncs through git, so it is treated as untrusted); the PWA shows them in the restore confirmation |
-| POST | `/api/workspaces/archived/restore` | Restore an archived workspace (`{id}`): move its folder back, re-register it, and put its schedules back **paused**. Every registry field and schedule row is rebuilt from validated metadata: invalid schedules and system rows are dropped, restored ones are pinned to the workspace, and an unreadable MCP allowlist becomes `[]`. Refuses when the name or the folder is taken, or when the archive's vault location is not inside the restored folder (409). Response `restored: {id, name, path, schedules, schedules_paused, schedules_dropped}` |
+| GET | `/api/workspaces/archived` | List archived workspaces, newest first: `{archived: [{id, name, archived_at, path, layout, color, default_provider, gws_profile, disallowed_tools, schedules, schedules_dropped, restorable, blocked_reason}]}`. The settings and `schedules` count are what a restore would apply after validation (`archive.json` syncs through git, so it is treated as untrusted); the PWA shows them in the restore confirmation |
+| POST | `/api/workspaces/archived/restore` | Restore an archived workspace (`{id}`): move its folder back, re-register it, and put its schedules back **paused**. Every registry field and schedule row is rebuilt from validated metadata: invalid schedules and system rows are dropped, and restored ones are pinned to the workspace. Refuses when the name or the folder is taken, or when the archive's vault location is not inside the restored folder (409). Response `restored: {id, name, path, schedules, schedules_paused, schedules_dropped}` |
 | GET | `/api/settings/providers` | Read each provider CLI's connection status |
-| POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or opencode CLI |
+| POST | `/api/settings/providers/{provider}/{action}` | Connect (browser on the engine's computer only: opens the provider sign-in in a terminal through `ciao.host_terminal`; any other browser gets 403 `not_on_host` with `command`), verify, or log out through the Claude Code or opencode CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
 | POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
@@ -193,6 +195,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/admin/restart` | Drain active chat work and restart the installed engine without pulling or rebuilding code (authenticated) |
 | POST | `/api/admin/drain` | Close admission for new turns ahead of an engine update; returns `{draining, active_chat_ids}` (loopback-only, no session; used by `ciao update apply`) |
 | POST | `/api/admin/drain/cancel` | Reopen admission after an update's drain timed out; returns `{draining: false}` (loopback-only, no session; used by `ciao update apply`) |
+| GET | `/api/admin/restart-blockers` | Chats a restart/stop would interrupt: `{restart_blockers: [{chat_id, reasons}]}`, reasons ⊂ streaming, background_agents, background_work, open_question, open_permission (loopback-only without session; session otherwise; used by `ciao service` and Settings → Restart) |
 | GET | `/api/admin/status` | Read admin/deploy status |
 | GET | `/api/service/login` | Whether the engine service starts at the next sign-in, as the machine reports it |
 | PATCH | `/api/service/login` | Turn that start-at-sign-in state on or off for this engine's own service (`{"enabled": bool}`) |
@@ -466,12 +469,20 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
   -H 'content-type: application/json' \
   -d '{"name":"Home reno","workspace":"personal","context":""}'
 
-# Update — any subset of: name, context, vault_folder. The running server owns
+# Update — any subset of: name, context, vault_folder, repo_path ("" unlinks). The running server owns
 # `.runtime/web_projects.json`; for renames, use PATCH here (not a hand-edit of
 # the file), or the next request will race with the server and create a duplicate.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/projects/$PID" \
   -H 'content-type: application/json' \
   -d '{"context":"Track the kitchen rebuild"}'
+
+# Link a local git checkout (must be the checkout's top level; 400 with the reason otherwise).
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/projects/$PID" \
+  -H 'content-type: application/json' \
+  -d '{"repo_path":"/Users/me/repos/myapp"}'
+
+# Candidate checkouts for the picker (read-only).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/repos/candidates"
 
 # Reorder — pass the full top-to-bottom sequence of project ids for one
 # workspace. Omitted ids keep their relative order after the listed ones;
@@ -552,6 +563,12 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/tasks
   -H 'content-type: application/json' \
   -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\",\"text\":\"Schema is in. Credentials arrive Tuesday.\"}"
 
+# Link a chat that worked on the task, outside delegation: CHAT is a chat id from
+# the chat list. Status and assignee do not move. `"remove": true` unlinks it.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/chats" \
+  -H 'content-type: application/json' \
+  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\",\"chat_id\":\"$CHAT\"}"
+
 # Ask for a learning pass over the task's saved resolution, at the revision you
 # read. Editing the resolution does not queue one by itself.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/resolution-review" \
@@ -584,8 +601,7 @@ AID=$(printf '%s' "$DREV" | python3 -c 'import json,sys; print(json.load(sys.std
 DREV=$(printf '%s' "$DREV" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task"]["revision"])')
 
 # The board row now carries the attempt facts a card draws: `attempt_state` (the
-# badge), `live_attempt_id` (non-empty while an attempt holds the task) and
-# `changed_since_delegated` (the task was edited after the handoff).
+# badge) and `live_attempt_id` (non-empty while an attempt holds the task).
 curl -sS -b /tmp/ciao.jar \
   "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID?workspace=personal"
 
@@ -615,17 +631,6 @@ curl -sS -b /tmp/ciao.jar -X POST \
 curl -sS -b /tmp/ciao.jar -X POST \
   "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/detach" \
   -H 'content-type: application/json' -d '{"workspace":"personal"}'
-
-# Send update: the task was edited after the hand-off, so hand the agent the current
-# description in the chat it is already working in. One ordinary attended message, no
-# second attempt — and the attempt is rebound to $TREV, so `changed_since_delegated`
-# goes back to false and the answer settles the card. A turn already running there
-# takes the message as its next follow-up (`queued: true`); a stale $TREV is a 409
-# that sends nothing and rebinds nothing.
-curl -sS -b /tmp/ciao.jar -X POST \
-  "http://localhost:${PWA_PORT:-8443}/api/tasks/$TID/attempt/$AID/update" \
-  -H 'content-type: application/json' \
-  -d "{\"workspace\":\"personal\",\"expected_revision\":\"$TREV\",\"message\":\"The task has changed since you were handed it. Work from this version.\"}"
 ```
 
 Project and chat uploads are limited to 50 MB per file, 100 files per request,
@@ -736,6 +741,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # `stop` message; use this when driving a chat over plain HTTP or when a
 # socket may not be connected.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/stop"
+
+# Move the running turn's foreground shell or subagent to the background
+# (OpenCode chats only; OpenCode's Ctrl+B). {moved: bool}: false when nothing
+# backgroundable was running. 409 {"error":"unsupported"} on Claude chats,
+# {"error":"not_running"} when the chat has no live provider.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/move-to-background"
 
 # Start a new provider session inside an existing chat (resets context).
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/new"
@@ -894,8 +905,8 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 **Routine settings (Settings → General / Models)**
 
 ```bash
-# Read internal-routine settings: the automatic-session-insights switch, the
-# critique model override, and the per-provider default model / mode /
+# Read internal-routine settings: the automatic-session-insights switch and the
+# per-provider default model / mode /
 # thinking / Session insights maps. insights_enabled=false stops the memory
 # pass. provider_insights_models is keyed by the chat's provider; a missing
 # entry means that provider's default chat model reads the session.
@@ -916,16 +927,20 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # anything else is a 400.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_enabled":false,"provider_insights_models":{"claude":"haiku"},"critique_models":"anthropic/claude-sonnet-4.5","provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"insights_enabled":false,"provider_insights_models":{"claude":"haiku"},"provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Keyboard settings (Settings → Home → Keyboard shortcuts)**
 
 ```bash
-# Read engine-shared shortcut overrides and send mode. Missing shortcut keys
-# use the PWA's built-in binding; "disabled" turns one off. Bindings use
-# physical KeyboardEvent codes and the Mod/Alt/Shift modifiers. The send mode
-# is "modifier" (Cmd/Ctrl+Enter) or "enter".
+# Read engine-shared shortcut overrides, send mode and mid-turn delivery.
+# Missing shortcut keys use the PWA's built-in binding; "disabled" turns one
+# off. Bindings use physical KeyboardEvent codes and the Mod/Alt/Shift
+# modifiers. The send mode is "modifier" (Cmd/Ctrl+Enter) or "enter". The
+# mid-turn delivery, `mid_turn_delivery`, is what a message sent while a turn
+# runs does by default: "queue" (a follow-up turn, the default) or "steer"
+# (injected into the running turn). The same field rides in the /ws/events
+# snapshot and in `keyboard_settings_changed`, and is part of `revision`.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/keyboard"
 
 # Include the revision returned by GET. A stale revision receives 409 instead
@@ -933,7 +948,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/keybo
 # .runtime/app_settings.json and broadcast through /ws/events.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/keyboard" \
   -H 'content-type: application/json' \
-  -d '{"revision":"<revision-from-GET>","keyboard_shortcuts":{"archiveChat":"Mod+KeyK","workspace2":"disabled"},"keyboard_send_mode":"enter"}'
+  -d '{"revision":"<revision-from-GET>","keyboard_shortcuts":{"archiveChat":"Mod+KeyK","workspace2":"disabled"},"keyboard_send_mode":"enter","mid_turn_delivery":"steer"}'
 ```
 
 **MCP inventory and status (Settings → MCP)**
@@ -1487,16 +1502,23 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_title`: auto-title finished.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
+- `chat_code_mode`: a chat's code mode was switched. Fields: `{chat_id, project_id, code_mode, actor: "user"|"agent", at}`. Switching off also publishes `chat_repo_location` with `{}`.
 - `chat_postprocess`: the memory pass queued by archiving a chat reporting on that chat. Fields: `{chat_id, project_id, postprocess}`, where `postprocess` is `{steps: {memory_pass: {status: "queued"|"running"|"ok"|"attention", extra: {chat_id}}}, updated_at}` and `extra.chat_id` is the pass's own chat. The same object is persisted on the archived chat and returned as `ChatInfo.postprocess`, so it can still link to its memory pass after a reload.
 - `workspaces_changed`: a workspace was archived or restored (any tab or device). No payload; clients refetch `GET /api/workspaces` and `GET /api/projects`, so the sidebar and pickers stop offering an archived workspace without a reload.
 - `schedules_changed`: an automation was created, edited, paused, resumed, or deleted (REST route, Automations page, or the `schedule_*` MCP tools mid-turn). No payload; the client refetches `GET /api/schedules`, which is where the computed `next_run` / `missed` / `context_available` fields are assembled. Without it an automation created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload. The deprecated `loops_changed` alias was removed with the loop MCP tools (#441); existing clients listen for `schedules_changed`.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 
-Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, and `server_restarting`. Permission and native-form cards stay visible until the provider acknowledges the reply: the server emits `permission_response_result` / `question_response_result` for the requesting client and ephemeral `permission_resolved` / `question_resolved` controls to other attached subscribers. Results are correlated by `request_id` and optional `session_id`; the PWA keeps the complete response frame in memory and retries it after a closed socket, while the persisted `pending_permission` / `pending_question` snapshot reconciles tabs that missed the live control. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; structured questions use `question_response {request_id, session_id?, action: "reply"|"cancel", answers: {question_id: string[]}}`. `permission_response.approved` must be a JSON boolean, never a truthy string.
+Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `tool_result`, `permission_request`, `model_capability_question`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `steer_fallback`, `prompt_cancelled`, `status`, `error`, and `server_restarting`. Permission and native-form cards stay visible until the provider acknowledges the reply: the server emits `permission_response_result` / `question_response_result` for the requesting client and ephemeral `permission_resolved` / `question_resolved` controls to other attached subscribers. `question_response_result` carries `delivered_as_message: true` when the form was dead (see `ChatInfo.pending_question`) and the reply was sent as an ordinary turn. `permission_response_result` carries `expired: true` when the permission was dead (see `ChatInfo.pending_permission`) and the reply only cleared it. Results are correlated by `request_id` and optional `session_id`; the PWA keeps the complete response frame in memory and retries it after a closed socket, while the persisted `pending_permission` / `pending_question` snapshot reconciles tabs that missed the live control. A `message` frame that reaches the server always starts its turn: the stream is registered before any socket write, so a client that disconnects right after sending (mobile/webview suspension) still gets the turn, and the reconnecting socket replays the buffered `user_echo` from the broker. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, `question_response`, and `capability_response`; structured questions use `question_response {request_id, session_id?, action: "reply"|"cancel", answers: {question_id: string[]}}`. `permission_response.approved` must be a JSON boolean, never a truthy string.
 
 **Image-capability pre-flight**: when a turn carries images and the selected model cannot see them, the server pauses before dispatch and emits `model_capability_question {request_id, missing: "image_input", current_model, candidates: [{id, label, supports_vision?, disabled?}], timeout_s: 30}`. `candidates` leads with the current model (disabled) followed by all same-backend vision models (for `opencode`, every catalog entry with `images is True`; other providers have no non-vision models today). The PWA renders the full provider-filtered `ModelSelector` inline — vision models only — with the current model shown disabled, so the user can pick any suitable model in one step. The client answers with `capability_response {request_id, action, model_id?}`: `switch` re-dispatches the turn on `model_id` (the chat model is persisted and a `model_changed` event is emitted) and `cancel` (or the 30s timeout) closes the turn with a `status` bubble telling the user the images were not sent. The `picker` action is retained only for old clients. The question is skipped entirely for text-only turns and for unattended (automation) turns, which close with the bubble instead of waiting.
 
-**Queue management**: while the assistant is streaming, the client can queue follow-up messages (mode `queue`). Each queued item gets an `id` and is flushed as its own user turn once the prior turn finishes. When that turn starts, its `user_echo` includes `entry_id` so the client removes only the flushed item and keeps later queue entries visible. The client can also send `queue_reorder {entry_id, before_id}` (move `entry_id` before `before_id`, or to the end when `before_id` is null), `queue_edit {entry_id, text, images?}`, and `queue_remove {entry_id}`. The server confirms with `queue_state {queue: [{id, text, images?}]}` so connected clients stay in sync.
+**Queue management**: while the assistant is streaming, the client can queue follow-up messages. A `message` frame sent mid-turn takes an optional `delivery`: `"queue"` (the default, and what a frame without the field means) flushes as its own user turn once the prior turn finishes; `"steer"` hands it to the running turn through the provider's native steering. `queued {id, text, images, delivery, waiting}` acknowledges it (`waiting` is always false: a new message is live). When a queued turn starts, its `user_echo` includes `entry_id` so the client removes only the flushed item and keeps later queue entries visible. The client can also send `queue_reorder {entry_id, before_id}` (move `entry_id` before `before_id`, or to the end when `before_id` is null), `queue_edit {entry_id, text, images?}`, `queue_remove {entry_id}` and `queue_set_delivery {entry_ids: string[], delivery: "queue"|"steer"}`. `queue_set_delivery` is the one frame behind the per-message mode control, the Steer action and Steer all; it carries 1 to 100 entry ids of at most 128 characters, and a malformed frame is ignored. The server confirms with `queue_state {queue: [{id, text, images?, delivery, steering, waiting}]}` so connected clients stay in sync (every entry has this shape). `waiting: true` marks a parked entry (held after Stop, an error or a question pause: `delivery: "queue"`, `steering: false`); `waiting: false` marks an entry of the running turn's own queue. Waiting entries come first. The client uses the flag to show a held chip as *Waiting* with a Steer button instead of the Queue/Steer pair.
+
+Steering. Setting entries to `steer` dispatches them at once, together with every other steer-mode entry not yet dispatched, as ONE message: the entries' texts joined with a blank line (`"\n\n"`) and all their images, in list order. A dispatched entry stays in the queue with `steering: true`, locked against edit, remove and a switch back to `queue`, until the provider confirms the message reached the turn. Then the server publishes `steered {entry_ids, text, images, turn_index, sent_at, delivery_id, origin?}` (the entries leave the queue, the message becomes its own user turn, history marks it `steered: true`, and clients dedup by `turn_index`) followed by `queue_state`. Nothing is dropped: a steer that cannot be dispatched, or is still undelivered when the turn ends, reverts to `delivery: "queue"` in place and the server publishes `steer_fallback {entry_ids, reason: "no_turn"|"not_running"|"finished"|"stopped"}` and `queue_state`. `no_turn`: no live foreground turn (none running, a background drain, or the queue closed); `not_running`: the provider could not take the steer (it has none, or the turn is past accepting one); `finished`: the turn ended or errored first; `stopped`: Stop wins, and the provider drops the pending steer. The reverted entries then flush as the next turn through the usual path, except after Stop (below). A provider that is slow (10 s) or fails to take the steer is a `not_running` fallback too. Providers without steering (OpenCode, for now) always fall back with `not_running`. A steer-mode entry with no text and no images reverts to queue at once (`not_running`). The steered turn inherits the running turn's unattended flag, so a steer into a scheduled turn does not make it look attended. Steer text gets the same `@file` expansion as a normal prompt, but no context prefix. The steered turn carries `origin` only when every steered entry carries the same one (a wake steered on its own); mixed with a typed entry or a different origin it has none.
+
+`prompt_cancelled {turn_index}`: Stop arrived while a Claude turn's prompt was still queued behind a background follow-up, so the CLI never ran it. The turn is rolled back (its index is reused by the next turn, and its timing, image, unattended and steered records are dropped), the client removes that user bubble, and the prompt reappears as a waiting entry in the next `queue_state` (`delivery: "queue"`). The stream buffers it after the turn's `user_echo`, so a reconnecting client replays both in order.
+
+**Stop holds the whole queue.** After a user Stop nothing queued is sent automatically: queued messages and steers Stop reverted are parked on the chat with their chips (`queue_state`). Pressing Steer on them with nothing running, `queue_set_delivery {entry_ids, delivery: "steer"}` with no live foreground turn, sends those entries now as a new turn: texts joined with a blank line, all images, list order, through the normal start path (prefix, capsule and `@file` refs apply). The new turn carries `origin` only when every sent entry carries the same one. They leave the waiting queue; every other waiting entry stays waiting. **Waiting entries only leave by an explicit action.** A queue parked on the chat (after Stop, an error, a question pause or a retry) is never re-seeded or flushed by a later message you send. Its chips stay visible in `queue_state` (which lists waiting entries first, then the running turn's own queue), and an entry leaves only through send-now, `queue_edit`, `queue_remove` or `queue_reorder`, which reach waiting entries as well as live ones. `queue_set_delivery` with `"queue"` on a waiting entry is a no-op. With a turn running, `"steer"` on a waiting entry (alone or mixed with live ids) moves it into the running turn's queue with its id, text and images and dispatches it with the other steer entries; if that steer falls back it is a live queue-mode entry of that turn, so it flushes as the next turn when the turn ends normally, and parks again if the turn is stopped. Send-now with nothing to send (blank text and no image that still resolves) returns without changes and leaves the entries waiting. During a restart drain the frame is answered with `server_restarting`.
 
 **Auto tier-fallback status events**: when the primary model returns a capability error (image input, tool use, context length, etc.), the server emits a `status` event with a "retrying on &lt;model&gt;" message, then runs the retry and emits the normal `result` for the new model. The terminal `result.effective_model` is the retry target's id. Rate limits, auth errors, content filters, and 5xx do NOT trigger this path; only Claude chats pinned to a bare tier alias participate.
 
@@ -1517,6 +1539,12 @@ An automation fires its prompt as an ordinary user turn, so without a marker it 
 - The model gets a matching line inside the injected-context block (stripped from rendered history) telling it the turn is unattended, that nobody is watching, and not to ask questions or wait for approvals.
 - Permission mode for these turns is `bypass`: an escalation would be auto-denied ("Scheduled runs cannot wait for interactive approval"), which silently broke any automation needing network access or a first-time write. Deny rules still apply.
 
+**Injected turns (origin)**
+
+Turns the engine writes into a chat are tagged with who wrote them, persisted in `ChatInfo.user_turn_origin` (`{"<turn_index>": origin}`) and rolled back with the other per-turn records when Stop cancels an unrun prompt. Values: `background_run`, `cli_task_wake`, `schedule`, `task_delegation`, `task_resume`, `webhook`, `update_task`.
+- WS `user_echo` carries optional `origin` (also on a queued wake when it flushes as its own turn, and on a send-now of waiting entries that all share one); WS `steered` carries it when every steered entry shares the same origin; `GET /api/chats/{chat_id}/messages` sets `origin` on the user entry. Absent = typed by the person (or a mix). `unattended` and `steered` are unchanged and independent; an origin turn that was steered is drawn as its card, without the steered mark.
+- The PWA draws these turns as a collapsed notice card instead of a user bubble. Background-run and lost-CLI-task wakes recorded before this field existed are recognised by their fixed `[Ciaobot] …` first line.
+
 **Automation banner**
 
 The PWA shows a banner at the top of a chat when an automation is bound to it. A project-bound automation is 1:many (it spawns a new chat each run), so the chat carries a durable backlink: `ChatInfo.schedule_id` and `ChatInfo.schedule_title`, stamped in `prepare_schedule_chat` for both the project (new chat) and fixed-chat (`web_chat_id`) branches and included in every chat object via `to_dict()`. The banner filters `GET /api/schedules` where `s.schedule_id === chat.schedule_id` OR `s.web_chat_id === chat.chat_id` (the second arm covers every fixed-chat automation, including the interval entries that replaced loops). Each row links to `/schedules/<id>` (Manage) and offers Pause/Resume (`PATCH {"enabled": bool}`) and Run now (`POST /api/schedule-run/{schedule_id}`). Existing chats predating the field stay empty-string and render no banner.
@@ -1526,6 +1554,8 @@ The PWA shows a banner at the top of a chat when an automation is bound to it. A
 Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged with `file_touch`. The PWA renders each card chronologically inside expanded `Activity`, plus a deduplicated `Outputs` chip below the final answer. If a turn is interrupted before producing a final answer, the chip remains inside `Activity` so the touched file is not hidden.
 
 - WS `/ws/chat/{chat_id}` `tool_use` event: adds optional `file_touch: {file_path, action}` when the tool mutates a file on disk. Detection lives in `extract_file_touch` (`ciao/web/chat_broker.py`); `action` is `written | edited`.
+- WS `/ws/chat/{chat_id}` `tool_use` event: adds optional `backgroundable: true` on a call `POST /api/chats/{chat_id}/move-to-background` can move (OpenCode `shell`/`subagent`). The call's result arrives as its own `tool_result` frame (#1416).
+- WS `/ws/chat/{chat_id}` `tool_result` event (OpenCode only): `{tool_name, tool_use_id?, is_error?, detail?, parent_tool_use_id?, session_id?}`. OpenCode emits one after every tool call, as its own frame rather than a second `tool_use` (#1416). The PWA marks the call's existing Activity line failed when `is_error` is set and never paints a second line. Claude emits none.
 - `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Both provider readers honour this.
 - Refused or failed calls get no card. `file_touch` is attached when a call is *requested*, so a denied `Write` used to paint an Outputs chip for a file that was never created. Live: the server publishes `tool_denied {tool_use_id}` on a deny and strips the touch from the replay buffer (the permission gate keys requests by `tool_use_id`, which is the same id the `tool_use` event carries). On reload: `/messages` and the subagent renderer skip the card when that call's `tool_result` came back `is_error`. The activity row stays either way, so the attempt is still visible.
 - Chat card/link clicks first resolve `/api/chats/{chat_id}/file-path?path=...`, then open the canonical absolute path through `/api/workspace-file` (text/code), `/api/workspace-image`, or the binary/HTML viewer. Resolution is exact and anchors relative paths to that chat's agent root. A missing chat/file returns 404; a disallowed extension returns 415. The signed-session API boundary is unchanged. Standalone viewer requests still anchor relative paths to `workspace_root`; absolute paths retain the intentional unrestricted host-path policy and extension/size guards. The workspace File access setting (`agent_fs_scope`) confines the agent and its shell, not these viewers. A failed manual or automatic pin leaves the viewer open.
@@ -1721,8 +1751,8 @@ moment it is exposed.
 ## State
 
 - Project and chat state: `.runtime/web_projects.json`. `.runtime/server.lock` prevents two backend processes from owning this registry, and `.runtime/web_projects.audit.jsonl` records append-only mutation IDs/revisions for repair without storing chat content. On-disk shape mirrors the `ProjectInfo` and `ChatInfo` dataclasses in `ciao/web/project_chats.py`; `to_dict()` on each defines the JSON fields. `ChatInfo.user_turn_timings` holds per-turn `{sent_at, completed_at, duration_ms}` keyed by user-turn index (as str); the matching `_turn_perf_started` map on `ProjectChatManager` is in-memory only.
-- `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...], "request_id": ..., "session_id": ...}`) set when the model paused the chat on a question. Native V2 forms persist this field until the server acknowledges the matching `question_response` (including an explicit cancel); transport loss or a terminal stream frame is not an acknowledgement. The PWA reads it on chat open to rebuild the interactive question picker after a reload. Empty string when no question is pending.
-- `ChatInfo.pending_permission` (string): the same durable acknowledgement boundary for a native permission, with `{request_id, session_id, tool_name, message, tool_input}`. It is cleared only by a successful/authoritatively stale response, not merely because the SSE turn ended or the browser disconnected.
+- `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...], "request_id": ..., "session_id": ...}`) set when the model paused the chat on a question. Native V2 forms persist this field until the server acknowledges the matching `question_response` (including an explicit cancel); transport loss or a terminal stream frame is not an acknowledgement. The PWA reads it on chat open to rebuild the interactive question picker after a reload. A native form persisted across an engine restart carries `"stale": true`. A form with no provider and no running turn is "dead": `question_response` cancel clears it, reply clears it and starts a normal turn whose prompt carries the answer (`question_response_result.delivered_as_message: true`), and an ordinary `message` supersedes it. A form held by a live provider still blocks new turns. Empty string when no question is pending.
+- `ChatInfo.pending_permission` (string): the same durable acknowledgement boundary for a native permission, with `{request_id, session_id, tool_name, message, tool_input}`. It is cleared only by a successful/authoritatively stale response, not merely because the SSE turn ended or the browser disconnected. A permission with no provider and no running turn is dead: an allow or deny clears it and reports ok with `expired: true` (an allow is not applied), and an ordinary `message` supersedes it.
 - `ChatInfo.schedule_id` / `ChatInfo.schedule_title` (strings, in `to_dict()`): backlink to the schedule that created or drives the chat. Stamped in `prepare_schedule_chat` for both schedule branches (project-schedule new chat, fixed-chat reuse). Drives the automation banner in ChatPanel. Empty for interactive chats and for chats created before the field existed. See "Automation banner" above.
 - Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `schedule_create`/`schedule_update` MCP tools carry the field semantics in their own docstrings.
 - Automation state: `.runtime/schedules.json` (`ciao/schedules.py`, `ScheduleEntry`), every cadence in one store. A legacy `.runtime/loops.json` is imported once on startup as `frequency: "interval"` entries — the `loop-…` id is kept as the `schedule_id` so deep links still resolve — and renamed `loops.json.migrated`. Interval entries additionally carry `interval_minutes`; their `missed` is always false, since relative cadence has no expected slot to have missed. `last_status` (`""` | `running` | `ok` | `error` | `busy` | `missing-chat` | `skipped`) is carried by every cadence: it is stamped `running` at dispatch and replaced by the run's outcome, which is what lets a wall-clock slot tell a completed run apart from one whose turn died mid-flight. A wall-clock entry whose run for the expected slot ended in `error` reports `missed: true` so it can be re-run from the UI (issue #486). `last_status` describes one dispatch, not the entry's whole history: `last_dispatch_id` (`<slot-day>#<token>`) names the dispatch it belongs to, so a run superseded by an overlapping one — a manual "Run now" started just before the cron slot — no longer writes its result over the current run's, while `last_completed_on` records the occurrence a completed run served so an already-done slot is never replayed because a later run for it failed (issue #490).

@@ -70,6 +70,19 @@ describe('parseQuestions', () => {
     expect(qs[0].requestId).toBe('r1')
   })
 
+  test('parseQuestions carries stale from a persisted native form', () => {
+    const stale = parseQuestions(JSON.stringify({ request_id: 'f', stale: true, questions: [{ id: 'q' }] }))
+    expect(stale[0].stale).toBe(true)
+    const live = parseQuestions(JSON.stringify({ request_id: 'f', questions: [{ id: 'q' }] }))
+    expect(live[0].stale).toBeUndefined()
+  })
+
+  test('stale freeform card keeps the marker', () => {
+    const qs = parseQuestions(JSON.stringify({ request_id: 'f', stale: true, questions: [] }))
+    expect(qs[0].id).toBe('__freeform__')
+    expect(qs[0].stale).toBe(true)
+  })
+
   test('allowOther defaults to true and honours an explicit isOther', () => {
     const withOptions = parseQuestions(JSON.stringify({
       questions: [{ question: 'q', isOther: false, options: [{ label: 'a' }] }],

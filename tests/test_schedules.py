@@ -116,16 +116,25 @@ def test_system_schedules_load_from_stock_not_runtime(tmp_path: Path) -> None:
     assert any(item.schedule_id == "system-memory-curation" for item in schedules)
 
 
+def _curation_text(prompt: str) -> str:
+    """The schedule prompt plus the `ciao-memory` curation reference files it points at (#1462)."""
+    from importlib import resources
+
+    refs = resources.files("ciao.stock").joinpath("skills", "ciao-memory", "references")
+    return "\n\n".join([prompt, *(item.read_text(encoding="utf-8") for item in sorted(refs.iterdir(), key=lambda i: i.name) if item.name.endswith(".md"))])
+
+
 def test_stock_memory_curation_schedule_contains_the_procedure(tmp_path: Path) -> None:
     """The schedule itself carries canonical-doc and memory-pass routing."""
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
-    assert "canonical doc" in entry.prompt.lower()
+    text = _curation_text(entry.prompt).lower()
+    assert "canonical doc" in text
     # The post-archive writer is the memory pass; the one-shot insights stage
     # this used to name was deleted in #627.
-    assert "memory pass" in entry.prompt.lower()
-    assert "session-insights" not in entry.prompt.lower()
+    assert "memory pass" in text
+    assert "session-insights" not in text
 
 
 def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
@@ -924,7 +933,7 @@ def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> 
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
-    prompt = entry.prompt
+    prompt = _curation_text(entry.prompt)
     # Promotion stays forbidden; consolidation is required when needed.
     assert "Do not promote new facts into the bounded" in prompt
     assert "consolidate that region now" in prompt
@@ -932,7 +941,8 @@ def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> 
     assert "Workspace/Memory-Consolidations.md" in prompt
     assert "undo log" in prompt
     # Guardrail 2: judgment calls become reviewable questions, not deletions.
-    assert "[review] Keep" in prompt
+    assert 'Keep "<entry text>" in ciao:<region>?' in prompt
+    assert "ciao memory-proposal-add --kind review --text-file" in prompt
     assert "Memory-Proposals.md" in prompt
     assert "ciao memory status" in prompt
     # The old blanket ban must be gone, or the two instructions cancel out.
@@ -944,10 +954,11 @@ def test_workspace_care_runs_overdue_structured_os_audit(tmp_path: Path) -> None
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")
     assert entry is not None
-    assert "ciao vault-index --write" in entry.prompt
-    assert "ciao os-audit --json --scope workspace" in entry.prompt
-    assert "last_full_pass" in entry.prompt
-    assert entry.prompt.index("vault-index --write") < entry.prompt.index("os-audit --json")
+    text = _curation_text(entry.prompt)
+    assert "ciao vault-index --write" in text
+    assert "ciao os-audit --json --scope workspace" in text
+    assert "last_full_pass" in text
+    assert text.index("vault-index --write") < text.index("os-audit --json")
 
 
 def test_user_schedule_description_round_trips(tmp_path: Path) -> None:
@@ -1296,6 +1307,59 @@ async def test_catch_up_recovers_an_interrupted_weekly_run(store: ScheduleStore)
     assert dispatched == [entry.schedule_id]
 
 
+def test_enrich_schedule_does_not_flag_a_retrying_run_as_missed():
+    from ciao.web.routes_api import _enrich_schedule
+
+    enriched = _enrich_schedule(
+        _interrupted_entry(last_status="retrying"), now=_AFTER_THE_SLOT
+    )
+
+    assert enriched["missed"] is False
+
+
+def test_settle_retrying_runs_only_touches_this_chats_retrying_rows(
+    store: ScheduleStore,
+):
+    from ciao.schedules import settle_retrying_runs
+
+    rows = []
+    for status, chat in (("retrying", "chat-a"), ("retrying", "chat-b"), ("skipped", "chat-a")):
+        e = store.create(
+            daily_time_utc="08:00", prompt=f"p {status} {chat}", model="sonnet",
+            mode="bypass", chat_id=0, frequency="daily", timezone_name="UTC",
+        )
+        e.last_status = status
+        e.last_run_chat_id = chat
+        e.last_dispatch_id = "2026-06-15#abc"
+        store.replace(e)
+        rows.append(e.schedule_id)
+
+    assert settle_retrying_runs(store, "chat-a", "ok") is True
+
+    got = [store.get(i) for i in rows]
+    assert [g.last_status for g in got] == ["ok", "retrying", "skipped"]
+    assert got[0].last_completed_on == "2026-06-15"
+
+
+def test_archiving_the_run_chat_fails_a_retrying_run(store: ScheduleStore):
+    from ciao.schedules import settle_runs_for_archived_chat
+
+    ids = []
+    for status in ("retrying", "skipped"):
+        e = store.create(
+            daily_time_utc="08:00", prompt=f"p {status}", model="sonnet",
+            mode="bypass", chat_id=0, frequency="daily", timezone_name="UTC",
+        )
+        e.last_status = status
+        e.last_run_chat_id = "chat-x"
+        store.replace(e)
+        ids.append(e.schedule_id)
+
+    assert settle_runs_for_archived_chat(store, "chat-x") is True
+
+    assert [store.get(i).last_status for i in ids] == ["error", "ok"]
+
+
 async def test_catch_up_never_refires_a_completed_run(store: ScheduleStore):
     """The double-fire guard. A run that reached a clean terminal state — or
     one that is only waiting on the user or the provider — is served, and no
@@ -1303,7 +1367,7 @@ async def test_catch_up_never_refires_a_completed_run(store: ScheduleStore):
     restart that stamp can only belong to a turn that never finished, which
     `test_restart_turns_an_unfinished_run_into_a_recoverable_miss` covers.)
     """
-    for status in ("ok", "skipped", ""):
+    for status in ("ok", "skipped", "retrying", ""):
         store_dir = store  # one store per status keeps the ids distinct
         entry = store_dir.create(
             daily_time_utc="08:00",

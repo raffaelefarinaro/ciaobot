@@ -16,6 +16,9 @@ belongs. The destination vocabulary is :data:`DESTINATIONS`:
 * ``[learnings]`` — reusable how-to knowledge → ``Workspace/Learnings.md``.
 * ``[review]``   — nobody was sure → waits for a human or the curator.
 
+``[repo <path>]`` is queued too but is not in :data:`DESTINATIONS`, see
+:data:`REPO_DESTINATION`.
+
 It also owns the one note-rewriting primitive the queue needs outside a region:
 :func:`set_note_type`, which a `[category <id>]` accept uses to retype the notes
 that were already filed under a spelling nobody had written down.
@@ -282,6 +285,13 @@ DESTINATIONS: tuple[str, ...] = (
 """Destination vocabulary shared with the proposals queue and the stock memory
 assets. A bullet tagged outside this set is treated as untagged and falls back
 to section defaults."""
+
+REPO_DESTINATION = "repo"
+"""The ``[repo <path>]`` kind: a fact for a linked repository's ``AGENTS.md``.
+
+Deliberately not in :data:`DESTINATIONS`: it needs a linked-repo payload that
+transcript-only producers (``import_extract``) cannot supply. The CLI and the
+memory pass use this constant instead."""
 
 # Matches a trailing destination tag: ``[memory]``, ``[project]``,
 # ``[people: Mo Salah]``. The colon-payload form is what the queue and the
@@ -1323,6 +1333,40 @@ Be conservative: when unsure between update and add, choose add.
 Reply with ONLY a JSON array, one object per candidate in their given order:
 [{"action": "add"}, {"action": "update", "index": 2, "text": "..."}, {"action": "covered"}]
 No prose, no code fences, no trailing commentary.
+
+<example>
+Input:
+Region `ciao:memory` current entries:
+1. The user prefers tabs over spaces.
+2. Deploys happen on Fridays.
+
+Candidate facts:
+A. The user likes tabs for indentation.
+Output: [{"action": "covered"}]
+</example>
+
+<example>
+Input:
+Region `ciao:memory` current entries:
+1. The user prefers tabs over spaces.
+2. Deploys happen on Fridays.
+
+Candidate facts:
+A. The user's dog is called Biscuit.
+Output: [{"action": "add"}]
+</example>
+
+<example>
+Input:
+Region `ciao:memory` current entries:
+1. The user prefers tabs over spaces.
+2. Deploys happen on Fridays.
+
+Candidate facts:
+A. Deploys now happen on Thursdays, not Fridays.
+B. The user prefers short commit messages.
+Output: [{"action": "update", "index": 2, "text": "Deploys happen on Thursdays."}, {"action": "add"}]
+</example>
 """
 
 # One reconcile call is bounded by the region cap (~3000 chars) plus a few

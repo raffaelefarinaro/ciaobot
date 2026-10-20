@@ -448,6 +448,191 @@ describe('per-chat WS auto-reconnect', () => {
     expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(false)
   })
 
+  test('a tool call and its result keep one line and mark a failed call', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-results'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c1' })
+    send({ type: 'tool_result', tool_name: 'shell', tool_use_id: 'c1', is_error: true })
+    let tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(1)
+    expect(tool.content).toContain('shell exit 1')
+    expect(tool.tool_use_ids).toEqual(['c1'])
+    expect(tool.failed).toEqual([true])
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c2' })
+    send({ type: 'tool_result', tool_use_id: 'c2' })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.tool_use_ids).toEqual(['c1', 'c2'])
+    expect(tool.failed).toEqual([true, false])
+  })
+
+  test('a tool_result for an unknown call adds no line', () => {
+    const store = useProjectStore()
+    const chatId = 'c-unknown-tool-result'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c1' })
+    const before = JSON.stringify(store.currentTimeline)
+    send({ type: 'tool_result', tool_use_id: 'ghost', is_error: true })
+    expect(JSON.stringify(store.currentTimeline)).toBe(before)
+  })
+
+  test('a later call of the same tool keeps the earlier call\'s failure mark', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-same-name'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c1' })
+    send({ type: 'tool_result', tool_use_id: 'c1', is_error: true })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'echo a-much-longer-command', tool_use_id: 'c2' })
+
+    const tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.content).toContain('exit 1')
+    expect(tool.tool_use_ids).toEqual(['c1', 'c2'])
+    expect(tool.failed).toEqual([true, false])
+  })
+
+  test('two identical calls keep separate lines', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-identical-calls'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c1' })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c2' })
+
+    const tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.tool_use_ids).toEqual(['c1', 'c2'])
+    expect(tool.failed).toEqual([false, false])
+  })
+
+  test('a multiline tool input gets one slot per rendered line', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-multiline'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'bash', tool_input: 'printf x\nexit 1', tool_use_id: 'c1' })
+    let tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.tool_use_ids).toEqual(['c1', 'c1'])
+    expect(tool.failed).toEqual([false, false])
+
+    send({ type: 'tool_use', tool_name: 'bash', tool_input: 'echo done', tool_use_id: 'c2' })
+    send({ type: 'tool_result', tool_use_id: 'c2', is_error: true })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(3)
+    expect(tool.tool_use_ids).toEqual(['c1', 'c1', 'c2'])
+    expect(tool.failed).toEqual([false, false, true])
+  })
+
+  test('a re-announced call replaces its lines and resets the mark', () => {
+    const store = useProjectStore()
+    const chatId = 'c-tool-reannounced'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c1' })
+    send({ type: 'tool_result', tool_use_id: 'c1', is_error: true })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1 --verbose', tool_use_id: 'c1' })
+
+    const tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(1)
+    expect(tool.tool_use_ids).toEqual(['c1'])
+    expect(tool.failed).toEqual([false])
+  })
+
+  test('an identical permission line is not duplicated', () => {
+    const store = useProjectStore()
+    const chatId = 'c-permission-line-dedupe'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'permission_request', request_id: 'r1', tool_name: 'Bash', message: 'approval required' })
+    send({ type: 'permission_request', request_id: 'r2', tool_name: 'Bash', message: 'approval required' })
+    let tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(1)
+    expect(tool.tool_use_ids).toEqual([undefined])
+    expect(tool.failed).toEqual([false])
+
+    send({ type: 'permission_request', request_id: 'r3', tool_name: 'Bash', message: 'short' })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+
+    send({ type: 'permission_request', request_id: 'r4', tool_name: 'Bash', message: 'a much longer approval required message' })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.content).toContain('a much longer approval required message')
+    expect(tool.tool_use_ids).toEqual([undefined, undefined])
+    expect(tool.failed).toEqual([false, false])
+  })
+
+  test('an id-bearing call is not swallowed by an identical id-less line', () => {
+    const store = useProjectStore()
+    const chatId = 'c-id-bearing-after-idless'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls' })
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c2' })
+    let tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.content.split('\n')).toHaveLength(2)
+    expect(tool.tool_use_ids).toEqual([undefined, 'c2'])
+    expect(tool.failed).toEqual([false, false])
+
+    send({ type: 'tool_result', tool_use_id: 'c2', is_error: true })
+    tool = store.currentTimeline.find(e => e.kind === 'tool')
+    expect(tool?.kind).toBe('tool')
+    if (!tool || tool.kind !== 'tool') throw new Error('Expected tool activity')
+    expect(tool.failed).toEqual([false, true])
+  })
+
   test('does not reconnect after an intentional disconnect', async () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
@@ -1474,6 +1659,49 @@ describe('result frames and unread state', () => {
   })
 })
 
+describe('move to background', () => {
+  test('tracks backgroundable calls from tool_use frames and clears them on result', () => {
+    const store = useProjectStore()
+    const chatId = 'c-backgroundable'
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const frame = (data: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(data) })
+    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true })
+    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
+    frame({ type: 'tool_result', tool_use_id: 'c1' })
+    expect(store.backgroundableCalls[chatId]).toEqual({})
+    frame({ type: 'tool_use', tool_name: 'shell', tool_use_id: 'c2', backgroundable: true })
+    frame({ type: 'result', text: 'done', is_error: false, effective_model: 'opus', usage: {}, session_id: 's1' })
+    expect(store.backgroundableCalls[chatId]).toBeUndefined()
+  })
+
+  test('a file-touching shell call is still tracked', () => {
+    const store = useProjectStore()
+    const chatId = 'c-backgroundable-file'
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({ data: JSON.stringify({
+      type: 'tool_use', tool_name: 'shell', tool_use_id: 'c1', backgroundable: true,
+      file_touch: { file_path: 'out.txt', action: 'created' },
+    }) })
+    expect(store.backgroundableCalls[chatId]).toHaveProperty('c1')
+  })
+
+  test('moveChatToBackground posts and toasts when nothing moved', async () => {
+    const store = useProjectStore()
+    apiPost.mockResolvedValueOnce({ moved: false })
+    expect(await store.moveChatToBackground('c')).toBe(false)
+    expect(apiPost).toHaveBeenCalledWith('/api/chats/c/move-to-background', {})
+    expect(store.toasts.at(-1)?.title).toBe('Nothing to move')
+    apiPost.mockResolvedValueOnce({ moved: true })
+    const toastCount = store.toasts.length
+    expect(await store.moveChatToBackground('c')).toBe(true)
+    expect(store.toasts).toHaveLength(toastCount)
+    apiPost.mockRejectedValueOnce(new Error('offline'))
+    expect(await store.moveChatToBackground('c')).toBe(false)
+    expect(store.toasts.at(-1)?.title).toBe('Could not move to background')
+  })
+})
+
 describe('ephemeral status events', () => {
   test('does not render Claude requesting status as a system message', () => {
     apiGet.mockResolvedValue([])
@@ -1561,8 +1789,8 @@ describe('ephemeral status events', () => {
 describe('subagent thinking deltas', () => {
   test('do not leak a subagent thinking delta into the parent turn trace or messages', () => {
     // Regression: thinking deltas fired from inside a Task subagent arrive
-    // with parent_tool_use_id set. The PWA already renders the subagent's
-    // transcript in its own "Subagent activity" box, so accumulating the
+    // with parent_tool_use_id set. The subagent's transcript belongs to its
+    // own read-only view, so accumulating the
     // delta into the parent's thinking buffer used to produce a stray
     // _thinking message at the end of the parent turn's trace block and
     // persist it into the chat history after the result event.
@@ -2219,12 +2447,30 @@ describe('chat closing', () => {
 })
 
 describe('queued message replay handling', () => {
+  test('user_echo carries origin onto the pushed bubble', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-origin'
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: '[Ciaobot] 1 background run finished.',
+        turn_index: 0,
+        origin: 'background_run',
+      }),
+    })
+
+    const user = (store.messages[chatId] || []).find(m => m.role === 'user')
+    expect(user?.origin).toBe('background_run')
+  })
+
   test('keeps later queued messages visible when the first follow-up starts', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'msg A' },
-      { id: 'q-2', text: 'msg B' },
+      { id: 'q-1', text: 'msg A', delivery: 'queue' },
+      { id: 'q-2', text: 'msg B', delivery: 'queue' },
     ]
     store.connectWs(chatId)
 
@@ -2238,7 +2484,7 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-2', text: 'msg B' },
+      { id: 'q-2', text: 'msg B', delivery: 'queue' },
     ])
   })
 
@@ -2246,8 +2492,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'same prompt' },
-      { id: 'q-2', text: 'same prompt' },
+      { id: 'q-1', text: 'same prompt', delivery: 'queue' },
+      { id: 'q-2', text: 'same prompt', delivery: 'queue' },
     ]
     store.connectWs(chatId)
 
@@ -2260,7 +2506,7 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-2', text: 'same prompt' },
+      { id: 'q-2', text: 'same prompt', delivery: 'queue' },
     ])
   })
 
@@ -2268,8 +2514,8 @@ describe('queued message replay handling', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.queuedMessages[chatId] = [
-      { id: 'q-1', text: 'follow-up A' },
-      { id: 'q-2', text: 'follow-up B' },
+      { id: 'q-1', text: 'follow-up A', delivery: 'queue' },
+      { id: 'q-2', text: 'follow-up B', delivery: 'queue' },
     ]
     store.connectWs(chatId)
 
@@ -2282,15 +2528,15 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toEqual([
-      { id: 'q-1', text: 'follow-up A' },
-      { id: 'q-2', text: 'follow-up B' },
+      { id: 'q-1', text: 'follow-up A', delivery: 'queue' },
+      { id: 'q-2', text: 'follow-up B', delivery: 'queue' },
     ])
   })
 
   test('clears local queued chips when server history contains the flushed user turn', async () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
-    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A' }]
+    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A', delivery: 'queue' }]
     apiGet.mockResolvedValue([
       { role: 'user', content: 'initial', sent_at: '', turn_index: 0 },
       { role: 'assistant', content: 'reply', sent_at: '' },
@@ -3206,6 +3452,179 @@ describe('provider-neutral input state', () => {
   })
 })
 
+describe('dead native forms', () => {
+  const chatId = 'dead-form'
+
+  function setup(extra: Record<string, unknown> = {}) {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Dead form',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.activeQuestions[chatId] = [{
+      id: 'choice',
+      question: 'Choose?',
+      header: 'Choice',
+      multiSelect: false,
+      allowOther: true,
+      isSecret: false,
+      requestId: 'form-1',
+      type: 'string',
+      required: true,
+      options: [],
+      ...extra,
+    }]
+    store.connectWs(chatId)
+    return { store, socket: fakeSockets[0] }
+  }
+
+  const sentMessages = (socket: FakeWebSocket) => socket.send.mock.calls
+    .map(([raw]) => JSON.parse(raw as string))
+    .filter(frame => frame.type === 'message')
+
+  test('blocks a send while a live native form is open and toasts once', () => {
+    const { store, socket } = setup()
+    expect(store.sendMessage(chatId, 'hello')).toBe(false)
+    expect(store.sendMessage(chatId, 'hello again')).toBe(false)
+    const toasts = store.toasts.filter(t => t.title === 'Answer the open question first')
+    expect(toasts).toHaveLength(1)
+    expect(toasts[0].variant).toBeUndefined()
+    expect(toasts[0].actionLabel).toBe('Show question')
+    expect(sentMessages(socket)).toHaveLength(0)
+  })
+
+  test('sends through a stale native form and clears the card', () => {
+    const { store, socket } = setup({ stale: true })
+    store.chats[0].pending_question = '{"request_id":"form-1","stale":true,"questions":[]}'
+    expect(store.sendMessage(chatId, 'hello')).toBe(true)
+    expect(sentMessages(socket)).toHaveLength(1)
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(store.chats[0].pending_question).toBe('')
+  })
+
+  const retryable = {
+    requestId: 'form-1',
+    sessionId: '',
+    action: 'reply' as const,
+    answers: {},
+    pending: false,
+    queued: false,
+    error: 'OpenCode form provider is unavailable; retry when it reconnects',
+    retryable: true,
+  }
+
+  test('sends through after a retryable failure while idle', () => {
+    const { store, socket } = setup()
+    store.questionSubmissions[chatId] = { ...retryable }
+    expect(store.sendMessage(chatId, 'hello')).toBe(true)
+    expect(sentMessages(socket)).toHaveLength(1)
+  })
+
+  test('still blocks after a retryable failure while the chat is streaming', () => {
+    const { store } = setup()
+    store.questionSubmissions[chatId] = { ...retryable }
+    store.streaming[chatId] = true
+    expect(store.sendMessage(chatId, 'hello')).toBe(false)
+  })
+
+  test('answer delivered as a message closes the card and shows the spinner', () => {
+    const { store, socket } = setup()
+    store.respondQuestion(chatId, 'form-1', { choice: ['yes'] }, 'reply')
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result',
+      request_id: 'form-1',
+      ok: true,
+      state: 'answered',
+      delivered_as_message: true,
+    }) })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(store.streaming[chatId]).toBe(true)
+  })
+
+  test('cancel acknowledged by the engine clears the card', () => {
+    const { store, socket } = setup()
+    store.respondQuestion(chatId, 'form-1', {}, 'cancel')
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'question_response_result',
+      request_id: 'form-1',
+      ok: true,
+      state: 'cancelled',
+    }) })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+  })
+
+  test('rebuild marks an already-open card stale without replacing it', async () => {
+    const { store } = setup({ sessionId: 'thread-1' })
+    const card = store.activeQuestions[chatId]
+    store.chats[0].pending_question = JSON.stringify({
+      request_id: 'form-1',
+      stale: true,
+      questions: [{ id: 'choice', question: 'Choose?', header: 'Choice' }],
+    })
+    apiGet.mockResolvedValue([])
+    await store.loadMessages(chatId)
+    expect(store.activeQuestions[chatId]).toBe(card)
+    expect(store.activeQuestions[chatId][0].stale).toBe(true)
+  })
+
+  function expiredPermission(approved: boolean) {
+    const store = useProjectStore()
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Dead permission',
+      model: 'gpt-test',
+      provider: 'opencode',
+      mode: 'normal',
+      session_id: 'session-1',
+      created_at: '',
+      archived: false,
+      pending_permission: JSON.stringify({
+        request_id: 'permission-1',
+        session_id: 'session-1',
+      }),
+    }]
+    store.pendingPermissions[chatId] = [{
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      tool_name: 'shell',
+      tool_input: 'echo ok',
+      message: 'Approve?',
+      received_at: Date.now(),
+    }]
+    store.respondPermission(chatId, 'permission-1', approved, '')
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({ data: JSON.stringify({
+      type: 'permission_response_result',
+      request_id: 'permission-1',
+      session_id: 'session-1',
+      ok: true,
+      expired: true,
+    }) })
+    return store
+  }
+
+  test('an approval for an expired permission clears the card and says the tool did not run', () => {
+    const store = expiredPermission(true)
+    expect(store.pendingPermissions[chatId]).toBeUndefined()
+    const toasts = store.toasts.filter(t => t.title === 'Approval not applied')
+    expect(toasts).toHaveLength(1)
+  })
+
+  test('a deny for an expired permission clears the card without a toast', () => {
+    const store = expiredPermission(false)
+    expect(store.pendingPermissions[chatId]).toBeUndefined()
+    expect(store.toasts.filter(t => t.title === 'Approval not applied')).toHaveLength(0)
+  })
+})
+
 describe('image-capability questions', () => {
   test('parses a model_capability_question event into the active list', () => {
     const store = useProjectStore()
@@ -3484,25 +3903,25 @@ describe('background agents indicator', () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
-    const chatId = 'c-nudge'
+    const chatId = 'c-follow-up'
     store.activeChatId = 'some-other-chat'
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
-    const fire = (remaining: number, nudged?: boolean) =>
+    const fire = (remaining: number) =>
       sock.onmessage?.({
-        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining, nudged }),
+        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining }),
       })
 
     fire(1)
     expect(store.backgroundAgents[chatId]).toBe(1)
 
-    fire(0, true)
+    fire(0)
     expect(store.toasts).toHaveLength(0)
     expect(store.unread[chatId]).toBeUndefined()
 
     store.backgroundAgents[chatId] = 1
 
-    fire(0, false)
+    fire(0)
     expect(store.toasts).toHaveLength(0)
     expect(store.unread[chatId]).toBeUndefined()
   })
@@ -3665,7 +4084,7 @@ describe('parked pending_queue chips', () => {
 
   test('an idle chat payload with pending_queue becomes chips', () => {
     const store = useProjectStore()
-    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip' }]
+    store.queuedMessages.idle = [{ id: 'old', text: 'stale chip', delivery: 'queue' }]
     store.reconcileChatList([
       chat({
         chat_id: 'idle',
@@ -3673,23 +4092,33 @@ describe('parked pending_queue chips', () => {
       }),
     ])
     expect(store.queuedMessages.idle).toEqual([
-      { id: 'q-1', text: 'after the error', images: ['shot.png'] },
+      { id: 'q-1', text: 'after the error', images: ['shot.png'], delivery: 'queue', steering: false, waiting: true },
     ])
+  })
+
+  test('a parked chat payload while streaming adds missing waiting chips ahead of the live ones', () => {
+    const store = useProjectStore()
+    store.streaming.live = true
+    store.queuedMessages.live = [{ id: 'q-live', text: 'live', delivery: 'queue' }]
+    store.reconcileChatList([
+      chat({ chat_id: 'live', pending_queue: [{ id: 'q-wait', text: 'held' }, { id: 'q-live', text: 'live' }] }),
+    ])
+    expect(store.queuedMessages.live.map(q => q.id)).toEqual(['q-wait', 'q-live'])
   })
 
   test('an empty pending_queue during streaming does not clear existing chips', () => {
     const store = useProjectStore()
     store.streaming.live = true
-    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued' }]
+    store.queuedMessages.live = [{ id: 'q-live', text: 'still queued', delivery: 'queue' }]
     store.reconcileChatList([
       chat({ chat_id: 'live', pending_queue: [] }),
     ])
-    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued' }])
+    expect(store.queuedMessages.live).toEqual([{ id: 'q-live', text: 'still queued', delivery: 'queue' }])
   })
 
   test('an empty pending_queue on an idle chat clears parked chips', () => {
     const store = useProjectStore()
-    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error' }]
+    store.queuedMessages.idle = [{ id: 'q-1', text: 'after the error', delivery: 'queue' }]
     store.reconcileChatList([
       chat({ chat_id: 'idle', pending_queue: [] }),
     ])
@@ -3855,6 +4284,77 @@ describe('memoryInsightRows', () => {
 })
 
 describe('chat_streaming_done clears stale streaming for inactive chats', () => {
+  const loc = { path: '/r/wt', branch: 'feat', is_worktree: true, exists: true }
+
+  it('chat_streaming_done applies repo_location to the chat', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'c-loc', project_id: 'p1', title: 'T' } as never]
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done',
+        chat_id: 'c-loc',
+        project_id: 'p1',
+        is_error: false,
+        repo_location: loc,
+      }),
+    })
+    expect(store.chats[0].repo_location).toEqual(loc)
+  })
+
+  it('chat_repo_location updates the chat', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'c-loc', project_id: 'p1', title: 'T' } as never]
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_repo_location',
+        chat_id: 'c-loc',
+        project_id: 'p1',
+        repo_location: { ...loc, exists: false },
+      }),
+    })
+    expect(store.chats[0].repo_location).toEqual({ ...loc, exists: false })
+  })
+
+  it('chat_code_mode flips the flag and refetches the chat', async () => {
+    const at = '2026-01-01T09:01:00Z'
+    apiGet.mockImplementation(async (url: string) => (
+      url === '/api/chats/c-loc'
+        ? { chat_id: 'c-loc', project_id: 'p1', title: 'T', code_mode: true, user_turn_count: 2 }
+        : []
+    ))
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'c-loc', project_id: 'p1', title: 'T' } as never]
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_code_mode', chat_id: 'c-loc', project_id: 'p1', code_mode: true, actor: 'agent', at,
+      }),
+    })
+    expect(store.chats[0].code_mode).toBe(true)
+    expect(apiGet).toHaveBeenCalledWith('/api/chats/c-loc')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(store.chats[0].user_turn_count).toBe(2)
+  })
+
+  it('setChatCodeMode PATCHes code_mode', async () => {
+    const store = useProjectStore()
+    store.chats = [{ chat_id: 'c1', project_id: 'p1', title: 'T' } as never]
+    apiPatch.mockResolvedValueOnce({ chat_id: 'c1', project_id: 'p1', title: 'T', code_mode: true })
+    await store.setChatCodeMode('c1', true)
+    expect(apiPatch).toHaveBeenCalledWith('/api/chats/c1', { code_mode: true })
+    expect(store.chats[0].code_mode).toBe(true)
+
+    apiPatch.mockRejectedValueOnce(new Error('Link a repository first'))
+    await expect(store.setChatCodeMode('c1', false)).rejects.toThrow('Link a repository first')
+  })
+
   test('an inactive chat finishing clears its orphaned local streaming flag', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
@@ -4073,28 +4573,6 @@ describe('deep-link chat navigation', () => {
     expect(store.streaming['c1']).toBe(false)
     expect(staleSocket.close).toBeDefined()
     expect(fakeSockets.length).toBeGreaterThan(1)
-  })
-
-  test('open_chat event over /ws/events navigates to the target chat', async () => {
-    const store = useProjectStore()
-    store.projects = [
-      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
-    ]
-    store.chats = [
-      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
-      { chat_id: 'c2', project_id: 'p1', title: 'Chat 2', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
-    ]
-    store.activeChatId = 'c1'
-    store.connectEventsWs()
-    const sock = fakeSockets[fakeSockets.length - 1]
-
-    sock.onmessage?.({
-      data: JSON.stringify({ type: 'open_chat', chat_id: 'c2' }),
-    })
-    await vi.waitFor(() => {
-      expect(store.activeChatId).toBe('c2')
-    })
-    expect(routerPush).toHaveBeenCalledWith('/chat/c2')
   })
 
   test('chat_archived event over /ws/events marks chat archived and clears active chat', async () => {
@@ -4827,7 +5305,7 @@ describe('workspace and chat transitions', () => {
     expect(apiGet).not.toHaveBeenCalledWith('/api/chats/c-personal-old/messages')
   })
 
-  test('switchWorkspace with transition false updates workspace and chat ID but does not redirect', async () => {
+  test('switchWorkspace with transition false updates workspace, opens no chat and does not redirect', async () => {
     const store = useProjectStore()
     store.projects = [
       { project_id: 'p-personal', name: 'Proj Personal', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
@@ -4846,7 +5324,7 @@ describe('workspace and chat transitions', () => {
     await store.switchWorkspace('personal', { transition: false })
 
     expect(store.activeWorkspace).toBe('personal')
-    expect(store.activeChatId).toBe('c-personal')
+    expect(store.activeChatId).toBeNull()
     expect(routerPush).not.toHaveBeenCalled()
     expect(apiPost).not.toHaveBeenCalled()
   })
@@ -6648,7 +7126,7 @@ describe('delegated task signals', () => {
       assignee: 'agent', chat_id: 'c-task', attempt_id: ATTEMPT, live_attempt_id: ATTEMPT,
       created_at: '', updated_at: '', revision: 'r'.repeat(64), relative_path: 'Tasks/t1.md',
       attempt_state: 'needs_you', attempt_outcome: 'needs_input', attempt_summary: '',
-      attempt_detail: '', changed_since_delegated: false,
+      attempt_detail: '',
       ...over,
     }
   }
@@ -6829,5 +7307,252 @@ describe('failed chats count as needs you', () => {
     })
     expect(store.chats[0].last_error).toBe('')
     expect(store.chatNeedsYou('c-err')).toBe(false)
+  })
+})
+
+describe('queue delivery: queue or steer', () => {
+  const chatId = 'chat-steer'
+
+  function frames(socket: FakeWebSocket, type: string) {
+    return socket.send.mock.calls
+      .map(([raw]) => JSON.parse(String(raw)) as Record<string, unknown>)
+      .filter(p => p.type === type)
+  }
+
+  function emit(socket: FakeWebSocket, event: Record<string, unknown>) {
+    socket.onmessage?.({ data: JSON.stringify(event) })
+  }
+
+  async function setup() {
+    const { applyKeyboardSettings } = await import('../composables/useKeyboardSettings')
+    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
+    const store = useProjectStore()
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    store.streaming[chatId] = true
+    return { store, socket: fakeSockets[fakeSockets.length - 1], applyKeyboardSettings }
+  }
+
+  it('sends delivery steer for a mid-turn message when the preference is steer', async () => {
+    const { store, socket, applyKeyboardSettings } = await setup()
+    applyKeyboardSettings({ mid_turn_delivery: 'steer' })
+    store.sendMessage(chatId, 'change course')
+    const [frame] = frames(socket, 'message')
+    expect(frame).toMatchObject({ text: 'change course', delivery: 'steer' })
+    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'steer', steering: true })
+    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
+  })
+
+  it('sends delivery queue by default', async () => {
+    const { store, socket } = await setup()
+    store.sendMessage(chatId, 'later')
+    expect(frames(socket, 'message')[0]).toMatchObject({ delivery: 'queue' })
+    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
+  })
+
+  it('steers a message with images when the preference is steer', async () => {
+    const { store, socket, applyKeyboardSettings } = await setup()
+    applyKeyboardSettings({ mid_turn_delivery: 'steer' })
+    store.pendingImages = ['shot.png']
+    store.sendMessage(chatId, 'look at this')
+    expect(frames(socket, 'message')[0]).toMatchObject({ delivery: 'steer', images: ['shot.png'] })
+    expect(store.queuedMessages[chatId][0].steering).toBe(true)
+    applyKeyboardSettings({ mid_turn_delivery: 'queue' })
+  })
+
+  it('folds a steered event into the transcript once', async () => {
+    const { store, socket } = await setup()
+    store.messages[chatId] = []
+    emit(socket, { type: 'queue_state', queue: [
+      { id: 'a', text: 'one', delivery: 'steer', steering: true },
+      { id: 'b', text: 'two', delivery: 'queue', steering: false },
+    ] })
+    const steered = { type: 'steered', entry_ids: ['a'], text: 'one', turn_index: 3, sent_at: '2026-10-15T10:00:00Z', delivery_id: 'd1' }
+    emit(socket, steered)
+    emit(socket, steered)
+    const bubbles = (store.messages[chatId] || []).filter(m => m.role === 'user' && m.content === 'one')
+    expect(bubbles).toHaveLength(1)
+    expect(bubbles[0]).toMatchObject({ steered: true, turn_index: 3 })
+    expect(store.queuedMessages[chatId].map(q => q.id)).toEqual(['b'])
+  })
+
+  it('steered event carries origin onto the message', async () => {
+    const { store, socket } = await setup()
+    store.messages[chatId] = []
+    emit(socket, { type: 'steered', entry_ids: ['w'], text: '[Ciaobot] 1 background run finished.', turn_index: 4, sent_at: '2026-10-19T10:00:00Z', delivery_id: 'd1', origin: 'background_run' })
+    emit(socket, { type: 'steered', entry_ids: ['t'], text: 'typed', turn_index: 5, sent_at: '2026-10-19T10:00:01Z', delivery_id: 'd2' })
+    const msgs = store.messages[chatId] || []
+    expect(msgs.find(m => m.role === 'user' && m.turn_index === 4)).toMatchObject({ steered: true, origin: 'background_run' })
+    expect(msgs.find(m => m.role === 'user' && m.turn_index === 5)?.origin).toBeUndefined()
+  })
+
+  it('steer_fallback flips chips to queue and sets a notice', async () => {
+    const { store, socket } = await setup()
+    emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
+    emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
+    expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
+    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
+    emit(socket, { type: 'result', text: 'done' })
+    emit(socket, { type: 'user_echo', text: 'one', turn_index: 5, entry_id: 'a' })
+    // The notice outlives the reply that ended and the turn that flushed it.
+    expect(store.steerNotice[chatId]).toContain('Steering missed the reply')
+  })
+
+  it('the fallback notice clears after 8 seconds and on the next send', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
+      vi.advanceTimersByTime(7900)
+      expect(store.steerNotice[chatId]).toBeDefined()
+      vi.advanceTimersByTime(200)
+      expect(store.steerNotice[chatId]).toBeUndefined()
+
+      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
+      store.sendMessage(chatId, 'next')
+      expect(store.steerNotice[chatId]).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a Steering lock the server never answers reverts to queue after 15 seconds with a notice', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      expect(store.queuedMessages[chatId][0].steering).toBe(true)
+      vi.advanceTimersByTime(14000)
+      expect(store.queuedMessages[chatId][0].steering).toBe(true)
+      vi.advanceTimersByTime(1500)
+      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
+      expect(store.steerNotice[chatId]).toBeTruthy()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a disposed store never reverts a pending steer lock or fires the notice timer', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      store.$dispose()
+      vi.advanceTimersByTime(20000)
+      expect(store.queuedMessages[chatId][0].steering).toBe(true)
+      expect(store.steerNotice[chatId]).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clearQueued cancels the lock and notice timers', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      expect(store.steerNotice[chatId]).toBeUndefined()
+      emit(socket, { type: 'steer_fallback', entry_ids: ['a'], reason: 'finished' })
+      expect(store.steerNotice[chatId]).toBeDefined()
+      store.clearQueued(chatId)
+      expect(store.steerNotice[chatId]).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a steer answered by steer_fallback or queue_state cancels the lock timer', async () => {
+    vi.useFakeTimers()
+    try {
+      const { store, socket } = await setup()
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'queue', steering: false }] })
+      store.setQueuedDelivery(chatId, ['a'], 'steer')
+      emit(socket, { type: 'queue_state', queue: [{ id: 'a', text: 'one', delivery: 'steer', steering: true }] })
+      vi.advanceTimersByTime(16000)
+      expect(store.queuedMessages[chatId][0].steering).toBe(true)
+      expect(store.steerNotice[chatId]).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a steer-default send arms the lock timer too', async () => {
+    vi.useFakeTimers()
+    const { applyKeyboardSettings } = await import('../composables/useKeyboardSettings')
+    try {
+      const { store } = await setup()
+      applyKeyboardSettings({ mid_turn_delivery: 'steer' })
+      store.sendMessage(chatId, 'go')
+      vi.advanceTimersByTime(15500)
+      expect(store.queuedMessages[chatId][0]).toMatchObject({ delivery: 'queue', steering: false })
+    } finally {
+      applyKeyboardSettings({ mid_turn_delivery: 'queue' })
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads the waiting flag from queue_state, and the server flag wins over the chat record', async () => {
+    const { store, socket } = await setup()
+    store.reconcileChatList([
+      { chat_id: chatId, project_id: 'p1', title: 'T', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, pending_queue: [{ id: 'w', text: 'held' }] } as never,
+    ])
+    expect(store.queuedMessages[chatId][0].waiting).toBe(true)
+    emit(socket, { type: 'queue_state', queue: [
+      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true },
+      { id: 'l', text: 'live', delivery: 'queue', steering: false, waiting: false },
+    ] })
+    expect(store.queuedMessages[chatId].map(q => !!q.waiting)).toEqual([true, false])
+    // The server says it is live now (adopted into the turn).
+    emit(socket, { type: 'queue_state', queue: [
+      { id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: false },
+    ] })
+    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
+  })
+
+  it('an entry that arrives only via queue_state after a reload is waiting', async () => {
+    const { store, socket } = await setup()
+    expect(store.queuedMessages[chatId]).toBeUndefined()
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
+    expect(store.queuedMessages[chatId][0]).toMatchObject({ id: 'w', waiting: true })
+  })
+
+  it('a queued event is live, and steering an entry clears its waiting mark', async () => {
+    const { store, socket } = await setup()
+    emit(socket, { type: 'queued', id: 'n', text: 'new', delivery: 'queue', waiting: false })
+    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
+    emit(socket, { type: 'queue_state', queue: [{ id: 'w', text: 'held', delivery: 'queue', steering: false, waiting: true }] })
+    store.setQueuedDelivery(chatId, ['w'], 'steer')
+    expect(store.queuedMessages[chatId][0].waiting).toBe(false)
+  })
+
+  it('prompt_cancelled removes the bubble and partials for that turn; a resend shows once', async () => {
+    const { store, socket } = await setup()
+    store.messages[chatId] = []
+    const bubbles = () => (store.messages[chatId] || []).filter(m => m.role === 'user' && m.turn_index === 4)
+    emit(socket, { type: 'user_echo', text: 'do it', turn_index: 4, sent_at: '2026-10-15T10:00:00Z' })
+    emit(socket, { type: 'text_delta', text: 'partial' })
+    expect(bubbles()).toHaveLength(1)
+    emit(socket, { type: 'prompt_cancelled', turn_index: 4 })
+    expect(bubbles()).toHaveLength(0)
+    expect(store.streamingText[chatId]).toBe('')
+    emit(socket, { type: 'user_echo', text: 'do it', turn_index: 4, sent_at: '2026-10-15T10:01:00Z' })
+    expect(bubbles()).toHaveLength(1)
+  })
+
+  it('snapshot and keyboard_settings_changed carry the preference', async () => {
+    const { useKeyboardSettings } = await import('../composables/useKeyboardSettings')
+    const store = useProjectStore()
+    apiGet.mockResolvedValue([])
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'steer', revision: 'r1' }) })
+    expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('steer')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'queue', revision: 'r2' }) })
+    expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('queue')
   })
 })

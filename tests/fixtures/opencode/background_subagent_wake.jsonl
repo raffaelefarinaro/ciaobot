@@ -1,0 +1,40 @@
+{"id":"evt_bgsub_00","type":"server.connected","data":{}}
+{"id":"evt_bgsub_01","type":"session.inbox.enqueued","data":{"inboxID":"msg_bgsub_prompt","sessionID":"ses_bgsub_parent","item":{"type":"user","payload":{"text":"Launch a background subagent, then reply LAUNCHED."},"delivery":"queue"}}}
+{"id":"evt_bgsub_02","type":"session.execution.started","data":{"sessionID":"ses_bgsub_parent"}}
+{"id":"evt_bgsub_03","type":"session.inbox.delivered","data":{"sessionID":"ses_bgsub_parent","inboxID":"msg_bgsub_prompt"}}
+{"id":"evt_bgsub_04","type":"session.step.started","data":{"sessionID":"ses_bgsub_parent","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_bgsub_a1"}}
+{"id":"evt_bgsub_05","type":"session.tool.input.started","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a1","id":"call_bgsub","name":"subagent"}}
+{"id":"evt_bgsub_06","type":"session.tool.called","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a1","id":"call_bgsub","input":{"agent":"general","description":"Run delayed shell command","prompt":"Run `sleep 15 && echo SUBDONE` and report its output.","background":true},"executed":false}}
+{"id":"evt_bgsub_07","type":"session.created","data":{"sessionID":"ses_bgsub_child","parentID":"ses_bgsub_parent","title":"Run delayed shell command","agent":"general","location":{"directory":"/workspace"}}}
+{"id":"evt_bgsub_08","type":"session.tool.progress","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a1","id":"call_bgsub","metadata":{"sessionID":"ses_bgsub_child","status":"running"}}}
+{"id":"evt_bgsub_09","type":"session.inbox.enqueued","data":{"inboxID":"msg_bgsub_child_prompt","sessionID":"ses_bgsub_child","item":{"type":"user","payload":{"text":"Run `sleep 15 && echo SUBDONE` and report its output."},"delivery":"steer"}}}
+{"id":"evt_bgsub_10","type":"session.tool.success","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a1","id":"call_bgsub","content":[{"type":"text","text":"The subagent is working in the background (sessionID: ses_bgsub_child)."}],"metadata":{"sessionID":"ses_bgsub_child","status":"running","truncated":false},"executed":false}}
+{"id":"evt_bgsub_11","type":"session.execution.started","data":{"sessionID":"ses_bgsub_child"}}
+{"id":"evt_bgsub_12","type":"session.inbox.delivered","data":{"sessionID":"ses_bgsub_child","inboxID":"msg_bgsub_child_prompt"}}
+{"id":"evt_bgsub_13","type":"session.step.ended","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a1","finish":"tool-calls","cost":0,"tokens":{"input":7468,"output":28,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_bgsub_14","type":"session.step.started","data":{"sessionID":"ses_bgsub_parent","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_bgsub_a2"}}
+{"id":"evt_bgsub_15","type":"session.text.started","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a2","ordinal":0}}
+{"id":"evt_bgsub_16","type":"session.text.ended","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a2","ordinal":0,"text":"LAUNCHED"}}
+{"id":"evt_bgsub_17","type":"session.step.ended","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a2","finish":"stop","cost":0,"tokens":{"input":9833,"output":6,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_bgsub_18","type":"session.execution.succeeded","data":{"sessionID":"ses_bgsub_parent"}}
+{"id":"evt_bgsub_19","type":"session.step.started","data":{"sessionID":"ses_bgsub_child","agent":"general","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_bgsub_c1"}}
+{"id":"evt_bgsub_20","type":"session.tool.input.started","data":{"sessionID":"ses_bgsub_child","assistantMessageID":"msg_bgsub_c1","id":"call_bgsub_child_shell","name":"shell"}}
+{"id":"evt_bgsub_21","type":"session.tool.called","data":{"sessionID":"ses_bgsub_child","assistantMessageID":"msg_bgsub_c1","id":"call_bgsub_child_shell","input":{"command":"sleep 15 && echo SUBDONE"},"executed":false}}
+{"id":"evt_bgsub_22","type":"shell.created","data":{"info":{"id":"sh_bgsub_child","status":"running","command":"sleep 15 && echo SUBDONE","cwd":"/workspace","metadata":{"sessionID":"ses_bgsub_child"},"time":{"started":1792051510528}}}}
+{"id":"evt_bgsub_23","type":"shell.exited","data":{"id":"sh_bgsub_child","exit":0,"status":"exited"}}
+{"id":"evt_bgsub_24","type":"session.tool.success","data":{"sessionID":"ses_bgsub_child","assistantMessageID":"msg_bgsub_c1","id":"call_bgsub_child_shell","content":[{"type":"text","text":"SUBDONE\n"}],"executed":false}}
+{"id":"evt_bgsub_25","type":"session.step.ended","data":{"sessionID":"ses_bgsub_child","assistantMessageID":"msg_bgsub_c1","finish":"tool-calls","cost":0,"tokens":{"input":7000,"output":20,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_bgsub_26","type":"session.step.started","data":{"sessionID":"ses_bgsub_child","agent":"general","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_bgsub_c2"}}
+{"id":"evt_bgsub_27","type":"session.text.started","data":{"sessionID":"ses_bgsub_child","assistantMessageID":"msg_bgsub_c2","ordinal":0}}
+{"id":"evt_bgsub_28","type":"session.text.ended","data":{"sessionID":"ses_bgsub_child","assistantMessageID":"msg_bgsub_c2","ordinal":0,"text":"SUBDONE"}}
+{"id":"evt_bgsub_29","type":"session.step.ended","data":{"sessionID":"ses_bgsub_child","assistantMessageID":"msg_bgsub_c2","finish":"stop","cost":0,"tokens":{"input":7100,"output":6,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_bgsub_30","type":"session.execution.succeeded","data":{"sessionID":"ses_bgsub_child"}}
+{"id":"evt_bgsub_31","type":"session.inbox.enqueued","data":{"inboxID":"msg_bgsub_wake","sessionID":"ses_bgsub_parent","item":{"type":"synthetic","payload":{"text":"<subagent sessionID=\"ses_bgsub_child\" state=\"completed\" description=\"Run delayed shell command\">\nSUBDONE\n</subagent>","description":"Run delayed shell command","metadata":{"source":"subagent","childID":"ses_bgsub_child","agent":"General","state":"completed"}},"delivery":"steer"}}}
+{"id":"evt_bgsub_32","type":"session.execution.started","data":{"sessionID":"ses_bgsub_parent"}}
+{"id":"evt_bgsub_33","type":"session.inbox.delivered","data":{"sessionID":"ses_bgsub_parent","inboxID":"msg_bgsub_wake"}}
+{"id":"evt_bgsub_34","type":"session.step.started","data":{"sessionID":"ses_bgsub_parent","agent":"build","model":{"id":"gpt-6-luna-fast","providerID":"openai","variant":"default"},"assistantMessageID":"msg_bgsub_a3"}}
+{"id":"evt_bgsub_35","type":"session.text.started","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a3","ordinal":0}}
+{"id":"evt_bgsub_36","type":"session.text.ended","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a3","ordinal":0,"text":"SUBDONE"}}
+{"id":"evt_bgsub_37","type":"session.step.ended","data":{"sessionID":"ses_bgsub_parent","assistantMessageID":"msg_bgsub_a3","finish":"stop","cost":0,"tokens":{"input":7675,"output":6,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_bgsub_38","type":"session.usage.updated","data":{"sessionID":"ses_bgsub_parent","cost":0,"tokens":{"input":17915,"output":47,"reasoning":0,"cache":{"read":0,"write":0}}}}
+{"id":"evt_bgsub_39","type":"session.execution.succeeded","data":{"sessionID":"ses_bgsub_parent"}}

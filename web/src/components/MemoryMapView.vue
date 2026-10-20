@@ -1704,7 +1704,7 @@ onBeforeUnmount(() => {
   flex: none;
   min-width: 280px;
   max-width: 60%;
-  margin: var(--space-2) var(--space-2) var(--space-2) 0;
+  margin: var(--space-4) var(--space-4) var(--space-4) 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2069,10 +2069,10 @@ onBeforeUnmount(() => {
 .mm-title-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .deg-n { color: var(--fg2); font-variant-numeric: tabular-nums; }
-.stale-age { color: var(--warning, #ff9800); white-space: nowrap; }
+.stale-age { color: var(--warning); white-space: nowrap; }
 .stale-flag {
   display: inline-flex; align-items: center; min-height: 20px; margin-left: 8px; padding: 0 6px;
-  border: 1px solid color-mix(in srgb, var(--warning, #ff9800) 45%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
   border-radius: var(--radius-xs, 4px);
   font-size: var(--text-xs); font-weight: 600;
 }
@@ -2124,6 +2124,13 @@ onBeforeUnmount(() => {
   text-underline-offset: 3px;
 }
 .mm-toolbar-stale strong { color: inherit; }
+@media (pointer: coarse) {
+  /* inline-block, not flex: flex items drop the space in "<strong>N</strong> unchecked". */
+  .mm-toolbar-stale {
+    display: inline-block;
+    line-height: var(--touch);
+  }
+}
 
 /* Facts unchecked inside notes, in the toolbar. Quieter than the note-level
    figure on purpose: it is the more speculative of the two (a bullet with no

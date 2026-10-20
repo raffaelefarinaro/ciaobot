@@ -94,7 +94,7 @@ async function mountLayout(seed: { questions?: ReturnType<typeof makeQuestion>[]
     history: createMemoryHistory(),
     routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId', component: EmptyStub }],
   })
-  await router.push('/')
+  await router.push(`/chat/${CHAT_ID}`)
   await router.isReady()
 
   const store = useProjectStore()
@@ -174,6 +174,16 @@ afterEach(() => {
 })
 
 describe('AskUserQuestion keyboard shortcuts', () => {
+  test('shows the restart note on a stale native card', async () => {
+    const { wrapper } = await mountLayout({
+      questions: [{ ...makeQuestion({ requestId: 'form-1' }), stale: true } as ReturnType<typeof makeQuestion>],
+    })
+    expect(wrapper.find('.question-card-note').text()).toBe(
+      'The engine restarted. Your answer will be sent as a message.',
+    )
+    wrapper.unmount()
+  })
+
   test('renders a keyboard badge 1..n on the first question options', async () => {
     const { wrapper } = await mountLayout({ questions: [makeQuestion()] })
 

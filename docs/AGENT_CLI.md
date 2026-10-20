@@ -118,8 +118,8 @@ live status from already running chats in the selected workspace; it does not
 write configuration or credentials, probe a server, or start a provider/MCP
 process. Add and authenticate servers through the provider CLI from the
 workspace directory (`claude mcp add` / `claude mcp login`, or OpenCode V2's
-`opencode mcp add` / `opencode mcp auth`). Claude's workspace allowlist remains
-authoritative and is never expanded by Settings.
+`opencode mcp add` / `opencode mcp auth`). Every server declared for the
+workspace loads; `mcp__<name>` in its `disallowed_tools` blocks one.
 
 Static configuration in an unrelated terminal is intentionally unsupported: the
 token is a live chat capability, not an operator credential. Use Ciaobot's
@@ -162,9 +162,11 @@ door. The target is resolved, not trusted — `skills_inventory.resolve_owned_sk
 decides, so a stock copy, a provider mirror, a shared source and an unknown name
 are refused by name, and the record carries the resolved path and revision
 rather than whatever the caller said. `--input-file` holds a JSON object with
-`title`, `problem`, `change`, `rationale` and a non-empty `sources` list whose
-entries carry `chat_id`, `archive`, `turn` and a verbatim `excerpt`: the finding
-is conversation prose, so none of it may travel as a shell argument. It proposes
+`title`, `problem`, `change`, `rationale` and either a non-empty `sources` list
+whose entries carry `chat_id`, `archive`, `turn` and a verbatim `excerpt`, or a
+non-empty `origins` list (`learning_id` and `finding`, optionally
+`source_revision` and `summary`) for a routed learning: the finding is
+conversation prose, so none of it may travel as a shell argument. It proposes
 only — `ciao skill-proposal-remove NAME` settles, and a settled record stays
 settled while it keeps collecting evidence. It records which outcome it was:
 `--applied` when the change landed and was checked (a promotion, so History
@@ -179,8 +181,9 @@ that simply finished: a turn ending is not a verified edit.
 
 The CLI replaces the transport recipes, not behavioural knowledge. Ciaobot's
 core prompt tells the agent to use `ciao <noun> <verb>` commands for the
-control plane (the compact command table lives in `ciao/system_prompt.md`) and
-keeps `ciao help` / `ciao <noun> --help` as the long reference. Provider and
+control plane and points at `ciao help` / `ciao <noun> --help` for the command
+reference (the command tables live in the `ciao-cli` skill, not in
+`ciao/system_prompt.md`, #1464). Provider and
 integration skills — Google Workspace, research, document authoring — remain
 useful because the CLI does not encode those domain decisions.
 

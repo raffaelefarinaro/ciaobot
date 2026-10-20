@@ -31,7 +31,6 @@ vi.mock('../../lib/api', () => {
       return Promise.resolve({
         installed: false,
         binary_path: '',
-        default_profile: '',
         cli_available: false,
         profiles: [],
       })
@@ -234,7 +233,7 @@ describe('Settings > Workspaces archive', () => {
   it('lists archived workspaces and restores one after showing what it restores', async () => {
     const { api } = await import('../../lib/api')
     const { pendingConfirm } = await import('../../lib/confirm')
-    state.archived = [archived({ allowed_mcp_servers: ['github'], disallowed_tools: null, schedules: 2, schedules_dropped: 1 })]
+    state.archived = [archived({ disallowed_tools: null, schedules: 2, schedules_dropped: 1 })]
     vi.mocked(api.post).mockImplementation((path: string) => {
       if (path === '/api/workspaces/archived/restore') {
         return Promise.resolve({
@@ -262,11 +261,10 @@ describe('Settings > Workspaces archive', () => {
       expect(request).toBeTruthy()
       expect(request!.title).toBe('Restore workspace')
       expect(request!.message).toBe(restoreConfirmMessage(archived({
-        allowed_mcp_servers: ['github'], disallowed_tools: null, schedules: 2, schedules_dropped: 1,
+        disallowed_tools: null, schedules: 2, schedules_dropped: 1,
       })))
       expect(request!.message).toContain('2 automations, restored paused')
       expect(request!.message).toContain('1 automation in the archive did not pass validation')
-      expect(request!.message).toContain('MCP servers allowed: github')
       expect(request!.message).toContain('Extra tools denied: workspace default')
       expect(request!.message).toContain('Google account: work')
       expect(api.post).not.toHaveBeenCalled()

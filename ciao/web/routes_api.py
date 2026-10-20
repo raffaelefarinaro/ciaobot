@@ -13,7 +13,6 @@ import math
 import os
 import posixpath
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -39,6 +38,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.media_types import guess_type as guess_media_type
+from ciao import host_terminal
 from ciao import proposal_actions
 from ciao import proposal_kinds
 from ciao import service_backend
@@ -46,16 +46,16 @@ from ciao import backup_service
 from ciao import subagent_tracking
 from ciao import entity_types
 from ciao import provider_registry
+from ciao import repo_link
 from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mutation
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
-from ciao.web.auth import is_loopback_client
+from ciao.web.auth import LOOPBACK_HOST_NAMES, is_loopback_client
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
     CLAUDE_MODELS,
-    GWS_DEFAULT_PROFILE,
     MAX_IMAGE_SIZE_BYTES,
     RESTART_EXIT_CODE,
     WorkspaceConfig,
@@ -953,36 +953,8 @@ def _provider_config_payload(config) -> dict:
     }
 
 
-def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
-    """Open the provider-owned interactive login in macOS Terminal."""
-    if not provider_registry.is_provider(provider):
-        raise ValueError(f"unsupported provider '{provider}'")
-    command = _auth_command_for_provider(provider)
-    rendered = shlex.join(command)
-    if sys.platform != "darwin":
-        return False, rendered
-    runtime_root = Path(config.state_path).parent
-    runtime_root.mkdir(parents=True, exist_ok=True)
-    script = runtime_root / f"provider-login-{provider}.command"
-    script.write_text(
-        "#!/bin/zsh\n"
-        "script_path=$0\n"
-        "rm -f -- \"$script_path\"\n"
-        f"{rendered}\n"
-        "status=$?\n"
-        "echo\n"
-        "echo 'Authentication finished. You can close this window.'\n"
-        "exit $status\n",
-        encoding="utf-8", newline="",
-    )
-    script.chmod(0o700)
-    subprocess.Popen(
-        ["/usr/bin/open", "-a", "Terminal", str(script)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    return True, rendered
+def _connect_hint(command: str) -> str:
+    return f"Run this in a terminal on the computer running Ciaobot: {command}"
 
 
 async def provider_connection_action(request: Request) -> JSONResponse:
@@ -992,11 +964,42 @@ async def provider_connection_action(request: Request) -> JSONResponse:
     if not provider_registry.is_provider(provider):
         return JSONResponse({"error": "unsupported provider"}, status_code=404)
     if action == "connect":
+        login_action = f"{provider}-login"
+        if login_action not in host_terminal.ACTION_IDS:
+            return JSONResponse({"error": "this provider has no sign-in action"}, status_code=404)
+        command = await asyncio.to_thread(host_terminal.action_command, login_action)
+        if not host_browser_request(request):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "reason": "not_on_host",
+                    "command": command,
+                    "error": f"{host_terminal.REASON_MESSAGES['not_on_host']} {_connect_hint(command)}",
+                },
+                status_code=403,
+            )
+        workspace = Path(config.workspace_root)
+        folder = workspace if workspace.is_dir() else Path.home()
         try:
-            opened, command = await asyncio.to_thread(_launch_provider_login, config, provider)
-        except (FileNotFoundError, OSError, ValueError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        return JSONResponse({"ok": True, "opened": opened, "command": command}, status_code=202)
+            launched = await asyncio.to_thread(
+                host_terminal.launch,
+                folder,
+                action=login_action,
+                runtime_dir=Path(config.state_path).parent,
+            )
+        except host_terminal.TerminalUnavailable as exc:
+            return JSONResponse(
+                {"ok": False, "reason": exc.reason, "command": command,
+                 "error": f"{exc} {_connect_hint(command)}"},
+                status_code=409,
+            )
+        except OSError as exc:
+            return JSONResponse(
+                {"ok": False, "reason": "launch_failed", "command": command,
+                 "error": f"Could not open a terminal: {exc}. {_connect_hint(command)}"},
+                status_code=500,
+            )
+        return JSONResponse({"ok": True, "launched": launched, "command": command}, status_code=202)
     if action == "verify":
         if provider == "claude":
             from ciao.setup_status import clear_claude_discovery_cache
@@ -1208,15 +1211,9 @@ def _gws_integration_payload(config) -> dict:
         if entry.get("label")
     }
     names = _gws_profile_names(config)
-    # An operator default that names no existing account is not a default the
-    # UI should advertise; workspaces then show "No Google account" instead.
-    default_profile = GWS_DEFAULT_PROFILE
-    if default_profile not in names:
-        default_profile = ""
     return {
         "installed": bool(binary_path),
         "binary_path": binary_path,
-        "default_profile": default_profile,
         "cli_available": bool(binary_path),
         "profiles": [
             _gws_profile_payload(config, profile, usage, health.get(profile), labels)
@@ -1227,10 +1224,6 @@ def _gws_integration_payload(config) -> dict:
 
 async def gws_integration_settings(request: Request) -> JSONResponse:
     return JSONResponse(_gws_integration_payload(request.app.state.config))
-
-
-GWS_CLI_PACKAGE = "@googleworkspace/cli"
-
 
 
 async def gws_save_client_secret(request: Request) -> JSONResponse:
@@ -1666,14 +1659,22 @@ async def create_project(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     config = request.app.state.config
     body = await request.json()
-    project = pcm.create_project(
-        name=body["name"],
-        # An omitted workspace has to resolve to one that exists: create_project
-        # does not validate the name, so an unknown one yields a project that is
-        # filtered out of every workspace's sidebar.
-        workspace=body.get("workspace") or config.primary_workspace(),
-        context=body.get("context", ""),
-    )
+    repo_path = body.get("repo_path") or ""
+    if not isinstance(repo_path, str):
+        return JSONResponse({"error": "repo_path must be a string"}, status_code=400)
+    try:
+        project = pcm.create_project(
+            name=body["name"],
+            # An omitted workspace has to resolve to one that exists: create_project
+            # does not validate the name, so an unknown one yields a project that is
+            # filtered out of every workspace's sidebar.
+            workspace=body.get("workspace") or config.primary_workspace(),
+            context=body.get("context", ""),
+            scaffold=True,
+            repo_path=repo_path,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(project.to_dict(), status_code=201)
 
 
@@ -1702,12 +1703,16 @@ async def project_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok})
     # PATCH
     body = await request.json()
+    repo_path = body.get("repo_path")
+    if repo_path is not None and not isinstance(repo_path, str):
+        return JSONResponse({"error": "repo_path must be a string"}, status_code=400)
     try:
         project = pcm.update_project(
             project_id,
             name=body.get("name"),
             context=body.get("context"),
             vault_folder=body.get("vault_folder"),
+            repo_path=repo_path,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1748,6 +1753,12 @@ async def list_completed_projects(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     workspace = request.query_params.get("workspace")
     return JSONResponse(pcm.list_completed_projects(workspace))
+
+
+async def repo_candidates(request: Request) -> JSONResponse:
+    """Git checkouts the project Repository picker can offer. Read-only."""
+    payload = await asyncio.to_thread(repo_link.candidates_payload)
+    return JSONResponse(payload)
 
 
 async def project_restore(request: Request) -> JSONResponse:
@@ -2439,6 +2450,9 @@ async def chat_detail(request: Request) -> Response:
     # read as "no change" there.
     if isinstance(body, dict) and "pin" in body:
         return await _chat_pin_patch(request, pcm, chat_id, body)
+    code_mode = body.get("code_mode") if isinstance(body, dict) else None
+    if code_mode is not None and not isinstance(code_mode, bool):
+        return JSONResponse({"error": "code_mode must be a boolean"}, status_code=400)
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -2449,6 +2463,8 @@ async def chat_detail(request: Request) -> Response:
             project_id=body.get("project_id"),
             thinking_level=body.get("thinking_level"),
         )
+        if chat is not None and code_mode is not None:
+            chat = pcm.set_code_mode(chat_id, code_mode, actor="user")
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -2640,6 +2656,29 @@ async def chat_stop(request: Request) -> JSONResponse:
     return JSONResponse({"stopped": stopped})
 
 
+async def chat_move_to_background(request: Request) -> JSONResponse:
+    """Move a running turn's foreground shell or subagent to the background (#1413).
+
+    OpenCode's Ctrl+B. 200 ``{"moved": true}`` when a running shell or
+    subagent was moved, ``{"moved": false}`` when nothing could move;
+    409 ``unsupported`` for a provider without the feature (Claude) and
+    ``not_running`` when the chat has no live provider; 502 when OpenCode
+    refused or could not be reached.
+    """
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    if pcm.get_chat(chat_id) is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    outcome = await pcm.move_chat_to_background(chat_id)
+    if outcome in {"moved", "nothing"}:
+        return JSONResponse({"moved": outcome == "moved"})
+    if outcome == "failed":
+        return JSONResponse(
+            {"error": "OpenCode did not accept the request"}, status_code=502
+        )
+    return JSONResponse({"error": outcome}, status_code=409)
+
+
 def _chat_background_run(request: Request) -> tuple[Any, Any] | JSONResponse:
     """The runner and the run named in the path, if this chat owns it.
 
@@ -2656,7 +2695,7 @@ def _chat_background_run(request: Request) -> tuple[Any, Any] | JSONResponse:
 
 
 async def chat_background_run_log(request: Request) -> JSONResponse:
-    """The last lines of a background run's log, for the Work details rail."""
+    """The last lines of a background run's log, for the Chat details rail."""
     resolved = _chat_background_run(request)
     if isinstance(resolved, JSONResponse):
         return resolved
@@ -2665,7 +2704,7 @@ async def chat_background_run_log(request: Request) -> JSONResponse:
 
 
 async def chat_background_run_cancel(request: Request) -> JSONResponse:
-    """Stop a background run from the Work details rail.
+    """Stop a background run from the Chat details rail.
 
     The finish edge announces itself over /ws/events and wakes the chat, the
     same as a cancel the agent asked for.
@@ -2899,6 +2938,8 @@ async def chat_messages(request: Request) -> JSONResponse:
     chat = pcm.get_chat(chat_id)
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if _request_params(request).get("offset") in (None, "", "0"):
+        pcm.schedule_repo_location_refresh(chat_id)
     rows = await transcript_service._assemble_chat_messages(
         pcm, request.app.state.config, chat
     )
@@ -5573,14 +5614,10 @@ async def list_models(request: Request) -> JSONResponse:
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
     s = app_settings.settings
-    from ciao.critique import critique_models_effective
-
-    critique_effective = critique_models_effective(config)
 
     return {
         # Overrides as stored ("" = automatic default).
         "insights_enabled": config.insights_enabled,
-        "critique_models": s.critique_models,
         # Per-provider default model for new chats, as stored (missing =
         # provider's own catalog default).
         "provider_default_models": s.provider_default_models or {},
@@ -5595,7 +5632,6 @@ def _routines_payload(config, app_settings) -> dict:
         # Per-provider Session insights models, as stored (missing = that
         # source chat's model).
         "provider_insights_models": s.provider_insights_models or {},
-        "critique_models_effective": critique_effective,
         # Server settings that used to be workspace `.env` variables, as
         # stored ("" = default). The bind address and the log level are read
         # at startup, so a change takes effect after a restart; developer mode
@@ -5668,19 +5704,22 @@ async def settings_routines(request: Request) -> JSONResponse:
 
 
 async def settings_keyboard(request: Request) -> JSONResponse:
-    """Read or update keyboard preferences shared by this engine's clients."""
+    """Read or update keyboard and composer preferences shared by this engine's clients."""
     app_settings = request.app.state.app_settings
     if app_settings is None:
         return JSONResponse({"error": "settings store unavailable"}, status_code=503)
     def payload() -> dict[str, Any]:
         keyboard_shortcuts = app_settings.settings.keyboard_shortcuts or {}
         keyboard_send_mode = app_settings.settings.keyboard_send_mode or "modifier"
+        mid_turn_delivery = app_settings.settings.mid_turn_delivery or "queue"
         revision_source = json.dumps(
-            [keyboard_shortcuts, keyboard_send_mode], sort_keys=True, separators=(",", ":")
+            [keyboard_shortcuts, keyboard_send_mode, mid_turn_delivery],
+            sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")
         return {
             "keyboard_shortcuts": keyboard_shortcuts,
             "keyboard_send_mode": keyboard_send_mode,
+            "mid_turn_delivery": mid_turn_delivery,
             "revision": hashlib.sha256(revision_source).hexdigest(),
         }
     if request.method == "PATCH":
@@ -5783,20 +5822,6 @@ async def _cached_update_hint(request: Request) -> tuple[str, bool]:
     return getattr(app.state, "update_hint", ("", False))
 
 
-async def active_chats_endpoint(request: Request) -> JSONResponse:
-    """Return chat IDs with in-flight work (streaming or background subagents).
-
-    Drives the macOS menu bar: it spins the icon while anything is working and
-    marks those chats in the open-chats list. Unauthenticated like the
-    startup-status endpoint, since the local menu bar process has no session;
-    it only leaks opaque chat IDs, not their contents.
-    """
-    pcm = getattr(request.app.state, "project_chat_manager", None)
-    if pcm is None:
-        return JSONResponse({"active_chat_ids": []})
-    return JSONResponse({"active_chat_ids": pcm.active_chat_ids()})
-
-
 def _menubar_chat_needs_input(pending_question: str, pending_permission: str = "") -> bool:
     """True when AskUserQuestion JSON or an Approve/Deny prompt is waiting."""
     if (pending_permission or "").strip():
@@ -5818,9 +5843,8 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     """Open-chat summaries for the macOS menu bar.
 
     Usable without a session, but only from a loopback peer (the tray holds no
-    session cookie) — see ``_LOOPBACK_ONLY_API`` in ``ciao.web.auth``. Unlike
-    ``/api/active-chats`` this returns titles and workspace names, so it must
-    not be reachable from the network.
+    session cookie) — see ``_LOOPBACK_ONLY_API`` in ``ciao.web.auth``. It
+    returns titles and workspace names, so it must not be reachable from the network.
     """
     limit_raw = request.query_params.get("limit", "10")
     try:
@@ -5866,25 +5890,6 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     # within each group) — the badge then always has something to point at.
     rows.sort(key=lambda row: not (row["unread"] or row["needs_input"]))
     return JSONResponse({"chats": rows[:limit], "attention_count": attention_count})
-
-
-async def open_chat_endpoint(request: Request) -> JSONResponse:
-    """Ask an already-open PWA to navigate to a chat.
-
-    macOS ``open -a PWA /chat/...`` often focuses the installed app without
-    changing the window URL when it is already running. The menu bar calls
-    this unauthenticated local endpoint first; connected clients receive an
-    ``open_chat`` event over ``/ws/events`` and switch chats in place.
-    """
-    chat_id = str(request.path_params.get("chat_id") or "").strip()
-    if not chat_id:
-        return JSONResponse({"ok": False, "error": "missing chat_id"}, status_code=400)
-    pcm = getattr(request.app.state, "project_chat_manager", None)
-    if pcm is None or pcm.get_chat(chat_id) is None:
-        return JSONResponse({"ok": False, "error": "chat not found"}, status_code=404)
-    delivered = bool(getattr(pcm.events, "subscriber_count", 0))
-    pcm.events.publish({"type": "open_chat", "chat_id": chat_id})
-    return JSONResponse({"ok": True, "chat_id": chat_id, "delivered": delivered})
 
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
@@ -6294,8 +6299,16 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
 # this machine cannot ride the session cookie.
 
 
-def _workspace_move_local(request: Request) -> bool:
+def host_browser_request(request: Request) -> bool:
+    """A browser on the computer running Ciaobot: loopback TCP peer, loopback Host, same-host Origin/Referer.
+
+    Narrows a session route; grants nothing by itself (AuthMiddleware still requires the session).
+    """
     return _localhost_request(request) and _setup_finish_origin_allowed(request)
+
+
+def _workspace_move_local(request: Request) -> bool:
+    return host_browser_request(request)
 
 
 def _workspace_move_guard(request: Request) -> JSONResponse | None:
@@ -6688,13 +6701,12 @@ async def admin_restart(request: Request) -> JSONResponse:
 # does not exclude it — and these routes need no session. The Host check
 # closes that: the name in the request is the only part of a rebound request
 # the attacker controls, so it has to be one this engine serves.
-_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _forbidden_host(request: Request) -> JSONResponse | None:
     """The 403 a request for a host this engine does not serve gets, or None."""
     host = (request.url.hostname or "").lower()
-    if host in _LOOPBACK_HOSTS:
+    if host in LOOPBACK_HOST_NAMES:
         return None
     return JSONResponse({"error": "forbidden host"}, status_code=403)
 
@@ -6746,6 +6758,14 @@ async def admin_drain_cancel(request: Request) -> JSONResponse:
     request.app.state.update_drain_active = False
     pcm.cancel_restart_drain()
     return JSONResponse({"draining": False})
+
+
+async def admin_restart_blockers(request: Request) -> JSONResponse:
+    """Chats a restart/stop would interrupt, reason-tagged. Loopback without session (ciao service gate) or with session (Settings)."""
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"restart_blockers": []})
+    return JSONResponse({"restart_blockers": pcm.restart_blockers()})
 
 
 async def admin_deploy(request: Request) -> JSONResponse:
@@ -8004,6 +8024,17 @@ async def proposals_history(request: Request) -> JSONResponse:
     )
 
 
+def _linked_repos_for(request: Request, row: dict[str, Any]) -> list[str]:
+    """Linked repo paths a `[repo]` row is checked against; empty for other kinds.
+
+    Called on the event loop: `list_projects` mutates the project registry.
+    """
+    if str(row.get("kind") or "") != "repo":
+        return []
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    return proposal_service.linked_repo_paths(pcm, str(row.get("workspace") or ""))
+
+
 async def proposal_preview(request: Request) -> JSONResponse:
     """Exactly what accepting one queued proposal would write, without writing.
 
@@ -8029,7 +8060,12 @@ async def proposal_preview(request: Request) -> JSONResponse:
     text = request.query_params.get("text", "")
     # Off the event loop: the preview reads a guide (taking no lock) and a
     # learnings file, and a slow filesystem must not stall every other request.
-    preview = await asyncio.to_thread(proposal_service.preview_row, config, ctx, text)
+    linked = _linked_repos_for(request, ctx["row"])
+    preview = await asyncio.to_thread(
+        functools.partial(
+            proposal_service.preview_row, config, ctx, text, linked_repos=linked
+        )
+    )
     return JSONResponse({"ok": True, "preview": preview})
 
 
@@ -8582,9 +8618,15 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         keep_lines.add(int(row["line"]))
                         continue
                     expected = revisions.get(row["id"], "")
+                    linked = _linked_repos_for(request, row)
                     if expected:
                         current = await asyncio.to_thread(
-                            proposal_service.destination_revision, config, row
+                            functools.partial(
+                                proposal_service.destination_revision,
+                                config,
+                                row,
+                                linked_repos=linked,
+                            )
                         )
                         if current and current != expected:
                             promoted[row["id"]] = proposal_service.AcceptOutcome(
@@ -8611,6 +8653,10 @@ async def proposals_batch(request: Request) -> JSONResponse:
                         promotion = await proposal_service._accept_people_row(config, row)
                     elif accept.action == "append_learnings":
                         promotion = proposal_service._accept_learnings_row(config, row)
+                    elif accept.action == "append_repo_doc":
+                        promotion = await asyncio.to_thread(
+                            proposal_service._accept_repo_row, config, row, linked
+                        )
                     elif accept.action == "add_category":
                         # A registry the validator refuses (a folder another
                         # category already claims) is the owner's problem to fix,
@@ -9041,13 +9087,25 @@ async def proposal_action(request: Request) -> JSONResponse:
             # rule out. The refreshed preview rides along so the client can
             # re-render the card instead of asking for it again. Off the loop:
             # it reads the destination.
+            linked = _linked_repos_for(request, row)
             if expected_revision:
                 current = await asyncio.to_thread(
-                    proposal_service.destination_revision, config, row
+                    functools.partial(
+                        proposal_service.destination_revision,
+                        config,
+                        row,
+                        linked_repos=linked,
+                    )
                 )
                 if current and current != expected_revision:
                     refreshed = await asyncio.to_thread(
-                        proposal_service.preview_row, config, ctx, edited_text
+                        functools.partial(
+                            proposal_service.preview_row,
+                            config,
+                            ctx,
+                            edited_text,
+                            linked_repos=linked,
+                        )
                     )
                     return JSONResponse(
                         {
@@ -9142,6 +9200,19 @@ async def proposal_action(request: Request) -> JSONResponse:
                 if not promoted.ok:
                     return JSONResponse(
                         {"error": promoted.error or "could not append", "id": pid},
+                        status_code=409,
+                    )
+            elif accept.action == "append_repo_doc":
+                promoted = await asyncio.to_thread(
+                    proposal_service._accept_repo_row, config, promote_row, linked
+                )
+                if not promoted.ok:
+                    return JSONResponse(
+                        {
+                            "error": promoted.error or "could not append to AGENTS.md",
+                            "id": pid,
+                            "conflict": bool(promoted.conflict),
+                        },
                         status_code=409,
                     )
             elif accept.action == "add_category":

@@ -1458,9 +1458,22 @@ def _stock(relative: str) -> str:
     return resources.files("ciao.stock").joinpath(relative).read_text(encoding="utf-8")
 
 
+def _care_references() -> str:
+    """Every curation reference file of the `ciao-memory` skill, concatenated (#1462)."""
+    from importlib import resources
+
+    refs = resources.files("ciao.stock").joinpath("skills", "ciao-memory", "references")
+    return "\n\n".join(
+        item.read_text(encoding="utf-8")
+        for item in sorted(refs.iterdir(), key=lambda i: i.name)
+        if item.name.endswith(".md")
+    )
+
+
 def test_the_schedule_starts_from_the_computed_worklist() -> None:
     """The agent must not re-derive by hand what pass 0 already decided."""
     skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
+    skill = skill + "\n\n" + _care_references()
 
     assert "ciao curation-begin --json" in skill
     assert "ciao curation-progress" in skill
@@ -1509,7 +1522,9 @@ def test_the_schedule_verifies_stale_notes_through_the_managed_operation() -> No
         for entry in json.loads(_stock("schedules.json"))["schedules"]
         if entry["schedule_id"] == "system-memory-curation"
     )
-    stale = prompt[prompt.index("**`stale_notes`**") : prompt.index("## 4.")]
+    reverify = _stock("skills/ciao-memory/references/curation-pass-3-reverify.md")
+    stale = reverify[reverify.index("## `stale_notes`") : reverify.index("## `stale_entry` items")]
+    prompt = prompt + "\n\n" + reverify
 
     # The managed pass, and the operation that is the only way to settle a note.
     assert "`note verify`" in stale
@@ -1546,6 +1561,59 @@ def test_the_memory_skill_routes_note_verification_through_the_operation() -> No
     # The specific failure mode this replaces.
     assert "never a direct edit" in skill
     assert "leaves no receipt" in skill
+
+
+def test_the_schedule_compares_a_stale_note_with_its_related_notes() -> None:
+    reverify = _stock("skills/ciao-memory/references/curation-pass-3-reverify.md")
+    stale = reverify[reverify.index("## `stale_notes`") : reverify.index("## `stale_entry` items")]
+
+    assert "ciao note related" in stale
+    assert "Reading a note is not checking it" in stale
+    assert '"due": true' in stale
+    assert "ciao memory-proposal-add --kind review --text-file" in stale
+    assert "**What needs you**" in stale
+
+
+def test_a_note_verified_outside_the_worklist_is_not_planned(tmp_path: Path) -> None:
+    """Crediting a related note needs no engine change: a verdict for a note that
+    was never a planned item records a check, and the next plan skips it."""
+    from types import SimpleNamespace
+
+    from ciao import note_verification as nv
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    today = date(2026, 9, 19)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    _note(vault, "People/Aldo.md", updated="2024-01-05")
+    other = _note(vault, "People/Bruno.md", updated="2024-01-05")
+    assert {item.label for item in _stale_items(vault, guide, today=today)} == {"Aldo", "Bruno"}
+
+    result = nv.verify_note(
+        nv.VerificationRequest(
+            workspace="personal",
+            relative_path="People/Bruno.md",
+            expected_revision=mr.content_revision(other.read_text(encoding="utf-8")),
+            outcome=nv.UNVERIFIED,
+            reason="no source this pass reached",
+        ),
+        vault_root=vault,
+        config=SimpleNamespace(workspace_vault_root=lambda _name: vault),
+        today=today,
+    )
+
+    assert result.status == nv.UNVERIFIED
+    assert {item.label for item in _stale_items(vault, guide, today=today)} == {"Aldo"}
+
+
+def test_the_memory_skill_points_at_note_related() -> None:
+    assert "ciao note related" in _stock("skills/ciao-memory/SKILL.md")
+
+
+def test_the_memory_skill_did_not_grow() -> None:
+    skill = _stock("skills/ciao-memory/SKILL.md")
+
+    assert len(skill.encode()) <= 13200
 
 
 # ── The Learnings cleanup pass (#728-E) ──────────────────────────────────────
@@ -2671,3 +2739,144 @@ def test_the_entry_pass_reads_the_check_state_once(tmp_path: Path) -> None:
         ev.read_entry_checks = monkey  # type: ignore[assignment]
 
     assert len(reads) == 1, f"the sidecar was read {len(reads)} times for one plan"
+
+
+# ── Observations pass (#1338) ─────────────────────────────────────────────
+
+
+def _observation_record(
+    text: str, chats: tuple[str, ...], *, last: date, first: date | None = None
+) -> LearningRecord:
+    from ciao.learning_records import LearningObservation
+
+    return LearningRecord(
+        learning_id=allocate_learning_id("work", f"obs:{text}"),
+        key=text.split()[-1],
+        text=f"About the user: {text}",
+        first_seen=first or last,
+        last_seen=last,
+        count=len(chats),
+        observations=tuple(LearningObservation(source=chat) for chat in chats),
+    )
+
+
+def _observation_vault(tmp_path: Path, *records: LearningRecord, resolved: tuple[LearningRecord, ...] = ()) -> Path:
+    from ciao import observations
+
+    vault = _vault(tmp_path)
+    body = "".join(f"{render_learning(record)}\n" for record in records)
+    done = "".join(f"{render_learning(record)}\n" for record in resolved)
+    (vault / observations.OBSERVATIONS_RELATIVE).write_text(
+        f"{observations.OBSERVATIONS_STUB}{body}\n## Promoted / Resolved\n{done}",
+        encoding="utf-8",
+        newline="",
+    )
+    return vault
+
+
+def _observation_worklist(vault: Path, tmp_path: Path, *, workspace: str | None = "work") -> cr.Worklist:
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    return cr.build_worklist(
+        vault_root=vault,
+        workspace=workspace,
+        guide_path=_guide(tmp_path),
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+
+def _observation_items(worklist: cr.Worklist) -> list[cr.WorklistItem]:
+    return [item for item in worklist.items if item.pass_id == cr.PASS_OBSERVATIONS]
+
+
+def test_observation_pass_plans_propose_and_prune(tmp_path: Path) -> None:
+    due = _observation_record("prefers one line", ("a", "b", "c"), last=date(2026, 9, 10))
+    stale = _observation_record("likes tea", ("a",), last=date(2026, 6, 1))
+    vault = _observation_vault(tmp_path, due, stale)
+
+    (item,) = _observation_items(_observation_worklist(vault, tmp_path))
+
+    assert item.label == "Propose recurring observations"
+    assert item.keys == (
+        cr.item_key(cr.PASS_OBSERVATIONS, f"propose:{due.learning_id}"),
+        cr.item_key(cr.PASS_OBSERVATIONS, "prune"),
+    )
+    assert "1 observation(s) seen in 3+ chats" in item.reason
+    assert "1 x1 observation(s) older than 60 days" in item.reason
+
+
+def test_observation_pass_caps_at_five_and_notes_overflow(tmp_path: Path) -> None:
+    records = [
+        _observation_record(f"habit number{index}", ("a", "b", "c"), last=date(2026, 9, 10),
+                            first=date(2026, 8, index + 1))
+        for index in range(7)
+    ]
+    vault = _observation_vault(tmp_path, *records)
+
+    worklist = _observation_worklist(vault, tmp_path)
+
+    (item,) = _observation_items(worklist)
+    assert len(item.keys) == cr.OBSERVATIONS_MAX_ITEMS
+    oldest = [cr.item_key(cr.PASS_OBSERVATIONS, f"propose:{r.learning_id}") for r in records[:5]]
+    assert list(item.keys) == oldest
+    assert any("7 observations are due" in note for note in worklist.notes)
+
+
+def test_observation_merge_is_planned_weekly_for_a_subject_seen_twice(tmp_path: Path) -> None:
+    one = _observation_record("prefers one line", ("a",), last=date(2026, 9, 10))
+    two = _observation_record("wants a short summary first", ("b",), last=date(2026, 9, 12))
+    vault = _observation_vault(tmp_path, one, two)
+
+    assert _observation_items(_observation_worklist(vault, tmp_path)) == []
+
+    _fresh_log(vault, last_full_pass=date(2026, 9, 1).isoformat())
+    worklist = cr.build_worklist(
+        vault_root=vault,
+        workspace="work",
+        guide_path=_guide(tmp_path),
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+    (item,) = _observation_items(worklist)
+    assert item.keys == (cr.item_key(cr.PASS_OBSERVATIONS, "merge"),)
+
+
+def test_resolved_observations_are_not_planned(tmp_path: Path) -> None:
+    done = _observation_record("prefers one line", ("a", "b", "c"), last=date(2026, 9, 10))
+    stale = _observation_record("likes tea", ("a",), last=date(2026, 1, 1))
+    vault = _observation_vault(tmp_path, resolved=(done, stale))
+
+    assert _observation_items(_observation_worklist(vault, tmp_path)) == []
+
+
+def test_observation_pass_runs_after_learnings_cleanup() -> None:
+    order = cr.PASS_ORDER
+    assert order.index(cr.PASS_OBSERVATIONS) == order.index(cr.PASS_LEARNINGS_CLEANUP) + 1
+    assert order.index(cr.PASS_OBSERVATIONS) < order.index(cr.PASS_HYGIENE)
+
+
+def test_observations_skipped_without_workspace_name(tmp_path: Path) -> None:
+    due = _observation_record("prefers one line", ("a", "b", "c"), last=date(2026, 9, 10))
+    vault = _observation_vault(tmp_path, due)
+
+    worklist = _observation_worklist(vault, tmp_path, workspace=None)
+
+    assert _observation_items(worklist) == []
+    assert any("observations were not planned" in note for note in worklist.notes)
+
+
+def test_the_care_prompt_proposes_observations_between_sections_4_and_5() -> None:
+    prompt = next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+
+    assert "## 4b. Propose recurring observations" in prompt
+    assert prompt.index("## 4. ") < prompt.index("## 4b. ") < prompt.index("## 5. ")
+    observations = _stock("skills/ciao-memory/references/curation-pass-4b-observations.md")
+    assert "references/curation-pass-4b-observations.md" in prompt
+    for command in ("ciao observation-propose", "ciao observation-merge", "ciao observation-prune"):
+        assert command in observations

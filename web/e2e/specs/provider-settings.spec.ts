@@ -20,8 +20,6 @@ for (const mobile of [false, true]) {
     } }))
     let settings = {
       insights_enabled: true,
-      critique_models: '',
-      critique_models_effective: '',
       provider_default_models: { claude: 'sonnet' },
       provider_default_thinking: {},
       provider_insights_models: {},

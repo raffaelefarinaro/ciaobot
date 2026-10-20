@@ -64,7 +64,7 @@
             ref="workspaceScopeTrigger"
             type="button"
             class="workspace-scope-trigger"
-            :data-workspace-color="colorForWorkspace(store.workspaceOptions.find(item => item.name === store.activeWorkspace))"
+            :data-workspace-color="activeWorkspaceAccent(store.workspaces, store.activeWorkspace)"
             :aria-label="`Workspace: ${workspaceLabel(store.activeWorkspace)}`"
             :aria-haspopup="canOpenWorkspaceMenu ? 'menu' : undefined"
             :aria-expanded="canOpenWorkspaceMenu ? workspaceScopeOpen : undefined"
@@ -99,7 +99,7 @@
               role="menuitem"
               class="workspace-scope-option"
               :class="{ active: workspace.name === store.activeWorkspace }"
-              :data-workspace-color="colorForWorkspace(workspace)"
+              :data-workspace-color="workspaceAccent(store.workspaces, workspace.name, store.activeWorkspace)"
               :aria-keyshortcuts="workspaceShortcut(workspace.name) || undefined"
               @click="selectWorkspaceScope(workspace.name)"
             >
@@ -613,12 +613,13 @@
                   @click="openProject(project.project_id)"
                   title="Open project page"
                 >
-                  {{ project.name }}
+                  <span class="project-name-text">{{ project.name }}</span>
                   <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
                   <!-- Only a collapsed project summarises its chats: expanded,
                        each chat row already carries its own signal. One static
                        dot when a chat wants the user (accent if it waits for an
-                       answer), else the working ring - never a count. -->
+                       answer), else the working ring - never a count. A chat's
+                       background run adds the static run glyph beside either. -->
                   <template v-if="!expandedProjects.has(project.project_id)">
                     <span
                       v-if="projectAttention(project.project_id)"
@@ -634,6 +635,13 @@
                       title="A chat in this project is working"
                       aria-label="A chat in this project is working"
                     ><span class="rollup-ring-core" aria-hidden="true" /></span>
+                    <span
+                      v-if="projectRunCount(project.project_id) > 0"
+                      class="project-run-rollup"
+                      role="img"
+                      :title="projectRunsLabel(project.project_id)"
+                      :aria-label="projectRunsLabel(project.project_id)"
+                    ><ActivityGlyph kind="run" /></span>
                   </template>
                 </button>
                 <input
@@ -734,6 +742,16 @@
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
                     <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
+                    <span v-if="isChatCodeModeOn(chat, project.repo) && !branchChip(chat, project.repo)" class="chat-code-tag" title="Code mode is on">code</span>
+                    <span
+                      v-if="branchChip(chat, project.repo)"
+                      class="chat-repo-tag"
+                      :class="{
+                        'chat-repo-tag--removed': branchChip(chat, project.repo)!.removed,
+                        'chat-repo-tag--code-off': branchChip(chat, project.repo)!.codeOff,
+                      }"
+                      :title="branchChip(chat, project.repo)!.title"
+                    >{{ branchChip(chat, project.repo)!.label }}</span>
                     <ChatSignals
                       :chat-id="chat.chat_id"
                       density="row"
@@ -900,14 +918,19 @@ import { useProposalsStore } from '../stores/proposals'
 import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
+import ActivityGlyph from './ActivityGlyph.vue'
+import { sidebarBranchChip } from '../lib/repoLocation'
+import { isChatCodeModeOn } from '../lib/codeMode'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
 import { isApplePlatform } from '../lib/platform'
-import { scheduleInWorkspace } from '../lib/automationWorkspace'
+import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
-import { colorForWorkspace } from '../lib/workspaceColors'
-import { ARCHIVE_CONFIRM_MESSAGE, ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
+import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
+import { SETTINGS_NAV } from '../lib/settingsNav'
+import { ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
+import { useArchiveChat } from '../composables/useArchiveChat'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
 import { writeClipboard } from '../lib/codeCopy'
@@ -917,6 +940,7 @@ const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'sch
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
 
 const store = useProjectStore()
+const { archiveChatWithTaskCheck } = useArchiveChat()
 const taskStore = useTaskStore()
 const housekeeping = useHousekeepingStore()
 const fileViewer = useFileViewerStore()
@@ -1032,16 +1056,6 @@ function promptTitle(prompt: string): string {
 // The scope menu opens even with one workspace: it is also where a new
 // workspace is started.
 const canOpenWorkspaceMenu = computed(() => store.workspaceOptions.length > 0)
-// Settings tabs, in rail order. /settings is the General tab (route kept as-is).
-const SETTINGS_NAV = [
-  { to: '/settings', label: 'General' },
-  { to: '/settings/workspaces', label: 'Workspaces' },
-  { to: '/settings/models', label: 'Models & providers' },
-  { to: '/settings/skills', label: 'Skills' },
-  { to: '/settings/subagents', label: 'Subagents' },
-  { to: '/settings/commands', label: 'Commands' },
-  { to: '/settings/mcp', label: 'MCP servers' },
-] as const
 // The chord ChatLayout binds for New chat: Option/Alt+N, because the browser
 // keeps Cmd+T for its own new-tab.
 const newChatShortcut = isApplePlatform() ? '⌥N' : 'Alt+N'
@@ -1094,6 +1108,23 @@ function projectAttentionLabel(projectId: string): string {
   return parts.join(', ')
 }
 
+// The branch chip for a chat row, with code mode folded in.
+function branchChip(chat: ChatInfo, repo: ProjectInfo['repo']) {
+  return sidebarBranchChip(repo, chat.repo_location, isChatCodeModeOn(chat, repo))
+}
+
+// Background command runs across this project's visible chats. A run can sit
+// in a chat for hours (a dev server), so a collapsed project says it has one.
+function projectRunCount(projectId: string): number {
+  return store.projectChats(projectId)
+    .reduce((n, chat) => n + (store.backgroundRuns[chat.chat_id]?.length || 0), 0)
+}
+
+function projectRunsLabel(projectId: string): string {
+  const n = projectRunCount(projectId)
+  return n === 1 ? '1 background run in this project' : `${n} background runs in this project`
+}
+
 function workspaceInitial(workspace: string): string {
   return (workspaceLabel(workspace).trim()[0] || '·').toUpperCase()
 }
@@ -1126,7 +1157,11 @@ function selectWorkspaceScope(workspace: string): void {
     void selectAutomationWorkspace(workspace)
     return
   }
-  void store.switchWorkspace(workspace, { transition: false })
+  // From a chat or project, switching lands on the new workspace's Home, the
+  // same as its number key. Views with no chat to leave stay where they are.
+  void store.switchWorkspace(workspace, {
+    transition: !props.mode || props.mode === 'chat' || props.mode === 'project',
+  })
 }
 
 function onWorkspaceMenuKeydown(event: KeyboardEvent): void {
@@ -1301,13 +1336,12 @@ const renameValue = ref('')
 const isAnyChatWorking = computed(() => store.anyChatBusy)
 
 const hasAutomationWarning = computed(() => {
-  return taskStore.schedules.some(s => {
-    // `missing-chat` is set at the same moment the entry is disabled (the
-    // dispatcher found neither a target chat nor a project to re-home into),
-    // so gating it on `enabled` hid the one failure that cannot fix itself.
-    if (s.last_status === 'missing-chat') return true
-    return s.enabled && (s.missed || s.last_status === 'error')
-  })
+  // Scoped like `missedCountFor`, so the colour and the count describe the
+  // same set as the Automations list.
+  return taskStore.schedules.some(s => (
+    scheduleInWorkspace(s, store.activeWorkspace, store.chats, store.projects)
+    && scheduleNeedsAttention(s)
+  ))
 })
 // Destination projects for "Move to..." — same workspace as the chat,
 // excluding the chat's current project. Backend rejects cross-workspace moves.
@@ -1579,11 +1613,11 @@ function workspaceShortcut(name: string): string {
 
 function colorForChat(chat: { project_id: string }) {
   const project = store.projects.find(item => item.project_id === chat.project_id)
-  return colorForWorkspace(store.workspaceOptions.find(item => item.name === project?.workspace))
+  return workspaceAccent(store.workspaces, project?.workspace, store.activeWorkspace)
 }
 
 function colorForProject(workspace: string) {
-  return colorForWorkspace(store.workspaceOptions.find(item => item.name === workspace))
+  return workspaceAccent(store.workspaces, workspace, store.activeWorkspace)
 }
 
 // ── Completed (archived) projects ──────────────────────────────────────
@@ -1699,12 +1733,10 @@ async function doArchiveChat(chatId: string) {
   closeChatMenus()
   // This path never asked for confirmation, unlike the chat header's archive
   // button, so archiving from the sidebar menu was a single misclick.
-  if (!await askConfirm(ARCHIVE_CONFIRM_MESSAGE, {
-    title: 'Archive chat',
-    confirmLabel: 'Archive',
-  })) return
+  const chat = store.chats.find(c => c.chat_id === chatId)
+  if (!chat) return
   try {
-    await store.archiveChat(chatId)
+    await archiveChatWithTaskCheck(chat)
   } catch {
     // archiveChat reconnected the sockets and raised an error toast already;
     // swallow the rejection so it is not an unhandled one.
@@ -2433,10 +2465,14 @@ async function confirmDeleteChat(chatId: string) {
   border-left: 1px solid var(--border);
 }
 
+/* A flex row so only the name truncates: the auto chip and the collapsed
+   state marks after it stay visible however long the name runs. */
 .project-name {
+  display: flex;
   flex: 1;
+  align-items: center;
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
   min-height: var(--touch);
@@ -2451,14 +2487,24 @@ async function confirmDeleteChat(chatId: string) {
   letter-spacing: inherit;
 }
 .project-name:hover { color: var(--fg); }
+.project-name-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.project-name > :not(.project-name-text) { flex-shrink: 0; }
 
-/* The project header is a text button, not a flex row, so the state marks sit
-   flush against the last letter of the name. Space them the same 6px .badge
-   already gives itself, and align them to the text rather than the baseline.
-   Scoped here on purpose: the workspace pill puts the same marks in a flex row
-   with a gap, where a margin would double up. */
+/* The state marks sit flush after the name (the row has no gap), spaced the
+   same 6px .badge already gives itself. Scoped here on purpose: the workspace
+   pill puts the same marks in a flex row with a gap, where a margin would
+   double up. */
 .project-name .rollup-needs-dot,
 .project-name .rollup-ring {
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
+.project-name .project-run-rollup {
+  display: inline-flex;
   margin-left: var(--space-2);
   vertical-align: middle;
 }
@@ -2602,7 +2648,8 @@ async function confirmDeleteChat(chatId: string) {
 /* A delegated task's chat says so in words, as a small squared tag
    (DESIGN.md: --radius-xs, the keycap's tokens) so it cannot read as a count.
    It never shrinks; the title truncates first, and the tag stays short. */
-.chat-task-tag {
+.chat-task-tag,
+.chat-code-tag {
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
@@ -2613,6 +2660,32 @@ async function confirmDeleteChat(chatId: string) {
   border-radius: var(--radius-xs);
   color: var(--fg3);
   font: 600 calc(10px * var(--font-scale))/1 var(--font-mono);
+}
+
+/* Same squared tag as .chat-task-tag, but it can truncate (branch names run long). */
+.chat-repo-tag {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 9em;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font: 600 calc(10px * var(--font-scale))/14px var(--font-mono);
+}
+.chat-repo-tag--removed {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+/* A worktree the chat is no longer coding in: still named, visibly inactive. */
+.chat-repo-tag--code-off {
+  border-style: dashed;
+  opacity: 0.55;
 }
 
 /* Unread is full-strength text plus the row's dot, not bold: bold chat
@@ -2855,9 +2928,9 @@ async function confirmDeleteChat(chatId: string) {
   }
   /* The button takes the place of the row's trailing marks while it shows,
      rather than half-covering them; they keep their space so nothing shifts. */
-  .chat-item:hover :is(.chat-task-tag, .chat-signals, .remote-chip),
-  .chat-item:focus-within :is(.chat-task-tag, .chat-signals, .remote-chip),
-  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-signals, .remote-chip) {
+  .chat-item:hover :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip),
+  .chat-item:focus-within :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip),
+  .chat-item:has(.chat-actions-btn[data-state='open']) :is(.chat-task-tag, .chat-code-tag, .chat-repo-tag, .chat-signals, .remote-chip) {
     visibility: hidden;
   }
 }

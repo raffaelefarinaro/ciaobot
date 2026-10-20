@@ -91,6 +91,18 @@ def test_manual_retry_can_be_set_and_stopped(tmp_path: Path) -> None:
     assert stopped.retry_prompt == ""
 
 
+def test_manual_retry_is_hourly_after_a_daily_automatic_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.retry_interval_seconds = 24 * 60 * 60
+
+    updated = pcm.set_chat_retry(chat.chat_id, "retry this hourly", reason="manual")
+
+    assert updated is not None
+    assert updated.retry_interval_seconds == 60 * 60
+
+
 async def test_try_retry_now_starts_stream_when_chat_is_idle(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("retry", workspace="personal")
@@ -737,6 +749,35 @@ def test_a_plainly_stated_usage_limit_arms_the_hourly_retry() -> None:
     assert _is_retryable_quota_error("Token limit exhausted for this key") is True
 
 
+def test_a_tool_quota_error_does_not_arm_the_provider_retry() -> None:
+    """"quota" alone is a noun tools and the OS use too, so it is not a provider limit.
+
+    "disk quota exceeded" ended a turn and armed the hourly provider retry,
+    re-running the turn against a problem that is not a provider limit. A
+    quota counts only when it is the caller's own (exceeded your quota) or a
+    named provider's (OpenAI quota exceeded).
+    """
+    from ciao.web.chat_service import _is_retryable_quota_error
+
+    assert _is_retryable_quota_error("OSError: [Errno 122] Disk quota exceeded") is False
+    assert (
+        _is_retryable_quota_error(
+            "Google API quota exceeded for quota metric 'Read requests' and limit 'Read requests per minute'"
+        )
+        is False
+    )
+    assert _is_retryable_quota_error("storage quota reached") is False
+    assert _is_retryable_quota_error("You have exceeded your daily request quota for this API") is False
+    assert (
+        _is_retryable_quota_error(
+            "You exceeded your current quota, please check your plan and billing details"
+        )
+        is True
+    )
+    assert _is_retryable_quota_error("OpenAI quota exceeded") is True
+    assert _is_retryable_quota_error("API Error: 429 Too Many Requests: quota") is True
+
+
 def test_a_limit_noun_alone_still_needs_the_429_marker() -> None:
     """The gate exists so ordinary prose mentioning a quota is not a quota error.
 
@@ -1165,3 +1206,173 @@ async def test_retry_loop_wakes_at_a_rearmed_retry_time(
     assert calls == ["run me", "run me"]
     assert current is not None
     assert current.retry_status == ""
+
+
+def _ok_result(chat) -> ResultEvent:
+    return ResultEvent(
+        type="result", result="network looks down", session_id="sess-net",
+        is_error=False, effective_model=chat.model, usage={}, quota={}, cost_usd=0.0,
+    )
+
+
+async def test_network_retry_arms_with_ten_minute_backoff_and_in_flight_prompt(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="net")
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        assert pcm.arm_network_retry(chat.chat_id) == "armed"
+        yield _ok_result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "do the scheduled thing", unattended=True)
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated.retry_status == "pending"
+    assert updated.retry_kind == "network"
+    assert updated.retry_prompt == "do the scheduled thing"
+    assert updated.retry_attempts == 0
+    assert updated.retry_interval_seconds == 600
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_network_retry_turn_that_rearms_survives_its_own_turn_end(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="net")
+    assert pcm.arm_network_retry(chat.chat_id, "job") == "armed"
+    seen: list[object] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        seen.append(_kwargs.get("unattended"))
+        assert pcm.arm_network_retry(chat.chat_id) == "armed"
+        yield _ok_result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    assert seen == [True]
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated.retry_status == "pending"
+    assert updated.retry_attempts == 1
+    assert updated.retry_interval_seconds == 1200
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_network_retry_turn_that_succeeds_clears_the_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="net")
+    assert pcm.arm_network_retry(chat.chat_id, "job") == "armed"
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield _ok_result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.try_chat_retry_now(chat.chat_id)
+    assert stream is not None
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    assert pcm.get_chat(chat.chat_id).retry_status == ""
+
+
+async def test_network_retry_backoff_doubles_and_caps_at_three(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="net")
+
+    for attempts, interval in ((0, 600), (1, 1200), (2, 2400)):
+        chat.retry_attempts = attempts
+        assert pcm.arm_network_retry(chat.chat_id, "job") == "armed"
+        assert chat.retry_interval_seconds == interval
+    chat.retry_attempts = 3
+    assert pcm.arm_network_retry(chat.chat_id, "job") == "exhausted"
+    assert chat.retry_status == "stopped"
+    assert chat.retry_kind == ""
+
+
+async def test_try_now_past_the_network_cap_exhausts_instead_of_firing(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="net")
+    assert pcm.arm_network_retry(chat.chat_id, "job") == "armed"
+    chat.retry_attempts = 3
+    calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append(prompt)
+        yield _ok_result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    assert pcm.try_chat_retry_now(chat.chat_id) is None
+    assert calls == []
+    assert chat.retry_status == "stopped"
+
+
+async def test_arm_network_retry_without_prompt_or_turn_refuses(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="net")
+
+    assert pcm.arm_network_retry(chat.chat_id) == "no_prompt"
+    assert chat.retry_status == ""
+
+
+async def test_network_retry_holds_the_result_push(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    pcm._push_delay_seconds = 0
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="net")
+    pushed: list[tuple] = []
+    pcm.notify_result_cb = lambda cid, title, snippet: pushed.append((cid, title, snippet))
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        pcm.arm_network_retry(chat.chat_id)
+        yield _ok_result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    stream = pcm.start_stream(chat.chat_id, "job", unattended=True)
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+    await asyncio.sleep(0.05)
+
+    assert pushed == []
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_control_plane_network_kind_maps_outcomes(tmp_path: Path) -> None:
+    from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="net")
+    cp = CiaoControlPlane(pcm._config, project_chat_manager=pcm, schedule_manager=None)
+    principal = McpPrincipal(
+        token_id="t", chat_id=chat.chat_id, project_id="p",
+        workspace="personal", provider="opencode",
+    )
+
+    out = cp.chat_retry_update(principal, chat.chat_id, "set", prompt="job", kind="network")
+    assert out["data"]["retry"]["interval_seconds"] == 600
+
+    with pytest.raises(ControlPlaneError) as bad_kind:
+        cp.chat_retry_update(principal, chat.chat_id, "set", prompt="job", kind="bogus")
+    assert bad_kind.value.code == "invalid_kind"
+    with pytest.raises(ControlPlaneError) as bad_action:
+        cp.chat_retry_update(principal, chat.chat_id, "stop", kind="network")
+    assert bad_action.value.code == "invalid_action"
+
+    chat.retry_attempts = 3
+    with pytest.raises(ControlPlaneError) as capped:
+        cp.chat_retry_update(principal, chat.chat_id, "set", prompt="job", kind="network")
+    assert capped.value.code == "retry_exhausted"
+    pcm.stop_chat_retry(chat.chat_id)

@@ -5,7 +5,7 @@
       <p class="hint">
         Ciaobot notifies you when a chat replies and the browser tab is in the background.
         <a
-          class="set-link"
+          class="settings-help-link"
           href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
           target="_blank"
           rel="noopener noreferrer"
@@ -142,59 +142,9 @@ async function togglePush() {
 
 </script>
 
+<style scoped src="./settingsPanels.css"></style>
+
 <style scoped>
-/* Shared settings-card scaffolding (mirrors SettingsView.vue so the card keeps
-   its layout when rendered from a child component). */
-.card {
-  width: 100%;
-  margin: 0;
-  padding: 0;
-  gap: var(--space-3);
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  scroll-margin-top: var(--space-4);
-}
-.card:focus {
-  outline: none;
-}
-.section-title {
-  color: var(--fg);
-  font-family: var(--font-sans);
-  font-size: var(--text-lg);
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  line-height: 1.3;
-  text-transform: none;
-}
-.settings-card-header {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding-bottom: var(--space-1);
-  border-bottom: 0;
-}
-.settings-card-header .hint {
-  color: var(--fg3);
-}
-.settings-card-header:last-child {
-  padding-bottom: 0;
-  border-bottom: none;
-}
-.settings-card-header--split {
-  flex-direction: row;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-.settings-card-header--split > div {
-  min-width: 0;
-}
-.settings-card-header .hint {
-  margin: var(--space-1) 0 0;
-  max-width: 76ch;
-}
 .notif-rows { border-top: 1px solid var(--border); }
 .notif-row {
   display: flex;

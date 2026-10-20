@@ -291,6 +291,40 @@ def test_read_operation_reads_a_record_written_before_env_freeze(
     assert op.env_python.endswith("/env/bin/python")
 
 
+def test_read_operation_ignores_the_retired_host_fields(
+    tmp_path: Path,
+) -> None:
+    # A record written by v1.5.x carries the retired host-migration fields. The
+    # reader drops them rather than refusing the record, so an update staged
+    # before this release still applies.
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / OPERATION_NAME).write_text(
+        json.dumps(
+            {
+                "id": "20260925T100000-1.2.3",
+                "phase": "staged",
+                "from_version": "1.2.2",
+                "to_version": "1.2.3",
+                "started_at": "2026-09-25T10:00:00+00:00",
+                "updated_at": "2026-09-25T10:00:05+00:00",
+                "env_python": "/u/.local/state/ciaobot/updates/1.2.3/env/bin/python",
+                "host_archive": "/x/host.zip",
+                "host_status": "migrated",
+                "host_error": "boom",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    op = read_operation(state)
+
+    assert op is not None
+    assert op.id == "20260925T100000-1.2.3"
+    assert op.phase == "staged"
+    assert not hasattr(op, "host_status")
+
+
 def test_stage_update_rejects_bad_signature(
     tmp_path: Path, release: FakeRelease, fake_run
 ) -> None:
@@ -1217,7 +1251,7 @@ def test_apply_drains_then_bootstraps_updater(tmp_path: Path) -> None:
     result = _apply(engine, state)
 
     # The drain is polled by POSTing it again rather than by reading
-    # `/api/active-chats`, which a client-mode node would forward to the host.
+    # a separate chat list.
     # Every request the engine saw is the drain itself.
     assert engine.posts == [f"{BASE}/api/admin/drain"] * 5
     assert result.phase == "applying"
@@ -2937,278 +2971,6 @@ def test_run_apply_allows_a_hosted_job_serving_the_receipt_env(
     assert engine.starts == 1
 
 
-# ── MIGRATION (#1249): an in-app update moves a revision-1 host to revision 2 ──
-
-_REVISION_ONE_HOST = (
-    "/Users/operator/Applications/Ciaobot Server.app/Contents/MacOS/CiaobotServerHost"
-)
-
-
-def _write_hosted_plist(host: str, python: str | Path) -> bytes:
-    """The revision-1 or revision-2 hosted LaunchAgent; returns its bytes."""
-    path = _server_plist_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as handle:
-        plistlib.dump(
-            {
-                "Label": SERVER_LABEL,
-                "ProgramArguments": [host, "serve", "--python", str(python)],
-                "RunAtLoad": True,
-                "KeepAlive": True,
-            },
-            handle,
-        )
-    return path.read_bytes()
-
-
-def _stage_host_for_apply(
-    op: Operation, state: Path, monkeypatch: pytest.MonkeyPatch
-) -> Path:
-    """Put the release's revision-2 host next to a staged update, as stage would."""
-    from ciao.release_manifest import server_host_artifact_entry
-
-    stage = Path(op.stage_dir)
-    archive = stage / server_host_install_filename()
-    archive.write_bytes(b"the signed revision-two host archive")
-    (stage / engine_update.MANIFEST_NAME).write_bytes(b"{}")
-    (stage / engine_update.SIGNATURE_NAME).write_text("sig", encoding="utf-8")
-    entry = server_host_artifact_entry(archive)
-    # The manifest is verified again at apply time; the test manifest carries
-    # only the host entry, with the key and signature checks answered by the fake.
-    monkeypatch.setattr(
-        engine_update.release_manifest,
-        "verify_manifest",
-        lambda raw, sig, key: {"artifacts": [entry]},
-    )
-    op.host_archive = str(archive)
-    write_operation(op, state)
-    return archive
-
-
-def server_host_install_filename() -> str:
-    from ciao.release_manifest import SERVER_HOST_FILENAME
-
-    return SERVER_HOST_FILENAME
-
-
-@mac_update_host
-def test_an_in_app_update_from_a_revision_one_host_is_not_refused_and_moves_the_host(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
-    live_python = engine.live_env / "bin" / "python"
-    # The installed revision-1 service: the old executable serving the receipt's env.
-    _write_hosted_plist(_REVISION_ONE_HOST, live_python)
-    _stage_host_for_apply(op, state, monkeypatch)
-    monkeypatch.setattr(update_host.MacUpdateHost, "server_host_migration_needed", lambda self: True)
-    installed: list[Path] = []
-
-    def install_revision_two(self: Any, archive: Path, entry: dict[str, Any]) -> Any:
-        # The installer's own replacement is tested in test_server_host_install;
-        # here it answers with the verified bundle the plist must then name.
-        installed.append(archive)
-        return SimpleNamespace(
-            bundle_path=str(tmp_path / "Applications" / "Ciaobot Server.app")
-        )
-
-    monkeypatch.setattr(update_host.MacUpdateHost, "_install_host", install_revision_two)
-
-    result = _run(
-        engine,
-        op,
-        state,
-        receipt_path,
-        # The revision-1 job is what launchd reports before the update.
-        launchctl=_loaded_hosted_job(
-            engine, live_python, executable="CiaobotServerHost"
-        ),
-    )
-
-    # The pre-swap check read the revision-1 command and let the update through.
-    assert result.phase == "applied", result.error
-    assert _env_version(engine.live_env) == TO_VERSION
-    assert engine.starts == 1
-    assert installed == [Path(op.host_archive)]
-    # The agent the start loaded names the revision-2 host, serving the same env.
-    with _server_plist_path().open("rb") as handle:
-        arguments = plistlib.load(handle)["ProgramArguments"]
-    assert arguments[0].endswith("/Contents/MacOS/Ciaobot Server")
-    assert arguments[1:] == ["serve", "--python", str(live_python)]
-    assert result.host_status == "migrated"
-    assert "macOS will ask again" in engine_update._format(result, as_json=False)
-    # A later update reads the revision-2 job with the strict parser and is allowed.
-    assert (
-        engine_update._service_disagreement(
-            engine.live_env,
-            executable=read_receipt(receipt_path).executable,
-            host=update_host.MacUpdateHost(launchctl=_loaded_hosted_job(engine, live_python)),
-        )
-        == ""
-    )
-
-
-@mac_update_host
-def test_a_failed_host_migration_leaves_the_engine_updated_and_the_old_host_running(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from ciao import server_host_install
-
-    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
-    live_python = engine.live_env / "bin" / "python"
-    before = _write_hosted_plist(_REVISION_ONE_HOST, live_python)
-    _stage_host_for_apply(op, state, monkeypatch)
-    monkeypatch.setattr(update_host.MacUpdateHost, "server_host_migration_needed", lambda self: True)
-
-    def refuse(self: Any, archive: Path, entry: dict[str, Any]) -> Any:
-        raise server_host_install.ServerHostInstallError(
-            "the revision-1 host could not be moved aside", code=server_host_install.INSTALL_FAILED
-        )
-
-    monkeypatch.setattr(update_host.MacUpdateHost, "_install_host", refuse)
-
-    result = _run(
-        engine,
-        op,
-        state,
-        receipt_path,
-        launchctl=_loaded_hosted_job(engine, live_python, executable="CiaobotServerHost"),
-    )
-
-    # The engine update succeeds on the new env and is started.
-    assert result.phase == "applied", result.error
-    assert _env_version(engine.live_env) == TO_VERSION
-    assert engine.starts == 1
-    # The agent still names the old host, which the installer left in place.
-    assert _server_plist_path().read_bytes() == before
-    assert result.host_status == "failed"
-    assert "moved aside" in result.host_error
-    assert "note:" in engine_update._format(result, as_json=False)
-
-
-def _stage_without_host(
-    op: Operation, state: Path, monkeypatch: pytest.MonkeyPatch, src: Path
-) -> dict[str, Any]:
-    """A staged update as v1.3.0 leaves it: a signed manifest, but no host archive."""
-    from ciao.release_manifest import server_host_artifact_entry
-
-    stage = Path(op.stage_dir)
-    (stage / engine_update.MANIFEST_NAME).write_bytes(b"{}")
-    (stage / engine_update.SIGNATURE_NAME).write_text("sig", encoding="utf-8")
-    src.mkdir(parents=True, exist_ok=True)
-    archive = src / server_host_install_filename()
-    archive.write_bytes(b"the signed revision-two host archive")
-    entry = server_host_artifact_entry(archive)
-    monkeypatch.setattr(
-        engine_update.release_manifest,
-        "verify_manifest",
-        lambda raw, sig, key: {"artifacts": [entry]},
-    )
-    write_operation(op, state)
-    return entry
-
-
-@mac_update_host
-def test_an_update_staged_without_the_host_fetches_it_during_apply_and_moves_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
-    live_python = engine.live_env / "bin" / "python"
-    _write_hosted_plist(_REVISION_ONE_HOST, live_python)
-    src = tmp_path / "src"
-    _stage_without_host(op, state, monkeypatch, src)
-    monkeypatch.setattr(update_host.MacUpdateHost, "server_host_migration_needed", lambda self: True)
-    installed: list[Path] = []
-    fetched: list[str] = []
-
-    def fetch(url: str, dest: Path, **kwargs: Any) -> None:
-        fetched.append(url)
-        shutil.copy(src / server_host_install_filename(), dest)
-
-    def install_revision_two(self: Any, archive: Path, entry: dict[str, Any]) -> Any:
-        installed.append(archive)
-        return SimpleNamespace(
-            bundle_path=str(tmp_path / "Applications" / "Ciaobot Server.app")
-        )
-
-    monkeypatch.setattr(update_host.MacUpdateHost, "_install_host", install_revision_two)
-
-    result = _run(
-        engine,
-        op,
-        state,
-        receipt_path,
-        launchctl=_loaded_hosted_job(engine, live_python, executable="CiaobotServerHost"),
-        fetch=fetch,
-        release_base="https://r",
-    )
-
-    assert result.phase == "applied", result.error
-    assert fetched == [f"https://r/v{TO_VERSION}/{server_host_install_filename()}"]
-    assert installed == [Path(op.stage_dir) / server_host_install_filename()]
-    with _server_plist_path().open("rb") as handle:
-        arguments = plistlib.load(handle)["ProgramArguments"]
-    assert arguments[0].endswith("/Contents/MacOS/Ciaobot Server")
-    assert result.host_status == "migrated"
-    assert "macOS will ask again" in engine_update._format(result, as_json=False)
-
-
-@mac_update_host
-def test_a_late_host_fetch_that_fails_still_applies_the_update_and_keeps_the_old_host(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
-    live_python = engine.live_env / "bin" / "python"
-    before = _write_hosted_plist(_REVISION_ONE_HOST, live_python)
-    _stage_without_host(op, state, monkeypatch, tmp_path / "src")
-    monkeypatch.setattr(update_host.MacUpdateHost, "server_host_migration_needed", lambda self: True)
-    installed: list[Path] = []
-
-    def install(self: Any, archive: Path, entry: dict[str, Any]) -> Any:
-        installed.append(archive)
-        raise AssertionError("the host must not be installed when the fetch failed")
-
-    def offline(url: str, dest: Path, **kwargs: Any) -> None:
-        raise OSError("offline")
-
-    monkeypatch.setattr(update_host.MacUpdateHost, "_install_host", install)
-
-    result = _run(
-        engine,
-        op,
-        state,
-        receipt_path,
-        launchctl=_loaded_hosted_job(engine, live_python, executable="CiaobotServerHost"),
-        fetch=offline,
-        release_base="https://r",
-    )
-
-    assert result.phase == "applied", result.error
-    assert _env_version(engine.live_env) == TO_VERSION
-    assert engine.starts == 1
-    assert installed == []
-    assert result.host_status == "failed"
-    assert "was not staged" in result.host_error
-    assert _server_plist_path().read_bytes() == before
-
-
-@mac_update_host
-def test_an_apply_without_a_host_to_migrate_never_fetches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
-    monkeypatch.setattr(update_host.MacUpdateHost, "server_host_migration_needed", lambda self: False)
-    fetched: list[str] = []
-
-    def fetch(url: str, dest: Path, **kwargs: Any) -> None:
-        fetched.append(url)
-
-    result = _run(engine, op, state, receipt_path, fetch=fetch, release_base="https://r")
-
-    assert result.phase == "applied", result.error
-    assert fetched == []
-    assert result.host_status == ""
-
-
 @mac_update_host
 def test_run_apply_refuses_a_hosted_job_serving_a_foreign_env(
     tmp_path: Path,
@@ -3275,6 +3037,30 @@ def test_a_hosted_command_with_a_non_python_interpreter_refuses(
     assert "not the receipt's environment" in result.error
     assert engine.changed_jobs() == []
     assert engine.starts == 0
+
+
+@mac_update_host
+def test_a_loaded_revision_one_host_is_refused_without_touching_anything(
+    tmp_path: Path,
+) -> None:
+    # A revision-1 host still loaded under the hosted command serves the
+    # receipt's own env, but the executable it runs is the retired name. The
+    # parser no longer accepts that name, so the pre-flight must refuse the swap
+    # rather than read the job as agreeing, and nothing may be changed.
+    op, state, receipt_path, engine = _staged(tmp_path, phase="applying")
+    launchctl = _loaded_hosted_job(
+        engine, engine.live_env / "bin" / "python", executable="CiaobotServerHost"
+    )
+
+    result = _run(engine, op, state, receipt_path, launchctl=launchctl)
+
+    assert result.phase == "failed"
+    assert "not the receipt's environment" in result.error
+    assert engine.changed_jobs() == []
+    assert not engine.booted_out(SERVER_LABEL)
+    assert engine.starts == 0
+    assert engine.run_calls == []
+    assert _env_version(engine.live_env) == FROM_VERSION
 
 
 @mac_update_host
@@ -3561,138 +3347,3 @@ def test_the_receipt_entry_point_is_compared_resolved(tmp_path: Path) -> None:
         tmp_path / "other", tmp_path / "other" / "env" / "bin" / "ciao"
     )
     assert engine_update._runs_the_receipt_install(other, env, executable) is False
-
-
-class _HostNeeded:
-    """A host seam answering whether a revision-1 host must be replaced."""
-
-    def __init__(self, needed: bool) -> None:
-        self.needed = needed
-
-    def server_host_migration_needed(self) -> bool:
-        return self.needed
-
-
-def _host_manifest(src: Path) -> tuple[dict[str, Any], Path]:
-    from ciao.release_manifest import SERVER_HOST_FILENAME, server_host_artifact_entry
-
-    src.mkdir(parents=True, exist_ok=True)
-    archive = src / SERVER_HOST_FILENAME
-    archive.write_bytes(b"the signed revision-two host archive")
-    return {"artifacts": [server_host_artifact_entry(archive)]}, archive
-
-
-def _stage_op(tmp_path: Path) -> Operation:
-    stage = tmp_path / "stage"
-    stage.mkdir(parents=True, exist_ok=True)
-    return Operation(
-        id="op-1",
-        phase="staging",
-        from_version="1.3.0",
-        to_version="1.3.1",
-        started_at="2026-10-10T00:00:00+00:00",
-        updated_at="2026-10-10T00:00:00+00:00",
-        stage_dir=str(stage),
-    )
-
-
-def test_staging_fetches_the_host_only_when_a_revision_one_host_needs_replacing(
-    tmp_path: Path,
-) -> None:
-    manifest, archive = _host_manifest(tmp_path / "src")
-    fetched: list[str] = []
-
-    def fetch(url: str, dest: Path, **kwargs: Any) -> None:
-        fetched.append(url)
-        shutil.copy(archive, dest)
-
-    op = _stage_op(tmp_path)
-    engine_update._stage_server_host(
-        op, manifest, stage_dir=Path(op.stage_dir), release_url="https://r/v1",
-        fetch=fetch, host=cast(Any, _HostNeeded(True)),
-    )
-    assert op.host_archive == str(Path(op.stage_dir) / archive.name)
-    assert op.host_status == ""
-    assert fetched == [f"https://r/v1/{archive.name}"]
-
-    # A current or absent host: no download at all.
-    op = _stage_op(tmp_path / "again")
-    engine_update._stage_server_host(
-        op, manifest, stage_dir=Path(op.stage_dir), release_url="https://r/v1",
-        fetch=fetch, host=cast(Any, _HostNeeded(False)),
-    )
-    assert op.host_archive == ""
-    assert fetched == [f"https://r/v1/{archive.name}"]
-
-
-def test_a_host_archive_that_fails_the_signed_digest_is_not_staged_and_does_not_fail_staging(
-    tmp_path: Path,
-) -> None:
-    manifest, _archive = _host_manifest(tmp_path / "src")
-
-    def tampered(url: str, dest: Path, **kwargs: Any) -> None:
-        dest.write_bytes(b"not the signed bytes")
-
-    op = _stage_op(tmp_path)
-    engine_update._stage_server_host(
-        op, manifest, stage_dir=Path(op.stage_dir), release_url="https://r/v1",
-        fetch=tampered, host=cast(Any, _HostNeeded(True)),
-    )
-    # The engine update is not failed by the host; the record says why it stayed.
-    assert op.phase == "staging"
-    assert op.host_archive == ""
-    assert op.host_status == "failed"
-    assert "does not match the signed manifest" in op.host_error
-
-
-def test_late_staging_skips_an_operation_that_already_tried(tmp_path: Path) -> None:
-    def never(url: str, dest: Path, **kwargs: Any) -> None:
-        raise AssertionError("an operation that already tried must not fetch again")
-
-    op = _stage_op(tmp_path)
-    op.host_status = "failed"
-    op.host_error = "earlier"
-    engine_update._late_stage_server_host(
-        op, cast(Any, _HostNeeded(True)), fetch=never, release_base="https://r"
-    )
-    assert op.host_status == "failed"
-    assert op.host_error == "earlier"
-    assert op.host_archive == ""
-
-
-def test_late_staging_records_an_unverifiable_manifest_and_does_not_raise(
-    tmp_path: Path,
-) -> None:
-    op = _stage_op(tmp_path)
-    engine_update._late_stage_server_host(
-        op, cast(Any, _HostNeeded(True)), fetch=lambda url, dest, **kw: None,
-        release_base="https://r",
-    )
-    assert op.host_status == "failed"
-    assert "was not staged" in op.host_error
-    assert op.host_archive == ""
-
-
-def test_late_staging_fetches_from_the_release_of_the_target_version(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, archive = _host_manifest(tmp_path / "src")
-    op = _stage_op(tmp_path)
-    stage = Path(op.stage_dir)
-    (stage / engine_update.MANIFEST_NAME).write_bytes(b"{}")
-    (stage / engine_update.SIGNATURE_NAME).write_text("sig", encoding="utf-8")
-    monkeypatch.setattr(
-        engine_update.release_manifest, "verify_manifest", lambda raw, sig, key: manifest
-    )
-    fetched: list[str] = []
-
-    def fetch(url: str, dest: Path, **kwargs: Any) -> None:
-        fetched.append(url)
-        shutil.copy(archive, dest)
-
-    engine_update._late_stage_server_host(
-        op, cast(Any, _HostNeeded(True)), fetch=fetch, release_base="https://r"
-    )
-    assert op.host_archive == str(stage / archive.name)
-    assert op.host_status == ""
-    assert fetched == [f"https://r/v{op.to_version}/{archive.name}"]

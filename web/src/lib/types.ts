@@ -58,7 +58,7 @@ export interface WorkspaceInfo {
   // Whether the workspace's Claude chats load the claude.ai connectors. Missing → on.
   claude_ai_connectors?: boolean
   gws_profile: string
-  // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
+  // PWA accent preset: amber | pink | cyan | emerald | violet. Missing → amber (Ciao orange).
   color?: string
   // Filesystem scope for the agent and its shell. Absent or null: the workspace
   // never chose one and runs under the engine's default_agent_fs_scope.
@@ -89,7 +89,6 @@ export interface ArchivedWorkspace {
   // What a restore applies, after server-side validation. `null` means unset:
   // no MCP server is reachable, and the default tool deny-list applies.
   disallowed_tools?: string[] | null
-  allowed_mcp_servers?: string[] | null
   // Valid automations, all restored paused, and how many were rejected.
   schedules: number
   schedules_dropped?: number
@@ -155,6 +154,21 @@ export interface McpUsage {
 
 // ── Projects & Chats ────────────────────────────────────────────────────
 
+/** A1: the project's linked repository main checkout, as the engine sees it now. */
+export interface ProjectRepo {
+  path: string
+  branch: string      // '' when HEAD is detached
+  dirty: boolean
+  missing: boolean    // folder gone or no longer a git toplevel
+  instructions?: { name: 'AGENTS.md' | 'CLAUDE.md'; chars: number } | null  // what code mode injects; null = none
+}
+
+/** A1: one entry of GET /api/repos/candidates `candidates` ({roots, candidates:[{path,name,root}]}). */
+export interface RepoCandidate {
+  path: string
+  name: string
+}
+
 export interface ProjectInfo {
   project_id: string
   name: string
@@ -169,6 +183,7 @@ export interface ProjectInfo {
   // 'memory' marks the app-owned per-workspace Memory project. The PWA hides
   // it from the sidebar; a user project may legitimately be named "Memory".
   kind?: string
+  repo?: ProjectRepo | null
 }
 
 export type ArchivedChatSummary = Pick<ChatInfo, 'chat_id' | 'title' | 'created_at' | 'archive_path'>
@@ -179,6 +194,15 @@ export interface ChatArchivePage {
   offset: number
   limit: number
 }
+
+export interface RepoLocation {
+  path: string
+  branch: string
+  is_worktree: boolean
+  exists: boolean
+}
+
+export type CodeModeActor = 'user' | 'agent'
 
 export interface ChatInfo {
   chat_id: string
@@ -230,10 +254,11 @@ export interface ChatInfo {
   // chat receiving the live WS stream. Cleared by the server on answer or
   // turn end.
   pending_permission?: string
-  // Follow-ups parked when a turn ended without flushing them (error, question
-  // pause, native question, retry, task-board stop). Each entry is
-  // {id, text, images}. Empty once the next turn re-seeds the live queue, so
-  // an empty list during a live turn is not "no chips".
+  // Follow-ups parked when a turn ended without flushing them (Stop, error,
+  // question pause, native question, retry, task-board stop). Each entry is
+  // {id, text, images}. Parked entries are never re-seeded by a later send:
+  // they leave only through Send now, edit, remove or reorder, so the list
+  // is the chat's waiting chips.
   pending_queue?: Array<{ id: string; text: string; images?: string[] }>
   retry?: ChatRetryInfo | null
   forked_from_chat_id?: string
@@ -281,6 +306,12 @@ export interface ChatInfo {
   pinned_file_path?: string
   dismissed_pin_paths?: string[]
   pin_revision?: number
+  // Server sends `{}` for no location; test `repo_location.path`, not the object.
+  repo_location?: Partial<RepoLocation>
+  // G1: always sent; optional for older payloads/test stubs.
+  code_mode?: boolean
+  // Visible user turns so far; code mode cannot be turned off once above 0.
+  user_turn_count?: number
 }
 
 /**
@@ -316,6 +347,11 @@ export interface ChatRetryInfo {
   interval_seconds: number
 }
 
+/** Who the engine wrote an injected user turn for (ChatInfo.user_turn_origin). */
+export type TurnOrigin =
+  | 'background_run' | 'cli_task_wake' | 'schedule' | 'task_delegation'
+  | 'task_resume' | 'webhook' | 'update_task'
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
@@ -330,6 +366,10 @@ export interface ChatMessage {
   // typed. Drives the ↻ marker on the bubble, so a self-driven turn is not
   // mistaken for something the reader sent. Only present on user messages.
   unattended?: boolean
+  // Sent into the running turn instead of starting its own (steered).
+  steered?: boolean
+  // Set when the engine wrote this user turn (wake, automation, webhook, ...); drawn as a notice card.
+  origin?: TurnOrigin
   // Monotonic per-chat user-turn index. Server-assigned; used to dedup
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
@@ -413,6 +453,11 @@ export interface RunningSubagentsResponse {
 
 // ── WebSocket events ────────────────────────────────────────────────────
 
+// What a queued message will do: wait for the next turn, or be handed to the
+// running one through the provider's native steering.
+export type QueueDelivery = 'queue' | 'steer'
+export type SteerFallbackReason = 'no_turn' | 'not_running' | 'finished' | 'stopped'
+
 export type WsEvent =
   // parent_tool_use_id is set when the event came from inside a Task
   // subagent. Its value is the parent's tool_use_id for the Task dispatch,
@@ -432,6 +477,9 @@ export type WsEvent =
       parent_tool_use_id?: string;
       request_id?: string;
       session_id?: string;
+      // Set when the provider can move this running call to the background
+      // (OpenCode shell/subagent; POST /api/chats/{id}/move-to-background).
+      backgroundable?: boolean;
       // Set by the backend when the tool mutates a file on disk. The PWA
       // renders this as a standalone inline preview card instead of folding
       // it into the generic _activity row. Path may be workspace-relative
@@ -439,6 +487,18 @@ export type WsEvent =
       file_touch?: { file_path: string; action: string };
       // Populated when one shell command creates/overwrites multiple files.
       file_touches?: Array<{ file_path: string; action: string }>;
+    }
+  // A call's completion, as its own frame. OpenCode emits one after every
+  // call; Claude emits none. It marks the call's existing trace line
+  // instead of painting a second one (#1416).
+  | {
+      type: 'tool_result';
+      tool_name?: string;
+      tool_use_id?: string;
+      is_error?: boolean;
+      detail?: string;
+      parent_tool_use_id?: string;
+      session_id?: string;
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
@@ -459,6 +519,7 @@ export type WsEvent =
       ok: boolean;
       error?: string;
       retryable?: boolean;
+      expired?: boolean;
     }
   | { type: 'permission_resolved'; request_id: string; session_id?: string }
   // The selected model cannot see the attached images; the engine asks the
@@ -478,7 +539,7 @@ export type WsEvent =
       timeout_s: number;
     }
   | { type: 'chat_title'; chat_id: string; title: string }
-  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string }
+  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string; origin?: TurnOrigin }
   // A tool call was refused (user Deny, or the auto-deny on an unattended
   // run). The call never executed, so any file card already painted for this
   // tool_use_id has to be retracted.
@@ -491,10 +552,19 @@ export type WsEvent =
       state: 'answered' | 'cancelled' | 'rejected';
       error?: string;
       retryable?: boolean;
+      delivered_as_message?: boolean;
     }
   | { type: 'question_resolved'; request_id: string; session_id?: string }
-  | { type: 'queued'; id?: string; text: string; images?: string[] }
-  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
+  | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean }
+  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[]; delivery?: QueueDelivery; steering?: boolean; waiting?: boolean }> }
+  // A steer reached the running turn: the entries leave the queue and the
+  // message becomes its own user turn.
+  | { type: 'steered'; entry_ids: string[]; text: string; images?: string[]; turn_index?: number; sent_at?: string; delivery_id?: string; origin?: TurnOrigin }
+  // Stop cancelled a prompt before the provider picked it up: its user turn
+  // never happened. The prompt comes back as a waiting queue entry.
+  | { type: 'prompt_cancelled'; turn_index: number }
+  // A steer could not be delivered; the entries are back in the queue.
+  | { type: 'steer_fallback'; entry_ids: string[]; reason: SteerFallbackReason }
   | { type: 'error'; message: string }
   | { type: 'auth_required'; message?: string }
   // Server is draining for restart; client should show RestartNotice, not
@@ -508,14 +578,16 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; keyboard_revision?: string }
-  | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; revision: string }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; background_runs?: Record<string, BackgroundRunSummary[]>; restarting?: boolean; chat_pins: Record<string, ChatPinState>; keyboard_shortcuts?: Record<string, string>; keyboard_send_mode?: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; keyboard_revision?: string }
+  | { type: 'keyboard_settings_changed'; keyboard_shortcuts: Record<string, string>; keyboard_send_mode: 'modifier' | 'enter'; mid_turn_delivery?: 'queue' | 'steer'; revision: string }
   | { type: 'chat_pin_changed'; chat_id: string; path: string; dismissed_paths: string[]; revision: number }
   | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
-  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string }
+  | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean; last_error?: string; repo_location?: Partial<RepoLocation> }
+  | { type: 'chat_repo_location'; chat_id: string; project_id: string; repo_location: Partial<RepoLocation> }
+  | { type: 'chat_code_mode'; chat_id: string; project_id: string; code_mode: boolean; actor: CodeModeActor; at: string }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
-  | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number; nudged?: boolean }
+  | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
   | { type: 'chat_background_runs'; chat_id: string; project_id: string; runs: BackgroundRunSummary[]; finished?: BackgroundRunSummary }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_unread'; chat_id: string; last_read_at: string }
@@ -540,7 +612,6 @@ export type EventsWsMessage =
   // device). Only a rename carries `from`/`to`; the client refetches
   // /api/workspaces either way.
   | { type: 'workspaces_changed'; from?: string; to?: string }
-  | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'server_restart_cancelled' }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
@@ -565,6 +636,9 @@ export interface InAppToast {
   // new" on the update-available toast). Opens in a new tab.
   linkUrl?: string
   linkLabel?: string
+  // An in-app action button on an info toast, which is dismissed after it runs.
+  actionLabel?: string
+  onAction?: () => void
   // When set, "Fix" becomes "Restore draft": reopens `text` as a fresh chat
   // draft in `projectId` (falling back to General if that project is gone)
   // instead of the error/fixRoute flow. `originalChatId` is the dead chat's
@@ -624,7 +698,10 @@ export interface Schedule {
   // retry) — see project_chats._schedule_dispatch_status. 'unfinished' is the
   // case split out of it where background subagents never settled: nothing in
   // the chat is waiting on the user (schedules.RUN_STATUS_UNFINISHED).
-  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'unfinished'
+  // 'retrying' means the agent could not reach an external service and armed a
+  // network retry in the run chat; the retried turn writes 'ok' or 'error'
+  // (schedules.RUN_STATUS_RETRYING).
+  last_status?: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat' | 'skipped' | 'unfinished' | 'retrying'
   day_of_month: number | null
   run_at_date: string | null
   web_chat_id: string | null
@@ -779,13 +856,13 @@ export interface ModelsResponse {
   thinking_levels?: Record<string, string[]>
 }
 
+export interface MoveToBackgroundResponse { moved: boolean }
+
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
 // model overrides (Settings → Models tab).
 export interface RoutineSettings {
   insights_enabled?: boolean
 
-  // Override as stored; empty string = automatic default.
-  critique_models: string
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.
   provider_default_models?: Record<string, string>
@@ -797,7 +874,6 @@ export interface RoutineSettings {
   // Per-provider Session insights models; missing = the source chat's model.
   provider_insights_models?: Record<string, string>
 
-  critique_models_effective: string
   // Server settings that used to be workspace .env variables, as stored
   // ("" = default). The bind address and log level apply at the next start.
   pwa_host?: string
@@ -824,6 +900,31 @@ export interface RoutineSettings {
   }
 }
 
+/** Action ids the engine can run in a terminal on its own machine (ciao/host_terminal.py::ACTION_IDS). */
+export type HostTerminalAction =
+  | 'claude-install'
+  | 'claude-login'
+  | 'opencode-install'
+  | 'opencode-login'
+  | 'gws-install'
+  | 'skills-update'
+
+/** `GET /api/host/terminal`. */
+export interface HostTerminalCapabilities {
+  available: boolean
+  platform: string
+  reason: string
+  terminal: string
+  actions: HostTerminalAction[]
+}
+
+/** `POST /api/host/terminal` on success. */
+export interface HostTerminalLaunchResult {
+  ok: boolean
+  platform: string
+  launched: string
+}
+
 export interface ProviderConnection {
   name: string
   // Display names from the backend registry, so the Settings card never has to
@@ -845,6 +946,8 @@ export interface ProviderConnection {
   install_url?: string
   /** Shell line that puts the CLI on PATH (`not_installed`, `missing`, `cli_too_old`). */
   path_command?: string
+  /** Terminal action that runs the command shown for this row, when the engine offers one. */
+  terminal_action?: HostTerminalAction
   /** Desktop app found while the CLI is missing. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */
@@ -882,7 +985,6 @@ export interface GwsIntegrationProfile {
 export interface GwsIntegrationSettings {
   installed: boolean
   binary_path: string
-  default_profile: string
   cli_available: boolean
   profiles: GwsIntegrationProfile[]
 }
@@ -1094,6 +1196,8 @@ export interface SetupProviderStatus {
   install_url?: string
   /** Shell line that puts the CLI on PATH (`not_installed`, `missing`, `cli_too_old`). */
   path_command?: string
+  /** Terminal action that runs the command shown for this row, when the engine offers one. */
+  terminal_action?: HostTerminalAction
   /** Desktop app found while the CLI is missing, so setup can say which step is left. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */
@@ -1124,7 +1228,7 @@ export interface SetupStatus {
 /** `/api/settings/providers/{provider}/{connect|logout|check}`. */
 export interface ProviderActionResult {
   ok?: boolean
-  opened?: boolean
+  launched?: string
   command?: string
   auth?: string
   detail?: string
@@ -1169,6 +1273,8 @@ export interface EngineUpdateStatus {
   install_mode: string
   can_update: boolean
   operation: EngineUpdateOperation | null
+  /** The server's background update task is alive (true between the two halves too). */
+  running?: boolean
   /** A coordinator refusal that wrote no operation of its own. */
   error?: string
 }
@@ -1252,6 +1358,8 @@ export interface Task {
   chat_id: string
   /** The attempt holding the task, empty when nothing is delegated. */
   attempt_id: string
+  /** Chats that worked on the task outside delegation; no lifecycle meaning. */
+  linked_chats: string[]
   created_at: string
   updated_at: string
   /** SHA-256 of the file's exact bytes, hex. Every write presents the one it read. */
@@ -1290,14 +1398,6 @@ export interface Task {
    * cannot say which, which is why the server sends this beside it.
    */
   live_attempt_id: string
-  /**
-   * The task was edited after the current attempt was handed over.
-   *
-   * The result the agent is about to produce was reached against a description
-   * the user has since changed. Nothing resolves this for the reviewer — the board
-   * says it and lets them decide.
-   */
-  changed_since_delegated: boolean
   /**
    * The task's chat is archived. Present only when `chat_id` is set: archived
    * chats are not in the browser's active chat list, so the board reads this
@@ -1391,7 +1491,6 @@ export interface TaskDelegateResponse {
   project_id: string
   project_origin: 'requested' | 'task' | 'general' | ''
   task: TaskDetail
-  changed_since_delegated: boolean
 }
 
 /** What an attempt gesture answers with. `resume`/`retry` add their own flags. */
@@ -1402,24 +1501,6 @@ export interface TaskAttemptActionResponse {
   task?: TaskDetail
   resumed?: boolean
   retried?: boolean
-}
-
-/**
- * What a **Send update** answers with.
- *
- * The attempt comes back rebound to the revision the update was made at, so
- * `task.changed_since_delegated` is `false` in this same answer — which is what
- * retires the control. `queued` says which of the two it was: the message was
- * accepted either way, but a queued one is still waiting behind a turn already
- * running in that chat.
- */
-export interface TaskSendUpdateResponse {
-  workspace: string
-  attempt: TaskAttempt
-  chat_id: string
-  task: TaskDetail
-  updated: boolean
-  queued: boolean
 }
 
 /**

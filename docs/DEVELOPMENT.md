@@ -49,7 +49,7 @@ repoint one that already serves a different workspace; use `ciao setup --workspa
 <dir> --load-launchd --yes` to repoint it. The macOS
 desktop-shell actions (`login`, `migrate`, `migration-classify`, `rollback`) and
 `update-engine` are not available on Windows and say so; `stop` and `restart`
-refuse while a chat is active unless `--force` is given.
+refuse while a chat would be interrupted (working, or holding an open question/approval card) unless `--force` is given.
 
 The weekly dependency-changelog review is an operator-owned routine, not part of the public app install. In a maintainer workspace it lives at `scripts/dependency_review.py` and invokes this checkout for the DAG/runtime; public release preparation uses only the generic helpers in `ciao/dependency_updates.py`.
 
@@ -70,7 +70,6 @@ ciao setup --workspace ~/ciao --workspace-name personal --load-launchd
 ciao vault-index --workspace default --format json
 ciao vault-search "project keyword" --limit 5
 ciao vault-lint --vault-root memory-vault
-ciao critique --input plan.md --type plan
 ciao os-audit --json
 ciao create-chat --prompt "Start here" --workspace default
 ciao cleanup-sdk-blobs --workspace .       # dry-run by default
@@ -286,6 +285,18 @@ published, so nobody can take that path. What stays is the engine side —
 `install-engine.sh --migrate` still does the hand-over for a machine that has
 not run `ciao desktop uninstall` yet.
 
+### Workspace re-root schedule paths
+
+`ciao workspace-reroot --apply` rewrites only explicit install-relative paths
+in user schedule prompts that match paths moved by that migration. The receipt
+records changed prompt fields so `--undo` can restore them while preserving
+later run metadata and unrelated schedules; if a recorded prompt was edited or
+its schedule disappeared, undo refuses before changing the filesystem. This
+rewrite applies to future migrations only. An install that already has a
+migrated receipt is not rewritten at startup; correct an existing prompt through
+the PWA or CLI schedule controls. Do not hand-edit `.runtime/schedules.json`
+while the server is running, because the live schedule store may be writing it.
+
 ## Branching and releases
 
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.
@@ -451,7 +462,6 @@ ciao package-smoke --skip-frontend # Wheel install smoke test
 ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
-ciao critique --input plan.md --type plan # Multi-model adversarial review panel
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
 ciao memory-audit --json # Bounded-memory rot only (regions; add --with-vault for note aging)
 ciao eval contracts --json # Deterministic behavioral-eval guard checks (model-free; CI half)
@@ -460,11 +470,6 @@ ciao eval compare --baseline a.json --candidate b.json # Baseline/candidate delt
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
-
-When the Critique panel picker is Automatic, `ciao/critique.py` collects the
-distinct effective default models of configured workspaces, skipping providers
-that are not signed in. The `/critique` command and critique skill use this same
-panel; `tests/test_critique.py` covers its resolution.
 
 When removing a background job, add its id to `job_runs.RETIRED_JOBS`:
 `job_runs_latest.json` keeps the last run of every job it ever saw, and the
@@ -531,8 +536,8 @@ complete anything, the confirmation says so, and the row stays reopenable in
 Settings. If you add a state, decide all four of those in the same change: what
 Home offers, what Settings lists, what a refusal says, and whether the outcome can
 be mistaken for "done".
-For Work details changes, verify the docked rail and narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list. The × closes the surface; the ⓘ tab reopens it, restoring focus between the rail heading and chat-body tab. Project context is readable prose with file mentions linked in place, resolving the canonical filename to its full path without a separate link row; token estimates count the sent capsule.
-For task-board layout changes, preserve To do, In progress, In review, and Done on every width: four columns above 940px of pane width, the same groups stacked below it. A status filter selects one group; horizontal drag and Shift+Left/Right movement are only available while columns are side by side. Earlier done tasks remain behind Show all.
+For Chat details changes, verify the docked rail and narrow-pane drawer together: both render `AgentContextSection.vue` and the running-subagent list. The × closes the surface; the ⓘ tab reopens it, restoring focus between the rail heading and chat-body tab. Project context is readable prose with file mentions linked in place, resolving the canonical filename to its full path without a separate link row; token estimates count the sent capsule.
+For task-board layout changes, preserve To do, In progress, In review and Done on every width: fixed 310px lanes side by side that scroll sideways when they do not fit, with Done behind a tab at the end of the row. A status filter selects one group; horizontal drag and Shift+Left/Right movement are only available while columns are side by side. Earlier done tasks remain behind Show all.
 For composer drag-and-drop changes, test the desktop-drop grant path end to
 end. Drops preserve the source file and add Markdown companions, and return
 bounded opaque file references rather than absolute paths; the server expands a
@@ -544,8 +549,7 @@ For security changes, the boundary is one origin and one session: every
 `ciao/web/auth.py`), every `/ws/*` handshake is checked for same-origin before
 the session, and every state-changing `/api/*` request must present a matching
 `Origin`/`Referer`. The loopback-only set (`_LOOPBACK_ONLY_API`, the update
-drain and the local feed) is gated on the TCP peer address, never the `Host`
-header. Do not add a capability or an origin exception for a page the model or
+drain and the local feed) is gated on the TCP peer address plus a loopback `Host` and a same-origin `Origin`/`Referer` when present; the peer alone never grants it. Do not add a capability or an origin exception for a page the model or
 a remote browser can influence. Auth/origin coverage is in
 `tests/test_auth_security.py`; hostile artifact coverage is in
 `tests/test_workspace_html.py`. This does not yet confine broad file endpoints,
@@ -851,7 +855,7 @@ The status and process exit code are a stable contract:
 | `needs_attention` | 1 | The scan completed reliably and found actionable items. |
 | `error` | 2 | Required evidence could not be inspected reliably. Findings may still be present, but the report is not a clean bill of health. |
 
-The daily `system-memory-curation` schedule is presented as **Workspace care**. Its packaged prompt runs lightweight memory passes nightly and uses `Workspace/Curation-Log.md`'s `last_full_pass` marker to catch up the deeper weekly work after downtime. A full pass runs `ciao vault-index --write` before `ciao os-audit --json --scope workspace`; a failed index rebuild or audit exit 2 leaves the marker overdue and prevents a healthy/no-op claim. Exit 1 means reliable findings and the pass continues with only safe structural repairs. A full pass also reviews the workspace guide body (AGENTS.md) for misplacement, drift, and bloat, applying the same state-vs-event and entity-placement rules the regions follow; that model-judged review is separate from the two required weekly checks, so an over-budget run that never reaches it does not suppress the next week's guide care.
+The daily `system-memory-curation` schedule is presented as **Workspace care**. Its packaged prompt runs lightweight memory passes nightly and uses `Workspace/Curation-Log.md`'s `last_full_pass` marker to catch up the deeper weekly work after downtime. A full pass runs `ciao vault-index --write` before `ciao os-audit --json --scope workspace`; a failed index rebuild or audit exit 2 leaves the marker overdue and prevents a healthy/no-op claim. Exit 1 means reliable findings and the pass continues with only safe structural repairs. A full pass also reviews the workspace guide body (AGENTS.md) for misplacement, drift, and bloat, applying the same state-vs-event and entity-placement rules the regions follow; that model-judged review is separate from the two required weekly checks, so an over-budget run that never reaches it does not suppress the next week's guide care. Ordinary skill-proposal decisions are keyed to the whitespace-normalized proposed change, so a new change can re-enter review while a repeat stays settled; `tests/test_skill_proposals.py` covers this alongside stable queue identity and learning-origin decisions. A legacy sidecar decision with a readable settled proposal is scoped to that proposal when next filed. If the queue file is already missing, the original change cannot be inferred, so the existing decision sidecar persists a `legacy:unresolved` marker before any replacement is written; the skill-wide suppression then survives later filings. Findings overwritten before this fix cannot be classified automatically.
 
 #### The migration notices, and why they are probed in one place
 
@@ -1726,8 +1730,6 @@ No subagents are packaged by default. Attended vault writes and proposal handlin
 
 The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions live in `gws-shared`; only the short profile-wrapper routing rule belongs in the compact core (`ciao/system_prompt.md`).
 
-The stock `visual-plan` skill produces local Markdown plans with an optional self-contained HTML companion, including diagrams drawn as inline SVG. It is the one-stop planning surface for work that needs an approval gate and a cross-session resume contract. Routine working docs (notes, analyses, drafts without an approval gate) use the core prompt's file-routing rules instead; `visual-plan` is reserved for plans that must be approved and survive a provider switch. Visual plans are local Markdown artifacts; only one file is pinned at a time, and Plan mode cannot produce one (the skill refuses and explains instead of failing on the write). Interactive HTML companions are authored by loading the stock `html-artifact` skill. A same-named workspace skill overrides the packaged copy; refresh a workspace with `ciao sync-skills --skip-upstream`, and roll back a future removal at the package level by reverting the stock skill from the next build.
-
 ### Provider context and native memory
 
 Normal chats send one compact provider-neutral context capsule containing the
@@ -1759,7 +1761,7 @@ sockets, and retries them on reconnect; a timeout makes the card retryable but
 does not discard the queued frame. Backend state is cleared only after a typed
 V2 success or an authoritative stale result. Resolution events are ephemeral
 for attached tabs, while the persisted chat snapshot reconciles tabs that were
-disconnected.
+disconnected. `background_shell_wake.jsonl` and `background_subagent_wake.jsonl` pin OpenCode's own follow-up executions after background work (#1391): inbox delivery ids decide which execution a turn owns, and `drain_events` streams the rest.
 
 ## DAG-style schedules (maintainers)
 
@@ -1774,7 +1776,7 @@ No shipped producer runs a DAG today — the weekly skill-evolution pass was the
 
 `ScheduleManager.catch_up()` runs once at server startup on the host; like `tick()`, it returns an empty list without touching anything when the legacy node-state startup gate says this machine is not the host (the one boot verdict from `ciao.legacy_node_state`, which is the whole gate now that no route can rewrite the role under a running server). It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`. Packaged system routines are excluded when the startup falls inside the post-setup grace window (`ciao/setup_marker.py`, 24h from a first-time setup): a brand-new install is greeted by its onboarding chat, and the routines fire at their next regular tick instead of all replaying missed runs in parallel. Cover that in `tests/test_setup_catch_up_grace.py`.
 
-The Work details *Running* list (rail and drawer Activity tab; the left sidebar no longer lists them) shows background command runs first, from the `chat_background_runs` event and the `/ws/events` snapshot (`BackgroundRun.summary()`: no pid, cwd or log path), with *Log* (`GET /api/chats/{id}/background-runs/{run_id}/log`) and *Stop* (`POST …/cancel`), both refusing another chat's run with 404. The subagent rows below them are fed by `GET /api/subagents/running` (dispatch metadata only, active chats only) and the store's poll, which replaces the whole map so a finished agent's row disappears. Only agents the parent session can name get a row — background dispatches, plus opencode children; a foreground Task is recorded in the parent JSONL by its own completion, so it is never running by the time it is nameable. Their read-only view is `SubagentChatView.vue` on `/chat/:chatId/subagent/:agentId`, fed by `GET /api/chats/{id}/subagents`. Claude agent ids arrive bare from the parent JSONL and `agent-`-prefixed from the local transcript fallback, so both surfaces normalise before comparing or routing. Cover changes in `tests/test_running_subagents.py` and the ChatPanel Work details tests.
+The Chat details *Running* list (rail and drawer Activity tab; the left sidebar no longer lists them) shows background command runs first, from the `chat_background_runs` event and the `/ws/events` snapshot (`BackgroundRun.summary()`: no pid, cwd or log path), with *Log* (`GET /api/chats/{id}/background-runs/{run_id}/log`) and *Stop* (`POST …/cancel`), both refusing another chat's run with 404. The subagent rows below them are fed by `GET /api/subagents/running` (dispatch metadata only, active chats only) and the store's poll, which replaces the whole map so a finished agent's row disappears. Only agents the parent session can name get a row — background dispatches, plus opencode children; a foreground Task is recorded in the parent JSONL by its own completion, so it is never running by the time it is nameable. Their read-only view is `SubagentChatView.vue` on `/chat/:chatId/subagent/:agentId`, fed by `GET /api/chats/{id}/subagents`. Claude agent ids arrive bare from the parent JSONL and `agent-`-prefixed from the local transcript fallback, so both surfaces normalise before comparing or routing. Cover changes in `tests/test_running_subagents.py` and the ChatPanel Chat details tests.
 
 ## Agent control plane (CLI-first since S6)
 
@@ -2077,4 +2079,4 @@ against a fake manager over a temp packaged root.
 - **Verify UI accessibility.** For PWA layout changes, check keyboard operation, visible focus, browser zoom, and 44px mobile targets at a narrow-phone viewport in addition to the build.
 - Keyboard shortcut changes also need coverage for shared `/ws/events` updates, custom-binding conflicts, IME composition, picker precedence, and Enter behavior on touch layouts.
 
-MCP status verification: cover native Claude/OpenCode configuration, scope precedence, workspace isolation, safe metadata, multiple chat connections, failed/unknown/needs-auth states, and unavailable provider status. Settings reads running provider sessions only; no status check should start a provider or MCP subprocess. Provider-native setup and authentication are performed from the workspace through each provider's CLI; Settings does not edit configuration, credentials, or workspace allowlists. Browser coverage lives in `web/e2e/specs/mcp-status.spec.ts`.
+MCP status verification: cover native Claude/OpenCode configuration, scope precedence, workspace isolation, safe metadata, multiple chat connections, failed/unknown/needs-auth states, and unavailable provider status. Settings reads running provider sessions only; no status check should start a provider or MCP subprocess. Provider-native setup and authentication are performed from the workspace through each provider's CLI; Settings does not edit configuration or credentials. Browser coverage lives in `web/e2e/specs/mcp-status.spec.ts`.

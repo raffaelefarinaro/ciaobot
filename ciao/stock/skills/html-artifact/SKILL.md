@@ -1,13 +1,13 @@
 ---
 name: html-artifact
-description: Build a self-contained interactive HTML page (an artifact) that Ciaobot renders live in the pinned panel. Use when the output is easier to look at than to read: dashboards, charts, annotated diffs, side-by-side option comparisons, timelines, interactive mockups, calculators, diagrams drawn as inline SVG, or anything the user wants to make visual, interactive, clickable, or "a page". Trigger on "artifact", "dashboard", "chart", "graph", "visualize this", "make it interactive", "build me a page", "show it side by side", "architecture", "flow diagram", "sequence". Do NOT use for prose reports (.md) or tabular data (.csv).
+description: "Build a self-contained interactive HTML page (an artifact) that Ciaobot renders live in the pinned panel. Use when the output is easier to look at than to read: dashboards, charts, annotated diffs, side-by-side option comparisons, timelines, interactive mockups, calculators, diagrams drawn as inline SVG, or anything the user wants to make visual, interactive, clickable, or \"a page\". Trigger on \"artifact\", \"dashboard\", \"chart\", \"graph of data\", \"visualize this\", \"make it interactive\", \"build me a page\", \"show it side by side\", \"architecture diagram\", \"flow diagram\". Do NOT use for prose reports (.md) or tabular data (.csv)."
 ---
 
 # HTML artifacts
 
 An artifact is one self-contained `.html` file in the workspace. Ciaobot renders it in the pinned panel next to the chat, with a Preview/Code toggle, and the user can open it full-window in a real browser.
 
-Write the file, then run `ciao file surface <path>` on it. Writing alone paints an inline card; only `ciao file surface` opens the panel.
+Write the file, then run `ciao file surface <path>` on it. Writing alone paints an inline card; only `ciao file surface` opens the panel. If the reply has `"dismissed": true`, the user closed this artifact's panel earlier and it stays closed: tell them, and that they can pin it from the file viewer's ⋯ menu.
 
 ## Use an artifact when
 
@@ -79,4 +79,4 @@ Editing the file and running `ciao file surface` again is enough; the panel relo
 
 ## More
 
-`reference.md` has three starting shells (metric dashboard with an SVG bar chart, tabbed comparison, timeline) and `assets/minichart.js` is a small inlinable chart helper for bars, lines, and donuts. Read `reference.md` when starting a new artifact rather than deriving the scaffolding again.
+`reference.md` has four starting shells (metric dashboard with an SVG bar chart, tabbed comparison, timeline, static SVG diagram) and `assets/minichart.js` is a small inlinable chart helper for bars, lines, and donuts. Read `reference.md` when starting a new artifact rather than deriving the scaffolding again.

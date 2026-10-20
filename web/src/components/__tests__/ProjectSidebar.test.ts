@@ -21,7 +21,6 @@ function delegatedTask(overrides: Partial<Task> = {}): Task {
     assignee: 'agent', chat_id: '', attempt_id: 'attempt-1', created_at: '', updated_at: '',
     revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: 'ready_for_review',
     attempt_outcome: 'done', attempt_summary: '', attempt_detail: '', live_attempt_id: 'attempt-1',
-    changed_since_delegated: false,
     ...overrides,
   } as Task
 }
@@ -303,7 +302,7 @@ describe('ProjectSidebar chat actions', () => {
     wrapper.unmount()
   })
 
-  // Running subagents are listed in the chat's Work details rail, not as
+  // Running subagents are listed in the Chat details rail, not as
   // rows under the chat in this tree.
   it('does not list running subagents as rows in the tree', async () => {
     const store = useProjectStore()
@@ -623,6 +622,61 @@ describe('ProjectSidebar update badge', () => {
 
     wrapper.unmount()
   })
+
+  function scheduleIn(workspace: string, patch: Record<string, unknown>) {
+    return {
+      schedule_id: `s-${workspace}-${Object.keys(patch).join('-')}`,
+      title: 'Routine',
+      prompt: 'go',
+      frequency: 'daily',
+      enabled: true,
+      scope: 'user',
+      workspace,
+      missed: false,
+      last_status: 'ok',
+      ...patch,
+    } as never
+  }
+
+  function seedWorkspaces() {
+    const store = useProjectStore()
+    store.workspaces = ['personal', 'work'].map(name => ({
+      name, vault_root: `/tmp/${name}`, default_provider: 'claude', gws_profile: '',
+    }))
+    store.activeWorkspace = 'personal'
+  }
+
+  it('does not warn on Automations for a failure in another workspace', async () => {
+    seedWorkspaces()
+    useTaskStore().schedules = [
+      scheduleIn('work', { last_status: 'error' }),
+      scheduleIn('work', { missed: true }),
+    ]
+    const wrapper = await mountSidebar()
+    await nextTick()
+    expect(wrapper.get('a[href="/schedules"]').classes()).not.toContain('nav-item--warning')
+    wrapper.unmount()
+  })
+
+  it('warns on Automations for a failure in the active workspace', async () => {
+    seedWorkspaces()
+    useTaskStore().schedules = [scheduleIn('personal', { last_status: 'error' })]
+    const wrapper = await mountSidebar()
+    await nextTick()
+    expect(wrapper.get('a[href="/schedules"]').classes()).toContain('nav-item--warning')
+    wrapper.unmount()
+  })
+
+  it('warns for a missing-chat schedule in the active workspace even when disabled', async () => {
+    seedWorkspaces()
+    useTaskStore().schedules = [
+      scheduleIn('personal', { enabled: false, last_status: 'missing-chat' }),
+    ]
+    const wrapper = await mountSidebar()
+    await nextTick()
+    expect(wrapper.get('a[href="/schedules"]').classes()).toContain('nav-item--warning')
+    wrapper.unmount()
+  })
 })
 
 describe('ProjectSidebar accessible context menus', () => {
@@ -743,6 +797,110 @@ describe('ProjectSidebar accessible context menus', () => {
     back.click()
     await flushPromises()
     expect(document.body.querySelectorAll('[data-reka-menu-content]')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('does not tag the project row with its branch', async () => {
+    const store = useProjectStore()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: true, missing: false }
+    const wrapper = await mountSidebar()
+    expect(wrapper.find('.project-repo-tag').exists()).toBe(false)
+    expect(wrapper.get('.project-header').text()).not.toContain('main')
+    wrapper.unmount()
+  })
+
+  it('tags a chat only when it worked outside the main checkout', async () => {
+    const store = useProjectStore()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
+    store.chats[0].repo_location = { path: '/r/app', branch: 'main', is_worktree: false, exists: true }
+    store.chats.push({
+      ...store.chats[0],
+      chat_id: 'chat-wt',
+      title: 'In a worktree',
+      repo_location: { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true },
+    })
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    const tags = wrapper.findAll('.chat-repo-tag')
+    expect(tags).toHaveLength(1)
+    expect(tags[0].text()).toBe('⑂ feat-x')
+    expect(tags[0].attributes('title')).toBe('Worktree: /r/app-wt (code mode off)')
+    wrapper.unmount()
+  })
+
+  it('tags a code-mode chat with a quiet code marker', async () => {
+    const store = useProjectStore()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
+    store.chats[0].code_mode = true
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    expect(wrapper.findAll('.chat-code-tag')).toHaveLength(1)
+    expect(wrapper.get('.chat-code-tag').text()).toBe('code')
+    wrapper.unmount()
+
+    store.projects[0].repo = null
+    const unlinked = await mountSidebar()
+    await flushPromises()
+    expect(unlinked.find('.chat-code-tag').exists()).toBe(false)
+    unlinked.unmount()
+  })
+
+  function worktreeChat(codeMode: boolean) {
+    const store = useProjectStore()
+    store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
+    store.chats[0].code_mode = codeMode
+    store.chats[0].repo_location = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
+  }
+
+  it('lets the branch chip stand in for code when both apply', async () => {
+    worktreeChat(true)
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
+    const chip = wrapper.get('.chat-repo-tag')
+    expect(chip.attributes('title')).toBe('Code mode · Worktree: /r/app-wt')
+    expect(chip.classes()).not.toContain('chat-repo-tag--code-off')
+    wrapper.unmount()
+  })
+
+  it('dims the branch chip of a chat whose code mode is off', async () => {
+    worktreeChat(false)
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    expect(wrapper.get('.chat-repo-tag').classes()).toContain('chat-repo-tag--code-off')
+    wrapper.unmount()
+  })
+
+  it('rolls background runs up onto a collapsed project header', async () => {
+    const store = useProjectStore()
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: { plugins: [router] },
+    })
+    await nextTick()
+    const projectId = store.chats[0].project_id
+    const group = () => wrapper.findAll('.project-group').find(g => g.find('.project-name').text().includes(
+      store.projects.find(p => p.project_id === projectId)!.name,
+    ))!
+    const chevron = () => group().get('.project-icon')
+    store.backgroundRuns = {
+      [store.chats[0].chat_id]: [{ run_id: 'r1', label: '', cmd: ['uv', 'sync'], started_at: '2026-10-06T10:00:00Z', status: 'running', exit_code: null }],
+    }
+    if (chevron().attributes('aria-expanded') !== 'true') await chevron().trigger('click')
+    expect(group().find('.project-run-rollup').exists()).toBe(false)
+    await chevron().trigger('click')
+    const rollup = group().get('.project-run-rollup')
+    expect(rollup.attributes('aria-label')).toBe('1 background run in this project')
+    expect(rollup.find('.activity-glyph--run').exists()).toBe(true)
+    // Only the name truncates; a long name must not push the mark out of view.
+    expect(group().get('.project-name-text').find('.project-run-rollup').exists()).toBe(false)
     wrapper.unmount()
   })
 })

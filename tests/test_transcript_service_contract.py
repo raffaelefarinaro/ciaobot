@@ -211,6 +211,8 @@ def _chat(**overrides) -> SimpleNamespace:
             }
         },
         user_turn_unattended={"0": False},
+        user_turn_steered={},
+        user_turn_origin={},
     )
     base.update(overrides)
     return SimpleNamespace(**base)

@@ -28,7 +28,6 @@ function integration(profiles: GwsIntegrationProfile[], installed = true): GwsIn
   return {
     installed,
     binary_path: '/usr/local/bin/gws',
-    default_profile: 'personal',
     cli_available: true,
     profiles,
   }

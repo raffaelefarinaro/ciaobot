@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -112,7 +113,7 @@ def test_chat_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     dispatcher must still run them as `ciao chat …` commands."""
     chat_group = {
         "chats_list", "chat_get", "chat_create", "chat_update", "chat_send",
-        "chat_continue", "chat_retry", "chat_handover", "chat_archive",
+        "chat_continue", "chat_retry", "chat_handover", "chat_reload", "chat_archive",
         "chat_delete", "chat_stop",
     }
     service, _ = _service(tmp_path)
@@ -138,6 +139,14 @@ def test_note_verification_dispatches_on_cli_only_and_is_write_gated(
     assert operation.annotations.readOnlyHint is False
     assert operation.annotations.destructiveHint is False
     assert set(inspect.signature(operation.fn).parameters) == {"service", "payload_file"}
+
+
+def test_note_related_is_a_read(tmp_path: Path) -> None:
+    from ciao import mcp_server
+
+    service, _ = _service(tmp_path)
+    assert "note_related" in service.operation_table
+    assert mcp_server.OPERATIONS_BY_NAME["note_related"].annotations == mcp_server._READ
 
 
 def test_a_plan_mode_chat_cannot_verify_a_note(tmp_path: Path) -> None:
@@ -358,6 +367,7 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["vault", "review", "restore-completed", "--candidate", "c1"], ("vault_review", {"action": "restore_completed", "candidate_id": "c1"})),
         (["file", "surface", "out/report.md"], ("file_surface", {"path": "out/report.md"})),
         # The payload crosses as a path; the verdict's prose never does.
+        (["note", "related", "People/Mo.md"], ("note_related", {"path": "People/Mo.md", "limit": 15})),
         (["note", "verify", "--payload-file", "out/verify.json"], ("verify_note", {"payload_file": "out/verify.json"})),
         (
             ["chat", "list", "--project", "p1"],
@@ -409,12 +419,16 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         ),
         (["chat", "continue", "--chat", "c3"], ("chat_continue", {"chat_id": "c3"})),
         (["chat", "retry"], ("chat_retry", {"chat_id": "", "action": "try_now", "prompt": ""})),
+        (["chat", "retry", "--action", "set", "--kind", "network"], ("chat_retry", {"chat_id": "", "action": "set", "prompt": "", "kind": "network"})),
         (["chat", "update", "--model", "opus", "--thinking-level", "high"], ("chat_update", {"chat_id": "", "model": "opus", "thinking_level": "high"})),
         (["chat", "handover", "--provider", "opencode"], ("chat_handover", {"chat_id": "", "provider": "opencode", "model": ""})),
+        (["chat", "reload"], ("chat_reload", {"chat_id": ""})),
         (["project", "list", "--include-completed"], ("projects_list", {"include_completed": True})),
         (["project", "get"], ("project_get", {"project_id": ""})),
         (["project", "create", "--name", "Q4", "--context", "ctx"], ("project", {"action": "create", "name": "Q4", "context": "ctx"})),
         (["project", "update", "p1", "--vault-folder", "Projects/Q4"], ("project", {"action": "update", "project_id": "p1", "vault_folder": "Projects/Q4"})),
+        (["project", "create", "--name", "Q4", "--repo", ""], ("project", {"action": "create", "name": "Q4", "repo_path": ""})),
+        (["project", "update", "p1", "--repo", ""], ("project", {"action": "update", "project_id": "p1", "repo_path": ""})),
         (["project", "restore", "q4-launch"], ("project", {"action": "restore", "stem": "q4-launch"})),
         (["project", "complete", "p1"], ("project_action", {"action": "complete", "project_id": "p1"})),
         (["task", "list"], ("task_list", {})),
@@ -445,6 +459,14 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
             ("task_action", {"action": "complete", "task_id": "a1b2", "expected_revision": "rev1"}),
         ),
         (
+            ["task", "link-chat", "a" * 32, "--revision", "r"],
+            ("task_link_chat", {"task_id": "a" * 32, "expected_revision": "r", "remove": False}),
+        ),
+        (
+            ["task", "link-chat", "a" * 32, "--revision", "r", "--chat", "c", "--remove"],
+            ("task_link_chat", {"task_id": "a" * 32, "expected_revision": "r", "chat_id": "c", "remove": True}),
+        ),
+        (
             ["run", "start", "--label", "report", "--timeout-s", "900", "--env", "A=1", "--", "bash", "-lc", "a && b"],
             ("background_run_start", {"cmd": ["bash", "-lc", "a && b"], "env": {"A": "1"}, "timeout_s": 900, "label": "report"}),
         ),
@@ -452,11 +474,62 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (["run", "cancel", "run-1"], ("background_run_cancel", {"run_id": "run-1"})),
         (["gws", "status"], ("gws_status", {})),
         (["workspace", "list"], ("workspaces_list", {})),
+        (["repo", "candidates"], ("repo_candidates", {})),
     ],
 )
 def test_cli_arguments_map_to_operations(argv: list[str], expected: tuple[str, dict]) -> None:
     parser = agent_cli.build_parser()
     assert agent_cli.resolve(parser.parse_args(argv)) == expected
+
+
+def test_chat_update_code_flag_maps_to_code_mode() -> None:
+    parser = agent_cli.build_parser()
+    assert agent_cli.resolve(parser.parse_args(["chat", "update", "--code", "on"])) == (
+        "chat_update",
+        {"chat_id": "", "code_mode": True},
+    )
+    assert agent_cli.resolve(parser.parse_args(["chat", "update", "--code", "off"])) == (
+        "chat_update",
+        {"chat_id": "", "code_mode": False},
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        agent_cli.main(["chat", "update", "--code", "maybe"])
+    assert excinfo.value.code == 2
+
+
+def test_plan_mode_refuses_a_code_mode_switch(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path, mode="plan")
+    token = _token(service)
+    with _client(service) as client:
+        response = _post(client, token, "chat_update", {"code_mode": True})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "plan_mode_read_only"
+
+
+def test_cli_repo_flag_is_made_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    parser = agent_cli.build_parser()
+    _op, arguments = agent_cli.resolve(parser.parse_args(["project", "update", "p1", "--repo", "."]))
+    assert arguments["repo_path"] == os.path.abspath(str(tmp_path))
+    assert agent_cli.is_agent_invocation(["repo", "candidates"])
+
+
+def test_repo_candidates_is_a_read_operation() -> None:
+    from ciao import mcp_server
+
+    assert mcp_server.OPERATIONS_BY_NAME["repo_candidates"].annotations == mcp_server._READ
+
+
+def test_repo_candidates_dispatches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "root"
+    (root / "app" / ".git").mkdir(parents=True)
+    monkeypatch.setattr("ciao.repo_link.REPO_ROOTS", (str(root),))
+    service, _plane, _pcm = _names_service(tmp_path)
+    with _client(service) as client:
+        res = _post(client, _token(service), "repo_candidates")
+    body = res.json()
+    assert body["ok"] is True
+    assert [c["name"] for c in body["data"]["candidates"]] == ["app"]
 
 
 def test_every_documented_command_parses(tmp_path: Path) -> None:
@@ -473,7 +546,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "vault review keep": ["--candidate", "c"], "vault review trash": ["--candidate", "c"],
         "vault review restore": ["--candidate", "c"], "vault review delete": ["--candidate", "c", "--confirm", "c"],
         "vault review complete": ["--candidate", "c"], "vault review restore-completed": ["--candidate", "c"],
-        "note verify": ["--payload-file", "p.json"],
+        "note related": ["People/Mo.md"], "note verify": ["--payload-file", "p.json"],
         "file surface": ["p"], "chat send": ["--chat", "c", "--prompt", "p"], "chat stop": ["--chat", "c"],
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
         "project complete": ["p"], "project delete": ["p"], "task create": ["--title", "t"],
@@ -482,6 +555,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "task complete": ["a" * 32, "--revision", "r"],
         "task delegate": ["a" * 32, "--revision", "r"],
         "task add-update": ["a" * 32, "--revision", "r", "--text-file", str(summary)],
+        "task link-chat": ["a" * 32, "--revision", "r"],
         "task report": ["a" * 32, "--outcome", "done", "--summary-file", str(summary)],
         "task attempt": ["a" * 32, "stop"],
         "schedule update": ["s"], "schedule pause": ["s"],
@@ -633,59 +707,30 @@ def test_cli_surface_prompt_variant_names_ciao_commands() -> None:
     for name in ("memory_update", "vault_search", "vault_expand", "file_surface", "background_run_start", "MCP tools", "CLAUDE.md`, with"):
         assert name not in append, name
     assert "`AGENTS.md`" in append
+    assert "ciao chat reload" in append
+    # `/mcp` appears only inside the prohibition, never as an instruction.
+    assert append.count("/mcp") == append.count("Never tell the user to run `/mcp`") == 1
 
 
-def test_cli_surface_prompt_carries_the_whole_command_table() -> None:
-    """D-12: the prompt is the reference, so it cannot drift from the CLI.
+def test_cli_surface_prompt_carries_a_compact_synopsis() -> None:
+    """The prompt keeps a compact synopsis; the full reference is ciao-cli (#1464).
 
-    Every session on the CLI surface opened with a `ciao help` call (1.56 per
-    session on claude, 1.08 on opencode), which is most of the +4.5 s / +8.3 s
-    the surface cost per turn. The table is in the prompt so that call is not
-    needed; this test is what keeps it true when a command is added.
+    An eval showed routing accuracy fell (0.823 -> 0.726, recall answered
+    without `ciao vault search`) once the synopsis left the prompt, so the
+    common commands, one line each with key flags, stay in
+    `<ciaobot_cli_reference>`. `tests/test_cli_docs_drift.py` checks them
+    against the parsers; every command must also be in the reference `ciao help`
+    prints. The cap stays at 12000, unchanged: measured as the payload length
+    the prompt is 10067 with the synopsis, so no raise was needed. A
+    raise should move a section out rather than buy more room.
     """
     cli = system_prompt_payload("")["append"]
-    missing = [command for command in _commands() if command not in cli]
+    reference = (Path(agent_cli._SKILL_PATH)).read_text(encoding="utf-8")
+    missing = [command for command in _commands() if command not in reference]
     assert missing == []
-    # It has to stay cheap: this text is prepended to every turn of every
-    # CLI-surface chat. Raised from 9000 to 9500 for `note verify` (#726-D) —
-    # the previous 9000 left 24 characters of headroom, so the operation the
-    # agent is supposed to use INSTEAD of hand-editing stale notes could not
-    # be described at all. A command with no line here is a command the model
-    # does not know exists, which for this one means it hand-edits a note's
-    # `updated:` and leaves no receipt behind: exactly the defect the child
-    # exists to close. Raised to 10300 for the task board (#1021, B3), which is
-    # the same trade for six commands: an agent that never sees `task list`
-    # invents its own board in a note and there is no second source of truth for
-    # it to have come from. The revision discipline and the completion refusal
-    # have to travel with the verbs, or the first thing it does is overwrite a
-    # task nobody read. Pay for the line, and keep the ceiling honest.
-    # Raised again to 10600 for task delegation (#1033, B5), the same trade for two
-    # more: without `task delegate`/`task attempt` an agent handed "work on the
-    # board task" reaches for `task update` and edits the record by hand, which
-    # produces no chat, no attempt and no review — the three things that make a
-    # delegation a delegation. Two lines of prose had to come with them, because
-    # "attended, not bypassing" and "a finished turn waits for review" are the two
-    # properties a model cannot infer from a verb list.
-    # Raised again to 11000 for webhook triggers (#1039, A6), the same trade for five
-    # commands: the shown-once secret and the created-disabled rule are the two facts
-    # that keep an agent from pasting a credential into a note or enabling a trigger
-    # nobody asked to enable, and neither survives being left to `ciao help`.
-    # B5 (#1033) and A6 (#1039) added their lines on divergent branches and meet
-    # here, so this is 11400 rather than either's 10600/11000: both sets of prose
-    # have to travel or one feature's guarantee silently disappears.
-    # Raised again to 11700 after a real chat (2026-10-05) asked "what can I
-    # delegate to you?", did the work in its own turn, left every task untouched,
-    # and only found `in_review` from `--help`. The column names, the
-    # delegate-means-`task delegate` rule and the note-then-`in_review` rule for
-    # self-worked tasks are what that chat lacked; `ciao-capabilities` gets one
-    # line so feature questions stop being answered from general knowledge.
-    # Raised again to 12000 for `task report` (#1064), the same trade for one
-    # command: a delegated turn that ends without a report reads to the user as
-    # *Unfinished* rather than as a result to review, so the verb a delegated
-    # agent is required to call is exactly the one a verb list cannot imply. This
-    # is the fifth raise, and `docs/UPKEEP.md` records the standing argument that
-    # the next one should move a section OUT to the `ciao-cli` skill instead of
-    # buying a sixth. Pay for the line, and keep the ceiling honest.
+    assert "ciao help" in cli and "ciao <noun> --help" in cli
+    assert "vault search       QUERY" in cli and "task report" in cli
+    assert "vault review restore-completed" not in cli
     assert len(cli) < 12000
 
 
@@ -804,6 +849,13 @@ class _NamesPcm:
             "chat-w": self._chat("chat-w", "project-w", "Work only"),
         }
         self.updated: list[tuple[str, dict]] = []
+        self.created: list[dict] = []
+
+    def create_project(self, name, workspace, context="", *, scaffold=False, repo_path=""):
+        self.created.append(
+            {"name": name, "workspace": workspace, "context": context, "scaffold": scaffold, "repo_path": repo_path}
+        )
+        return SimpleNamespace(to_dict=lambda: {"name": name})
 
     @staticmethod
     def _chat(chat_id: str, project_id: str, title: str, *, archived: bool = False):
@@ -858,6 +910,22 @@ def _names_service(tmp_path: Path):
     )
     service.bind(plane)
     return service, plane, pcm
+
+
+def test_project_create_scaffolds_the_vault_note(tmp_path: Path) -> None:
+    service, plane, pcm = _names_service(tmp_path)
+    principal = SimpleNamespace(workspace="personal")
+    plane.project_create(principal, "Q4", "ctx")
+    assert pcm.created[-1]["scaffold"] is True
+
+
+def test_project_op_forwards_repo_path(tmp_path: Path) -> None:
+    service, _plane, pcm = _names_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        res = _post(client, token, "project", {"action": "create", "name": "Q4", "repo_path": "/x"})
+    assert res.json()["ok"] is True
+    assert pcm.created[-1]["repo_path"] == "/x"
 
 
 def test_chats_list_accepts_a_project_name(tmp_path: Path) -> None:

@@ -672,7 +672,6 @@ describe('delegated task chats on Home', () => {
       assignee: 'agent', chat_id: 'quiet', attempt_id: 'attempt-1', created_at: '', updated_at: '',
       revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: 'running',
       attempt_outcome: '', attempt_summary: '', attempt_detail: '', live_attempt_id: 'attempt-1',
-      changed_since_delegated: false,
       ...overrides,
     } as Task
   }
@@ -747,6 +746,26 @@ describe('delegated task chats on Home', () => {
   it('leaves ordinary chats without the task word', async () => {
     const wrapper = await mountWithTask({ chat_id: 'someone-else' })
     expect(wrapper.find('.home-chat-task').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each([
+    [true, true],
+    [true, false],
+    [false, true],
+  ])('tags a chat with code mode %s in a project with a repo %s as in the sidebar', async (codeMode, linked) => {
+    seedChats()
+    const store = useProjectStore()
+    const quiet = store.chats.find(c => c.chat_id === 'quiet')!
+    quiet.code_mode = codeMode
+    const project = store.projectFor('quiet')!
+    project.repo = linked ? ({ repo_path: '/repos/app' } as unknown as typeof project.repo) : undefined
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+    const tag = rowFor(wrapper, 'A quiet chat').find('.home-chat-code')
+    expect(tag.exists()).toBe(codeMode && linked)
+    if (tag.exists()) expect(tag.text()).toBe('code')
     wrapper.unmount()
   })
 })

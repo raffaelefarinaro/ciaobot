@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from unittest.mock import AsyncMock
@@ -626,6 +627,98 @@ async def test_context_marker_waits_for_provider_session(tmp_path: Path) -> None
     assert chat.context_session_id == "native-session"
 
 
+def test_request_is_context_primed_only_when_the_marker_matches_the_session(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Primed", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    chat.session_id = "ses_1"
+
+    first = manager.build_agent_request(chat, prompt="first")
+    assert first.context_primed is False
+
+    manager._commit_context_marker(chat, first, "ses_1")
+    second = manager.build_agent_request(chat, prompt="second")
+    assert second.context_primed is True
+    compact = manager.build_agent_request(chat, prompt="/compact", compact=True)
+    assert compact.context_primed is False
+
+    chat.context_digest = ""
+    assert manager.build_agent_request(chat, prompt="third").context_primed is False
+
+
+async def _drive_marker_turn(tmp_path: Path, events: list) -> ChatInfo:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Marker", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    request = manager.build_agent_request(chat, prompt="first")
+
+    class _Provider:
+        current_session_id = None
+
+        async def execute_streaming(self, _request):
+            self.current_session_id = "native-session"
+            for event in events:
+                yield event
+
+    manager._providers[chat.chat_id] = _Provider()  # type: ignore[assignment]
+    outcome = _StreamOutcome(effective_model=chat.model)
+    async for _ in manager._drive_stream(
+        chat_id=chat.chat_id, request=request, outcome=outcome
+    ):
+        pass
+    return chat
+
+
+@pytest.mark.asyncio
+async def test_error_result_does_not_commit_the_context_marker(tmp_path: Path) -> None:
+    chat = await _drive_marker_turn(
+        tmp_path,
+        [
+            ResultEvent(
+                type="result",
+                result="rejected",
+                is_error=True,
+                session_id="native-session",
+            )
+        ],
+    )
+
+    assert chat.context_digest == ""
+    assert chat.context_session_id == ""
+    assert chat.session_id == "native-session"
+
+
+@pytest.mark.asyncio
+async def test_successful_result_commits_the_context_marker(tmp_path: Path) -> None:
+    chat = await _drive_marker_turn(
+        tmp_path,
+        [ResultEvent(type="result", result="ok", session_id="native-session")],
+    )
+
+    assert chat.context_digest
+    assert chat.context_session_id == "native-session"
+
+
+@pytest.mark.asyncio
+async def test_compaction_in_a_turn_leaves_the_context_marker_cleared(
+    tmp_path: Path,
+) -> None:
+    from ciao.models import SystemStatusEvent
+
+    chat = await _drive_marker_turn(
+        tmp_path,
+        [
+            SystemStatusEvent(type="system", status="Compacted context: 1 → 2 tokens"),
+            ResultEvent(type="result", result="ok", session_id="native-session"),
+        ],
+    )
+
+    assert chat.context_digest == ""
+    assert chat.context_session_id == ""
+
+
 def test_compact_request_carries_no_context_capsule(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Compact request", workspace="personal")
@@ -765,6 +858,7 @@ def test_compaction_refused_while_a_native_question_is_open(tmp_path: Path) -> N
     chat = manager.create_chat(project.project_id)
     chat.session_id = "native-session"
     chat.pending_question = json.dumps({"request_id": "form-1"})
+    manager._providers[chat.chat_id] = SimpleNamespace(provider=object())  # type: ignore[assignment]
 
     with pytest.raises(ValueError, match="Answer the open question"):
         manager.start_stream(chat.chat_id, "/compact", compact=True)
@@ -866,3 +960,20 @@ async def test_opencode_effective_model_is_persisted_for_model_less_chat(
 
     assert chat.model == "opencode/big-pickle"
     assert _persisted_chats(tmp_path)[chat.chat_id]["model"] == "opencode/big-pickle"
+
+
+async def test_network_retry_kind_and_interval_survive_reload(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Net", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    assert manager.arm_network_retry(chat.chat_id, "job") == "armed"
+
+    second = _make_manager(tmp_path)
+    reloaded = second.get_chat(chat.chat_id)
+
+    assert reloaded is not None
+    assert reloaded.retry_kind == "network"
+    assert reloaded.retry_interval_seconds == 600
+    assert reloaded.retry_status == "pending"
+    manager.stop_chat_retry(chat.chat_id)
+    second.stop_chat_retry(chat.chat_id)

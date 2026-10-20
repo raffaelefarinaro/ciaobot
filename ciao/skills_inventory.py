@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ciao.frontmatter import split_frontmatter, unquote_scalar
 from ciao.memory_receipts import write_queue_atomically
 
 if TYPE_CHECKING:
@@ -162,19 +163,17 @@ def _read_frontmatter_description(path: Path) -> str:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return ""
-    if not text.startswith("---"):
+    parts = split_frontmatter(text)
+    if parts is None:
         return ""
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return ""
-    lines = parts[1].splitlines()
+    lines = parts[0].splitlines()
     collecting = False
     values: list[str] = []
     for line in lines:
         if line.startswith("description:"):
             raw = line.split(":", 1)[1].strip()
             if raw and raw not in {"|", ">", "|-", ">-"}:
-                return raw.strip('"\'')
+                return unquote_scalar(raw)
             collecting = True
             continue
         if collecting:
@@ -182,7 +181,7 @@ def _read_frontmatter_description(path: Path) -> str:
                 break
             stripped = line.strip()
             if stripped:
-                values.append(stripped.strip('"\''))
+                values.append(unquote_scalar(stripped))
     return " ".join(values).strip()
 
 
@@ -485,20 +484,20 @@ def _frontmatter_pair(content: str, name: str) -> tuple[str, str]:
     every catalog listing and every provider's skill index reads, so a skill
     without one is installed and never selected.
     """
-    parts = content.split("---", 2)
-    if len(parts) < 3 or not parts[0].strip() == "":
+    parts = split_frontmatter(content.lstrip())
+    if parts is None:
         raise ValueError(
             f"a new skill needs YAML frontmatter: the content for {name!r} does "
             "not open with a `---` line"
         )
     fields: dict[str, str] = {}
-    for line in parts[1].splitlines():
+    for line in parts[0].splitlines():
         key, sep, value = line.partition(":")
         if not sep:
             continue
         key = key.strip().casefold()
         if key in {"name", "description"} and key not in fields:
-            fields[key] = value.strip().strip("\"'")
+            fields[key] = unquote_scalar(value)
     declared = fields.get("name", "")
     if declared != name:
         raise ValueError(
@@ -512,7 +511,7 @@ def _frontmatter_pair(content: str, name: str) -> tuple[str, str]:
             f"a new skill needs a `description:` in its frontmatter: that is "
             f"what {name!r} is selected on, and without one it is never chosen"
         )
-    if not parts[2].strip():
+    if not parts[1].strip():
         raise ValueError(
             f"the content for {name!r} has frontmatter and no body: a skill that "
             "says nothing has nothing to load"

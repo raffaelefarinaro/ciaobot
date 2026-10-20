@@ -133,7 +133,7 @@ describe('mergeMessageFields', () => {
     const local = msg({
       role: 'assistant', content: 'a', timestamp: 'T', effective_model: 'loc',
       usage: { input: '5' }, quota: { used: 1 }, is_error: false, turn_index: 3,
-      duration_ms: 90, unattended: true,
+      duration_ms: 90, unattended: true, origin: 'schedule',
     })
     const merged = mergeMessageFields(server, local)
     expect(merged.effective_model).toBe('srv')
@@ -143,6 +143,7 @@ describe('mergeMessageFields', () => {
     expect(merged.turn_index).toBe(3)
     expect(merged.duration_ms).toBe(90)
     expect(merged.unattended).toBe(true)
+    expect(merged.origin).toBe('schedule')
     expect(merged.timestamp).toBe('T')
   })
 })
@@ -184,6 +185,16 @@ describe('toChatMessage', () => {
     const out = toChatMessage({ role: 'assistant', content: 'a' })
     expect(out.timestamp).toBe('')
     expect(out.unattended).toBeUndefined()
+  })
+
+  test('carries the steered marker for a user row sent into a running turn', () => {
+    expect(toChatMessage({ role: 'user', content: 'q', steered: true }).steered).toBe(true)
+    expect(toChatMessage({ role: 'user', content: 'q' }).steered).toBeUndefined()
+  })
+
+  test('toChatMessage carries origin', () => {
+    expect(toChatMessage({ role: 'user', content: 'q', origin: 'webhook' }).origin).toBe('webhook')
+    expect(toChatMessage({ role: 'user', content: 'q' }).origin).toBeUndefined()
   })
 
   test('carries the fields the footer and dedup depend on', () => {

@@ -194,6 +194,7 @@ def _provider(
     app_path: str = "",
     cli_path: str = "",
     path_command: str = "",
+    terminal_action: str = "",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -223,6 +224,8 @@ def _provider(
         row["cli_path"] = cli_path
     if path_command:
         row["path_command"] = path_command
+    if terminal_action:
+        row["terminal_action"] = terminal_action
     return row
 
 
@@ -836,6 +839,7 @@ def _claude_status(
             install_url=CLAUDE_INSTALL_DOCS_URL,
             app_path=app_path,
             path_command=claude_path_hint(""),
+            terminal_action="claude-install",
         )
     auth_status = claude_auth_status(binary, env=env)
     if auth_status["logged_in"]:
@@ -857,6 +861,7 @@ def _claude_status(
             skills=claude_skills,
             mcps=claude_mcps,
             cli_path=binary,
+            terminal_action="claude-login",
         )
     # No fallback on unparseable probe output: a timeout or process error is
     # not evidence of authentication, and neither is Desktop metadata — an
@@ -885,6 +890,7 @@ def _claude_status(
             install_url=CLAUDE_INSTALL_DOCS_URL,
             cli_path=binary,
             path_command=claude_path_hint(binary),
+            terminal_action="claude-install",
         )
     app_path = claude_app_path()
     auth_command = claude_auth_command(binary)
@@ -907,6 +913,7 @@ def _claude_status(
         # An installed CLI the terminal cannot find still needs the PATH line:
         # the user is about to be handed a command to type into that terminal.
         path_command=claude_path_hint(binary),
+        terminal_action="claude-login",
     )
 
 

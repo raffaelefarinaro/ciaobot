@@ -38,6 +38,7 @@ function task(overrides: Partial<Task> = {}): Task {
     assignee: 'agent',
     chat_id: 'chat-1',
     attempt_id: 'att-1',
+    linked_chats: [],
     created_at: '',
     updated_at: '',
     revision: REVISION,
@@ -47,7 +48,6 @@ function task(overrides: Partial<Task> = {}): Task {
     attempt_summary: '',
     attempt_detail: '',
     live_attempt_id: 'att-1',
-    changed_since_delegated: false,
     completed_at: null,
     has_resolution: false,
     ...overrides,
@@ -59,12 +59,12 @@ const CHAT: Pick<ChatInfo, 'chat_id' | 'helper'> = {
   helper: { kind: 'task_delegation', task_id: 'ship', task_revision: REVISION, attempt_id: 'att-1' },
 }
 
-function mountNote(tasks: Task[], chat = CHAT, variant: 'rail' | 'note' = 'rail') {
+function mountNote(tasks: Task[], chat = CHAT) {
   const signals = useTaskSignalsStore()
   signals.tasks = tasks
   signals.loadedWorkspace = 'personal'
   return mount(TaskOriginNote, {
-    props: { chat, variant },
+    props: { chat },
     global: { stubs: { RouterLink: RouterLinkStub } },
   })
 }
@@ -183,8 +183,7 @@ describe('TaskOriginNote', () => {
   })
 
   it('falls back to the stamp alone when the store does not hold the task', () => {
-    const wrapper = mountNote([], CHAT, 'note')
-    expect(wrapper.classes()).toContain('task-origin--note')
+    const wrapper = mountNote([])
     expect(wrapper.text()).toContain('This chat works on a task on the board.')
     expect(JSON.parse(wrapper.get('a').attributes('data-to')!)).toEqual({ name: 'task-detail', params: { taskId: 'ship' } })
     expect(wrapper.find('.task-origin-status').exists()).toBe(false)

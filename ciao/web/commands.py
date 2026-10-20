@@ -22,6 +22,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao import provider_registry
+from ciao.frontmatter import unquote_scalar
 
 from ciao.skills_inventory import build_skill_inventory
 from ciao.workspaces import agent_root_for
@@ -56,7 +57,7 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
-        result[key.strip()] = value.strip().strip('"').strip("'")
+        result[key.strip()] = unquote_scalar(value)
     return result
 
 

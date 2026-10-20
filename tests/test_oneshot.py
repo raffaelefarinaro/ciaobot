@@ -215,7 +215,7 @@ async def test_run_oneshot_disables_claude_auto_memory(monkeypatch) -> None:
 
 
 # ── opencode one-shot ───────────────────────────────────────────────────
-# Routines (titles, insights, critique) reach non-Anthropic, non-OpenAI models
+# Routines (titles, insights) reach non-Anthropic, non-OpenAI models
 # through opencode, so opencode needs a one-shot path of its own.
 
 

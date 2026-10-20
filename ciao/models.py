@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -136,6 +137,10 @@ class AgentRequest:
     # lets a pre-session failure retry with the full capsule.
     context_digest: str = ""
     context_session_id: str = ""
+    # True when the chat's persisted context marker says the resumed native
+    # session already holds Ciaobot's stable context (and, for OpenCode, the
+    # chat core sent with it). Lets a freshly built provider skip re-sending.
+    context_primed: bool = False
     # Full stable context held aside for providers that have to replace a
     # missing/invalid resumed session after the request was built.
     stable_context_prefix: str = ""
@@ -149,6 +154,10 @@ class AgentRequest:
     # workspace vault root, de-duplicated. Machine scope ignores both.
     agent_fs_scope: str = "machine"
     agent_roots: tuple[str, ...] = ()
+    # Resolved path of the project's linked git repository ("" = none). Both
+    # providers load its skills and allow it in every filesystem scope; it is
+    # fixed when the provider process starts.
+    linked_repo: str = ""
 
     @property
     def control_token(self) -> str:
@@ -165,6 +174,11 @@ def agent_control_token(request: object) -> str:
     """
     extra_env = getattr(request, "extra_env", None) or {}
     return str(extra_env.get("CIAO_AGENT_TOKEN", "") or "")
+
+
+def linked_repo_of(request: object) -> str:
+    """The request's linked repository path, or "" (see AgentRequest.linked_repo)."""
+    return str(getattr(request, "linked_repo", "") or "")
 
 
 def provider_reuse_key(request: object) -> str:
@@ -229,11 +243,18 @@ class ToolUseEvent(StreamEvent):
     request_id: str = ""
     session_id: str = ""
     file_touches: list | None = None
+    # absolute-or-~ directories a shell call ran in (`cd`, `git -C`, `workdir`),
+    # from the raw input; see `tool_work_dirs`
+    work_dirs: list[str] | None = None
     # Size of the call's raw JSON input and the control surface it went
     # through ("cli" or "mcp", see ``tool_call_facts``). Both come from the
     # raw input, which ``tool_input`` (a summary) does not carry.
     input_chars: int | None = None
     control_surface: str = ""
+    # True when the provider can move this call to the background while it
+    # runs (OpenCode's shell and subagent tools; see
+    # OpencodeProvider.move_to_background). Only set on a call, never a result.
+    backgroundable: bool = False
     # On a ``tool_result`` event: whether the call failed. ``None`` = unknown.
     is_error: bool | None = None
 
@@ -266,6 +287,34 @@ def tool_call_facts(tool_name: str, raw_input: object) -> tuple[int, str]:
         if isinstance(command, str) and _CLI_COMMAND_RE.match(command):
             return input_chars, "cli"
     return input_chars, ""
+
+
+_CD_RE = re.compile(r"(?:^|[;&|(]\s*|&&\s*|\s)cd\s+(\"[^\"]+\"|'[^']+'|[^\s;&|)]+)")
+_GIT_C_RE = re.compile(r"\bgit\s+-C\s+(\"[^\"]+\"|'[^']+'|[^\s;&|)]+)")
+
+
+def tool_work_dirs(tool_name: str, raw_input: object) -> list[str]:
+    """Directories a shell call ran in, absolute only, in order, deduped."""
+    if tool_name not in _SHELL_TOOL_NAMES or not isinstance(raw_input, Mapping):
+        return []
+    candidates: list[str] = []
+    for key in ("workdir", "cwd"):
+        value = raw_input.get(key)
+        if isinstance(value, str):
+            candidates.append(value)
+    command = raw_input.get("command")
+    if isinstance(command, str):
+        candidates.extend(m.group(1) for m in _CD_RE.finditer(command))
+        candidates.extend(m.group(1) for m in _GIT_C_RE.finditer(command))
+    out: list[str] = []
+    for raw in candidates:
+        value = raw.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        value = os.path.expanduser(value)
+        if value and Path(value).is_absolute() and value not in out:
+            out.append(value)
+    return out
 
 
 @dataclass(slots=True)
@@ -310,6 +359,22 @@ class TokenUsageEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class SteerDeliveredEvent(StreamEvent):
+    """A message sent with ``steer_turn`` reached the running turn."""
+
+    delivery_id: str = ""
+
+
+@dataclass(slots=True)
+class PromptCancelledEvent(StreamEvent):
+    """Stop cancelled the turn's prompt before the provider ran it.
+
+    Host bookkeeping: the drive loop puts the turn's prompt back in the
+    chat's waiting queue so the user can resend it.
+    """
+
+
+@dataclass(slots=True)
 class ResultEvent(StreamEvent):
     """Terminal stream event."""
 
@@ -333,6 +398,10 @@ class ResultEvent(StreamEvent):
     # unanswered. The result is then published over a live card, so a watcher
     # reading it must not treat the attempt as finished work (#1111).
     recovered_with_pending: bool = False
+    # Kind of input that started this turn, as the provider reports it: "" for
+    # Ciaobot's own prompt, "task-notification" for a follow-up turn the CLI ran
+    # on its own after background work finished (#1394).
+    origin: str = ""
 
 
 @dataclass(slots=True)

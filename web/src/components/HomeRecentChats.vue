@@ -88,6 +88,7 @@
                       :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
                     <span v-if="taskSignals.isDelegatedChat(chat)" class="home-chat-task">task</span>
+                    <span v-if="isChatCodeModeOn(chat, store.projectFor(chat.chat_id)?.repo)" class="home-chat-task home-chat-code" title="Code mode is on">code</span>
                   </span>
                   <!-- Project plus a status phrase read from the same signals
                        that sorted the row into its tier, so the sub-line can
@@ -183,9 +184,10 @@ import { ageBucket, chatActivityTimestamp, groupHomeTiers, type HomeTierKey, typ
 import { activeInsightSummary, type MemoryInsight } from '../lib/memoryInsights'
 import { formatRelative } from '../lib/relativeTime'
 import { classifyError } from '../lib/errorAttribution'
-import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
+import { DEFAULT_WORKSPACE_COLOR, colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useTaskSignalsStore } from '../stores/taskSignals'
+import { isChatCodeModeOn } from '../lib/codeMode'
 import ChatSignals from './ChatSignals.vue'
 
 type NewWorkspaceChatAction = { workspace: string; projectId: string; isCreating: boolean }
@@ -300,11 +302,11 @@ const lanes = computed<HomeLane[]>(() => {
   // without this sweep, they would vanish from home until a reload.
   for (const [workspace, chats] of grouped) {
     if (!chats.length || knownNames.has(workspace)) continue
-    result.push(makeLane(workspace, workspaceLabel(workspace), '—', 'pink', chats))
+    result.push(makeLane(workspace, workspaceLabel(workspace), '—', DEFAULT_WORKSPACE_COLOR, chats))
   }
 
   if (unknown.length) {
-    result.push(makeLane('unknown', '', '—', 'pink', unknown, null))
+    result.push(makeLane('unknown', '', '—', DEFAULT_WORKSPACE_COLOR, unknown, null))
   }
   return result
 })
@@ -1175,8 +1177,8 @@ defineExpose({ onArrow })
 
 .home-chat-heading:has(.home-chat-task) .home-chat-title { flex: 0 1 auto; }
 
-/* The sidebar's task tag (ProjectSidebar `.chat-task-tag`): a squared mono
-   word after the title, never colour. */
+/* The sidebar's task and code tags (ProjectSidebar `.chat-task-tag`,
+   `.chat-code-tag`): a squared mono word after the title, never colour. */
 .home-chat-task {
   display: inline-grid;
   place-items: center;

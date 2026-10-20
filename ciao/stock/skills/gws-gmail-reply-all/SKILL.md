@@ -1,6 +1,6 @@
 ---
 name: gws-gmail-reply-all
-description: "Gmail: Reply-all to a message (handles threading automatically)."
+description: "Use to reply to everyone on a message (sender, To and Cc), keeping the thread; needs the message ID (find it with gws-gmail-triage)."
 metadata:
   version: 0.22.5
 ---
@@ -56,3 +56,6 @@ ciao gws "$GWS_PROFILE" gmail +reply-all --message-id 18f1a2b3c4d --body 'Draft 
 - With --html, the quoted block uses Gmail's gmail_quote CSS classes and preserves HTML formatting. Use fragment tags (<p>, <b>, <a>, etc.) — no <html>/<body> wrapper needed.
 - With --html, inline images in the quoted message are preserved via cid: references.
 - Use --draft to save the reply as a draft instead of sending it immediately.
+
+> [!CAUTION]
+> This is a **write** command — confirm with the user before executing. Show the recipients, subject and body before sending, and use `--draft` unless the user asked to send.

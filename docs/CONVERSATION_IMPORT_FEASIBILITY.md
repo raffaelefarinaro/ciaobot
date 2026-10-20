@@ -393,7 +393,7 @@ would therefore not even be sufficient.
 
 `ciao/providers/oneshot.py` already implements a no-tools turn on **both**
 harnesses, and it is the transport Ciaobot uses today for titles, doc folds,
-critique, schedule summaries, and the behavioral eval:
+schedule summaries, and the behavioral eval:
 
 * **Claude** — `_run_claude_oneshot` (L128-165) builds `ClaudeAgentOptions`
   with `setting_sources=[]`, `skills=[]`, `tools=[]`, and

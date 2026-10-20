@@ -41,7 +41,6 @@ Confirmed product capabilities include:
 - direct work with workspace and vault files, including previews, editing, pinned context, line and cell annotations, attachments, and document conversion;
 - recurring, interval-based, and one-off automations that dispatch prompts into new or existing chats;
 - archived-conversation insights, scoped durable-memory routing, proposal review, reversible managed changes, nightly curation, vault search, the Memory Map, and deterministic vault review;
-- multi-model adversarial review through a configured critique panel;
 - per-workspace extensions such as skills, subagents, commands, and permitted MCP servers;
 - optional Google Workspace workflows through the `gws` CLI;
 - an installable browser/PWA surface that is the only client: status, notifications, navigation, and engine maintenance are its own Settings surfaces;

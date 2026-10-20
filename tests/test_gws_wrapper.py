@@ -209,3 +209,93 @@ def test_main_reports_an_unusable_install_instead_of_running_it(tmp_path, monkey
 
     assert gws_wrapper.main(["personal", "drive", "files", "list"]) == 1
     assert "node is not on PATH" in capsys.readouterr().err
+
+
+def test_main_refuses_without_a_linked_profile(tmp_path, monkeypatch, capsys) -> None:
+    """No profile argument and an empty GWS_PROFILE means the workspace has no
+    Google account: refuse instead of falling back to "personal"."""
+    monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: _config(tmp_path)))
+    monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
+    monkeypatch.setenv("GWS_PROFILE", "")
+    monkeypatch.setattr(gws_wrapper, "resolve_command", lambda name: pytest.fail("must not resolve gws"))
+    monkeypatch.setattr(gws_wrapper, "hand_off", lambda *a: pytest.fail("must not run"))
+
+    assert gws_wrapper.main(["drive", "files", "list"]) == 2
+    assert "No Google account is linked to this workspace" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--profile", "", "drive"], ["--profile", "  ", "drive"], ["--profile"]],
+    ids=["empty", "whitespace", "dangling"],
+)
+def test_main_refuses_a_blank_or_dangling_profile_flag(tmp_path, monkeypatch, capsys, argv) -> None:
+    """An explicit blank profile must not fall back to a GWS_PROFILE in the env."""
+    monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: _config(tmp_path)))
+    monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
+    monkeypatch.setenv("GWS_PROFILE", "personal")
+    monkeypatch.setattr(gws_wrapper, "resolve_command", lambda name: pytest.fail("must not resolve gws"))
+    monkeypatch.setattr(gws_wrapper, "hand_off", lambda *a: pytest.fail("must not run"))
+
+    assert gws_wrapper.main(argv) == 2
+    assert capsys.readouterr().err
+
+
+# ── chat lock to the linked account ─────────────────────────────────────────
+
+
+def _locked_main(tmp_path, monkeypatch, *, token: bool, linked: str = "work"):
+    monkeypatch.setattr("ciao.config.CiaoConfig.from_env", classmethod(lambda cls: _config(tmp_path)))
+    monkeypatch.setattr(gws_wrapper, "_configured_workspace_root", lambda config: tmp_path)
+    monkeypatch.setenv("GWS_PROFILE", linked)
+    if token:
+        monkeypatch.setenv("CIAO_AGENT_TOKEN", "t")
+    else:
+        monkeypatch.delenv("CIAO_AGENT_TOKEN", raising=False)
+    monkeypatch.setattr(gws_wrapper, "resolve_command", lambda name: ["gws"])
+    seen: list[dict[str, str]] = []
+
+    def fake_hand_off(executable, argv, env) -> int:
+        seen.append(env)
+        return 0
+
+    monkeypatch.setattr(gws_wrapper, "hand_off", fake_hand_off)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["personal", "gmail", "x"],
+        ["--profile", "personal", "gmail", "x"],
+        ["--profile", "Other Acct", "gmail", "x"],
+    ],
+)
+def test_chat_refuses_an_account_other_than_the_linked_one(tmp_path, monkeypatch, capsys, argv) -> None:
+    seen = _locked_main(tmp_path, monkeypatch, token=True)
+
+    assert gws_wrapper.main(argv) == 2
+    assert "only use its linked Google account" in capsys.readouterr().err
+    assert seen == []
+
+
+@pytest.mark.parametrize("argv", [["work", "gmail", "x"], ["--profile", " work ", "gmail", "x"], ["gmail", "x"]])
+def test_chat_allows_the_linked_account(tmp_path, monkeypatch, argv) -> None:
+    seen = _locked_main(tmp_path, monkeypatch, token=True)
+
+    assert gws_wrapper.main(argv) == 0
+    assert seen[0]["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"].endswith("gws")
+
+
+def test_chat_with_no_linked_account_refuses_an_explicit_one(tmp_path, monkeypatch) -> None:
+    seen = _locked_main(tmp_path, monkeypatch, token=True, linked="")
+
+    assert gws_wrapper.main(["personal", "gmail"]) == 2
+    assert seen == []
+
+
+def test_operator_terminal_keeps_the_explicit_override(tmp_path, monkeypatch) -> None:
+    seen = _locked_main(tmp_path, monkeypatch, token=False)
+
+    assert gws_wrapper.main(["personal", "gmail", "x"]) == 0
+    assert seen[0]["GOOGLE_WORKSPACE_CLI_CONFIG_DIR"].endswith("gws-personal")

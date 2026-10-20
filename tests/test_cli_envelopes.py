@@ -190,6 +190,8 @@ def _chat() -> SimpleNamespace:
         turn_index_base=0,
         user_turn_timings={},
         user_turn_unattended={},
+        user_turn_steered={},
+        user_turn_origin={},
     )
 
 
@@ -365,14 +367,12 @@ def test_shell_output_quoting_a_notification_never_completes_an_agent(
 
     The tracker identified a completion by searching the record's body, so
     the agent's own transcript being printed into the chat reported it
-    "failed" — and opened a synthesis-nudge window for a completion that
-    never happened, which is the window steering into kills the run.
+    "failed".
     """
     state = subagent_tracking.parse_session_subagents(
         _session(tmp_path, [_DISPATCH, _DISPATCH_RESULT, _user(SHELL_OUTPUT)])
     )
     assert state.subagents["aaa"].status == "running"
-    assert state.notification_pending is False
 
 
 def test_a_real_notification_still_completes_its_agent(tmp_path) -> None:
@@ -413,3 +413,16 @@ def test_prose_quoting_a_notification_advances_both_turn_counters(
 
     # The renderer's side of the same claim: three user bubbles.
     assert subagent_tracking._is_countable_user_turn(f"why did this fail?\n{ONE}")
+
+
+def test_hidden_continuations_are_recognised_with_and_without_the_capsule():
+    capsule = "[CIAO_CONTEXT_BEGIN]\nx\n[CIAO_CONTEXT_END]\n\n"
+    for prompt in (
+        cli_envelopes.CODE_MODE_CONTINUE_PROMPT,
+        cli_envelopes.RELOAD_CONTINUE_PROMPT,
+    ):
+        assert cli_envelopes.is_hidden_continuation(prompt)
+        assert cli_envelopes.is_hidden_continuation(capsule + prompt)
+        assert not cli_envelopes.is_hidden_continuation("please " + prompt)
+        assert not subagent_tracking._is_countable_user_turn(capsule + prompt)
+    assert not cli_envelopes.is_hidden_continuation("ordinary text")

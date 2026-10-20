@@ -27,8 +27,7 @@ These read the registry and pick up a new id with no further edit:
 
 - Workspace default provider, chat and schedule validation, `ciao` flags
   that take `--provider`.
-- Settings → Providers connection cards, including the macOS Terminal
-  login launcher (`POST /api/providers/{id}/connect`).
+- Settings → Providers connection cards.
 - Startup connection checks for every descriptor that has a status probe,
   except Claude, which is probed on its own path (`ciao/main.py`).
 - `/api/models`, which ships each provider's `ProviderCapabilities`.
@@ -71,7 +70,7 @@ set and nothing else.
 | `PermissionRequestEvent` | The CLI is waiting on an approval card. |
 | `TokenUsageEvent` | Live counts. The terminal `ResultEvent.usage` is still the authoritative total. |
 | `ModelChangedEvent` | The effective model changed mid-turn. |
-| `ResultEvent` | Every turn ends on one. Carry `session_id`, `effective_model`, `is_error`, `stopped` (a user Stop is not an error), `usage`, and `quota` when the CLI has it. `recovered_with_pending` means a permission or question card is still unanswered. |
+| `ResultEvent` | Every turn ends on one. Carry `session_id`, `effective_model`, `is_error`, `stopped` (a user Stop is not an error), `usage`, and `quota` when the CLI has it. `recovered_with_pending` means a permission or question card is still unanswered. Set `origin` to a non-empty kind (Claude: `task-notification`) on a result the provider produced without a prompt from Ciaobot, so the host drain can tell a follow-up turn apart. |
 
 ### Methods the chat manager already calls
 
@@ -79,11 +78,12 @@ set and nothing else.
 |---|---|---|
 | `disconnect()` | Session reset, delete, idle reap, stop escalation. | The process is leaked. On `BaseProvider` the default is a no-op. |
 | `ActiveHandle.stop()` | The Stop button. | Registered from `run_streaming`. |
+| `steer_turn(request)` | A user steer during a live turn: returns a delivery id and emits `SteerDeliveredEvent` once the model consumed it. | Falls back to the next-turn queue. On `BaseProvider` the default returns `None`. |
+| `move_to_background()` | The PWA's *Move to background* action (OpenCode's Ctrl+B). | On `BaseProvider` the default returns `"unsupported"` and the route answers 409. A provider that implements it sets `ToolUseEvent.backgroundable` on the calls it can move; the PWA shows the action only for those. |
 | `current_session_id` | Permission and question replies. | The reply cannot find the live session. |
-| `steer(request)` | A message sent while a turn is running. | The message waits for the next turn. |
 | `send_permission_response` / `permission_gate` | The approval card. | The card cannot be answered. Claude uses `PermissionGate`; OpenCode posts to the session. |
 | `send_question_response` | A native question card. | Same, for questions. |
-| `can_drain` / `drain_events` | Claude, between turns, so a background agent can wake the parent. | No between-turns drain. OpenCode reports `can_drain` false. |
+| `can_drain` / `drain_events` | Claude and OpenCode, between turns, so a background agent or shell can wake the parent. | OpenCode reports `can_drain` true only while a live server has background shells or subagents outstanding. |
 | `read_thread` / `delete_thread` | OpenCode titles and session reclaim. Claude uses its own JSONL helpers instead. | See the skip list below. |
 
 Declare `capabilities = ProviderCapabilities(...)` honestly.
@@ -105,13 +105,13 @@ arm.
 | Subagent routes return `[]`. | No child transcripts, and the sidebar shows no running agents. | `ciao/web/routes_api.py` chat subagents and `_running_subagent_rows`. |
 | The schedule archive wait returns "settled" immediately. | A schedule can archive while its background agents are still running. | `ciao/web/schedule_dispatch.py` `_await_schedule_subagents`. |
 | The subagent watcher falls through to the Claude JSONL reader. | Only if `background_subagents` is true. The watcher then looks for a Claude session file and finds nothing. | `ciao/web/subagent_watchers.py` `watch_inner`. The CLI-task orphan sweep is Claude-only and skips everyone else, which is safe. |
-| `disallowed_tools_for_chat` returns `[]`. | The harness denylist and the MCP allowlist are not applied. Credential denies are also not applied unless the adapter sends them itself. | `ProjectChatManager.disallowed_tools_for_chat`. OpenCode applies the shared patterns from `execution_modes.opencode_credential_deny_rules` inside its own permission rules. |
+| `disallowed_tools_for_chat` returns `[]`. | The harness denylist is not applied. Credential denies are also not applied unless the adapter sends them itself. | `ProjectChatManager.disallowed_tools_for_chat`. OpenCode applies the shared patterns from `execution_modes.opencode_credential_deny_rules` inside its own permission rules. |
 | Image preflight runs only for OpenCode. | A model that cannot see images receives them anyway. Claude and current Anthropic/OpenAI models all accept images, which is why the check is OpenCode-only. | `ProjectChatManager._opencode_image_support`. |
 | Native title read returns `None`. | The chat keeps the deterministic title, then the one-shot titler. The poll window is Claude's instant poll only when the id is `claude`; every other id waits out the OpenCode delays first. | `ProjectChatManager._native_chat_title`. |
 | Transcript reload uses the local markdown only. | The chat bubble history still renders from Ciaobot's own transcript. Provider-side history that never landed there does not. | `ciao/web/transcript_service.py`. |
 | Stop escalation disconnects only Claude. | A wedged CLI is not torn down on Stop unless `ActiveHandle.stop` already did it. | `ProjectChatManager` force-stop. |
-| One-shot raises `Unknown one-shot provider`. | Titles, critique, doc folding, and routine-model calls fail. | `ciao/providers/oneshot.py`. This is a separate no-tools call, not `run_streaming`. |
-| Critique's availability map has no entry. | The review panel skips the provider. | `ciao/critique.py` `default_critique_panel`. |
+| One-shot raises `Unknown one-shot provider`. | Titles, doc folding, and routine-model calls fail. | `ciao/providers/oneshot.py`. This is a separate no-tools call, not `run_streaming`. |
+| Connect has no `<id>-login` action. | Settings → Connect answers 404. | `ACTION_IDS` and `action_command` in `ciao/host_terminal.py`; `tests/test_provider_connect_route.py::test_every_provider_has_a_login_action` fails until it is added. |
 | Logout assumes `auth_command` is `[binary, auth, login]`. | Settings → Logout runs `[binary, auth, logout]`. A CLI with a different shape signs nobody out and can still exit 0. | `provider_connection_action` in `ciao/web/routes_api.py`. |
 | `ciao auth --print-only` has a missing-binary fallback only for OpenCode. | The printed command errors when the binary is not installed. | `ciao/cli.py`. |
 
@@ -134,7 +134,9 @@ Before writing a projection, check whether the new CLI already loads
 OpenCode and project only the surfaces it does not discover (commands,
 subagents, MCP). `ciao/web/commands.py` `_provider_command_dir` is the
 slash-command half of that. System skills shown in Settings come from
-the descriptor's `system_skills_path`.
+the descriptor's `system_skills_path`. The function also feeds the slash
+picker's provider skills and must be cheap or cached, since `/api/commands`
+calls it (opencode caches a private-server read for 300 s).
 
 Claude Code hides harness surfaces the PWA already owns (plan mode, its
 own scheduler, notifications). The deny list is `HARNESS_DISABLED_SKILLS`
@@ -198,6 +200,6 @@ Before pushing, run the gates in `AGENTS.md`: `mypy ciao`,
 3. Add permission replies, question replies, and Stop. Wire the skip-list
    rows whose feature you claim to support, and leave the others
    explicitly unsupported in `ProviderCapabilities`.
-4. Add the one-shot path so titles and critique work.
+4. Add the one-shot path so titles and doc folds work.
 5. Decide asset discovery versus projection.
 6. Replay fixtures, then run one real turn.

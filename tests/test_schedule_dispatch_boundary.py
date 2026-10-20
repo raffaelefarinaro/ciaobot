@@ -72,6 +72,7 @@ class _ScheduleHost:
         self.saves = 0
         self.prepared: list[tuple[str, str, str, str]] = []
         self.started: list[tuple[str, str, bool]] = []
+        self.origins: list[str] = []
         self.awaits: list[tuple[str, float | None]] = []
         self.discarded: list[str] = []
         self.drain_waits: list[str] = []
@@ -154,9 +155,11 @@ class _ScheduleHost:
         *,
         is_retry: bool = False,
         unattended: bool = False,
+        origin: str = "",
     ) -> ChatStream:
         del images, is_retry
         self.started.append((chat_id, prompt, unattended))
+        self.origins.append(origin)
         return cast(ChatStream, _Stream(self._stream_events))
 
     async def _await_schedule_subagents(
@@ -262,6 +265,7 @@ async def test_dispatch_keeps_schedule_outcome_vocabulary(
     assert result == {"chat_id": "chat-1", "status": expected_status}
     assert host.prepared == [("sched-contract", "Run the routine.", "opus", "claude")]
     assert host.started == [("chat-1", "Run the routine.", True)]
+    assert host.origins == ["schedule"]
     if expected_status == "ok":
         assert host.awaits == [("chat-1", 900.0)]
         assert host.discarded == ["chat-1", "chat-1"]
@@ -465,7 +469,7 @@ async def test_curation_run_that_took_the_lease_stays_ok(
     vault = tmp_path / "vault"
     (vault / "Workspace").mkdir(parents=True)
     host.start_stream = (  # type: ignore[method-assign]
-        lambda chat_id, prompt, images=None, *, is_retry=False, unattended=False: cast(
+        lambda chat_id, prompt, images=None, *, is_retry=False, unattended=False, origin="": cast(
             ChatStream, _LeaseTakingStream(host._stream_events, vault)
         )
     )

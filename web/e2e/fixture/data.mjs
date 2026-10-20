@@ -22,6 +22,7 @@ export const PROJECTS = WORKSPACES.flatMap((workspace, wi) => ([
     workspace: workspace.name,
     context: `Synthetic ${workspace.name} general project`,
     order: 0,
+    repo: wi === 0 ? { path: '/synthetic/repos/alpha-app', branch: 'main', dirty: true, missing: false, instructions: { name: 'AGENTS.md', chars: 3200 } } : null,
     color: ['#ff4d6d', '#6a47b8', '#37b39c'][wi],
   },
   {
@@ -83,6 +84,7 @@ function chat(workspace, n, projectId, title, extra = {}) {
     pinned_file_path: '',
     dismissed_pin_paths: [],
     pin_revision: 0,
+    code_mode: false,
     ...extra,
   }
 }
@@ -107,7 +109,12 @@ export const CHATS = WORKSPACES.flatMap((workspace) => ([
     // alpha chats every other spec measures.
     workspace.name === 'beta'
       ? { pinned_file_path: '/synthetic/beta/pinned-report.md', dismissed_pin_paths: [], pin_revision: 1 }
-      : {}),
+      : workspace.name === 'alpha'
+        ? {
+          repo_location: { path: '/synthetic/repos/alpha-app-worktrees/feature-login-a-very-long-unbreakable-worktree-directory-name', branch: 'feature/login', is_worktree: true, exists: true },
+          code_mode: true,
+        }
+        : {}),
   chat(workspace.name, 2, `${workspace.name}-notes`, `${workspace.name} second conversation`),
   // Archived, and only in the first workspace: the sidebar hides it, so every
   // other spec sees the same rows it saw before, while a deep link to its id

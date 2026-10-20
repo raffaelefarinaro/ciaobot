@@ -25,6 +25,7 @@ export type ActiveQuestion = {
   isSecret: boolean
   requestId: string
   sessionId?: string
+  stale?: boolean
   type?: string
   required?: boolean
   when?: QuestionWhen[]
@@ -243,6 +244,7 @@ export function parseQuestions(
     if (!Array.isArray(parsed?.questions)) return []
     const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
     const resolvedSessionId = sessionId || String(parsed?.session_id ?? '')
+    const stale = parsed?.stale === true ? true : undefined
     if (parsed.questions.length === 0) {
       // Some provider turns emit the AskUserQuestion tool
       // with an empty questions array. Do not silently demote that event to
@@ -257,6 +259,7 @@ export function parseQuestions(
         isSecret: false,
         requestId: resolvedRequestId,
         sessionId: resolvedSessionId || undefined,
+        stale,
         type: 'string',
         required: true,
         when: [],
@@ -283,6 +286,7 @@ export function parseQuestions(
         isSecret: Boolean(q.isSecret),
         requestId: resolvedRequestId,
         sessionId: resolvedSessionId || undefined,
+        stale,
         type: type || (q.multiSelect ? 'multiselect' : 'string'),
         required: q.required === undefined ? true : Boolean(q.required),
         when: Array.isArray(q.when)

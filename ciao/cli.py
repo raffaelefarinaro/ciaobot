@@ -1088,7 +1088,7 @@ def setup_workspace(
         # before the new server first starts, so writing a synthetic
         # single-workspace registry here would make the server's one-time
         # import keep that synthetic entry and drop the variable's real
-        # vault_root / disallowed_tools / allowlist for the same name. Import
+        # vault_root / disallowed_tools for the same name. Import
         # the variable first so the registry setup sees is the real one.
         _import_legacy_workspaces_for_setup(root, existing_env)
     # No registry yet means this folder has never been set up, even when it
@@ -4169,6 +4169,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         return refused
     from ciao.memory_proposals import (
         DESTINATIONS,
+        REPO_DESTINATION,
         MemoryProposal,
         append_proposals,
         was_dismissed,
@@ -4217,22 +4218,41 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
     # (newlines included) into a single space.
     text = " ".join(text.split())
     kind = args.kind.strip().lower()
-    if kind not in DESTINATIONS:
+    allowed = (*DESTINATIONS, REPO_DESTINATION)
+    if kind not in allowed:
         print(
-            f"unknown kind {kind!r}; expected one of: {', '.join(DESTINATIONS)}",
+            f"unknown kind {kind!r}; expected one of: {', '.join(allowed)}",
             file=sys.stderr,
         )
         return 2
-    if kind in {"people", "project"} and not payload:
+    if kind in {"people", "project", REPO_DESTINATION} and not payload:
         # The PWA accept handlers refuse these bullets ("the bullet names no
         # person" / "...no project doc"), so queueing one would create a row
         # nobody can ever promote.
         print(
             f"kind {kind!r} requires a --payload naming its target "
-            "(person name for people, doc path for project)",
+            "(person name for people, doc path for project, repository path for repo)",
             file=sys.stderr,
         )
         return 2
+    if kind == REPO_DESTINATION:
+        # Not stat'ed: the pass chat's sandbox may not see the repository, and
+        # the accept validates it against the workspace's linked projects.
+        if "]" in payload:
+            print(
+                "kind 'repo' cannot queue a repository path containing ']': "
+                "the queue bullet cannot carry it",
+                file=sys.stderr,
+            )
+            return 2
+        repo_payload = Path(payload).expanduser()
+        if not repo_payload.is_absolute():
+            print(
+                "kind 'repo' needs the repository's absolute path as --payload/--payload-file",
+                file=sys.stderr,
+            )
+            return 2
+        payload = str(repo_payload)
     # `--request` is lesson provenance: it is what a `[learnings]` accept hands
     # to `append_learning` so the line can cite the user request the sighting
     # came from instead of an archive turn that does not exist. A request on any
@@ -4303,6 +4323,212 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         print(f"Already in the queue; nothing added for {text!r}.")
     else:
         print(f"Queued [{kind}] proposal in {path}.")
+    return 0
+
+
+def _observation_context(args: argparse.Namespace) -> tuple[Path, str] | int:
+    """``(vault root, workspace name)`` for an observation command, or an exit code.
+
+    An observation id is minted under the registered workspace name, so every
+    command resolves it the way the learnings commands do.
+    """
+    try:
+        vault_root, workspace, _runtime_root = _learnings_workspace(args)
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+    if not vault_root.is_dir():
+        print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
+        return 1
+    return vault_root, workspace
+
+
+def _read_argv_safe(value: str, path: str, what: str) -> str | None:
+    """*value*, or the stripped contents of *path*; ``None`` after printing why not."""
+    if value and path:
+        print(f"pass {what} either inline or via its -file option, not both", file=sys.stderr)
+        return None
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            print(f"could not read {path}: {exc}", file=sys.stderr)
+            return None
+    return value.strip()
+
+
+def _emit_json(payload: object) -> None:
+    json.dump(payload, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+
+
+def _observation_add_command(args: argparse.Namespace) -> int:
+    """Count one chat's sighting of a behavioural pattern in ``Workspace/Observations.md``.
+
+    The text goes through ``--text-file`` for the reason ``memory-proposal-add``
+    has one: it is transcript-derived prose and must not reach a shell.
+    """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.observations import USER_SUBJECT, add_observation
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    about = _read_argv_safe(args.about or "", args.about_file or "", "--about")
+    text = _read_argv_safe("", args.text_file or "", "the observation")
+    if about is None or text is None:
+        return 2
+    if about.lower() == "user":
+        about = USER_SUBJECT
+    try:
+        operation = add_observation(
+            vault_root,
+            workspace=workspace,
+            about=about,
+            text=text,
+            source=args.source or "",
+        )
+    except ValueError as exc:
+        print(f"ciao observation-add: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        _emit_json({"operation": operation, "about": about, "source": args.source})
+    elif operation == "add":
+        print(f"Added an observation about {about}.")
+    elif operation == "update":
+        print(f"Counted a new chat for the observation about {about}.")
+    else:
+        print(f"Already counted this chat for the observation about {about}.")
+    return 0
+
+
+def _observations_command(args: argparse.Namespace) -> int:
+    """List the observations with their counts and what is due. Read-only."""
+    from ciao.observations import (
+        OBSERVATIONS_RELATIVE,
+        due_for_proposal,
+        due_for_prune,
+        parse_observations,
+    )
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    path = vault_root / OBSERVATIONS_RELATIVE
+    text = path.read_bytes().decode("utf-8") if path.exists() else ""
+    today = datetime.datetime.now(datetime.UTC).date()
+    rows = []
+    for obs in parse_observations(text, workspace=workspace):
+        due = (
+            "propose"
+            if due_for_proposal(obs)
+            else "prune"
+            if due_for_prune(obs, today=today)
+            else None
+        )
+        record = obs.record
+        rows.append(
+            {
+                "id": record.learning_id,
+                "about": obs.about,
+                "statement": obs.statement,
+                "section": obs.section,
+                "chats": list(obs.chats),
+                "count": record.count,
+                "first_seen": record.first_seen.isoformat() if record.first_seen else None,
+                "last_seen": record.last_seen.isoformat() if record.last_seen else None,
+                "due": due,
+            }
+        )
+    if args.json:
+        _emit_json({"observations": rows})
+        return 0
+    if not rows:
+        print("No observations recorded.")
+    for row in rows:
+        due_tag = f" [due: {row['due']}]" if row["due"] else ""
+        print(
+            f"- {row['id']} ({row['section']}, x{row['count']}) "
+            f"About {row['about']}: {row['statement']}{due_tag}"
+        )
+    return 0
+
+
+def _observation_propose_command(args: argparse.Namespace) -> int:
+    """Queue the proposal for one observation seen in enough chats."""
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.observations import propose_observation
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    try:
+        result = propose_observation(
+            vault_root, workspace=workspace, observation_id=args.id
+        )
+    except ValueError as exc:
+        print(f"ciao observation-propose: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        _emit_json(result)
+    elif result["queued"]:
+        print(f"Queued a [{result['destination']}] proposal for {result['id']}.")
+    else:
+        print(f"Nothing queued for {result['id']}; it is now resolved.")
+    return 0
+
+
+def _observation_merge_command(args: argparse.Namespace) -> int:
+    """Merge two Active observations that say the same thing."""
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.observations import merge_observations
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    try:
+        result = merge_observations(
+            vault_root,
+            workspace=workspace,
+            keep_id=args.keep_id,
+            drop_id=args.drop_id,
+        )
+    except ValueError as exc:
+        print(f"ciao observation-merge: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        _emit_json(result)
+    else:
+        print(f"Merged {result['dropped']} into {result['kept']} ({result['chats']} chats).")
+    return 0
+
+
+def _observation_prune_command(args: argparse.Namespace) -> int:
+    """Archive x1 observations that never recurred."""
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.observations import prune_observations
+
+    context = _observation_context(args)
+    if isinstance(context, int):
+        return context
+    vault_root, workspace = context
+    result = prune_observations(vault_root, workspace=workspace)
+    if args.json:
+        _emit_json(result)
+    else:
+        print(f"Archived {len(result['archived'])} observation(s).")
     return 0
 
 
@@ -6793,21 +7019,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.set_defaults(func=_vault_export_command)
 
-    # Registered for discoverability only; `main` intercepts "critique" before
-    # argparse so the panel's own flags reach `ciao.critique` untouched (the
-    # same reason `gws` is intercepted — argparse eats `--`-prefixed args before
-    # a subparser's REMAINDER can see them). Do not give it a `func`.
-    #
-    # It needs a `ciao` entry point at all because a packaged install puts only
-    # a `ciao` wrapper on PATH: `python3 -m ciao.critique` resolves some external
-    # interpreter that has neither `ciao` nor its dependencies, so /critique
-    # failed for every user who had not installed from source.
-    subparsers.add_parser(
-        "critique",
-        help="Run the multi-model critique panel on an artifact.",
-        add_help=False,
-    )
-
     lint_parser = subparsers.add_parser(
         "vault-lint",
         help="Run vault hygiene checks.",
@@ -7419,15 +7630,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="memory",
         help=(
             "Destination kind: memory, profile, project, people, learnings, "
-            "review. Defaults to memory."
+            "review, repo. Defaults to memory."
         ),
     )
     memory_proposal_add_parser.add_argument(
         "--payload",
         default="",
         help=(
-            "Kind payload: person name for people, doc path for project. "
-            "Required for those two kinds."
+            "Kind payload: person name for people, doc path for project, "
+            "absolute repository path for repo. Required for those kinds."
         ),
     )
     memory_proposal_add_parser.add_argument(
@@ -7469,6 +7680,86 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-file a previously dismissed fact for review; promoted facts remain deduped.",
     )
     memory_proposal_add_parser.set_defaults(func=_memory_proposal_add_command)
+
+    def _observation_options(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--vault-root",
+            type=Path,
+            default=None,
+            help="Vault root. Defaults to the workspace's registered vault.",
+        )
+        parser.add_argument(
+            "--workspace",
+            default=None,
+            help=(
+                "Registered workspace name. Defaults to the workspace that owns "
+                "--vault-root, else CIAO_ACTIVE_WORKSPACE, else the primary workspace."
+            ),
+        )
+        parser.add_argument(
+            "--json", action="store_true", help="Emit the structured result as JSON."
+        )
+
+    observation_add_parser = subparsers.add_parser(
+        "observation-add",
+        help="Count one chat's sighting of a behavioural pattern.",
+        description=(
+            "Records a low-confidence pattern in `Workspace/Observations.md`. A "
+            "chat counts at most once per observation; at three distinct chats "
+            "the nightly Workspace care run proposes it for review."
+        ),
+    )
+    observation_add_parser.add_argument(
+        "--about",
+        default="",
+        help="`user`, or the name of the person the pattern is about.",
+    )
+    observation_add_parser.add_argument(
+        "--about-file",
+        default="",
+        help="Read --about from this file; the argv-safe form for names with quotes.",
+    )
+    observation_add_parser.add_argument(
+        "--source", default="", help="The chat id this was seen in (required)."
+    )
+    observation_add_parser.add_argument(
+        "--text-file",
+        default="",
+        help="Read the one-sentence pattern verbatim from this file.",
+    )
+    _observation_options(observation_add_parser)
+    observation_add_parser.set_defaults(func=_observation_add_command)
+
+    observations_parser = subparsers.add_parser(
+        "observations",
+        help="List counted observations and what is due.",
+    )
+    _observation_options(observations_parser)
+    observations_parser.set_defaults(func=_observations_command)
+
+    observation_propose_parser = subparsers.add_parser(
+        "observation-propose",
+        help="Queue a proposal for an observation seen in three chats.",
+    )
+    observation_propose_parser.add_argument("id", help="The observation id.")
+    _observation_options(observation_propose_parser)
+    observation_propose_parser.set_defaults(func=_observation_propose_command)
+
+    observation_merge_parser = subparsers.add_parser(
+        "observation-merge",
+        help="Merge two observations that say the same thing.",
+    )
+    observation_merge_parser.add_argument("keep_id", help="The observation to keep.")
+    observation_merge_parser.add_argument("drop_id", help="The observation folded into it.")
+    _observation_options(observation_merge_parser)
+    observation_merge_parser.set_defaults(func=_observation_merge_command)
+
+    observation_prune_parser = subparsers.add_parser(
+        "observation-prune",
+        help="Archive observations seen once and never again.",
+    )
+    _observation_options(observation_prune_parser)
+    observation_prune_parser.set_defaults(func=_observation_prune_command)
 
     memory_proposal_dismiss_parser = subparsers.add_parser(
         "memory-proposal-dismiss",
@@ -7634,9 +7925,12 @@ def build_parser() -> argparse.ArgumentParser:
             "is edited — this files a proposal for a person to review, and "
             "`ciao skill-proposal-remove` is what settles one.\n\n"
             "--input-file holds a JSON object with `title`, `problem`, `change`, "
-            "`rationale` and a non-empty `sources` list, each entry carrying "
-            "`chat_id`, `archive`, `turn` and a short verbatim `excerpt`. The "
-            "finding is read from a file because every field is text from a "
+            "`rationale`, plus a non-empty `sources` list (each entry carrying "
+            "`chat_id`, `archive`, `turn` and a short verbatim `excerpt`) or, for "
+            "a routed learning, a non-empty `origins` list (each entry with "
+            "`learning_id` and `finding`, optionally `source_revision` and "
+            "`summary`) in place of `sources`; a payload with neither is refused. "
+            "The finding is read from a file because every field is text from a "
             "conversation, and `$()`, backticks or quotes in a shell argument "
             "would run or mangle."
         ),
@@ -8217,42 +8511,6 @@ def _gws_auth_helper_command(args: argparse.Namespace) -> int:
     return gws_auth_helper.main_entry(argv)
 
 
-def _resolve_critique_paths(args: list[str]) -> list[str]:
-    """Make a relative ``--input`` absolute against the caller's directory.
-
-    The bundled launcher `cd`s into the runtime root before exec'ing Python, so
-    a relative path — including the `memory-vault/...` form the command doc
-    explicitly supports — would resolve against the app bundle and be reported
-    missing. The launcher records where
-    the caller actually stood in ``CIAO_INVOCATION_CWD``; from source there is
-    no cd and the current directory is already right.
-    """
-    base = os.environ.get("CIAO_INVOCATION_CWD", "").strip()
-    if not base:
-        return args
-    out = list(args)
-    for index, token in enumerate(out):
-        value = ""
-        if token == "--input" and index + 1 < len(out):
-            target = index + 1
-            value = out[target]
-        elif token.startswith("--input="):
-            target = index
-            value = token.split("=", 1)[1]
-        else:
-            continue
-        # A tilde path is never relative to the caller's directory. Quoted, it
-        # reaches here unexpanded and `Path("~/x").is_absolute()` is False, so
-        # rebasing would produce `<cwd>/~/x` and defeat the `expanduser()` that
-        # `ciao.critique` does later — turning an artifact that resolved fine
-        # into one reported missing. Left alone, that expansion still works.
-        if not value or value.startswith("~") or Path(value).is_absolute():
-            continue
-        resolved = str(Path(base) / value)
-        out[target] = resolved if target != index else f"--input={resolved}"
-    return out
-
-
 def main(argv: list[str] | None = None) -> int:
     use_utf8_stdio()
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
@@ -8276,10 +8534,6 @@ def main(argv: list[str] | None = None) -> int:
         from ciao.engine_update import main as update_main
 
         return update_main(argv_list[1:])
-    if argv_list[:1] == ["critique"]:
-        from ciao.critique import main as critique_main
-
-        return critique_main(_resolve_critique_paths(argv_list[1:]))
     if argv_list[:1] == ["gws"]:
         # Passthrough: forward everything (including leading gws options such as
         # `--version`) untouched, keeping argparse out of the way.

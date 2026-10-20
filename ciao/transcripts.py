@@ -21,6 +21,7 @@ from claude_agent_sdk import (
 )
 
 from ciao.agent_paths import claude_projects_dir
+from ciao.frontmatter import yaml_scalar
 from ciao.jsonio import read_json_dict
 from ciao.memory_policy import is_unattended_turn
 from ciao.models import (
@@ -854,14 +855,14 @@ class TranscriptStore:
         if isinstance(value, list):
             lines = [f"{key}:"]
             for item in value:
-                lines.append(f"  - {item}")
+                lines.append(f"  - {yaml_scalar(item)}")
             return lines
         if isinstance(value, dict):
             lines = [f"{key}:"]
             for subkey, subvalue in value.items():
-                lines.append(f"  {subkey}: {subvalue}")
+                lines.append(f"  {subkey}: {yaml_scalar(subvalue)}")
             return lines
-        return [f"{key}: {value}"]
+        return [f"{key}: {yaml_scalar(value)}"]
 
 
 # ── Skill evidence in the archive ─────────────────────────────────────────
@@ -1558,6 +1559,31 @@ def _lift_compact_summary_flags(
     return messages
 
 
+def _steered_user_entry(entry: dict) -> dict | None:
+    """The user record a mid-turn steer stands for, or None for any other entry.
+
+    The CLI stores a message absorbed mid-turn as a ``queued_command``
+    attachment on the parent chain rather than a ``user`` record, so the SDK's
+    visibility filter drops it. ``prompt`` is a string or a list of content
+    blocks and is passed through unchanged.
+    """
+    if entry.get("type") != "attachment":
+        return None
+    attachment = entry.get("attachment")
+    if not isinstance(attachment, dict):
+        return None
+    if attachment.get("type") != "queued_command" or attachment.get("commandMode") != "prompt":
+        return None
+    return {
+        "type": "user",
+        "uuid": entry.get("uuid"),
+        "parentUuid": entry.get("parentUuid"),
+        "sessionId": entry.get("sessionId"),
+        "timestamp": entry.get("timestamp"),
+        "message": {"role": "user", "content": attachment.get("prompt")},
+    }
+
+
 def get_session_messages_full(
     session_id: str,
     directory: str | None = None,
@@ -1684,7 +1710,13 @@ def get_session_messages_full(
             cur = by_uuid.get(parent) if parent and isinstance(parent, str) else None
 
         chain.reverse()
-        visible = [e for e in chain if _is_visible_message(e)]
+        visible: list[dict] = []
+        for e in chain:
+            steered = _steered_user_entry(e)
+            if steered is not None:
+                visible.append(steered)
+            elif _is_visible_message(e):
+                visible.append(e)
         messages: list[SessionMessage] = []
         for e in visible:
             msg = _to_session_message(e)

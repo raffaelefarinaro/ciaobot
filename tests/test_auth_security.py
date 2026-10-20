@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 from itsdangerous import URLSafeTimedSerializer
@@ -10,6 +11,8 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from ciao import macos_service
+from ciao.web import auth
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_auth import auth_login, auth_logout
 
@@ -337,3 +340,115 @@ def test_loopback_client_reads_the_peer_address(host, local) -> None:
     client = TestClient(app, base_url="http://localhost:8443", client=(host, 5555))
 
     assert client.get("/").json() == {"local": local}
+
+
+_LOOPBACK_ONLY_ROUTES = [
+    ("GET", "/api/menubar-chats"),
+    ("POST", "/api/admin/drain"),
+    ("POST", "/api/admin/drain/cancel"),
+    ("GET", "/api/admin/restart-blockers"),
+]
+
+
+def _loopback_only_client(
+    base_url: str, peer: str = "127.0.0.1"
+) -> tuple[TestClient, URLSafeTimedSerializer]:
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route(p, _ok, methods=[m]) for m, p in _LOOPBACK_ONLY_ROUTES],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    return TestClient(app, base_url=base_url, client=(peer, 5555)), serializer
+
+
+def test_loopback_only_set_is_pinned() -> None:
+    assert auth._LOOPBACK_ONLY_API == {p for _, p in _LOOPBACK_ONLY_ROUTES}
+
+
+@pytest.mark.parametrize("method,path", _LOOPBACK_ONLY_ROUTES)
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://localhost:8443", "http://127.0.0.1:8443", "http://[::1]:8443"],
+)
+def test_loopback_only_routes_allow_a_loopback_host(method, path, base_url) -> None:
+    client, _ = _loopback_only_client(base_url)
+    assert client.request(method, path).status_code == 200
+
+
+@pytest.mark.parametrize("method,path", _LOOPBACK_ONLY_ROUTES)
+@pytest.mark.parametrize("headers", [{}, {"Origin": "http://evil.example:8443"}])
+def test_loopback_only_routes_refuse_a_rebound_host(method, path, headers) -> None:
+    client, _ = _loopback_only_client("http://evil.example:8443")
+    assert client.request(method, path, headers=headers).status_code == 401
+
+
+def test_rebound_host_with_a_session_takes_the_session_path() -> None:
+    client, serializer = _loopback_only_client("http://mini.local:8443")
+    resp = client.request(
+        "GET", "/api/admin/restart-blockers", cookies=_auth_cookie(serializer)
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("method,path", _LOOPBACK_ONLY_ROUTES)
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Origin": "https://evil.example"},
+        {"Origin": "http://localhost:3000"},
+        {"Referer": "https://evil.example/page"},
+    ],
+)
+def test_loopback_only_routes_refuse_a_cross_site_origin(method, path, headers) -> None:
+    client, _ = _loopback_only_client("http://localhost:8443")
+    resp = client.request(method, path, headers=headers)
+    assert resp.status_code == 403
+    assert resp.json() == {"error": "forbidden origin"}
+
+
+@pytest.mark.parametrize("method,path", _LOOPBACK_ONLY_ROUTES)
+def test_loopback_only_routes_refuse_a_local_proxy(method, path) -> None:
+    client, _ = _loopback_only_client("http://localhost:8443")
+    resp = client.request(method, path, headers={"X-Forwarded-For": "203.0.113.9"})
+    assert resp.status_code == 401
+
+
+def test_cli_restart_gate_request_is_exempt(monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"restart_blockers": []}'
+
+    def fake_urlopen(*args, **kwargs):
+        req = args[0]
+        seen["url"] = req if isinstance(req, str) else req.full_url
+        return _Resp()
+
+    monkeypatch.setattr(macos_service.urllib.request, "urlopen", fake_urlopen)
+    macos_service.restart_blockers(8443)
+    parts = urlsplit(seen["url"])
+    assert parts.hostname == "localhost"
+    client, _ = _loopback_only_client(f"http://{parts.netloc}")
+    assert client.get(parts.path).status_code == 200
+
+
+def test_open_chat_route_is_gone_and_api_is_protected() -> None:
+    from ciao.web import routes_api
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/open-chat/{chat_id}", _ok, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    client = TestClient(app, base_url="https://ciao.example")
+    assert client.get("/api/open-chat/c1").status_code == 401
+    assert not hasattr(routes_api, "open_chat_endpoint")

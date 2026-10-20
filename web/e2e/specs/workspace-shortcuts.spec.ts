@@ -37,6 +37,31 @@ test.describe('workspace shortcuts', () => {
     await expect(activeWorkspaceButton(page)).toContainText('Alpha')
   })
 
+  test('switching workspace from the sidebar lands on its Home, and a reload keeps it', async ({ page }) => {
+    const chooseBeta = async () => {
+      await activeWorkspaceButton(page).click()
+      await page.getByRole('menu', { name: 'Choose workspace' }).getByRole('menuitem', { name: /Beta/ }).click()
+      await expect(activeWorkspaceButton(page)).toContainText('Beta')
+    }
+
+    // From an open chat.
+    await boot(page, '/chat/alpha-chat-1', COMPOSER)
+    await chooseBeta()
+    await expect(page).toHaveURL(/\/$/)
+    await expect(page.locator(COMPOSER)).toHaveCount(0)
+
+    // From Home: no chat of the new workspace opens, and none is remembered
+    // for the reload to bring back.
+    await page.keyboard.press('1')
+    await expect(activeWorkspaceButton(page)).toContainText('Alpha')
+    await chooseBeta()
+    await expect(page.locator(COMPOSER)).toHaveCount(0)
+    await page.reload()
+    await expect(activeWorkspaceButton(page)).toContainText('Beta')
+    await expect(page).toHaveURL(/\/$/)
+    await expect(page.locator(COMPOSER)).toHaveCount(0)
+  })
+
   test('a digit typed into the composer stays in the composer', async ({ page }) => {
     await boot(page, '/chat/alpha-chat-1', COMPOSER)
 

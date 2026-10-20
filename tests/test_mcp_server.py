@@ -25,6 +25,13 @@ class _FakeControlPlane:
         self.schedule_values = None
         self.schedule_create_values: dict | None = None
         self.schedule_updates: list[tuple[str, dict]] = []
+        self.retry_calls: list[dict] = []
+
+    def chat_retry_update(self, _principal, chat_id, *, action, prompt="", kind=""):
+        self.retry_calls.append(
+            {"chat_id": chat_id, "action": action, "prompt": prompt, "kind": kind}
+        )
+        return {"ok": True, "data": {}}
 
     def chat_mode(self, _principal) -> str:
         return self.mode
@@ -279,6 +286,8 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
             "workspace_update",
             "workspace_delete",
             "project_files_list",
+            # Retired with the critique feature; the name stays here so a
+            # reintroduced MCP tool fails this absence assertion.
             "adversarial_review",
             # Deleted rather than migrated to the CLI (D-03): never called,
             # and the PWA owns both (POST /api/workspaces, /api/chats/{id}/fork).
@@ -655,6 +664,14 @@ def _dispatcher_call(service: CiaoMcpService, name: str, arguments: dict) -> dic
         AgentDispatcher(service).dispatch(_schedule_token(service), name, arguments)
     )
     return {"status": status, "envelope": envelope}
+
+
+def test_chat_retry_forwards_the_network_kind(tmp_path: Path) -> None:
+    service, control_plane = _service(tmp_path)
+
+    _dispatcher_call(service, "chat_retry", {"action": "set", "kind": "network"})
+
+    assert [c["kind"] for c in control_plane.retry_calls] == ["network"]
 
 
 def test_schedule_update_forwards_values_that_equal_the_create_defaults(
@@ -1280,6 +1297,133 @@ def test_chat_update_resolves_omitted_chat_id() -> None:
     assert result["data"]["title"] == "Renamed"
 
 
+def _code_mode_plane(
+    tmp_path: Path,
+    *,
+    was_on: bool = False,
+    set_error: Exception | None = None,
+    arm_result: bool = True,
+):
+    """A control plane over a recording pcm for the `chat update --code` tests."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    (repo / "AGENTS.md").write_text("Run the tests.\n", encoding="utf-8")
+    state = {"on": was_on}
+    switches: list[tuple[str, bool, str]] = []
+    armed: list[str] = []
+
+    def set_code_mode(cid, on, *, actor):
+        if set_error is not None:
+            raise set_error
+        switches.append((cid, on, actor))
+        state["on"] = on
+        return SimpleNamespace(
+            chat_id=cid,
+            project_id="project-1",
+            to_dict=lambda local=True: {"chat_id": cid, "code_mode": on},
+        )
+
+    def arm(cid):
+        armed.append(cid)
+        return arm_result
+
+    pcm = SimpleNamespace(
+        update_chat=lambda cid, **kwargs: SimpleNamespace(
+            chat_id=cid,
+            project_id="project-1",
+            to_dict=lambda local=True: {"chat_id": cid},
+        ),
+        is_session_local=lambda c: True,
+        get_chat=lambda cid: SimpleNamespace(
+            chat_id=cid, project_id="project-1", code_mode=state["on"]
+        ),
+        get_project=lambda pid: SimpleNamespace(
+            project_id=pid, workspace="personal", repo_path=str(repo)
+        ),
+        set_code_mode=set_code_mode,
+        arm_code_mode_continuation=arm,
+    )
+    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+    plane = CiaoControlPlane(
+        config, project_chat_manager=pcm, schedule_manager=SimpleNamespace()
+    )
+    return plane, switches, armed
+
+
+def test_chat_update_code_on_returns_instructions_and_arms_the_calling_chat(
+    tmp_path: Path,
+) -> None:
+    from ciao.control_plane import CODE_MODE_ON_NOTE
+
+    plane, switches, armed = _code_mode_plane(tmp_path)
+
+    data = plane.chat_update(_chat_create_principal(), "", code_mode=True)["data"]
+
+    assert switches == [("chat-1", True, "agent")]
+    assert data["repo_instructions"]["name"] == "AGENTS.md"
+    assert "Run the tests." in data["repo_instructions"]["text"]
+    assert data["repo_instructions"]["truncated"] is False
+    assert data["note"] == CODE_MODE_ON_NOTE
+    assert armed == ["chat-1"]
+
+
+def test_chat_update_code_on_for_another_chat_does_not_arm(tmp_path: Path) -> None:
+    from ciao.control_plane import CODE_MODE_ON_NEXT_TURN_NOTE
+
+    plane, switches, armed = _code_mode_plane(tmp_path)
+
+    data = plane.chat_update(_chat_create_principal(), "chat-2", code_mode=True)["data"]
+
+    assert switches == [("chat-2", True, "agent")]
+    assert armed == []
+    assert data["note"] == CODE_MODE_ON_NEXT_TURN_NOTE
+    assert "repo_instructions" in data
+
+
+def test_chat_update_code_on_own_chat_without_a_live_turn_says_your_next_turn(
+    tmp_path: Path,
+) -> None:
+    from ciao.control_plane import CODE_MODE_ON_OWN_NEXT_TURN_NOTE
+
+    plane, _, armed = _code_mode_plane(tmp_path, arm_result=False)
+
+    data = plane.chat_update(_chat_create_principal(), "", code_mode=True)["data"]
+
+    assert armed == ["chat-1"]
+    assert data["note"] == CODE_MODE_ON_OWN_NEXT_TURN_NOTE
+    assert "your next turn" in data["note"]
+
+
+def test_chat_update_code_on_when_already_on_adds_nothing(tmp_path: Path) -> None:
+    plane, _, armed = _code_mode_plane(tmp_path, was_on=True)
+
+    data = plane.chat_update(_chat_create_principal(), "", code_mode=True)["data"]
+
+    assert "repo_instructions" not in data
+    assert "note" not in data
+    assert armed == []
+
+
+def test_chat_update_code_off_never_arms(tmp_path: Path) -> None:
+    plane, switches, armed = _code_mode_plane(tmp_path, was_on=True)
+
+    data = plane.chat_update(_chat_create_principal(), "", code_mode=False)["data"]
+
+    assert switches == [("chat-1", False, "agent")]
+    assert "repo_instructions" not in data
+    assert "note" not in data
+    assert armed == []
+
+
+def test_chat_update_code_mode_value_error_is_code_mode_unavailable(tmp_path: Path) -> None:
+    plane, _, _ = _code_mode_plane(tmp_path, set_error=ValueError("not linked"))
+
+    with pytest.raises(ControlPlaneError) as exc:
+        plane.chat_update(_chat_create_principal(), "", code_mode=True)
+
+    assert exc.value.code == "code_mode_unavailable"
+
+
 def _interval_control_plane(tmp_path: Path):
     """A control plane whose caller is a chat in the `work` workspace."""
     from ciao.schedules import ScheduleManager, ScheduleStore
@@ -1499,11 +1643,24 @@ def test_gws_status_reports_unlinked_workspace(tmp_path: Path) -> None:
 
     assert result["ok"] is True
     data = result["data"]
-    # No workspace link, and the operator-level default "personal" does not name
-    # a real account on a fresh install, so nothing is reported as connected.
+    # No workspace link means no Google access.
     assert data["profile"] == ""
     assert data["configured"] is False
     assert data["connected"] is False
+
+
+def test_gws_status_unlinked_workspace_ignores_an_existing_personal_account(
+    tmp_path: Path,
+) -> None:
+    plane, config, _refreshes = _workspace_control_plane(tmp_path)
+    secret_dir = Path(config.workspace_root) / "secrets" / "gws-personal"
+    secret_dir.mkdir(parents=True)
+    (secret_dir / "client_secret.json").write_text("{}", encoding="utf-8")
+
+    data = plane.gws_status(_chat_create_principal())["data"]
+
+    assert data["profile"] == ""
+    assert data["configured"] is False
 
 
 def test_gws_status_reports_connected_profile(tmp_path: Path) -> None:
@@ -1868,12 +2025,16 @@ class _StreamPcm:
     def __init__(self, stream: Any = None) -> None:
         self._stream = stream
         self.surfaced: list[tuple[str, str]] = []
+        self.dismissed: list[str] = []
 
     def get_active_stream(self, chat_id: str) -> Any:
         return self._stream
 
-    def surface_chat_file(self, chat_id: str, path: str) -> None:
+    def surface_chat_file(self, chat_id: str, path: str) -> dict[str, Any]:
         self.surfaced.append((chat_id, path))
+        if path not in self.dismissed:
+            return {"path": path, "dismissed_paths": list(self.dismissed), "revision": 1}
+        return {"path": "", "dismissed_paths": list(self.dismissed), "revision": 1}
 
 
 def _fake_ws(host: str) -> SimpleNamespace:
@@ -1967,7 +2128,13 @@ def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
     )
     result = plane.file_surface(principal, "note.md")
     assert result["ok"] is True
-    assert result["data"] == {"path": "note.md", "viewers": 1, "stream_state": "active"}
+    assert result["data"] == {
+        "path": "note.md",
+        "viewers": 1,
+        "stream_state": "active",
+        "pinned": True,
+        "dismissed": False,
+    }
 
 
 def test_file_surface_persists_the_canonical_path_only_for_a_chat_principal(
@@ -1987,19 +2154,43 @@ def test_file_surface_persists_the_canonical_path_only_for_a_chat_principal(
     (root / "reports").mkdir(parents=True)
     (root / "reports" / "october.md").write_text("b", encoding="utf-8")
 
-    plane.file_surface(_chat_principal("chat-1"), "reports/october.md")
+    chat_result = plane.file_surface(_chat_principal("chat-1"), "reports/october.md")
     assert pcm.surfaced == [
         ("chat-1", (root / "reports" / "october.md").as_posix())
     ]
+    assert chat_result["data"]["pinned"] is True
+    assert chat_result["data"]["dismissed"] is False
 
     # No chat principal: validation and the honest signal fields still happen,
     # but no chat's pin state is touched.
     result = plane.file_surface(_chat_principal(""), "reports/october.md")
     assert result["ok"] is True
     assert result["data"]["path"] == "reports/october.md"
+    assert result["data"]["pinned"] is False
+    assert result["data"]["dismissed"] is False
     assert pcm.surfaced == [
         ("chat-1", (root / "reports" / "october.md").as_posix())
     ]
+
+
+def test_file_surface_reports_a_dismissed_path(tmp_path: Path) -> None:
+    """A path the user closed in this chat is skipped, and the reply says so.
+
+    The surface stays ``ok`` (the dismissal is the user's choice), but the
+    agent must be able to tell it did not pin, so it can ask the user to pin
+    the file themselves.
+    """
+    plane = _file_surface_plane(tmp_path, stream=None, connection_tracker=None)
+    pcm = plane.pcm
+    assert isinstance(pcm, _StreamPcm)
+    root = plane.config.workspace_root
+    (root / "note.md").write_text("hi", encoding="utf-8")
+    pcm.dismissed = [(root / "note.md").as_posix()]
+
+    result = plane.file_surface(_chat_principal("chat-1"), "note.md")
+    assert result["ok"] is True
+    assert result["data"]["pinned"] is False
+    assert result["data"]["dismissed"] is True
 
 
 def test_file_surface_does_not_pin_a_rejected_path(tmp_path: Path) -> None:

@@ -30,10 +30,6 @@ open source (and Debug only in dev mode). Watch for:
   repository and raw diagnostics sit behind a native `<details>` disclosure.
 - The "What can Ciaobot do?" card at the top links out to the public
   feature guide.
-- The critique panel on **Models** is *explained*, not just labelled — what a
-  panel is, that each model reviews independently, that `/critique` or the skill
-  invokes it. A bare "Models asked for an adversarial review" is the pre-fix
-  state.
 
 The **"On this page" rail is route-specific**: it is built from the cards the
 current tab rendered (`tocItems` in `web/src/components/SettingsView.vue`), so

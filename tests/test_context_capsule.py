@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
-from ciao.context.capsule import TASK_BOARD_HINT, build_context_capsule, context_digest
+from ciao.context.capsule import (
+    LINKED_REPO_RULES,
+    TASK_BOARD_HINT,
+    build_context_capsule,
+    context_digest,
+    render_linked_repo_block,
+)
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -174,9 +180,10 @@ def test_the_board_hint_is_a_constant_and_not_a_routing_fact() -> None:
     """It must not make every capsule look like its routing changed.
 
     `context_digest` decides whether the stable block is re-sent to a provider
-    session. It reads exactly the five routing facts and nothing else, so the hint
-    — which never varies — cannot reach it: a board hint that fed the digest would
-    re-send the whole stable block on every turn of every session forever.
+    session. It reads exactly the five routing facts plus the linked-repo
+    fingerprint (#1436) and nothing else, so the hint — which never varies —
+    cannot reach it: a board hint that fed the digest would re-send the whole
+    stable block on every turn of every session forever.
     """
     assert tuple(inspect.signature(context_digest).parameters) == (
         "workspace",
@@ -184,6 +191,7 @@ def test_the_board_hint_is_a_constant_and_not_a_routing_fact() -> None:
         "project_name",
         "project_context",
         "canonical_doc",
+        "linked_repo",
     )
     # And the hint is byte-identical in both capsules: it is a constant wearing a
     # workspace's name, not a fact about one.
@@ -243,3 +251,100 @@ def test_the_prompt_prefix_states_file_access_only_for_workspace_scope(
     assert ("file_access=workspace only" in prefix) is confined
     if confined:
         assert str(config.agent_root("work").resolve()) in prefix
+
+
+# #1436: a linked project's capsule carries the repo's instructions.
+
+
+def test_the_linked_repo_block_rides_the_stable_block_only() -> None:
+    block = render_linked_repo_block(
+        path="/r", missing=False, instructions_name="AGENTS.md", instructions_text="Run make test"
+    )
+    first = build_context_capsule(workspace="w", linked_repo_block=block, linked_repo_line="linked_repo=/r branch=main")
+    later = build_context_capsule(
+        workspace="w", linked_repo_block=block, linked_repo_line="linked_repo=/r branch=main", include_stable=False
+    )
+    assert "Run make test" in first
+    assert "Run make test" not in later
+    assert "linked_repo=/r branch=main" in later
+
+
+def test_the_linked_repo_rules_name_the_shared_checkout_contract() -> None:
+    for needle in ("git status", "git -C", "Commit or push only when", "project note", "files you changed"):
+        assert needle in LINKED_REPO_RULES
+
+
+def test_the_linked_repo_block_without_instructions_says_to_ask() -> None:
+    block = render_linked_repo_block(path="/r", missing=False, instructions_name="", instructions_text="")
+    assert "Ask the user before creating an AGENTS.md" in block
+
+
+def test_context_digest_is_unchanged_for_an_unlinked_chat() -> None:
+    import hashlib
+
+    values = {
+        "workspace": "personal",
+        "gws_profile": "",
+        "project_name": "General",
+        "project_context": "",
+        "canonical_doc": "",
+    }
+    assert context_digest(**values) == context_digest(**values, linked_repo="")
+    assert context_digest(**values) == hashlib.sha256("\0".join(values.values()).encode()).hexdigest()[:16]
+    assert context_digest(**values, linked_repo="x") != context_digest(**values)
+
+
+def _linked_manager(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text("Run make test", encoding="utf-8")
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Ciaobot", workspace="work")
+    project.repo_path = str(repo)
+    monkeypatch.setattr(
+        "ciao.web.project_chats.repo_state",
+        lambda path: {"path": path, "branch": "main", "dirty": False, "missing": False},
+    )
+    chat = manager.create_chat(project.project_id)
+    chat.code_mode = True
+    return manager, chat, repo
+
+
+def test_a_linked_project_prefix_injects_agents_md_and_resends_on_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat, repo = _linked_manager(tmp_path, monkeypatch)
+    prefix = manager._build_prompt_prefix(chat)
+    assert "Run make test" in prefix
+    assert "branch=main" in prefix
+    assert "[Linked repository]" in prefix
+    d1 = manager._stable_context_marker(chat)[0]
+    (repo / "AGENTS.md").write_text("Run make check", encoding="utf-8")
+    assert manager._stable_context_marker(chat)[0] != d1
+    assert "Run make check" in manager._stable_context_prefix(chat)
+
+
+def test_an_unlinked_project_prefix_has_no_repo_block(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Ciaobot", workspace="work")
+    prefix = manager._build_prompt_prefix(manager.create_chat(project.project_id))
+    assert "[Linked repository]" not in prefix
+    assert "linked_repo=" not in prefix
+
+
+def test_a_linked_chat_with_code_mode_off_gets_the_light_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, chat, _repo = _linked_manager(tmp_path, monkeypatch)
+    on_marker = manager._stable_context_marker(chat)[0]
+    chat.code_mode = False
+    prefix = manager._build_prompt_prefix(chat)
+    assert "Code mode is off" in prefix
+    assert "code_mode=off" in prefix
+    assert "Run make test" not in prefix
+    assert "Code-work rules" not in prefix
+    assert manager._stable_context_marker(chat)[0] != on_marker
+
+
+def test_the_linked_repo_rules_keep_notes_out_of_the_repo() -> None:
+    assert "Notes, plans, reports, drafts and artifacts" in LINKED_REPO_RULES

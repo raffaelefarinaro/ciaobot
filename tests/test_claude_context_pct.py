@@ -10,7 +10,13 @@ call ahead of the chat model.
 from __future__ import annotations
 
 import pytest
-from claude_agent_sdk import AssistantMessage, CLIConnectionError, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    CLIConnectionError,
+    ResultMessage,
+    TextBlock,
+    UserMessage,
+)
 
 from ciao.models import ResultEvent
 from ciao.providers.claude import ClaudeProvider
@@ -254,6 +260,20 @@ async def test_unexpected_get_context_usage_error_falls_back_to_estimate() -> No
 
 
 @pytest.mark.asyncio
+async def test_slow_get_context_usage_is_bounded(monkeypatch) -> None:
+    """The first call on a fresh CLI took up to 27.8 s; it must not hold the result."""
+    import asyncio
+
+    class _Slow:
+        async def get_context_usage(self):
+            await asyncio.sleep(3600)
+
+    monkeypatch.setattr("ciao.providers.claude._CONTEXT_USAGE_TIMEOUT_S", 0.05)
+    event = await asyncio.wait_for(_augment(_Slow(), _result(), _last_call()), 2)
+    assert event.usage["context_pct"] == "2.3%"
+
+
+@pytest.mark.asyncio
 async def test_cli_percentage_is_preferred_over_the_estimate() -> None:
     response = {"totalTokens": 22848, "maxTokens": 1000000, "rawMaxTokens": 1000000, "percentage": 2}
     event = await _augment(_Client(response), _result(), _last_call(cache_read=500000))
@@ -282,10 +302,11 @@ async def test_streaming_turn_tracks_the_main_agents_last_call(tmp_path, monkeyp
         async def connect(self, _payload):
             return None
 
-        async def query(self, _payload):
-            return None
+        async def query(self, payload):
+            self.prompt_uuid = [i async for i in payload][-1]["uuid"]
 
         async def receive_response(self):
+            yield UserMessage(content="go", uuid=self.prompt_uuid)
             yield _last_call(cache_read=13880, cache_creation=0)
             # A Task subagent's call in its own, smaller context.
             sub = _last_call(cache_read=5000, cache_creation=0)
@@ -309,7 +330,6 @@ async def test_streaming_turn_tracks_the_main_agents_last_call(tmp_path, monkeyp
     from ciao.models import AgentRequest
 
     monkeypatch.setattr(provider, "_ensure_connected", fake_ensure)
-    monkeypatch.setattr(provider, "_prompt_payload", lambda _req: None)
     request = AgentRequest(prompt="go", model="opus", mode="normal")
     events = [e async for e in provider.run_streaming(request, lambda _handle: None)]
     results = [e for e in events if isinstance(e, ResultEvent)]
