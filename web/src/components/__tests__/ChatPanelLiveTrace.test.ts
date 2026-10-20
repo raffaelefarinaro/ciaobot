@@ -139,6 +139,14 @@ async function mountPanel(): Promise<{
 
 const MID = 'Mid-turn update that is long enough to once have been its own bubble. '.repeat(4)
 
+function livePreviewKey(wrapper: VueWrapper): string {
+  const transition = wrapper.findAllComponents({ name: 'Transition' })
+    .find(candidate => candidate.attributes('name') === 'live-step')
+  const slot = transition?.vm.$slots.default?.() as Array<{ key?: string | number | null; props?: { class?: string | string[] } }> | undefined
+  const child = slot?.find(node => String(node.props?.class).includes('live-preview-text'))
+  return String(child?.key)
+}
+
 function turnMessages() {
   return [
     { role: 'user' as const, content: 'do it', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
@@ -168,6 +176,8 @@ describe('ChatPanel live trace', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
     scrollProto.scrollTo = originalScrollTo
     vi.restoreAllMocks()
     localStorage.clear()
@@ -199,6 +209,7 @@ describe('ChatPanel live trace', () => {
       store.subagents['chat-1'] = subs()
       store.streaming['chat-1'] = true
       await flushPromises()
+      await wrapper.get('.trace-block.live .trace-summary').trigger('click')
 
       expect(shownIds(wrapper)).toEqual(['old-resumed', 'this-turn'])
     })
@@ -217,12 +228,86 @@ describe('ChatPanel live trace', () => {
     })
   })
 
-  it('opens the live trace by default while streaming', async () => {
+  it('keeps the live trace collapsed by default while streaming', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = turnMessages().slice(0, 1)
     store.streaming['chat-1'] = true
     await flushPromises()
-    expect(wrapper.get('.trace-block.live').classes()).toContain('open')
+    expect(wrapper.get('.trace-block.live').classes()).not.toContain('open')
+    expect(wrapper.get('.trace-block.live .trace-summary').attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('.trace-block.live .trace-body').exists()).toBe(false)
+    expect(wrapper.get('.trace-block.live .live-preview').text()).toBe('Thinking…')
+  })
+
+  it('summarizes streamed text without exposing its contents or restarting per token', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = turnMessages().slice(0, 1)
+    store.streaming['chat-1'] = true
+    store.streamingText['chat-1'] = 'private partial answer'
+    await flushPromises()
+
+    expect(wrapper.get('.trace-block.live .live-preview').text()).toBe('Writing response…')
+    store.streamingText['chat-1'] = 'private partial answer, more tokens'
+    await flushPromises()
+    expect(wrapper.get('.trace-block.live .live-preview').text()).toBe('Writing response…')
+    expect(wrapper.find('.trace-block.live .trace-body').exists()).toBe(false)
+  })
+
+  it('keys the preview to its selected phase and logical tool activity', async () => {
+    const { wrapper, store, send } = await mountWithSocket()
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'tool-a' })
+    await flushPromises()
+    const toolKey = livePreviewKey(wrapper)
+    expect(wrapper.get('.live-preview-text').text()).toBe('shell ls')
+    const timelineHistory = JSON.stringify(store.currentTimeline)
+
+    store.streamingText['chat-1'] = 'first response token'
+    await flushPromises()
+    const responseKey = livePreviewKey(wrapper)
+    expect(responseKey).not.toBe(toolKey)
+    expect(wrapper.get('.live-preview-text').text()).toBe('Writing response…')
+    store.streamingText['chat-1'] = 'first response token plus more'
+    await flushPromises()
+    expect(livePreviewKey(wrapper)).toBe(responseKey)
+
+    store.streamingText['chat-1'] = ''
+    store.streamingThinking['chat-1'] = 'private reasoning'
+    await flushPromises()
+    const thinkingKey = livePreviewKey(wrapper)
+    expect(thinkingKey).not.toBe(responseKey)
+    expect(wrapper.get('.live-preview-text').text()).toBe('Thinking…')
+    store.streamingThinking['chat-1'] = ''
+    store.streamingText['chat-1'] = 'next answer token'
+    await flushPromises()
+    expect(livePreviewKey(wrapper)).not.toBe(thinkingKey)
+    expect(wrapper.get('.live-preview-text').text()).toBe('Writing response…')
+    expect(JSON.stringify(store.currentTimeline)).toBe(timelineHistory)
+
+    store.streamingText['chat-1'] = ''
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'tool-b' })
+    await flushPromises()
+    const repeatedToolKey = livePreviewKey(wrapper)
+    expect(repeatedToolKey).not.toBe(toolKey)
+    expect(wrapper.get('.live-preview-text').text()).toBe('shell ls')
+    expect(store.currentTimeline).toHaveLength(1)
+    expect(store.currentTimeline[0].kind).toBe('tool')
+    expect(store.currentTimeline[0].content.match(/shell ls/g)).toHaveLength(2)
+  })
+
+  it('does not change the preview key when elapsed time advances', async () => {
+    vi.useFakeTimers()
+    const { wrapper, send } = await mountWithSocket()
+    send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'tool-a' })
+    await flushPromises()
+    const initialKey = livePreviewKey(wrapper)
+    const initialMeta = wrapper.get('.trace-meta').text()
+
+    await vi.advanceTimersByTimeAsync(1100)
+    await flushPromises()
+
+    expect(wrapper.get('.trace-meta').text()).not.toBe(initialMeta)
+    expect(livePreviewKey(wrapper)).toBe(initialKey)
+    vi.useRealTimers()
   })
 
   it('marks a failed tool call on its own activity line', async () => {
@@ -262,6 +347,7 @@ describe('ChatPanel live trace', () => {
       send({ type: 'tool_use', tool_name: 'shell', tool_input: 'exit 1', tool_use_id: 'c2' })
       send({ type: 'tool_result', tool_name: 'shell', tool_use_id: 'c2', is_error: true })
       await flushPromises()
+      await wrapper.get('.trace-block.live .trace-summary').trigger('click')
       const lines = wrapper.findAll('.trace-step--tool .activity-line')
       expect(lines).toHaveLength(2)
       expect(lines[1].classes()).toContain('failed')
@@ -303,7 +389,7 @@ describe('ChatPanel live trace', () => {
     await flushPromises()
     const socket = sockets[sockets.length - 1]
     const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
-    return { wrapper, send }
+    return { wrapper, store, send }
   }
 
   it('stops naming a permission request once it is answered (#1618)', async () => {
@@ -312,10 +398,13 @@ describe('ChatPanel live trace', () => {
       send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c1' })
       send({ type: 'permission_request', request_id: 'c1', tool_name: 'shell', message: 'Approve use of shell?' })
       await flushPromises()
-      expect(wrapper.get('.trace-block.live .trace-label').text()).toBe('Working · Permission: shell - Approve use of shell?')
+      expect(wrapper.get('.trace-block.live .live-preview').text()).toBe('Permission: shell - Approve use of shell?')
+      const pendingKey = livePreviewKey(wrapper)
       send({ type: 'permission_resolved', request_id: 'c1' })
       await flushPromises()
-      expect(wrapper.get('.trace-block.live .trace-label').text()).toBe('Working · shell ls')
+      expect(wrapper.get('.trace-block.live .live-preview').text()).toBe('shell ls')
+      expect(livePreviewKey(wrapper)).not.toBe(pendingKey)
+      await wrapper.get('.trace-block.live .trace-summary').trigger('click')
       expect(wrapper.findAll('.trace-step--tool .activity-line')).toHaveLength(2)
     } finally {
       vi.unstubAllGlobals()
@@ -330,25 +419,34 @@ describe('ChatPanel live trace', () => {
       send({ type: 'permission_resolved', request_id: 'c1' })
       send({ type: 'tool_denied', tool_use_id: 'c1' })
       await flushPromises()
-      expect(wrapper.get('.trace-block.live .trace-label').text()).toBe('Working...')
+      expect(wrapper.get('.trace-block.live .live-preview').text()).toBe('Working…')
     } finally {
       vi.unstubAllGlobals()
     }
   })
 
-  it('reopens the live trace for the next turn after the user closed it', async () => {
+  it('resets the live trace collapsed for the next turn', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = turnMessages().slice(0, 1)
     store.streaming['chat-1'] = true
     await flushPromises()
-    await wrapper.get('.trace-block.live .trace-summary').trigger('click')
     expect(wrapper.get('.trace-block.live').classes()).not.toContain('open')
+    await wrapper.get('.trace-block.live .trace-summary').trigger('click')
+    expect(wrapper.get('.trace-block.live').classes()).toContain('open')
 
     store.streaming['chat-1'] = false
     await flushPromises()
     store.streaming['chat-1'] = true
     await flushPromises()
-    expect(wrapper.get('.trace-block.live').classes()).toContain('open')
+    expect(wrapper.get('.trace-block.live').classes()).not.toContain('open')
+    await wrapper.get('.trace-block.live .trace-summary').trigger('click')
+
+    store.chats = [...store.chats, makeChat('chat-2')]
+    store.messages['chat-2'] = turnMessages().slice(0, 1)
+    store.streaming['chat-2'] = true
+    store.activeChatId = 'chat-2'
+    await flushPromises()
+    expect(wrapper.get('.trace-block.live').classes()).not.toContain('open')
   })
 
   it('renders the finished turn collapsed with only the final reply as a bubble', async () => {
@@ -393,11 +491,12 @@ describe('ChatPanel live trace', () => {
     expect(wrapper.get('.trace-block').classes()).not.toContain('open')
   })
 
-  async function streamingPanel(releaseOpenPin = true) {
+  async function streamingPanel(releaseOpenPin = true, expandLive = false) {
     const ctx = await mountPanel()
     ctx.store.messages['chat-1'] = turnMessages().slice(0, 1)
     ctx.store.streaming['chat-1'] = true
     await flushPromises()
+    if (expandLive) await ctx.wrapper.get('.trace-block.live .trace-summary').trigger('click')
     const messagesEl = ctx.wrapper.get('.messages').element
     // End the open-time pin-to-bottom window so only turn-end logic moves the view.
     if (releaseOpenPin) messagesEl.dispatchEvent(new Event('wheel'))
@@ -498,7 +597,7 @@ describe('ChatPanel live trace', () => {
   })
 
   it('follows the live trace tail again after the user closed and reopened it', async () => {
-    const { wrapper, store } = await streamingPanel()
+    const { wrapper, store } = await streamingPanel(true, true)
     store.streamingText['chat-1'] = 'working on it'
     await flushPromises()
     const first = wrapper.get('.trace-block.live .trace-body').element
@@ -534,13 +633,12 @@ describe('ChatPanel live trace', () => {
     expect(wrapper.get('.trace-block').classes()).toContain('open')
   })
 
-  it('does not collapse a trace the user closed then reopened until they scroll away and back', async () => {
+  it('keeps an explicitly expanded trace open until the reader returns to bottom', async () => {
     const { wrapper, store, messagesEl } = await streamingPanel()
     stubMetrics(messagesEl, { scrollHeight: 2000, clientHeight: 500, scrollTop: 1500 })
     messagesEl.dispatchEvent(new Event('scroll'))
     await flushPromises()
     const summary = wrapper.get('.trace-block.live .trace-summary')
-    await summary.trigger('click')
     await summary.trigger('click')
 
     await finishTurn(store)
@@ -577,7 +675,7 @@ describe('ChatPanel live trace', () => {
   })
 
   it('holds the trace after an upward scroll inside the live trace body', async () => {
-    const { wrapper, store } = await streamingPanel()
+    const { wrapper, store } = await streamingPanel(true, true)
     store.streamingText['chat-1'] = 'working on it'
     await flushPromises()
     const body = wrapper.get('.trace-block.live .trace-body').element
@@ -592,7 +690,7 @@ describe('ChatPanel live trace', () => {
   })
 
   it('ignores a growth-only scroll inside the live trace body', async () => {
-    const { wrapper, store } = await streamingPanel()
+    const { wrapper, store } = await streamingPanel(true, true)
     store.streamingText['chat-1'] = 'working on it'
     await flushPromises()
     const body = wrapper.get('.trace-block.live .trace-body').element
@@ -601,6 +699,7 @@ describe('ChatPanel live trace', () => {
     stubMetrics(body, { scrollHeight: 1200, clientHeight: 300, scrollTop: 600 })
     body.dispatchEvent(new Event('scroll'))
     await flushPromises()
+    await wrapper.get('.trace-block.live .trace-summary').trigger('click')
 
     await finishTurn(store)
     expect(wrapper.get('.trace-block').classes()).not.toContain('open')

@@ -18,6 +18,12 @@ these optional modules. The engine status request is bounded and shared between
 startup progress and outage monitoring; a ready response within the brief
 startup display delay avoids showing the curtain on a warm load.
 
+During a live chat turn, Activity stays compact by default: one `Working` row
+shows the latest safe activity description and elapsed time. Activate the row
+with click, Enter, or Space to inspect the complete scrolling timeline; the
+expanded choice is preserved at turn completion. New activity slides within
+the preview, except when reduced motion is requested.
+
 Production hashed JavaScript and CSS under `/assets` use negotiated gzip above
 500 bytes. Other static files, API responses, and chat streams keep their
 existing response path. Conditional and ranged asset requests retain their
