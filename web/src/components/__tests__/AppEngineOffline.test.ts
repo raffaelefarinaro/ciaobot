@@ -6,6 +6,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import App from '../../App.vue'
 import { useProjectStore } from '../../stores/projects'
+import { PROBE_TIMEOUT_MS } from '../../lib/engineStatus'
 
 vi.mock('vue-router', () => ({
   useRoute: () => ({ path: '/' }),
@@ -17,6 +18,7 @@ vi.mock('vue-router', () => ({
 // lands over a route that stays mounted.
 const engine = vi.hoisted(() => ({
   onChange: null as null | ((state: string) => void),
+  isAlive: null as null | (() => boolean),
   start: vi.fn(),
   stop: vi.fn(),
   retry: vi.fn(async () => {}),
@@ -26,8 +28,12 @@ vi.mock('../../lib/engineStatus', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../lib/engineStatus')>()
   return {
     ...actual,
-    createEngineMonitor: (opts: { onChange: (state: string) => void }) => {
+    createEngineMonitor: (opts: {
+      onChange: (state: string) => void
+      isAlive?: () => boolean
+    }) => {
       engine.onChange = opts.onChange
+      engine.isAlive = opts.isAlive ?? null
       return {
         start: engine.start,
         stop: engine.stop,
@@ -177,7 +183,7 @@ describe('engine offline screen wiring', () => {
 
     await vi.advanceTimersByTimeAsync(200)
     expect(wrapper.find('.startup-stub').exists()).toBe(true)
-    await vi.advanceTimersByTimeAsync(4000)
+    await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(1500)
     expect(fetchMock).toHaveBeenCalledTimes(2)
@@ -209,6 +215,18 @@ describe('engine offline screen wiring', () => {
 
     wrapper.unmount()
     expect(engine.stop).toHaveBeenCalled()
+  })
+
+  it('tells the monitor that the socket can vouch for the engine', async () => {
+    // The awareness socket carries a keepalive every few seconds, so a recent
+    // frame is proof the engine is up. The monitor consults it so a slow
+    // remote path never raises the "computer is off" curtain.
+    const wrapper = await mountApp()
+    // The monitor is handed the store's own answer, and the store has not
+    // seen a frame yet, so the engine is not vouched for.
+    expect(engine.isAlive).toBeTypeOf('function')
+    expect(engine.isAlive?.()).toBe(false)
+    wrapper.unmount()
   })
 
   it('never shows the screen for an auth challenge', async () => {

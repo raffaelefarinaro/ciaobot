@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   FAILURE_THRESHOLD,
   HEALTHY_INTERVAL_MS,
+  OUTAGE_GRACE_MS,
   PROBE_TIMEOUT_MS,
   RECOVERY_INTERVAL_MS,
   classifyResponse,
@@ -35,6 +36,14 @@ describe('classifyResponse', () => {
     expect(classifyResponse(504, {})).toBe('failure')
     expect(classifyResponse(500, {})).toBe('failure')
   })
+
+  it('tells a request that ran out of time from one that never got an answer', () => {
+    // No answer at all: the request was refused, reset, or never left.
+    expect(classifyResponse(0, null)).toBe('failure')
+    // Our own budget ran out: nobody answered in time, which is a slow path
+    // far more often than a dead engine.
+    expect(classifyResponse(0, null, true)).toBe('timeout')
+  })
 })
 
 describe('probeEngine', () => {
@@ -55,11 +64,13 @@ describe('probeEngine', () => {
     // A dead engine behind a proxy that never answers is the common case: the
     // request stays open until our own abort fires.
     const hanging = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      init.signal?.addEventListener('abort', () => reject(abortError()))
     }))
     const pending = probeEngine(hanging as unknown as typeof fetch)
     await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS)
-    await expect(pending).resolves.toBe('failure')
+    // A timeout is not the same evidence as a failure: it says the path did
+    // not answer in time, not that the engine is gone.
+    await expect(pending).resolves.toBe('timeout')
   })
 })
 
@@ -74,14 +85,14 @@ describe('requestStartupStatus', () => {
     const [startup, monitor] = await Promise.all([requestStartupStatus(), requestStartupStatus()])
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(startup).toEqual({ status: 200, body: { overall_ready: true } })
+    expect(startup).toEqual({ status: 200, body: { overall_ready: true }, timedOut: false })
     expect(monitor).toEqual(startup)
   })
 
   it('aborts a shared request that never responds', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
-      init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+      init.signal?.addEventListener('abort', () => reject(abortError()))
     }))
     vi.stubGlobal('fetch', fetchMock)
     const first = requestStartupStatus()
@@ -89,8 +100,8 @@ describe('requestStartupStatus', () => {
 
     await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS)
 
-    await expect(first).resolves.toBeNull()
-    await expect(second).resolves.toBeNull()
+    await expect(first).resolves.toEqual({ status: 0, body: null, timedOut: true })
+    await expect(second).resolves.toEqual({ status: 0, body: null, timedOut: true })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })
@@ -228,4 +239,83 @@ describe('createEngineMonitor', () => {
     expect(probe.mock.calls.length).toBe(4)
     monitor.stop()
   })
+
+  it('does not raise the curtain for unanswered probes before the grace window', async () => {
+    vi.useFakeTimers()
+    const onChange = vi.fn()
+    // A remote origin on a slow path: the probe runs out of time every round
+    // while the engine is perfectly healthy. Two of those must not be read as
+    // "the computer is off".
+    const probe = queue(new Array(12).fill('timeout'))
+    const monitor = createEngineMonitor({ probe, onChange })
+    monitor.start()
+    await vi.advanceTimersByTimeAsync(HEALTHY_INTERVAL_MS + RECOVERY_INTERVAL_MS * 4)
+    expect(monitor.state).toBe('ready')
+    expect(onChange).not.toHaveBeenCalled()
+    monitor.stop()
+  })
+
+  it('raises the curtain for unanswered probes once the grace window passes', async () => {
+    vi.useFakeTimers()
+    const onChange = vi.fn()
+    const probe = queue(new Array(12).fill('timeout'))
+    const monitor = createEngineMonitor({ probe, onChange })
+    monitor.start()
+    await vi.advanceTimersByTimeAsync(HEALTHY_INTERVAL_MS + RECOVERY_INTERVAL_MS * 5)
+    expect(monitor.state).toBe('unreachable')
+    monitor.stop()
+  })
+
+  it('trusts the socket\'s proof of life over a failed probe', async () => {
+    vi.useFakeTimers()
+    const onChange = vi.fn()
+    // The awareness socket carries a keepalive every few seconds, so the
+    // engine is provably serving. A probe that times out against it is the
+    // path being slow, and must never raise the "computer is off" curtain.
+    const probe = queue(new Array(12).fill('timeout'))
+    const monitor = createEngineMonitor({ probe, isAlive: () => true, onChange })
+    monitor.start()
+    await vi.advanceTimersByTimeAsync(HEALTHY_INTERVAL_MS + RECOVERY_INTERVAL_MS * 8)
+    expect(monitor.state).toBe('ready')
+    expect(onChange).not.toHaveBeenCalled()
+    monitor.stop()
+  })
+
+  it('lifts the curtain when the socket proves the engine is alive', async () => {
+    vi.useFakeTimers()
+    const onChange = vi.fn()
+    let alive = false
+    const probe = queue(new Array(12).fill('failure'))
+    const monitor = createEngineMonitor({ probe, isAlive: () => alive, onChange })
+    monitor.start()
+    await vi.advanceTimersByTimeAsync(HEALTHY_INTERVAL_MS + RECOVERY_INTERVAL_MS)
+    expect(monitor.state).toBe('unreachable')
+    // The engine comes back: the socket says so, so the curtain lifts even
+    // though the next probe has not answered yet.
+    alive = true
+    await vi.advanceTimersByTimeAsync(RECOVERY_INTERVAL_MS)
+    expect(monitor.state).toBe('ready')
+    expect(onChange.mock.calls.map(([state]) => state)).toEqual(['unreachable', 'ready'])
+    monitor.stop()
+  })
+
+  it('uses the grace window it was given', async () => {
+    vi.useFakeTimers()
+    const onChange = vi.fn()
+    const probe = queue(new Array(12).fill('timeout'))
+    const monitor = createEngineMonitor({ probe, outageGraceMs: 1000, onChange })
+    monitor.start()
+    await vi.advanceTimersByTimeAsync(HEALTHY_INTERVAL_MS + RECOVERY_INTERVAL_MS * 5)
+    expect(monitor.state).toBe('unreachable')
+    monitor.stop()
+  })
+
+  it('documents the grace window the monitor uses by default', () => {
+    expect(OUTAGE_GRACE_MS).toBeGreaterThan(HEALTHY_INTERVAL_MS)
+  })
 })
+
+/** The error a browser raises when its own abort fires. */
+function abortError(): Error {
+  return Object.assign(new Error('aborted'), { name: 'AbortError' })
+}

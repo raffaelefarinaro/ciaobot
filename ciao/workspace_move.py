@@ -28,6 +28,7 @@ There is no separate undo: moving the folder back is the same operation.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -35,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -92,7 +94,12 @@ _VAULT_KEYED_RECEIPTS = ("vault-vocabulary.", "retired-stock-types.")
 _SYMLINK_WALK_PRUNE = frozenset({".git", "node_modules", ".venv", ".runtime", "__pycache__"})
 
 _POLL_INTERVAL = 1.0
+# For the GET probes only.
 _HTTP_TIMEOUT = 5.0
+# Drain and cancel POSTs reach an engine that is busy by definition, and the
+# handler only does in-memory work, so 30s tolerates an event-loop stall
+# without hiding a dead engine. Matches _STOP_TIMEOUT.
+_DRAIN_REQUEST_TIMEOUT = 30.0
 _IDLE_POLLS_REQUIRED = 3
 _DRAIN_TIMEOUT = 600.0
 _STOP_TIMEOUT = 30.0
@@ -469,6 +476,11 @@ def plan(
             "The Python environment in .venv names its old location and will stop "
             "working; recreate it after the move."
         )
+    from ciao.setup_status import cloud_sync_warning
+
+    cloud_warning = cloud_sync_warning(target, platform=platform)
+    if cloud_warning:
+        result.warnings.append(cloud_warning)
     worktrees = source / ".git" / "worktrees"
     if worktrees.is_dir() and any(worktrees.iterdir()):
         result.warnings.append(
@@ -1162,9 +1174,44 @@ def _get_json(url: str) -> dict[str, Any] | None:
 
 def _post_json(url: str) -> dict[str, Any]:
     request = urllib.request.Request(url, method="POST", data=b"")
-    with _LOCAL_OPENER.open(request, timeout=_HTTP_TIMEOUT) as response:
+    with _LOCAL_OPENER.open(request, timeout=_DRAIN_REQUEST_TIMEOUT) as response:
         parsed: Any = json.loads(response.read().decode("utf-8"))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _no_answer(step: str) -> str:
+    return (
+        f"the running engine did not answer the {step} within "
+        f"{int(_DRAIN_REQUEST_TIMEOUT)}s (it may be busy); nothing was moved"
+    )
+
+
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    """``": <error>"`` from a JSON error body, or ``""`` when there is none."""
+    try:
+        parsed: Any = json.loads(exc.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return ""
+    error = parsed.get("error") if isinstance(parsed, dict) else None
+    return f": {error}" if isinstance(error, str) else ""
+
+
+def _drain_request(post: PostJson, url: str, step: str) -> dict[str, Any]:
+    """POST one drain-handshake request, failing with a reason that names ``step``."""
+    try:
+        return post(url)
+    except urllib.error.HTTPError as exc:
+        raise MoveError(
+            f"the running engine refused the {step} (HTTP {exc.code}{_http_error_detail(exc)})"
+        ) from exc
+    except TimeoutError as exc:
+        raise MoveError(_no_answer(step)) from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise MoveError(_no_answer(step)) from exc
+        raise MoveError(f"could not reach the running engine for the {step}: {exc.reason}") from exc
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        raise MoveError(f"the running engine gave no usable answer to the {step}: {exc}") from exc
 
 
 def _server_lock_held(workspace: Path) -> bool:
@@ -1249,11 +1296,13 @@ def run_move(
                 return False
             sleep(_POLL_INTERVAL)
 
-    def reopen() -> None:
+    def reopen() -> str:
+        """Re-admit turns. ``""`` on success, else why the cancel did not land."""
         try:
-            post(f"{base}/api/admin/drain/cancel")
-        except Exception:  # noqa: BLE001 — best effort
-            pass
+            _drain_request(post, f"{base}/api/admin/drain/cancel", "drain cancel")
+        except Exception as exc:  # noqa: BLE001 — best effort; never raises
+            return str(exc) or exc.__class__.__name__
+        return ""
 
     # Drain, then stop. Nothing has changed on disk yet, so a failure here
     # leaves the engine where it was, admitting turns again.
@@ -1262,7 +1311,7 @@ def run_move(
         deadline = clock() + _DRAIN_TIMEOUT
         idle = 0
         while idle < _IDLE_POLLS_REQUIRED:
-            body = post(f"{base}/api/admin/drain")
+            body = _drain_request(post, f"{base}/api/admin/drain", "drain status poll")
             idle = 0 if body.get("active_chat_ids") else idle + 1
             if idle >= _IDLE_POLLS_REQUIRED:
                 break
@@ -1287,8 +1336,14 @@ def run_move(
                 reason = f"{reason}; the engine did not start again: {detail or 'no reason given'}"
             raise MoveError(reason) from refusal
     except Exception as exc:  # noqa: BLE001 — recorded for the operator
-        reopen()
-        advance("failed", str(exc) or exc.__class__.__name__)
+        cancel_error = reopen()
+        reason = str(exc) or exc.__class__.__name__
+        if cancel_error:
+            reason = (
+                f"{reason}; reopening chats also failed ({cancel_error}), "
+                "so new chats may be refused until Ciaobot restarts"
+            )
+        advance("failed", reason)
         return op
 
     moved = False

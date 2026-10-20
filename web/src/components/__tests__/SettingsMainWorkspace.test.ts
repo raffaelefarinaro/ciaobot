@@ -95,3 +95,18 @@ it('reports a move that was rolled back', async () => {
     wrapper.unmount()
   }
 })
+
+it('shows the cloud-sync warning under the workspace path', async () => {
+  const warned = await mountSettings({ local: true, cloud_sync_warning: '/Users/me/ciaobot is inside iCloud Drive. Sync apps can break it.' })
+  try {
+    expect(warned.card().querySelector('.workspace-cloud-warning')?.textContent).toContain('inside iCloud Drive')
+  } finally {
+    warned.wrapper.unmount()
+  }
+  const plain = await mountSettings({ local: true })
+  try {
+    expect(plain.card().querySelector('.workspace-cloud-warning')).toBeNull()
+  } finally {
+    plain.wrapper.unmount()
+  }
+})

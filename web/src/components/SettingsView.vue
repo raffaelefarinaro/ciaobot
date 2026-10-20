@@ -378,6 +378,9 @@
             </p>
           </div>
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
+          <p v-if="workspaceMove?.cloud_sync_warning" class="hint hint--warn workspace-cloud-warning" role="note">
+            {{ workspaceMove.cloud_sync_warning }}
+          </p>
           <p v-if="workspaceMoveOutcome" class="hint workspace-move-outcome" :class="{ 'workspace-move-outcome--error': workspaceMoveOutcome.error }">
             {{ workspaceMoveOutcome.text }}
           </p>
@@ -467,12 +470,16 @@
               <label class="settings-field">
                 <span class="ws-label">Current password</span>
                 <input
+                  id="auth-current-password"
                   v-model="authCurrentPassword"
                   type="password"
                   class="routine-input"
                   autocomplete="current-password"
+                  :aria-invalid="authCurrentPasswordError ? 'true' : undefined"
+                  :aria-describedby="authCurrentPasswordError ? 'auth-current-password-error' : undefined"
                   :disabled="authSettingsSaving"
                 />
+                <span v-if="authCurrentPasswordError" id="auth-current-password-error" class="hint hint--warn" role="alert">{{ authCurrentPasswordError }}</span>
               </label>
               <label class="settings-field">
                 <span class="ws-label">New password</span>
@@ -2337,6 +2344,7 @@ interface WorkspaceMoveStatus {
   workspace_root: string
   local: boolean
   admin_only?: boolean
+  cloud_sync_warning?: string
   operation: WorkspaceMoveOperation | null
 }
 
@@ -3012,14 +3020,16 @@ function scrollToChatProvidersIfLinked(): void {
 }
 watch(() => route.fullPath, scrollToChatProvidersIfLinked)
 
-// The Home setup card's "How to install" lands on /settings#install-app; the
-// card is mounted with the home tab, so only the scroll needs waiting for.
+// Home links land on these home-tab cards (#install-app from the setup
+// card's "How to install", #other-devices from "Phone setup"); the cards
+// are mounted with the home tab, so only the scroll needs waiting for.
+const HOME_TAB_ANCHORS = new Set(['#install-app', '#other-devices'])
 watch(
   () => route.hash,
   hash => {
-    if (hash !== '#install-app') return
+    if (!HOME_TAB_ANCHORS.has(hash)) return
     void nextTick(() => {
-      document.getElementById('install-app')?.scrollIntoView?.({ block: 'start' })
+      document.getElementById(hash.slice(1))?.scrollIntoView?.({ block: 'start' })
     })
   },
   { immediate: true },
@@ -4295,6 +4305,8 @@ interface AuthSettings {
 
 const authSettings = ref<AuthSettings | null>(null)
 const authCurrentPassword = ref('')
+const authCurrentPasswordError = ref('')
+watch(authCurrentPassword, () => { authCurrentPasswordError.value = '' })
 const authNewPassword = ref('')
 const authSettingsSaving = ref(false)
 const authSettingsResult = ref('')
@@ -4322,6 +4334,7 @@ async function saveAuthSettings() {
   authSettingsSaving.value = true
   authSettingsResult.value = ''
   authSettingsError.value = false
+  authCurrentPasswordError.value = ''
   try {
     const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', {
       password: authNewPassword.value,
@@ -4334,6 +4347,16 @@ async function saveAuthSettings() {
     authNewPassword.value = ''
     authSettingsResult.value = 'Password saved. Other devices have to log in again.'
   } catch (e) {
+    const code = (e as { payload?: { code?: unknown } } | null)?.payload?.code
+    if (code === 'wrong_current_password' || code === 'current_password_required') {
+      authCurrentPasswordError.value = code === 'wrong_current_password'
+        ? 'Current password is incorrect.'
+        : 'Enter your current password.'
+      authSettingsSaving.value = false
+      await nextTick()
+      document.getElementById('auth-current-password')?.focus()
+      return
+    }
     authSettingsError.value = true
     authSettingsResult.value = apiErrorMessage(e, 'Could not save password settings')
   }
@@ -6241,7 +6264,7 @@ a.btn-secondary {
   .provider-brings > summary::before { transition: none; }
 }
 /* /settings/providers scrolls here; keep the card clear of the pane header. */
-#chat-providers, #install-app { scroll-margin-top: var(--space-4); }
+#chat-providers, #install-app, #other-devices { scroll-margin-top: var(--space-4); }
 .provider-brings > summary:hover { color: var(--fg); }
 .provider-brings > summary:focus-visible {
   outline: 2px solid var(--accent);
