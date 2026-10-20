@@ -80,8 +80,8 @@ Confirm, after the click:
 - no leftover spinner: the *Working* activity row is gone and no activity
   spinner keeps turning,
 - the text the stopped turn had already streamed is still in the transcript as
-  that turn's reply — one bubble, not an error card, and not marked unread.
-  This is intended: a Stop keeps what the client already rendered, so a
+  that turn's reply — one bubble, not an error card, and not badged unread
+  elsewhere (the sidebar, another device). This is intended: a Stop keeps what the client already rendered, so a
   missing stopped reply is a finding.
 
 Commentary and intermediate text from the turn belong in its **Activity** row

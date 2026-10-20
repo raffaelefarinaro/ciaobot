@@ -244,7 +244,8 @@ def test_chat_walk_checks_in_flight_stop_without_requiring_a_partial_bubble() ->
     assert "proves nothing" in lowered
     assert "retry once" in lowered
     # The old instruction was "wait about three seconds so the reply is
-    # mid-stream"; the fixed-delay phrasing is rejected in both of its forms.
+    # mid-stream". The second pattern rejects it; the first only rejects a
+    # rephrasing that adds the word "fixed" and cannot match on its own.
     assert _omits(plain, r"(?:wait|after)\s+(?:about\s+)?(?:a\s+)?fixed\s+(?:three|3)[\s-]*seconds?")
     assert _omits(plain, r"(?:wait|after)\s+(?:about\s+)?(?:a\s+)?(?:three|3)[\s-]*seconds?\b")
     assert "BLOCKED" in text

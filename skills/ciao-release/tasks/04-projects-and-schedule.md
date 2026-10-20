@@ -13,8 +13,9 @@ Two separate things are checked here, and they must not be conflated:
    **scaffolds the project's vault note** and binds the project to it, so the
    new project is vault-backed: its page offers a **Complete** action, and the
    page's ••• actions menu is **absent** (`web/src/components/ProjectView.vue`
-   renders *Complete* when the project has a `vault_folder`, and renders the
-   ••• menu — the one holding *Delete project* — only when it has none).
+   renders *Complete* for a project with a `vault_folder`, and the ••• menu —
+   the one holding *Delete project* — only for one without; auto-created
+   projects are excluded from both branches).
 2. **A vault project note.** A note in the memory vault under `projects/`. It is
    completed from **Memory → To decide → To revisit**
    (`/memory/review?show=revisit`), which posts `complete` to
@@ -31,7 +32,8 @@ append a timestamp or an attempt suffix (e.g. `Release smoke vX.Y.Z #2`), or
 run this step in a fresh smoke workspace. The name you pick leaves the fixture
 in the sidebar, so a second walkthrough of the same version would otherwise
 hit the same slug: `_scaffold_project_note` refuses to bind a slug another
-project (or a note under `completed/`) already holds, and the new project then
+project (or a project already moved under `projects/completed/<slug>`)
+   already holds, and the new project then
 stays registry-only, with no vault folder. **A newly created project that is
 not vault-backed is only a finding if its slug was free** — a taken slug is
 the one legitimate reason, so check the slug before calling it.
@@ -52,7 +54,8 @@ and it is not cleaned up afterwards. The page must offer a **Complete** action
 ••• actions menu must be **absent**, because that menu, the one holding
 *Delete project*, is rendered only for a project with no vault folder. A page
 offering ••• instead of Complete means the app stopped scaffolding the vault
-note, which is the confusion this task exists to avoid. (The sidebar row's own
+note — unless the slug was taken (above) — which is the confusion this task
+exists to avoid. (The sidebar row's own
 menu is a different one and offers *Rename* + *Delete*, so scope this check to
 the project page.) Record the project id, its vault folder, and the fact that
 it is untouched.
