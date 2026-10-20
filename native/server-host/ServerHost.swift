@@ -105,6 +105,12 @@ func usage() -> Never {
 /// (`ciao.server_host._absolute_posix`), and the host refuses it too, so the
 /// two agree on what a valid path is. A dot *directory* (`.local`) is ordinary
 /// and is not a dot alias: only the `.` and `..` components are refused.
+///
+/// The engine's contract also refuses a backslash, because on Windows it is a
+/// separator and on macOS it is an ordinary (and suspicious) filename byte.
+/// The host runs only on macOS, where a backslash is not a separator, so it is
+/// not refused here; a path carrying one still names exactly one file, and the
+/// argv carries no shell to expand it.
 func isNormalizedAbsolutePath(_ path: String) -> Bool {
     guard path.hasPrefix("/") else { return false }
     if path.hasSuffix("/") { return false }
@@ -129,11 +135,22 @@ func isRunnableExecutable(_ path: String) -> Bool {
     return FileManager.default.isExecutableFile(atPath: path)
 }
 
-/// True when `value` is a plain operation id: a non-empty run of characters
-/// that are not a path separator, so an id can never name another directory.
+/// True when `value` is a plain operation id: it starts with a letter or a
+/// digit and continues with letters, digits, `_` or `-`.
+///
+/// The engine mints these ids as a timestamp plus six hex characters
+/// (`ciao.workspace_move`), so the class covers every id it can produce and
+/// nothing else. A leading dash is refused on purpose: the id is handed to
+/// the child as an argument value, and an id shaped like `--state-dir` would
+/// make the child's own argument parser read it as an option.
 func isPlainIdentifier(_ value: String) -> Bool {
-    guard !value.isEmpty else { return false }
-    return !value.contains("/") && !value.contains("\\") && value != "." && value != ".."
+    guard let first = value.first, first.isLetter || first.isNumber else { return false }
+    for character in value.dropFirst() {
+        guard character.isLetter || character.isNumber || character == "_" || character == "-" else {
+            return false
+        }
+    }
+    return true
 }
 
 /// Parse the fixed invocation strictly. Rejects repeated, unknown and extra

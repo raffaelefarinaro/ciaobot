@@ -653,6 +653,13 @@ def install_server_host(
                 try:
                     os.rename(aside, bundle)
                 except OSError as exc:
+                    # The bundle stays in the staging directory and the record
+                    # names the new revision, so for as long as this ordering
+                    # survives, the record does not match what is installed.
+                    # The rename is the same filesystem and the same directory
+                    # tree that already succeeded once, so it does not fail
+                    # in practice; if it ever does, the next install writes a
+                    # fresh record over this one.
                     problem = (
                         f"the superseded host could not be moved back to {bundle} "
                         f"({exc}); it is kept at {aside}"

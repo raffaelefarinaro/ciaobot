@@ -933,6 +933,23 @@ def test_host_rejects_an_invalid_run_move_argv(
         ).returncode
         == 2
     )
+    # An id shaped like an option is refused too: the child would read it as
+    # one, and the engine never mints an id that starts with a dash.
+    for bad_id in ("--state-dir", "-x", ".hidden", "op 1234", ""):
+        assert (
+            run(
+                [
+                    "run-move",
+                    "--python",
+                    str(executable),
+                    "--operation",
+                    bad_id,
+                    "--state-dir",
+                    str(state_dir),
+                ]
+            ).returncode
+            == 2
+        ), bad_id
     # Nothing was spawned: every refusal is a plain exit 2 with no output.
     for args in (
         [*valid[:2], "relative/python", *valid[4:]],

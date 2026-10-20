@@ -773,17 +773,23 @@ def test_a_first_host_install_does_not_warn_about_permissions(tmp_path: Path) ->
 
 @runs_the_sh_installer
 @needs_local_tools
-def test_replacing_a_revision_two_host_warns_about_permissions(
+def test_replacing_a_superseded_host_warns_about_permissions(
     tmp_path: Path,
 ) -> None:
-    # A revision-2 host is replaced by the new one (#1659). The replacement
+    # A superseded host is replaced by the new one (#1659). The replacement
     # changes the signed bytes macOS granted Accessibility/Automation to, so the
     # user is told once that macOS will ask again.
+    #
+    # The revision is the constant, not a literal: a copy of the number here
+    # would stop matching on the next revision bump, and the warning is exactly
+    # what a user needs then.
+    from ciao.server_host import HOST_REVISION, LEGACY_HOST_REVISION
+
     host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
     host_archive.parent.mkdir(parents=True)
     host_archive.write_bytes(b"the signed universal host archive")
     harness = _harness(tmp_path, host_archive=host_archive)
-    _write_host_plist(harness["home"], "2")
+    _write_host_plist(harness["home"], str(LEGACY_HOST_REVISION))
 
     result = _run_installer(harness, "--version", VERSION, "--no-start")
 
@@ -800,11 +806,13 @@ def test_a_current_revision_host_does_not_warn_about_permissions(
 ) -> None:
     # A host that is already the current revision is not replaced, so nothing
     # changed and nothing is warned about.
+    from ciao.server_host import HOST_REVISION
+
     host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
     host_archive.parent.mkdir(parents=True)
     host_archive.write_bytes(b"the signed universal host archive")
     harness = _harness(tmp_path, host_archive=host_archive)
-    _write_host_plist(harness["home"], "3")
+    _write_host_plist(harness["home"], str(HOST_REVISION))
 
     result = _run_installer(harness, "--version", VERSION, "--no-start")
 

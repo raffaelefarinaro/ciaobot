@@ -1350,25 +1350,33 @@ if [ -n "$host_entry" ]; then
     # (a manifest/selection error or an archive that does not match its signed
     # digest), and stops the run.
     #
-    # A revision-2 host is replaced by this one (#1659). Its presence before the
+    # A superseded host is replaced by this one (#1659). Its presence before the
     # install is what makes a successful install a replacement, and a
     # replacement changes the bytes macOS granted Accessibility/Automation to,
-    # so the user is told once. Delete this with the superseded-host path in
-    # ciao/server_host.py.
+    # so the user is told once.
     #
-    # The revision is read from the sealed plist with `plutil`, the one tool
-    # macOS has for exactly this. A plist it cannot read is not proof of
-    # anything, so it only ever means "not a revision-2 host": the warning is a
+    # The revision that is superseded is read from the wheel itself
+    # (`ciao.server_host.LEGACY_HOST_REVISION`), never written here: a copy of
+    # the number in this script would silently stop matching on the next
+    # revision bump, and the warning is exactly what a user needs then. The
+    # installed revision is read from the sealed plist with `plutil`, the one
+    # tool macOS has for exactly this. A plist it cannot read is not proof of
+    # anything, so it only ever means "not a superseded host": the warning is a
     # courtesy, and the replacement itself is the installer's decision, made
     # from the ownership record, not from this.
     host_superseded_plist="$HOME/Applications/Ciaobot Server.app/Contents/Info.plist"
     host_replacing=0
-    if [ -f "$host_superseded_plist" ]; then
+    superseded_revision=$(
+        "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
+            python -I -c 'from ciao.server_host import LEGACY_HOST_REVISION; print(LEGACY_HOST_REVISION)' \
+            2>/dev/null || true
+    )
+    if [ -n "$superseded_revision" ] && [ -f "$host_superseded_plist" ]; then
         host_revision=$(
             /usr/bin/plutil -extract CFBundleVersion raw -o - \
                 "$host_superseded_plist" 2>/dev/null || true
         )
-        if [ "$host_revision" = "2" ]; then
+        if [ "$host_revision" = "$superseded_revision" ]; then
             host_replacing=1
         fi
     fi
