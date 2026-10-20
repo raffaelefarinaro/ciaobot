@@ -1381,7 +1381,6 @@ import {
   buildTurnParts,
   collectToolUsage,
   collectTraceOutputs,
-  describeToolStep,
   fileCardBasename,
   fileCardDirname,
   fileCardIcon,
@@ -1391,6 +1390,8 @@ import {
   isImageFilePath,
   isScratchPath,
   isSubagentLine,
+  liveToolStep,
+  permissionActivityLine,
   mentionedFilePaths,
   mergeTraceOutputs,
   collapseOutputsByName,
@@ -3830,15 +3831,18 @@ const liveTraceMetaParts = computed(() => {
 // progress, otherwise "Thinking..." while the model reasons.
 // What the agent is doing right now, for the live Activity line. Read from
 // the last timeline entry; empty when the timeline gives nothing concrete.
+// Permission lines still waiting for an answer. An answered one stays in the
+// trace as history but is no longer the current step (#1618).
+const openPermissionLines = computed(() => new Set(
+  pendingApprovals.value.flatMap(p => activityLines(permissionActivityLine(p.tool_name, p.message))),
+))
 const liveStepLabel = computed(() => {
   if (store.currentStreamingThinking) return ''
   const last = store.currentTimeline[store.currentTimeline.length - 1]
   if (!last) return ''
   if (last.kind === 'filecard' && last.file_path) return `Editing ${fileCardBasename(last.file_path)}`
   if (last.kind !== 'tool') return ''
-  const lines = activityLines(last.content)
-  // The row ellipses in CSS; this only turns the raw tool line into words.
-  return describeToolStep(lines[lines.length - 1] || '')
+  return liveToolStep(activityLines(last.content), last.tool_use_ids, openPermissionLines.value, new Set(store.currentDeniedToolUseIds))
 })
 const liveTraceLabel = computed(() => {
   if (liveStepLabel.value) return `Working · ${liveStepLabel.value}`

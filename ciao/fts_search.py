@@ -16,6 +16,7 @@ import yaml
 
 from ciao import vault_index
 from ciao.async_reads import keyed_lock
+from ciao.redact import redact_secret_line
 
 logger = logging.getLogger(__name__)
 
@@ -916,27 +917,6 @@ EXPAND_MAX_CHARS = 1800
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
-# Credential-shaped assignments whose VALUE is dropped from an expanded window.
-# Defence in depth behind the section bound, not the primary guarantee: the
-# primary guarantee is that a window never leaves the matched section.
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b((?:api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token"
-    r"|auth[_-]?token|refresh[_-]?token|password|passwd|passphrase"
-    r"|private[_-]?key|bearer)\s*[:=]\s*)(\S.*)"
-)
-
-# A bare, long, space-free base64 run: a PEM body or a raw token carries no
-# keyword of its own, so the assignment rule above would not see it.
-_OPAQUE_BLOB_RE = re.compile(r"^[A-Za-z0-9+/=_-]{40,}$")
-
-
-def _redact_secrets(line: str) -> str:
-    """Drop the value of a credential-shaped line, keeping its label."""
-    if _OPAQUE_BLOB_RE.match(line.strip()):
-        return "[redacted]"
-    return _SECRET_ASSIGNMENT_RE.sub(lambda m: m.group(1) + "[redacted]", line)
-
-
 # Function words carry no lexical signal, and inside this function they are
 # actively harmful. The terms below do not decide WHICH note is expanded — the
 # index already did that — they decide which LINES of it come back, and a line
@@ -1148,7 +1128,7 @@ def expand_note(
     sections: list[dict[str, Any]] = []
     used = 0
     for low, high, start in windows:
-        rendered = "\n".join(_redact_secrets(line) for line in lines[low:high]).strip()
+        rendered = "\n".join(redact_secret_line(line) for line in lines[low:high]).strip()
         if not rendered:
             continue
         if used + len(rendered) > max_chars:

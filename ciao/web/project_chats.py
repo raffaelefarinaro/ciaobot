@@ -4865,6 +4865,7 @@ class ProjectChatManager:
             file_roots=fs_roots if fs_scope == "workspace" else (),
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
+            permission_mode=self._effective_mode_for_chat(chat, unattended=unattended),
         )
         if capsule:
             capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
@@ -7906,7 +7907,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is not None:
             provider_service = self._providers.get(chat_id)
-            session_id = str(
+            session_id = event.session_id or str(
                 getattr(
                     getattr(provider_service, "provider", None),
                     "current_session_id",
@@ -8076,6 +8077,18 @@ class ProjectChatManager:
             stream.resolve_permission(request_id, session_id)
         return cleared
 
+    @staticmethod
+    def _provider_holds_permission(
+        provider: object, request_id: str, session_id: str
+    ) -> bool:
+        """Whether the live provider is still waiting on this permission request."""
+        if isinstance(provider, OpencodeProvider):
+            return provider.has_permission_request(request_id, session_id)
+        gate = getattr(provider, "permission_gate", None)
+        has_pending = getattr(gate, "has_pending", None)
+        # The Claude gate's has_pending takes no session: its ids are global.
+        return bool(callable(has_pending) and has_pending(request_id))
+
     async def respond_permission(
         self,
         chat_id: str,
@@ -8097,15 +8110,35 @@ class ProjectChatManager:
         stored = self._pending_response_record(chat.pending_permission)
         stored_request = str(stored.get("request_id") or "")
         stored_session = str(stored.get("session_id") or "")
-        if stored_request and stored_request != request_id:
-            # The submitting tab is stale, but a newer permission owns the
-            # persisted slot and must remain untouched.
-            return QuestionResponseResult(True)
-        if session_id and stored_session and session_id != stored_session:
-            return QuestionResponseResult(True)
-        expected_session = session_id or stored_session or str(
-            getattr(chat, "session_id", "") or ""
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        # Several permissions can be pending at once but the chat persists only
+        # one slot. A request the live provider still holds is answered on its
+        # own terms; only requests it does not know are treated as stale.
+        provider_holds = self._provider_holds_permission(provider, request_id, session_id)
+        if not provider_holds:
+            if stored_request and stored_request != request_id:
+                # The submitting tab is stale, but a newer permission owns the
+                # persisted slot and must remain untouched.
+                logger.info(
+                    "permission reply %s session=%s approved=%s: stale-ignored",
+                    request_id, session_id, approved,
+                )
+                return QuestionResponseResult(True)
+            if session_id and stored_session and session_id != stored_session:
+                logger.info(
+                    "permission reply %s session=%s approved=%s: stale-ignored",
+                    request_id, session_id, approved,
+                )
+                return QuestionResponseResult(True)
+        held_session = (
+            provider.permission_request_session(request_id)
+            if provider_holds and isinstance(provider, OpencodeProvider)
+            else ""
         )
+        expected_session = session_id or held_session or (
+            stored_session if stored_request == request_id else ""
+        ) or str(getattr(chat, "session_id", "") or "")
 
         if self._native_form_is_dead(chat_id):
             if not stored_request:
@@ -8120,15 +8153,14 @@ class ProjectChatManager:
             )
             return QuestionResponseResult(True, expired=True)
 
-        provider_service = self._providers.get(chat_id)
-        provider = provider_service.provider if provider_service is not None else None
         if provider_service is None or provider is None:
             return QuestionResponseResult(
                 False, "Permission provider is unavailable; retry when it reconnects", True
             )
         provider_session = str(getattr(provider, "current_session_id", "") or "")
         if (
-            expected_session
+            not provider_holds
+            and expected_session
             and provider_session
             and isinstance(provider, OpencodeProvider)
             and provider_session != expected_session
@@ -8192,7 +8224,16 @@ class ProjectChatManager:
         legacy_stale = not native_result and not response.ok
         stale = native_stale or legacy_stale
         if not response.ok and not stale:
+            logger.info(
+                "permission reply %s session=%s approved=%s: failed",
+                request_id, session_id, approved,
+            )
             return response
+        logger.info(
+            "permission reply %s session=%s approved=%s: %s",
+            request_id, session_id, approved,
+            "already-resolved" if stale else "delivered",
+        )
 
         self._clear_permission_state(chat_id, request_id, expected_session)
 

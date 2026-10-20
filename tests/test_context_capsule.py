@@ -253,6 +253,24 @@ def test_the_prompt_prefix_states_file_access_only_for_workspace_scope(
         assert str(config.agent_root("work").resolve()) in prefix
 
 
+def test_the_capsule_states_the_permission_mode_every_turn() -> None:
+    capsule = build_context_capsule(workspace="w", permission_mode="auto", include_stable=False)
+    assert "permission_mode=auto: routine actions run without asking" in capsule
+    assert "permission_mode=" not in build_context_capsule(workspace="w", include_stable=False)
+    unknown = build_context_capsule(workspace="w", permission_mode="x", include_stable=False)
+    assert "permission_mode=x" in unknown.splitlines()
+
+
+def test_the_prompt_prefix_states_the_effective_permission_mode(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Ciaobot", workspace="work")
+    chat = manager.create_chat(project.project_id)
+
+    assert f"permission_mode={chat.mode}" in manager._build_prompt_prefix(chat)
+    if chat.mode != "plan":
+        assert "permission_mode=bypass" in manager._build_prompt_prefix(chat, unattended=True)
+
+
 # #1436: a linked project's capsule carries the repo's instructions.
 
 
