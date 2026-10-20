@@ -56,6 +56,17 @@ carried by the session.
   terminals. The body carries an action id or a chat/project id, never a command
   or a path. `GET` reports `not_on_host` (200) to a signed-in remote browser so it
   can hide the buttons; `POST` answers 403.
+- `POST /api/auth/settings` (change the PWA password) needs the session and,
+  from anywhere but the host, the current password. A browser on the host
+  (`host_browser_request`: loopback peer with no proxy headers, loopback `Host`,
+  same-host `Origin`, plus an exact same-origin `Origin`/`Referer` check that
+  includes the port) may skip the current password; the session is never
+  skipped, so this route stays out of `_LOOPBACK_ONLY_API`. `GET
+  /api/auth/settings` reports `on_host` from the same predicate so the card can
+  hide the field. A `tailscale serve` or other proxied caller is not the host.
+  An SSH local forward counts as the host; that caller can already read `.env`.
+  Any password change re-keys the session signer, so every other device is
+  signed out and must sign in with the new password.
 - The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
   need the session *and* `host_browser_request`, and are not in
   `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails
@@ -75,8 +86,9 @@ carried by the session.
   are retired (`#579`), so a remote browser gets nothing a local one does not,
   and `trigger_app_update` does not exist. A browser is a local control path only
   through session routes that also require the host: `/api/workspace-move*`,
-  `/api/host/terminal`, `GET /api/welcome/password`, `POST /api/welcome/open-folder`
-  and `POST /api/settings/providers/{provider}/connect`
+  `/api/host/terminal`, `GET /api/welcome/password`, `POST /api/welcome/open-folder`,
+  `POST /api/settings/providers/{provider}/connect` and `POST /api/auth/settings`
+  (current-password exemption only)
   check the loopback peer, a loopback `Host` and a same-host `Origin`;
   `/api/workspace-open` checks the loopback peer only. Each refuses a non-host
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
