@@ -4865,6 +4865,7 @@ class ProjectChatManager:
             file_roots=fs_roots if fs_scope == "workspace" else (),
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
+            permission_mode=self._effective_mode_for_chat(chat, unattended=unattended),
         )
         if capsule:
             capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
