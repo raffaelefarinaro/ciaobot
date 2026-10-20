@@ -18,6 +18,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao import subagent_tracking
+from ciao.providers.opencode import OpencodeProvider
 from ciao.web.routes_api import running_subagents
 
 
@@ -92,6 +93,85 @@ def _chat(chat_id: str, session_id: str) -> SimpleNamespace:
     return SimpleNamespace(
         chat_id=chat_id, session_id=session_id, provider="claude", archived=False
     )
+
+
+class _OpencodeResponse:
+    def __init__(self, payload: object, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.text = ""
+
+    def json(self) -> object:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"status {self.status_code}")
+
+
+class _OpencodeClient:
+    """A fake OpenCode server that records every path it is asked for."""
+
+    def __init__(self) -> None:
+        self.get_calls: list[str] = []
+
+    async def get(self, path: str, *, params=None):
+        self.get_calls.append(path)
+        if path == "/api/session":
+            return _OpencodeResponse({"data": [
+                {"id": "ses_child_a", "parentID": "ses_parent", "title": "First"},
+                {"id": "ses_child_b", "parentID": "ses_parent", "title": "Second"},
+            ]})
+        if path == "/api/session/active":
+            return _OpencodeResponse({"data": {
+                "ses_child_a": {"type": "running"},
+            }})
+        if path.endswith("/message"):
+            return _OpencodeResponse({
+                "data": [],
+                "cursor": {"previous": None, "next": None},
+            })
+        return _OpencodeResponse({"data": {}})
+
+    async def post(self, path: str, json=None):  # pragma: no cover - unused
+        raise AssertionError(f"unexpected POST {path}")
+
+
+def test_running_rows_do_not_read_transcripts(tmp_path: Path) -> None:
+    """The sidebar poll needs a count, not a transcript (#1652).
+
+    Reading every child's history here made a chat with many background
+    agents re-read every transcript on every poll.
+    """
+    recorder = _OpencodeClient()
+    provider = OpencodeProvider(tmp_path)
+    provider._client = recorder  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)
+    provider._session_id = "ses_parent"
+
+    chat = SimpleNamespace(
+        chat_id="chat-1",
+        session_id="ses_parent",
+        provider="opencode",
+        archived=False,
+        user_turn_timings={},
+    )
+    pcm = SimpleNamespace(
+        get_chat=lambda chat_id: chat if chat_id == "chat-1" else None,
+        active_chat_ids=lambda: ["chat-1"],
+        _providers={"chat-1": SimpleNamespace(provider=provider)},
+        _agent_root_for_chat=lambda chat_id: None,
+    )
+    app = Starlette(
+        routes=[Route("/api/subagents/running", running_subagents, methods=["GET"])]
+    )
+    app.state.project_chat_manager = pcm
+    app.state.config = SimpleNamespace(workspace_root=tmp_path)
+
+    payload = TestClient(app).get("/api/subagents/running").json()
+
+    assert not [path for path in recorder.get_calls if path.endswith("/message")]
+    assert [row["agent_id"] for row in payload["chats"]["chat-1"]] == ["ses_child_a"]
 
 
 def test_lists_the_agents_the_parent_session_knows_are_running(

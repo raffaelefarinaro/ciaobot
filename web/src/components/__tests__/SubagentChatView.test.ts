@@ -141,4 +141,21 @@ describe('SubagentChatView', () => {
     expect(wrapper.find('.running-spinner').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  // The unfiltered list no longer carries transcripts, so the "row exists but
+  // has no messages" case must not re-fetch the whole set: that fallback can
+  // only ever produce an empty transcript.
+  it('does not re-fetch the whole set when the row has no messages', async () => {
+    const store = useProjectStore()
+    store.subagents = {
+      [CHAT_ID]: [transcript({ messages: [] })],
+    }
+    const loadSubagents = vi.spyOn(store, 'loadSubagents')
+
+    const wrapper = await mountView()
+
+    expect(wrapper.text()).toContain('No captured turns.')
+    expect(loadSubagents).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
 })

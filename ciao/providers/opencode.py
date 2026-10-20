@@ -1902,7 +1902,12 @@ class OpencodeProvider(BaseSDKProvider):
             pass
         self._background_changed.clear()
 
-    async def read_live_collab_tree(self) -> list[dict[str, Any]]:
+    async def read_live_collab_tree(
+        self,
+        *,
+        include_messages: bool = False,
+        only_child_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """``read_collab_tree`` read over this chat's already-running server.
 
         Same shape as the classmethod, but skips ``_EphemeralServer`` entirely:
@@ -1911,6 +1916,17 @@ class OpencodeProvider(BaseSDKProvider):
         a process start each time. Callers should check ``has_live_server``
         first and fall back to the classmethod otherwise (e.g. a chat with no
         attached provider, viewed from another device or after a restart).
+
+        ``include_messages`` is off by default because the callers that run on
+        a timer (the subagent watcher, the schedule waiter, the sidebar poll)
+        only need a count or a status, and both come from the session metadata
+        and the activity map. Reading every child's history on every tick was
+        what made a chat with many background agents re-read every transcript
+        every few seconds. Only the subagent detail view needs the
+        transcript, and it asks for it.
+
+        ``only_child_id`` narrows the tree to one child, so the detail view
+        reads one transcript instead of every sibling's.
         """
         client = self._client
         if client is None or not self._session_id:
@@ -1930,14 +1946,34 @@ class OpencodeProvider(BaseSDKProvider):
         if isinstance(children_result, Exception):
             return []
         # A transient failure of the auxiliary activity map must not discard
-        # successfully fetched children. ``None`` means activity is unknown;
-        # the conservative counter will fall back to message timing.
+        # successfully fetched children. ``None`` means activity is unknown, and
+        # the conservative counter treats an unknown child as still running.
         active_ids = (
             None
             if isinstance(active_result, Exception)
             else active_result
         )
         children = [child for child in children_result if child.get("id")]
+        if only_child_id is not None:
+            # The same spelling the route filters on: a prefixed id and a bare
+            # one name the same agent.
+            children = [
+                child
+                for child in children
+                if str(child.get("id")).removeprefix("agent-") == only_child_id
+            ]
+        if not include_messages:
+            return [
+                {
+                    "info": child,
+                    "active": (
+                        None
+                        if active_ids is None
+                        else str(child["id"]) in active_ids
+                    ),
+                }
+                for child in children
+            ]
         histories = await asyncio.gather(
             *(_child_messages(str(child["id"])) for child in children)
         )
