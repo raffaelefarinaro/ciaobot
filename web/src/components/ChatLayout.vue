@@ -962,7 +962,18 @@ function clearRetainedChatView() {
 }
 
 onMounted(async () => {
-  await store.fetchAll()
+  try {
+    await store.fetchAll()
+  } catch {
+    // The engine is unreachable. Without this, the rejection skipped the
+    // whole tail of this hook — including the deep-link lookup — and
+    // nothing could ever clear the pending state, so a chat route sat on
+    // "Loading conversation" instead of the home-boot skeleton that says
+    // the workspaces are still on their way. The store is not bootstrapped
+    // in this state, so the home-boot branch is the honest answer.
+    chatLookupPendingId.value = null
+    return
+  }
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
   // The route is re-read here, after the awaits, never captured before them.
@@ -1012,6 +1023,12 @@ watch(
       // and a route that names a chat which does not exist ends on the home
       // empty state rather than on a permanent "Loading conversation".
       void openChatFromRoute(id)
+    } else if (!store.activeChat) {
+      // The selection names a chat the catalog does not have: the poll
+      // dropped it, another device pruned it, the boot could not resolve it.
+      // Nothing is on screen and no lookup is running, so the pane must not
+      // sit on the placeholder for a conversation that does not exist.
+      chatLookupPendingId.value = null
     } else void store.markRead(id)
     if (isMobile.value) sidebarCollapsed.value = true
   }

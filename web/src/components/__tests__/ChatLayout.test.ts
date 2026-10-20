@@ -2846,4 +2846,114 @@ describe('ChatLayout chat route without a catalog entry', () => {
     expect(wrapper.find('.empty-shell').exists()).toBe(true)
     wrapper.unmount()
   })
+
+  // The hole the round 2 review found: the selection still names the chat
+  // after the poll dropped the row (`reconcileChatList` replaces `chats` and
+  // does not touch `activeChatId`), so the route watcher's "the selection
+  // already names this chat" branch runs and no lookup ever starts. Nothing
+  // can then clear the pending state, and the pane sits on "Loading
+  // conversation" for a conversation that does not exist.
+  it('drops the placeholder when the selection names a chat the poll dropped', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/settings', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
+    })
+    await router.push('/chat/chat-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = [{ chat_id: 'chat-1', project_id: 'project-1', title: 'Test chat' }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(store, 'openChatFromDeepLink').mockResolvedValue(undefined)
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub, ProjectSidebar: EmptyStub, ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The poll drops the row. The selection is not cleared with it, so the
+    // store now names a chat the catalog does not have.
+    store.reconcileChatList([])
+    expect(store.activeChatId).toBe('chat-1')
+    expect(store.activeChat).toBeNull()
+
+    // Leaving to a secondary destination and back re-runs the route watcher
+    // with the selection still naming the route's chat.
+    await router.push('/settings')
+    await flushPromises()
+    await router.push('/chat/chat-1')
+    await flushPromises()
+    await nextTick()
+
+    // No lookup is running and no chat is on screen, so the pane must not
+    // sit on the placeholder for a conversation that does not exist.
+    expect(wrapper.find('[role="status"][aria-label="Loading conversation"]').exists()).toBe(false)
+    expect(wrapper.find('.empty-shell').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  // The same hole on the boot path: `onMounted` awaits `fetchAll()` without
+  // a catch, so when the engine is unreachable the rejection skipped the
+  // whole tail of the hook — including the deep-link lookup — and nothing
+  // could clear the pending state. The pane sat on "Loading conversation"
+  // instead of the home-boot skeleton that says the workspaces are still on
+  // their way.
+  it('shows the home-boot skeleton when the bootstrap cannot reach the engine', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/settings', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
+    })
+    await router.push('/chat/chat-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    store.chats = []
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = false
+    // The engine is unreachable: the bootstrap fails.
+    vi.spyOn(store, 'fetchAll').mockRejectedValue(new Error('engine unreachable'))
+    vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub, ProjectSidebar: EmptyStub, ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The workspaces are still on their way, and that is what the pane says:
+    // not "Loading conversation", which claims a conversation is coming.
+    expect(wrapper.find('[role="status"][aria-label="Loading conversation"]').exists()).toBe(false)
+    expect(wrapper.find('[role="status"][aria-label="Loading your workspaces"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
 })
