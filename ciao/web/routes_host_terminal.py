@@ -4,7 +4,7 @@ Both routes take the normal session path (signed session cookie plus the
 same-origin check on the POST) and appear in neither the public nor the
 loopback-only allowlist: that last set lets a loopback peer skip the session,
 which would let any local process open terminals. The handlers then add
-``host_browser_request``: loopback TCP peer, loopback Host, same-host
+``host_browser_request``: loopback TCP peer, local Host, exact same-origin
 Origin/Referer.
 
 The body carries an action id or a chat/project id, never a command or a path;

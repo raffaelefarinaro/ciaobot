@@ -1119,7 +1119,7 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
 
 
 def test_setup_finish_accepts_0000_host(tmp_path) -> None:
-    """0.0.0.0 counts as loopback: users copy it from the bind-address log."""
+    """0.0.0.0 is an accepted local Host spelling: users copy it from the bind-address log."""
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
