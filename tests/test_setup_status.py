@@ -2360,3 +2360,88 @@ def test_setup_warns_when_the_workspace_is_in_a_synced_folder(monkeypatch, capsy
 
     assert cli.main(["setup", "--workspace", str(Path.home() / "plain")]) == 0
     assert "Dropbox" not in capsys.readouterr().err
+
+
+def _tested_record(running: str) -> dict:
+    return {
+        "schema": 1,
+        "ciaobot": running,
+        "recorded": "2026-10-20",
+        "providers": {
+            "opencode": {"status": "tested", "version": "2.1.0", "package": "@opencode/cli"},
+            "claude": {"status": "tested", "version": "2.1.301", "source": "claude-agent-sdk 0.2.168"},
+        },
+    }
+
+
+def test_claude_row_marks_bundled_release_check(tmp_path, monkeypatch) -> None:
+    import ciao
+    from ciao import provider_versions
+
+    bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: bundled)
+    monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
+    config = _config(tmp_path)
+
+    claude = setup_status(config, env={})["providers"]["claude"]
+
+    assert claude["release_check"] == {"state": "bundled", "tested": "2.1.301"}
+
+
+def test_opencode_unsupported_row_keeps_v2_migration_text(monkeypatch) -> None:
+    import ciao
+    from ciao import provider_versions
+    from ciao.providers import opencode
+
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda *a, **k: "/bin/opencode")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="1.14.0\n", returncode=0)
+    )
+    monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
+
+    row = opencode.opencode_login_status(inventory=False)
+
+    assert row["auth"] == "unsupported_version"
+    assert row["detail"] == opencode.OPENCODE_V2_REQUIRED
+    assert row["terminal_action"] == "opencode-install"
+    assert row["release_check"] == {"state": "unsupported"}
+
+
+def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> None:
+    import ciao
+    from ciao import provider_versions
+    from ciao.providers import opencode
+
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda *a, **k: "/bin/opencode")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.0.32\n", returncode=0)
+    )
+    monkeypatch.setattr(opencode, "_credential_count", lambda *a, **k: 1)
+    monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
+
+    row = opencode.opencode_login_status(inventory=False)
+
+    assert row["release_check"]["state"] == "below_tested"
+    assert row["release_check"]["terminal_action"] == "opencode-update"
+    assert row["release_check"]["command"].endswith("upgrade 2.1.0")
+
+
+def test_clearing_the_discovery_cache_rereads_a_system_cli_version(monkeypatch) -> None:
+    from ciao import setup_status as module
+
+    monkeypatch.undo()  # drop the autouse stand-in for the real, cached probe
+    calls: list[str] = []
+
+    def fake_run(argv, **_k):
+        calls.append(argv[0])
+        return SimpleNamespace(stdout="2.0.0\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    module._cli_version.cache_clear()
+    module._cli_version("/x/claude")
+    module._cli_version("/x/claude")
+    assert len(calls) == 1
+    module.clear_claude_discovery_cache()
+    module._cli_version("/x/claude")
+    assert len(calls) == 2

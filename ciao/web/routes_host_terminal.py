@@ -99,6 +99,8 @@ async def host_terminal_launch(request: Request) -> JSONResponse:
             {"ok": False, "platform": host_terminal.host_platform(), "reason": exc.reason, "error": str(exc)},
             status_code=409,
         )
+    except LookupError as exc:
+        return _fail("not_applicable", str(exc), 409)
     except OSError as exc:
         return _fail("launch_failed", str(exc), 500)
     return JSONResponse({"ok": True, "platform": host_terminal.host_platform(), "launched": launched})

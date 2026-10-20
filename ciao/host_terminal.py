@@ -2,7 +2,9 @@
 
 The caller names an *action id* or a chat/project; it never supplies a command
 or a path. Every command string is a server-side constant or comes from the
-functions that already produce the text Ciaobot shows, and every folder is
+functions that already produce the text Ciaobot shows (the ``*-update`` actions
+take theirs from the packaged provider record and the resolved binary, see
+``ciao.provider_versions``), and every folder is
 derived from server state (`resolve_folder`). The routes in
 ``ciao/web/routes_host_terminal.py`` add the auth and host-browser checks.
 """
@@ -38,6 +40,8 @@ ACTION_IDS: tuple[str, ...] = (
     "opencode-login",
     "gws-install",
     "skills-update",
+    "opencode-update",
+    "claude-update",
 )
 
 REASON_MESSAGES = {
@@ -166,9 +170,20 @@ def _ps_quote(value: str) -> str:
 
 
 def action_command(action: str) -> str:
-    """The command line for an allowlisted action id; KeyError for any other."""
+    """The command line for an allowlisted action id; KeyError for any other.
+
+    LookupError (not KeyError) when an update action has nothing to update.
+    """
     if action not in ACTION_IDS:
         raise KeyError(action)
+    if action in ("opencode-update", "claude-update"):
+        from ciao import provider_versions
+
+        provider = action.removesuffix("-update")
+        check = provider_versions.current_checks().get(provider, {})
+        if check.get("state") != "below_tested" or not check.get("command"):
+            raise LookupError(f"{action}: nothing to update")
+        return check["command"]
     from ciao import setup_status
     from ciao.providers import opencode
 

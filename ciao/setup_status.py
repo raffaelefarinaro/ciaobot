@@ -88,6 +88,8 @@ def clear_claude_discovery_cache() -> None:
     _claude_mcps_cache = None
     _claude_skills_cache = None
     _claude_mcps_generation += 1
+    # Tests replace `_cli_version` with a plain function; only the real one caches.
+    getattr(_cli_version, "cache_clear", lambda: None)()
 
 
 def _acquire_mcps_probe() -> threading.Event | None:
@@ -283,6 +285,7 @@ def _provider(
     cli_path: str = "",
     path_command: str = "",
     terminal_action: str = "",
+    release_check: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -314,6 +317,8 @@ def _provider(
         row["path_command"] = path_command
     if terminal_action:
         row["terminal_action"] = terminal_action
+    if release_check is not None:
+        row["release_check"] = release_check
     return row
 
 
@@ -901,8 +906,22 @@ def _claude_status(
     *,
     workspace_root: Path | None = None,
 ) -> dict[str, Any]:
+    from ciao.provider_versions import release_check
+    from ciao.providers.claude import get_bundled_claude_path
+
     binary = claude_cli_path()
     version = _cli_version(binary) if binary else "not installed"
+    bundled_path = get_bundled_claude_path()
+    check = (
+        release_check(
+            "claude",
+            version,
+            bundled=bool(bundled_path) and binary == str(bundled_path),
+            binary=binary,
+        )
+        if binary
+        else None
+    )
     claude_skills = discover_claude_system_skills()
     claude_mcps = discover_claude_mcps(workspace_root, config_path=config_path)
     if not binary:
@@ -949,6 +968,7 @@ def _claude_status(
             skills=claude_skills,
             mcps=claude_mcps,
             cli_path=binary,
+            release_check=check,
             terminal_action="claude-login",
         )
     # No fallback on unparseable probe output: a timeout or process error is
@@ -977,6 +997,7 @@ def _claude_status(
             mcps=claude_mcps,
             install_url=CLAUDE_INSTALL_DOCS_URL,
             cli_path=binary,
+            release_check=check,
             path_command=claude_path_hint(binary),
             terminal_action="claude-install",
         )
@@ -998,6 +1019,7 @@ def _claude_status(
         skills=claude_skills,
         mcps=claude_mcps,
         cli_path=binary,
+        release_check=check,
         # An installed CLI the terminal cannot find still needs the PATH line:
         # the user is about to be handed a command to type into that terminal.
         path_command=claude_path_hint(binary),

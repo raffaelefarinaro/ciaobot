@@ -64,9 +64,35 @@ def test_actions_map_to_the_commands_ciaobot_already_shows(monkeypatch: pytest.M
     assert set(host_terminal.ACTION_IDS) == {
         "claude-install", "claude-login", "opencode-install",
         "opencode-login", "gws-install", "skills-update",
+        "opencode-update", "claude-update",
     }
     with pytest.raises(KeyError):
         host_terminal.action_command("rm")
+
+
+@pytest.mark.parametrize("provider", ["opencode", "claude"])
+def test_update_actions_resolve_from_current_checks(
+    monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    from ciao import provider_versions
+
+    command = f"{provider} upgrade 2.1.0"
+    monkeypatch.setattr(
+        provider_versions,
+        "current_checks",
+        lambda: {provider: {"state": "below_tested", "command": command}},
+    )
+    assert host_terminal.action_command(f"{provider}-update") == command
+    for state in ("current", "untested", "bundled", "unsupported", "unknown"):
+        monkeypatch.setattr(
+            provider_versions, "current_checks", lambda s=state: {provider: {"state": s}}
+        )
+        with pytest.raises(LookupError):
+            host_terminal.action_command(f"{provider}-update")
+    monkeypatch.setattr(provider_versions, "current_checks", lambda: {})
+    with pytest.raises(LookupError) as excinfo:
+        host_terminal.action_command(f"{provider}-update")
+    assert not isinstance(excinfo.value, KeyError)
 
 
 def test_frontend_copy_names_the_gws_install_command() -> None:
