@@ -179,6 +179,22 @@ in System Settings. That is why ordinary engine updates must keep these bytes
 unchanged, and why a host upgrade is a separate, explicit, warned action. The
 builder and tests never edit TCC and never remove a grant.
 
+## Workspaces in Desktop, Documents and Downloads
+
+Step 1 of #1577 (2026-10-20, macOS 27.0.1, v1.6.0) on a real Mac: the
+launchd-started host gets the "Ciaobot Server would like to access files in your
+Documents folder" prompt without any `NS*FolderUsageDescription` key. Allow
+covers the supervisor, the engine and the agent children, and survives logout
+and login. A direct (bare-Python) definition gets no prompt and no grant, so
+`setup_workspace` and `_register_launchd_service` still refuse a protected
+folder when no verified host is installed, and workspace move (a bare-Python
+launchd job) refuses a protected source and destination.
+
+The usage strings are deliberately absent from the host `Info.plist`: adding
+them changes the signed bytes, which is a host revision (see above). Not yet
+verified: whether the grant survives a host revision (a re-signed bundle). Check
+it in the release walk of the next host revision.
+
 ## Tests
 
 `tests/test_server_host.py` runs the pure checks everywhere (identity distinct
@@ -201,6 +217,16 @@ by the tests, and no live launchd, `.app`, engine or TCC is involved.
 ```sh
 PYTHONPATH=$PWD python -m pytest tests/test_server_host.py -q
 ```
+
+## When macOS denies workspace access
+
+If the user answers *Don't Allow* to "Ciaobot Server would like to access files in your Documents folder" (or Desktop, Downloads, a removable or network volume), the supervisor's first probe (`ciao/workspace_access.py`) sees `EPERM` before it touches the workspace. It writes one plain line to `~/.local/state/ciaobot/workspace-access-denied.txt` (outside every workspace), prints it to stderr and exits 78, without launching the engine.
+
+The user sees the line in `ciao service status` (text and `--json`, field `workspace_access_denied`), in the installer when its health wait fails, and in the file itself. The message names System Settings, Privacy & Security, Files and Folders, Ciaobot Server.
+
+Exit 78 passes through the host unchanged: it is neither a stop code nor a launch failure. launchd relaunches the job after its ~10 s throttle, so once the switch is turned on the engine comes up on its own and the next passing probe deletes the file. On a host migration the installer rolls back and the previous engine keeps running until access is granted and the installer is rerun.
+
+To bring the prompt back for testing: `tccutil reset SystemPolicyDocumentsFolder local.ciaobot.server` (Desktop: `SystemPolicyDesktopFolder`, Downloads: `SystemPolicyDownloadsFolder`).
 
 ## Not in this child
 

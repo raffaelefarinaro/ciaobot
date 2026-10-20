@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import plistlib
 import re
 import shlex
 import shutil
@@ -20,6 +21,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 from typing import Iterable, Mapping, Any
 
 from ciao import provider_registry
@@ -135,10 +137,10 @@ def detect_nested_workspaces(vault_path: Path) -> list[str]:
     )
 
 
-# macOS TCC (privacy) protects these home subfolders. A launchd-spawned
-# background agent has no access grant for them, so a workspace placed inside
-# one fails at runtime with EPERM ("Operation not permitted") reading its own
-# .runtime files — the server and menu bar die (exit 78). Steer setup away.
+# macOS privacy protection (TCC) guards these home subfolders. A bare-Python
+# launchd job gets no prompt and no grant (EPERM, "Operation not permitted"),
+# while the `Ciaobot Server.app` host gets the "access files in your <folder>
+# folder" prompt and its grant covers its child processes (docs/SERVER_HOST.md).
 _TCC_PROTECTED_DIRS = ("Desktop", "Documents", "Downloads")
 
 
@@ -154,6 +156,19 @@ def tcc_protected_location(path: Path | str) -> str | None:
         if resolved == base or base in resolved.parents:
             return name
     return None
+
+
+def macos_access_note(path: Path | str) -> str:
+    """One sentence for surfaces that show a workspace inside a TCC folder, or ""."""
+    protected = tcc_protected_location(path)
+    if not protected:
+        return ""
+    return (
+        f"This folder is inside ~/{protected}. The first time Ciaobot starts there, "
+        f"macOS asks to let \"Ciaobot Server\" access your {protected} folder: choose "
+        "Allow, or Ciaobot cannot start. You can change it later in System Settings → "
+        "Privacy & Security → Files and Folders."
+    )
 
 
 # Sync clients mirror these folders to the cloud. A workspace inside one gets
@@ -189,12 +204,29 @@ def _parts_under(path: Path, base: Path) -> tuple[str, ...] | None:
     return None
 
 
+def _finder_prefs(home: Path) -> Mapping[str, Any]:
+    """Finder's preferences, or {} when unreadable."""
+    try:
+        with (home / "Library/Preferences/com.apple.finder.plist").open("rb") as handle:
+            loaded = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError, ExpatError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+_ICLOUD_FINDER_KEYS = {
+    "desktop": "FXICloudDriveDesktop",
+    "documents": "FXICloudDriveDocuments",
+}
+
+
 def cloud_synced_location(
     path: Path | str,
     *,
     platform: str | None = None,
     home: Path | None = None,
     env: Mapping[str, str] | None = None,
+    finder_prefs: Mapping[str, Any] | None = None,
 ) -> str | None:
     """The sync service whose folder holds ``path`` ("iCloud Drive",
     "Dropbox", ...), or None when the path is not in a known synced folder."""
@@ -212,6 +244,10 @@ def cloud_synced_location(
         return None
     folded = [part.casefold() for part in parts]
     first = folded[0]
+    if platform == "darwin" and first in _ICLOUD_FINDER_KEYS:
+        prefs = finder_prefs if finder_prefs is not None else _finder_prefs(home)
+        if bool(prefs.get(_ICLOUD_FINDER_KEYS[first])):
+            return "iCloud Drive (Desktop & Documents)"
     if platform == "darwin" and first == "library":
         if len(parts) >= 2 and folded[1] == "mobile documents":
             return "iCloud Drive"

@@ -19,6 +19,7 @@ from typing import Any, Callable, Sequence
 from xml.parsers.expat import ExpatError
 
 from ciao.server_host import ServerHostError, parse_service_command
+from ciao.workspace_access import read_denial
 
 SERVER_LABEL = "com.ciao.server"
 LEGACY_MENUBAR_LABEL = "com.ciao.menubar"
@@ -563,7 +564,13 @@ def service_status(
         blockers = restart_blockers(runtime.port) if reachable else []
     except RestartBlockersUnavailable:
         blockers = None
-    message = "Ciaobot engine is running." if reachable else "Ciaobot engine is stopped."
+    denied = "" if reachable else read_denial()
+    if reachable:
+        message = "Ciaobot engine is running."
+    elif denied:
+        message = f"Ciaobot engine is not running: {denied}"
+    else:
+        message = "Ciaobot engine is stopped."
     if blockers:
         message += f"\n{len(blockers)} chat(s) would be interrupted by a restart."
     elif blockers is None and reachable:
@@ -586,6 +593,7 @@ def service_status(
             "plist_matches_loaded": plist_matches_loaded,
             "reachable": reachable,
             "restart_blockers": blockers,
+            "workspace_access_denied": denied or None,
         },
     )
 

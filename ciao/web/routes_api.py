@@ -6023,22 +6023,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     workspace = str(body.get("workspace", "")).strip()
     if not workspace:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
-    from ciao.setup_status import tcc_protected_location
-
-    protected = tcc_protected_location(workspace)
-    if protected:
-        return JSONResponse(
-            {
-                "error": (
-                    f"'{workspace}' is inside ~/{protected}, which macOS privacy "
-                    "protection blocks background services from reading — the "
-                    "Ciaobot server and menu bar would fail to start. Pick a "
-                    "folder outside ~/Desktop, ~/Documents, and ~/Downloads "
-                    "(for example ~/ciaobot)."
-                )
-            },
-            status_code=400,
-        )
     try:
         port = int(body.get("port") or config.pwa_port)
     except (TypeError, ValueError):
@@ -6241,8 +6225,13 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     chips when they are present; otherwise it asks for the logical workspace
     name that will be assigned to the selected folder.
     """
+    from ciao import cli
     from ciao.cli import detect_vault_mode
-    from ciao.setup_status import cloud_sync_warning, detect_nested_workspaces
+    from ciao.setup_status import (
+        cloud_sync_warning,
+        detect_nested_workspaces,
+        macos_access_note,
+    )
 
     guard = _setup_fs_guard(request)
     if guard is not None:
@@ -6269,6 +6258,9 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
         "vault_root": str(vault_root),
         "existing_workspaces": nested,
         "cloud_sync_warning": cloud_sync_warning(target),
+        "macos_access_note": (
+            macos_access_note(target) if cli._verified_host_if_installed() is not None else ""
+        ),
     })
 
 

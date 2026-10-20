@@ -1145,6 +1145,42 @@ def test_setup_finish_accepts_0000_host(tmp_path) -> None:
     assert resp.json()["ok"] is True
 
 
+def test_setup_finish_refuses_a_protected_folder_without_a_host(
+    tmp_path, monkeypatch
+) -> None:
+    from ciao import cli
+
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: None)
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    workspace = home / "Documents" / "ws"
+
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(workspace),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 409
+    assert "Ciaobot Server" in resp.json()["error"]
+    assert not workspace.exists()
+
+
 def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
     config = _config(tmp_path)
     serializer = URLSafeTimedSerializer("test-secret")
@@ -2346,6 +2382,89 @@ def test_setup_inspect_folder_reports_cloud_sync_warning(tmp_path, monkeypatch) 
     monkeypatch.setattr("ciao.setup_status.cloud_sync_warning", lambda path, **kw: "SYNCED")
     resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
     assert resp.json()["cloud_sync_warning"] == "SYNCED"
+
+
+def test_macos_access_note_names_the_folder(monkeypatch, tmp_path) -> None:
+    from ciao import setup_status
+
+    home = tmp_path / "home"
+    (home / "Documents" / "ws").mkdir(parents=True)
+    (home / "projects" / "ws").mkdir(parents=True)
+    monkeypatch.setattr(setup_status.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(setup_status.sys, "platform", "darwin")
+
+    note = setup_status.macos_access_note(home / "Documents" / "ws")
+    assert "Documents" in note and "Ciaobot Server" in note
+    assert setup_status.macos_access_note(home / "projects" / "ws") == ""
+
+    monkeypatch.setattr(setup_status.sys, "platform", "linux")
+    assert setup_status.macos_access_note(home / "Documents" / "ws") == ""
+
+
+def test_cloud_synced_location_detects_icloud_desktop_and_documents(tmp_path) -> None:
+    from ciao.setup_status import cloud_synced_location
+
+    home = tmp_path / "h"
+    docs = home / "Documents" / "ws"
+    desk = home / "Desktop" / "ws"
+    label = "iCloud Drive (Desktop & Documents)"
+
+    def where(path, prefs, platform="darwin"):
+        return cloud_synced_location(path, platform=platform, home=home, finder_prefs=prefs)
+
+    assert where(docs, {"FXICloudDriveDocuments": 1}) == label
+    assert where(desk, {"FXICloudDriveDocuments": 1}) is None
+    assert where(desk, {"FXICloudDriveDesktop": True}) == label
+    assert where(docs, {"FXICloudDriveDesktop": True}) is None
+    assert where(docs, {}) is None and where(desk, {}) is None
+    assert where(docs, {"FXICloudDriveDocuments": 0}) is None
+    assert where(docs, {"FXICloudDriveDocuments": 1}, platform="linux") is None
+
+
+def test_finder_prefs_reads_the_plist_and_tolerates_garbage(tmp_path) -> None:
+    import plistlib
+
+    from ciao.setup_status import cloud_synced_location
+
+    home = tmp_path / "h"
+    prefs = home / "Library" / "Preferences" / "com.apple.finder.plist"
+    prefs.parent.mkdir(parents=True)
+    with prefs.open("wb") as handle:
+        plistlib.dump({"FXICloudDriveDocuments": True}, handle, fmt=plistlib.FMT_BINARY)
+    docs = home / "Documents" / "ws"
+    assert (
+        cloud_synced_location(docs, platform="darwin", home=home)
+        == "iCloud Drive (Desktop & Documents)"
+    )
+
+    prefs.write_bytes(b"not a plist at all")
+    assert cloud_synced_location(docs, platform="darwin", home=home) is None
+    prefs.write_bytes(
+        b'<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>FXICl'
+    )
+    assert cloud_synced_location(docs, platform="darwin", home=home) is None
+    prefs.unlink()
+    assert cloud_synced_location(docs, platform="darwin", home=home) is None
+
+
+def test_setup_inspect_folder_reports_macos_access_note(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "notes"
+    target.mkdir()
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["macos_access_note"] == ""
+
+    monkeypatch.setattr("ciao.setup_status.macos_access_note", lambda path: "ALLOW IT")
+    # No verified Ciaobot Server on this Mac: the folder is refused later, so
+    # promising a prompt would mislead.
+    monkeypatch.setattr("ciao.cli._verified_host_if_installed", lambda: None)
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["macos_access_note"] == ""
+
+    monkeypatch.setattr("ciao.cli._verified_host_if_installed", lambda: object())
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["macos_access_note"] == "ALLOW IT"
 
 
 def test_setup_warns_when_the_workspace_is_in_a_synced_folder(monkeypatch, capsys) -> None:
