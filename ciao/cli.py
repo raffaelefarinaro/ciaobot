@@ -6464,6 +6464,20 @@ def _service_command(args: argparse.Namespace) -> int:
                 )
             runtime = macos_service.discover_runtime()
         result = macos_service.start_service(runtime=runtime)
+        if result.ok:
+            # The engine has to boot before it can fail, so a start that
+            # reports "started" before the engine has had the time to fail
+            # reports a hope. The wait ends as soon as the engine serves its
+            # port or records that it could not bind it (#1654).
+            macos_service.wait_for_engine(runtime)
+            reason = macos_service.port_in_use_reason(runtime)
+            if reason is not None:
+                result = macos_service.ServiceResult(
+                    False,
+                    "start",
+                    reason,
+                    {**result.details, "port_in_use": True},
+                )
     elif action == "restart":
         result = macos_service.restart_service(force=bool(args.force))
     elif action == "stop":

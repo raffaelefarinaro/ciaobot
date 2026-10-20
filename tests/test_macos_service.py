@@ -159,7 +159,7 @@ def test_start_service_uses_explicit_launchctl_argv(tmp_path: Path) -> None:
     )
 
     assert result.ok is True
-    assert calls == [
+    assert calls[:3] == [
         ["launchctl", "enable", "gui/501/com.ciao.server"],
         ["launchctl", "bootstrap", "gui/501", runtime.server_plist],
         ["launchctl", "kickstart", "-k", "gui/501/com.ciao.server"],
@@ -1282,3 +1282,181 @@ def test_status_reports_a_workspace_access_denial(tmp_path: Path, monkeypatch) -
 
     assert up.message == "Ciaobot engine is running."
     assert up.details["workspace_access_denied"] is None
+
+
+# ── the port the engine binds is taken (#1654) ────────────────────────────
+
+
+def _launchd_print_with_exit_code(code: int) -> str:
+    """A `launchctl print` block that reports a last exit code."""
+    return (
+        "gui/501/com.ciao.server = {\n"
+        "\tstate = not running\n"
+        "\tlast exit code = %d\n"
+        "}\n" % code
+    )
+
+
+def test_the_last_exit_code_is_read_out_of_the_launchd_print(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+
+    result = macos_service.service_status(
+        runtime=runtime,
+        uid=501,
+        runner=_launchd_runner([], _launchd_print_with_exit_code(0)),
+    )
+
+    assert result.details["last_exit_code"] == 0
+
+
+def test_status_names_the_port_when_the_engine_could_not_bind(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`ciao service status` has to say *why* the engine is not running.
+
+    The engine leaves with the port-in-use exit code when it could not bind
+    its port, so the job's last exit code is that code — and the status has
+    to turn it back into the sentence the operator needs: which port, and
+    what to do about it.
+    """
+    from ciao.port_in_use import PORT_IN_USE_EXIT_CODE
+
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+
+    result = macos_service.service_status(
+        runtime=runtime,
+        uid=501,
+        runner=_launchd_runner([], _launchd_print_with_exit_code(PORT_IN_USE_EXIT_CODE)),
+    )
+
+    assert result.details["port_in_use"] is True
+    assert str(runtime.port) in result.message
+    assert "already in use" in result.message
+    assert "PWA_PORT" in result.message
+
+
+def test_status_says_nothing_about_the_port_for_an_ordinary_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+
+    result = macos_service.service_status(
+        runtime=runtime,
+        uid=501,
+        runner=_launchd_runner([], _launchd_print_with_exit_code(1)),
+    )
+
+    assert result.details["port_in_use"] is False
+    assert "PWA_PORT" not in result.message
+
+
+def test_status_says_nothing_about_the_port_when_the_exit_code_is_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A job that was never run has no last exit code, and no verdict."""
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+
+    result = macos_service.service_status(
+        runtime=runtime,
+        uid=501,
+        runner=_launchd_runner([], NOT_LOADED_PRINT, print_returncode=113),
+    )
+
+    assert result.details["last_exit_code"] is None
+    assert result.details["port_in_use"] is False
+
+
+def test_status_names_the_port_from_the_record_the_engine_left(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The record is the truth, because the job is being held.
+
+    The supervisor holds the job after a bind failure rather than letting
+    the service manager respawn it, so the job's last exit code is stale:
+    the reason is what the engine recorded.
+    """
+    from ciao import port_in_use
+
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+    port_in_use.record_port_in_use(
+        port_in_use.port_in_use_message(runtime.port, Path(runtime.workspace))
+    )
+
+    result = macos_service.service_status(
+        runtime=runtime,
+        uid=501,
+        runner=_launchd_runner([], _launchd_print_with_exit_code(0)),
+    )
+
+    assert result.details["port_in_use"] is True
+    assert str(runtime.port) in result.message
+    assert "already in use" in result.message
+    assert "PWA_PORT" in result.message
+    port_in_use.clear_port_in_use()
+
+
+def test_start_service_reports_the_port_the_engine_could_not_bind(
+    tmp_path: Path,
+) -> None:
+    """`ciao service start` names the port instead of a bare failure.
+
+    The job was started and the engine died on the bind, so the job's last
+    exit code is the port-in-use one. The operator has to be told which port
+    and how to move it, not that "launchctl start failed".
+    """
+    from ciao.port_in_use import PORT_IN_USE_EXIT_CODE
+
+    runtime = _runtime(tmp_path)
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        printed = (
+            _launchd_print_with_exit_code(PORT_IN_USE_EXIT_CODE)
+            if command[1] == "print"
+            else ""
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=printed, stderr="")
+
+    result = macos_service.start_service(runtime=runtime, uid=501, runner=run)
+
+    assert result.ok is False
+    assert result.details["port_in_use"] is True
+    assert str(runtime.port) in result.message
+    assert "already in use" in result.message
+    assert "PWA_PORT" in result.message
+
+
+def test_start_service_succeeds_when_the_engine_did_not_fail_on_the_port(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        printed = (
+            _launchd_print_with_exit_code(0)
+            if command[1] == "print"
+            else ""
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=printed, stderr="")
+
+    result = macos_service.start_service(runtime=runtime, uid=501, runner=run)
+
+    assert result.ok is True
+    assert result.message == "Ciaobot engine started."
+    assert "PWA_PORT" not in result.message
+

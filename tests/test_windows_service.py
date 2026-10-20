@@ -219,6 +219,32 @@ def test_schtasks_failure_carries_the_tool_message(monkeypatch: pytest.MonkeyPat
         ws.register_task(Path(r"C:\x\t.xml"))
 
 
+def test_status_names_the_port_the_engine_could_not_bind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bind failure is named, on every platform that has a service.
+
+    An engine that cannot bind its port cannot serve the endpoint that
+    would report it, so the reason is read from the record the engine left
+    outside the workspace (#1654).
+    """
+    from ciao import port_in_use
+
+    monkeypatch.setattr(ws.subprocess, "run", _Schtasks())
+    monkeypatch.setattr(ws.macos_service, "server_reachable", lambda _port: False)
+    port_in_use.record_port_in_use(
+        port_in_use.port_in_use_message(8443, Path(r"C:\w"))
+    )
+    try:
+        result = ws.service_status(8443)
+    finally:
+        port_in_use.clear_port_in_use()
+
+    assert "8443" in result.message
+    assert "already in use" in result.message
+    assert "PWA_PORT" in result.message
+
+
 def test_schtasks_timeout_is_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
     def timeout(*args: object, **kwargs: object):
         raise subprocess.TimeoutExpired(["schtasks.exe"], ws.SCHTASKS_TIMEOUT_S)

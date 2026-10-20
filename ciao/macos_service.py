@@ -18,6 +18,12 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 from xml.parsers.expat import ExpatError
 
+from ciao.port_in_use import (
+    PORT_IN_USE_EXIT_CODE,
+    clear_port_in_use,
+    port_in_use_message,
+    read_port_in_use,
+)
 from ciao.server_host import ServerHostError, parse_service_command
 from ciao.workspace_access import read_denial
 
@@ -37,6 +43,12 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 # exists fails or leaves a half-dead service.
 RELOAD_TEARDOWN_TIMEOUT_S = 45
 RELOAD_POLL_INTERVAL_S = 0.5
+# How long a start waits for the engine to come up, or to record that it
+# could not bind its port. A start that reports "started" before the engine
+# has had a chance to fail is a start that reports a hope. The engine
+# reaches its bind within a second or two of starting, so this is about
+# the failure and not about the engine being ready.
+START_SETTLE_TIMEOUT_S = 2.0
 # Test seam: the teardown poll sleeps through this, so tests run without waiting.
 _sleep: Callable[[float], None] = time.sleep
 
@@ -233,6 +245,23 @@ def parse_launchctl_print_arguments(text: str) -> list[str] | None:
     return launchctl_print_list(text, "arguments")
 
 
+def parse_launchctl_last_exit_code(text: str) -> int | None:
+    """The code the loaded job last exited with, or ``None`` when it has not.
+
+    launchd renders it as ``last exit code = 3`` inside the job's own block.
+    A job that has never run has no such line, and a launchctl that printed
+    nothing usable for the job has none either: both answer ``None``, which
+    is "the machine did not say", not "the job exited cleanly".
+    """
+    value = launchctl_print_field(text, "last exit code").strip()
+    if not value:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 def load_server_plist(launch_agents_dir: Path | None = None) -> dict[str, Any] | None:
     """The parsed ``com.ciao.server.plist``, or ``None`` when missing or unreadable.
 
@@ -272,13 +301,32 @@ def _loaded_definition(uid: int, runner: Runner) -> tuple[bool, list[str] | None
     ``(False, None)`` when the job is not loaded or launchctl cannot be run.
     ``(True, None)`` when it is loaded but its arguments are not readable.
     """
+    loaded, arguments, _code = _loaded_job(uid, runner)
+    return loaded, arguments
+
+
+def _loaded_job(
+    uid: int, runner: Runner
+) -> tuple[bool, list[str] | None, int | None]:
+    """What launchd holds for the server job: loaded, its argv, its exit code.
+
+    One ``launchctl print`` answers all three, so the job is asked once: a
+    second call could see a different job (one that just exited, one that
+    was just reloaded) and the three facts would no longer be the same
+    moment.
+    """
     try:
         completed = _launchctl(["print", f"gui/{uid}/{SERVER_LABEL}"], runner=runner)
     except OSError:
-        return False, None
+        return False, None, None
+    printed = completed.stdout or ""
     if completed.returncode != 0:
-        return False, None
-    return True, parse_launchctl_print_arguments(completed.stdout or "")
+        return False, None, None
+    return (
+        True,
+        parse_launchctl_print_arguments(printed),
+        parse_launchctl_last_exit_code(printed),
+    )
 
 
 def _plist_matches_loaded(
@@ -543,6 +591,50 @@ def server_reachable(port: int, *, timeout: float = 2.0) -> bool:
         return False
 
 
+def wait_for_engine(runtime: DesktopRuntime) -> None:
+    """Give the engine time to come up, or to record that it could not.
+
+    Bounded: the engine is starting in the background, and a start that
+    waits forever is a start that never answers. The wait ends as soon as
+    the engine serves its port or records a bind failure.
+    """
+    deadline = time.monotonic() + START_SETTLE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if read_port_in_use():
+            return
+        if server_reachable(runtime.port):
+            return
+        time.sleep(0.5)
+
+
+def port_in_use_reason(
+    runtime: DesktopRuntime,
+    *,
+    uid: int | None = None,
+    runner: Runner = subprocess.run,
+) -> str | None:
+    """Why the engine could not start, when the port was the reason.
+
+    The engine records the reason where a reader outside it can find it
+    (see :mod:`ciao.port_in_use`), because an engine that cannot bind
+    cannot serve the endpoint that would report it. The launchd job's last
+    exit code says the same thing from the other side: the engine left
+    with the port-in-use code, so a job that last exited that way failed
+    for this reason and not for another.
+
+    ``None`` when neither says so — the engine may not have run at all, it
+    may be running fine, or it may have failed for another reason.
+    """
+    recorded = read_port_in_use()
+    if recorded:
+        return recorded
+    resolved_uid = _getuid() if uid is None else uid
+    _loaded, _arguments, last_exit_code = _loaded_job(resolved_uid, runner)
+    if last_exit_code != PORT_IN_USE_EXIT_CODE:
+        return None
+    return port_in_use_message(runtime.port, Path(runtime.workspace))
+
+
 def service_status(
     *,
     runtime: DesktopRuntime | None = None,
@@ -552,7 +644,7 @@ def service_status(
     runtime = runtime or discover_runtime()
     resolved_uid = _getuid() if uid is None else uid
     installed = Path(runtime.server_plist).is_file()
-    loaded, loaded_arguments = _loaded_definition(resolved_uid, runner)
+    loaded, loaded_arguments, last_exit_code = _loaded_job(resolved_uid, runner)
     loaded_python_path = service_python_path(loaded_arguments) if loaded_arguments else None
     plist_matches_loaded = _plist_matches_loaded(
         loaded_arguments,
@@ -565,10 +657,16 @@ def service_status(
     except RestartBlockersUnavailable:
         blockers = None
     denied = "" if reachable else read_denial()
+    port_in_use_reason_text = (
+        "" if reachable else port_in_use_reason(runtime, uid=resolved_uid, runner=runner)
+    )
+    port_in_use = bool(port_in_use_reason_text)
     if reachable:
         message = "Ciaobot engine is running."
     elif denied:
         message = f"Ciaobot engine is not running: {denied}"
+    elif port_in_use:
+        message = f"Ciaobot engine is not running: {port_in_use_reason_text}"
     else:
         message = "Ciaobot engine is stopped."
     if blockers:
@@ -594,6 +692,9 @@ def service_status(
             "reachable": reachable,
             "restart_blockers": blockers,
             "workspace_access_denied": denied or None,
+            "last_exit_code": last_exit_code,
+            "port_in_use": port_in_use,
+            "port_in_use_reason": port_in_use_reason_text or None,
         },
     )
 
@@ -604,6 +705,14 @@ def start_service(
     uid: int | None = None,
     runner: Runner = subprocess.run,
 ) -> ServiceResult:
+    """Start the engine, and say why if it could not bind its port.
+
+    The engine records a bind failure where a reader outside it can find it
+    (see :mod:`ciao.port_in_use`), because an engine that cannot bind
+    cannot serve the endpoint that would report it. The record of an
+    earlier failure is cleared first, so what is read back belongs to this
+    start and not to a run before it.
+    """
     runtime = runtime or discover_runtime()
     plist = Path(runtime.server_plist)
     if not plist.is_file():
@@ -615,6 +724,7 @@ def start_service(
         )
     resolved_uid = _getuid() if uid is None else uid
     domain = f"gui/{resolved_uid}"
+    clear_port_in_use()
     try:
         _launchctl(["enable", f"{domain}/{SERVER_LABEL}"], runner=runner)
         bootstrap = _launchctl(["bootstrap", domain, str(plist)], runner=runner)
@@ -627,6 +737,14 @@ def start_service(
     if kickstart.returncode != 0:
         detail = _command_error(kickstart) or _command_error(bootstrap)
         return ServiceResult(False, "start", detail or "launchctl start failed", asdict(runtime))
+    reason = port_in_use_reason(runtime, uid=resolved_uid, runner=runner)
+    if reason is not None:
+        return ServiceResult(
+            False,
+            "start",
+            reason,
+            {**asdict(runtime), "port_in_use": True},
+        )
     return ServiceResult(True, "start", "Ciaobot engine started.", asdict(runtime))
 
 
