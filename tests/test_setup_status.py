@@ -1145,6 +1145,42 @@ def test_setup_finish_accepts_0000_host(tmp_path) -> None:
     assert resp.json()["ok"] is True
 
 
+def test_setup_finish_refuses_a_protected_folder_without_a_host(
+    tmp_path, monkeypatch
+) -> None:
+    from ciao import cli
+
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: None)
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    workspace = home / "Documents" / "ws"
+
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(workspace),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 409
+    assert "Ciaobot Server" in resp.json()["error"]
+    assert not workspace.exists()
+
+
 def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
     config = _config(tmp_path)
     serializer = URLSafeTimedSerializer("test-secret")
@@ -2403,6 +2439,10 @@ def test_finder_prefs_reads_the_plist_and_tolerates_garbage(tmp_path) -> None:
 
     prefs.write_bytes(b"not a plist at all")
     assert cloud_synced_location(docs, platform="darwin", home=home) is None
+    prefs.write_bytes(
+        b'<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>FXICl'
+    )
+    assert cloud_synced_location(docs, platform="darwin", home=home) is None
     prefs.unlink()
     assert cloud_synced_location(docs, platform="darwin", home=home) is None
 
@@ -2416,6 +2456,13 @@ def test_setup_inspect_folder_reports_macos_access_note(tmp_path, monkeypatch) -
     assert resp.json()["macos_access_note"] == ""
 
     monkeypatch.setattr("ciao.setup_status.macos_access_note", lambda path: "ALLOW IT")
+    # No verified Ciaobot Server on this Mac: the folder is refused later, so
+    # promising a prompt would mislead.
+    monkeypatch.setattr("ciao.cli._verified_host_if_installed", lambda: None)
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["macos_access_note"] == ""
+
+    monkeypatch.setattr("ciao.cli._verified_host_if_installed", lambda: object())
     resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
     assert resp.json()["macos_access_note"] == "ALLOW IT"
 

@@ -1432,9 +1432,9 @@ install_step "could not write the install receipt" \
 # runtime root a host owns.
 if [ "$migrate_path" != client ]; then
     # --yes turns off every guard in `ciao setup` (a health check that never
-    # comes up, a service silently re-pointed at a different workspace), so it is passed only for the workspace this
-    # script detected the engine already running in - the same rule install.sh
-    # applies.
+    # comes up, a service silently re-pointed at a different workspace), so it
+    # is passed only for the workspace this script detected the engine already
+    # running in - the same rule install.sh applies.
     setup_yes=
     if [ -z "$workspace" ]; then
         workspace=

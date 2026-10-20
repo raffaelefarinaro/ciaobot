@@ -21,6 +21,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 from typing import Iterable, Mapping, Any
 
 from ciao import provider_registry
@@ -208,7 +209,7 @@ def _finder_prefs(home: Path) -> Mapping[str, Any]:
     try:
         with (home / "Library/Preferences/com.apple.finder.plist").open("rb") as handle:
             loaded = plistlib.load(handle)
-    except (OSError, plistlib.InvalidFileException, ValueError):
+    except (OSError, plistlib.InvalidFileException, ValueError, ExpatError):
         return {}
     return loaded if isinstance(loaded, dict) else {}
 

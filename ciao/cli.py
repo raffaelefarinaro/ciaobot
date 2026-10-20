@@ -1062,7 +1062,13 @@ def setup_workspace(
                 if launch_agents_dir is not None
                 else service_backend.current_backend().agents_dir()
             )
-            if not _existing_hosted_definition_serves(tcc_launch_dir, root):
+            # An installed definition that already serves this workspace, in
+            # either shape, keeps working (a Mac set up before this guard moved);
+            # only a workspace the service does not yet serve is refused.
+            if (
+                not _existing_hosted_definition_serves(tcc_launch_dir, root)
+                and _registered_service_workspace(tcc_launch_dir) != root
+            ):
                 raise RuntimeError(
                     f"{root} is inside ~/{protected}. macOS lets the background engine into "
                     "that folder only when it runs as the Ciaobot Server app, and no verified "

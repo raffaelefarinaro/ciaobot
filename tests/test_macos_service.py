@@ -529,7 +529,11 @@ def test_service_start_registers_a_protected_workspace_under_the_host(
     import plistlib
 
     from ciao import cli
-    from tests.test_server_host_activation import _verified_host
+    from tests.test_server_host_activation import (
+        _ENGINE_PYTHON,
+        _hosted_expected,
+        _verified_host,
+    )
 
     home = tmp_path
     workspace = home / "Documents" / "ws"
@@ -541,6 +545,8 @@ def test_service_start_registers_a_protected_workspace_under_the_host(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: host)
+    monkeypatch.setattr(sys, "executable", _ENGINE_PYTHON)
+    monkeypatch.delenv("CIAO_ENGINE_PATH", raising=False)
     monkeypatch.setattr(
         macos_service,
         "_launchctl",
@@ -555,7 +561,7 @@ def test_service_start_registers_a_protected_workspace_under_the_host(
     assert rc == 0, capsys.readouterr().out
     with plist_path.open("rb") as handle:
         argv = plistlib.load(handle)["ProgramArguments"]
-    assert argv[0].endswith("Ciaobot Server")
+    assert argv == _hosted_expected(host, _ENGINE_PYTHON)
 
 
 @launchd_only

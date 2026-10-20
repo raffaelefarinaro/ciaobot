@@ -59,7 +59,7 @@ def test_plan_refuses_a_protected_destination_or_source(
 
     protected = _workspace(home / "Desktop" / "old")
     result = _plan(protected, home / "new")
-    assert any("background job" in r and "workspace" in r for r in result.refusals)
+    assert any(r.startswith("The workspace is inside ~/Desktop") for r in result.refusals)
 
     assert not any("background job" in r for r in _plan(plain, home / "new").refusals)
 

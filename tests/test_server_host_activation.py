@@ -466,6 +466,37 @@ def test_setup_writes_a_hosted_definition_for_a_protected_workspace(
     assert data["ProgramArguments"] == _hosted_expected(host, _ENGINE_PYTHON)
 
 
+def test_setup_keeps_an_existing_direct_definition_for_a_protected_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _fake_home(tmp_path, monkeypatch)
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    workspace = (home / "Documents" / "ws").resolve()
+    workspace.mkdir()
+    other = (home / "Documents" / "other").resolve()
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: None)
+    cli._write_launchd_plist(workspace=workspace, launch_agents_dir=agents, port=8443)
+
+    # The installed definition already serves this workspace: setup goes on.
+    cli.setup_workspace(
+        workspace,
+        launch_agents_dir=agents,
+        python_path=sys.executable,
+        confirm_repoint=True,
+    )
+
+    # A different workspace in a protected folder is still refused.
+    with pytest.raises(RuntimeError, match="Ciaobot Server"):
+        cli.setup_workspace(
+            other,
+            launch_agents_dir=agents,
+            python_path=sys.executable,
+            confirm_repoint=True,
+        )
+    assert not other.exists()
+
+
 @macos_host_shape_only
 def test_setup_keeps_an_existing_hosted_definition_for_a_protected_workspace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

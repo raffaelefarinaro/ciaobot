@@ -6212,6 +6212,7 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     chips when they are present; otherwise it asks for the logical workspace
     name that will be assigned to the selected folder.
     """
+    from ciao import cli
     from ciao.cli import detect_vault_mode
     from ciao.setup_status import (
         cloud_sync_warning,
@@ -6244,7 +6245,9 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
         "vault_root": str(vault_root),
         "existing_workspaces": nested,
         "cloud_sync_warning": cloud_sync_warning(target),
-        "macos_access_note": macos_access_note(target),
+        "macos_access_note": (
+            macos_access_note(target) if cli._verified_host_if_installed() is not None else ""
+        ),
     })
 
 
