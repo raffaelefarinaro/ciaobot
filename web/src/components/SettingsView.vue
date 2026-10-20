@@ -467,12 +467,16 @@
               <label class="settings-field">
                 <span class="ws-label">Current password</span>
                 <input
+                  id="auth-current-password"
                   v-model="authCurrentPassword"
                   type="password"
                   class="routine-input"
                   autocomplete="current-password"
+                  :aria-invalid="authCurrentPasswordError ? 'true' : undefined"
+                  :aria-describedby="authCurrentPasswordError ? 'auth-current-password-error' : undefined"
                   :disabled="authSettingsSaving"
                 />
+                <span v-if="authCurrentPasswordError" id="auth-current-password-error" class="hint hint--warn" role="alert">{{ authCurrentPasswordError }}</span>
               </label>
               <label class="settings-field">
                 <span class="ws-label">New password</span>
@@ -4295,6 +4299,8 @@ interface AuthSettings {
 
 const authSettings = ref<AuthSettings | null>(null)
 const authCurrentPassword = ref('')
+const authCurrentPasswordError = ref('')
+watch(authCurrentPassword, () => { authCurrentPasswordError.value = '' })
 const authNewPassword = ref('')
 const authSettingsSaving = ref(false)
 const authSettingsResult = ref('')
@@ -4322,6 +4328,7 @@ async function saveAuthSettings() {
   authSettingsSaving.value = true
   authSettingsResult.value = ''
   authSettingsError.value = false
+  authCurrentPasswordError.value = ''
   try {
     const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', {
       password: authNewPassword.value,
@@ -4334,6 +4341,16 @@ async function saveAuthSettings() {
     authNewPassword.value = ''
     authSettingsResult.value = 'Password saved. Other devices have to log in again.'
   } catch (e) {
+    const code = (e as { payload?: { code?: unknown } } | null)?.payload?.code
+    if (code === 'wrong_current_password' || code === 'current_password_required') {
+      authCurrentPasswordError.value = code === 'wrong_current_password'
+        ? 'Current password is incorrect.'
+        : 'Enter your current password.'
+      authSettingsSaving.value = false
+      await nextTick()
+      document.getElementById('auth-current-password')?.focus()
+      return
+    }
     authSettingsError.value = true
     authSettingsResult.value = apiErrorMessage(e, 'Could not save password settings')
   }
