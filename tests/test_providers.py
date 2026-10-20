@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,14 +12,19 @@ import pytest
 
 from ciao.execution_modes import harness_skill_overrides
 from ciao.fs_sandbox import FsSandboxUnavailable
-from ciao.models import AgentRequest, ImageAttachment
+from ciao.models import AgentRequest, ImageAttachment, ResultEvent
 from ciao.providers.base import (
     build_claude_message_content,
     build_prompt,
 )
 from claude_agent_sdk import ClaudeSDKError
 
-from ciao.providers.claude import ClaudeProvider, _sdk_permission_mode
+from ciao.providers.claude import (
+    ClaudeInitializeTimeout,
+    ClaudeProvider,
+    _is_initialize_timeout,
+    _sdk_permission_mode,
+)
 from ciao.providers.opencode import OpencodeProvider
 from ciao.web.project_chats import ProjectChatManager
 
@@ -2985,3 +2991,119 @@ def test_a_changed_linked_repo_changes_the_claude_spawn_key(tmp_path: Path) -> N
     req_b = AgentRequest(prompt="x", model="sonnet", mode="auto", linked_repo="/r/b")
 
     assert provider._spawn_key_for(req_a) != provider._spawn_key_for(req_b)
+
+
+# ── Initialize handshake: budget, diagnostics, retry ─────────────────────
+# A cold CLI start measured 13-53 s on a loaded machine (2026-10-20), right at
+# the SDK's 60 s initialize floor. These pin the three things that keep a
+# first turn alive: a longer deadline, a startup failure that names itself, and
+# one retry on a fresh CLI when the handshake still misses.
+
+
+def test_initialize_timeout_matches_only_the_initialize_subtype() -> None:
+    assert _is_initialize_timeout(Exception("Control request timeout: initialize"))
+    assert not _is_initialize_timeout(Exception("Control request timeout: get_context_usage"))
+    assert not _is_initialize_timeout(Exception("ProcessTransport is not ready for writing"))
+
+
+@pytest.mark.asyncio
+async def test_claude_cli_gets_the_initialize_budget_and_startup_failure_results(
+    tmp_path: Path, monkeypatch
+) -> None:
+    constructed: list[object] = []
+
+    class FakeClient:
+        def __init__(self, options):
+            constructed.append(options)
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    monkeypatch.delenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT", raising=False)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        extra_env={"CIAO_CHAT_ID": "chat-1"},
+    )
+
+    await provider._ensure_connected(request)
+
+    options = constructed[0]
+    assert options.env["CLAUDE_CODE_STARTUP_FAILURE_RESULTS"] == "1"
+    # The caller's own environment still reaches the CLI.
+    assert options.env["CIAO_CHAT_ID"] == "chat-1"
+    # The SDK reads this from the process environment, not from options.
+    assert os.environ["CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"] == "180000"
+
+
+@pytest.mark.asyncio
+async def test_caller_startup_failure_results_value_wins(
+    tmp_path: Path, monkeypatch
+) -> None:
+    constructed: list[object] = []
+
+    class FakeClient:
+        def __init__(self, options):
+            constructed.append(options)
+
+    provider = ClaudeProvider(tmp_path)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        extra_env={"CLAUDE_CODE_STARTUP_FAILURE_RESULTS": "0"},
+    )
+
+    await provider._ensure_connected(request)
+
+    assert constructed[0].env["CLAUDE_CODE_STARTUP_FAILURE_RESULTS"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_claude_initialize_timeout_retries_once_with_a_fresh_cli(
+    tmp_path: Path, monkeypatch
+) -> None:
+    provider = ClaudeProvider(tmp_path)
+    attempts: list[int] = []
+
+    async def fake_once(request, register_handle):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ClaudeInitializeTimeout("Control request timeout: initialize")
+        yield ResultEvent(type="result", result="ok")
+
+    monkeypatch.setattr(provider, "_run_streaming_once", fake_once)
+    request = AgentRequest(prompt="hi", model="sonnet", mode="auto")
+
+    events = [event async for event in provider.run_streaming(request, lambda handle: None)]
+
+    assert len(attempts) == 2
+    assert [event.type for event in events] == ["result"]
+    assert events[0].result == "ok"
+
+
+@pytest.mark.asyncio
+async def test_claude_second_initialize_timeout_is_not_retried_again(
+    tmp_path: Path, monkeypatch
+) -> None:
+    provider = ClaudeProvider(tmp_path)
+    attempts: list[int] = []
+
+    async def fake_once(request, register_handle):
+        attempts.append(1)
+        raise ClaudeInitializeTimeout("Control request timeout: initialize")
+        yield ResultEvent(type="result")  # pragma: no cover - unreachable
+
+    monkeypatch.setattr(provider, "_run_streaming_once", fake_once)
+    request = AgentRequest(prompt="hi", model="sonnet", mode="auto")
+
+    with pytest.raises(ClaudeInitializeTimeout):
+        async for _ in provider.run_streaming(request, lambda handle: None):
+            pass
+
+    # One retry, then the error is the user's: a machine failing every spawn
+    # must not loop.
+    assert len(attempts) == 2
