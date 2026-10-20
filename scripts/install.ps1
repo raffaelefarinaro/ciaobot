@@ -279,6 +279,25 @@ print(name, digest, size)
         }
     }
 
+    # Why the engine could not bind its port (#1669), or '' when it did not say.
+    #
+    # The engine records the reason outside the workspace
+    # (ciao/port_in_use.port_in_use_path), because an engine that cannot bind
+    # cannot serve the endpoint that would report it - the same record
+    # install-engine.sh, `ciao service status` and ciao/windows_service.py read.
+    # The path is asked of the wheel, so it has one owner rather than a copy
+    # here that could drift.
+    function Read-PortInUseReason([string]$Uv, [string]$Wheel) {
+        if (-not $Uv -or -not $Wheel) { return '' }
+        $probe = Invoke-Native $Uv @(
+            'run', '--quiet', '--no-project', '--python', $PythonVersion, '--with', $Wheel,
+            'python', '-I', '-c',
+            "import sys`nfrom ciao.port_in_use import read_port_in_use`ntext = read_port_in_use()`nsys.stdout.write(text)`nsys.exit(0 if text else 1)"
+        ) $true
+        if ($probe.ExitCode -ne 0) { return '' }
+        return (@($probe.Output) | ForEach-Object { [string]$_ }) -join "`n"
+    }
+
     # PWA_PORT out of the workspace .env, the same source install-engine.sh
     # reads; the last occurrence wins, as that pipeline's `tail -1` does.
     function Read-WorkspacePort([string]$Path) {
@@ -923,24 +942,30 @@ print(name, digest, size)
             }
             Start-Sleep -Seconds 1
         }
+        # The link is printed unless the engine is known not to be serving. A
+        # slow first boot and a signed-out account both keep it: the task is
+        # registered, so the engine comes up, and the link is what signs the
+        # person in when it does.
+        $engineReady = $true
         if (-not $signedIn) {
             Write-Host "Nobody is signed in to Windows as $env:USERDOMAIN\$env:USERNAME, so the engine starts the next time this account signs in."
         } elseif (-not $healthy) {
-            # The same sentence install-engine.sh prints: a warning, not a
-            # failure, and not a rollback either - the task is registered, so the
-            # engine is on its way up.
-            Write-Warning 'Ciaobot engine installer: the engine is still starting; check: ciao service status'
-        }
-
-        # Printed to the terminal and nowhere else: the URL is a one-time
-        # credential that signs the person at this keyboard in. A failure must not
-        # reach the user as "Open Ciaobot: " with nothing after it.
-        $urlOutput = Invoke-Native $ciao @('setup-url', '--workspace', $workspace) $true
-        $urlLines = @($urlOutput.Output | Where-Object { ([string]$_).Trim() -ne '' })
-        $url = ''
-        if ($urlLines.Count -gt 0) { $url = ([string]$urlLines[-1]).Trim() }
-        if (($urlOutput.ExitCode -ne 0) -or -not $url.StartsWith('http://')) {
-            Fail "could not create the sign-in link; run: $(Format-Command $ciao @('setup-url', '--workspace', $workspace))"
+            # The engine records a bind failure outside the workspace, because
+            # an engine that cannot bind cannot serve the endpoint that would
+            # report it (#1654, #1669). Naming the port and the two ways out is
+            # what turns "it is still starting" into something the operator can
+            # act on - and a link to a port nothing is listening on cannot work,
+            # so it is not printed.
+            $portReason = Read-PortInUseReason $uv $wheel
+            if ($portReason) {
+                Write-Warning "Ciaobot engine installer: $portReason"
+                $engineReady = $false
+            } else {
+                # The same sentence install-engine.sh prints: a warning, not a
+                # failure, and not a rollback either - the task is registered, so
+                # the engine is on its way up.
+                Write-Warning 'Ciaobot engine installer: the engine is still starting; check: ciao service status'
+            }
         }
 
         Write-Host ''
@@ -949,15 +974,29 @@ print(name, digest, size)
         if ($pathEntry) {
             Write-Host "Added to your PATH for new terminals (and to this one): $pathEntry"
         }
-        Write-Host "Open Ciaobot: $url"
-        Write-Host 'This link signs you in once. Do not share it.'
-        if ($welcomePending) { Write-Host 'Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager.' }
-        # Only when there is a terminal to open it in: redirected output means
-        # this text is a log file, and a browser popping up over a CI log is
-        # nobody's idea of a good time.
-        if (-not [Console]::IsOutputRedirected) {
-            try { Start-Process $url | Out-Null } catch { Write-Host "Could not open a browser; open the link above." }
+        if ($engineReady) {
+            # Printed to the terminal and nowhere else: the URL is a one-time
+            # credential that signs the person at this keyboard in. A failure
+            # must not reach the user as "Open Ciaobot: " with nothing after it,
+            # and a link to an engine that is not serving cannot work at all
+            # (#1669) - so no link is made when the port was the reason.
+            $urlOutput = Invoke-Native $ciao @('setup-url', '--workspace', $workspace) $true
+            $urlLines = @($urlOutput.Output | Where-Object { ([string]$_).Trim() -ne '' })
+            $url = ''
+            if ($urlLines.Count -gt 0) { $url = ([string]$urlLines[-1]).Trim() }
+            if (($urlOutput.ExitCode -ne 0) -or -not $url.StartsWith('http://')) {
+                Fail "could not create the sign-in link; run: $(Format-Command $ciao @('setup-url', '--workspace', $workspace))"
+            }
+            Write-Host "Open Ciaobot: $url"
+            Write-Host 'This link signs you in once. Do not share it.'
+            # Only when there is a terminal to open it in: redirected output
+            # means this text is a log file, and a browser popping up over a CI
+            # log is nobody's idea of a good time.
+            if (-not [Console]::IsOutputRedirected) {
+                try { Start-Process $url | Out-Null } catch { Write-Host "Could not open a browser; open the link above." }
+            }
         }
+        if ($welcomePending) { Write-Host 'Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager.' }
     } catch {
         $message = $_.Exception.Message
         if ($mutated) {
