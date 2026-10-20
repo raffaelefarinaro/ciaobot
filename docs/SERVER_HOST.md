@@ -198,8 +198,17 @@ Documents folder" prompt without any `NS*FolderUsageDescription` key. Allow
 covers the supervisor, the engine and the agent children, and survives logout
 and login. A direct (bare-Python) definition gets no prompt and no grant, so
 `setup_workspace` and `_register_launchd_service` still refuse a protected
-folder when no verified host is installed, and workspace move (a bare-Python
-launchd job) refuses a protected source and destination.
+folder when no verified host is installed.
+
+The workspace move is the other half of that rule (#1658). Its launchd job
+runs the host's `run-move` operation, so it is a descendant of the branded
+`Ciaobot Server` app and the grant the user gave the host covers the move too.
+With a verified host the plan warns (naming the folder and the one-time macOS
+prompt) instead of refusing; without one the job stays a bare interpreter and
+a protected source or destination is still refused. A folder the user answered
+*Don't Allow* to is recorded through `ciao/workspace_access.py::record_denial`
+and reported with the move's folder, not as a traceback in
+`workspace-move.log`.
 
 Revision 3 adds the three usage strings the prompt was missing
 (#1659): `NSDesktopFolderUsageDescription`,
