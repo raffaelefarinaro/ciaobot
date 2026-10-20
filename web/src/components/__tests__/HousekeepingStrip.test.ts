@@ -2,8 +2,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { mount } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { flushPromises, mount } from '@vue/test-utils'
+import { defineComponent, nextTick } from 'vue'
 import HousekeepingStrip from '../HousekeepingStrip.vue'
 import HomeNoticeReopen from '../HomeNoticeReopen.vue'
 import { resetHomeNoticeWindows } from '../../composables/useHomeNoticeWindows'
@@ -394,5 +394,102 @@ describe('a blocking precondition', () => {
     expect(tiles[1].classes()).not.toContain('housekeeping-tile--blocking')
     // It is actionable in place: no navigation required to clear it.
     expect(tiles[0].text()).toContain('Separate them now')
+  })
+})
+
+describe('a provider update tile', () => {
+  const terminalStub = defineComponent({
+    name: 'HostTerminalButton',
+    props: { action: { type: String, default: '' }, label: { type: String, default: '' } },
+    emits: ['not-applicable'],
+    template: '<button class="terminal-stub" @click="$emit(\'not-applicable\')">{{ label }}</button>',
+  })
+
+  function providerUpdate(overrides: Partial<OperatorAction> = {}): OperatorAction {
+    return action({
+      id: 'provider-update:opencode',
+      workspace: '',
+      terminal_action: 'opencode-update',
+      command: 'opencode upgrade 2.1.0',
+      run_label: 'Check again',
+      dismiss_label: 'Not now',
+      ...overrides,
+    })
+  }
+
+  function mountStrip() {
+    return mount(HousekeepingStrip, { global: { stubs: { HostTerminalButton: terminalStub } } })
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('renders the copyable command and the terminal button for a provider update', async () => {
+    useHousekeepingStore().actions = [providerUpdate()]
+    const wrapper = mountStrip()
+    await nextTick()
+
+    expect(wrapper.get('.housekeeping-command code').text()).toBe('opencode upgrade 2.1.0')
+    const terminal = wrapper.getComponent(terminalStub)
+    expect(terminal.props('action')).toBe('opencode-update')
+    expect(terminal.props('label')).toBe('Update in Terminal')
+    const checkAgain = wrapper.findAll('.housekeeping-actions button').find(b => b.text() === 'Check again')!
+    expect(checkAgain.classes()).toContain('btn-chip')
+    expect(checkAgain.classes()).not.toContain('btn-primary')
+  })
+
+  it('copies the command and says Copied', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } })
+    useHousekeepingStore().actions = [providerUpdate()]
+    const wrapper = mountStrip()
+    await nextTick()
+
+    const copy = wrapper.get('.housekeeping-command button')
+    expect(copy.text()).toBe('Copy')
+    await copy.trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('opencode upgrade 2.1.0')
+    expect(copy.text()).toBe('Copied')
+  })
+
+  it('dismisses a provider update with Not now', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [providerUpdate()]
+    const dismiss = vi.spyOn(store, 'dismiss').mockResolvedValue({ ok: true, summary: '' })
+    const wrapper = mountStrip()
+    await nextTick()
+
+    await wrapper.findAll('.housekeeping-actions button').find(b => b.text() === 'Not now')!.trigger('click')
+    expect(dismiss).toHaveBeenCalledWith('provider-update:opencode')
+  })
+
+  it('refreshes the strip when the terminal says there is nothing to update', async () => {
+    const store = useHousekeepingStore()
+    store.actions = [providerUpdate()]
+    const refresh = vi.spyOn(store, 'refresh').mockResolvedValue(undefined)
+    const wrapper = mountStrip()
+    await nextTick()
+
+    await wrapper.get('.terminal-stub').trigger('click')
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows no command row or terminal button for actions without one', async () => {
+    useHousekeepingStore().actions = [action({ run_label: 'Run' })]
+    const wrapper = mountStrip()
+    await nextTick()
+
+    expect(wrapper.find('.housekeeping-command').exists()).toBe(false)
+    expect(wrapper.find('.terminal-stub').exists()).toBe(false)
+  })
+
+  it('keeps the filled run button when there is no terminal action', async () => {
+    useHousekeepingStore().actions = [action({ run_label: 'Install' })]
+    const wrapper = mountStrip()
+    await nextTick()
+
+    expect(wrapper.get('.housekeeping-actions button').classes()).toContain('btn-primary')
   })
 })

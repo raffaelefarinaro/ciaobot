@@ -819,6 +819,78 @@ describe('component mount smoke', () => {
     }
   })
 
+  async function mountModelsWith(releaseChecks: Record<string, Record<string, unknown>>) {
+    const testApi = api as typeof api & {
+      setResponse: (path: string, value: unknown) => void
+      getResponse: (path: string) => unknown
+    }
+    const original = testApi.getResponse('/api/settings/providers') as {
+      connections: Record<string, Record<string, unknown>>
+    }
+    const connections = { ...original.connections }
+    for (const [key, release_check] of Object.entries(releaseChecks)) {
+      connections[key] = { ...connections[key], release_check }
+    }
+    testApi.setResponse('/api/settings/providers', { ...original, connections })
+    const router = makeRouter()
+    await router.push('/settings/models')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+    return { wrapper, restore: () => testApi.setResponse('/api/settings/providers', original) }
+  }
+
+  function providerRow(wrapper: ReturnType<typeof mount>, label: RegExp) {
+    return wrapper.findAll('.provider-connections .credential-row').find(r => label.test(r.find('.set-row-title').text()))!
+  }
+
+  it('SettingsView shows the release-tested version and an update command for an older OpenCode', async () => {
+    const { wrapper, restore } = await mountModelsWith({
+      opencode: { state: 'below_tested', installed: '2.0.32', tested: '2.1.0', command: 'opencode upgrade 2.1.0', terminal_action: 'opencode-update' },
+    })
+    try {
+      const row = providerRow(wrapper, /opencode/i)
+      expect(row.text()).toContain('Older than 2.1.0')
+      expect(row.text()).toContain('opencode upgrade 2.1.0')
+      expect(row.find('.provider-release-check button').text()).toBe('Copy')
+    } finally {
+      wrapper.unmount()
+      restore()
+    }
+  })
+
+  it('SettingsView says Tested with for a current provider', async () => {
+    const { wrapper, restore } = await mountModelsWith({
+      opencode: { state: 'current', installed: '2.1.0', tested: '2.1.0' },
+    })
+    try {
+      const row = providerRow(wrapper, /opencode/i)
+      expect(row.text()).toContain('Tested with 2.1.0')
+      expect(row.text()).not.toContain('Older than')
+    } finally {
+      wrapper.unmount()
+      restore()
+    }
+  })
+
+  it('SettingsView says bundled Claude updates with Ciaobot and offers no claude update', async () => {
+    const { wrapper, restore } = await mountModelsWith({
+      claude: { state: 'bundled', tested: '2.1.301' },
+    })
+    try {
+      const row = providerRow(wrapper, /claude/i)
+      expect(row.text()).toContain('Bundled with Ciaobot')
+      expect(row.text()).not.toContain('claude update')
+    } finally {
+      wrapper.unmount()
+      restore()
+    }
+  })
+
   it('SettingsView labels every provider connection from the backend registry', async () => {
     const router = makeRouter()
     await router.push('/settings/models')

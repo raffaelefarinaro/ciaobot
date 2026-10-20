@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useHostTerminal } from '../composables/useHostTerminal'
-import { apiErrorMessage } from '../lib/errorMessage'
+import { apiErrorMessage, errorPayload } from '../lib/errorMessage'
 import type { HostTerminalAction } from '../lib/types'
 
 const props = withDefaults(
@@ -15,6 +15,10 @@ const props = withDefaults(
   }>(),
   { variant: 'link' },
 )
+
+// An update action answers 409 not_applicable when the CLI is already current;
+// the parent's notice is stale, so it re-reads rather than leave the button there.
+const emit = defineEmits<{ (e: 'not-applicable'): void }>()
 
 const { available, canRun, ensureCapabilities, runAction, openFolder } = useHostTerminal()
 
@@ -38,6 +42,7 @@ async function launch() {
     done.value = result.launched
   } catch (e) {
     error.value = apiErrorMessage(e, 'Could not open a terminal.')
+    if (errorPayload(e)?.reason === 'not_applicable') emit('not-applicable')
   } finally {
     pending.value = false
   }
