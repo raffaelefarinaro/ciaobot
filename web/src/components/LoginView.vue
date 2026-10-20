@@ -96,6 +96,12 @@
             Ciaobot detects what's inside and adjusts automatically: an empty folder gets a fresh
             second brain; existing notes are preserved, then an initial curation chat adapts clear
             material into its structure.</span>
+          <span
+            v-if="cloudSyncWarning"
+            id="setup-workspace-cloud-warning"
+            class="hint hint--warn"
+            role="note"
+          >{{ cloudSyncWarning }}</span>
         </div>
 
         <div class="form-group">
@@ -498,12 +504,14 @@ const advancedOpen = ref(false)
 // read-only chips. The server adopts them on /api/setup/finish.
 const folderInspecting = ref(false)
 const detectedWorkspaces = ref<string[]>([])
+const cloudSyncWarning = ref('')
 let inspectToken = 0
 
 async function inspectWorkspaceFolder(rawPath: string) {
   const path = rawPath.trim()
   if (!path) {
     detectedWorkspaces.value = []
+    cloudSyncWarning.value = ''
     folderInspecting.value = false
     return
   }
@@ -513,14 +521,17 @@ async function inspectWorkspaceFolder(rawPath: string) {
     const data = await api.get<{
       mode: string
       existing_workspaces: string[]
+      cloud_sync_warning?: string
     }>(`/api/setup/inspect-folder?path=${encodeURIComponent(path)}`)
     if (token !== inspectToken) return
     detectedWorkspaces.value = data.existing_workspaces || []
+    cloudSyncWarning.value = data.cloud_sync_warning || ''
   } catch {
     // Network or guard error: fall back to the text field, the same as
     // before this probe existed.
     if (token !== inspectToken) return
     detectedWorkspaces.value = []
+    cloudSyncWarning.value = ''
   } finally {
     if (token === inspectToken) folderInspecting.value = false
   }
