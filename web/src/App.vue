@@ -66,13 +66,18 @@ const canUseDeviceControls = isLoopbackPage()
 // An engine that stops answering (crash, `ciao service stop`, reboot) used to
 // leave a loaded tab with no honest state: API calls failed one at a time and
 // the WebSocket backed off silently. The monitor reports `unreachable` only
-// after two consecutive failed probes, so a single blip never flashes the
-// screen, and an announced restart reads as `updating` rather than an outage.
+// after the engine has gone unanswered for a sustained stretch, and only when
+// the awareness socket cannot vouch for it either: a remote origin (a phone
+// or a laptop reaching the engine over a VPN or a relay) can leave a probe
+// unanswered for seconds while the engine is perfectly healthy, and the
+// curtain that says "your computer is off" must not appear for that. An
+// announced restart reads as `updating` rather than an outage.
 const engineState = ref<EngineState>('ready')
 const engineRetrying = ref(false)
 const engineHost = window.location.host
 const engineMonitor = createEngineMonitor({
   isUpdating: () => projectStore.serverRestarting,
+  isAlive: () => projectStore.engineSeenAliveWithin(),
   onChange: (s) => {
     const prev = engineState.value
     engineState.value = s
@@ -115,13 +120,15 @@ let appMounted = false
 async function pollStartup(generation: number) {
   const response = await requestStartupStatus()
   if (!appMounted || generation !== pollGeneration) return
-  if (response?.status === 401 || response?.status === 403) {
+  if (response.status === 401 || response.status === 403) {
     // Move the monitor's own state too, so its next healthy probe reports
     // recovery and lets startup status resume without a parallel poll loop.
     void engineMonitor.retry().catch(() => {})
     return
   }
-  if (!response || response.status < 200 || response.status >= 300) return
+  // Status 0 means no answer arrived at all (the request failed or ran out
+  // of time): there is no status to read a phase list from.
+  if (response.status < 200 || response.status >= 300) return
   const data = response.body as { phases?: Phase[]; overall_ready?: boolean } | null
   const nextPhases = data?.phases || []
   if (JSON.stringify(phases.value) !== JSON.stringify(nextPhases)) phases.value = nextPhases
