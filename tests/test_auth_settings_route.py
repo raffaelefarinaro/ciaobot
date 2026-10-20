@@ -297,3 +297,18 @@ def test_host_browser_needs_a_new_password(tmp_path: Path) -> None:
     assert res.status_code == 400
     assert res.json()["code"] == "new_password_required"
     assert not (tmp_path / ".env").exists()
+
+
+def test_password_change_clears_welcome_pending(tmp_path: Path) -> None:
+    from ciao.setup_marker import welcome_pending, write_welcome_pending
+
+    write_welcome_pending(tmp_path / ".runtime")
+    client = TestClient(_app(tmp_path, token="old-secret"), client=("127.0.0.1", 5555))
+
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter2-new", "current_password": "old-secret"},
+    )
+
+    assert res.status_code == 200
+    assert welcome_pending(tmp_path / ".runtime") is False

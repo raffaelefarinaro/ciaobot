@@ -5,10 +5,12 @@ from __future__ import annotations
 import hmac
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao.setup_marker import RUNTIME_DIR_NAME, clear_welcome_pending
 from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
 
 logger = logging.getLogger(__name__)
@@ -167,6 +169,8 @@ async def auth_settings_update(request: Request) -> JSONResponse:
         )
 
     _write_env_values(_env_path(config), {"PWA_AUTH_TOKEN": token_to_store})
+    # The generated password the welcome card would show is no longer the password.
+    clear_welcome_pending(Path(config.workspace_root) / RUNTIME_DIR_NAME)
     config.pwa_auth_token = token_to_store
     request.app.state.serializer = make_serializer(token_to_store)
     logger.info("PWA password changed (on_host=%s)", on_host)

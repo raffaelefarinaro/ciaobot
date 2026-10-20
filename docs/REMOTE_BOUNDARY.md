@@ -67,6 +67,14 @@ carried by the session.
   An SSH local forward counts as the host; that caller can already read `.env`.
   Any password change re-keys the session signer, so every other device is
   signed out and must sign in with the new password.
+- The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
+  need the session *and* `host_browser_request`, and are not in
+  `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails
+  `is_loopback_client` (the `Tailscale-*`/`X-Forwarded-For` headers) and the
+  loopback `Host` check. The password is returned only while
+  `.runtime/welcome-pending` exists; dismissing or changing the password deletes
+  it. An SSH port-forward looks local, and anyone with SSH to the host can
+  already read `.env`.
 - Model-authored HTML is served from `/api/workspace-html` under a sandboxing
   CSP (`sandbox allow-scripts`, no `allow-same-origin`, `connect-src 'none'`,
   `form-action 'none'`), so an artifact cannot reach the API or the local-only
@@ -78,8 +86,9 @@ carried by the session.
   are retired (`#579`), so a remote browser gets nothing a local one does not,
   and `trigger_app_update` does not exist. A browser is a local control path only
   through session routes that also require the host: `/api/workspace-move*`,
-  `/api/host/terminal`, `POST /api/settings/providers/{provider}/connect` and
-  `POST /api/auth/settings` (current-password exemption only)
+  `/api/host/terminal`, `GET /api/welcome/password`, `POST /api/welcome/open-folder`,
+  `POST /api/settings/providers/{provider}/connect` and `POST /api/auth/settings`
+  (current-password exemption only)
   check the loopback peer, a loopback `Host` and a same-host `Origin`;
   `/api/workspace-open` checks the loopback peer only. Each refuses a non-host
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in

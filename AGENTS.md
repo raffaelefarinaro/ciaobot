@@ -161,6 +161,16 @@ this file; the gates are the ones under Verification.
   release plumbing.
 - There is no `/code-review` command for reviewer workers; review from
   `git diff origin/develop...HEAD`.
+- Other sessions merge into `develop` all day, so use the skill's serial merge
+  queue. The `gates.sh` for this repo runs, from the worktree root: `PYTHONPATH=$PWD
+  ~/repos/ciaobot/.venv/bin/python -m mypy ciao`, the same with `--platform
+  win32`, `PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto
+  tests/` (re-run only `--lf` before calling it red; latency tests flake under
+  load), and, after symlinking `web/node_modules`, `npm test` and `npm run build`
+  in `web/` (remove the symlink afterwards).
+- `PWA_API.md`, `DESIGN.md` (the Home paragraph), `web/README.md` and
+  `docs/ARCHITECTURE.md` are appended to by most PRs and conflict when two land
+  together. Resolve by keeping both sides.
 - An engine booted inside a worktree can push memory-backup commits
   (`backup <ts>Z`, `<branch> session commit <ts>`) to the branch. Compare
   `git ls-remote origin <branch>` with the reported sha and drop strays with
