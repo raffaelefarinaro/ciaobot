@@ -163,6 +163,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     context = _verbs(nouns.add_parser("context", help="Workspace, project and chat context."))
     context.add_parser("get", help="Return the active workspace, project, chat and server status.")
+    logs = context.add_parser("logs", help="Return Ciaobot's version and recent error, debug and service log tails.")
+    logs.add_argument("--lines", type=int, default=200, help="Lines per log, 1-1000.")
 
     memory = _verbs(nouns.add_parser("memory", help="Bounded native-guide memory."))
     memory.add_parser("status", help="Memory usage and diagnostics.")
@@ -539,6 +541,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     if noun == "help":
         return None
     if noun == "context":
+        if verb == "logs":
+            return "context_logs", {"lines": args.lines}
         return "context_get", {}
     if noun == "memory":
         if verb == "status":

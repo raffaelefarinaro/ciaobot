@@ -138,7 +138,7 @@ bounded memory (`ciao memory status|update`), vault (`ciao vault search`,
 (`ciao run …`), schedules (`ciao schedule …`), the task board
 (`ciao task …`, including `task delegate` and `task report`), note
 verification (`ciao note verify`), webhook triggers (`ciao webhook …`),
-Google Workspace (`ciao gws status`), context (`ciao context get`), and file
+Google Workspace (`ciao gws status`), context and Ciaobot's own logs (`ciao context get|logs`), and file
 surfacing (`ciao file surface`). Browser-session administration,
 login/OAuth secrets, and raw server deploy endpoints remain PWA/operator-only.
 

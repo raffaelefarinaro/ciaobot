@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import io
 import sys
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 from starlette.applications import Starlette
@@ -320,6 +322,7 @@ def _run(
     drained: bool = True,
     service_type: type[_Service] = _Service,
     prepare: Any = None,
+    post_override: Callable[[str], dict[str, Any]] | None = None,
 ) -> tuple[workspace_move.MoveOperation, _Service, list[str]]:
     source = _workspace(tmp_path / "old")
     if prepare is not None:
@@ -334,6 +337,8 @@ def _run(
 
     def post(url: str) -> dict[str, Any]:
         posts.append(url)
+        if post_override is not None:
+            return post_override(url)
         return {"active_chat_ids": [] if drained else ["busy"]}
 
     def get(url: str) -> dict[str, Any] | None:
@@ -383,6 +388,82 @@ def test_run_move_leaves_everything_when_chats_never_drain(tmp_path: Path) -> No
     assert (tmp_path / "old" / ".env").is_file()
     assert host.calls == []
     assert posts[-1].endswith("/api/admin/drain/cancel")
+
+
+def test_run_move_drain_poll_timeout_names_the_step(tmp_path: Path) -> None:
+    host = _Host()
+
+    def override(url: str) -> dict[str, Any]:
+        if url.endswith("/drain/cancel"):
+            return {}
+        raise TimeoutError("timed out")
+
+    result, _service, posts = _run(tmp_path, host, post_override=override)
+    assert result.phase == "failed"
+    assert "did not answer the drain status poll within 30s" in result.error
+    assert "nothing was moved" in result.error
+    assert result.error != "timed out"
+    assert host.calls == []
+    assert (tmp_path / "old" / ".env").is_file()
+    assert posts[-1].endswith("/api/admin/drain/cancel")
+
+
+def test_run_move_drain_refused_reports_the_engine_reason(tmp_path: Path) -> None:
+    host = _Host()
+
+    def override(url: str) -> dict[str, Any]:
+        if url.endswith("/drain/cancel"):
+            return {}
+        raise urllib.error.HTTPError(
+            url,
+            409,
+            "Conflict",
+            None,  # type: ignore[arg-type]
+            io.BytesIO(b'{"error": "a restart is already draining"}'),
+        )
+
+    result, _service, _posts = _run(tmp_path, host, post_override=override)
+    assert result.phase == "failed"
+    assert "refused the drain status poll (HTTP 409: a restart is already draining)" in result.error
+
+
+def test_run_move_failed_cancel_is_recorded(tmp_path: Path) -> None:
+    host = _Host()
+
+    def override(url: str) -> dict[str, Any]:
+        if url.endswith("/drain/cancel"):
+            raise TimeoutError("timed out")
+        raise urllib.error.URLError(TimeoutError())
+
+    result, _service, _posts = _run(tmp_path, host, post_override=override)
+    assert result.phase == "failed"
+    assert (
+        "reopening chats also failed (the running engine did not answer the drain cancel within 30s"
+        in result.error
+    )
+
+
+def test_drain_post_uses_the_drain_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    timeouts: list[float] = []
+
+    class _Response:
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    def fake_open(_request: Any, timeout: float) -> _Response:
+        timeouts.append(timeout)
+        return _Response()
+
+    monkeypatch.setattr(workspace_move._LOCAL_OPENER, "open", fake_open)
+    workspace_move._post_json("http://127.0.0.1:1/api/admin/drain")
+    workspace_move._get_json("http://127.0.0.1:1/api/startup-status")
+    assert timeouts == [30.0, 5.0]
 
 
 def test_run_move_restarts_the_engine_when_it_will_not_stop(tmp_path: Path) -> None:
