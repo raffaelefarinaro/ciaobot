@@ -209,23 +209,24 @@ def cloud_synced_location(
     parts = _parts_under(target, home)
     if not parts:
         return None
-    first = parts[0]
-    if platform == "darwin" and first == "Library":
-        if len(parts) >= 2 and parts[1] == "Mobile Documents":
+    folded = [part.casefold() for part in parts]
+    first = folded[0]
+    if platform == "darwin" and first == "library":
+        if len(parts) >= 2 and folded[1] == "mobile documents":
             return "iCloud Drive"
-        if len(parts) >= 3 and parts[1] == "CloudStorage":
+        if len(parts) >= 3 and folded[1] == "cloudstorage":
             for prefix, label in _MAC_CLOUD_STORAGE_PREFIXES:
-                if parts[2].startswith(prefix):
+                if parts[2].casefold().startswith(prefix.casefold()):
                     return label
             return "a cloud-synced folder"
         return None
-    if first == "Dropbox" or first.startswith("Dropbox ("):
+    if first == "dropbox" or first.startswith("dropbox ("):
         return "Dropbox"
-    if first == "Google Drive":
+    if first == "google drive":
         return "Google Drive"
-    if first.startswith("OneDrive"):
+    if first.startswith("onedrive"):
         return "OneDrive"
-    if platform == "win32" and first == "iCloudDrive":
+    if platform == "win32" and first == "iclouddrive":
         return "iCloud Drive"
     return None
 

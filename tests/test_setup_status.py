@@ -2293,6 +2293,7 @@ def test_cloud_synced_location_recognises_sync_folders(tmp_path) -> None:
         ("darwin", mac / "Nextcloud/ws", "a cloud-synced folder"),
         ("darwin", home / "Dropbox (Acme)/ws", "Dropbox"),
         ("darwin", home / "OneDrive - Contoso/ws", "OneDrive"),
+        ("darwin", home / "dropbox" / "ws", "Dropbox"),
         ("darwin", home / "Ciaobot", None),
         ("darwin", home, None),
         ("darwin", mac, None),
