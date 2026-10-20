@@ -6,6 +6,7 @@ no Finder or Explorer window is ever opened.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -193,3 +194,40 @@ def test_dismiss_clears_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert welcome_pending(tmp_path / ".runtime") is False
     assert client.get("/api/welcome", headers=_signed(client)).json() == {"pending": False}
     assert client.post("/api/welcome/dismiss", headers=_signed(client)).status_code == 200
+
+
+def test_password_refused_for_a_different_port_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mark(tmp_path)
+    client, _ = _client(tmp_path, monkeypatch)
+    res = client.get(
+        "/api/welcome/password", headers=_signed(client, origin="http://localhost:3000")
+    )
+    assert res.status_code == 403
+    assert PASSWORD not in res.text
+
+
+def test_open_folder_refused_for_a_different_port_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, opened = _client(tmp_path, monkeypatch)
+    res = client.post(
+        "/api/welcome/open-folder", headers=_signed(client, origin="http://localhost:3000")
+    )
+    assert res.status_code == 403
+    assert opened == []
+
+
+def test_open_folder_timeout_is_a_clean_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = _client(tmp_path, monkeypatch)
+
+    def _hang(path: Path) -> None:
+        raise subprocess.TimeoutExpired(["open"], 30)
+
+    monkeypatch.setattr(routes_welcome, "_open_path_with_default_app", _hang)
+    res = client.post("/api/welcome/open-folder", headers=_signed(client))
+    assert res.status_code == 500
+    assert "error" in res.json()

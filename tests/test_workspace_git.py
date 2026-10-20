@@ -701,3 +701,17 @@ def test_setup_workspace_rerun_keeps_existing_token_unmarked(tmp_path: Path) -> 
 
     assert not (ws / ".runtime" / "welcome-pending").exists()
     assert "PWA_AUTH_TOKEN=mine" in (ws / ".env").read_text(encoding="utf-8")
+
+
+def test_setup_workspace_rerun_with_explicit_token_clears_pending(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    kwargs = {
+        "launch_agents_dir": tmp_path / "LaunchAgents",
+        "app_dir": tmp_path / "Applications",
+    }
+    setup_workspace(ws, **kwargs)
+    assert (ws / ".runtime" / "welcome-pending").is_file()
+
+    setup_workspace(ws, auth_token="x", **kwargs)
+
+    assert not (ws / ".runtime" / "welcome-pending").exists()

@@ -1161,6 +1161,11 @@ def setup_workspace(
         from ciao.setup_marker import write_welcome_pending
 
         written.append(write_welcome_pending(root / RUNTIME_DIR_NAME))
+    elif auth_token:
+        # A chosen password replaces any generated one the card would show.
+        from ciao.setup_marker import clear_welcome_pending
+
+        clear_welcome_pending(root / RUNTIME_DIR_NAME)
 
     runtime_root = root / RUNTIME_DIR_NAME
 

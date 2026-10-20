@@ -36,10 +36,17 @@ from ciao.setup_marker import (
     clear_welcome_pending,
     welcome_pending,
 )
+from ciao.web.auth import _same_origin_source
 from ciao.web.routes_api import _open_path_with_default_app, host_browser_request
 
 _NO_STORE = {"Cache-Control": "no-store"}
 NOT_ON_HOST = "The password is shown on the computer running Ciaobot."
+
+
+def _host_request(request: Request) -> bool:
+    # host_browser_request ignores ports; the exact-origin check keeps another
+    # localhost app (a dev server on :3000) from reading the password.
+    return host_browser_request(request) and _same_origin_source(request)
 
 
 def _runtime_root(config: Any) -> Path:
@@ -58,7 +65,7 @@ async def welcome_status(request: Request) -> JSONResponse:
             "workspace_root": str(Path(config.workspace_root).resolve()),
             "provider": provider,
             "provider_label": descriptor.cli_label if descriptor else provider,
-            "on_host": host_browser_request(request),
+            "on_host": _host_request(request),
             "platform": sys.platform,
         },
         headers=_NO_STORE,
@@ -67,7 +74,7 @@ async def welcome_status(request: Request) -> JSONResponse:
 
 async def welcome_password(request: Request) -> JSONResponse:
     config = request.app.state.config
-    if not host_browser_request(request):
+    if not _host_request(request):
         return JSONResponse(
             {"error": NOT_ON_HOST, "reason": "not_on_host"},
             status_code=403,
@@ -81,7 +88,7 @@ async def welcome_password(request: Request) -> JSONResponse:
 
 async def welcome_open_folder(request: Request) -> JSONResponse:
     config = request.app.state.config
-    if not host_browser_request(request):
+    if not _host_request(request):
         return JSONResponse(
             {
                 "error": "Opening the folder is only available on the computer running Ciaobot.",
@@ -95,7 +102,7 @@ async def welcome_open_folder(request: Request) -> JSONResponse:
         return JSONResponse({"error": "folder not found"}, status_code=404, headers=_NO_STORE)
     try:
         await asyncio.to_thread(_open_path_with_default_app, root)
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.SubprocessError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=500, headers=_NO_STORE)
     return JSONResponse({"ok": True}, headers=_NO_STORE)
 
