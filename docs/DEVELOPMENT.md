@@ -1762,7 +1762,10 @@ credential resources covered in both absolute and workspace-relative spellings
 when a custom runtime root is configured. Keep form constraints and explicit
 empty-versus-cancel semantics in the provider/PWA contract. Native form and
 permission cards stay mounted until a matching `(chat_id, session_id,
-request_id)` response is acknowledged. The PWA keeps complete response frames
+request_id)` response is acknowledged. Permission and form requests from
+task/subagent child sessions (known from `session.created.parentID`, or the
+server's active-session map) surface with the child's own session id; every
+other child event stays filtered. The PWA keeps complete response frames
 in memory only (never localStorage), queues them across closed or failed
 sockets, and retries them on reconnect; a timeout makes the card retryable but
 does not discard the queued frame. Backend state is cleared only after a typed
