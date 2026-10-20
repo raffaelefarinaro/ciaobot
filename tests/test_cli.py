@@ -4578,3 +4578,46 @@ def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
         workspace="client-a",
     ).entries[0]
     assert entry.verified == date(2024, 1, 5)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_rotate_setup_token_writes_an_owner_only_file(tmp_path):
+    from ciao.os_support.private import is_private
+
+    token_path = tmp_path / ".runtime" / "setup-token"
+    token_path.parent.mkdir()
+    token_path.write_text("old\n", encoding="utf-8")
+    os.chmod(token_path, 0o644)
+
+    token = cli._rotate_setup_token(tmp_path)
+
+    assert token_path.read_text(encoding="utf-8") == token + "\n"
+    assert is_private(token_path)
+
+
+def test_setup_url_reports_a_token_create_race_without_a_traceback(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    def raced(*args, **kwargs):
+        raise FileExistsError("setup-token")
+
+    monkeypatch.setattr(cli, "open_private", raced)
+
+    assert cli.main(["setup-url", "--workspace", str(tmp_path)]) == 1
+
+    err = capsys.readouterr().err.strip()
+    assert len(err.splitlines()) == 1
+    assert "setup token" in err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_ensure_setup_token_tightens_an_older_world_readable_file(tmp_path: Path) -> None:
+    from ciao.os_support.private import is_private
+
+    token_path = tmp_path / ".runtime" / "setup-token"
+    token_path.parent.mkdir()
+    token_path.write_text("old-token\n", encoding="utf-8")
+    os.chmod(token_path, 0o644)
+
+    assert cli._ensure_setup_token(tmp_path) == "old-token"
+    assert is_private(token_path)
