@@ -850,3 +850,130 @@ async def test_failed_question_reply_log_omits_the_error_text(
     assert not result.ok
     assert "failed" in caplog.text
     assert "SECRET-ANSWER" not in caplog.text
+
+
+class _YieldingFormClient(_FormClient):
+    def __init__(self, status_code: int = 204) -> None:
+        super().__init__()
+        self.status_code = status_code
+
+    async def post(self, path: str, json: object = None, **_: object) -> SimpleNamespace:
+        self.posts.append((path, json))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return SimpleNamespace(status_code=self.status_code, text="")
+
+    async def delete(self, path: str, **_: object) -> SimpleNamespace:
+        self.posts.append((f"DELETE {path}", None))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return SimpleNamespace(status_code=self.status_code, text="")
+
+
+def _form_race_chat(tmp_path: Path, status_code: int = 204):
+    pcm, chat, provider = _forms_chat(tmp_path, [_form("frm_a", "ses_1")])
+    provider._client = _YieldingFormClient(status_code)  # type: ignore[assignment]
+    return pcm, chat, provider
+
+
+@pytest.mark.asyncio
+async def test_losing_concurrent_form_reply_is_already_resolved(tmp_path: Path) -> None:
+    pcm, chat, provider = _form_race_chat(tmp_path)
+
+    first, second = await asyncio.gather(
+        pcm.respond_question(
+            chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+        ),
+        pcm.respond_question(
+            chat.chat_id, request_id="frm_a", answers={"value": ["two"]}, session_id="ses_1"
+        ),
+    )
+
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_1/form/frm_a/reply", {"answer": {"value": "one"}})
+    ]
+    assert first.ok and not first.already_resolved
+    assert second.ok and second.already_resolved
+    assert chat.pending_question == ""
+    assert provider._question_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_form_reply_and_cancel_race_sends_one_call(tmp_path: Path) -> None:
+    pcm, chat, provider = _form_race_chat(tmp_path)
+
+    reply, cancel = await asyncio.gather(
+        pcm.respond_question(
+            chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+        ),
+        pcm.respond_question(
+            chat.chat_id, request_id="frm_a", answers={}, action="cancel", session_id="ses_1"
+        ),
+    )
+
+    assert len(provider._client.posts) == 1  # type: ignore[attr-defined]
+    assert reply.ok
+    assert cancel.ok and cancel.already_resolved
+    assert chat.pending_question == ""
+
+
+@pytest.mark.asyncio
+async def test_sequential_second_form_reply_is_already_resolved(tmp_path: Path) -> None:
+    pcm, chat, provider = _form_race_chat(tmp_path)
+
+    first = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+    )
+    second = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={"value": ["two"]}, session_id="ses_1"
+    )
+
+    assert first.ok and not first.already_resolved
+    assert second.ok and second.already_resolved
+    assert len(provider._client.posts) == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_opencode_409_form_reply_is_already_resolved(tmp_path: Path) -> None:
+    pcm, chat, provider = _form_race_chat(tmp_path, status_code=409)
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+    )
+
+    assert result.ok and result.already_resolved
+    assert chat.pending_question == ""
+    assert not provider.has_question_request("frm_a")
+
+
+@pytest.mark.asyncio
+async def test_form_reply_404_is_already_resolved(tmp_path: Path) -> None:
+    pcm, chat, _provider = _form_race_chat(tmp_path, status_code=404)
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+    )
+
+    assert result.ok and result.already_resolved
+    assert chat.pending_question == ""
+
+
+@pytest.mark.asyncio
+async def test_losing_form_reply_is_logged_already_resolved(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pcm, chat, _provider = _form_race_chat(tmp_path)
+
+    with caplog.at_level("INFO", logger="ciao.web.project_chats"):
+        await asyncio.gather(
+            pcm.respond_question(
+                chat.chat_id, request_id="frm_a", answers={"value": ["one"]},
+                session_id="ses_1",
+            ),
+            pcm.respond_question(
+                chat.chat_id, request_id="frm_a", answers={"value": ["two"]},
+                session_id="ses_1",
+            ),
+        )
+
+    assert "question reply frm_a session=ses_1 action=reply: already-resolved" in caplog.text
