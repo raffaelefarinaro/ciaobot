@@ -45,6 +45,13 @@ async function mountCard() {
 }
 
 describe('SettingsDevices', () => {
+  it('exposes a stable #other-devices anchor', async () => {
+    const wrapper = await mountCard()
+
+    expect(wrapper.find('#other-devices').exists()).toBe(true)
+    expect(wrapper.element.id).toBe('other-devices')
+  })
+
   it('lists the trusted URL first with full-app label and LAN as browser-only', async () => {
     const wrapper = await mountCard()
     const rows = wrapper.findAll('.device-row')
