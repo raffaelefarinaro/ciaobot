@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-
-import pytest
 from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.routing import Route

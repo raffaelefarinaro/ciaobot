@@ -171,6 +171,17 @@ def test_logout_clears_host_only_cookie() -> None:
     assert "Max-Age=0" in set_cookie
 
 
+def test_non_ascii_setup_token_is_401_not_500(tmp_path) -> None:
+    token_path = tmp_path / ".runtime" / "setup-token"
+    token_path.parent.mkdir()
+    token_path.write_text("setup-secret\n", encoding="utf-8")
+
+    resp = _setup_token_client(tmp_path).get("/?setup=s%C3%A9tup", follow_redirects=False)
+
+    assert resp.status_code == 401
+    assert token_path.exists()
+
+
 def test_setup_token_redeems_localhost_session_and_deletes_token(tmp_path) -> None:
     token_path = tmp_path / ".runtime" / "setup-token"
     token_path.parent.mkdir()

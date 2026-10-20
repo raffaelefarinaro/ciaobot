@@ -270,7 +270,8 @@ def _redeem_setup_token(request: Request, token: str):
     if token_path is None or not token_path.exists():
         return JSONResponse({"error": "invalid setup token"}, status_code=401)
     expected = token_path.read_text(encoding="utf-8").strip()
-    if not expected or not hmac.compare_digest(token, expected):
+    # Compare bytes: compare_digest raises TypeError on a non-ASCII str.
+    if not expected or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
         return JSONResponse({"error": "invalid setup token"}, status_code=401)
 
     signed = request.app.state.serializer.dumps({"user": "owner"})
