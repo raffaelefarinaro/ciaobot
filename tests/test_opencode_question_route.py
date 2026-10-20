@@ -203,6 +203,27 @@ def test_question_response_reports_delivered_as_message() -> None:
     assert result["ok"] is True
 
 
+def test_question_response_reports_already_resolved() -> None:
+    class _LostRaceManager(_Manager):
+        async def respond_question(self, _chat_id: str, **payload):
+            self.calls.append(payload)
+            return QuestionResponseResult(True, already_resolved=True)
+
+    manager = _LostRaceManager()
+    with signed_in(TestClient(_app(manager))).websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_json({
+            "type": "question_response",
+            "request_id": "form-1",
+            "action": "reply",
+            "answers": {"choice": ["yes"]},
+        })
+        result = ws.receive_json()
+
+    assert result["already_resolved"] is True
+    assert result["ok"] is True
+    assert "delivered_as_message" not in result
+
+
 def test_delivered_as_message_does_not_resettle_the_attempt() -> None:
     """A dead form's reply starts a turn, whose own result settles the attempt."""
 

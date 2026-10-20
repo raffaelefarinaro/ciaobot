@@ -554,6 +554,7 @@ export type WsEvent =
       error?: string;
       retryable?: boolean;
       delivered_as_message?: boolean;
+      already_resolved?: boolean;
     }
   | { type: 'question_resolved'; request_id: string; session_id?: string }
   | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean }
