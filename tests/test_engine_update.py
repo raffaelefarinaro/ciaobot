@@ -1331,6 +1331,131 @@ def test_apply_drain_timeout_cancels_and_leaves_engine(tmp_path: Path) -> None:
     assert not (state / UPDATER_PLIST_NAME).exists()
 
 
+def _apply_with_post(engine: _FakeEngine, state: Path, post: Any) -> Operation:
+    return apply_update(
+        state_dir=state,
+        port=PORT,
+        http_post=post,
+        launchctl=engine.launchctl,
+        uid=501,
+        sleep=lambda seconds: None,
+        clock=_FakeClock(),
+    )
+
+
+def test_apply_drain_request_timeout_names_the_step(tmp_path: Path) -> None:
+    _, state, _, engine = _staged(tmp_path)
+    posts: list[str] = []
+
+    def post(url: str) -> dict[str, Any]:
+        posts.append(url)
+        if url.endswith("/drain/cancel"):
+            return {}
+        raise TimeoutError("timed out")
+
+    with pytest.raises(UpdateError, match="did not answer the drain request within 30s"):
+        _apply_with_post(engine, state, post)
+
+    record = read_operation(state)
+    assert record is not None
+    assert record.phase == "failed"
+    assert "nothing was stopped or swapped" in record.error
+    assert posts[-1] == f"{BASE}/api/admin/drain/cancel"
+    assert engine.launchctl_calls == []
+
+
+def test_apply_drain_poll_timeout_names_the_poll(tmp_path: Path) -> None:
+    _, state, _, engine = _staged(tmp_path)
+    calls = {"drain": 0}
+
+    def post(url: str) -> dict[str, Any]:
+        if url.endswith("/drain/cancel"):
+            return {}
+        calls["drain"] += 1
+        if calls["drain"] == 1:
+            return {"active_chat_ids": ["c1"]}
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    with pytest.raises(UpdateError) as info:
+        _apply_with_post(engine, state, post)
+
+    assert "drain status poll" in str(info.value)
+    assert "within 30s" in str(info.value)
+
+
+def test_apply_drain_refused_reports_the_engine_reason(tmp_path: Path) -> None:
+    _, state, _, engine = _staged(tmp_path)
+
+    def post(url: str) -> dict[str, Any]:
+        if url.endswith("/drain/cancel"):
+            return {}
+        raise urllib.error.HTTPError(
+            url, 409, "Conflict", {}, io.BytesIO(b'{"error": "a restart is already draining"}')  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(UpdateError) as info:
+        _apply_with_post(engine, state, post)
+
+    assert "refused the drain request (HTTP 409: a restart is already draining)" in str(info.value)
+
+
+def test_apply_unreachable_engine_names_the_drain_request(tmp_path: Path) -> None:
+    _, state, _, engine = _staged(tmp_path)
+
+    def post(url: str) -> dict[str, Any]:
+        if url.endswith("/drain/cancel"):
+            return {}
+        raise urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+
+    with pytest.raises(UpdateError) as info:
+        _apply_with_post(engine, state, post)
+
+    assert str(info.value).startswith("could not reach the running engine for the drain request:")
+
+
+def test_apply_failed_cancel_is_recorded(tmp_path: Path) -> None:
+    _, state, _, engine = _staged(tmp_path)
+
+    def post(url: str) -> dict[str, Any]:
+        raise TimeoutError("timed out")
+
+    with pytest.raises(UpdateError) as info:
+        _apply_with_post(engine, state, post)
+
+    message = str(info.value)
+    assert "did not answer the drain request" in message
+    assert (
+        "reopening chats also failed (the running engine did not answer the drain cancel within 30s"
+        in message
+    )
+    record = read_operation(state)
+    assert record is not None
+    assert record.error == message
+
+
+def test_drain_requests_use_the_drain_timeout() -> None:
+    seen: list[float] = []
+
+    class _Response:
+        def __enter__(self) -> "_Response":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    def opener(request: Any, timeout: float) -> _Response:
+        seen.append(timeout)
+        return _Response()
+
+    engine_update._post_json("http://localhost/x", opener=opener)
+    engine_update._get_json("http://localhost/x", opener=opener)
+
+    assert seen == [30.0, 5.0]
+
+
 def test_apply_refuses_without_staged_update(tmp_path: Path) -> None:
     state = tmp_path / "empty"
     state.mkdir()
