@@ -94,6 +94,7 @@ namespaces = false
   "skills/.gitkeep",
   "skills/**/*",
   "schedules.json",
+  "provider-versions.json",
   "update-tasks/**/*",
 ]
 

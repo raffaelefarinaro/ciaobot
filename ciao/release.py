@@ -13,6 +13,15 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from ciao.provider_versions import (
+    PROVIDERS,
+    SCHEMA_VERSION,
+    STABLE_VERSION_RE,
+    parse_cli_version,
+    render_record,
+    validate_record,
+)
+
 
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
@@ -679,8 +688,17 @@ def _pr_body(
     version: str,
     changelog_section: str,
     checks: list[str],
+    *,
+    provider_record: dict | None = None,
 ) -> str:
     testing = "\n".join(f"- {label}" for label in checks) or "- Not run"
+    if provider_record is None:
+        provider_lines = "- Not re-recorded (--skip-provider-versions)"
+    else:
+        provider_lines = "\n".join(
+            f"- {_PROVIDER_LABELS[name]}: {_describe_entry(provider_record['providers'][name])}"
+            for name in PROVIDERS
+        )
     return f"""## Summary
 - Release Ciaobot v{version} to `main`
 - Update package, PWA, and lockfile versions
@@ -691,6 +709,9 @@ def _pr_body(
 
 ## Testing
 {testing}
+
+## Provider versions tested
+{provider_lines}
 
 ## After approval
 - Merge this PR into `main`
@@ -821,6 +842,229 @@ def _refresh_stock_gws_skills(root: Path) -> list[Path]:
     return [_stock_skills_dir(root) / name / "SKILL.md" for name in result.updated]
 
 
+_PROVIDER_LABELS = {"opencode": "OpenCode", "claude": "Claude"}
+_OPENCODE_PACKAGE = "@opencode/cli"
+_CLAUDE_PACKAGE = "@anthropic-ai/claude-code"
+PROVIDER_RECORD_RELPATH = Path("ciao") / "stock" / "provider-versions.json"
+
+
+def _describe_entry(entry: dict) -> str:
+    if entry["status"] == "tested":
+        return f"tested {entry['version']}"
+    return f"untested ({entry['reason']})"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderProbe:
+    provider: str
+    installed: str | None
+    latest: str | None
+    published: bool | None
+    note: str
+    source: str = ""
+
+
+def _probe_opencode() -> ProviderProbe:
+    """Probe the releaser's OpenCode binary and npm. Never raises."""
+    installed: str | None = None
+    note = ""
+    latest: str | None = None
+    published: bool | None = None
+    try:
+        from ciao.dependency_updates import get_latest_npm_version
+        from ciao.providers.opencode import resolve_opencode_binary
+
+        binary = resolve_opencode_binary()
+        if binary is None:
+            note = "opencode binary not found"
+        else:
+            proc = subprocess.run(
+                [binary, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+            installed = parse_cli_version(proc.stdout or proc.stderr)
+            if installed is None:
+                note = "unreadable --version output"
+        latest = get_latest_npm_version(_OPENCODE_PACKAGE)
+        if installed is not None:
+            import httpx
+
+            try:
+                published = (
+                    httpx.get(
+                        f"https://registry.npmjs.org/{_OPENCODE_PACKAGE}/{installed}",
+                        timeout=10,
+                    ).status_code
+                    == 200
+                )
+            except Exception:  # noqa: BLE001 - registry unreachable
+                published = None
+    except Exception as exc:  # noqa: BLE001 - probes never raise
+        note = note or f"probe failed: {exc}"
+    return ProviderProbe("opencode", installed, latest, published, note)
+
+
+def _probe_bundled_claude(root: Path) -> ProviderProbe:
+    """Probe the Claude CLI bundled in the installed SDK. Never raises."""
+    import importlib
+
+    installed: str | None = None
+    source = ""
+    notes: list[str] = []
+    latest: str | None = None
+    try:
+        cli_version = str(importlib.import_module("claude_agent_sdk._cli_version").__cli_version__)
+        sdk_version = str(importlib.import_module("claude_agent_sdk._version").__version__)
+    except Exception as exc:  # noqa: BLE001 - a missing SDK blocks the release
+        return ProviderProbe(
+            "claude", None, None, None, f"claude_agent_sdk unreadable: {exc}"
+        )
+    installed = cli_version
+    source = f"claude-agent-sdk {sdk_version}"
+    try:
+        from ciao.dependency_updates import (
+            get_latest_npm_version,
+            parse_pyproject_dependencies,
+        )
+
+        spec = parse_pyproject_dependencies(root / "pyproject.toml").get(
+            "claude-agent-sdk", ""
+        )
+        match = re.fullmatch(r"==\s*(\S+)", spec.strip())
+        pin = match.group(1) if match else None
+        if pin != sdk_version:
+            notes.append(
+                f"installed claude-agent-sdk {sdk_version} != pyproject pin {pin}; "
+                "reinstall the SDK"
+            )
+        from ciao.providers.claude import get_bundled_claude_path
+
+        binary = get_bundled_claude_path()
+        if binary is None:
+            notes.append("bundled claude binary not found")
+        else:
+            proc = subprocess.run(
+                [binary, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                check=False,
+            )
+            reported = parse_cli_version(proc.stdout or proc.stderr)
+            if reported != cli_version:
+                notes.append(
+                    f"bundled claude reports {reported}, SDK records {cli_version}"
+                )
+        latest = get_latest_npm_version(_CLAUDE_PACKAGE)
+    except Exception as exc:  # noqa: BLE001 - probes never raise
+        notes.append(f"probe failed: {exc}")
+    return ProviderProbe("claude", installed, latest, None, "; ".join(notes), source)
+
+
+def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
+    """``(reason, why)`` when OpenCode cannot be recorded as tested."""
+    from ciao.providers.opencode import _server_version_error
+
+    version = probe.installed
+    if version is None:
+        if probe.note and "not found" not in probe.note:
+            return "unreadable", f"could not be read ({probe.note})"
+        return "not_installed", "is not installed"
+    if "-" in version or not STABLE_VERSION_RE.match(version):
+        return "unpublished", f"{version} is not a stable version"
+    if _server_version_error({"version": version}) is not None:
+        return "unreadable", f"{version} is outside the supported 2.0.16+ / 2.x contract"
+    if probe.published is False:
+        return "unpublished", f"{version} is not published on npm"
+    if probe.published is None:
+        return "unreadable", f"{version} could not be checked against the npm registry"
+    return None
+
+
+def build_provider_record(
+    *,
+    version: str,
+    release_date: date,
+    opencode: ProviderProbe,
+    claude: ProviderProbe,
+    untested: set[str],
+) -> dict:
+    """Build the validated provider record, refusing anything not testable."""
+    if claude.note or claude.installed is None:
+        raise ReleaseError(
+            "Claude CLI cannot be recorded: "
+            f"{claude.note or 'bundled CLI version not found'}"
+        )
+    problem = _opencode_untested_reason(opencode)
+    if problem is None:
+        opencode_entry: dict = {
+            "status": "tested",
+            "version": opencode.installed,
+            "package": _OPENCODE_PACKAGE,
+        }
+    else:
+        reason, why = problem
+        if "opencode" not in untested:
+            raise ReleaseError(
+                f"OpenCode {why}; install a published 2.x and re-run, "
+                "or pass --untested-provider opencode"
+            )
+        opencode_entry = {"status": "untested", "reason": reason}
+    claude_entry = {
+        "status": "tested",
+        "version": claude.installed,
+        "source": claude.source,
+    }
+    record = {
+        "schema": SCHEMA_VERSION,
+        "ciaobot": version,
+        "recorded": release_date.isoformat(),
+        "providers": {"opencode": opencode_entry, "claude": claude_entry},
+    }
+    return validate_record(record)
+
+
+def _print_provider_versions(opencode: ProviderProbe, claude: ProviderProbe) -> None:
+    print()
+    print("Provider versions:")
+    for probe in (opencode, claude):
+        label = _PROVIDER_LABELS[probe.provider]
+        if probe.installed is None:
+            print(f"  {label}: not found ({probe.note or 'unknown'})")
+            continue
+        line = f"  {label} {probe.installed}"
+        if probe.latest:
+            line += f" (latest {probe.latest})"
+            if probe.provider == "opencode":
+                major = probe.latest.split(".", 1)[0]
+                if major != "2":
+                    line += f" -- latest {probe.latest} is outside the supported major; not suggested"
+                elif probe.installed != probe.latest and _is_behind(
+                    probe.installed, probe.latest
+                ):
+                    line += (
+                        " -- WARN: behind latest stable; update and re-test before "
+                        f"cutting, or cut with {probe.installed} recorded as tested"
+                    )
+        if probe.note:
+            line += f" -- BLOCKER: {probe.note}"
+        print(line)
+
+
+def _is_behind(installed: str, latest: str) -> bool:
+    def key(value: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in re.findall(r"\d+", value.split("-", 1)[0]))
+
+    return key(installed) < key(latest)
+
+
 def _print_plan(
     *,
     root: Path,
@@ -941,6 +1185,33 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    parser.add_argument(
+        "--untested-provider",
+        action="append",
+        choices=["opencode"],
+        default=[],
+        help=(
+            "Record this provider as untested instead of failing when it cannot "
+            "be recorded."
+        ),
+    )
+    parser.add_argument(
+        "--skip-provider-versions",
+        action="store_true",
+        help=(
+            "Leave ciao/stock/provider-versions.json untouched (tests/emergencies); "
+            "the PR body says so."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-provider-versions",
+        action="store_true",
+        help=(
+            "Probe and rewrite the provider record for the current pyproject "
+            "version on the current branch, then exit."
+        ),
+    )
+
     args = parser.parse_args(argv)
     root = Path(args.repo_root).expanduser().resolve()
     if not root.is_dir():
@@ -958,6 +1229,22 @@ def main(argv: list[str] | None = None) -> int:
             "PWA versions are out of sync with pyproject.toml: "
             + ", ".join(sorted(pwa_versions | {current.pyproject}))
         )
+    if args.refresh_provider_versions:
+        opencode_probe = _probe_opencode()
+        claude_probe = _probe_bundled_claude(root)
+        _print_provider_versions(opencode_probe, claude_probe)
+        refreshed = build_provider_record(
+            version=current.pyproject,
+            release_date=date.today(),
+            opencode=opencode_probe,
+            claude=claude_probe,
+            untested=set(args.untested_provider),
+        )
+        (root / PROVIDER_RECORD_RELPATH).write_text(
+            render_record(refreshed), encoding="utf-8", newline="\n"
+        )
+        print(render_record(refreshed), end="")
+        return 0
     version = (
         _require_version(args.version, label="release version")
         if args.version
@@ -1013,6 +1300,9 @@ def main(argv: list[str] | None = None) -> int:
         gws_installed, gws_pinned = _gws_skills_versions(root)
         _print_gws_skills_status(gws_installed, gws_pinned)
 
+    if not args.skip_provider_versions:
+        _print_provider_versions(_probe_opencode(), _probe_bundled_claude(root))
+
     if not args.apply:
         return 0
 
@@ -1039,6 +1329,20 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_gws_skills:
         touched = [*touched, *_refresh_stock_gws_skills(root)]
 
+    provider_record: dict | None = None
+    if not args.skip_provider_versions:
+        provider_record = build_provider_record(
+            version=version,
+            release_date=release_date,
+            opencode=_probe_opencode(),
+            claude=_probe_bundled_claude(root),
+            untested=set(args.untested_provider),
+        )
+        record_path = root / PROVIDER_RECORD_RELPATH
+        record_path.write_text(render_record(provider_record), encoding="utf-8", newline="\n"
+        )
+        touched = [*touched, record_path]
+
     checks = [] if args.skip_checks else _run_checks(root, skip_frontend=args.skip_frontend)
 
     if args.commit:
@@ -1064,7 +1368,12 @@ def main(argv: list[str] | None = None) -> int:
             "--title",
             f"Release v{version}",
             "--body",
-            _pr_body(version, changelog_section, checks),
+            _pr_body(
+                version,
+                changelog_section,
+                checks,
+                provider_record=provider_record,
+            ),
         ]
         if not args.ready:
             cmd.append("--draft")
