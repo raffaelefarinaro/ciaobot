@@ -393,14 +393,14 @@
 
       <!-- STANDARD LOGIN FORM -->
       <!-- A plain labelled password field, not a terminal prompt: the old
-           "$ auth_token: paste token ↵" line hid that this is the password
-           the owner chose in setup, and people could not tell where to type. -->
+           "$ auth_token: paste token ↵" line hid which field takes
+           the password, and people could not tell where to type. -->
       <form v-else class="login-body login-form" @submit.prevent="doLogin">
         <p class="line line--banner">
           <span class="wordmark wordmark--md">ciaobot</span>
         </p>
         <h1 class="login-title">Enter your password</h1>
-        <p class="login-lede">This is the Ciaobot password you chose when you set it up.</p>
+        <p class="login-lede">Use the Ciaobot password for this computer. The installer picks one for you; you can change it in Settings.</p>
         <label class="login-label" for="login-token">Password</label>
         <div class="login-row">
           <input
@@ -421,6 +421,13 @@
           >{{ loading ? 'Logging in…' : 'Log in' }}</button>
         </div>
         <p v-if="error" id="login-error" class="login-error" role="alert">{{ error }}</p>
+        <div v-if="onHost" class="login-host">
+          <button type="button" class="login-host-signin" :disabled="hostSignInBusy" @click="hostSignIn">
+            {{ hostSignInBusy ? 'Opening…' : 'Sign in on this computer' }}
+          </button>
+          <p v-if="hostSignInStatus" class="login-host-status" role="status">{{ hostSignInStatus }}</p>
+          <code v-if="hostSignInFallback" class="login-host-command">ciao setup-url --workspace ~/Ciaobot</code>
+        </div>
         <a
           class="login-help"
           :href="PASSWORD_HELP_URL"
@@ -438,6 +445,7 @@ import { useAuthStore } from '../stores/auth'
 import type { SetupStatus } from '../lib/types'
 import { errorMessage } from '../lib/errorMessage'
 import { api } from '../lib/api'
+import { isHostOrigin } from '../lib/hostOrigin'
 import { writeClipboard } from '../lib/codeCopy'
 import HostTerminalButton from './HostTerminalButton.vue'
 
@@ -667,6 +675,65 @@ const providerBadgeLabel = computed(() => {
   return '[!] Not Configured'
 })
 
+const onHost = isHostOrigin()
+const hostSignInBusy = ref(false)
+const hostSignInStatus = ref('')
+const hostSignInFallback = ref(false)
+const HOST_SIGN_IN_POLL_MS = 2000
+const HOST_SIGN_IN_POLL_LIMIT_MS = 120_000
+let hostSignInTimer: ReturnType<typeof setInterval> | null = null
+
+function stopHostSignInPoll() {
+  if (hostSignInTimer !== null) {
+    clearInterval(hostSignInTimer)
+    hostSignInTimer = null
+  }
+}
+
+function startHostSignInPoll() {
+  stopHostSignInPoll()
+  const startedAt = Date.now()
+  hostSignInTimer = setInterval(async () => {
+    await auth.check()
+    if (auth.authenticated) {
+      stopHostSignInPoll()
+      window.location.replace('/')
+    } else if (Date.now() - startedAt >= HOST_SIGN_IN_POLL_LIMIT_MS) {
+      stopHostSignInPoll()
+    }
+  }, HOST_SIGN_IN_POLL_MS)
+}
+
+async function hostSignIn() {
+  hostSignInBusy.value = true
+  hostSignInStatus.value = ''
+  hostSignInFallback.value = false
+  try {
+    await api.post('/api/auth/host-sign-in')
+    hostSignInStatus.value =
+      'A signed-in Ciaobot tab is opening in your default browser. Then choose a new password in Settings → PWA password.'
+    startHostSignInPoll()
+  } catch (e) {
+    const { status, payload } = e as { status?: number; payload?: { reason?: string } }
+    const reason = payload?.reason
+    if (status === 429) {
+      hostSignInStatus.value = 'A sign-in page was just opened. Look for it in your browser.'
+    } else if (reason === 'not_on_host') {
+      hostSignInStatus.value = 'This only works in a browser on the computer running Ciaobot.'
+    } else if (reason === 'setup_required') {
+      hostSignInStatus.value = 'Finish setting up Ciaobot first, then sign in.'
+    } else if (reason === 'no_desktop' || reason === 'open_failed' || reason === 'no_workspace') {
+      hostSignInFallback.value = true
+      hostSignInStatus.value =
+        'Ciaobot could not open a browser here. Run this in a terminal on this computer, then open the link it prints:'
+    } else {
+      hostSignInStatus.value = 'Could not start the sign-in. Use the steps behind “Forgot your password?”.'
+    }
+  } finally {
+    hostSignInBusy.value = false
+  }
+}
+
 async function doLogin() {
   loading.value = true
   error.value = ''
@@ -801,6 +868,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  stopHostSignInPoll()
   if (pollInterval) {
     clearInterval(pollInterval)
     pollInterval = null
@@ -1079,6 +1147,33 @@ onUnmounted(() => {
   font-size: var(--text-base);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+.login-host {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.login-host-signin {
+  min-height: var(--touch);
+  padding: 0 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--text-base);
+  cursor: pointer;
+}
+.login-host-signin:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.login-host-signin:disabled { opacity: 0.6; cursor: default; }
+.login-host-status { margin: 0; color: var(--fg2); font-size: var(--text-sm); }
+.login-host-command {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--text-sm);
+  user-select: all;
+  overflow-wrap: anywhere;
 }
 .login-help:hover { color: var(--accent-strong); }
 .login-help:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }

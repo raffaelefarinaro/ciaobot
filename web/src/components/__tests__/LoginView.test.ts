@@ -658,4 +658,91 @@ describe('LoginView setup wizard tests', () => {
     expect(plain.find('#setup-workspace-cloud-warning').exists()).toBe(false)
   })
 
+  describe('sign in on this computer', () => {
+    const configured = { configured: true, bootstrap: false, mode: 'configured', providers: {} }
+
+    it('offers "Sign in on this computer" on the host and posts to host-sign-in', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockResolvedValue({ ok: true })
+      const wrapper = await mountLoginView()
+      vi.useFakeTimers()
+      const fetchMock = vi.fn(() => Promise.resolve({ ok: true }))
+      vi.stubGlobal('fetch', fetchMock)
+      const replace = vi.fn()
+      const original = window.location
+      Object.defineProperty(window, 'location', { configurable: true, value: { ...original, replace, search: '' } })
+      try {
+        const button = wrapper.get('.login-host-signin')
+        expect(button.text()).toBe('Sign in on this computer')
+        await button.trigger('click')
+        await flushPromises()
+        expect(mockApiPost).toHaveBeenCalledWith('/api/auth/host-sign-in', undefined)
+        expect(wrapper.get('.login-host-status').text()).toContain('Settings → PWA password')
+        await vi.advanceTimersByTimeAsync(2000)
+        expect(fetchMock).toHaveBeenCalled()
+        expect(replace).toHaveBeenCalledWith('/')
+      } finally {
+        Object.defineProperty(window, 'location', { configurable: true, value: original })
+        vi.useRealTimers()
+        vi.unstubAllGlobals()
+      }
+    })
+
+    it('shows the setup-url command when the engine cannot open a browser', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 409, payload: { reason: 'no_desktop' } }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-command').text()).toBe('ciao setup-url --workspace ~/Ciaobot')
+    })
+
+    it('says plainly when the page is not on the computer running Ciaobot', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 403, payload: { reason: 'not_on_host' } }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-status').text()).toBe('This only works in a browser on the computer running Ciaobot.')
+      expect(wrapper.find('.login-host-command').exists()).toBe(false)
+    })
+
+    it('asks to finish setup first when the engine is not set up', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 409, payload: { reason: 'setup_required' } }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-status').text()).toBe('Finish setting up Ciaobot first, then sign in.')
+    })
+
+    it('tells the user to look for the tab on a cooldown', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 429, payload: { reason: 'cooldown' } }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-status').text()).toBe('A sign-in page was just opened. Look for it in your browser.')
+    })
+
+    it('falls back to the forgot-password steps for any other failure', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 500 }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-status').text()).toBe('Could not start the sign-in. Use the steps behind “Forgot your password?”.')
+    })
+
+    it('pressing Enter in the password field still logs in', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      const wrapper = await mountLoginView()
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('invalid token'), { status: 401 }))
+      await wrapper.get('#login-token').setValue('secret')
+      await wrapper.get('form.login-form').trigger('submit')
+      await flushPromises()
+      expect(mockApiPost).toHaveBeenCalledWith('/api/auth', { token: 'secret' })
+      expect(mockApiPost).not.toHaveBeenCalledWith('/api/auth/host-sign-in', expect.anything())
+    })
+  })
 })
