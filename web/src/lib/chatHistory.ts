@@ -161,6 +161,111 @@ export function mergeMessageFields(sMsg: ChatMessage, lMsg: ChatMessage): ChatMe
   return merged
 }
 
+/**
+ * Collapse every run of whitespace, so two renderings of the same text
+ * compare equal no matter how the provider joined or padded its parts.
+ *
+ * Note what "every" means: newlines go too, so two answers that differ only
+ * in indentation compare equal. That is safe here only because
+ * `hasRenderedFinalAnswer` also requires that no `user` row follows the
+ * matched answer — a later user turn means the transcript has moved on, so
+ * the frame is a genuine new answer and never a replay.
+ */
+export function squashWhitespace(s: string): string {
+  return s.replace(/\s+/g, '')
+}
+
+/**
+ * True when the transcript already renders `text` as its final answer.
+ *
+ * A `result` frame is replayed to every new subscriber of a chat's stream
+ * (that is how a reconnect re-attaches). When the reload that preceded the
+ * replay already hydrated the finished turn from `/messages`, the replayed
+ * result used to append a second identical bubble, footer included.
+ *
+ * The answer must be the transcript's tail: a later user row means the
+ * transcript has moved on, and the frame is then a genuine new answer.
+ *
+ * A row the client rendered itself carries `phase: 'final_answer'`. A row
+ * hydrated from `/messages` carries no phase at all — the server does not
+ * stamp one — so it is recognised by its position: the last assistant text
+ * of the transcript, closing a turn.
+ */
+export function hasRenderedFinalAnswer(msgs: ChatMessage[], text: string): boolean {
+  if (!text) return false
+  const wanted = squashWhitespace(text)
+  // The LAST matching answer decides: a repeated answer earlier in the
+  // transcript must not shadow a newer one.
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const row = msgs[i]
+    if (row.role !== 'assistant' || row.tool_name) continue
+    if (row.phase === 'commentary') continue
+    if (squashWhitespace(row.content || '') !== wanted) continue
+    if (row.phase !== 'final_answer' && !isTranscriptTailAnswer(msgs, i)) continue
+    // A user row after the answer means a newer turn started: this frame is
+    // not a replay of that answer.
+    for (let j = i + 1; j < msgs.length; j++) {
+      if (msgs[j].role === 'user') return false
+    }
+    return true
+  }
+  return false
+}
+
+/**
+ * True when the row at `index` is the answer a hydrated transcript ends on.
+ *
+ * A hydrated history row carries no `phase`, so the answer is the last
+ * assistant text of the transcript: the trace rows that may follow it
+ * (activity, thinking, a file card) are the turn's own trace, not a newer
+ * answer.
+ */
+function isTranscriptTailAnswer(msgs: ChatMessage[], index: number): boolean {
+  for (let j = index + 1; j < msgs.length; j++) {
+    const row = msgs[j]
+    if (row.role === 'user') return false
+    if (row.role === 'assistant' && !row.tool_name) return false
+  }
+  return true
+}
+
+/**
+ * Drop local optimistic user bubbles the server history already holds.
+ *
+ * The client renders a user bubble at send time; the server stamps the same
+ * turn with its own `turn_index` when it lands. A bubble that never got an
+ * index and whose text the server also holds is that optimistic copy — but
+ * only when the server holds it as many times: the pairing is one-to-one, so
+ * a genuinely repeated message keeps both copies.
+ *
+ * A row the server already indexed (it carries an absolute index) is the
+ * server's own copy, never an optimistic bubble, whatever its turn index
+ * says: an archived-transcript row has no `turn_index` at all.
+ */
+export function pruneOrphanOptimisticUsers(
+  local: ChatMessage[], serverUsers: ChatMessage[],
+): ChatMessage[] {
+  const server = serverUsers.filter(m => m.role === 'user')
+  if (!server.length) return local
+  const consumed = new Set<number>()
+  const kept: ChatMessage[] = []
+  for (const row of local) {
+    if (row.role !== 'user' || row.turn_index != null || typeof row.i === 'number') {
+      kept.push(row)
+      continue
+    }
+    const match = server.findIndex(
+      (candidate, idx) => !consumed.has(idx) && (candidate.content || '').trim() === (row.content || '').trim(),
+    )
+    if (match >= 0) {
+      consumed.add(match)
+      continue
+    }
+    kept.push(row)
+  }
+  return kept
+}
+
 export function groupIntoTurns(msgsList: ChatMessage[]): { user: ChatMessage | null; responses: ChatMessage[] }[] {
   const turns: { user: ChatMessage | null; responses: ChatMessage[] }[] = []
   let currentTurn: { user: ChatMessage | null; responses: ChatMessage[] } = { user: null, responses: [] }

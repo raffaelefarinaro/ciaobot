@@ -47,6 +47,7 @@ test('live subagents render as single rows with the link inside the trace', asyn
     })
   }, CHAT_ID)
 
+  await page.locator('.trace-block.live .trace-summary').click()
   const rows = page.locator('.trace-block.live .subagent-row')
   await expect(rows).toHaveCount(2, { timeout: 8_000 })
   await expect(page.locator('.subagent-panel')).toHaveCount(0)

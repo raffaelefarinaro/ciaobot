@@ -3045,7 +3045,15 @@ async def chat_subagents(request: Request) -> JSONResponse:
             and live_provider.has_live_server
             and live_provider.current_session_id == chat.session_id
         ):
-            collab_tree = await live_provider.read_live_collab_tree()
+            # Metadata only, unless the caller asked for one child's
+            # transcript: the list is polled every few seconds, and reading
+            # every child's history on every poll is what made a chat with
+            # many background agents re-read every transcript every few
+            # seconds.
+            collab_tree = await live_provider.read_live_collab_tree(
+                include_messages=bool(wanted_agent_id),
+                only_child_id=wanted_agent_id or None,
+            )
         else:
             resolver = getattr(pcm, "_agent_root_for_chat", None)
             root = resolver(chat_id) if resolver is not None else config.workspace_root
@@ -3080,6 +3088,9 @@ async def chat_subagents(request: Request) -> JSONResponse:
                     item.get("active") if isinstance(item.get("active"), bool) else None,
                 ),
                 "turn_index": transcript_service._opencode_child_turn_index(info, chat),
+                # The list carries no transcript, so the run length comes from
+                # the child session's own timestamps.
+                "duration_ms": transcript_service._opencode_child_duration_ms(info),
             })
         return JSONResponse(opencode_entries)
 
@@ -3269,6 +3280,8 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
             agent_id = str(info.get("id") or "")
             if not agent_id:
                 continue
+            # The live tree carries no transcript; the ephemeral fallback still
+            # does, and the status falls back to message timing there.
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
             if transcript_service._opencode_child_status(
@@ -6010,22 +6023,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     workspace = str(body.get("workspace", "")).strip()
     if not workspace:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
-    from ciao.setup_status import tcc_protected_location
-
-    protected = tcc_protected_location(workspace)
-    if protected:
-        return JSONResponse(
-            {
-                "error": (
-                    f"'{workspace}' is inside ~/{protected}, which macOS privacy "
-                    "protection blocks background services from reading — the "
-                    "Ciaobot server and menu bar would fail to start. Pick a "
-                    "folder outside ~/Desktop, ~/Documents, and ~/Downloads "
-                    "(for example ~/ciaobot)."
-                )
-            },
-            status_code=400,
-        )
     try:
         port = int(body.get("port") or config.pwa_port)
     except (TypeError, ValueError):
@@ -6228,8 +6225,13 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     chips when they are present; otherwise it asks for the logical workspace
     name that will be assigned to the selected folder.
     """
+    from ciao import cli
     from ciao.cli import detect_vault_mode
-    from ciao.setup_status import cloud_sync_warning, detect_nested_workspaces
+    from ciao.setup_status import (
+        cloud_sync_warning,
+        detect_nested_workspaces,
+        macos_access_note,
+    )
 
     guard = _setup_fs_guard(request)
     if guard is not None:
@@ -6256,6 +6258,9 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
         "vault_root": str(vault_root),
         "existing_workspaces": nested,
         "cloud_sync_warning": cloud_sync_warning(target),
+        "macos_access_note": (
+            macos_access_note(target) if cli._verified_host_if_installed() is not None else ""
+        ),
     })
 
 

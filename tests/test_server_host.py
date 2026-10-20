@@ -256,10 +256,10 @@ def test_identity_is_distinct_from_pwa_retired_and_experiment() -> None:
 def test_revision_is_independent_of_engine_version() -> None:
     info = BUILD.bundle_info()
     # The bundle version expresses the host revision, never the engine release.
-    assert BUILD.HOST_REVISION == 2
-    assert info["CFBundleVersion"] == "2"
-    assert info["CFBundleShortVersionString"] == "2"
-    assert info[BUILD.HOST_PROTOCOL_KEY] == 1
+    assert BUILD.HOST_REVISION == 3
+    assert info["CFBundleVersion"] == "3"
+    assert info["CFBundleShortVersionString"] == "3"
+    assert info[BUILD.HOST_PROTOCOL_KEY] == 2
     assert info["LSMinimumSystemVersion"] == "13.0"
 
     from ciao import __version__
@@ -268,6 +268,104 @@ def test_revision_is_independent_of_engine_version() -> None:
     for value in (info["CFBundleVersion"], info["CFBundleShortVersionString"]):
         assert value != __version__
         assert __version__ not in str(value)
+
+
+# --- the folder usage descriptions ------------------------------------------
+
+
+_FOLDER_USAGE_KEYS = {
+    "NSDesktopFolderUsageDescription": "Desktop",
+    "NSDocumentsFolderUsageDescription": "Documents",
+    "NSDownloadsFolderUsageDescription": "Downloads",
+}
+
+
+def test_the_host_declares_the_folder_usage_strings() -> None:
+    # macOS shows the explanation line it is given; with no key for a folder the
+    # prompt appears with an empty line (#1577, #1659).
+    info = BUILD.bundle_info()
+    for key, folder in _FOLDER_USAGE_KEYS.items():
+        text = info[key]
+        assert isinstance(text, str) and text.strip() == text
+        # One plain sentence: it names the folder, says who asks, and says the
+        # access is scoped to a workspace the user chose.
+        assert text.endswith(".")
+        assert text.count(".") == 1, f"{key} is not one sentence: {text!r}"
+        assert folder in text
+        assert "Ciaobot Server" in text
+        assert "workspace" in text
+    # The two existing usage descriptions are untouched.
+    assert info["NSAppleEventsUsageDescription"] == BUILD.APPLE_EVENTS_USAGE
+    assert info["NSAccessibilityUsageDescription"] == BUILD.ACCESSIBILITY_USAGE
+
+
+def test_a_bundle_with_the_folder_usage_strings_still_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The three new keys are part of the sealed plist, so they change the
+    # bundle's digest. Adding them must not break the ownership contract: the
+    # inspector reads the identity fields, and the record matches the bytes.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    from ciao import server_host
+
+    bundle = tmp_path / server_host.APP_NAME
+    for relative in (
+        "Contents/MacOS/Ciaobot Server",
+        "Contents/Resources/CiaobotServer.icns",
+        "Contents/_CodeSignature/CodeResources",
+    ):
+        path = bundle / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"sealed")
+    with (bundle / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump(BUILD.bundle_info(), handle)
+
+    snapshot = server_host.inspect_host_bundle(bundle, runner=_plist_runner())
+    assert snapshot.host_revision == 3
+    assert snapshot.host_protocol == 2
+    # The sealed plist really carries the new keys.
+    plist_bytes = (bundle / "Contents" / "Info.plist").read_bytes()
+    assert snapshot.bundle_files["Contents/Info.plist"] == hashlib.sha256(
+        plist_bytes
+    ).hexdigest()
+    for key in _FOLDER_USAGE_KEYS:
+        assert key.encode() in plist_bytes
+
+    # The record that vouches for it verifies the very same bytes.
+    record = tmp_path / "server-host.json"
+    record.write_text(json.dumps(snapshot.to_record()), encoding="utf-8")
+    os.chmod(record, 0o600)
+    verified = server_host.verify_owned_host(
+        bundle, ownership_path=record, runner=_plist_runner()
+    )
+    assert verified == snapshot
+
+
+def _plist_runner() -> Any:
+    """A runner that answers the codesign probes for a fixture bundle."""
+    codesign = "/usr/bin/codesign"
+
+    def run(cmd: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == [codesign, "-dv"]:
+            if "--arch" in cmd:
+                arch = cmd[cmd.index("--arch") + 1]
+                return subprocess.CompletedProcess(
+                    cmd,
+                    0,
+                    stdout="",
+                    stderr=f"CDHash={hashlib.sha1(arch.encode()).hexdigest()}\n",
+                )
+            stderr = (
+                "Identifier=local.ciaobot.server\n"
+                "Format=app bundle with Mach-O universal (arm64 x86_64)\n"
+                "Signature=adhoc\n"
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr=stderr)
+        if cmd[:2] == [codesign, "--verify"]:
+            return subprocess.CompletedProcess(cmd, 0)
+        raise AssertionError(f"unexpected native probe: {cmd}")
+
+    return run
 
 
 # --- icon -----------------------------------------------------------------
@@ -388,8 +486,8 @@ def test_injected_build_order_and_metadata(tmp_path: Path) -> None:
 
     metadata = result["metadata"]
     assert metadata["bundle_id"] == "local.ciaobot.server"
-    assert metadata["host_revision"] == 2
-    assert metadata["host_protocol"] == 1
+    assert metadata["host_revision"] == 3
+    assert metadata["host_protocol"] == 2
     assert metadata["minimum_system_version"] == "13.0"
     assert metadata["architectures"] == ["arm64", "x86_64"]
     assert metadata["executable_sha256"] == hashlib.sha256(b"universal-binary").hexdigest()
@@ -471,7 +569,7 @@ def test_build_archive_preserves_strict_signature(tmp_path: Path) -> None:
     with (extracted_app / "Contents" / "Info.plist").open("rb") as handle:
         info = plistlib.load(handle)
     assert info["CFBundleIdentifier"] == "local.ciaobot.server"
-    assert info[BUILD.HOST_PROTOCOL_KEY] == 1
+    assert info[BUILD.HOST_PROTOCOL_KEY] == 2
 
     # The per-arch CDHashes in the metadata are the real signed slices' hashes,
     # cross-checked against each slice thinned out of the extracted executable.
@@ -487,6 +585,29 @@ def test_build_archive_preserves_strict_signature(tmp_path: Path) -> None:
             ["codesign", "-dv", "--verbose=4", str(thin)], capture_output=True, text=True
         )
         assert f"CDHash={expected}" in shown.stderr.splitlines()
+
+
+@requires_macos_tools
+def test_the_built_app_carries_the_folder_usage_strings(tmp_path: Path) -> None:
+    # The real, signed bundle: the three folder usage keys are in its sealed
+    # Info.plist, and the bundle version is the new host revision.
+    result = BUILD.build(tmp_path / "host")
+    app: Path = result["paths"]["app"]
+
+    with (app / "Contents" / "Info.plist").open("rb") as handle:
+        info = plistlib.load(handle)
+
+    assert info["CFBundleVersion"] == "3"
+    assert info["CFBundleShortVersionString"] == "3"
+    for key, folder in _FOLDER_USAGE_KEYS.items():
+        text = info[key]
+        assert isinstance(text, str)
+        assert folder in text
+        assert "Ciaobot Server" in text
+        assert "workspace" in text
+    # The two existing usage descriptions are still there.
+    assert info["NSAppleEventsUsageDescription"] == BUILD.APPLE_EVENTS_USAGE
+    assert info["NSAccessibilityUsageDescription"] == BUILD.ACCESSIBILITY_USAGE
 
 
 # --- serve branch runtime (macOS only) ------------------------------------
@@ -636,6 +757,207 @@ def test_host_fixed_supervisor_argv_and_lifetime(
     assert rec["open_fds"] == [0, 1, 2]
     # The environment is inherited verbatim.
     assert rec["mark"] == "inherited-value"
+
+
+@requires_macos_tools
+def test_host_run_move_spawns_the_move_child(
+    host_binary: Path, child_helper: Path, tmp_path: Path
+) -> None:
+    # The move job runs under the host, so a granted folder grant covers it
+    # (#1658). The child's argv is the fixed move command plus the two
+    # validated values - no arbitrary command and no shell.
+    record = tmp_path / "record.json"
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    operation = "op-1234"
+    env = _child_env(HOST_RECORD=record, HOST_MODE="report", HOST_EXIT="0")
+    host = subprocess.Popen(
+        [
+            str(host_binary),
+            "run-move",
+            "--python",
+            str(child_helper),
+            "--operation",
+            operation,
+            "--state-dir",
+            str(state_dir),
+        ],
+        env=env,
+        start_new_session=True,
+    )
+    host_pgid = os.getpgid(host.pid)
+    try:
+        assert host.wait(timeout=30) == 0
+        rec = json.loads(record.read_text())
+        # Exactly the fixed move argv, and nothing else.
+        assert rec["args"] == [
+            "-I",
+            "-m",
+            "ciao.workspace_move",
+            "run",
+            "--operation",
+            operation,
+            "--state-dir",
+            str(state_dir),
+        ]
+        # The child shares the host's process group: the move job stays in
+        # launchd's own job group, like the supervisor does.
+        assert rec["pgid"] == host_pgid
+        assert rec["sid"] == host_pgid
+        assert rec["ppid"] == host.pid
+        # No permission or shell surface: only stdio is open in the child.
+        assert rec["open_fds"] == [0, 1, 2]
+    finally:
+        _kill_group_exact(host_pgid)
+
+
+@requires_macos_tools
+def test_host_run_move_mirrors_the_child_exit_code(
+    host_binary: Path, child_helper: Path, tmp_path: Path
+) -> None:
+    # The move job's own exit status is what launchd and the move's log see,
+    # so the host mirrors it exactly.
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    for code in (0, 5, 78):
+        result = subprocess.run(
+            [
+                str(host_binary),
+                "run-move",
+                "--python",
+                str(child_helper),
+                "--operation",
+                "op-1234",
+                "--state-dir",
+                str(state_dir),
+            ],
+            capture_output=True,
+            text=True,
+            env=_child_env(
+                HOST_RECORD=tmp_path / f"record-{code}.json",
+                HOST_MODE="report",
+                HOST_EXIT=str(code),
+            ),
+            timeout=30,
+        )
+        assert result.returncode == code
+
+
+@requires_macos_tools
+def test_host_rejects_an_invalid_run_move_argv(
+    host_binary: Path, tmp_path: Path
+) -> None:
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    executable = tmp_path / "python"
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    plain = tmp_path / "plain.txt"
+    plain.write_text("not executable")
+
+    def run(args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(host_binary), *args], capture_output=True, text=True, timeout=30
+        )
+
+    valid = [
+        "run-move",
+        "--python",
+        str(executable),
+        "--operation",
+        "op-1234",
+        "--state-dir",
+        str(state_dir),
+    ]
+    # A relative python, a missing --state-dir, a ".." in either value and an
+    # extra argument are all refused before anything is spawned.
+    assert run([*valid[:2], "relative/python", *valid[4:]]).returncode == 2
+    assert run([*valid[:2], str(executable), "--operation", "op-1234"]).returncode == 2
+    assert (
+        run(
+            [
+                "run-move",
+                "--python",
+                str(executable),
+                "--operation",
+                "op-1234",
+                "--state-dir",
+                f"{state_dir}/../escape",
+            ]
+        ).returncode
+        == 2
+    )
+    assert (
+        run(
+            [
+                "run-move",
+                "--python",
+                f"{executable}/../python",
+                "--operation",
+                "op-1234",
+                "--state-dir",
+                str(state_dir),
+            ]
+        ).returncode
+        == 2
+    )
+    assert run([*valid, "extra"]).returncode == 2
+    assert run([*valid, "--python", str(executable)]).returncode == 2
+    # A non-executable python is refused, like the serve branch.
+    assert (
+        run(
+            [
+                "run-move",
+                "--python",
+                str(plain),
+                "--operation",
+                "op-1234",
+                "--state-dir",
+                str(state_dir),
+            ]
+        ).returncode
+        == 2
+    )
+    # The operation id must be a plain id, not a path or an option.
+    assert (
+        run(
+            [
+                "run-move",
+                "--python",
+                str(executable),
+                "--operation",
+                "../escape",
+                "--state-dir",
+                str(state_dir),
+            ]
+        ).returncode
+        == 2
+    )
+    # An id shaped like an option is refused too: the child would read it as
+    # one, and the engine never mints an id that starts with a dash.
+    for bad_id in ("--state-dir", "-x", ".hidden", "op 1234", ""):
+        assert (
+            run(
+                [
+                    "run-move",
+                    "--python",
+                    str(executable),
+                    "--operation",
+                    bad_id,
+                    "--state-dir",
+                    str(state_dir),
+                ]
+            ).returncode
+            == 2
+        ), bad_id
+    # Nothing was spawned: every refusal is a plain exit 2 with no output.
+    for args in (
+        [*valid[:2], "relative/python", *valid[4:]],
+        [*valid, "extra"],
+    ):
+        result = run(args)
+        assert result.returncode == 2
+        assert result.stdout == ""
 
 
 @requires_macos_tools
@@ -1045,6 +1367,36 @@ def test_serve_branch_has_no_permission_api() -> None:
     assert "execv" not in source
     # The host must never signal the shared launchd job group itself.
     assert "killpg" not in _source_without_comments()
+
+
+def test_the_move_branch_keeps_the_fixed_argv_discipline() -> None:
+    # The host's promise is no arbitrary-command surface, and the move branch
+    # is the newest one: its child is the fixed move command plus the two
+    # validated values, and nothing else reaches the argv.
+    source = _source_without_comments()
+    # The fixed pieces are the only caller-supplied-free part of the argv.
+    assert (
+        'let MOVE_ARGUMENTS = ["-I", "-m", "ciao.workspace_move", "run", "--operation"]'
+        in source
+    )
+    assert 'let MOVE_STATE_DIR_ARGUMENT = "--state-dir"' in source
+    # The spawn builds the argv from the fixed pieces and the two values.
+    match = re.search(
+        r"func spawnMove\(.*?\n\}\n", source, re.DOTALL
+    )
+    assert match is not None
+    spawn = match.group(0)
+    assert "MOVE_ARGUMENTS + [operation, MOVE_STATE_DIR_ARGUMENT, stateDir]" in spawn
+    # The move child is spawned by the same fixed-spawn helper as the
+    # supervisor, so it gets the same attributes and no new process group.
+    assert "spawnFixedChild(" in spawn
+    # The parser validates both values before the child is built.
+    parse = source.split("func parseInvocation(")[1].split("/// The outcome of preparing")[0]
+    assert "isRunnableExecutable(python)" in parse
+    assert "isPlainIdentifier(operation)" in parse
+    assert "isNormalizedAbsolutePath(stateDir)" in parse
+    # No new process group for the move child: it stays in launchd's job group.
+    assert "POSIX_SPAWN_SETPGROUP" not in source
 
 
 def test_host_protocol_revision_matches_builder() -> None:

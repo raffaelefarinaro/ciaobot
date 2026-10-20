@@ -658,4 +658,195 @@ describe('LoginView setup wizard tests', () => {
     expect(plain.find('#setup-workspace-cloud-warning').exists()).toBe(false)
   })
 
+  it('shows the macOS access note for a protected folder', async () => {
+    const mockInspect = (extra: Record<string, unknown>) => {
+      mockApiGet.mockImplementation((path: string) => {
+        if (path.startsWith('/api/setup/inspect-folder')) {
+          return Promise.resolve({ mode: 'scratch', existing_workspaces: [], ...extra })
+        }
+        return Promise.resolve({ configured: false, bootstrap: true, mode: 'bootstrap', providers: {} })
+      })
+    }
+    mockInspect({ macos_access_note: 'macOS asks to let "Ciaobot Server" access your Documents folder.' })
+    const noted = await mountLoginView()
+    const note = noted.find('#setup-workspace-macos-access-note')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('Ciaobot Server')
+
+    mockInspect({})
+    const plain = await mountLoginView()
+    expect(plain.find('#setup-workspace-macos-access-note').exists()).toBe(false)
+  })
+
+  describe('sign in on this computer', () => {
+    const configured = { configured: true, bootstrap: false, mode: 'configured', providers: {} }
+
+    it('offers "Sign in on this computer" on the host and posts to host-sign-in', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockResolvedValue({ ok: true })
+      const wrapper = await mountLoginView()
+      vi.useFakeTimers()
+      const fetchMock = vi.fn(() => Promise.resolve({ ok: true }))
+      vi.stubGlobal('fetch', fetchMock)
+      const replace = vi.fn()
+      const original = window.location
+      Object.defineProperty(window, 'location', { configurable: true, value: { ...original, replace, search: '' } })
+      try {
+        const button = wrapper.get('.login-host-signin')
+        expect(button.text()).toBe('Sign in on this computer')
+        expect(button.attributes('type')).toBe('button')
+        await button.trigger('click')
+        await flushPromises()
+        expect(mockApiPost).toHaveBeenCalledWith('/api/auth/host-sign-in', undefined)
+        expect(wrapper.get('.login-host-status').text()).toContain('Settings → PWA password')
+        await vi.advanceTimersByTimeAsync(2000)
+        expect(fetchMock).toHaveBeenCalled()
+        expect(replace).toHaveBeenCalledWith('/')
+      } finally {
+        Object.defineProperty(window, 'location', { configurable: true, value: original })
+        vi.useRealTimers()
+        vi.unstubAllGlobals()
+      }
+    })
+
+    it('shows the setup-url command when the engine cannot open a browser', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 409, payload: { reason: 'no_desktop' } }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-command').text()).toBe('ciao setup-url --workspace ~/Ciaobot')
+      const region = wrapper.get('.login-host-status')
+      expect(region.find('.login-host-command').exists()).toBe(true)
+      expect(region.text()).toContain('If your Ciaobot folder is somewhere else, put its path after --workspace.')
+    })
+
+    it('says plainly when the page is not on the computer running Ciaobot', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 403, payload: { reason: 'not_on_host' } }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-status').text()).toBe('This only works in a browser on the computer running Ciaobot.')
+      expect(wrapper.find('.login-host-command').exists()).toBe(false)
+    })
+
+    it('asks to finish setup first when the engine is not set up', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 409, payload: { reason: 'setup_required' } }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-status').text()).toBe('Finish setting up Ciaobot first, then sign in.')
+    })
+
+    it('tells the user to look for the tab on a cooldown', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 429, payload: { reason: 'cooldown' } }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-status').text()).toBe('A sign-in page was just opened. Look for it in your browser.')
+    })
+
+    it('falls back to the forgot-password steps for any other failure', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 500 }))
+      const wrapper = await mountLoginView()
+      await wrapper.get('.login-host-signin').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.login-host-status').text()).toBe('Could not start the sign-in. Use the steps behind “Forgot your password?”.')
+    })
+
+    it('pressing Enter in the password field still logs in', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      const wrapper = await mountLoginView()
+      mockApiPost.mockRejectedValueOnce(Object.assign(new Error('invalid token'), { status: 401 }))
+      await wrapper.get('#login-token').setValue('secret')
+      await wrapper.get('form.login-form').trigger('submit')
+      await flushPromises()
+      expect(mockApiPost).toHaveBeenCalledWith('/api/auth', { token: 'secret' })
+      expect(mockApiPost).not.toHaveBeenCalledWith('/api/auth/host-sign-in', expect.anything())
+    })
+    it('renders one polite status region before anything is said, so a screen reader hears it fill', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      const wrapper = await mountLoginView()
+      const region = wrapper.get('.login-host-status')
+      expect(region.attributes('role')).toBe('status')
+      expect(region.attributes('aria-live')).toBe('polite')
+      expect(region.text()).toBe('')
+    })
+
+    it('keeps focus on the button while busy by using aria-disabled, and ignores a second click', async () => {
+      mockApiGet.mockResolvedValue(configured)
+      let release: (v: unknown) => void = () => {}
+      mockApiPost.mockReturnValueOnce(new Promise((r) => { release = r }))
+      const wrapper = await mountLoginView()
+      const button = wrapper.get('.login-host-signin')
+      await button.trigger('click')
+      expect(button.attributes('aria-disabled')).toBe('true')
+      expect(button.attributes('disabled')).toBeUndefined()
+      await button.trigger('click')
+      expect(mockApiPost).toHaveBeenCalledTimes(1)
+      release({ ok: true })
+      await flushPromises()
+      wrapper.unmount()
+    })
+
+    describe('polling after a successful sign-in', () => {
+      async function startPoll(checkOk: boolean) {
+        mockApiGet.mockResolvedValue(configured)
+        mockApiPost.mockResolvedValue({ ok: true })
+        const wrapper = await mountLoginView()
+        vi.useFakeTimers()
+        const fetchMock = vi.fn(() => Promise.resolve({ ok: checkOk }))
+        vi.stubGlobal('fetch', fetchMock)
+        const replace = vi.fn()
+        const original = window.location
+        Object.defineProperty(window, 'location', { configurable: true, value: { ...original, replace, search: '' } })
+        await wrapper.get('.login-host-signin').trigger('click')
+        await flushPromises()
+        return { wrapper, fetchMock, replace, restore: () => {
+          Object.defineProperty(window, 'location', { configurable: true, value: original })
+          vi.useRealTimers()
+          vi.unstubAllGlobals()
+        } }
+      }
+
+      it('asks /api/auth/check and does not redirect while the session is not signed in', async () => {
+        const { wrapper, fetchMock, replace, restore } = await startPoll(false)
+        try {
+          await vi.advanceTimersByTimeAsync(6000)
+          expect(fetchMock).toHaveBeenCalled()
+          expect(fetchMock.mock.calls[0]).toEqual(['/api/auth/check', expect.anything()])
+          expect(replace).not.toHaveBeenCalled()
+          wrapper.unmount()
+        } finally { restore() }
+      })
+
+      it('gives up after 120 s and points to the other browser', async () => {
+        const { wrapper, fetchMock, replace, restore } = await startPoll(false)
+        try {
+          await vi.advanceTimersByTimeAsync(121_000)
+          const calls = fetchMock.mock.calls.length
+          expect(wrapper.get('.login-host-status').text()).toBe('If a signed-in tab opened in another browser, use that one.')
+          await vi.advanceTimersByTimeAsync(20_000)
+          expect(fetchMock.mock.calls.length).toBe(calls)
+          expect(replace).not.toHaveBeenCalled()
+          wrapper.unmount()
+        } finally { restore() }
+      })
+
+      it('stops polling when the page unmounts', async () => {
+        const { wrapper, fetchMock, restore } = await startPoll(false)
+        try {
+          await vi.advanceTimersByTimeAsync(2000)
+          wrapper.unmount()
+          const calls = fetchMock.mock.calls.length
+          await vi.advanceTimersByTimeAsync(10_000)
+          expect(fetchMock.mock.calls.length).toBe(calls)
+        } finally { restore() }
+      })
+    })
+  })
 })

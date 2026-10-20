@@ -44,6 +44,26 @@ def _plan(source: Path, target: Path | str, **kwargs: Any) -> workspace_move.Mov
 # ── plan ─────────────────────────────────────────────────────────────
 
 
+def test_plan_refuses_a_protected_destination_or_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    (home / "Desktop").mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr("ciao.setup_status.sys.platform", "darwin")
+
+    plain = _workspace(home / "old")
+    result = _plan(plain, home / "Documents" / "new")
+    assert any("background job" in r for r in result.refusals)
+
+    protected = _workspace(home / "Desktop" / "old")
+    result = _plan(protected, home / "new")
+    assert any(r.startswith("The workspace is inside ~/Desktop") for r in result.refusals)
+
+    assert not any("background job" in r for r in _plan(plain, home / "new").refusals)
+
+
 def test_plan_accepts_a_new_folder_and_an_empty_one(tmp_path: Path) -> None:
     source = _workspace(tmp_path / "old")
     assert _plan(source, tmp_path / "new").ok

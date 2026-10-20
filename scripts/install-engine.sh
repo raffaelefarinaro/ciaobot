@@ -1349,6 +1349,40 @@ if [ -n "$host_entry" ]; then
     # deletes it by hand. Exit 1 is reserved for a release that did not verify
     # (a manifest/selection error or an archive that does not match its signed
     # digest), and stops the run.
+    #
+    # A superseded host is replaced by this one (#1659). Its presence before the
+    # install is what makes a successful install a replacement, and a
+    # replacement changes the bytes macOS granted Accessibility/Automation to,
+    # so the user is told once.
+    #
+    # The revision that is superseded is read from the wheel itself
+    # (`ciao.server_host.LEGACY_HOST_REVISION`), never written here: a copy of
+    # the number in this script would silently stop matching on the next
+    # revision bump, and the warning is exactly what a user needs then. The
+    # installed revision is read from the sealed plist with `plutil`, the one
+    # tool macOS has for exactly this. A plist it cannot read is not proof of
+    # anything, so it only ever means "not a superseded host": the warning is a
+    # courtesy, and the replacement itself is the installer's decision, made
+    # from the ownership record, not from this.
+    host_superseded_plist="$HOME/Applications/Ciaobot Server.app/Contents/Info.plist"
+    host_replacing=0
+    superseded_revision=$(
+        "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
+            python -I -c 'from ciao.server_host import LEGACY_HOST_REVISION; print(LEGACY_HOST_REVISION)' \
+            2>/dev/null || true
+    )
+    if [ -n "$superseded_revision" ] && [ -f "$host_superseded_plist" ]; then
+        # `plutil` is looked up on PATH, not by its absolute path: the
+        # installer is exercised on Linux CI too, where macOS's own plutil is
+        # not there. A missing plutil only means "not a superseded host".
+        host_revision=$(
+            plutil -extract CFBundleVersion raw -o - \
+                "$host_superseded_plist" 2>/dev/null || true
+        )
+        if [ "$host_revision" = "$superseded_revision" ]; then
+            host_replacing=1
+        fi
+    fi
     host_rc=0
     "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
         python -I -m ciao.server_host_install install \
@@ -1357,7 +1391,12 @@ if [ -n "$host_entry" ]; then
         --archive "$host" \
         --public-key "$RELEASE_PUBLIC_KEY" >/dev/null || host_rc=$?
     case "$host_rc" in
-        0) echo "Ciaobot Server host installed and recorded." ;;
+        0)
+            echo "Ciaobot Server host installed and recorded."
+            if [ "$host_replacing" -eq 1 ]; then
+                echo "warning: Ciaobot Server was replaced by a new build, so macOS will ask again for its Accessibility and Automation permissions; approve them in System Settings > Privacy & Security" >&2
+            fi
+            ;;
         3) echo "warning: the Ciaobot Server host was not installed (see above); the engine install continues" >&2 ;;
         *) fail "the signed server host could not be installed" ;;
     esac
@@ -1431,11 +1470,10 @@ install_step "could not write the install receipt" \
 # service, no agent: the one thing it must not become is a second writer for a
 # runtime root a host owns.
 if [ "$migrate_path" != client ]; then
-    # --yes turns off every guard in `ciao setup` (a LaunchAgent macOS TCC will
-    # block, a health check that never comes up, a service silently re-pointed
-    # at a different workspace), so it is passed only for the workspace this
-    # script detected the engine already running in - the same rule install.sh
-    # applies.
+    # --yes turns off every guard in `ciao setup` (a health check that never
+    # comes up, a service silently re-pointed at a different workspace), so it
+    # is passed only for the workspace this script detected the engine already
+    # running in - the same rule install.sh applies.
     setup_yes=
     if [ -z "$workspace" ]; then
         workspace=
@@ -1504,6 +1542,8 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
     if [ "$migrate_path" = host ]; then
         health_attempts=90
     fi
+    # Only a record written after this point describes this run.
+    : > "$tmp/health-wait-started"
     attempt=0
     healthy=0
     while [ "$attempt" -lt "$health_attempts" ]; do
@@ -1531,11 +1571,25 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
         attempt=$((attempt + 1))
         "$SLEEP" 1
     done
+    # Written by the supervisor when macOS denies the workspace; the path is
+    # ciao.workspace_access.denial_path() (DENIAL_FILE_NAME): keep both in sync.
+    access_denied=
+    denial_record="$HOME/.local/state/ciaobot/workspace-access-denied.txt"
+    if [ "$denial_record" -nt "$tmp/health-wait-started" ]; then
+        access_denied=$(cat "$denial_record" 2>/dev/null || true)
+    fi
     if [ "$healthy" -eq 0 ]; then
         if [ "$migrate_path" = host ]; then
+            if [ -n "$access_denied" ]; then
+                abort_install "$access_denied"
+            fi
             abort_install "the new engine did not answer on http://localhost:$port with version $version within ${health_attempts}s; check: $ciao service status"
         fi
-        echo "Ciaobot engine installer: the engine is still starting; check: ciao service status" >&2
+        if [ -n "$access_denied" ]; then
+            echo "Ciaobot engine installer: $access_denied" >&2
+        else
+            echo "Ciaobot engine installer: the engine is still starting; check: ciao service status" >&2
+        fi
     fi
 fi
 

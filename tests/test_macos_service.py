@@ -500,6 +500,7 @@ def test_service_start_rejects_tcc_protected_workspace(
     calls: list[list[str]] = []
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: None)
     monkeypatch.setattr(
         macos_service,
         "_launchctl",
@@ -517,8 +518,56 @@ def test_service_start_rejects_tcc_protected_workspace(
     )
     assert rc == 1
     assert "Documents" in payload["message"]
+    assert "Ciaobot Server" in payload["message"]
     assert not plist_path.exists()
     assert calls == []
+
+
+def test_service_start_registers_a_protected_workspace_under_the_host(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import plistlib
+
+    from ciao import cli
+    from tests.test_server_host_activation import (
+        _ENGINE_PYTHON,
+        _hosted_expected,
+        _verified_host,
+    )
+
+    home = tmp_path
+    workspace = home / "Documents" / "ws"
+    workspace.mkdir(parents=True)
+    (workspace / ".env").write_text("PWA_PORT=9555\n", encoding="utf-8")
+    (workspace / ".runtime").mkdir(parents=True, exist_ok=True)
+    (workspace / ".runtime" / "workspaces.json").write_text("[]\n", encoding="utf-8")
+    host = _verified_host()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: host)
+    monkeypatch.setattr(sys, "executable", _ENGINE_PYTHON)
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
+    monkeypatch.delenv("CIAO_ENGINE_PATH", raising=False)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        macos_service,
+        "_launchctl",
+        lambda args, runner=None: calls.append(list(args))
+        or subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+    )
+
+    rc = cli.main(["service", "start", "--workspace", str(workspace), "--json"])
+
+    plist_path = (
+        Path(os.environ["CIAO_LAUNCH_AGENTS_DIR"]) / "com.ciao.server.plist"
+    )
+    assert rc == 0, capsys.readouterr().out
+    with plist_path.open("rb") as handle:
+        argv = plistlib.load(handle)["ProgramArguments"]
+    assert argv == _hosted_expected(host, _ENGINE_PYTHON)
+    gui_domains = [arg for call in calls for arg in call if arg.startswith("gui/")]
+    assert gui_domains
+    assert all(arg == "gui/501" or arg.startswith("gui/501/") for arg in gui_domains)
 
 
 @launchd_only
@@ -1208,3 +1257,28 @@ def test_gate_lets_a_stopped_engine_through_when_blockers_cannot_be_read(tmp_pat
     monkeypatch.setattr(macos_service, "server_reachable", lambda _port, **_kw: False)
 
     assert macos_service.restart_gate(8443, "restart", force=False) is None
+
+
+def test_status_reports_a_workspace_access_denial(tmp_path: Path, monkeypatch) -> None:
+    from ciao import workspace_access
+
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    line = "macOS denied Ciaobot Server access to /w: allow it in System Settings."
+    record = workspace_access.denial_path()
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(line + "\n", encoding="utf-8")
+    runner = _launchd_runner([], NOT_LOADED_PRINT, print_returncode=113)
+
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+    down = macos_service.service_status(runtime=runtime, uid=501, runner=runner)
+
+    assert down.message.startswith("Ciaobot engine is not running: macOS denied")
+    assert down.details["workspace_access_denied"] == line
+
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: True)
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [])
+    up = macos_service.service_status(runtime=runtime, uid=501, runner=runner)
+
+    assert up.message == "Ciaobot engine is running."
+    assert up.details["workspace_access_denied"] is None

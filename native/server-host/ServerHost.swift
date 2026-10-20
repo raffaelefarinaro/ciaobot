@@ -1,7 +1,7 @@
 // Ciaobot Server native host.
 //
 // This is the small, persistent macOS host that launchd will eventually own as
-// the final job-group member (#1009, child A of #1008). It does exactly two
+// the final job-group member (#1009, child A of #1008). It does exactly three
 // things, and nothing else:
 //
 //   Ciaobot Server serve --python /absolute/interpreter
@@ -16,6 +16,15 @@
 //       stays alive for five seconds and then exits. It never grants anything
 //       by itself and never reads, clicks, types, or scripts.
 //
+//   Ciaobot Server run-move --python /absolute/interpreter --operation <id>
+//       --state-dir /absolute/dir
+//       Launch exactly `[python, -I, -m, ciao.workspace_move, run, --operation,
+//       <id>, --state-dir, <dir>]` as a child and mirror its status. The
+//       workspace move must run as a descendant of this host, so a macOS
+//       folder grant the user gave the host covers the move too (#1658).
+//       The command is fixed: only the interpreter, the operation id and the
+//       state directory are caller-supplied, and all three are validated.
+//
 // There is no network, IPC, arbitrary-command, shell, exec-replacement or
 // desktop-control surface. The host never spawns a shell and never sets a
 // custom environment knob. The child inherits cwd, environment and stdio.
@@ -29,7 +38,7 @@
 // never calls `killpg` itself: a stop is forwarded to the tracked,
 // still-unreaped child PID only, and launchd is the final group owner.
 //
-// Protocol revision 1. Invalid argv exits 2 before AppKit is set up and before
+// Protocol revision 2. Invalid argv exits 2 before AppKit is set up and before
 // any permission call is reachable.
 
 import AppKit
@@ -39,7 +48,7 @@ import Foundation
 
 /// Wire/contract revision of the fixed host protocol. Bump only with the
 /// builder's `CiaobotServerHostProtocol` plist key and the docs.
-let HOST_PROTOCOL_REVISION = 1
+let HOST_PROTOCOL_REVISION = 2
 
 /// How long the host waits after forwarding a stop before it escalates to
 /// SIGKILL, and how long the asynchronous accessibility prompt is retained.
@@ -54,6 +63,12 @@ let REQUEST_LIFETIME_SECONDS = 5.0
 /// seam for additional engine arguments, scripts or shell strings.
 let SUPERVISOR_ARGUMENTS = ["-I", "-m", "ciao.cli", "supervise"]
 
+/// The fixed arguments of the workspace move. The operation id and the state
+/// directory are the only caller-supplied parts, and they are validated before
+/// the child is built.
+let MOVE_ARGUMENTS = ["-I", "-m", "ciao.workspace_move", "run", "--operation"]
+let MOVE_STATE_DIR_ARGUMENT = "--state-dir"
+
 let EXIT_USAGE: Int32 = 2
 let EXIT_LAUNCH_FAILURE: Int32 = 1
 
@@ -61,6 +76,7 @@ let EXIT_LAUNCH_FAILURE: Int32 = 1
 enum Operation {
     case serve(python: String)
     case requestAccessibility
+    case runMove(python: String, operation: String, stateDir: String)
 }
 
 func writeStderr(_ message: String) {
@@ -76,20 +92,65 @@ func usage() -> Never {
     writeStderr(
         "Usage: Ciaobot Server serve --python /absolute/interpreter\n"
             + "       Ciaobot Server request-accessibility\n"
+            + "       Ciaobot Server run-move --python /absolute/interpreter"
+            + " --operation <id> --state-dir /absolute/dir\n"
     )
     exit(EXIT_USAGE)
+}
+
+/// True when `path` is an absolute, normalized path: no `.`, `..`, `//` or
+/// trailing `/`.
+///
+/// The engine's own contract refuses such a path for the interpreter
+/// (`ciao.server_host._absolute_posix`), and the host refuses it too, so the
+/// two agree on what a valid path is. A dot *directory* (`.local`) is ordinary
+/// and is not a dot alias: only the `.` and `..` components are refused.
+///
+/// The engine's contract also refuses a backslash, because on Windows it is a
+/// separator and on macOS it is an ordinary (and suspicious) filename byte.
+/// The host runs only on macOS, where a backslash is not a separator, so it is
+/// not refused here; a path carrying one still names exactly one file, and the
+/// argv carries no shell to expand it.
+func isNormalizedAbsolutePath(_ path: String) -> Bool {
+    guard path.hasPrefix("/") else { return false }
+    if path.hasSuffix("/") { return false }
+    // The leading "/" is the root, so the components start after it.
+    let components = path.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
+    for component in components {
+        if component == "." || component == ".." { return false }
+        if component.isEmpty { return false }
+    }
+    return true
 }
 
 /// True when `path` is an absolute path naming an existing, executable,
 /// non-directory file. Symlinks and dot aliases are resolved by the filesystem
 /// as ordinary executable paths; nothing here forbids them.
 func isRunnableExecutable(_ path: String) -> Bool {
-    guard path.hasPrefix("/") else { return false }
+    guard isNormalizedAbsolutePath(path) else { return false }
     var isDirectory: ObjCBool = false
     guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
         !isDirectory.boolValue
     else { return false }
     return FileManager.default.isExecutableFile(atPath: path)
+}
+
+/// True when `value` is a plain operation id: it starts with a letter or a
+/// digit and continues with letters, digits, `_` or `-`.
+///
+/// The engine mints these ids as a timestamp plus six hex characters
+/// (`ciao.workspace_move`), so the class covers every id it can produce and
+/// nothing else. A leading dash is refused on purpose: the id is handed to
+/// the child as an argument value, and an id shaped like `--state-dir` would
+/// make the child's own argument parser read it as an option.
+func isPlainIdentifier(_ value: String) -> Bool {
+    guard let first = value.first, first.isLetter || first.isNumber else { return false }
+    for character in value.dropFirst() {
+        guard character.isLetter || character.isNumber || character == "_" || character == "-" else {
+            return false
+        }
+    }
+    return true
 }
 
 /// Parse the fixed invocation strictly. Rejects repeated, unknown and extra
@@ -99,6 +160,31 @@ func parseInvocation(_ arguments: [String]) -> Operation {
     let args = Array(arguments.dropFirst())
     if args == ["request-accessibility"] {
         return .requestAccessibility
+    }
+    if args.first == "run-move" {
+        guard args.count == 7, args[1] == "--python", args[3] == "--operation",
+            args[5] == MOVE_STATE_DIR_ARGUMENT
+        else {
+            usage()
+        }
+        let python = args[2]
+        guard isRunnableExecutable(python) else {
+            writeStderr("Ciaobot Server: --python must be an absolute existing executable\n")
+            exit(EXIT_USAGE)
+        }
+        let operation = args[4]
+        guard isPlainIdentifier(operation) else {
+            writeStderr("Ciaobot Server: --operation must be a plain identifier\n")
+            exit(EXIT_USAGE)
+        }
+        let stateDir = args[6]
+        guard isNormalizedAbsolutePath(stateDir) else {
+            writeStderr(
+                "Ciaobot Server: --state-dir must be an absolute path without '..'\n"
+            )
+            exit(EXIT_USAGE)
+        }
+        return .runMove(python: python, operation: operation, stateDir: stateDir)
     }
     guard args.count == 3, args[0] == "serve", args[1] == "--python" else {
         usage()
@@ -117,7 +203,11 @@ enum SpawnOutcome {
     case failed(String)
 }
 
-/// Spawn the fixed supervisor with the public `posix_spawn` API.
+/// Spawn a fixed child with the public `posix_spawn` API.
+///
+/// The child's argv is the interpreter followed by `arguments`, which are fixed
+/// pieces plus the values the parser already validated. There is no seam for a
+/// caller-supplied command, a shell string or an extra argument.
 ///
 /// No `POSIX_SPAWN_SETPGROUP`: the child stays in the host's process group and
 /// session, so launchd's final job-group cleanup still reaches the supervisor
@@ -127,7 +217,7 @@ enum SpawnOutcome {
 /// `POSIX_SPAWN_CLOEXEC_DEFAULT` closes every descriptor except the explicitly
 /// re-inherited stdio. Every fallible call is checked; the spawn attributes,
 /// file actions and the C-string argv are released on every path.
-func spawnSupervisor(python: String) -> SpawnOutcome {
+func spawnFixedChild(python: String, arguments: [String]) -> SpawnOutcome {
     var attributes: posix_spawnattr_t? = nil
     var fileActions: posix_spawn_file_actions_t? = nil
     var argv: [UnsafeMutablePointer<CChar>?] = []
@@ -171,7 +261,7 @@ func spawnSupervisor(python: String) -> SpawnOutcome {
         }
     }
 
-    for part in [python] + SUPERVISOR_ARGUMENTS {
+    for part in [python] + arguments {
         guard let duplicate = strdup(part) else {
             return .failed("could not allocate the child argv")
         }
@@ -185,10 +275,35 @@ func spawnSupervisor(python: String) -> SpawnOutcome {
     return .spawned(pid)
 }
 
-/// Owns the serve branch: launch the fixed child, keep the event loop
-/// responsive, forward one stop, escalate once, reap and mirror the exit.
-final class ServeController {
+/// Spawn the fixed supervisor child.
+func spawnSupervisor(python: String) -> SpawnOutcome {
+    spawnFixedChild(python: python, arguments: SUPERVISOR_ARGUMENTS)
+}
+
+/// Spawn the fixed workspace-move child.
+///
+/// The argv is the fixed move command with the two validated values: the
+/// operation id and the state directory. Nothing else is caller-supplied.
+func spawnMove(python: String, operation: String, stateDir: String) -> SpawnOutcome {
+    spawnFixedChild(
+        python: python,
+        arguments: MOVE_ARGUMENTS + [operation, MOVE_STATE_DIR_ARGUMENT, stateDir]
+    )
+}
+
+/// Owns the serve and move branches: launch the fixed child, keep the event
+/// loop responsive, forward one stop, escalate once, reap and mirror the exit.
+///
+/// The two branches differ only in what they spawn and in the wording of the
+/// launch failure, so the child lifecycle lives here once: the same stop
+/// handling, the same escalation, the same reaping and the same exit-status
+/// mapping. The move child is a descendant of the host for the same reason the
+/// supervisor is: a macOS folder grant follows the responsible process.
+final class ChildController {
+    /// What to spawn, and how to name it in a launch failure.
     private let python: String
+    private let spawn: () -> SpawnOutcome
+    private let childName: String
     /// The child PID, held from spawn until it has been reaped. Holding the
     /// unreaped PID is what makes "never signal a recycled PID" true: the
     /// kernel cannot reuse the PID while this process still owns the zombie.
@@ -198,8 +313,10 @@ final class ServeController {
     private var escalation: DispatchSourceTimer?
     private var stopRequested = false
 
-    init(python: String) {
+    init(python: String, childName: String, spawn: @escaping () -> SpawnOutcome) {
         self.python = python
+        self.childName = childName
+        self.spawn = spawn
     }
 
     /// Install the stop handlers and schedule the child launch on the event
@@ -235,10 +352,10 @@ final class ServeController {
     /// A stop that lands before this runs exits the host from `handleStop`, so
     /// reaching here means no stop has been requested yet.
     private func launch() {
-        switch spawnSupervisor(python: python) {
+        switch spawn() {
         case .failed(let message):
             writeStderr(
-                "Ciaobot Server: could not launch supervisor \(python): \(message)\n"
+                "Ciaobot Server: could not launch \(childName) \(python): \(message)\n"
             )
             exit(EXIT_LAUNCH_FAILURE)
         case .spawned(let pid):
@@ -396,10 +513,15 @@ final class HostApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-func runServe(python: String) -> Never {
+/// Run a fixed child under the host's event loop, mirroring its exit status.
+func runChild(
+    python: String,
+    childName: String,
+    spawn: @escaping () -> SpawnOutcome
+) -> Never {
     // Install stop handlers and defer the launch BEFORE AppKit is set up, so a
     // stop that lands during startup is seen and no child is ever launched.
-    let controller = ServeController(python: python)
+    let controller = ChildController(python: python, childName: childName, spawn: spawn)
     controller.begin()
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
@@ -413,10 +535,27 @@ func runServe(python: String) -> Never {
     exit(0)
 }
 
+func runServe(python: String) -> Never {
+    runChild(python: python, childName: "supervisor") {
+        spawnSupervisor(python: python)
+    }
+}
+
+/// The move branch: the workspace move runs as a descendant of the host, so a
+/// macOS folder grant the user gave the host covers the move too (#1658). The
+/// child is the fixed move command and nothing else.
+func runMove(python: String, operation: String, stateDir: String) -> Never {
+    runChild(python: python, childName: "workspace move") {
+        spawnMove(python: python, operation: operation, stateDir: stateDir)
+    }
+}
+
 let operation = parseInvocation(CommandLine.arguments)
 switch operation {
 case .serve(let python):
     runServe(python: python)
 case .requestAccessibility:
     runRequestAccessibility()
+case .runMove(let python, let moveOperation, let stateDir):
+    runMove(python: python, operation: moveOperation, stateDir: stateDir)
 }
