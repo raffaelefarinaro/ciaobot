@@ -230,6 +230,19 @@ class ServiceCommand:
     argv: tuple[str, ...]
 
 
+def _getuid() -> int:
+    """This user's uid.
+
+    ``os.getuid`` does not exist on Windows, where this module is imported (the
+    contract is shared) but no macOS path runs. Read through ``getattr`` so
+    mypy's win32 pass type-checks it too, and typed locally because the
+    ``getattr`` is ``Any`` (``no-any-return``). The same seam
+    :func:`ciao.macos_service._getuid` uses, and the seam a test patches.
+    """
+    getuid: Callable[[], int] = getattr(os, "getuid")
+    return getuid()
+
+
 def _absolute_posix(value: object, *, what: str, code: str) -> str:
     """Require an absolute POSIX path string, portable across platforms.
 
@@ -679,7 +692,7 @@ def _read_ownership_record(
             code=INVALID_OWNERSHIP,
         )
     if sys.platform == "darwin":
-        if info.st_uid != os.getuid():
+        if info.st_uid != _getuid():
             raise ServerHostError(
                 f"the host ownership record is not owned by this user: {record}",
                 code=INVALID_OWNERSHIP,
