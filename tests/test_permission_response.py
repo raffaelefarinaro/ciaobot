@@ -502,6 +502,124 @@ async def test_parallel_claude_permissions_both_reach_the_gate(tmp_path: Path) -
     assert isinstance(await asyncio.wait_for(second, 1), PermissionResultAllow)
 
 
+class _YieldingPostClient(_PostClient):
+    def __init__(self, status_code: int = 204) -> None:
+        super().__init__()
+        self.status_code = status_code
+
+    async def post(self, path: str, json: object = None, **_: object) -> SimpleNamespace:
+        self.posts.append((path, json))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        return SimpleNamespace(status_code=self.status_code, text="")
+
+
+def _write_race_chat(
+    tmp_path: Path, status_code: int = 204
+) -> tuple[ProjectChatManager, object, OpencodeProvider, ChatStream]:
+    pcm, chat, provider = _opencode_chat(
+        tmp_path, [_asked("per_w", "ses_1", "write", "notes.md", "call_w")]
+    )
+    provider._client = _YieldingPostClient(status_code)  # type: ignore[assignment]
+    stream = pcm._broker.get(chat.chat_id)
+    stream.publish({  # type: ignore[union-attr]
+        "type": "tool_use", "tool_name": "write", "tool_use_id": "call_w",
+        "file_touch": {"file_path": "notes.md", "action": "created"},
+    })
+    return pcm, chat, provider, stream  # type: ignore[return-value]
+
+
+def _denied(stream: ChatStream) -> list[dict]:
+    return [e for e in stream.buffered_events() if e.get("type") == "tool_denied"]
+
+
+@pytest.mark.asyncio
+async def test_losing_opencode_deny_does_not_retract_an_approved_call(tmp_path: Path) -> None:
+    pcm, chat, provider, stream = _write_race_chat(tmp_path)
+
+    approve, deny = await asyncio.gather(
+        pcm.respond_permission(chat.chat_id, request_id="per_w", approved=True, session_id="ses_1"),
+        pcm.respond_permission(chat.chat_id, request_id="per_w", approved=False, session_id="ses_1"),
+    )
+
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_1/permission/per_w/reply", {"decision": "once"})
+    ]
+    assert approve.ok and not approve.already_resolved
+    assert deny.ok and deny.already_resolved
+    assert _denied(stream) == []
+    tool_event = next(e for e in stream.buffered_events() if e.get("type") == "tool_use")
+    assert "file_touch" in tool_event
+    assert chat.pending_permission == ""  # type: ignore[attr-defined]
+    assert provider._permission_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_winning_opencode_deny_retracts_and_the_approval_is_already_resolved(
+    tmp_path: Path,
+) -> None:
+    pcm, chat, provider, stream = _write_race_chat(tmp_path)
+
+    deny, approve = await asyncio.gather(
+        pcm.respond_permission(chat.chat_id, request_id="per_w", approved=False, session_id="ses_1"),
+        pcm.respond_permission(chat.chat_id, request_id="per_w", approved=True, session_id="ses_1"),
+    )
+
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_1/permission/per_w/reply", {"decision": "reject"})
+    ]
+    assert any(e.get("tool_use_id") == "call_w" for e in _denied(stream))
+    assert deny.ok
+    assert approve.ok and approve.already_resolved
+
+
+@pytest.mark.asyncio
+async def test_opencode_409_deny_does_not_retract_the_card(tmp_path: Path) -> None:
+    pcm, chat, _provider, stream = _write_race_chat(tmp_path, status_code=409)
+
+    result = await pcm.respond_permission(
+        chat.chat_id, request_id="per_w", approved=False, session_id="ses_1"
+    )
+
+    assert result.ok and result.already_resolved
+    assert _denied(stream) == []
+
+
+@pytest.mark.asyncio
+async def test_losing_claude_deny_does_not_retract_an_approved_call(tmp_path: Path) -> None:
+    from claude_agent_sdk.types import PermissionResultAllow, ToolPermissionContext
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    gate = pcm._get_provider(chat.chat_id).provider.permission_gate
+    stream = ChatStream("hi")
+    pcm._broker.register(chat.chat_id, stream)
+    gate.set_emit(lambda ev: pcm._notify_permission(chat.chat_id, ev))
+    stream.publish({
+        "type": "tool_use", "tool_name": "Write", "tool_use_id": "tu-a",
+        "file_touch": {"file_path": "notes.md", "action": "created"},
+    })
+
+    ctx = ToolPermissionContext(
+        signal=None, suggestions=[], tool_use_id="tu-a", agent_id=None
+    )
+    task = asyncio.create_task(gate.handle("Write", {}, ctx))
+    await asyncio.sleep(0)
+
+    approve, deny = await asyncio.gather(
+        pcm.respond_permission(chat.chat_id, request_id="tu-a", approved=True),
+        pcm.respond_permission(chat.chat_id, request_id="tu-a", approved=False),
+    )
+
+    assert approve.ok and not approve.already_resolved
+    assert deny.ok and deny.already_resolved
+    assert isinstance(await asyncio.wait_for(task, 1), PermissionResultAllow)
+    assert _denied(stream) == []
+    tool_event = next(e for e in stream.buffered_events() if e.get("type") == "tool_use")
+    assert "file_touch" in tool_event
+
+
 _CHILD_THEN_NEWER = [
     _asked("per_child", "ses_child", "shell", "gh issue list", "call_c"),
     _asked("per_newer", "ses_1", "shell", "git status --short", "call_n"),

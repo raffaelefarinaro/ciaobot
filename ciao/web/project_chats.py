@@ -8275,6 +8275,9 @@ class ProjectChatManager:
         )
         legacy_stale = not native_result and not response.ok
         stale = native_stale or legacy_stale
+        # A reply that lost the race (another tab answered, V2 409, Claude gate
+        # already resolved) changed nothing: never retract the winning call's card.
+        already_resolved = stale or response.already_resolved
         if not response.ok and not stale:
             logger.info(
                 "permission reply %s session=%s approved=%s: failed",
@@ -8284,20 +8287,20 @@ class ProjectChatManager:
         logger.info(
             "permission reply %s session=%s approved=%s: %s",
             request_id, session_id, approved,
-            "already-resolved" if stale else "delivered",
+            "already-resolved" if already_resolved else "delivered",
         )
 
         self._clear_permission_state(chat_id, request_id, expected_session)
 
         stream = self._broker.get(chat_id)
-        if stream is not None and not approved:
+        if stream is not None and not approved and not already_resolved:
             # The refused call never ran, so retract any file card it already
             # painted. Custom adapters may use a request id that differs from
             # the tool id, so use the id captured before the provider consumed
             # its pending-request entry.
             stream.deny_tool_use(tool_use_id or request_id)
-        if stale:
-            return QuestionResponseResult(True)
+        if already_resolved:
+            return QuestionResponseResult(True, already_resolved=True)
         return response
 
     def _clear_question_state(
