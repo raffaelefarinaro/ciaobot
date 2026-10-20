@@ -52,7 +52,7 @@ from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
 from ciao.port_in_use import BIND_PHASE
-from ciao.web.auth import LOOPBACK_HOST_NAMES, is_loopback_client
+from ciao.web.auth import LOOPBACK_HOST_NAMES, _same_origin, is_loopback_client
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
@@ -6318,16 +6318,37 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
 # computer running Ciaobot only: browsing folders and moving the install are
 # filesystem operations a phone or a remote browser has no business making.
 # "Local" is the setup routes' rule (`_localhost_request`: a loopback TCP peer
-# whose Host names loopback) plus a same-host Origin, so a DNS-rebound page on
-# this machine cannot ride the session cookie.
+# whose Host names loopback) plus an exact same-origin Origin, so a
+# DNS-rebound page on this machine cannot ride the session cookie.
 
 
 def host_browser_request(request: Request) -> bool:
-    """A browser on the computer running Ciaobot: loopback TCP peer, loopback Host, same-host Origin/Referer.
+    """A browser on the computer running Ciaobot: loopback TCP peer, loopback Host, exact same-origin Origin/Referer.
+
+    The browser's own origin must match this request's origin in scheme, host
+    and effective port — a page on `http://localhost:3000` is a different
+    origin from `http://localhost:8443`, and it is not this engine's own page.
+    `Origin` is the browser's declaration and wins; `Referer` is only read
+    when there is no `Origin`. A request with neither is not a browser request
+    and keeps the peer/Host gating alone.
 
     Narrows a session route; grants nothing by itself (AuthMiddleware still requires the session).
     """
-    return _localhost_request(request) and _setup_finish_origin_allowed(request)
+    if not _localhost_request(request):
+        return False
+    source = request.headers.get("origin") or request.headers.get("referer")
+    if not source:
+        return True
+    try:
+        scheme = urlsplit(source).scheme.lower()
+    except ValueError:
+        return False
+    if scheme not in {"http", "https"} or scheme != request.url.scheme.lower():
+        return False
+    # `_same_origin` compares the host and the effective port; a proxy-declared
+    # host cannot stand in for the browser's own origin here, because a request
+    # carrying proxy headers never reaches this point (`is_loopback_client`).
+    return _same_origin(request, source)
 
 
 def _workspace_move_local(request: Request) -> bool:
