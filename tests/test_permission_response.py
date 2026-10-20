@@ -560,3 +560,146 @@ async def test_child_request_outside_the_slot_resolves_other_tabs(tmp_path: Path
     assert {
         "type": "permission_resolved", "request_id": "per_child", "session_id": "ses_child",
     } in live
+
+
+class _FormClient(_PostClient):
+    async def delete(self, path: str, **_: object) -> SimpleNamespace:
+        self.posts.append((f"DELETE {path}", None))
+        return SimpleNamespace(status_code=204, text="")
+
+
+def _form(form_id: str, session_id: str) -> dict:
+    return {"type": "form.created", "data": {"form": {
+        "id": form_id, "sessionID": session_id, "title": "Choice",
+        "fields": [{"key": "value", "title": "Value", "type": "string"}],
+    }}}
+
+
+def _forms_chat(tmp_path: Path, created: list[dict]):
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t", provider="opencode")
+    chat.session_id = "ses_1"
+    provider = OpencodeProvider(tmp_path)
+    provider._client = _FormClient()  # type: ignore[assignment]
+    provider._session_id = "ses_1"
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
+    pcm._broker.register(chat.chat_id, ChatStream("hi"))
+    for event in created:
+        for ev in provider._event_to_stream(event):
+            # As chat_streaming does: the newest form owns the persisted slot.
+            chat.pending_question = json.dumps({
+                **json.loads(ev.tool_input),
+                "request_id": ev.request_id, "session_id": ev.session_id,
+            })
+    return pcm, chat, provider
+
+
+_PARALLEL_FORMS = [_form("frm_a", "ses_1"), _form("frm_b", "ses_1")]
+
+
+@pytest.mark.asyncio
+async def test_parallel_opencode_forms_both_reach_the_provider(tmp_path: Path) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    first = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+    )
+    second = await pcm.respond_question(
+        chat.chat_id, request_id="frm_b", answers={"value": ["two"]}, session_id="ses_1"
+    )
+
+    assert first.ok and second.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_1/form/frm_a/reply", {"answer": {"value": "one"}}),
+        ("/api/session/ses_1/form/frm_b/reply", {"answer": {"value": "two"}}),
+    ]
+    assert provider._question_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_older_form_reply_keeps_newer_slot(tmp_path: Path) -> None:
+    pcm, chat, _provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+    )
+
+    assert result.ok
+    assert json.loads(chat.pending_question)["request_id"] == "frm_b"
+
+
+@pytest.mark.asyncio
+async def test_older_form_cancel_reaches_the_provider(tmp_path: Path) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={}, action="cancel", session_id="ses_1"
+    )
+
+    assert result.ok
+    assert ("DELETE /api/session/ses_1/form/frm_a", None) in provider._client.posts  # type: ignore[attr-defined]
+    assert not provider.has_question_request("frm_a")
+    assert json.loads(chat.pending_question)["request_id"] == "frm_b"
+
+
+@pytest.mark.asyncio
+async def test_child_session_form_reply_uses_child_session(tmp_path: Path) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, [_form("frm_child", "ses_child")])
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_child", answers={"value": ["x"]},
+        session_id="ses_child",
+    )
+
+    assert result.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_child/form/frm_child/reply", {"answer": {"value": "x"}})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_child_form_outside_the_slot_is_answered_without_a_client_session(
+    tmp_path: Path,
+) -> None:
+    pcm, chat, provider = _forms_chat(
+        tmp_path, [_form("frm_child", "ses_child"), _form("frm_newer", "ses_1")]
+    )
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_child", answers={"value": ["x"]}
+    )
+
+    assert result.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_child/form/frm_child/reply", {"answer": {"value": "x"}})
+    ]
+    assert json.loads(chat.pending_question)["request_id"] == "frm_newer"
+
+
+@pytest.mark.asyncio
+async def test_held_form_from_another_session_is_still_stale(tmp_path: Path) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_b", answers={"value": ["x"]}, session_id="ses_old"
+    )
+
+    assert result.ok
+    assert provider._client.posts == []  # type: ignore[attr-defined]
+    assert provider.has_question_request("frm_b")
+    assert json.loads(chat.pending_question)["session_id"] == "ses_1"
+
+
+@pytest.mark.asyncio
+async def test_question_reply_outcome_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pcm, chat, _provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    with caplog.at_level("INFO", logger="ciao.web.project_chats"):
+        await pcm.respond_question(
+            chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+        )
+
+    assert "question reply frm_a session=ses_1 action=reply: delivered" in caplog.text

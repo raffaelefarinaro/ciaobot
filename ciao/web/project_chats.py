@@ -8272,6 +8272,19 @@ class ProjectChatManager:
             stream.resolve_question(request_id, session_id)
         return cleared
 
+    @staticmethod
+    def _provider_holds_question(
+        provider: object, request_id: str, session_id: str
+    ) -> bool:
+        """Whether the live provider is still waiting on this form.
+
+        Only OpenCode holds native forms: Claude's AskUserQuestion carries no
+        request id and is answered as a new message.
+        """
+        return isinstance(provider, OpencodeProvider) and provider.has_question_request(
+            request_id, session_id
+        )
+
     async def respond_question(
         self,
         chat_id: str,
@@ -8288,15 +8301,35 @@ class ProjectChatManager:
         )
         stored_request = str(stored.get("request_id") or "")
         stored_session = str(stored.get("session_id") or "")
-        if stored_request and stored_request != request_id:
-            # Settle only the stale submitter. A newer form keeps both the
-            # persisted backend state and the other tab's card.
-            return QuestionResponseResult(True)
-        if session_id and stored_session and session_id != stored_session:
-            return QuestionResponseResult(True)
-        expected_session = session_id or stored_session or str(
-            getattr(chat, "session_id", "") or ""
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        # Several forms can be pending at once (parallel calls, child sessions)
+        # but the chat persists only one slot. A form the live provider still
+        # holds is answered on its own terms; only unknown forms are stale.
+        provider_holds = self._provider_holds_question(provider, request_id, session_id)
+        if not provider_holds:
+            if stored_request and stored_request != request_id:
+                # Settle only the stale submitter. A newer form keeps both the
+                # persisted backend state and the other tab's card.
+                logger.info(
+                    "question reply %s session=%s action=%s: stale-ignored",
+                    request_id, session_id, action,
+                )
+                return QuestionResponseResult(True)
+            if session_id and stored_session and session_id != stored_session:
+                logger.info(
+                    "question reply %s session=%s action=%s: stale-ignored",
+                    request_id, session_id, action,
+                )
+                return QuestionResponseResult(True)
+        held_session = (
+            provider.question_request_session(request_id)
+            if provider_holds and isinstance(provider, OpencodeProvider)
+            else ""
         )
+        expected_session = session_id or held_session or (
+            stored_session if stored_request == request_id else ""
+        ) or str(getattr(chat, "session_id", "") or "")
 
         if self._native_form_is_dead(chat_id):
             if not stored_request:
@@ -8316,8 +8349,6 @@ class ProjectChatManager:
                 return QuestionResponseResult(False, str(exc), False)
             return QuestionResponseResult(True, delivered_as_message=True)
 
-        provider_service = self._providers.get(chat_id)
-        provider = provider_service.provider if provider_service is not None else None
         if provider is None:
             return QuestionResponseResult(
                 False,
@@ -8326,7 +8357,8 @@ class ProjectChatManager:
             )
         provider_session = str(getattr(provider, "current_session_id", "") or "")
         if (
-            expected_session
+            not provider_holds
+            and expected_session
             and provider_session
             and isinstance(provider, OpencodeProvider)
             and provider_session != expected_session
@@ -8356,14 +8388,26 @@ class ProjectChatManager:
                 True,
             )
         if result.ok:
+            logger.info(
+                "question reply %s session=%s action=%s: delivered",
+                request_id, session_id, action,
+            )
             self._clear_question_state(chat_id, request_id, expected_session)
             return result
         if (
             not result.retryable
             and result.error == "Question request is no longer active"
         ):
+            logger.info(
+                "question reply %s session=%s action=%s: already-resolved",
+                request_id, session_id, action,
+            )
             self._clear_question_state(chat_id, request_id, expected_session)
             return QuestionResponseResult(True)
+        logger.info(
+            "question reply %s session=%s action=%s: failed (%s)",
+            request_id, session_id, action, result.error,
+        )
         return result
 
     def respond_capability(
