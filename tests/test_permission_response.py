@@ -387,3 +387,116 @@ async def test_denial_retracts_the_tool_card_before_v2_consumes_the_request(
     )
     tool_event = next(event for event in events if event.get("type") == "tool_use")
     assert "file_touch" not in tool_event
+
+
+class _PostClient:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, object]] = []
+
+    async def post(self, path: str, json: object = None, **_: object) -> SimpleNamespace:
+        self.posts.append((path, json))
+        return SimpleNamespace(status_code=204, text="")
+
+
+def _asked(request_id: str, session_id: str, action: str, command: str, call: str) -> dict:
+    return {"type": "permission.asked", "data": {
+        "id": request_id, "sessionID": session_id, "action": action,
+        "resources": [command], "metadata": {"command": command},
+        "source": {"type": "tool", "messageID": "msg_1", "id": call},
+    }}
+
+
+def _opencode_chat(
+    tmp_path: Path, asked: list[dict]
+) -> tuple[ProjectChatManager, object, OpencodeProvider]:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    provider = OpencodeProvider(tmp_path)
+    provider._client = _PostClient()  # type: ignore[assignment]
+    provider._session_id = "ses_1"
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
+    pcm._broker.register(chat.chat_id, ChatStream("hi"))
+    for event in asked:
+        for stream_event in provider._event_to_stream(event):
+            pcm._notify_permission(chat.chat_id, stream_event)
+    return pcm, chat, provider
+
+
+_PARALLEL_ASKED = [
+    _asked("per_grep", "ses_1", "grep", "TODO", "call_g"),
+    _asked("per_shell", "ses_1", "shell", "git status --short", "call_s"),
+]
+
+
+@pytest.mark.asyncio
+async def test_parallel_opencode_permissions_both_reach_the_provider(tmp_path: Path) -> None:
+    pcm, chat, provider = _opencode_chat(tmp_path, _PARALLEL_ASKED)
+
+    first = await pcm.respond_permission(
+        chat.chat_id, request_id="per_grep", approved=True, session_id="ses_1"
+    )
+    second = await pcm.respond_permission(
+        chat.chat_id, request_id="per_shell", approved=True, session_id="ses_1"
+    )
+
+    assert first.ok and second.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_1/permission/per_grep/reply", {"decision": "once"}),
+        ("/api/session/ses_1/permission/per_shell/reply", {"decision": "once"}),
+    ]
+    assert provider._permission_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_older_permission_reply_keeps_newer_slot(tmp_path: Path) -> None:
+    pcm, chat, _provider = _opencode_chat(tmp_path, _PARALLEL_ASKED)
+
+    await pcm.respond_permission(
+        chat.chat_id, request_id="per_grep", approved=True, session_id="ses_1"
+    )
+
+    assert json.loads(chat.pending_permission)["request_id"] == "per_shell"
+
+
+@pytest.mark.asyncio
+async def test_child_session_permission_reply_uses_child_session(tmp_path: Path) -> None:
+    pcm, chat, provider = _opencode_chat(
+        tmp_path, [_asked("per_child", "ses_child", "shell", "gh issue list", "call_c")]
+    )
+
+    result = await pcm.respond_permission(
+        chat.chat_id, request_id="per_child", approved=True, session_id="ses_child"
+    )
+
+    assert result.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_child/permission/per_child/reply", {"decision": "once"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parallel_claude_permissions_both_reach_the_gate(tmp_path: Path) -> None:
+    from claude_agent_sdk.types import PermissionResultAllow, ToolPermissionContext
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    gate = pcm._get_provider(chat.chat_id).provider.permission_gate
+    pcm._broker.register(chat.chat_id, ChatStream("hi"))
+    gate.set_emit(lambda ev: pcm._notify_permission(chat.chat_id, ev))
+
+    def ctx(tool_use_id: str) -> ToolPermissionContext:
+        return ToolPermissionContext(
+            signal=None, suggestions=[], tool_use_id=tool_use_id, agent_id=None
+        )
+
+    first = asyncio.create_task(gate.handle("Grep", {}, ctx("tu-a")))
+    second = asyncio.create_task(gate.handle("Bash", {}, ctx("tu-b")))
+    await asyncio.sleep(0)
+
+    assert (await pcm.respond_permission(chat.chat_id, request_id="tu-a", approved=True)).ok
+    assert isinstance(await asyncio.wait_for(first, 1), PermissionResultAllow)
+    assert json.loads(chat.pending_permission)["request_id"] == "tu-b"
+    assert (await pcm.respond_permission(chat.chat_id, request_id="tu-b", approved=True)).ok
+    assert isinstance(await asyncio.wait_for(second, 1), PermissionResultAllow)

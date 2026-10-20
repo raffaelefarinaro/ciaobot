@@ -2861,6 +2861,11 @@ class OpencodeProvider(BaseSDKProvider):
 
     # ------------------------------------------------------------ permissions
 
+    def has_permission_request(self, request_id: str, session_id: str = "") -> bool:
+        """Whether ``request_id`` is a permission this provider is still waiting on."""
+        pending = self._permission_requests.get(request_id)
+        return pending is not None and (not session_id or pending.session_id == session_id)
+
     def tool_use_id_for_request(
         self, request_id: str, session_id: str = ""
     ) -> str:
