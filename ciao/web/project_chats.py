@@ -279,10 +279,10 @@ _BACKGROUND_WAKE_TAIL_LINES = 50
 # Claude keeps one CLI process per chat alive between turns (#1402), so this
 # timeout also bounds how long an idle Claude CLI lives. opencode runs
 # **one `opencode serve` process per chat** — see the module
-# docstring in ciao/providers/opencode.py for why the control plane's per-chat
-# MCP token forces that. Without a reaper, a day of touching chats leaves a
-# server process, a port, an SSE stream and a stderr reader alive for every
-# one of them until the app restarts.
+# docstring in ciao/providers/opencode.py for why the chat's per-chat
+# capability token, sandbox and server password force that. Without a reaper, a
+# day of touching chats leaves a server process, a port, an SSE stream and a
+# stderr reader alive for every one of them until the app restarts.
 #
 # A provider is only reclaimed when the chat has been quiet for the timeout
 # AND has no work in flight (`active_chat_ids`, a between-turns drain with
@@ -292,6 +292,15 @@ _BACKGROUND_WAKE_TAIL_LINES = 50
 # takes (ciao/providers/opencode.py::_ensure_server,
 # ciao/providers/claude.py::_ensure_connected).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
+# Claude is the exception to the timeout above. Its provider is one CLI
+# process whose next turn resumes the same session, but rebuilding it pays a
+# cold start that measured 13-53 s on a loaded 10-core Mac — which is what the
+# SDK's initialize deadline times out on. The most recently used few are
+# therefore kept warm past the idle timeout. Both bounds matter: the count
+# stops a day of touching chats from pinning one CLI per chat, and the idle
+# age stops a chat left open for days from doing the same.
+_CLAUDE_WARM_PROVIDER_LIMIT = 4
+_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS = 3600.0
 RESTART_BLOCKER_REASONS = (
     "streaming",
     "background_agents",
@@ -845,6 +854,10 @@ class ProjectChatManager:
         # started lazily on first use so a manager built in a test (or any
         # process with no running loop) never creates one it does not need.
         self._provider_last_used: dict[str, float] = {}
+        # Provider id per chat, recorded when the provider is built. The reaper
+        # needs it to tell a cheap-to-rebuild opencode server from a Claude CLI
+        # worth keeping warm (see `_CLAUDE_WARM_PROVIDER_LIMIT`).
+        self._provider_kind: dict[str, str] = {}
         # Consecutive failed disconnect attempts per chat, kept only while a
         # provider is being retried (see `_PROVIDER_DISCONNECT_MAX_ATTEMPTS`)
         # and cleared by `_pop_provider`, so it cannot outlive the provider it
@@ -4360,6 +4373,9 @@ class ProjectChatManager:
                 agent_root=agent_root,
                 workspace=self._workspace_for_chat(chat_id),
             )
+            # Only on creation: the kind must describe the provider object that
+            # is actually in the map, not whatever the chat row says later.
+            self._provider_kind[chat_id] = provider_name
         # Stamped on every hand-out, not just on creation: a long conversation
         # reuses one ProviderService for its whole life, so creation time says
         # nothing about whether the chat is still in use.
@@ -4378,6 +4394,7 @@ class ProjectChatManager:
         """
         self._provider_last_used.pop(chat_id, None)
         self._provider_disconnect_failures.pop(chat_id, None)
+        self._provider_kind.pop(chat_id, None)
         self._steer_locks.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
 
@@ -4517,6 +4534,33 @@ class ProjectChatManager:
             or getattr(chat, "pending_permission", "")
         )
 
+    def _warm_claude_ids(self, now: float) -> set[str]:
+        """Chats whose Claude CLI should outlive the idle timeout.
+
+        A Claude provider is one CLI process, and its next turn resumes the
+        same session instead of starting a new conversation — but rebuilding
+        the process costs a cold start that measured 13-53 s under load, which
+        is exactly what the SDK's initialize deadline times out on. Keeping the
+        most recently used few warm turns the common case (return to a chat you
+        were in) into a ~2 s warm turn instead of a cold start.
+
+        Bounded by count and by idle age so neither a long day of chat-hopping
+        nor a chat left open for days pins a process per chat. opencode is
+        never kept: its provider is a whole `opencode serve` with a port and an
+        SSE stream, which is what the idle timeout exists for.
+        """
+        candidates = [
+            (self._provider_last_used[chat_id], chat_id)
+            for chat_id, kind in self._provider_kind.items()
+            if kind == "claude"
+            and chat_id in self._providers
+            and chat_id in self._provider_last_used
+            and now - self._provider_last_used[chat_id]
+            < _CLAUDE_WARM_IDLE_TIMEOUT_SECONDS
+        ]
+        candidates.sort(reverse=True)
+        return {chat_id for _, chat_id in candidates[:_CLAUDE_WARM_PROVIDER_LIMIT]}
+
     async def reap_idle_providers(self, *, force: bool = False) -> list[str]:
         """Disconnect providers for chats idle past the timeout.
 
@@ -4530,11 +4574,17 @@ class ProjectChatManager:
         Only the provider is released. The chat row, its ``session_id`` and its
         transcript are untouched, so the next turn reconnects and resumes — see
         ``_PROVIDER_IDLE_TIMEOUT_SECONDS``.
+
+        The most recently used Claude providers are exempt while they are
+        within ``_CLAUDE_WARM_PROVIDER_LIMIT`` and
+        ``_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS``; rebuilding one costs a cold
+        start (``_warm_claude_ids``). ``force`` ignores that exemption too.
         """
         if not self._providers:
             return []
         now = time.monotonic()
         active = set(self.active_chat_ids())
+        warm = set() if force else self._warm_claude_ids(now)
         reclaimed: list[str] = []
         for chat_id in list(self._providers):
             if self._provider_is_busy(chat_id, active):
@@ -4555,6 +4605,8 @@ class ProjectChatManager:
                 self._provider_last_used[chat_id] = now
                 continue
             if not force and now - last_used < self._provider_idle_timeout:
+                continue
+            if chat_id in warm:
                 continue
             failures = self._provider_disconnect_failures.get(chat_id, 0)
             provider = self._pop_provider(chat_id)
@@ -8272,6 +8324,19 @@ class ProjectChatManager:
             stream.resolve_question(request_id, session_id)
         return cleared
 
+    @staticmethod
+    def _provider_holds_question(
+        provider: object, request_id: str, session_id: str
+    ) -> bool:
+        """Whether the live provider is still waiting on this form.
+
+        Only OpenCode holds native forms: Claude's AskUserQuestion carries no
+        request id and is answered as a new message.
+        """
+        return isinstance(provider, OpencodeProvider) and provider.has_question_request(
+            request_id, session_id
+        )
+
     async def respond_question(
         self,
         chat_id: str,
@@ -8288,15 +8353,35 @@ class ProjectChatManager:
         )
         stored_request = str(stored.get("request_id") or "")
         stored_session = str(stored.get("session_id") or "")
-        if stored_request and stored_request != request_id:
-            # Settle only the stale submitter. A newer form keeps both the
-            # persisted backend state and the other tab's card.
-            return QuestionResponseResult(True)
-        if session_id and stored_session and session_id != stored_session:
-            return QuestionResponseResult(True)
-        expected_session = session_id or stored_session or str(
-            getattr(chat, "session_id", "") or ""
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        # Several forms can be pending at once (parallel calls, child sessions)
+        # but the chat persists only one slot. A form the live provider still
+        # holds is answered on its own terms; only unknown forms are stale.
+        provider_holds = self._provider_holds_question(provider, request_id, session_id)
+        if not provider_holds:
+            if stored_request and stored_request != request_id:
+                # Settle only the stale submitter. A newer form keeps both the
+                # persisted backend state and the other tab's card.
+                logger.info(
+                    "question reply %s session=%s action=%s: stale-ignored",
+                    request_id, session_id, action,
+                )
+                return QuestionResponseResult(True)
+            if session_id and stored_session and session_id != stored_session:
+                logger.info(
+                    "question reply %s session=%s action=%s: stale-ignored",
+                    request_id, session_id, action,
+                )
+                return QuestionResponseResult(True)
+        held_session = (
+            provider.question_request_session(request_id)
+            if provider_holds and isinstance(provider, OpencodeProvider)
+            else ""
         )
+        expected_session = session_id or held_session or (
+            stored_session if stored_request == request_id else ""
+        ) or str(getattr(chat, "session_id", "") or "")
 
         if self._native_form_is_dead(chat_id):
             if not stored_request:
@@ -8316,8 +8401,6 @@ class ProjectChatManager:
                 return QuestionResponseResult(False, str(exc), False)
             return QuestionResponseResult(True, delivered_as_message=True)
 
-        provider_service = self._providers.get(chat_id)
-        provider = provider_service.provider if provider_service is not None else None
         if provider is None:
             return QuestionResponseResult(
                 False,
@@ -8326,7 +8409,8 @@ class ProjectChatManager:
             )
         provider_session = str(getattr(provider, "current_session_id", "") or "")
         if (
-            expected_session
+            not provider_holds
+            and expected_session
             and provider_session
             and isinstance(provider, OpencodeProvider)
             and provider_session != expected_session
@@ -8356,14 +8440,26 @@ class ProjectChatManager:
                 True,
             )
         if result.ok:
+            logger.info(
+                "question reply %s session=%s action=%s: delivered",
+                request_id, session_id, action,
+            )
             self._clear_question_state(chat_id, request_id, expected_session)
             return result
         if (
             not result.retryable
             and result.error == "Question request is no longer active"
         ):
+            logger.info(
+                "question reply %s session=%s action=%s: already-resolved",
+                request_id, session_id, action,
+            )
             self._clear_question_state(chat_id, request_id, expected_session)
             return QuestionResponseResult(True)
+        logger.info(
+            "question reply %s session=%s action=%s: failed",
+            request_id, session_id, action,
+        )
         return result
 
     def respond_capability(

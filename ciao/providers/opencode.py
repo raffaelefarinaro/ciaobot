@@ -8,9 +8,16 @@ permission rules, event payloads, and model catalog, so carrying both wire
 contracts would duplicate every provider operation.
 
 **One server process per active chat.** A shared server is tempting because
-OpenCode isolates chats as sessions, but Ciaobot scopes its control-plane MCP
-token per chat, while OpenCode configures MCP at server scope. Per-session
-agent, model, and permission rules keep chat behavior isolated.
+OpenCode isolates chats as sessions, and Ciaobot injects no MCP configuration
+of its own: MCP comes from the user's own OpenCode config, exactly as Claude
+reads it from ``.mcp.json``. What ties a server to one chat is process-scoped,
+not session-scoped: the chat's bearer capability (``CIAO_AGENT_TOKEN``, minted
+per chat) travels in the server's environment, ``OPENCODE_SERVER_PASSWORD`` is
+per server, the filesystem sandbox wraps the server process, and
+``OPENCODE_CONFIG_CONTENT`` (linked-repo skills) is read at startup. A token
+rotation or scope change therefore restarts this chat's server. Per-session
+agent, model, and permission rules are OpenCode's own and keep chat behavior
+isolated.
 
 The V2 wire contract is verified against the server's own OpenAPI document at
 ``/openapi.json`` on startup. Readiness and the installed major version come
@@ -2869,6 +2876,16 @@ class OpencodeProvider(BaseSDKProvider):
     def permission_request_session(self, request_id: str) -> str:
         """Session that owns the pending permission ``request_id``, or ``""``."""
         pending = self._permission_requests.get(request_id)
+        return pending.session_id if pending is not None else ""
+
+    def has_question_request(self, request_id: str, session_id: str = "") -> bool:
+        """Whether ``request_id`` is a form this provider is still waiting on."""
+        pending = self._question_requests.get(request_id)
+        return pending is not None and (not session_id or pending.session_id == session_id)
+
+    def question_request_session(self, request_id: str) -> str:
+        """Session that owns the pending form ``request_id``, or ``""``."""
+        pending = self._question_requests.get(request_id)
         return pending.session_id if pending is not None else ""
 
     def tool_use_id_for_request(
