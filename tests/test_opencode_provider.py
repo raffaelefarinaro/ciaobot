@@ -1252,6 +1252,26 @@ def test_reused_form_id_in_a_new_session_replaces_the_old_request(tmp_path):
     assert provider._question_requests["frm_reused"].session_id == "ses_new"
 
 
+def test_has_question_request_matches_its_own_session(tmp_path):
+    provider = _provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_s",
+            "sessionID": "ses_child",
+            "fields": [{"key": "value", "title": "Value", "type": "string"}],
+        }},
+    )
+
+    assert provider.has_question_request("frm_s")
+    assert provider.has_question_request("frm_s", "ses_child")
+    assert not provider.has_question_request("frm_s", "ses_1")
+    assert not provider.has_question_request("nope")
+    assert provider.question_request_session("frm_s") == "ses_child"
+    assert provider.question_request_session("nope") == ""
+
+
 @pytest.mark.asyncio
 async def test_form_reply_rejects_a_different_session(tmp_path):
     provider, client = _armed_provider(tmp_path)

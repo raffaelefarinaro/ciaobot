@@ -271,6 +271,71 @@ describe('ChatPanel live trace', () => {
     }
   })
 
+  async function mountWithSocket() {
+    const sockets: Array<{ onmessage: ((event: { data: string }) => void) | null }> = []
+    class FakeWebSocket {
+      static CONNECTING = 0
+      static OPEN = 1
+      static CLOSING = 2
+      static CLOSED = 3
+      readyState = FakeWebSocket.OPEN
+      onmessage: ((event: { data: string }) => void) | null = null
+      onclose: ((event: CloseEvent) => void) | null = null
+      onerror: (() => void) | null = null
+      #onopen: (() => void) | null = null
+      get onopen() { return this.#onopen }
+      set onopen(fn: (() => void) | null) {
+        this.#onopen = fn
+        fn?.()
+      }
+      constructor(public url: string) { sockets.push(this) }
+      send = vi.fn()
+      close(code?: number) {
+        this.readyState = FakeWebSocket.CLOSED
+        this.onclose?.({ code } as CloseEvent)
+      }
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = turnMessages().slice(0, 1)
+    store.streaming['chat-1'] = true
+    store.connectWs('chat-1')
+    await flushPromises()
+    const socket = sockets[sockets.length - 1]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+    return { wrapper, send }
+  }
+
+  it('stops naming a permission request once it is answered (#1618)', async () => {
+    try {
+      const { wrapper, send } = await mountWithSocket()
+      send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c1' })
+      send({ type: 'permission_request', request_id: 'c1', tool_name: 'shell', message: 'Approve use of shell?' })
+      await flushPromises()
+      expect(wrapper.get('.trace-block.live .trace-label').text()).toBe('Working · Permission: shell - Approve use of shell?')
+      send({ type: 'permission_resolved', request_id: 'c1' })
+      await flushPromises()
+      expect(wrapper.get('.trace-block.live .trace-label').text()).toBe('Working · shell ls')
+      expect(wrapper.findAll('.trace-step--tool .activity-line')).toHaveLength(2)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('falls back to Working... after a denied permission (#1618)', async () => {
+    try {
+      const { wrapper, send } = await mountWithSocket()
+      send({ type: 'tool_use', tool_name: 'shell', tool_input: 'ls', tool_use_id: 'c1' })
+      send({ type: 'permission_request', request_id: 'c1', tool_name: 'shell', message: 'Approve use of shell?' })
+      send({ type: 'permission_resolved', request_id: 'c1' })
+      send({ type: 'tool_denied', tool_use_id: 'c1' })
+      await flushPromises()
+      expect(wrapper.get('.trace-block.live .trace-label').text()).toBe('Working...')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('reopens the live trace for the next turn after the user closed it', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = turnMessages().slice(0, 1)

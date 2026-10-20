@@ -1614,6 +1614,12 @@ def _setup_command(args: argparse.Namespace) -> int:
                 )
                 return 1
 
+    from ciao.setup_status import cloud_sync_warning
+
+    cloud_warning = cloud_sync_warning(root)
+    if cloud_warning:
+        print(f"Warning: {cloud_warning}", file=sys.stderr)
+
     env_path = root / ".env"
     try:
         had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
