@@ -87,6 +87,14 @@ current platform as a highlight, never a filter: all five rows are always on the
 page, and it only claims what this window can see (`isStandalone`), because a
 browser tab cannot know whether the app is installed on the device.
 
+The one-time *Your Ciaobot* card on Home (`components/HomeWelcomeCard.vue`,
+state in `composables/useWelcome.ts`) shows the workspace folder, the generated
+password and the AI tool while the engine's `.runtime/welcome-pending` marker
+exists. The password is fetched only when the user presses Show or Copy, lives
+only in the component's state and is cleared on dismiss and unmount. Only the
+engine decides `on_host` (from `GET /api/welcome`); the PWA never infers it.
+The X dismisses engine-wide through `/api/welcome/dismiss`, not per browser.
+
 
 The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quirks are addressed in code; do not undo them without reading why.
 
