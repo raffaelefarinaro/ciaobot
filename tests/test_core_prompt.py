@@ -154,6 +154,37 @@ def test_system_prompt_payload_preserves_existing_append() -> None:
     assert "memory block" in payload["append"]
 
 
+def test_conversational_scope_rule_reaches_provider_append() -> None:
+    """The chat-first rule reaches every provider payload (#1599).
+
+    The rule lives in the always-loaded core, so the ordinary payload and the
+    payload that already carries an operator append must both keep it, and
+    neither may lose the append that was already there.
+    """
+    instructions = mi._system_instructions()
+    assert "stay in the chat" in instructions
+
+    ordinary = mi.system_prompt_payload("")
+    assert ordinary is not None
+    assert "stay in the chat" in ordinary["append"]
+    assert ordinary["type"] == "preset"
+    assert ordinary["preset"] == "claude_code"
+
+    with_append = mi.system_prompt_payload(
+        "memory block",
+        base_system_prompt={
+            "type": "preset",
+            "preset": "claude_code",
+            "append": "operator hint",
+        },
+    )
+    assert with_append is not None
+    append = with_append["append"]
+    assert append.startswith("operator hint")
+    assert "stay in the chat" in append
+    assert "memory block" in append
+
+
 def test_core_sections_are_tag_delimited() -> None:
     payload = mi.system_prompt_payload("memory block")
     assert payload is not None
