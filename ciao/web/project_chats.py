@@ -5429,6 +5429,10 @@ class ProjectChatManager:
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         # Artifacts publish to claude.ai; ciaobot has no use for that surface
         env["CLAUDE_CODE_DISABLE_ARTIFACT"] = "1"
+        # Nobody sits at a tool's terminal: a credential prompt from git or gh
+        # would block the call until it is killed, stalling the whole turn.
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GH_PROMPT_DISABLED"] = "1"
         # The claude.ai connectors (the Claude account's remote MCP servers)
         # load into every Claude chat unless Claude Code is told not to. A
         # workspace can switch them off; a memory pass always runs without them,
