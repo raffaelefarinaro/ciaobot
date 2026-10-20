@@ -59,11 +59,13 @@ import {
 } from '../lib/chatWs'
 import {
   dropSupersededLiveTail,
+  hasRenderedFinalAnswer,
   historySignature,
   isSettledHistoryRow,
   mergeMessageFields,
   mergeMetadata,
   normalizeMessages,
+  pruneOrphanOptimisticUsers,
   queuedTextAlreadyRendered,
   toChatMessage,
   toolIcon,
@@ -852,13 +854,30 @@ export const useProjectStore = defineStore('projects', () => {
   // in the same burst to a dying socket is rare next to the common
   // single-message case, and the queue path already persists server-side
   // when its frame arrives.
-  interface UnackedSend { text: string; images?: string[]; at: number; attempts: number }
+  interface UnackedSend { id: string; text: string; images?: string[]; at: number; attempts: number }
   const unackedSends: Record<string, UnackedSend> = {}
   const unackedRecoveryTimers: Record<string, ReturnType<typeof setTimeout>> = {}
   // Grace before declaring a send lost: a turn that DID start replays its
   // buffered user_echo immediately after reconnect, and /messages can lag
   // the provider session write by a moment.
   const UNACKED_RECOVERY_DELAY_MS = 1500
+  // Past this age a send is not resent automatically. The turn it belonged to
+  // may have been answered long ago, and a resend now would repeat the
+  // message in a chat that has moved on. The user gets the failure notice
+  // instead and decides.
+  const UNACKED_RESEND_MAX_AGE_MS = 30_000
+
+  // One id per logical send. The engine records it per user turn, so it can
+  // tell a recovery resend apart from a deliberate repeat of the same text.
+  function newSendId(): string {
+    const cryptoObj = typeof crypto !== 'undefined' ? crypto : undefined
+    if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+      return cryptoObj.randomUUID()
+    }
+    // jsdom (and any browser without the WebCrypto helper) has no
+    // randomUUID: fall back to a random id that is still unique per send.
+    return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  }
 
   function persistUnackedSends() {
     try {
@@ -868,9 +887,15 @@ export const useProjectStore = defineStore('projects', () => {
 
   // Server proof of receipt: the echoed turn (user_echo) or the hydrated
   // history row. Whichever lands first clears the tracking.
-  function acknowledgeSend(chatId: string, text: string) {
+  function acknowledgeSend(chatId: string, text: string, sendId?: string) {
     const unacked = unackedSends[chatId]
-    if (unacked && unacked.text.trim() === text.trim()) {
+    if (!unacked) return
+    // A send id identifies the send exactly; the text is only a fallback for
+    // servers that do not echo it.
+    const matched = sendId
+      ? unacked.id === sendId
+      : unacked.text.trim() === text.trim()
+    if (matched) {
       delete unackedSends[chatId]
       persistUnackedSends()
     }
@@ -880,11 +905,15 @@ export const useProjectStore = defineStore('projects', () => {
     const unacked = unackedSends[chatId]
     if (!unacked) return
     const rows = messages.value[chatId] || []
-    // Only a SERVER-stamped row proves delivery: hydrated user bubbles carry
-    // the server-assigned turn_index, while our own optimistic bubble (which
-    // can survive a history reload against an older server, or simply look
-    // identical to an older repeated message) never has one.
-    if (rows.some(m => m.role === 'user' && m.turn_index != null && (m.content || '').trim() === unacked.text.trim())) {
+    // Any matching user row proves delivery. An archived or transcript-fallback
+    // row carries no turn_index at all, so requiring one could never prove a
+    // send that did land. Our own optimistic bubble is excluded by its send
+    // id: it is the one row that is not the server's copy.
+    if (rows.some(m => (
+      m.role === 'user'
+      && m.send_id !== unacked.id
+      && (m.content || '').trim() === unacked.text.trim()
+    ))) {
       delete unackedSends[chatId]
       persistUnackedSends()
     }
@@ -911,8 +940,12 @@ export const useProjectStore = defineStore('projects', () => {
     // optimistic `streaming` flag cannot veto here — after a lost message no
     // result ever arrives to clear it, so it would block recovery forever.
     if (projectStreaming.value[chatId]) return
-    if (unacked.attempts >= 1) {
+    const stale = Date.now() - unacked.at > UNACKED_RESEND_MAX_AGE_MS
+    if (stale || unacked.attempts >= 1) {
       // One silent recovery is enough; surface the failure rather than loop.
+      // A stale send is never resent at all: the turn it belonged to has
+      // long been answered, and repeating it now would put the message back
+      // into a chat that has moved on.
       delete unackedSends[chatId]
       persistUnackedSends()
       const errorMsgs = messages.value[chatId] || []
@@ -934,11 +967,14 @@ export const useProjectStore = defineStore('projects', () => {
     // reload, so this re-renders it fresh; a successful delivery clears the
     // tracking via the echoed user_echo. Empty comment buckets: the original
     // send already consumed them via consumePreparedAttachments.
+    // The same send id rides on: this is the same logical send, so the
+    // engine can recognise it instead of running a second turn for it.
     sendMessage(chatId, unacked.text, {
       composed: unacked.text,
       imageRefs: unacked.images,
       fileComments: [],
       chatComments: [],
+      sendId: unacked.id,
     })
   }
 
@@ -1591,6 +1627,10 @@ export const useProjectStore = defineStore('projects', () => {
               const row = entry as Partial<UnackedSend> | null
               if (row && typeof row.text === 'string' && row.text.trim()) {
                 unackedSends[cid] = {
+                  // A cached entry from before the send-id feature has none:
+                  // mint one, so the retry still carries an id the engine can
+                  // recognise.
+                  id: typeof row.id === 'string' && row.id ? row.id : newSendId(),
                   text: row.text,
                   images: Array.isArray(row.images) ? row.images.map(String) : undefined,
                   at: typeof row.at === 'number' ? row.at : Date.now(),
@@ -3224,7 +3264,15 @@ export const useProjectStore = defineStore('projects', () => {
               cursor = match
             }
           }
-          messages.value[chatId] = dropSupersededLiveTail(merged, tailStart, windowRows)
+          // The pairing loop above already matched a server row to its live
+          // copy. The prune is the leftover case: a hole below `cachedEnd`, an
+          // archived transcript window, or a turn the loop could not pair left
+          // an optimistic user bubble with no server counterpart of its own.
+          messages.value[chatId] = dropSupersededLiveTail(
+            pruneOrphanOptimisticUsers(merged, windowRows),
+            tailStart,
+            windowRows,
+          )
         }
         persistMessages()
         // Same rule the flat branch below applies, through the same predicate:
@@ -3297,15 +3345,10 @@ export const useProjectStore = defineStore('projects', () => {
       // authoritative and holds each turn exactly once, so drop any local
       // null-turn_index user bubble whose text already appears as a server
       // user turn before comparing lengths — otherwise the "never shrink
-      // history" guard below would preserve the duplicate forever.
-      const serverUserContent = new Set(
-        normalizedServer.filter(m => m.role === 'user').map(m => m.content),
-      )
-      if (serverUserContent.size) {
-        const pruned = normalizedLocal.filter(
-          m => !(m.role === 'user' && m.turn_index == null && serverUserContent.has(m.content)),
-        )
-        if (pruned.length !== normalizedLocal.length) normalizedLocal = pruned
+      // history" guard below would preserve the duplicate forever. The
+      // pairing is one-to-one, so a genuine repeat keeps both copies.
+      if (normalizedServer.some(m => m.role === 'user')) {
+        normalizedLocal = pruneOrphanOptimisticUsers(normalizedLocal, normalizedServer)
       }
 
       if (historySignature(normalizedServer) !== historySignature(normalizedLocal)) {
@@ -4923,6 +4966,15 @@ export const useProjectStore = defineStore('projects', () => {
       return true
     }
     const alreadyStreaming = isChatStreaming(chatId)
+    // One send id per logical send. A recovery resend reuses the id it
+    // already has, so the engine can tell it apart from a deliberate repeat.
+    // A tracked entry for a DIFFERENT message is not this send: it gets its
+    // own id, and the tracked entry keeps its id for its own retry.
+    const tracked = unackedSends[chatId]
+    const trackedIsThisSend = Boolean(tracked && tracked.text === composed)
+    const sendId = message.sendId
+      ?? (trackedIsThisSend ? tracked?.id : undefined)
+      ?? newSendId()
 
     if (alreadyStreaming) {
       // Queue: don't push to the main messages list yet. Queued messages live
@@ -4944,7 +4996,9 @@ export const useProjectStore = defineStore('projects', () => {
       })
       clearSteerNotice(chatId)
       if (delivery === 'steer') armSteerLockTimer(chatId)
-      const payload: Record<string, unknown> = { type: 'message', text: composed, mode: 'queue', delivery }
+      const payload: Record<string, unknown> = {
+        type: 'message', text: composed, mode: 'queue', delivery, send_id: sendId,
+      }
       if (imageRefs) payload.images = imageRefs
       payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
@@ -4963,6 +5017,9 @@ export const useProjectStore = defineStore('projects', () => {
         content: composed,
         timestamp: new Date().toISOString(),
         images: imageRefs,
+        // The id marks this bubble as the client's own optimistic copy, so
+        // the server's copy of the same turn is never mistaken for it.
+        send_id: sendId,
       })
       messages.value[chatId] = msgs
     }
@@ -4977,15 +5034,16 @@ export const useProjectStore = defineStore('projects', () => {
     persistStreamStartedAt()
     delete liveUsage.value[chatId]
 
-    const payload: Record<string, unknown> = { type: 'message', text: composed }
+    const payload: Record<string, unknown> = { type: 'message', text: composed, send_id: sendId }
     if (imageRefs) payload.images = imageRefs
     // Track until the server proves receipt. Cleared by the echoed user_echo,
     // by the turn showing up in /messages, or recovered once on reconnect.
     // An identical pending entry (the recovery path resending this very
     // message) keeps its attempt count so the one-retry cap holds.
-    const tracked = unackedSends[chatId]
-    if (!tracked || tracked.text !== composed) {
-      unackedSends[chatId] = { text: composed, images: imageRefs, at: Date.now(), attempts: 0 }
+    if (!trackedIsThisSend) {
+      unackedSends[chatId] = {
+        id: sendId, text: composed, images: imageRefs, at: Date.now(), attempts: 0,
+      }
       persistUnackedSends()
     }
     ws.send(JSON.stringify(payload))
@@ -5654,7 +5712,16 @@ export const useProjectStore = defineStore('projects', () => {
         // entry that just started so later messages remain visible/editable.
         removeEchoedQueued(chatId, event.entry_id, trimmed)
         // The server received and started the send: drop the recovery copy.
-        acknowledgeSend(chatId, trimmed)
+        acknowledgeSend(chatId, trimmed, event.send_id)
+        if (event.duplicate) {
+          // The engine already owns this send id: the frame was a repeat of
+          // a turn that ran. Nothing to render — the transcript already holds
+          // the turn — but the client state has to settle: the send is
+          // delivered, and no turn is streaming.
+          clearStreamingState(chatId)
+          void loadMessages(chatId, { background: true })
+          break
+        }
         const turnIndex = event.turn_index
         // Dedup by server-assigned turn_index when available. Covers the
         // mid-stream reload case: /messages hydrates user bubbles with their
@@ -5696,11 +5763,22 @@ export const useProjectStore = defineStore('projects', () => {
           for (let i = msgs.length - 1; i >= 0; i--) {
             const m = msgs[i]
             if (m.role === 'user' && m.turn_index == null && m.content === trimmed) {
-              if (sawAssistant) {
-                msgs.splice(i, 1)
-                break
+              // The send id names the exact bubble this echo belongs to. A
+              // repeated text has several optimistic bubbles, and only one
+              // of them is this send.
+              const isThisSend = !event.send_id || m.send_id === event.send_id
+              if (sawAssistant || !isThisSend) {
+                if (sawAssistant) {
+                  msgs.splice(i, 1)
+                  break
+                }
+                continue
               }
               m.turn_index = turnIndex
+              // The echo carries the send id the engine recorded for this
+              // turn: stamp it on the bubble we own, so the server's copy of
+              // the same turn is never mistaken for it.
+              if (event.send_id) m.send_id = event.send_id
               if (event.unattended) m.unattended = true
               if (event.origin) m.origin = event.origin
               upgraded = true
@@ -6113,6 +6191,25 @@ export const useProjectStore = defineStore('projects', () => {
       case 'result': {
         delete backgroundableCalls.value[chatId]
         clearSteerLockTimer(chatId)
+        // The broker replays its whole event buffer to every new subscriber,
+        // so a reconnect receives the terminal `result` of a turn the history
+        // reload already hydrated. Rendering it again appended a second
+        // identical answer bubble — the "one reply, two bubbles" report. The
+        // answer is already on screen: clear the live state and reconcile,
+        // but materialize nothing.
+        const replayed = hasRenderedFinalAnswer(messages.value[chatId] || [], event.text || '')
+        if (replayed) {
+          streaming.value[chatId] = false
+          streamingText.value[chatId] = ''
+          streamingThinking.value[chatId] = ''
+          delete streamingTextPhase.value[chatId]
+          delete liveUsage.value[chatId]
+          delete streamStartedAt.value[chatId]
+          persistStreamStartedAt()
+          persistMessages()
+          void reconcileAfterResult(chatId)
+          break
+        }
         // Final flush before the result event is materialized: lock any
         // trailing thinking/text deltas into the timeline so they render
         // in the correct order.

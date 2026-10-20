@@ -374,6 +374,12 @@ export interface ChatMessage {
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
   turn_index?: number
+  // The client send id of the client's OWN optimistic bubble for this turn.
+  // The engine records the same id per user turn and echoes it on the
+  // user_echo, so the client can tell its bubble from the server's copy of
+  // the same turn and prove that a send was delivered. Only present on the
+  // client-rendered copy of a user message.
+  send_id?: string
   // Server-reported agent latency for the final assistant bubble of a turn,
   // in milliseconds. Drives the footer "· 7.3s" label.
   duration_ms?: number
@@ -543,7 +549,22 @@ export type WsEvent =
       timeout_s: number;
     }
   | { type: 'chat_title'; chat_id: string; title: string }
-  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string; origin?: TurnOrigin }
+  | {
+      type: 'user_echo';
+      text: string;
+      images?: string[];
+      turn_index?: number;
+      sent_at?: string;
+      unattended?: boolean;
+      entry_id?: string;
+      origin?: TurnOrigin;
+      // The client send id this turn owns. It identifies the send exactly, so
+      // the client can tell its own optimistic bubble from the server's copy.
+      send_id?: string;
+      // True when the engine already owns this send id: the frame was a
+      // repeat of a turn that ran, and no second turn was started.
+      duplicate?: boolean;
+    }
   // A tool call was refused (user Deny, or the auto-deny on an unattended
   // run). The call never executed, so any file card already painted for this
   // tool_use_id has to be retracted.
@@ -560,7 +581,7 @@ export type WsEvent =
       already_resolved?: boolean;
     }
   | { type: 'question_resolved'; request_id: string; session_id?: string }
-  | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean }
+  | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean; send_id?: string }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[]; delivery?: QueueDelivery; steering?: boolean; waiting?: boolean }> }
   // A steer reached the running turn: the entries leave the queue and the
   // message becomes its own user turn.

@@ -192,6 +192,7 @@ def _chat() -> SimpleNamespace:
         user_turn_unattended={},
         user_turn_steered={},
         user_turn_origin={},
+        user_turn_send_ids={},
     )
 
 
