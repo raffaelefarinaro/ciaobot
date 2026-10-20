@@ -46,6 +46,10 @@
             @open-sidebar="sidebarCollapsed = false"
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" file-pinned @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <!-- The route names a chat the catalog has not delivered yet: the
+               pane is on its way, so it shows the skeleton rather than
+               nothing (#1651). -->
+          <ChatPaneSkeleton v-else-if="chatRoutePending" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
@@ -210,6 +214,10 @@
           </div>
           <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         </template>
+        <!-- The route names a chat the catalog has not delivered yet: the pane
+             is on its way, so it shows the skeleton rather than nothing
+             (#1651). -->
+        <ChatPaneSkeleton v-else-if="chatRoutePending" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
@@ -321,6 +329,7 @@ import ProjectSidebar from './ProjectSidebar.vue'
 import type ChatPanelComponent from './ChatPanel.vue'
 import type PinnedFilePanelComponent from './PinnedFilePanel.vue'
 import { loadChatPanel, loadFileViewerModal, loadPinnedFilePanel, prefetchChatPanelForRoute } from '../lib/chatComponents'
+import ChatPaneSkeleton from './ChatPaneSkeleton.vue'
 // The destinations behind the rail are loaded on first visit, not on boot.
 // Statically imported they landed in the same chunk as the chat itself — a
 // third of a megabyte of Settings, Automations, the memory canvas and the
@@ -336,7 +345,19 @@ const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
 const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
 const TaskBoardView = defineAsyncComponent(() => import('./TaskBoardView.vue'))
 const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
-const ChatPanel = defineAsyncComponent(loadChatPanel)
+// The chat chunk is the biggest one, and the first chat opened after an
+// update is exactly when it has to be fetched: the hashed assets change with
+// every build, so nothing is warm. `defineAsyncComponent` renders nothing
+// while the loader is in flight, which is how the pane could come up blank
+// (#1651). The skeleton is the loading component, and `delay: 0` because
+// Vue's default 200 ms wait is what makes the pane look dead on a cold
+// chunk — the placeholder has to be on screen from the first frame.
+const ChatPanel = defineAsyncComponent({
+  loader: loadChatPanel,
+  loadingComponent: ChatPaneSkeleton,
+  delay: 0,
+  timeout: 30000,
+})
 const PinnedFilePanel = defineAsyncComponent(loadPinnedFilePanel)
 const FileViewerModal = defineAsyncComponent(loadFileViewerModal)
 import PaneHeader from './PaneHeader.vue'
@@ -592,6 +613,15 @@ const subagentRoute = computed(() => {
   const agentId = (route.params.agentId as string) || ''
   return chatId && agentId ? { chatId, agentId } : null
 })
+// The route names a chat, but the catalog has not caught up with it yet:
+// `activeChat` is still null while the selection and the URL already point at
+// the conversation (a reload, a desktop deep link, a chat the poll has not
+// delivered yet). Every render branch used to fall through in that window and
+// the pane came up completely empty (#1651) — no header, no skeleton, no
+// composer, and no `aria-busy` to say it was on its way. The pane skeleton is
+// what covers the gap; the real transcript takes over as soon as the entry
+// arrives.
+const chatRoutePending = computed(() => Boolean(route.params.chatId) && !store.activeChat)
 const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'

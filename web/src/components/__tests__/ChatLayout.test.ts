@@ -2572,3 +2572,71 @@ describe('ChatLayout PWA Option/Alt chords', () => {
     wrapper.unmount()
   })
 })
+
+// #1651: a chat route whose catalog entry has not arrived used to paint a
+// completely empty pane. The route names a chat, the store has it selected,
+// but `activeChat` is still null (the catalog is in flight), and every branch
+// in the layout fell through — no header, no skeleton, no composer.
+describe('ChatLayout chat route without a catalog entry', () => {
+  class MemoryStorage {
+    private values = new Map<string, string>()
+    getItem(key: string): string | null { return this.values.get(key) ?? null }
+    setItem(key: string, value: string): void { this.values.set(key, value) }
+    removeItem(key: string): void { this.values.delete(key) }
+    clear(): void { this.values.clear() }
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('shows the pane skeleton while a chat route has no catalog entry', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/chat/:chatId?', component: EmptyStub },
+      ],
+    })
+    await router.push('/chat/chat-missing')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{ project_id: 'project-1', name: 'General', workspace: 'personal' }] as unknown as typeof store.projects
+    // The catalog does not know this chat yet, so `activeChat` reads null
+    // while the route and the selection already name it.
+    store.chats = []
+    store.activeChatId = 'chat-missing'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    vi.spyOn(useTaskStore(), 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub, ProjectSidebar: EmptyStub, ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub, SettingsView: EmptyStub, FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub, PaneHeader: EmptyStub, HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The pane says it is loading instead of showing nothing.
+    const status = wrapper.find('[role="status"][aria-label="Loading conversation"]')
+    expect(status.exists()).toBe(true)
+    // Home is not the answer here: the route names a chat, so the home empty
+    // state would be a different lie.
+    expect(wrapper.find('.empty-shell').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
