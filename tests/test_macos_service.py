@@ -1251,3 +1251,28 @@ def test_gate_lets_a_stopped_engine_through_when_blockers_cannot_be_read(tmp_pat
     monkeypatch.setattr(macos_service, "server_reachable", lambda _port, **_kw: False)
 
     assert macos_service.restart_gate(8443, "restart", force=False) is None
+
+
+def test_status_reports_a_workspace_access_denial(tmp_path: Path, monkeypatch) -> None:
+    from ciao import workspace_access
+
+    runtime = _runtime(tmp_path)
+    _write_program_arguments(runtime, [HOSTED_HOST, "serve", "--python", "/x/bin/python"])
+    line = "macOS denied Ciaobot Server access to /w: allow it in System Settings."
+    record = workspace_access.denial_path()
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(line + "\n", encoding="utf-8")
+    runner = _launchd_runner([], NOT_LOADED_PRINT, print_returncode=113)
+
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: False)
+    down = macos_service.service_status(runtime=runtime, uid=501, runner=runner)
+
+    assert down.message.startswith("Ciaobot engine is not running: macOS denied")
+    assert down.details["workspace_access_denied"] == line
+
+    monkeypatch.setattr(macos_service, "server_reachable", lambda _port: True)
+    monkeypatch.setattr(macos_service, "restart_blockers", lambda _port: [])
+    up = macos_service.service_status(runtime=runtime, uid=501, runner=runner)
+
+    assert up.message == "Ciaobot engine is running."
+    assert up.details["workspace_access_denied"] is None
