@@ -44,15 +44,32 @@ def read_denial(path: Path | None = None) -> str:
 
 
 def record_denial(message: str, path: Path | None = None) -> None:
-    """Best effort: the probe result must not depend on being able to record it."""
+    """Best effort: the probe result must not depend on being able to record it.
+
+    Written like the install receipt: a private temp file renamed into place, so
+    a symlink planted at the record path is replaced, never followed.
+    """
+    from ciao.os_support.files import replace_file
+    from ciao.os_support.private import make_private_dir, mkstemp_private
+
     target = path or denial_path()
+    tmp: Path | None = None
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        make_private_dir(target.parent)
+        fd, tmp_name = mkstemp_private(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+        tmp = Path(tmp_name)
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(message + "\n")
+        replace_file(tmp, target)
     except OSError:
         pass
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def clear_denial(path: Path | None = None) -> None:

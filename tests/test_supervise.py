@@ -333,6 +333,7 @@ def test_a_child_is_killed_when_the_process_tree_cannot_be_tracked(
 def test_access_denied_returns_78_without_launching(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         supervise_module, "check_workspace_access", lambda: "macOS denied Ciaobot Server access"
     )
@@ -342,6 +343,7 @@ def test_access_denied_returns_78_without_launching(
 
     assert code == supervise_module.ACCESS_DENIED_EXIT == 78
     assert _launches(tmp_path) == 0
+    assert not (tmp_path / ".runtime").exists()
     assert "macOS denied Ciaobot Server access" in capsys.readouterr().err
 
 

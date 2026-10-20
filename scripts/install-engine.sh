@@ -1504,6 +1504,8 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
     if [ "$migrate_path" = host ]; then
         health_attempts=90
     fi
+    # Only a record written after this point describes this run.
+    : > "$tmp/health-wait-started"
     attempt=0
     healthy=0
     while [ "$attempt" -lt "$health_attempts" ]; do
@@ -1533,7 +1535,11 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
     done
     # Written by the supervisor when macOS denies the workspace; the path is
     # ciao.workspace_access.denial_path() (DENIAL_FILE_NAME): keep both in sync.
-    access_denied=$(cat "$HOME/.local/state/ciaobot/workspace-access-denied.txt" 2>/dev/null || true)
+    access_denied=
+    denial_record="$HOME/.local/state/ciaobot/workspace-access-denied.txt"
+    if [ "$denial_record" -nt "$tmp/health-wait-started" ]; then
+        access_denied=$(cat "$denial_record" 2>/dev/null || true)
+    fi
     if [ "$healthy" -eq 0 ]; then
         if [ "$migrate_path" = host ]; then
             if [ -n "$access_denied" ]; then

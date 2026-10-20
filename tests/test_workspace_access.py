@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import errno
+import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -114,3 +116,20 @@ def test_missing_workspace_env_uses_a_generic_name(tmp_path: Path) -> None:
 
 def test_denial_path_is_outside_the_workspace() -> None:
     assert denial_path() == install_receipt.default_receipt_path().parent / DENIAL_FILE_NAME
+
+
+def test_a_symlinked_record_is_replaced_not_followed(tmp_path: Path) -> None:
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    record = tmp_path / "x.txt"
+    record.symlink_to(victim)
+
+    message = check_workspace_access(
+        platform="darwin", getcwd=_eperm, environ={}, path=record
+    )
+
+    assert victim.read_text(encoding="utf-8") == "keep"
+    assert not record.is_symlink()
+    assert record.read_text(encoding="utf-8") == f"{message}\n"
+    if sys.platform != "win32":
+        assert stat.S_IMODE(record.stat().st_mode) == 0o600

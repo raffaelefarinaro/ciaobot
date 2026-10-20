@@ -208,7 +208,7 @@ If the user answers *Don't Allow* to "Ciaobot Server would like to access files 
 
 The user sees the line in `ciao service status` (text and `--json`, field `workspace_access_denied`), in the installer when its health wait fails, and in the file itself. The message names System Settings, Privacy & Security, Files and Folders, Ciaobot Server.
 
-Exit 78 passes through the host unchanged: it is neither a stop code nor a launch failure. launchd relaunches the job after its ~10 s throttle, so once the switch is turned on the engine comes up on its own and the next passing probe deletes the file.
+Exit 78 passes through the host unchanged: it is neither a stop code nor a launch failure. launchd relaunches the job after its ~10 s throttle, so once the switch is turned on the engine comes up on its own and the next passing probe deletes the file. On a host migration the installer rolls back and the previous engine keeps running until access is granted and the installer is rerun.
 
 To bring the prompt back for testing: `tccutil reset SystemPolicyDocumentsFolder local.ciaobot.server` (Desktop: `SystemPolicyDesktopFolder`, Downloads: `SystemPolicyDownloadsFolder`).
 
