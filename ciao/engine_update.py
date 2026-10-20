@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import http.client
 import json
 import logging
 import math
@@ -92,10 +93,15 @@ SERVER_LABEL = macos_service.SERVER_LABEL
 # one rollback generation is retained.
 PREVIOUS_ENV_NAME = "previous-env"
 _CHUNK = 1 << 20
-# Generous, because every one of these calls is to a local service answering
-# from a warm page cache, and a hung local socket is a bug rather than a
-# condition worth waiting on.
+# For the GET probes only (`_get_json`): they go to a local service answering
+# from a warm page cache, and no answer within this time means "not up", which
+# is itself the answer the caller wants.
 _HTTP_TIMEOUT = 5.0
+# The drain and cancel POSTs reach an engine that is busy by definition while
+# it drains. The handler only does in-memory work, so 30s tolerates an event
+# loop stall without hiding a dead engine. It matches `_STOP_TIMEOUT` and
+# `_LOCK_TIMEOUT`.
+_DRAIN_REQUEST_TIMEOUT = 30.0
 _POLL_INTERVAL = 1.0
 # Three consecutive empty readings, not one: a chat that settles between two
 # polls would otherwise look drained while its work is still visible.
@@ -639,11 +645,12 @@ def _post_json(url: str, *, opener: Opener = _LOCAL_OPENER.open) -> dict[str, An
     """POST an empty body to ``url`` and return the JSON object answer.
 
     ``opener`` is a parameter so the failure-injection tests never open a
-    socket. The timeout is short because both callers are talking to a server
-    on this machine, where a slow answer is a wedged one.
+    socket. The timeout is ``_DRAIN_REQUEST_TIMEOUT`` because the callers are
+    talking to an engine that is busy draining, so a slow answer is not yet a
+    dead one.
     """
     request = urllib.request.Request(url, method="POST", data=b"")
-    with opener(request, timeout=_HTTP_TIMEOUT) as response:
+    with opener(request, timeout=_DRAIN_REQUEST_TIMEOUT) as response:
         return _decode_body(response.read())
 
 
@@ -662,6 +669,44 @@ def _get_json(
             return _decode_body(response.read())
     except Exception:  # noqa: BLE001 — unreachability is an answer here
         return None
+
+
+def _no_answer(step: str) -> str:
+    return (
+        f"the running engine did not answer the {step} within "
+        f"{int(_DRAIN_REQUEST_TIMEOUT)}s (it may be busy); nothing was stopped or swapped"
+    )
+
+
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    """``": <error>"`` from a JSON error body, or ``""`` when there is none."""
+    try:
+        error = _decode_body(exc.read()).get("error")
+    except (OSError, ValueError):
+        return ""
+    return f": {error}" if isinstance(error, str) else ""
+
+
+def _drain_request(post: PostJson, url: str, step: str) -> dict[str, Any]:
+    """POST one drain-handshake request, failing with a reason that names ``step``."""
+    try:
+        return post(url)
+    except urllib.error.HTTPError as exc:
+        raise UpdateError(
+            f"the running engine refused the {step} (HTTP {exc.code}{_http_error_detail(exc)})"
+        ) from exc
+    except TimeoutError as exc:
+        raise UpdateError(_no_answer(step)) from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise UpdateError(_no_answer(step)) from exc
+        raise UpdateError(
+            f"could not reach the running engine for the {step}: {exc.reason}"
+        ) from exc
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        raise UpdateError(
+            f"the running engine gave no usable answer to the {step}: {exc}"
+        ) from exc
 
 
 def _drain_timeout(drain_timeout: float) -> UpdateError:
@@ -699,17 +744,19 @@ def _drain_timeout_arg(value: str) -> float:
     return seconds
 
 
-def _reopen_admission(post: PostJson, base: str) -> None:
-    """Undo a drain, ignoring whether it worked.
+def _reopen_admission(post: PostJson, base: str) -> str:
+    """Undo a drain and return why it failed, or ``""`` when it landed.
 
     The engine is either unreachable — in which case it is refusing nothing —
     or wedged, in which case the cancel is exactly what a retry needs. Neither
-    is worth masking the real failure for, so this never raises.
+    is worth masking the real failure for, so this never raises; the caller
+    appends the returned text to the reason it records.
     """
     try:
-        post(f"{base}/api/admin/drain/cancel")
-    except Exception:  # noqa: BLE001 — best effort by definition
-        pass
+        _drain_request(post, f"{base}/api/admin/drain/cancel", "drain cancel")
+    except Exception as exc:  # noqa: BLE001 — best effort by definition
+        return str(exc)
+    return ""
 
 
 def _advance_ignoring_failure(advance: Callable[[str], None], phase: str) -> None:
@@ -889,17 +936,26 @@ def apply_update(
             op.updated_at = _now()
             write_operation(op, root)
 
-        def fail(message: str) -> None:
-            """Reopen admission and record why, with the engine left running."""
-            _reopen_admission(post, base)
+        def fail(message: str) -> str:
+            """Reopen admission and record why, with the engine left running.
+
+            Returns the recorded message, which names a failed cancel too.
+            """
+            cancel_error = _reopen_admission(post, base)
+            if cancel_error:
+                message = (
+                    f"{message}; reopening chats also failed ({cancel_error}), "
+                    "so new chats may be refused until Ciaobot restarts"
+                )
             op.phase = "failed"
             op.error = message
             op.updated_at = _now()
             write_operation(op, root)
+            return message
 
         try:
             advance("draining")
-            post(f"{base}/api/admin/drain")
+            _drain_request(post, f"{base}/api/admin/drain", "drain request")
             # Polled by re-POSTing the drain, not by reading
             # a separate chat list: the drain POST is loopback-only, so it always
             # answers for this machine, and `begin_restart_drain` is idempotent,
@@ -911,7 +967,7 @@ def apply_update(
             deadline = clock() + drain_timeout
             idle = 0
             while True:
-                body = post(f"{base}/api/admin/drain")
+                body = _drain_request(post, f"{base}/api/admin/drain", "drain status poll")
                 active = body.get("active_chat_ids") or []
                 idle = idle + 1 if not active else 0
                 if idle >= _IDLE_POLLS_REQUIRED:
@@ -925,8 +981,7 @@ def apply_update(
             # minutes is the most likely way this ends, and skipping `fail()`
             # there would leave the engine refusing every turn with nothing in
             # the record to say why.
-            message = _reason(exc)
-            fail(message)
+            message = fail(_reason(exc))
             if not isinstance(exc, Exception):
                 raise
             raise UpdateError(message) from exc
@@ -934,8 +989,7 @@ def apply_update(
         try:
             platform.spawn_updater(op, op.env_python or str(staged_python))
         except BaseException as exc:
-            message = _reason(exc)
-            fail(message)
+            message = fail(_reason(exc))
             if not isinstance(exc, Exception):
                 raise
             raise UpdateError(message) from exc
