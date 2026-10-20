@@ -1617,6 +1617,9 @@ class OpencodeProvider(BaseSDKProvider):
         # same id waits for this outcome instead of posting a second decision.
         self._permission_inflight: dict[str, asyncio.Future[QuestionResponseResult]] = {}
         self._question_requests: dict[str, _PendingRequest] = {}
+        # Form replies/cancels awaiting V2. A concurrent reply or cancel for the
+        # same id waits for this outcome instead of sending a second answer.
+        self._question_inflight: dict[str, asyncio.Future[QuestionResponseResult]] = {}
         self._tool_calls: dict[str, str] = {}
         self._settled_tool_ids: set[str] = set()
         self._mcp_token: str = ""
@@ -2988,8 +2991,11 @@ class OpencodeProvider(BaseSDKProvider):
         except httpx.HTTPError as exc:
             logger.debug("OpenCode form cancellation failed", exc_info=True)
             return QuestionResponseResult(False, str(exc), True)
-        if response.status_code in {200, 204, 409}:
+        if response.status_code in {200, 204}:
             return QuestionResponseResult(True)
+        if response.status_code == 409:
+            # V2 already settled this form (another answer or cancel won).
+            return QuestionResponseResult(True, already_resolved=True)
         if response.status_code == 404:
             return QuestionResponseResult(
                 False, "Question request is no longer active", False
@@ -3017,8 +3023,11 @@ class OpencodeProvider(BaseSDKProvider):
         except httpx.HTTPError as exc:
             logger.debug("OpenCode form reply failed", exc_info=True)
             return QuestionResponseResult(False, str(exc), True)
-        if response.status_code in {200, 204, 409}:
+        if response.status_code in {200, 204}:
             return QuestionResponseResult(True)
+        if response.status_code == 409:
+            # V2 already settled this form (another answer or cancel won).
+            return QuestionResponseResult(True, already_resolved=True)
         if response.status_code == 404:
             return QuestionResponseResult(
                 False, "Question request is no longer active", False
@@ -3050,19 +3059,40 @@ class OpencodeProvider(BaseSDKProvider):
                 False, "Question request belongs to another session", False
             )
         if pending is None:
-            # A duplicate reply after the SSE form.replied/cancelled event is
-            # idempotently successful; there is nothing left to mutate.
-            return QuestionResponseResult(True)
+            # The form was already settled (SSE form.replied/cancelled, or
+            # another tab's answer finished first): this reply changed nothing.
+            return QuestionResponseResult(True, already_resolved=True)
         if self._client is None:
             return QuestionResponseResult(False, "OpenCode is not connected", False)
-        if cancel:
-            result = await self._reject_question(pending)
-        else:
+        inflight = self._question_inflight.get(request_id)
+        if inflight is not None:
+            # Another tab's reply or cancel is already in flight. Its outcome
+            # decides ours: success means this one did nothing; failure keeps
+            # the card retryable.
+            outcome = await asyncio.shield(inflight)
+            if outcome.ok:
+                return QuestionResponseResult(True, already_resolved=True)
+            return outcome
+        answer: dict[str, FormValue] = {}
+        if not cancel:
             try:
                 answer = _validate_form_answer(pending, answers)
             except _FormValidationError as exc:
                 return QuestionResponseResult(False, str(exc), False)
-            result = await self._reply_question(pending, answer)
+        future: asyncio.Future[QuestionResponseResult] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._question_inflight[request_id] = future
+        result = QuestionResponseResult(False, "Question reply was interrupted", True)
+        try:
+            if cancel:
+                result = await self._reject_question(pending)
+            else:
+                result = await self._reply_question(pending, answer)
+        finally:
+            self._question_inflight.pop(request_id, None)
+            if not future.done():
+                future.set_result(result)
         if result.ok or result.error == "Question request is no longer active":
             self._question_requests.pop(request_id, None)
         return result
