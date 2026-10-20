@@ -11,6 +11,12 @@ missed occurrence at startup.
 Its second line is the vault mode setup chose (`scratch` or `existing`), which
 only the first-run onboarding chat reads. It used to be `CIAO_VAULT_MODE` in
 `.env`, a permanent variable for a one-shot decision.
+
+`.runtime/welcome-pending` is a separate file (an ISO timestamp): setup writes
+it only when it generated the PWA password itself, so Home can show that
+password once on the host. Dismissing the card or changing the password
+deletes it, which is why it is not a line of the receipt above (that one
+drives the catch-up grace).
 """
 
 from __future__ import annotations
@@ -112,3 +118,27 @@ def catch_up_grace_active(
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=UTC)
     return current - stamp < SETUP_CATCH_UP_GRACE
+
+
+WELCOME_PENDING_FILENAME = "welcome-pending"
+
+
+def welcome_pending_path(runtime_root: Path) -> Path:
+    return runtime_root / WELCOME_PENDING_FILENAME
+
+
+def write_welcome_pending(runtime_root: Path, *, now: datetime | None = None) -> Path:
+    """Record that setup generated the PWA password and nobody has acknowledged it yet."""
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    stamp = (now or datetime.now(UTC)).isoformat(timespec="seconds")
+    path = welcome_pending_path(runtime_root)
+    path.write_text(f"{stamp}\n", encoding="utf-8", newline="")
+    return path
+
+
+def welcome_pending(runtime_root: Path) -> bool:
+    return welcome_pending_path(runtime_root).is_file()
+
+
+def clear_welcome_pending(runtime_root: Path) -> None:
+    welcome_pending_path(runtime_root).unlink(missing_ok=True)
