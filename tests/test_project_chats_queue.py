@@ -143,6 +143,72 @@ async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
     assert echoes[2].get("entry_id") == "q-b"
 
 
+async def test_queued_flush_records_the_send_id(tmp_path: Path) -> None:
+    """A queued send's id must be recorded on the turn it flushes into.
+
+    The flush is a turn of its own: it allocates a turn index, records the
+    turn's timing and echoes the message back. If it dropped the client's
+    send id, the engine would own no turn for that id, and a recovery resend
+    of the queued message (the client could not prove the delivery) would
+    start a second turn — the duplicate this issue is about.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-queue-send-id", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="queue-send-id-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-sid",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    assert pcm.queue_message(chat.chat_id, "queued one", send_id="s-queued") is True
+
+    first_turn_ready.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The flushed turn owns the send id: a repeat of that frame is a
+    # duplicate, not a new turn.
+    found = pcm.find_turn_by_send_id(chat.chat_id, "s-queued")
+    assert found is not None, "the flushed turn must record the queued send id"
+    assert found["turn_index"] == 1, found
+
+    # And the echo that renders the queued message names it, so the client
+    # can tell this bubble from its own optimistic copy.
+    echoes = [e for e in captured if e.get("type") == "user_echo"]
+    flushed = [e for e in echoes if e.get("text") == "queued one"]
+    assert len(flushed) == 1, echoes
+    assert flushed[0].get("send_id") == "s-queued", flushed[0]
+
+
 async def test_a_blank_queued_follow_up_does_not_rerun_the_previous_prompt(
     tmp_path: Path,
 ) -> None:

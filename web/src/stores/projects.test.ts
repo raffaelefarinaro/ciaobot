@@ -1061,6 +1061,45 @@ describe('unacknowledged send recovery', () => {
     expect(frames).toHaveLength(2)
     expect(JSON.parse(frames[1]).send_id).toBe(firstId)
   })
+
+  test('matches an acknowledgement by send id first, not by text', () => {
+    // The send id names the send exactly. A user_echo that carries the same
+    // text but a DIFFERENT id belongs to another logical send (the user
+    // deliberately sent the same words again), so it must not clear the
+    // tracking of the first one: that one is still unproven, and dropping it
+    // would leave a lost send with no recovery.
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-id-match'
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'same words')
+    const sendId = JSON.parse(sentMessageFrames()[0]).send_id
+    expect(sendId).toBeTruthy()
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.id).toBe(sendId)
+
+    // Another send's echo, with the same text and another id: not our proof.
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'same words',
+        send_id: 's-other',
+      }),
+    })
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeDefined()
+
+    // The echo that names OUR id is the proof.
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'same words',
+        send_id: sendId,
+      }),
+    })
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+  })
 })
 
 describe('duplicate send suppression', () => {
@@ -3202,6 +3241,47 @@ describe('optimistic user bubble reconciliation', () => {
     await store.loadMessages(chatId)
 
     const userMsgs = store.messages[chatId].filter(m => m.role === 'user' && m.content === 'again')
+    expect(userMsgs).toHaveLength(2)
+  })
+
+  test('a flat reload leaves one bubble when it meets the optimistic copy', async () => {
+    // The flat (non-envelope) response is what an older server answers with,
+    // and it has its own merge path. The client's optimistic bubble (no
+    // turn_index) and the server's own copy of the same text must end up as
+    // ONE bubble: the prune that drops the orphan belongs to this path too.
+    const store = useProjectStore()
+    const chatId = 'chat-flat-orphan'
+    store.messages[chatId] = [
+      { role: 'user', content: 'same words', timestamp: '', turn_index: undefined },
+      { role: 'user', content: 'same words', timestamp: '2026-10-20T12:20:40Z', turn_index: 0 },
+    ]
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'same words', sent_at: '2026-10-20T12:20:40Z', turn_index: 0 },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(m => m.role === 'user' && m.content === 'same words')
+    expect(userMsgs).toHaveLength(1)
+  })
+
+  test('a flat reload keeps both bubbles when the server holds the text twice', async () => {
+    // The mirror of the case above: a deliberate repeat. The server holds the
+    // message twice, so both bubbles are real and must survive the reload.
+    const store = useProjectStore()
+    const chatId = 'chat-flat-repeat'
+    store.messages[chatId] = [
+      { role: 'user', content: 'same words', timestamp: '', turn_index: undefined },
+      { role: 'user', content: 'same words', timestamp: '2026-10-20T12:20:40Z', turn_index: 0 },
+    ]
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'same words', sent_at: '2026-10-20T12:20:40Z', turn_index: 0 },
+      { role: 'user', content: 'same words', sent_at: '2026-10-20T12:25:19Z', turn_index: 1 },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(m => m.role === 'user' && m.content === 'same words')
     expect(userMsgs).toHaveLength(2)
   })
 })

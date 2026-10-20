@@ -3776,11 +3776,6 @@ class ProjectChatManager:
                 fork.user_turn_images[str(copied_turn_index)] = copied_refs
             else:
                 row.pop("images", None)
-            # The forked turn keeps the send id the original client minted, so
-            # a frame that repeats it is still recognised as a duplicate.
-            copied_send_id = str(row.get("send_id") or "")
-            if copied_send_id:
-                fork.user_turn_send_ids[str(copied_turn_index)] = copied_send_id
             copied_turn_index += 1
         fork.user_turn_count = copied_turn_index
         fork.turn_index_base = copied_turn_index
@@ -5994,9 +5989,8 @@ class ProjectChatManager:
         ``delivery="steer"`` marks it for injection into the running turn; the
         caller then awaits ``steer_queue`` to dispatch it. ``origin`` tags an
         engine-written message (see ``start_stream``); it rides on the entry.
-        ``send_id`` is the client send id: a queue entry that already holds
-        that id is the same logical send, so it is refused instead of queued
-        twice.
+        ``send_id`` is the client send id, recorded on the queue entry so the
+        flushed turn can carry it.
 
         Returns True if queued, False if there's no active stream (caller
         should fall through to `start_stream`).
@@ -6010,10 +6004,6 @@ class ProjectChatManager:
             # `accepting_queue` is the same refusal for a stream whose loop has
             # already decided it is finished: queueing there is a message the
             # user is told was accepted and that no turn will ever pick up.
-            return False
-        if send_id and stream.has_pending_send(send_id):
-            # The same logical send is already waiting in this queue. A second
-            # frame for it would turn one message into two turns.
             return False
         image_refs: list[str] = []
         for img in images or []:

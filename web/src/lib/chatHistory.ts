@@ -164,6 +164,12 @@ export function mergeMessageFields(sMsg: ChatMessage, lMsg: ChatMessage): ChatMe
 /**
  * Collapse every run of whitespace, so two renderings of the same text
  * compare equal no matter how the provider joined or padded its parts.
+ *
+ * Note what "every" means: newlines go too, so two answers that differ only
+ * in indentation compare equal. That is safe here only because
+ * `hasRenderedFinalAnswer` also requires that no `user` row follows the
+ * matched answer — a later user turn means the transcript has moved on, so
+ * the frame is a genuine new answer and never a replay.
  */
 export function squashWhitespace(s: string): string {
   return s.replace(/\s+/g, '')

@@ -474,25 +474,6 @@ async def ws_chat(websocket: WebSocket) -> None:
                         if delivery == "steer":
                             await pcm.steer_queue(chat_id)
                         continue
-                    if send_id and pcm.has_pending_send(chat_id, send_id):
-                        # The queue took the same logical send between the
-                        # duplicate check above and this call. Queueing it
-                        # again would make one message two turns, so answer
-                        # with the duplicate echo instead of starting one.
-                        logger.info(
-                            "Suppressing duplicate send %s for chat %s", send_id, chat_id
-                        )
-                        try:
-                            await websocket.send_json({
-                                "type": "user_echo",
-                                "duplicate": True,
-                                "text": text,
-                                "images": [img.original_filename for img in images or []],
-                                "send_id": send_id,
-                            })
-                        except (WebSocketDisconnect, RuntimeError):
-                            break
-                        continue
                     # Else: the stream raced-finish between check and queue;
                     # fall through to start a new stream below.
 

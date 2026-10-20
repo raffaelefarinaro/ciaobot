@@ -17,6 +17,7 @@ STREAM_KEEPALIVE_SECONDS cadence.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -341,6 +342,63 @@ def test_duplicate_send_id_does_not_start_a_second_turn() -> None:
     assert echo["turn_index"] == 7
 
 
+def test_every_send_frame_is_logged_with_its_send_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A send frame leaves a trace: who sent what, and was it a duplicate.
+
+    Without it, a duplicated turn cannot be attributed to a frame afterwards:
+    the ws frames were never written down.
+    """
+    started: list[dict] = []
+    with caplog.at_level(logging.DEBUG, logger="ciao.web.routes_chat"):
+        client = signed_in(TestClient(_duplicate_app(started)))
+        with client.websocket_connect("/ws/chat/chat-1") as ws:
+            ws.send_text('{"type":"message","text":"hello there","send_id":"s-1"}')
+            assert ws.receive_json() == {"type": "status", "message": "thinking"}
+
+    send_lines = [
+        rec.getMessage() for rec in caplog.records
+        if rec.name == "ciao.web.routes_chat" and "ws send" in rec.getMessage()
+    ]
+    assert len(send_lines) == 1, caplog.records
+    line = send_lines[0]
+    assert "chat-1" in line, line
+    assert "s-1" in line, line
+    # The text length, not the text: the message itself never reaches a log.
+    assert "len=11" in line, line
+    assert "duplicate=False" in line, line
+    assert "hello there" not in line, line
+
+
+def test_a_send_id_with_unsafe_characters_is_sanitized(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A send id is written to a log line and to chat metadata.
+
+    It is therefore reduced to a token alphabet: whitespace and control
+    characters are stripped, so no log record can be forged with a newline
+    and the id the engine records is the sanitized one.
+    """
+    started: list[dict] = []
+    with caplog.at_level(logging.DEBUG, logger="ciao.web.routes_chat"):
+        client = signed_in(TestClient(_duplicate_app(started)))
+        with client.websocket_connect("/ws/chat/chat-1") as ws:
+            ws.send_text('{"type":"message","text":"hello","send_id":"a b\\nc"}')
+            assert ws.receive_json() == {"type": "status", "message": "thinking"}
+
+    assert started[0]["send_id"] == "abc", started
+    # No log record carries a newline out of the id.
+    for rec in caplog.records:
+        assert "\n" not in rec.getMessage(), rec.getMessage()
+    send_lines = [
+        rec.getMessage() for rec in caplog.records
+        if rec.name == "ciao.web.routes_chat" and "ws send" in rec.getMessage()
+    ]
+    assert len(send_lines) == 1, caplog.records
+    assert "abc" in send_lines[0], send_lines[0]
+
+
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -431,17 +489,55 @@ async def test_the_history_row_does_not_carry_the_send_id(
     assert not any(r.get("send_id") for r in user_rows), rows
 
 
-def test_queue_message_suppresses_a_duplicate_send_id(tmp_path: Path) -> None:
-    """With a turn in flight, two frames with one send id leave one entry."""
-    pcm = _make_manager(tmp_path)
-    stream = ChatStream("chat-1")
-    pcm._broker.register("chat-1", stream)
+def test_a_duplicate_send_id_is_not_queued_twice() -> None:
+    """With a turn in flight, two frames with one send id leave one entry.
 
-    assert pcm.queue_message("chat-1", "hello", send_id="s-1") is True
-    assert pcm.queue_message("chat-1", "hello", send_id="s-1") is False
-    assert len(stream.pending) == 1
-    assert stream.pending[0]["send_id"] == "s-1"
-    # A different logical send still queues.
-    assert pcm.queue_message("chat-1", "again", send_id="s-2") is True
-    assert len(stream.pending) == 2
+    The duplicate check belongs to the route, not to the queue: the route
+    sees the pending id before it queues anything, so the second frame is
+    answered with a duplicate echo and never reaches the queue. `start_stream`
+    is never reached either — a second turn for one logical send is the
+    duplicate this issue is about.
+    """
+    queued_ids: list[str] = []
+    started: list[dict] = []
+
+    def queue_message(
+        chat_id: str, text: str, images=None, entry_id=None, delivery="queue",
+        send_id: str = "",
+    ) -> bool:
+        queued_ids.append(send_id)
+        return True
+
+    def start_stream(chat_id: str, text: str, images=None, send_id: str = "") -> None:
+        started.append({"chat_id": chat_id, "text": text, "send_id": send_id})
+
+    manager = SimpleNamespace(
+        get_chat=lambda _cid: SimpleNamespace(archived=False),
+        get_active_stream=lambda _cid: ChatStream("chat-1"),
+        resolve_image_ref=lambda ref: None,
+        find_turn_by_send_id=lambda _cid, _sid: None,
+        has_pending_send=lambda _cid, send_id: send_id in queued_ids,
+        queue_message=queue_message,
+        start_stream=start_stream,
+    )
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = manager
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+
+    client = signed_in(TestClient(app))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"message","text":"hello","send_id":"s-1"}')
+        # The same logical send arrives a second time (a recovery resend).
+        ws.send_text('{"type":"message","text":"hello","send_id":"s-1"}')
+        echo = ws.receive_json()
+
+    # Only one queue entry: the second frame was refused at the route.
+    assert queued_ids == ["s-1"], queued_ids
+    # The second frame is answered with the duplicate echo.
+    assert echo["type"] == "user_echo"
+    assert echo["duplicate"] is True
+    assert echo["send_id"] == "s-1"
+    # And no turn was started for it.
+    assert started == [], started
 
