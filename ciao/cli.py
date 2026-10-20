@@ -36,6 +36,7 @@ from ciao.setup_marker import RUNTIME_DIR_NAME
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir, hosted_service_python, load_server_plist
 from ciao.jsonio import write_private_text
+from ciao.os_support.private import make_private, open_private
 from ciao.os_support.console import use_utf8_stdio
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.shell_hints import path_hint, path_hint_note
@@ -437,6 +438,7 @@ def _ensure_setup_token(workspace: Path) -> str:
     if path.exists():
         token = path.read_text(encoding="utf-8").strip()
         if token:
+            make_private(path)  # a file from an older version may be world-readable
             return token
     return _rotate_setup_token(workspace)
 
@@ -454,7 +456,10 @@ def _rotate_setup_token(workspace: Path) -> str:
     path = _setup_token_path(workspace)
     token = secrets.token_urlsafe(24)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token + "\n", encoding="utf-8", newline="")
+    path.unlink(missing_ok=True)
+    fd = open_private(path, os.O_WRONLY | os.O_EXCL, follow_symlinks=False)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write(token + "\n")
     return token
 
 
@@ -1101,6 +1106,7 @@ def setup_workspace(
     )
     name = requested_name or "personal"
 
+    generated_password = not auth_token and "PWA_AUTH_TOKEN" not in existing_env
     token = auth_token or secrets.token_urlsafe(32)
     desired_env: list[tuple[str, str]] = [
         ("PWA_AUTH_TOKEN", token),
@@ -1155,6 +1161,16 @@ def setup_workspace(
         written.append(
             write_setup_marker(root / RUNTIME_DIR_NAME, vault_mode=vault_mode)
         )
+    if generated_password:
+        # Home shows the generated password once, on this computer.
+        from ciao.setup_marker import write_welcome_pending
+
+        written.append(write_welcome_pending(root / RUNTIME_DIR_NAME))
+    elif auth_token:
+        # A chosen password replaces any generated one the card would show.
+        from ciao.setup_marker import clear_welcome_pending
+
+        clear_welcome_pending(root / RUNTIME_DIR_NAME)
 
     runtime_root = root / RUNTIME_DIR_NAME
 
@@ -1643,6 +1659,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         print(
             "\nPassword protection is on. No --auth-token was given, so a random "
             f"password was written to {root / '.env'} (PWA_AUTH_TOKEN).\n"
+            "Ciaobot also shows it once on Home on this computer.\n"
             "Open Ciaobot with the login URL below and change it in "
             "Settings -> PWA password."
         )
@@ -1689,10 +1706,17 @@ def _setup_url_command(args: argparse.Namespace) -> int:
 
     root = Path(args.workspace).expanduser().resolve()
     port = _pwa_port_from_env(root, args.port)
-    if args.rotate:
-        token = _rotate_setup_token(root)
-    else:
-        token = _ensure_setup_token(root)
+    try:
+        if args.rotate:
+            token = _rotate_setup_token(root)
+        else:
+            token = _ensure_setup_token(root)
+    except FileExistsError:
+        print(
+            "Could not write the setup token: another process created it at the same time. Run `ciao setup-url` again.",
+            file=sys.stderr,
+        )
+        return 1
     print(f"Workspace: {root}")
     print(f"http://localhost:{port}/?setup={token}")
     return 0

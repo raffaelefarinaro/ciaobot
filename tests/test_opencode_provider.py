@@ -1252,6 +1252,26 @@ def test_reused_form_id_in_a_new_session_replaces_the_old_request(tmp_path):
     assert provider._question_requests["frm_reused"].session_id == "ses_new"
 
 
+def test_has_question_request_matches_its_own_session(tmp_path):
+    provider = _provider(tmp_path)
+    _convert(
+        provider,
+        "form.created",
+        {"form": {
+            "id": "frm_s",
+            "sessionID": "ses_child",
+            "fields": [{"key": "value", "title": "Value", "type": "string"}],
+        }},
+    )
+
+    assert provider.has_question_request("frm_s")
+    assert provider.has_question_request("frm_s", "ses_child")
+    assert not provider.has_question_request("frm_s", "ses_1")
+    assert not provider.has_question_request("nope")
+    assert provider.question_request_session("frm_s") == "ses_child"
+    assert provider.question_request_session("nope") == ""
+
+
 @pytest.mark.asyncio
 async def test_form_reply_rejects_a_different_session(tmp_path):
     provider, client = _armed_provider(tmp_path)
@@ -1460,6 +1480,18 @@ class _RecordingPermissionClient:
         return _Response()
 
 
+class _YieldingPermissionClient(_RecordingPermissionClient):
+    async def post(self, path, json=None):
+        self.calls.append((path, json))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        class _Response:
+            status_code = self.status_code
+
+        return _Response()
+
+
 async def _drain_tasks():
     """Let the fire-and-forget reply task run to completion."""
     for _ in range(3):
@@ -1598,6 +1630,82 @@ async def test_permission_reply_404_is_reported_as_no_longer_active(tmp_path):
     assert result.retryable is False
     assert result.error == "Permission request is no longer active"
     assert "per_live1" not in provider._permission_requests
+
+
+@pytest.mark.asyncio
+async def test_concurrent_permission_replies_post_once(tmp_path):
+    provider = _provider(tmp_path)
+    client = _YieldingPermissionClient()
+    provider._client = client  # type: ignore[assignment]
+    _convert(provider, "permission.asked", LIVE_PERMISSION)
+
+    a, b = await asyncio.gather(
+        provider.send_permission_response("per_live1", True),
+        provider.send_permission_response("per_live1", False),
+    )
+
+    assert len(client.calls) == 1
+    assert client.calls[0][1] == {"decision": "once"}
+    assert a.ok and not a.already_resolved
+    assert b.ok and b.already_resolved
+    assert provider._permission_requests == {}
+    assert provider._permission_inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_permission_reply_shares_a_retryable_failure(tmp_path):
+    provider = _provider(tmp_path)
+    client = _YieldingPermissionClient(status_code=500)
+    provider._client = client  # type: ignore[assignment]
+    _convert(provider, "permission.asked", LIVE_PERMISSION)
+
+    a, b = await asyncio.gather(
+        provider.send_permission_response("per_live1", True),
+        provider.send_permission_response("per_live1", False),
+    )
+
+    assert len(client.calls) == 1
+    assert a.ok is False and a.retryable is True
+    assert b.ok is False and b.retryable is True
+    assert "per_live1" in provider._permission_requests
+    assert provider._permission_inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_permission_reply_409_is_already_resolved(tmp_path):
+    provider, client = _armed_provider(tmp_path)
+    _convert(provider, "permission.asked", LIVE_PERMISSION)
+    client.status_code = 409
+
+    result = await provider.send_permission_response("per_live1", False)
+
+    assert result.ok
+    assert result.already_resolved
+    assert "per_live1" not in provider._permission_requests
+
+
+@pytest.mark.asyncio
+async def test_cancelled_permission_reply_releases_the_waiter(tmp_path):
+    class _HangingClient(_RecordingPermissionClient):
+        async def post(self, path, json=None):
+            self.calls.append((path, json))
+            await asyncio.Event().wait()
+
+    provider = _provider(tmp_path)
+    provider._client = _HangingClient()  # type: ignore[assignment]
+    _convert(provider, "permission.asked", LIVE_PERMISSION)
+
+    winner = asyncio.create_task(provider.send_permission_response("per_live1", True))
+    await asyncio.sleep(0)
+    loser = asyncio.create_task(provider.send_permission_response("per_live1", False))
+    await asyncio.sleep(0)
+    winner.cancel()
+    result = await asyncio.wait_for(loser, 1)
+
+    assert result.ok is False
+    assert result.retryable is True
+    assert "per_live1" in provider._permission_requests
+    assert provider._permission_inflight == {}
 
 
 @pytest.mark.asyncio
