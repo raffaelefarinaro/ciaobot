@@ -911,15 +911,34 @@ def _probe_opencode() -> ProviderProbe:
 
 def _probe_bundled_claude(root: Path) -> ProviderProbe:
     """Probe the Claude CLI bundled in the installed SDK. Never raises."""
-    import importlib
-
     installed: str | None = None
     source = ""
     notes: list[str] = []
     latest: str | None = None
+    # A fresh interpreter: this process may have imported the SDK before a
+    # release step reinstalled it.
     try:
-        cli_version = str(importlib.import_module("claude_agent_sdk._cli_version").__cli_version__)
-        sdk_version = str(importlib.import_module("claude_agent_sdk._version").__version__)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                "import json, claude_agent_sdk._version as v, "
+                "claude_agent_sdk._cli_version as c; "
+                "print(json.dumps({'sdk': v.__version__, 'cli': c.__cli_version__}))",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or "").strip()[-300:] or f"rc {proc.returncode}")
+        payload = json.loads(proc.stdout)
+        cli_version = str(payload["cli"])
+        sdk_version = str(payload["sdk"])
     except Exception as exc:  # noqa: BLE001 - a missing SDK blocks the release
         return ProviderProbe(
             "claude", None, None, None, f"claude_agent_sdk unreadable: {exc}"
@@ -1213,6 +1232,10 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    if args.refresh_provider_versions and args.skip_provider_versions:
+        parser.error(
+            "--refresh-provider-versions and --skip-provider-versions conflict"
+        )
     root = Path(args.repo_root).expanduser().resolve()
     if not root.is_dir():
         raise ReleaseError(f"repo root does not exist: {root}")
@@ -1339,7 +1362,8 @@ def main(argv: list[str] | None = None) -> int:
             untested=set(args.untested_provider),
         )
         record_path = root / PROVIDER_RECORD_RELPATH
-        record_path.write_text(render_record(provider_record), encoding="utf-8", newline="\n"
+        record_path.write_text(
+            render_record(provider_record), encoding="utf-8", newline="\n"
         )
         touched = [*touched, record_path]
 

@@ -859,3 +859,59 @@ def test_main_apply_writes_and_stages_provider_record(
     )
     assert record["ciaobot"] == "0.3.0"
     assert record["providers"]["opencode"]["version"] == "2.1.0"
+
+
+def test_probe_bundled_claude_reads_fresh_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import subprocess
+    import sys
+    import types
+
+    # Stale modules already imported in this process must be ignored.
+    for name, attr in (
+        ("claude_agent_sdk._version", "__version__"),
+        ("claude_agent_sdk._cli_version", "__cli_version__"),
+    ):
+        fake = types.ModuleType(name)
+        setattr(fake, attr, "0.0.1")
+        monkeypatch.setitem(sys.modules, name, fake)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "ciao"\nversion = "0.2.0"\n'
+        'dependencies = ["claude-agent-sdk[otel]==0.2.168"]\n',
+        encoding="utf-8",
+    )
+
+    def fake_run(cmd, **kwargs):
+        out = (
+            json.dumps({"sdk": "0.2.168", "cli": "2.1.301"})
+            if "-c" in cmd
+            else "2.1.301 (Claude Code)"
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude"
+    )
+    monkeypatch.setattr(
+        "ciao.dependency_updates.get_latest_npm_version", lambda name: None
+    )
+
+    probe = release_mod._probe_bundled_claude(tmp_path)
+
+    assert probe.installed == "2.1.301"
+    assert probe.note == ""
+    assert probe.source == "claude-agent-sdk 0.2.168"
+
+
+def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        release_mod.main(
+            [
+                str(tmp_path),
+                "--refresh-provider-versions",
+                "--skip-provider-versions",
+            ]
+        )

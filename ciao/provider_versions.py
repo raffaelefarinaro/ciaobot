@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.resources
 import json
 import re
+from datetime import date
 from collections.abc import Mapping
 from typing import Any
 
@@ -19,7 +20,7 @@ PROVIDERS = ("opencode", "claude")
 UNTESTED_REASONS = frozenset(
     {"not_recorded", "not_installed", "unpublished", "unreadable"}
 )
-STABLE_VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+STABLE_VERSION_RE = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
 
 _TOP_KEYS = frozenset({"schema", "ciaobot", "recorded", "providers"})
 _TESTED_KEYS = {
@@ -53,14 +54,19 @@ def validate_record(data: object) -> dict[str, Any]:
     missing = _TOP_KEYS - set(data)
     if missing:
         raise _fail("record", f"is missing keys {sorted(missing)}")
-    if data["schema"] != SCHEMA_VERSION or isinstance(data["schema"], bool):
+    if type(data["schema"]) is not int or data["schema"] != SCHEMA_VERSION:
         raise _fail("schema", f"must be {SCHEMA_VERSION}")
-    if not isinstance(data["ciaobot"], str) or not STABLE_VERSION_RE.match(
+    if not isinstance(data["ciaobot"], str) or not STABLE_VERSION_RE.fullmatch(
         data["ciaobot"]
     ):
         raise _fail("ciaobot", "must be an X.Y.Z version")
     if not isinstance(data["recorded"], str):
         raise _fail("recorded", "must be a string")
+    if data["recorded"]:
+        try:
+            date.fromisoformat(data["recorded"])
+        except ValueError:
+            raise _fail("recorded", "must be an ISO date") from None
     providers = data["providers"]
     if not isinstance(providers, dict):
         raise _fail("providers", "must be an object")
@@ -78,7 +84,7 @@ def validate_record(data: object) -> dict[str, Any]:
             if extra:
                 raise _fail(f"providers.{name}", f"has unknown keys {sorted(extra)}")
             version = entry.get("version")
-            if not isinstance(version, str) or not STABLE_VERSION_RE.match(version):
+            if not isinstance(version, str) or not STABLE_VERSION_RE.fullmatch(version):
                 raise _fail(
                     f"providers.{name}.version", "must be a stable X.Y.Z version"
                 )

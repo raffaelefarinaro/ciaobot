@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from ciao.provider_versions import (
+    STABLE_VERSION_RE,
     ProviderRecordError,
     load_record,
     parse_cli_version,
@@ -38,11 +39,27 @@ def _tested() -> dict:
     }
 
 
-def test_seed_record_is_valid_and_untested() -> None:
+def test_shipped_record_is_valid() -> None:
     record = load_record()
     assert validate_record(record) is record
-    assert _tested_version(record, "opencode") is None
-    assert _tested_version(record, "claude") is None
+    for provider in ("opencode", "claude"):
+        version = _tested_version(record, provider)
+        assert version is None or STABLE_VERSION_RE.fullmatch(version)
+
+
+def test_untested_seed_shape_is_valid() -> None:
+    seed = {
+        "schema": 1,
+        "ciaobot": "1.6.0",
+        "recorded": "",
+        "providers": {
+            "opencode": {"status": "untested", "reason": "not_recorded"},
+            "claude": {"status": "untested", "reason": "not_recorded"},
+        },
+    }
+    assert validate_record(seed) is seed
+    assert _tested_version(seed, "opencode") is None
+    assert _tested_version(seed, "claude") is None
 
 
 def test_tested_record_round_trips() -> None:
@@ -84,6 +101,10 @@ def _mutate(fn):
             or r["providers"]["opencode"].pop("version")
         ),
         _mutate(lambda r: r.update(recorded="")),
+        _mutate(lambda r: r["providers"]["opencode"].update(version="2.1.0\n")),
+        _mutate(lambda r: r.update(recorded="yesterday")),
+        _mutate(lambda r: r.update(schema=True)),
+        _mutate(lambda r: r.update(schema=1.0)),
         "not a dict",
     ],
 )
