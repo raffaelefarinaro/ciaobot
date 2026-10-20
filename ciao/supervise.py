@@ -13,6 +13,7 @@ from typing import IO, Any
 
 from ciao.config import RESTART_EXIT_CODE
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
+from ciao.port_in_use import PORT_IN_USE_EXIT_CODE
 from ciao.workspace_access import ACCESS_DENIED_EXIT, check_workspace_access
 
 CRASH_LOOP_MAX_RESTARTS = 5      # consecutive restart exits tolerated before waiting
@@ -61,6 +62,7 @@ def supervise(
     child_argv: Sequence[str] | None = None,
     sleep: Callable[[float], Any] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    hold: Callable[[], Any] | None = None,
 ) -> int:
     """Run the child until it exits with a code other than RESTART_EXIT_CODE.
 
@@ -71,7 +73,9 @@ def supervise(
     ``child_argv`` replaces ``default_child_argv(extra_args)`` (test seam);
     ``sleep`` defaults to waiting on the stop event so a stop request cuts a
     backoff short; ``clock`` times each child run, which is what tells a crash
-    loop from a long-lived engine that merely asked to restart.
+    loop from a long-lived engine that merely asked to restart; ``hold``
+    replaces the wait that keeps the job alive after a port-in-use exit
+    (test seam).
 
     On macOS a TCC-denied workspace returns ``ACCESS_DENIED_EXIT`` without
     launching the child (see ``ciao.workspace_access``).
@@ -175,6 +179,28 @@ def supervise(
                 # The stop reached the child first and it answered with the
                 # restart code. The stop wins: 75 here would be a service
                 # manager's cue to relaunch, or its record of a failed run.
+                return 0
+            if code == PORT_IN_USE_EXIT_CODE and not stop.is_set():
+                # The engine could not bind its port (#1654). It has already
+                # said why, in its log and in the startup status, and it left
+                # with the port-in-use code so nothing here relaunches it.
+                # The supervisor holds the job instead of exiting: the
+                # service manager owns this process, and a service manager
+                # that respawns on every exit (launchd's KeepAlive) would
+                # otherwise put the engine straight back into the same
+                # failure, forever. Holding it here is what makes the
+                # failure stop being a loop; the operator's way out — free
+                # the port, or set PWA_PORT — is a service start, and a
+                # stop (SIGTERM, which is how the service is stopped)
+                # ends the hold.
+                print(
+                    "The engine could not bind its port; it will not be "
+                    "relaunched until the port is free. Free the port, or set "
+                    "PWA_PORT in the workspace .env, then run: ciao service start",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                (hold or stop.wait)()
                 return 0
             if stop.is_set() or code != RESTART_EXIT_CODE:
                 return code if code >= 0 else 128 - code

@@ -348,6 +348,14 @@ case "${1:-}" in
             esac
         fi
         if [ "${1:-}" = "-I" ]; then shift; fi
+        # The port probe cannot run at all: the wheel would not import, or
+        # the interpreter would not start. That says nothing about the port,
+        # and the installer must not read it as "taken".
+        if [ -f "$HOME/port-probe-cannot-run" ]; then
+            case "$*" in
+                *port_is_available*) exit 2 ;;
+            esac
+        fi
         PYTHONPATH="__REPO_ROOT__" exec "__PYTHON__" "$@"
         ;;
     tool)
@@ -499,14 +507,32 @@ def _fake_uv() -> str:
 # engine being started on the Mac running the tests. Every other URL is passed
 # straight through to the real curl, so the file:// release downloads are still
 # the real thing.
+#
+# The engine answers on the port its workspace names (`engine-port`), and on
+# no other: a port nobody serves is not answered for, so the installer's
+# preflight sees a foreign listener rather than Ciaobot's own engine.
+#
+# `startup-port-in-use` makes the engine answer that it could not bind its
+# port (#1654), which is what the installer has to read instead of waiting
+# the whole health budget out.
 _CURL_STUB = """#!/bin/sh
 printf 'curl %s\\n' "$*" >> "$HOME/trace.log"
+engine_port=$(cat "$HOME/engine-port" 2>/dev/null || echo 8443)
 for arg in "$@"; do
     case "$arg" in
         */api/startup-status)
+            case "$arg" in
+                *":$engine_port/"*) ;;
+                *) exit 7 ;;
+            esac
             version=$(cat "$HOME/startup-version" 2>/dev/null || echo "__VERSION__")
+            if [ -f "$HOME/startup-port-in-use" ]; then
+                port=$(cat "$HOME/startup-port-in-use")
+                printf '{"phases": [{"name": "server_starting", "status": "failed", "message": "port %s is already in use by another program. Free port %s, or set PWA_PORT in the workspace .env to serve on a different port."}], "overall_ready": true, "port_in_use": true, "version": "%s", "node_role": "host"}\\n' "$port" "$port" "$version"
+                exit 0
+            fi
             # Shaped like the real response, which has keys before `version`.
-            printf '{"phases": [], "overall_ready": true, "version": "%s", "node_role": "host"}\\n' "$version"
+            printf '{"phases": [], "overall_ready": true, "port_in_use": false, "version": "%s", "node_role": "host"}\\n' "$version"
             exit 0
             ;;
     esac
@@ -526,6 +552,9 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
     home = (tmp_path / "home").resolve()
     (home / ".local" / "bin").mkdir(parents=True)
     (home / "Ciaobot").mkdir(parents=True)
+    # The port the fake engine answers on. The workspace `.env` says 8443, so
+    # the fake curl answers there and nowhere else.
+    (home / "engine-port").write_text("8443\n", encoding="utf-8")
 
     release = tmp_path / "rel" / f"v{VERSION}"
     release.mkdir(parents=True)
@@ -3576,3 +3605,289 @@ def test_migrate_host_ignores_a_stale_workspace_access_denial(tmp_path: Path) ->
     assert result.returncode == 1
     assert line not in result.stderr
     assert f"with version {VERSION}" in result.stderr
+
+
+# ── the port the engine binds is taken (#1654) ────────────────────────────
+
+
+def _hold_port(harness: dict[str, Any]) -> int:
+    """A port really held by a socket, and the number it was given.
+
+    The installer's preflight is the engine's own bind, so a port that is
+    only *reported* as busy would not fail it: the socket has to be there.
+    A wildcard bind is what the engine does, so that is what is held. The
+    fake engine is moved off the port, so the port is held by a foreign
+    listener and not by Ciaobot's own engine.
+
+    The wildcard address is load-bearing here, and not an accident: the
+    engine binds ``0.0.0.0`` (``DEFAULT_PWA_HOST``), and a listener on
+    ``127.0.0.1`` does **not** block a wildcard bind - the probe would
+    succeed and the port would look free. Only a wildcard listener makes
+    the engine's own bind fail, which is the case under test. The socket
+    listens on an ephemeral port for the length of one installer run and
+    accepts nothing.
+    """
+    import socket
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.bind(("0.0.0.0", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    # The socket is closed on the next line's process exit; the port stays
+    # held for the length of the installer run through this helper's
+    # caller, so the fd is kept in the module-level registry below.
+    _HELD_PORTS.append(holder)
+    (harness["home"] / "engine-port").write_text("1\n", encoding="utf-8")
+    return port
+
+
+# The sockets the port tests hold, so they are closed when the test ends.
+_HELD_PORTS: list[Any] = []
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_refuses_to_install_over_a_port_something_else_holds(
+    tmp_path: Path,
+) -> None:
+    """A port held by another program is refused before the service starts.
+
+    The engine would die on the bind and the service manager would respawn
+    it forever, so the installer checks the port first and says which port
+    it is and how to move it.
+    """
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    # The port the workspace will use, and a program that holds it. The
+    # probe is the engine's own bind, so the port has to be really held:
+    # a socket on it is what makes the probe fail.
+    port = _hold_port(harness)
+    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _write_exec(
+        harness["fakebin"] / "lsof",
+        "#!/bin/sh\n"
+        "printf 'lsof %s\\n' \"$*\" >> \"$HOME/trace.log\"\n"
+        "printf 'COMMAND  PID  USER  FD  TYPE  DEVICE  SIZE/OFF  NODE  NAME\\n'\n"
+        f"printf 'tailscaled  418  root  9u  IPv4  0x1  0t0  TCP *:{port} (LISTEN)\\n'\n"
+        "exit 0\n",
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1, result.stdout
+    assert str(port) in result.stderr
+    assert "already in use" in result.stderr
+    # The two ways out.
+    assert "tailscaled" in result.stderr
+    assert "PWA_PORT" in result.stderr
+    # The service is never registered: nothing is started on a port the
+    # engine cannot bind.
+    assert "service start" not in _log(harness, "ciao-calls.log")
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_refuses_to_install_over_a_port_something_else_holds_no_lsof(
+    tmp_path: Path,
+) -> None:
+    """Without lsof the port is still named; only the owner is unknown."""
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    port = _hold_port(harness)
+    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1, result.stdout
+    assert str(port) in result.stderr
+    assert "already in use" in result.stderr
+    assert "PWA_PORT" in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_accepts_a_port_ciaobots_own_engine_holds(
+    tmp_path: Path,
+) -> None:
+    """A re-install of a running engine is legitimate.
+
+    The port is held — by Ciaobot's own engine, which answers on it — and
+    the install goes ahead: refusing there would make every upgrade of a
+    running engine fail.
+    """
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    # The engine answers on the port the workspace names, and the port is
+    # really held by it.
+    port = _hold_port(harness)
+    (home / "engine-port").write_text(f"{port}\n", encoding="utf-8")
+    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert "already in use" not in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_the_port_owner_name_cannot_smuggle_terminal_escapes(
+    tmp_path: Path,
+) -> None:
+    """The name of the program holding the port is printed to a terminal.
+
+    It is the name the holding process chose for itself, so it can carry a
+    carriage return or an ANSI escape. Either would reach the operator's
+    terminal verbatim and could rewrite the line the message appears on, so
+    only printable bytes survive.
+    """
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    port = _hold_port(harness)
+    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _write_exec(
+        harness["fakebin"] / "lsof",
+        "#!/bin/sh\n"
+        "printf 'COMMAND  PID  USER  FD  TYPE  DEVICE  SIZE/OFF  NODE  NAME\\n'\n"
+        f"printf 'evil\\033[2K\\r  418  root  9u  IPv4  0x1  0t0  TCP *:{port} (LISTEN)\\n'\n"
+        "exit 0\n",
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1, result.stdout
+    assert str(port) in result.stderr
+    # The escape and the carriage return are gone; the name is still there.
+    assert "\033" not in result.stderr
+    assert "\r" not in result.stderr
+    assert "evil" in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_process_that_merely_answers_on_the_port_is_not_the_engine(
+    tmp_path: Path,
+) -> None:
+    """The exemption is for Ciaobot's own engine, not for anything that answers.
+
+    A hostile process holding the port could answer the health check with
+    anything. The engine's startup status carries a "version" field, so a
+    response without one is not the engine and the install is refused.
+    """
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    port = _hold_port(harness)
+    (home / "Ciaobot" / ".env").write_text(f"PWA_PORT={port}\n", encoding="utf-8")
+    _write_exec(
+        harness["fakebin"] / "curl",
+        "#!/bin/sh\n"
+        "printf 'curl %s\\n' \"$*\" >> \"$HOME/trace.log\"\n"
+        "case \"$*\" in\n"
+        "    */api/startup-status)\n"
+        "        # Something is listening, and it answers - but it is not the\n"
+        "        # engine: no version field.\n"
+        "        printf 'hello\\n'\n"
+        "        exit 0\n"
+        "        ;;\n"
+        "esac\n"
+        f'exec "{shutil.which("curl") or "curl"}" "$@"\n',
+    )
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 1, result.stdout
+    assert str(port) in result.stderr
+    assert "already in use" in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_port_probe_that_cannot_run_does_not_refuse_the_install(
+    tmp_path: Path,
+) -> None:
+    """A probe that could not run says nothing about the port.
+
+    Reading a probe that failed as "the port is taken" would refuse an
+    install on a guess — a wheel that would not import, or an interpreter
+    that would not start, is not evidence about the port.
+    """
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    (home / "port-probe-cannot-run").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert "already in use" not in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_says_why_the_engine_never_came_up(tmp_path: Path) -> None:
+    """The engine's own answer is read, and it names the port.
+
+    A `tailscale serve` holding the port leaves the engine dead; the
+    installer waited 60 s and then printed "the engine is still starting"
+    and a sign-in link that could not work. It now says which port, and
+    prints no link.
+    """
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    (home / "Ciaobot" / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+    (home / "startup-port-in-use").write_text("8443\n", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert "8443" in result.stderr
+    assert "already in use" in result.stderr
+    assert "PWA_PORT" in result.stderr
+    # The dead link is the point: it must not be printed.
+    assert "Open Ciaobot:" not in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_reads_the_record_the_engine_left_outside_the_workspace(
+    tmp_path: Path,
+) -> None:
+    """An engine that cannot bind cannot answer the startup status.
+
+    So the reason is read from the record the engine leaves outside the
+    workspace, the way the workspace-access denial is read (#1654).
+    """
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    (home / "Ciaobot" / ".env").write_text("PWA_PORT=8443\n", encoding="utf-8")
+    record = home / ".local/state/ciaobot/port-in-use.txt"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        "port 8443 is already in use by another program. Free port 8443, or "
+        "set PWA_PORT in the workspace .env to serve on a different port.\n",
+        encoding="utf-8",
+    )
+    # Written before the installer's wait began, so it says nothing about
+    # this run: the installer must not believe a stale record.
+    stamp = time.time() - 3600
+    os.utime(record, (stamp, stamp))
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    # The stale record is not this run's failure, so the install carries on
+    # and the engine's own answer is what counts.
+    assert "Open Ciaobot:" in result.stdout
+    assert "already in use" not in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_still_prints_the_link_when_the_engine_came_up(
+    tmp_path: Path,
+) -> None:
+    """The ordinary path is unchanged: a working engine gets its link."""
+    harness = _harness(tmp_path)
+
+    result = _run_installer(harness, "--version", VERSION)
+
+    assert result.returncode == 0, result.stderr
+    assert "Open Ciaobot: http://localhost:8443/?setup=tok" in result.stdout
+

@@ -33,6 +33,7 @@ from xml.sax.saxutils import escape
 
 from ciao import macos_service
 from ciao.os_support.users import user_key
+from ciao.port_in_use import read_port_in_use
 
 TASK_NAME = "\\Ciaobot\\Engine"
 TASK_FILE_NAME = "Ciaobot-Engine.xml"
@@ -494,6 +495,11 @@ def service_status(port: int) -> macos_service.ServiceResult:
     Both facts are asked of the machine rather than parsed out of localized
     output. The caller resolves ``port`` from the task workspace's ``.env``, the
     way the macOS status resolves it from the plist.
+
+    A bind failure is named too, from the record the engine left outside the
+    workspace (#1654): an engine that cannot bind its port cannot serve the
+    endpoint that would report it, so the record is the only place the reason
+    can be read from.
     """
 
     try:
@@ -501,8 +507,11 @@ def service_status(port: int) -> macos_service.ServiceResult:
     except WindowsServiceError as exc:
         return _failed("status", str(exc))
     reachable = macos_service.server_reachable(port)
+    port_in_use = "" if reachable else read_port_in_use()
     if reachable:
         message = "Ciaobot engine is running."
+    elif port_in_use:
+        message = f"Ciaobot engine is not running: {port_in_use}"
     elif registered:
         message = f"Ciaobot engine is registered but not reachable (task {TASK_NAME})."
     else:
