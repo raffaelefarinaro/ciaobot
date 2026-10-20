@@ -33,6 +33,9 @@ Before changing code:
 - `ciao/stock/` holds generic assets shipped in the wheel (skills, commands,
   schedules, workspace templates). User vaults and runtime data belong in a
   separate workspace, never in this repo.
+- `ciao/keep_awake.py` aggregates active agent-work tokens; platform power
+  assertions live in `ciao/os_support/power.py`, never in browser-side platform
+  detection.
 - `web/src/`: `components/` (one SFC per pane, Settings panels in `settings/`),
   `stores/` (Pinia), `composables/`, `lib/` (pure helpers, no Vue imports).
   Tests sit in `__tests__/` beside the code, or as `foo.test.ts` next to `lib/foo.ts`.

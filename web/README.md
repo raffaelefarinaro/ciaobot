@@ -268,7 +268,8 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   Updates section (compact to a title and an "Up to date" status when nothing is
   in progress), then the capability-help section linking to the public feature
   guide, then Use Ciaobot as an app, Notifications, Keyboard shortcuts and the
-  update task history.
+  update task history. Host-specific controls include Start at sign-in and the
+  Power switch for keeping the engine computer awake during agent work.
   The "On this page" navigation is built from the rendered sections in DOM order,
   so it follows that order. The MCP tab is a read-only provider inventory:
   `composables/useMcpServers.ts` owns status and usage reads, while

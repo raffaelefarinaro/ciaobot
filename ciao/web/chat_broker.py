@@ -1154,8 +1154,12 @@ class ChatStream:
 class ChatStreamBroker:
     """Tracks one ChatStream per chat_id."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        on_activity_change: Callable[[str, bool], None] | None = None,
+    ) -> None:
         self._streams: dict[str, ChatStream] = {}
+        self._on_activity_change = on_activity_change
 
     def get(self, chat_id: str) -> ChatStream | None:
         """Return the active (not-yet-done) stream for this chat, if any."""
@@ -1182,6 +1186,8 @@ class ChatStreamBroker:
         guarantee.
         """
         self._streams[chat_id] = stream
+        if self._on_activity_change is not None:
+            self._on_activity_change(chat_id, True)
 
     def clear(self, chat_id: str, stream: ChatStream | None = None) -> None:
         """Drop the stream for this chat (only if it matches, to avoid racing).
@@ -1194,6 +1200,8 @@ class ChatStreamBroker:
         if stream is not None and current is not stream:
             return
         self._streams.pop(chat_id, None)
+        if self._on_activity_change is not None:
+            self._on_activity_change(chat_id, False)
 
 
 class EventsSubscription:

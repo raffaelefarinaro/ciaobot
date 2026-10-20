@@ -16,6 +16,12 @@ irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install
 
 The installer is per user and needs no administrator rights. It installs the engine into a `uv tool` environment, puts `ciao.exe` on your user `PATH`, creates the workspace (`%USERPROFILE%\Ciaobot`, or `-Workspace DIR`), registers the per-user logon task `\Ciaobot\Engine` and starts it. Options are `-Workspace`, `-NoStart` and `-Uninstall`; because `iex` cannot take arguments, pass them through a script block. The full guide, including logs and troubleshooting, is [docs/WINDOWS.md](docs/WINDOWS.md). For engine updates and rollback, see [the Windows update guide](docs/WINDOWS.md#update-and-rollback).
 
+The optional Settings → General keep-awake switch uses the engine host's native
+power facility: a Windows power request or macOS `caffeinate`. PowerToys Awake
+is not required. It prevents idle system sleep during agent work, not display
+sleep; closing the lid, explicitly sleeping the host, or other OS power
+conditions may still suspend it.
+
 ### Upgrading from the macOS app
 
 v1.0.0 retires the macOS `Ciaobot.app`; the PWA is now served by the engine.

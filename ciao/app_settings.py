@@ -2,7 +2,7 @@
 
 The env-backed :class:`ciao.config.CiaoConfig` stays the source of
 defaults; this store holds the small set of knobs the PWA Settings →
-Models tab can change at runtime (internal-routine models), plus the
+General and Models tabs can change at runtime (internal-routine models), plus the
 durable operational state of the unattended backup service
 (:mod:`ciao.backup_service`) — whether it is on or paused, and what it has
 already pushed. Values are applied as an overlay onto the live
@@ -22,7 +22,8 @@ The backup fields are the one part of this file that no env var and no
 whether a given machine backs up, and what it last managed to push, is
 only knowable at runtime. They are read on every gate check rather than
 cached, which is what lets a pause survive a restart and a resume take
-effect on the next tick.
+effect on the next tick. The opt-in keep-awake switch is also engine-owned:
+it controls a process-local OS assertion while agent work is active.
 """
 
 from __future__ import annotations
@@ -92,6 +93,7 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
 }
 _BOOLEAN_FIELDS = {
     "insights_enabled",
+    "keep_awake_while_agents_working",
     "backup_enabled",
     "backup_paused",
     "dev_mode",
@@ -186,6 +188,11 @@ class AppSettings:
     """
 
     insights_enabled: bool = True
+
+    # Prevent the engine host from idle sleeping while agent work is active.
+    # The OS assertion is process-local and never starts just because the
+    # engine or PWA is open.
+    keep_awake_while_agents_working: bool = False
 
     # The unattended backup service (ciao/backup_service.py). `backup_enabled`
     # is the owner's standing decision and defaults on, so an existing install

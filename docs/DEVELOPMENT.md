@@ -430,6 +430,18 @@ After PWA changes, rebuild and either restart the service or use the **Deploy** 
 
 Restart requests made through the running server enter a drain phase: existing chats and background agents finish before shutdown, and new turns are not admitted during that window. Directly killing the process bypasses this protection. A drain that is cancelled (an update whose drain timed out) replays the background-run and CLI-task wakes it deferred instead of losing them, since no restart follows to deliver them.
 
+The opt-in **Keep awake while agents are working** setting is engine-host scoped
+and defaults off. Its shared activity set covers chat streams, subagent
+watchers, and agent-launched background commands; idle provider sessions and
+maintenance jobs do not count. macOS uses `caffeinate -i -w <engine PID>` and
+Windows uses a native `PowerRequestSystemRequired` handle, so neither requires
+an extra install and both release on engine exit. The assertion prevents idle
+system sleep only: the display may turn off, and user-directed sleep or other
+host power conditions can still take effect. Focused coverage is in
+`tests/test_keep_awake.py`, `tests/test_os_support_power.py`,
+`tests/test_settings_routines_route.py`, and
+`web/src/components/__tests__/SettingsKeepAwake.test.ts`.
+
 ## Local PWA dev
 
 The installed-app share target is a service-worker-intercepted multipart POST

@@ -355,6 +355,14 @@
              never the optional app window SettingsAppInstall owns. -->
         <SettingsEngineLogin />
 
+        <!-- Power policy belongs to the machine running the engine, even when
+             Settings is open from a different device. -->
+        <SettingsKeepAwake
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
+
         <!-- Memory backup. The unattended, one-way copy of the user's memory,
              right below the program's own repository controls so the two are
              read together and never confused. The panel owns its data and its
@@ -2050,6 +2058,7 @@ import SettingsNotifications from './settings/SettingsNotifications.vue'
 import GwsSetupChecklist from './settings/GwsSetupChecklist.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
+import SettingsKeepAwake from './settings/SettingsKeepAwake.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
@@ -2312,7 +2321,7 @@ const agentAssets = ref<AgentAssetsResponse | null>(null)
 const agentAssetsLoaded = ref(false)
 const agentAssetsError = ref('')
 
-// ── Routine settings (Models tab) ─────────────────────────────────────────
+// ── Shared runtime settings (General and Models tabs) ────────────────────
 const routines = ref<RoutineSettings | null>(null)
 const routinesLoaded = ref(false)
 const routinesError = ref('')
@@ -2401,11 +2410,11 @@ async function saveRoutines(patch: Record<string, unknown>) {
   routinesResult.value = ''
   try {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
-    notifySaved('Model settings saved.')
+    notifySaved('Settings saved.')
   } catch (e) {
     const detail = errorMessage(e)
     routinesResult.value = `Error: ${detail}`
-    notifyFailed('Could not save model settings', detail)
+    notifyFailed('Could not save settings', detail)
   } finally {
     routinesSaving.value = false
   }

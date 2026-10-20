@@ -731,11 +731,19 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     )
 
     # Create ProjectChatManager
+    from ciao.keep_awake import KeepAwakeController
+    from ciao.os_support.power import create_power_assertion
+
+    keep_awake = KeepAwakeController(
+        create_power_assertion(),
+        enabled=app_settings.settings.keep_awake_while_agents_working,
+    )
     pcm = ProjectChatManager(
         config,
         state_store=state,
         transcript_store=transcripts,
         path=config.state_path.parent / "web_projects.json",
+        keep_awake=keep_awake,
     )
     # Dispatch failures stamp last_status on the stored schedule row so the
     # Automations sidebar flags them for attention instead of leaving an
@@ -828,9 +836,11 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     from ciao.background import BackgroundRun, BackgroundRunner, BackgroundRunStore
 
     def _background_started(run: BackgroundRun) -> None:
+        pcm.agent_work_started(f"background-run:{run.run_id}")
         pcm.announce_background_runs(run.parent_chat_id)
 
     def _background_finished(run: BackgroundRun, tail: list[str]) -> None:
+        pcm.agent_work_finished(f"background-run:{run.run_id}")
         # Drop the indicator now. The wake below is coalesced over a short
         # window, so waiting for it would leave the chat claiming a run is
         # live for seconds after it exited.
@@ -901,6 +911,7 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
+    app.state.keep_awake_controller = keep_awake
 
     from ciao.web.connection_tracker import ConnectionTracker
 
@@ -1409,11 +1420,17 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # running finishes on its own.
         backup_stop.set()
 
+    async def _shutdown_keep_awake() -> None:
+        # Graceful shutdown releases now; the platform backend independently
+        # ties its assertion to the engine process for crash cleanup.
+        keep_awake.close()
+
     async def _shutdown_children() -> None:
         await _shutdown_concurrently(_shutdown_providers, _shutdown_background_runs)
 
     app.state.shutdown_callbacks = [
         _shutdown_children,
+        _shutdown_keep_awake,
         # Before the read executor: the scan is waiting on a worker, and closing
         # the pool out from under a pending task is the leak worth avoiding.
         _shutdown_links_scan,

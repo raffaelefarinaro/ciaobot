@@ -38,6 +38,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.media_types import guess_type as guess_media_type
+from ciao.os_support.power import keep_awake_platform
 from ciao import host_terminal
 from ciao import proposal_actions
 from ciao import proposal_kinds
@@ -5609,7 +5610,7 @@ async def list_models(request: Request) -> JSONResponse:
     })
 
 
-# ── Routine settings (Settings → Models tab) ────────────────────────────
+# ── Runtime settings (Settings → General / Models) ──────────────────────
 
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
@@ -5618,6 +5619,10 @@ def _routines_payload(config, app_settings) -> dict:
     return {
         # Overrides as stored ("" = automatic default).
         "insights_enabled": config.insights_enabled,
+        "keep_awake_while_agents_working": s.keep_awake_while_agents_working,
+        # The UI must describe/control the engine host, not infer support from
+        # the browser that happens to be viewing this response.
+        "keep_awake_platform": keep_awake_platform(),
         # Per-provider default model for new chats, as stored (missing =
         # provider's own catalog default).
         "provider_default_models": s.provider_default_models or {},
@@ -5678,11 +5683,11 @@ def _routines_payload(config, app_settings) -> dict:
 
 
 async def settings_routines(request: Request) -> JSONResponse:
-    """GET returns routine settings; PATCH updates the runtime overrides.
+    """GET returns runtime settings; PATCH updates and persists a partial update.
 
-    Persisted in ``.runtime/app_settings.json`` and applied to the live
-    config immediately — no restart needed. Empty string clears an
-    override back to the env-backed default.
+    Persisted in ``.runtime/app_settings.json``. Runtime settings apply
+    immediately, except the bind address and log level, which take effect on
+    the next start. Empty string clears a string override to its default.
     """
     config = request.app.state.config
     app_settings = request.app.state.app_settings
@@ -5700,6 +5705,12 @@ async def settings_routines(request: Request) -> JSONResponse:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         app_settings.apply_to_config(config)
+        if "keep_awake_while_agents_working" in body:
+            controller = getattr(request.app.state, "keep_awake_controller", None)
+            if controller is not None:
+                controller.set_enabled(
+                    app_settings.settings.keep_awake_while_agents_working
+                )
     return JSONResponse(_routines_payload(config, app_settings))
 
 

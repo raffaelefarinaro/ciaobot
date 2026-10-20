@@ -1,4 +1,4 @@
-"""Tests for GET/PATCH /api/settings/routines (Settings → Models tab)."""
+"""Tests for GET/PATCH /api/settings/routines (Settings → General / Models)."""
 
 from __future__ import annotations
 
@@ -44,6 +44,8 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
     assert data["insights_enabled"] is True
+    assert data["keep_awake_while_agents_working"] is False
+    assert data["keep_awake_platform"] in {"macos", "windows", ""}
     # Session insights is chosen per provider now; the global knob is gone.
     assert data["provider_insights_models"] == {}
     assert "insights_model" not in data
@@ -118,6 +120,40 @@ def test_patch_rejects_non_boolean_insights_enabled(tmp_path):
         json={"insights_enabled": "false"},
     )
     assert resp.status_code == 400
+
+
+def test_patch_toggles_keep_awake_and_updates_the_live_controller(tmp_path):
+    class Controller:
+        def __init__(self) -> None:
+            self.changes: list[bool] = []
+
+        def set_enabled(self, enabled: bool) -> None:
+            self.changes.append(enabled)
+
+    client, _config = _make_client(tmp_path)
+    controller = Controller()
+    client.app.state.keep_awake_controller = controller
+
+    response = client.patch(
+        "/api/settings/routines",
+        json={"keep_awake_while_agents_working": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["keep_awake_while_agents_working"] is True
+    assert controller.changes == [True]
+    assert AppSettingsStore(tmp_path / ".runtime" / "app_settings.json").settings.keep_awake_while_agents_working is True
+
+
+def test_patch_rejects_non_boolean_keep_awake(tmp_path):
+    client, _config = _make_client(tmp_path)
+
+    response = client.patch(
+        "/api/settings/routines",
+        json={"keep_awake_while_agents_working": "true"},
+    )
+
+    assert response.status_code == 400
 
 
 def test_patch_applies_provider_default_models(tmp_path):

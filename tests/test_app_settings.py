@@ -51,6 +51,23 @@ def test_insights_enabled_rejects_non_boolean(tmp_path):
         store.update({"insights_enabled": "false"})
 
 
+def test_keep_awake_setting_is_opt_in_and_persists(tmp_path):
+    path = tmp_path / "app_settings.json"
+    store = AppSettingsStore(path)
+    assert store.settings.keep_awake_while_agents_working is False
+
+    store.update({"keep_awake_while_agents_working": True})
+
+    assert json.loads(path.read_text())["keep_awake_while_agents_working"] is True
+    assert AppSettingsStore(path).settings.keep_awake_while_agents_working is True
+
+
+def test_keep_awake_setting_rejects_non_boolean(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    with pytest.raises(ValueError, match="must be a boolean"):
+        store.update({"keep_awake_while_agents_working": "true"})
+
+
 def test_keyboard_preferences_persist_and_validate(tmp_path):
     path = tmp_path / "app_settings.json"
     store = AppSettingsStore(path)
@@ -122,6 +139,7 @@ def test_update_persists_and_roundtrips(tmp_path):
     store.update({"insights_enabled": False, "ignored": "x"})
     assert json.loads(path.read_text()) == {
         "insights_enabled": False,
+        "keep_awake_while_agents_working": False,
         "backup_enabled": True,
         "backup_paused": False,
     }
@@ -192,6 +210,7 @@ def test_provider_routine_models_persist_and_apply(tmp_path):
     path = tmp_path / "app_settings.json"
     assert json.loads(path.read_text()) == {
         "insights_enabled": True,
+        "keep_awake_while_agents_working": False,
         "backup_enabled": True,
         "backup_paused": False,
         "provider_insights_models": {"opencode": "anthropic/claude-sonnet-4-6"},

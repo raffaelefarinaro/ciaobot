@@ -905,11 +905,14 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 **Routine settings (Settings → General / Models)**
 
 ```bash
-# Read internal-routine settings: the automatic-session-insights switch and the
+# Read internal-routine settings: the automatic-session-insights and optional
+# keep-awake switches (engine-host power control) and the
 # per-provider default model / mode /
 # thinking / Session insights maps. insights_enabled=false stops the memory
 # pass. provider_insights_models is keyed by the chat's provider; a missing
 # entry means that provider's default chat model reads the session.
+# keep_awake_while_agents_working defaults false; keep_awake_platform is
+# "macos" or "windows" when the engine host supports the switch, otherwise "".
 # Also the server settings that used to be .env variables, as stored ("" =
 # default): pwa_host (bind address), log_level, dev_mode, app_repo (source
 # checkout), with server_defaults and server_running (what the running engine
@@ -918,7 +921,9 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
-# to the env default. A stored "apple"/"apfel" Session insights model (from the
+# to the env default. keep_awake_while_agents_working holds one engine-host
+# assertion for active chat streams, subagent watchers and agent-launched
+# background commands. A stored "apple"/"apfel" Session insights model (from the
 # retired on-device option) reads as Automatic rather than reaching a provider
 # as a literal model id. Per-provider defaults use the nested maps:
 # provider_default_models, provider_default_thinking, provider_insights_models.
@@ -927,7 +932,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # anything else is a 400.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"insights_enabled":false,"provider_insights_models":{"claude":"haiku"},"provider_default_models":{"opencode":"provider/model"}}'
+  -d '{"insights_enabled":false,"keep_awake_while_agents_working":true,"provider_insights_models":{"claude":"haiku"},"provider_default_models":{"opencode":"provider/model"}}'
 ```
 
 **Keyboard settings (Settings → Home → Keyboard shortcuts)**

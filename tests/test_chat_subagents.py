@@ -14,8 +14,10 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
+from ciao.keep_awake import KeepAwakeController
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web.chat_broker import ChatStream
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_api import chat_subagents
 
@@ -37,7 +39,9 @@ def _write_jsonl(path: Path, entries: list[dict]) -> None:
     )
 
 
-def _make_manager(tmp_path: Path) -> ProjectChatManager:
+def _make_manager(
+    tmp_path: Path, *, keep_awake: KeepAwakeController | None = None
+) -> ProjectChatManager:
     """Build a ProjectChatManager backed by tmp_path-only stores."""
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -54,7 +58,66 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         state_store=state,
         transcript_store=transcripts,
         path=runtime / "web_projects.json",
+        keep_awake=keep_awake,
     )
+
+
+def test_chat_streams_share_one_keep_awake_assertion(tmp_path: Path) -> None:
+    class Assertion:
+        def __init__(self) -> None:
+            self.acquires = 0
+            self.releases = 0
+
+        def acquire(self) -> None:
+            self.acquires += 1
+
+        def release(self) -> None:
+            self.releases += 1
+
+    assertion = Assertion()
+    keep_awake = KeepAwakeController(assertion, enabled=True)
+    pcm = _make_manager(tmp_path, keep_awake=keep_awake)
+    first = ChatStream()
+    second = ChatStream()
+
+    pcm._broker.register("chat-a", first)
+    pcm._broker.register("chat-b", second)
+    assert assertion.acquires == 1
+
+    pcm._broker.clear("chat-a", first)
+    assert assertion.releases == 0
+    pcm._broker.clear("chat-b", second)
+    assert assertion.releases == 1
+
+
+@pytest.mark.asyncio
+async def test_subagent_watcher_holds_keep_awake_until_it_exits(tmp_path: Path) -> None:
+    class Assertion:
+        def __init__(self) -> None:
+            self.acquires = 0
+            self.releases = 0
+
+        def acquire(self) -> None:
+            self.acquires += 1
+
+        def release(self) -> None:
+            self.releases += 1
+
+    assertion = Assertion()
+    pcm = _make_manager(
+        tmp_path,
+        keep_awake=KeepAwakeController(assertion, enabled=True),
+    )
+    project = pcm.create_project("watcher-keep-awake", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="watcher-keep-awake")
+
+    pcm._start_subagent_watcher(chat.chat_id, project.project_id)
+    task = pcm._pending_subagent_watchers[chat.chat_id]
+    assert assertion.acquires == 1
+
+    await task
+
+    assert assertion.releases == 1
 
 
 def _dispatch_records(tool_use_id: str, agent_id: str) -> list[dict]:
@@ -2162,5 +2225,4 @@ def test_a_background_stream_does_not_count_as_a_live_turn(tmp_path: Path) -> No
         pcm._broker.clear("chat-1", background)
 
     assert calls == [("chat-1", "proj-1", "Title", "interim")]
-
 

@@ -245,6 +245,8 @@ const GET_ROUTES = {
   // field; an empty object crashed the tab, so the stub mirrors the shape.
   '/api/settings/routines': () => ({
     insights_enabled: true,
+    keep_awake_while_agents_working: false,
+    keep_awake_platform: 'macos',
     provider_default_models: {},
     provider_default_modes: {},
     provider_default_thinking: {},

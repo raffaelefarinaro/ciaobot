@@ -92,6 +92,7 @@ import yaml
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import backup_scope, cli_envelopes, repo_link, repo_location, subagent_tracking
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
+from ciao.keep_awake import KeepAwakeController
 from ciao.config import (
     CLAUDE_MODELS,
     GWS_DEFAULT_PROFILE,
@@ -811,11 +812,13 @@ class ProjectChatManager:
         state_store: StateStore,
         transcript_store: TranscriptStore,
         path: Path | None = None,
+        keep_awake: KeepAwakeController | None = None,
     ) -> None:
         self._config = config
         self._state = state_store
         self._transcripts = transcript_store
         self._path = path
+        self._keep_awake = keep_awake
         self._projects: dict[str, ProjectInfo] = {}
         self._chats: dict[str, ChatInfo] = {}
         self._file_refs: dict[str, tuple[str, str, float]] = {}
@@ -862,7 +865,9 @@ class ProjectChatManager:
         # Bound by main.py when the embedded MCP control plane is enabled.
         # Tests and legacy-only instances intentionally leave it unset.
         self._mcp_service: Optional["CiaoMcpService"] = None
-        self._broker = ChatStreamBroker()
+        self._broker = ChatStreamBroker(
+            on_activity_change=self._chat_stream_activity_changed
+        )
         self._events = EventsHub()
         # Per-(chat, file) content snapshots taken on Write/Edit/MultiEdit/
         # NotebookEdit. Backs the file viewer's History and Diff tabs and the
@@ -6380,6 +6385,26 @@ class ProjectChatManager:
         """Cross-chat awareness pub/sub (drives /ws/events)."""
         return self._events
 
+    def _chat_stream_activity_changed(self, chat_id: str, active: bool) -> None:
+        """Mirror broker streams into the engine-wide keep-awake activity set."""
+        if self._keep_awake is None:
+            return
+        work_id = f"chat-stream:{chat_id}"
+        if active:
+            self._keep_awake.work_started(work_id)
+        else:
+            self._keep_awake.work_finished(work_id)
+
+    def agent_work_started(self, work_id: str) -> None:
+        """Register agent-owned work outside the chat-stream broker."""
+        if self._keep_awake is not None:
+            self._keep_awake.work_started(work_id)
+
+    def agent_work_finished(self, work_id: str) -> None:
+        """Release agent-owned work outside the chat-stream broker."""
+        if self._keep_awake is not None:
+            self._keep_awake.work_finished(work_id)
+
     @property
     def snapshots(self) -> SnapshotStore:
         """File snapshot store. PWA routes read this for History and Diff."""
@@ -7604,6 +7629,7 @@ class ProjectChatManager:
 
     def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None:
         """Replace any existing subagent watcher for this chat with a new one."""
+        self.agent_work_started(f"subagent-watcher:{chat_id}")
         self._subagents.start(chat_id, project_id)
 
     def _publish_subagent_count(
@@ -7612,7 +7638,15 @@ class ProjectChatManager:
         self._subagents.publish_count(chat_id, project_id, count)
 
     async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
-        await self._subagents.watch(chat_id, project_id)
+        current = asyncio.current_task()
+        try:
+            await self._subagents.watch(chat_id, project_id)
+        finally:
+            # start() replaces a watcher before cancellation is delivered. An
+            # old task must not release the token now owned by its replacement.
+            registered = self._subagents.watchers.get(chat_id)
+            if registered is None or registered is current:
+                self.agent_work_finished(f"subagent-watcher:{chat_id}")
 
     async def _watch_subagent_completion_inner(
         self, chat_id: str, project_id: str, saw_work: list[bool]

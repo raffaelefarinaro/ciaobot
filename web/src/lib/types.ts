@@ -858,10 +858,13 @@ export interface ModelsResponse {
 
 export interface MoveToBackgroundResponse { moved: boolean }
 
-// GET/PATCH /api/settings/routines — internal-routine model overrides and
-// model overrides (Settings → Models tab).
+// GET/PATCH /api/settings/routines — runtime settings shared by Settings →
+// General and Models.
 export interface RoutineSettings {
   insights_enabled?: boolean
+  keep_awake_while_agents_working?: boolean
+  /** Host OS for the keep-awake control; empty when the engine host is unsupported. */
+  keep_awake_platform?: 'macos' | 'windows' | ''
 
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.
