@@ -4832,6 +4832,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
     """Bounded, credential-free opencode install/auth status for Settings."""
     import subprocess
 
+    from ciao.provider_versions import release_check
     from ciao.setup_status import _provider
 
     binary: str | None
@@ -4885,6 +4886,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
             detail=OPENCODE_V2_REQUIRED,
             version=version or "unknown",
             terminal_action="opencode-install",
+            release_check=release_check("opencode", version, binary=binary),
         )
     credentials = _credential_count(binary, timeout=timeout)
     # opencode's own free tier serves models with no credentials at all, so an
@@ -4912,6 +4914,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
         skills=found.skills,
         bundled_skills=found.bundled_skills,
         mcps=found.mcps,
+        release_check=release_check("opencode", version, binary=binary),
     )
 
 
