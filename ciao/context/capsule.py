@@ -104,6 +104,17 @@ def render_linked_repo_block(
     return block + "\n[End linked repository]"
 
 
+PERMISSION_MODE_HINTS = {
+    "normal": (
+        "tool calls wait for the user's approval (every call on OpenCode, edits and "
+        "shell on Claude), so make few, deliberate calls"
+    ),
+    "plan": "read-only: propose a plan and change nothing",
+    "auto": "routine actions run without asking; risky ones ask the user",
+    "bypass": "every action runs without asking",
+}
+
+
 def _file_access_line(file_roots: Sequence[str]) -> str:
     """One line: where a workspace-scoped chat may write, and who can widen it."""
     roots = ", ".join(_field(root, limit=300) for root in file_roots)
@@ -128,6 +139,7 @@ def build_context_capsule(
     file_roots: Sequence[str] = (),
     linked_repo_block: str = "",
     linked_repo_line: str = "",
+    permission_mode: str = "",
 ) -> str:
     """Render the compact context visible to every provider.
 
@@ -136,6 +148,10 @@ def build_context_capsule(
 
     ``file_roots`` are the folders a workspace-scoped chat may read and write.
     Empty means no file-access line (machine scope).
+
+    ``permission_mode`` is the chat's effective permission mode; it is sent every
+    turn with a one-line hint (see ``PERMISSION_MODE_HINTS``), since it can change
+    mid-session. Empty means no line.
 
     Stable project facts can be omitted after the first turn of a provider
     session. The date, the unattended marker, the file-access line and handover
@@ -179,6 +195,10 @@ def build_context_capsule(
         dynamic.append(UNATTENDED_CAPSULE_GUIDANCE)
     if file_roots:
         dynamic.append(_file_access_line(file_roots))
+    if permission_mode:
+        line = f"permission_mode={_field(permission_mode, limit=20)}"
+        hint = PERMISSION_MODE_HINTS.get(permission_mode)
+        dynamic.append(f"{line}: {hint}" if hint else line)
     if linked_repo_line:
         dynamic.append(_field(linked_repo_line, limit=400))
 

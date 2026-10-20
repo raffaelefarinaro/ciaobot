@@ -19,7 +19,11 @@ import pytest
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import (
+    _CLAUDE_WARM_IDLE_TIMEOUT_SECONDS,
+    _CLAUDE_WARM_PROVIDER_LIMIT,
+    ProjectChatManager,
+)
 
 
 class _StubProvider:
@@ -422,3 +426,68 @@ async def test_a_drain_with_outstanding_background_work_holds_its_provider(
         assert not provider.disconnected
     finally:
         drain.cancel()
+
+
+# ── The Claude warm pool ──────────────────────────────────────────────────
+# A Claude provider is one CLI process whose rebuild costs a cold start that
+# measured 13-53 s under load, which is what the SDK's initialize deadline
+# times out on. The most recently used few therefore outlive the idle timeout.
+# opencode is a whole `opencode serve` per chat and is never kept warm.
+
+
+def _attach_claude(
+    manager: ProjectChatManager, chat_id: str, *, idle_for: float
+) -> _StubProvider:
+    provider = _attach(manager, chat_id, idle_for=idle_for)
+    manager._provider_kind[chat_id] = "claude"
+    return provider
+
+
+@pytest.mark.asyncio
+async def test_recent_claude_providers_stay_warm_past_the_idle_timeout(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    idle = manager._provider_idle_timeout + 1
+    # Four recent chats plus one that fell out of the pool.
+    for offset in range(_CLAUDE_WARM_PROVIDER_LIMIT):
+        _attach_claude(manager, _chat(manager), idle_for=idle + offset)
+    stale = _chat(manager)
+    stale_provider = _attach_claude(manager, stale, idle_for=idle + 1000)
+
+    assert await manager.reap_idle_providers() == [stale]
+    assert stale_provider.disconnected
+    # The warm ones are still live and still stamped.
+    assert len(manager._providers) == _CLAUDE_WARM_PROVIDER_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_claude_provider_past_the_warm_window_is_reaped(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    provider = _attach_claude(
+        manager, chat_id, idle_for=_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS + 1
+    )
+
+    assert await manager.reap_idle_providers() == [chat_id]
+    assert provider.disconnected
+
+
+@pytest.mark.asyncio
+async def test_opencode_provider_is_never_kept_warm(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    provider = _attach(manager, chat_id, idle_for=manager._provider_idle_timeout + 1)
+    manager._provider_kind[chat_id] = "opencode"
+
+    assert await manager.reap_idle_providers() == [chat_id]
+    assert provider.disconnected
+
+
+@pytest.mark.asyncio
+async def test_force_reaps_even_a_warm_claude_provider(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    chat_id = _chat(manager)
+    _attach_claude(manager, chat_id, idle_for=manager._provider_idle_timeout + 1)
+
+    assert await manager.reap_idle_providers(force=True) == [chat_id]

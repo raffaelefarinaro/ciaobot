@@ -59,8 +59,8 @@ operator's approval, report it under "Action needed:" and leave the action to th
 
 Steps:
 1. Group the log lines and failed job runs into distinct issues.
-2. Diagnose each one from local evidence first (`.runtime/server_errors.log`, \
-`.runtime/job_runs.jsonl`, `.runtime/ciao.stderr.log`, workspace config) and \
+2. Diagnose each one from local evidence first (`ciao context logs` for the error, debug and \
+service log tails and failed runs; it works under workspace-only file access; plus workspace config) and \
 stay with what the evidence shows.
 3. Check if the errors are typical environment or installation issues:
    - Python version mismatch (Ciaobot requires Python 3.12+).
@@ -72,7 +72,7 @@ stay with what the evidence shows.
 when it is a local, reversible change the unattended rules allow, and say in your \
 reply that you applied it. Environment issues are not Ciaobot bugs, so they get \
 no bug report.
-4. When the root cause is a bug in the Ciaobot app itself, find the installed version (by reading `ciao/__init__.py` or running `ciao --version`) and gather basic system details (OS, Python version). GitHub issues are the only bug inbox, and the operator approves public issues, so you only prepare the report. If the `gh` CLI is authenticated, check for an existing report with the read-only \
+4. When the root cause is a bug in the Ciaobot app itself, find the installed version (`version` in `ciao context logs`) and gather basic system details (OS, Python version). GitHub issues are the only bug inbox, and the operator approves public issues, so you only prepare the report. If the `gh` CLI is authenticated, check for an existing report with the read-only \
 `gh issue list --repo raffaelefarinaro/ciaobot --search "..."`; when one matches, point to it instead of preparing a new one. \
 Otherwise end with, under "Action needed:":
    - A clickable pre-filled GitHub issue URL (https://github.com/raffaelefarinaro/ciaobot/issues/new?title=...&body=...) pre-filling the title and summary (properly URL-encoded).

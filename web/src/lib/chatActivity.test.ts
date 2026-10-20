@@ -13,6 +13,9 @@ import {
   isInterruptedTail,
   formatTokenUsage,
   isProgressCommentary,
+  isPermissionActivityLine,
+  liveToolStep,
+  permissionActivityLine,
   normalizeOutputPath,
   outputActionTag,
   traceSummaryMeta,
@@ -503,3 +506,39 @@ describe('shortDirname', () => {
   })
 })
 
+
+describe('liveToolStep (#1618)', () => {
+  const perm = permissionActivityLine('shell', 'Approve use of shell?')
+  const lines = ['\u{1F527} shell ls', perm]
+  const ids = ['c1', undefined]
+
+  it('shows an open permission request as the step', () => {
+    expect(liveToolStep(lines, ids, new Set([perm]), new Set())).toBe('Permission: shell - Approve use of shell?')
+  })
+
+  it('after an answer, names the call that asked', () => {
+    expect(liveToolStep(lines, ids, new Set(), new Set())).toBe('shell ls')
+  })
+
+  it('after a denial, names nothing', () => {
+    expect(liveToolStep(lines, ids, new Set(), new Set(['c1']))).toBe('')
+  })
+
+  it('an answered permission line with nothing before it names nothing', () => {
+    expect(liveToolStep([perm], [undefined], new Set(), new Set())).toBe('')
+  })
+
+  it('a shared line stays open while another request with the same text is pending', () => {
+    // Two requests with identical text fold into one line; one answered, one still pending.
+    expect(liveToolStep([perm], [undefined], new Set([perm]), new Set())).toBe('Permission: shell - Approve use of shell?')
+  })
+
+  it('a denial of an earlier call does not hide a running later call', () => {
+    expect(liveToolStep(['\u{1F527} shell ls'], ['c1'], new Set(), new Set(['c1']))).toBe('shell ls')
+  })
+
+  it('recognises permission lines', () => {
+    expect(isPermissionActivityLine(perm)).toBe(true)
+    expect(isPermissionActivityLine('\u{1F527} shell ls')).toBe(false)
+  })
+})

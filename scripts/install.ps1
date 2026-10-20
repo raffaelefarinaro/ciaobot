@@ -888,6 +888,7 @@ print(name, digest, size)
             3 { Write-Warning 'ciao setup could not set up memory regions (see the warning above); continuing install' }
             default { Fail 'ciao setup failed' }
         }
+        $welcomePending = Test-Path -LiteralPath (Join-Path $workspace '.runtime\welcome-pending')
 
         if ($NoStart) {
             # -NoStart promised no service: no task registered (above), no
@@ -896,6 +897,7 @@ print(name, digest, size)
             Write-Host ''
             Write-Host "Ciaobot $Version is installed: $ciao"
             Write-Host "Workspace: $workspace"
+            if ($welcomePending) { Write-Host 'Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager.' }
             Write-Host 'No logon task was registered and nothing was started. To register it later, run:'
             Write-Host "  $(Format-Command $ciao @('setup', '--workspace', $workspace, '--load-launchd'))"
             Write-Host "  $(Format-Command $ciao @('service', 'start', '--workspace', $workspace))"
@@ -949,6 +951,7 @@ print(name, digest, size)
         }
         Write-Host "Open Ciaobot: $url"
         Write-Host 'This link signs you in once. Do not share it.'
+        if ($welcomePending) { Write-Host 'Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager.' }
         # Only when there is a terminal to open it in: redirected output means
         # this text is a log file, and a browser popping up over a CI log is
         # nobody's idea of a good time.
