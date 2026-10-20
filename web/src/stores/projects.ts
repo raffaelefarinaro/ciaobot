@@ -3,7 +3,7 @@ import { ref, computed, onScopeDispose, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { buildFixPrompt } from '../lib/fixError'
 import { isPlausibleFilePath } from '../lib/filePaths'
-import { activityLines } from '../lib/chatActivity'
+import { activityLines, permissionActivityLine } from '../lib/chatActivity'
 import { useTaskSignalsStore } from './taskSignals'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
@@ -266,6 +266,8 @@ export const useProjectStore = defineStore('projects', () => {
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string; tool_use_id?: string }
     | { kind: 'status'; content: string }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
+  // per-chat ids of refused calls this turn; the live label reads them (#1618)
+  const deniedToolUseIds = ref<Record<string, string[]>>({})
   const unread = ref<Record<string, number>>({})  // per-chat unread assistant message count
   // Per-chat truncated text of the last assistant response, from the same
   // `chat_result_ready` snippet already used for the toast body. Session-only
@@ -2121,6 +2123,7 @@ export const useProjectStore = defineStore('projects', () => {
     streamingText.value[chatId] = ''
     streamingThinking.value[chatId] = ''
     streamingTimeline.value[chatId] = []
+    delete deniedToolUseIds.value[chatId]
     delete streamingTextPhase.value[chatId]
     delete liveUsage.value[chatId]
     delete streamStartedAt.value[chatId]
@@ -5451,6 +5454,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   /** Currently accumulated timeline entries for the active turn (tools + intermediate text). */
   const currentTimeline = computed<StreamEntry[]>(() => streamingTimeline.value[activeChatId.value || ''] || [])
+  const currentDeniedToolUseIds = computed<string[]>(() => deniedToolUseIds.value[activeChatId.value || ''] || [])
   /** Live token totals for the active turn, or null when none reported yet. */
   const currentLiveUsage = computed<{ input: number; output: number } | null>(
     () => liveUsage.value[activeChatId.value || ''] || null
@@ -5586,6 +5590,7 @@ export const useProjectStore = defineStore('projects', () => {
   function _flushTimeline(chatId: string): StreamEntry[] {
     const entries = streamingTimeline.value[chatId] || []
     streamingTimeline.value[chatId] = []
+    delete deniedToolUseIds.value[chatId]
     return entries
   }
 
@@ -5957,6 +5962,10 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       case 'tool_denied': {
+        if (event.tool_use_id) {
+          const denied = deniedToolUseIds.value[chatId] || []
+          if (!denied.includes(event.tool_use_id)) deniedToolUseIds.value[chatId] = [...denied, event.tool_use_id]
+        }
         // The call was refused, so it never ran. Drop the file card it already
         // painted: the chip is emitted on request, which made a denied Write
         // look like a created file. Its activity line stays, so the attempt is
@@ -6329,7 +6338,7 @@ export const useProjectStore = defineStore('projects', () => {
         // Approve/Deny bubble. Keep a visible timeline line too so the user
         // sees the context even if they dismiss the buttons by scrolling.
         _commitStreamingTextToTimeline(chatId)
-        _pushToolLine(chatId, `\u{1F6A7} Permission: ${event.tool_name} - ${event.message}`)
+        _pushToolLine(chatId, permissionActivityLine(event.tool_name, event.message))
         pendingPermissions.value[chatId] = [
           ...list,
           {
@@ -6388,7 +6397,7 @@ export const useProjectStore = defineStore('projects', () => {
     serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, activeBackgroundableCalls, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, activeBackgroundRuns, activeBackgroundableCalls, currentActivity, currentTimeline, currentDeniedToolUseIds, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, chatFailed, chatNeedsYou, chatPendingQuestion, chatLastSnippet, chatIsAttentionItem, projectNeedsInput, projectUnread, workspaceUnread, workspaceNeedsInput, totalUnread, attentionChatCount, clearUnread, markRead, markUnread, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, chatHasBackgroundRuns, fetchBackgroundRunLog, cancelBackgroundRun, runningSubagentsFor, chatHasRunningSubagents, chatIsWorking, anyChatBusy, workspaceIsStreaming, projectFor,
     chatPostprocess,

@@ -609,6 +609,22 @@ describe('per-chat WS auto-reconnect', () => {
     expect(tool.failed).toEqual([false, false])
   })
 
+  test('records denied tool ids for the live label and clears them with the turn', () => {
+    const store = useProjectStore()
+    const chatId = 'c-denied-ids'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    const send = (event: Record<string, unknown>) => socket.onmessage?.({ data: JSON.stringify(event) })
+
+    send({ type: 'tool_denied', tool_use_id: 'c1' })
+    send({ type: 'tool_denied', tool_use_id: 'c1' })
+    expect(store.currentDeniedToolUseIds).toEqual(['c1'])
+
+    send({ type: 'result', result: 'done' })
+    expect(store.currentDeniedToolUseIds).toEqual([])
+  })
+
   test('an id-bearing call is not swallowed by an identical id-less line', () => {
     const store = useProjectStore()
     const chatId = 'c-id-bearing-after-idless'

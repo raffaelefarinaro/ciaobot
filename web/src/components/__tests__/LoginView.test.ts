@@ -638,4 +638,24 @@ describe('LoginView setup wizard tests', () => {
     wrapper.unmount()
   })
 
+  it('warns, without blocking, when the folder is in a cloud-synced folder', async () => {
+    const mockInspect = (extra: Record<string, unknown>) => {
+      mockApiGet.mockImplementation((path: string) => {
+        if (path.startsWith('/api/setup/inspect-folder')) {
+          return Promise.resolve({ mode: 'scratch', existing_workspaces: [], ...extra })
+        }
+        return Promise.resolve({ configured: false, bootstrap: true, mode: 'bootstrap', providers: {} })
+      })
+    }
+    mockInspect({ cloud_sync_warning: '~/Dropbox/ws is inside Dropbox. Sync apps can make conflicted copies.' })
+    const warned = await mountLoginView()
+    const note = warned.find('#setup-workspace-cloud-warning')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('inside Dropbox')
+
+    mockInspect({})
+    const plain = await mountLoginView()
+    expect(plain.find('#setup-workspace-cloud-warning').exists()).toBe(false)
+  })
+
 })
