@@ -10,7 +10,7 @@ protection_json() {
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["linux-server", "test"]
+    "contexts": ["linux-server", "linux-web", "windows"]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": {
