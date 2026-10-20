@@ -8085,6 +8085,7 @@ class ProjectChatManager:
             return provider.has_permission_request(request_id, session_id)
         gate = getattr(provider, "permission_gate", None)
         has_pending = getattr(gate, "has_pending", None)
+        # The Claude gate's has_pending takes no session: its ids are global.
         return bool(callable(has_pending) and has_pending(request_id))
 
     async def respond_permission(
@@ -8129,7 +8130,12 @@ class ProjectChatManager:
                     request_id, session_id, approved,
                 )
                 return QuestionResponseResult(True)
-        expected_session = session_id or (
+        held_session = (
+            provider.permission_request_session(request_id)
+            if provider_holds and isinstance(provider, OpencodeProvider)
+            else ""
+        )
+        expected_session = session_id or held_session or (
             stored_session if stored_request == request_id else ""
         ) or str(getattr(chat, "session_id", "") or "")
 

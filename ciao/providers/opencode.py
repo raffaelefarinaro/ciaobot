@@ -2866,6 +2866,11 @@ class OpencodeProvider(BaseSDKProvider):
         pending = self._permission_requests.get(request_id)
         return pending is not None and (not session_id or pending.session_id == session_id)
 
+    def permission_request_session(self, request_id: str) -> str:
+        """Session that owns the pending permission ``request_id``, or ``""``."""
+        pending = self._permission_requests.get(request_id)
+        return pending.session_id if pending is not None else ""
+
     def tool_use_id_for_request(
         self, request_id: str, session_id: str = ""
     ) -> str:

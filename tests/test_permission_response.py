@@ -500,3 +500,63 @@ async def test_parallel_claude_permissions_both_reach_the_gate(tmp_path: Path) -
     assert json.loads(chat.pending_permission)["request_id"] == "tu-b"
     assert (await pcm.respond_permission(chat.chat_id, request_id="tu-b", approved=True)).ok
     assert isinstance(await asyncio.wait_for(second, 1), PermissionResultAllow)
+
+
+_CHILD_THEN_NEWER = [
+    _asked("per_child", "ses_child", "shell", "gh issue list", "call_c"),
+    _asked("per_newer", "ses_1", "shell", "git status --short", "call_n"),
+]
+
+
+@pytest.mark.asyncio
+async def test_child_request_outside_the_slot_is_approved_without_a_client_session(
+    tmp_path: Path,
+) -> None:
+    pcm, chat, provider = _opencode_chat(tmp_path, _CHILD_THEN_NEWER)
+    chat.session_id = "ses_1"
+
+    result = await pcm.respond_permission(chat.chat_id, request_id="per_child", approved=True)
+
+    assert result.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_child/permission/per_child/reply", {"decision": "once"})
+    ]
+    assert json.loads(chat.pending_permission)["request_id"] == "per_newer"
+
+
+@pytest.mark.asyncio
+async def test_child_request_outside_the_slot_denial_retracts_its_own_call(
+    tmp_path: Path,
+) -> None:
+    pcm, chat, _provider = _opencode_chat(tmp_path, _CHILD_THEN_NEWER)
+    chat.session_id = "ses_1"
+    stream = pcm._broker.get(chat.chat_id)
+    stream.publish({  # type: ignore[union-attr]
+        "type": "tool_use", "tool_name": "shell", "tool_use_id": "call_c",
+        "file_touch": {"file_path": "notes.md", "action": "created"},
+    })
+
+    result = await pcm.respond_permission(chat.chat_id, request_id="per_child", approved=False)
+
+    assert result.ok
+    assert any(
+        ev.get("type") == "tool_denied" and ev.get("tool_use_id") == "call_c"
+        for ev in stream.buffered_events()  # type: ignore[union-attr]
+    )
+
+
+@pytest.mark.asyncio
+async def test_child_request_outside_the_slot_resolves_other_tabs(tmp_path: Path) -> None:
+    pcm, chat, _provider = _opencode_chat(tmp_path, _CHILD_THEN_NEWER)
+    chat.session_id = "ses_1"
+    stream = pcm._broker.get(chat.chat_id)
+    other_tab: asyncio.Queue[dict] = asyncio.Queue()
+    stream._subs.add(other_tab)  # type: ignore[union-attr,arg-type]
+
+    result = await pcm.respond_permission(chat.chat_id, request_id="per_child", approved=True)
+
+    assert result.ok
+    live = [other_tab.get_nowait() for _ in range(other_tab.qsize())]
+    assert {
+        "type": "permission_resolved", "request_id": "per_child", "session_id": "ses_child",
+    } in live
