@@ -18,6 +18,7 @@ rows with `scope == "system"`, so it cannot be extended by writing to
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -429,3 +430,71 @@ def test_a_user_schedule_named_like_the_retired_routine_survives(
     colliding = rows["system-skill-evolution-mine"]
     assert colliding.prompt == "also mine"
     assert colliding.scope == "user"
+
+
+# ---- first_seen_at ---------------------------------------------------------
+
+_EPOCH = "1970-01-01T00:00:00Z"
+
+
+def _read_state(tmp_path: Path) -> dict:
+    return json.loads(
+        (tmp_path / "system_schedules_state.json").read_text(encoding="utf-8")
+    )["schedules"]
+
+
+def test_a_read_never_writes_first_seen(tmp_path: Path) -> None:
+    store = _store(tmp_path, "personal")
+    entry = store.get("system-memory-curation@personal")
+    assert entry is not None
+    assert entry.created_at != _EPOCH
+    assert not (tmp_path / "system_schedules_state.json").exists()
+
+
+def test_record_first_seen_stamps_only_rows_without_state(tmp_path: Path) -> None:
+    _write_state(
+        tmp_path,
+        {
+            "system-memory-curation@personal": {
+                "enabled": True,
+                "last_triggered_on": "2026-01-17",
+            }
+        },
+    )
+    store = _store(tmp_path, "personal", "work")
+    stamped = store.record_system_first_seen(datetime(2026, 1, 19, 14, 0, tzinfo=UTC))
+
+    assert stamped == ["system-memory-curation@work"]
+    state = _read_state(tmp_path)
+    assert state["system-memory-curation@work"]["first_seen_at"] == "2026-01-19T14:00:00Z"
+    assert "first_seen_at" not in state["system-memory-curation@personal"]
+    personal = store.get("system-memory-curation@personal")
+    work = store.get("system-memory-curation@work")
+    assert personal is not None and work is not None
+    assert personal.created_at == _EPOCH
+    assert work.created_at == "2026-01-19T14:00:00Z"
+
+
+def test_record_first_seen_does_not_cut_legacy_inheritance(tmp_path: Path) -> None:
+    _write_state(tmp_path, {"system-memory-curation": {"enabled": False}})
+    store = _store(tmp_path, "personal")
+
+    assert store.record_system_first_seen(datetime(2026, 1, 19, 14, 0, tzinfo=UTC)) == []
+    entry = store.get("system-memory-curation@personal")
+    assert entry is not None
+    assert entry.enabled is False
+
+
+def test_replace_records_first_seen_once(tmp_path: Path) -> None:
+    store = _store(tmp_path, "personal")
+    entry = store.get("system-memory-curation@personal")
+    assert entry is not None
+    entry.enabled = False
+    store.replace(entry)
+    first = _read_state(tmp_path)["system-memory-curation@personal"]["first_seen_at"]
+    assert first == entry.created_at
+
+    entry.enabled = True
+    store.replace(entry)
+    row = _read_state(tmp_path)["system-memory-curation@personal"]
+    assert row["first_seen_at"] == first
