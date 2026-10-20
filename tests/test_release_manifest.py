@@ -400,10 +400,10 @@ def test_manifest_with_host_signed_round_trip(tmp_path: Path) -> None:
         ("bundle_id", "local.ciaobot.other"),
         # bool is an int subclass; a protocol of True must not pass as 1.
         ("host_protocol", True),
-        ("host_protocol", 2),
+        ("host_protocol", 3),
         ("host_protocol", None),
         ("host_revision", True),
-        ("host_revision", 3),
+        ("host_revision", 4),
         ("host_revision", None),
         ("size", 0),
         ("size", -1),
@@ -433,8 +433,8 @@ def test_verify_manifest_accepts_an_unsupported_host_beside_the_wheel() -> None:
     priv, public_key, key_id = _keypair()
     future_host = _host_entry(
         filename="ciaobot-server-host-macos-universal-v2.tar.gz",
-        host_revision=2,
-        host_protocol=2,
+        host_revision=4,
+        host_protocol=3,
     )
     document = build_manifest(
         "1.2.3",
@@ -493,7 +493,7 @@ def test_server_host_selection_rejects_unsupported_entry() -> None:
         "schema": 1,
         "version": "1.2.3",
         "tag": "v1.2.3",
-        "artifacts": [_host_entry(host_protocol=2)],
+        "artifacts": [_host_entry(host_protocol=3)],
     }
 
     with pytest.raises(ValueError):
@@ -609,7 +609,7 @@ def test_server_host_signature_tampering_fails_before_schema() -> None:
     priv, public_key, key_id = _keypair()
     document = build_manifest(
         "1.2.3",
-        [_host_entry(host_protocol=2)],
+        [_host_entry(host_protocol=3)],
         created="2026-09-25T10:00:00+00:00",
     )
     raw = json.dumps(document).encode()

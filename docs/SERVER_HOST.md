@@ -12,11 +12,12 @@ the direct shape is kept. Host upgrade and rollback are later children.
 
 ## What it does
 
-The host exposes exactly two fixed operations, revision 2:
+The host exposes exactly three fixed operations, revision 3:
 
 ```sh
 Ciaobot Server.app/Contents/MacOS/Ciaobot Server serve --python /absolute/interpreter
 Ciaobot Server.app/Contents/MacOS/Ciaobot Server request-accessibility
+Ciaobot Server.app/Contents/MacOS/Ciaobot Server run-move --python /absolute/interpreter --operation <id> --state-dir /absolute/dir
 ```
 
 - **`serve`** launches exactly `[python, -I, -m, ciao.cli, supervise]` as a child
@@ -32,13 +33,23 @@ Ciaobot Server.app/Contents/MacOS/Ciaobot Server request-accessibility
   for five seconds so macOS can present the asynchronous settings prompt. It
   never grants anything itself, never reads, clicks, types or scripts, and never
   runs AppleScript.
+- **`run-move`** launches exactly
+  `[python, -I, -m, ciao.workspace_move, run, --operation, <id>, --state-dir, <dir>]`
+  as a child and mirrors its status, exactly like `serve`. The workspace move
+  must run as a descendant of the host, so a macOS folder grant the user gave
+  the host covers the move too (#1658). The command is fixed: only the
+  interpreter, the operation id and the state directory are caller-supplied, and
+  all three are validated before anything is spawned. There is no arbitrary
+  command, no shell and no extra argument.
 
 The parser is strict. It accepts exactly `serve --python <absolute existing
-executable>` or `request-accessibility` and rejects repeated, unknown and extra
-arguments, relative and empty paths, and non-executable targets. Invalid argv
-exits `2` before AppKit is set up or any permission call is reachable. A
-symlinked or dot-alias path is resolved by the filesystem as an ordinary
-executable path.
+executable>`, `request-accessibility`, or
+`run-move --python <absolute existing executable> --operation <id> --state-dir
+<absolute normalized dir>` and rejects repeated, unknown and extra arguments,
+relative and empty paths, a `..` in either value, an operation id that is not a
+plain identifier, and non-executable targets. Invalid argv exits `2` before
+AppKit is set up or any permission call is reachable. A symlinked or dot-alias
+path is resolved by the filesystem as an ordinary executable path.
 
 ## Process group and job ownership
 
@@ -123,8 +134,8 @@ built by the later service child (#1008 child B), not here.
 | Bundle ID | `local.ciaobot.server` |
 | Display name | `Ciaobot Server` |
 | Executable | `Ciaobot Server` |
-| Host protocol | `CiaobotServerHostProtocol` = `1` |
-| Bundle version | host revision (`2`), never the engine release |
+| Host protocol | `CiaobotServerHostProtocol` = `2` |
+| Bundle version | host revision (`3`), never the engine release |
 | Minimum system | `13.0` |
 | `LSUIElement` | `true` (accessory app: no window, no Dock) |
 
@@ -190,21 +201,29 @@ and login. A direct (bare-Python) definition gets no prompt and no grant, so
 folder when no verified host is installed, and workspace move (a bare-Python
 launchd job) refuses a protected source and destination.
 
-The usage strings are deliberately absent from the host `Info.plist`: adding
-them changes the signed bytes, which is a host revision (see above). Not yet
-verified: whether the grant survives a host revision (a re-signed bundle). Check
-it in the release walk of the next host revision.
+Revision 3 adds the three usage strings the prompt was missing
+(#1659): `NSDesktopFolderUsageDescription`,
+`NSDocumentsFolderUsageDescription` and
+`NSDownloadsFolderUsageDescription`. Each names its folder, names Ciaobot
+Server, and says the access is scoped to a workspace the user chose. Adding them
+changed the signed bytes, which is why the host revision moved to 3 and why the
+installer can now replace a revision-2 host instead of refusing it (see
+`docs/SERVER_HOST_CONTRACT.md`). Not yet verified: whether the folder grant
+survives a host revision (a re-signed bundle). Check it in the release walk of
+the next host revision.
 
 ## Tests
 
 `tests/test_server_host.py` runs the pure checks everywhere (identity distinct
 from the PWA/retired/experiment IDs, revision independent of engine version, the
-icon digest, no Python bundled, the exact both-arch compile commands and
-deployment floor, output refusal, non-macOS refusal before writes, injected
-build ordering, archive safety and metadata, the `killpg`-free and
-`posix_spawn`-only source contract). On macOS with Command Line Tools it
+folder usage descriptions the macOS folder prompts need, the icon digest, no
+Python bundled, the exact both-arch compile commands and deployment floor,
+output refusal, non-macOS refusal before writes, injected build ordering,
+archive safety and metadata, the `killpg`-free and `posix_spawn`-only source
+contract). On macOS with Command Line Tools it
 compiles the real host and a small offline C child fixture once, then exercises
-the shipped host: fixed supervisor argv, inherited cwd/environment/stdio, the
+the shipped host: fixed supervisor argv, the fixed `run-move` argv and the
+process group it shares with the host, inherited cwd/environment/stdio, the
 child's reset signal mask and dispositions, the dropped extra fd, exit and
 signal mirroring, exit `130`/`143` treated as a clean stop (and unchanged
 without a stop), stop forwarding and reaping, the graceful Quit Apple Event
