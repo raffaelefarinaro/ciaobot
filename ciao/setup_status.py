@@ -88,8 +88,7 @@ def clear_claude_discovery_cache() -> None:
     _claude_mcps_cache = None
     _claude_skills_cache = None
     _claude_mcps_generation += 1
-    # Tests replace `_cli_version` with a plain function; only the real one caches.
-    getattr(_cli_version, "cache_clear", lambda: None)()
+    _CLI_VERSION_CACHE.cache_clear()
 
 
 def _acquire_mcps_probe() -> threading.Event | None:
@@ -333,6 +332,11 @@ def _cli_version(binary: str) -> str:
         return "installed"
     lines = (run.stdout or run.stderr).strip().splitlines()
     return lines[-1] if lines else "installed"
+
+
+# The real lru_cache'd probe. Tests replace the module attribute `_cli_version`;
+# clearing goes through this reference so it still reaches the cache.
+_CLI_VERSION_CACHE = _cli_version
 
 
 # Skills Claude Code ships itself (code-review, dataviz, ...). Nothing lists

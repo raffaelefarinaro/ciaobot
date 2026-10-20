@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.resources
 import json
 import logging
+import os
 import re
 import shlex
 import subprocess
@@ -203,7 +204,13 @@ def update_command(provider: str, tested: str, binary: str) -> str:
         on_path = resolve_on_terminal_path(provider)
     except Exception:
         on_path = None
-    if on_path or not binary:
+    if not binary:
+        raise ValueError("update_command needs the resolved binary")
+    try:
+        same = bool(on_path) and os.path.samefile(on_path or "", binary)
+    except OSError:
+        same = False
+    if same:
         name = provider
     elif host_terminal.host_platform() == host_terminal.PLATFORM_WINDOWS:
         name = "& " + host_terminal._ps_quote(binary)
@@ -223,9 +230,12 @@ def release_check(
 ) -> dict[str, str]:
     """Compare an installed provider CLI with the version the release was tested with.
 
-    Suggestions are suppressed (``untested``) when the running Ciaobot is not
-    the release the record describes: a develop or dev build carries the last
-    release's record, which says nothing about what that build expects.
+    Suggestions are suppressed (``untested``) when the record belongs to another
+    Ciaobot version, e.g. a release cut with ``--skip-provider-versions`` keeps
+    the previous record. A develop checkout or dev install reports the last
+    release's version until the next cut, so it compares against that release's
+    record; that is safe because ``below_tested`` only ever points up to a
+    version a release was tested with, and bundled Claude never gets a command.
     """
     if record is None:
         try:
@@ -240,11 +250,14 @@ def release_check(
     tested = tested_version(record, provider)
     if tested is None or record.get("ciaobot") != running_version:
         return {"state": "untested"}
-    if bundled:
-        return {"state": "bundled", "tested": tested}
     if provider == "opencode":
         from ciao.providers.opencode import _server_version_error
 
+        if _server_version_error({"version": tested}) is not None:
+            return {"state": "untested"}
+    if bundled:
+        return {"state": "bundled", "tested": tested}
+    if provider == "opencode":
         if _server_version_error({"version": installed_text}) is not None:
             return {"state": "unsupported", "tested": tested}
     installed = parse_cli_version(installed_text)

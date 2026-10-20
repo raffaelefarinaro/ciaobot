@@ -87,12 +87,18 @@ def test_update_actions_resolve_from_current_checks(
         monkeypatch.setattr(
             provider_versions, "current_checks", lambda s=state: {provider: {"state": s}}
         )
-        with pytest.raises(LookupError):
+        with pytest.raises(host_terminal.NothingToUpdate):
             host_terminal.action_command(f"{provider}-update")
     monkeypatch.setattr(provider_versions, "current_checks", lambda: {})
-    with pytest.raises(LookupError) as excinfo:
+    with pytest.raises(host_terminal.NothingToUpdate) as excinfo:
         host_terminal.action_command(f"{provider}-update")
-    assert not isinstance(excinfo.value, KeyError)
+    assert not isinstance(excinfo.value, (KeyError, LookupError))
+
+
+def test_ps_quote_doubles_every_powershell_quote_character() -> None:
+    assert host_terminal._ps_quote("C:\\Users\\o'brien") == "'C:\\Users\\o''brien'"
+    for ch in "\u2018\u2019\u201a\u201b":
+        assert host_terminal._ps_quote(f"a{ch}b") == f"'a{ch}{ch}b'"
 
 
 def test_frontend_copy_names_the_gws_install_command() -> None:

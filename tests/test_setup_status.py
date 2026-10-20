@@ -2399,13 +2399,14 @@ def test_opencode_unsupported_row_keeps_v2_migration_text(monkeypatch) -> None:
         "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="1.14.0\n", returncode=0)
     )
     monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
 
     row = opencode.opencode_login_status(inventory=False)
 
     assert row["auth"] == "unsupported_version"
     assert row["detail"] == opencode.OPENCODE_V2_REQUIRED
     assert row["terminal_action"] == "opencode-install"
-    assert row["release_check"] == {"state": "unsupported"}
+    assert row["release_check"] == {"state": "unsupported", "tested": "2.1.0"}
 
 
 def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> None:
@@ -2430,7 +2431,6 @@ def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> No
 def test_clearing_the_discovery_cache_rereads_a_system_cli_version(monkeypatch) -> None:
     from ciao import setup_status as module
 
-    monkeypatch.undo()  # drop the autouse stand-in for the real, cached probe
     calls: list[str] = []
 
     def fake_run(argv, **_k):
@@ -2438,10 +2438,14 @@ def test_clearing_the_discovery_cache_rereads_a_system_cli_version(monkeypatch) 
         return SimpleNamespace(stdout="2.0.0\n", stderr="", returncode=0)
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
-    module._cli_version.cache_clear()
-    module._cli_version("/x/claude")
-    module._cli_version("/x/claude")
-    assert len(calls) == 1
-    module.clear_claude_discovery_cache()
-    module._cli_version("/x/claude")
-    assert len(calls) == 2
+    probe = module._CLI_VERSION_CACHE
+    probe.cache_clear()
+    try:
+        probe("/x/claude")
+        probe("/x/claude")
+        assert len(calls) == 1
+        module.clear_claude_discovery_cache()
+        probe("/x/claude")
+        assert len(calls) == 2
+    finally:
+        probe.cache_clear()

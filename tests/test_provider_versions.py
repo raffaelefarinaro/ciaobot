@@ -211,15 +211,25 @@ def test_release_check_states(
         assert result == {"state": "untested"}
 
 
-def test_release_check_is_untested_for_a_build_that_is_not_the_recorded_release(
+def test_release_check_is_untested_when_the_record_is_from_another_version(
     terminal_paths: None,
 ) -> None:
-    # A develop or dev install carries the last release's tested record, but
-    # its own bundled Claude and expectations may differ: stay silent.
-    for running in ("1.6.2", "1.6.1.dev3", "1.7.0-rc.1", ""):
+    # e.g. a release cut with --skip-provider-versions keeps the previous record.
+    for running in ("1.6.2", "1.7.0"):
         assert release_check(
             "opencode", "2.0.32", binary="/x", record=_tested(), running_version=running
         ) == {"state": "untested"}
+
+
+@pytest.mark.parametrize("tested", ["1.14.0", "2.0.15", "3.0.0"])
+def test_release_check_is_untested_when_the_tested_opencode_is_outside_the_contract(
+    terminal_paths: None, tested: str
+) -> None:
+    record = _tested()
+    record["providers"]["opencode"]["version"] = tested
+    assert release_check(
+        "opencode", "2.0.32", binary="/x", record=record, running_version=RUNNING
+    ) == {"state": "untested"}
 
 
 def test_release_check_defaults_to_the_running_ciaobot_version(
@@ -242,8 +252,15 @@ def test_release_check_survives_a_broken_record(monkeypatch: pytest.MonkeyPatch)
 def test_update_command_forms(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("ciao.host_terminal.host_platform", lambda: "macos")
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: "/usr/bin/" + cmd)
-    assert update_command("opencode", "2.1.0", "/opt/oc/opencode") == "opencode upgrade 2.1.0"
-    assert update_command("claude", "2.1.301", "/opt/c/claude") == "claude update"
+    monkeypatch.setattr("os.path.samefile", lambda a, b: True)
+    assert update_command("opencode", "2.1.0", "/usr/bin/opencode") == "opencode upgrade 2.1.0"
+    assert update_command("claude", "2.1.301", "/usr/bin/claude") == "claude update"
+
+    # The terminal resolves a different binary than the one Ciaobot runs.
+    monkeypatch.setattr("os.path.samefile", lambda a, b: False)
+    assert update_command("opencode", "2.1.0", "/opt/oc/opencode") == "/opt/oc/opencode upgrade 2.1.0"
+    monkeypatch.setattr("os.path.samefile", lambda a, b: (_ for _ in ()).throw(OSError("gone")))
+    assert update_command("claude", "2.1.301", "/opt/c/claude") == "/opt/c/claude update"
 
     monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
     spaced = "/Users/a b/bin/opencode"
@@ -260,6 +277,11 @@ def test_update_command_forms(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_update_command_rejects_unvalidated_versions(tested: str) -> None:
     with pytest.raises(ValueError):
         update_command("opencode", tested, "/x/opencode")
+
+
+def test_update_command_rejects_an_empty_binary(terminal_paths: None) -> None:
+    with pytest.raises(ValueError):
+        update_command("opencode", "2.1.0", "")
 
 
 def test_update_command_rejects_unknown_providers() -> None:

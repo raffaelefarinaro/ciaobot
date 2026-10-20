@@ -12,6 +12,7 @@ derived from server state (`resolve_folder`). The routes in
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -32,6 +33,10 @@ PLATFORM_MACOS, PLATFORM_WINDOWS, PLATFORM_LINUX, PLATFORM_OTHER = (
 
 GWS_INSTALL_COMMAND = "npm install -g @googleworkspace/cli"
 SKILLS_UPDATE_COMMAND = "npx skills update -g -y"
+
+class NothingToUpdate(Exception):
+    """An ``*-update`` action was requested but the provider is not older than tested."""
+
 
 ACTION_IDS: tuple[str, ...] = (
     "claude-install",
@@ -166,13 +171,14 @@ def capabilities() -> Capabilities:
 
 
 def _ps_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
+    # PowerShell treats the typographic single quotes as quotes too.
+    return "'" + re.sub("['\u2018\u2019\u201a\u201b]", lambda m: m.group(0) * 2, value) + "'"
 
 
 def action_command(action: str) -> str:
     """The command line for an allowlisted action id; KeyError for any other.
 
-    LookupError (not KeyError) when an update action has nothing to update.
+    NothingToUpdate when an update action has nothing to update.
     """
     if action not in ACTION_IDS:
         raise KeyError(action)
@@ -182,7 +188,7 @@ def action_command(action: str) -> str:
         provider = action.removesuffix("-update")
         check = provider_versions.current_checks().get(provider, {})
         if check.get("state") != "below_tested" or not check.get("command"):
-            raise LookupError(f"{action}: nothing to update")
+            raise NothingToUpdate(f"{action}: nothing to update")
         return check["command"]
     from ciao import setup_status
     from ciao.providers import opencode

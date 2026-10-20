@@ -229,6 +229,15 @@ def test_update_action_not_applicable_is_409(tmp_path: Path, monkeypatch: pytest
     assert rec.launches == []
 
 
+def test_a_lookup_error_from_launch_is_not_reported_as_not_applicable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, rec, _ = _client(tmp_path, monkeypatch)
+    rec.launch_error = LookupError("something else")
+    with pytest.raises(LookupError):
+        client.post(PATH, json={"action": "gws-install"}, headers=_signed(client))
+
+
 def test_launch_oserror_is_500(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, rec, _ = _client(tmp_path, monkeypatch)
     rec.launch_error = OSError("boom")

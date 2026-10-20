@@ -4756,7 +4756,7 @@ def opencode_login_status(*, timeout: float = 5.0, inventory: bool = True) -> di
             detail=OPENCODE_V2_REQUIRED,
             version=version or "unknown",
             terminal_action="opencode-install",
-            release_check={"state": "unsupported"},
+            release_check=release_check("opencode", version, binary=binary),
         )
     credentials = _credential_count(binary, timeout=timeout)
     # opencode's own free tier serves models with no credentials at all, so an
