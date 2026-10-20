@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -148,3 +150,11 @@ def test_non_claude_chats_never_get_the_variable(tmp_path: Path) -> None:
     manager = _manager(tmp_path, connectors=False)
     assert ENV_VAR not in manager._build_extra_env(_chat(manager, "opencode"))
     assert ENV_VAR not in manager._build_extra_env(_pass_chat(manager, "opencode"))
+
+
+@pytest.mark.parametrize("provider", ["claude", "opencode"])
+def test_chat_env_disables_credential_prompts(tmp_path: Path, provider: str) -> None:
+    manager = _manager(tmp_path, connectors=True)
+    env = manager._build_extra_env(_chat(manager, provider))
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GH_PROMPT_DISABLED"] == "1"
