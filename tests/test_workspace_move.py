@@ -783,3 +783,17 @@ def test_the_mac_move_job_shares_the_engine_bundle_ids(tmp_path: Path, monkeypat
     job = plistlib.loads((tmp_path / workspace_move.JOB_PLIST_NAME).read_bytes())
     assert job["AssociatedBundleIdentifiers"] == ["local.ciaobot.server"]
     assert calls[-1][0] == "bootstrap"
+
+
+def test_plan_warns_about_a_cloud_synced_destination(tmp_path: Path) -> None:
+    source = _workspace(tmp_path / "old")
+    (Path.home() / "Dropbox").mkdir(parents=True)
+    plan = _plan(source, Path.home() / "Dropbox" / "moved", platform="linux", admin=True)
+    assert plan.ok
+    assert any("Dropbox" in w for w in plan.warnings)
+
+
+def test_status_reports_cloud_sync_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(workspace_move, "default_state_dir", lambda: tmp_path / "state")
+    status = _client(tmp_path, peer="127.0.0.1").get("/api/workspace-move").json()
+    assert status["cloud_sync_warning"] == ""

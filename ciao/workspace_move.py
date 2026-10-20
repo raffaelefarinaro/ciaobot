@@ -469,6 +469,11 @@ def plan(
             "The Python environment in .venv names its old location and will stop "
             "working; recreate it after the move."
         )
+    from ciao.setup_status import cloud_sync_warning
+
+    cloud_warning = cloud_sync_warning(target, platform=platform)
+    if cloud_warning:
+        result.warnings.append(cloud_warning)
     worktrees = source / ".git" / "worktrees"
     if worktrees.is_dir() and any(worktrees.iterdir()):
         result.warnings.append(

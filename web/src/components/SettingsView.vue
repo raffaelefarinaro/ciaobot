@@ -378,6 +378,9 @@
             </p>
           </div>
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
+          <p v-if="workspaceMove?.cloud_sync_warning" class="hint hint--warn workspace-cloud-warning" role="note">
+            {{ workspaceMove.cloud_sync_warning }}
+          </p>
           <p v-if="workspaceMoveOutcome" class="hint workspace-move-outcome" :class="{ 'workspace-move-outcome--error': workspaceMoveOutcome.error }">
             {{ workspaceMoveOutcome.text }}
           </p>
@@ -2337,6 +2340,7 @@ interface WorkspaceMoveStatus {
   workspace_root: string
   local: boolean
   admin_only?: boolean
+  cloud_sync_warning?: string
   operation: WorkspaceMoveOperation | null
 }
 

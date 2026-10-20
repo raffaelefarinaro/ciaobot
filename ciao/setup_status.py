@@ -155,6 +155,93 @@ def tcc_protected_location(path: Path | str) -> str | None:
     return None
 
 
+# Sync clients mirror these folders to the cloud. A workspace inside one gets
+# conflicted copies of files the engine is writing and a .git directory
+# synced mid-write. Setup warns and never refuses: some people sync on purpose.
+_MAC_CLOUD_STORAGE_PREFIXES = (
+    ("Dropbox", "Dropbox"),
+    ("GoogleDrive", "Google Drive"),
+    ("OneDrive", "OneDrive"),
+    ("iCloudDrive", "iCloud Drive"),
+    ("Box", "Box"),
+)
+_WINDOWS_ONEDRIVE_ENV = ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
+
+
+def _parts_under(path: Path, base: Path) -> tuple[str, ...] | None:
+    """``path``'s parts below ``base``, trying both as written and resolved."""
+
+    def forms(p: Path) -> list[Path]:
+        out = [p.absolute()]
+        try:
+            out.append(p.resolve())
+        except (OSError, RuntimeError):
+            pass
+        return out
+
+    for candidate in forms(path):
+        for root in forms(base):
+            try:
+                return candidate.relative_to(root).parts
+            except ValueError:
+                continue
+    return None
+
+
+def cloud_synced_location(
+    path: Path | str,
+    *,
+    platform: str | None = None,
+    home: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> str | None:
+    """The sync service whose folder holds ``path`` ("iCloud Drive",
+    "Dropbox", ...), or None when the path is not in a known synced folder."""
+    platform = platform or sys.platform
+    home = home if home is not None else Path.home()
+    source = env if env is not None else os.environ
+    target = Path(path).expanduser()
+    if platform == "win32":
+        for name in _WINDOWS_ONEDRIVE_ENV:
+            root = str(source.get(name, "") or "").strip()
+            if root and _parts_under(target, Path(root)) is not None:
+                return "OneDrive"
+    parts = _parts_under(target, home)
+    if not parts:
+        return None
+    first = parts[0]
+    if platform == "darwin" and first == "Library":
+        if len(parts) >= 2 and parts[1] == "Mobile Documents":
+            return "iCloud Drive"
+        if len(parts) >= 3 and parts[1] == "CloudStorage":
+            for prefix, label in _MAC_CLOUD_STORAGE_PREFIXES:
+                if parts[2].startswith(prefix):
+                    return label
+            return "a cloud-synced folder"
+        return None
+    if first == "Dropbox" or first.startswith("Dropbox ("):
+        return "Dropbox"
+    if first == "Google Drive":
+        return "Google Drive"
+    if first.startswith("OneDrive"):
+        return "OneDrive"
+    if platform == "win32" and first == "iCloudDrive":
+        return "iCloud Drive"
+    return None
+
+
+def cloud_sync_warning(path: Path | str, **kwargs: Any) -> str:
+    """One sentence for every surface that shows a workspace path, or ""."""
+    service = cloud_synced_location(path, **kwargs)
+    if not service:
+        return ""
+    return (
+        f"{Path(path).expanduser()} is inside {service}. Sync apps can make "
+        "conflicted copies of files Ciaobot is writing and can break its Git "
+        "history. A folder that is not synced, such as ~/Ciaobot, is safer."
+    )
+
+
 def _check(
     *,
     check_id: str,
