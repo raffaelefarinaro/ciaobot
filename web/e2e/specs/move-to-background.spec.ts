@@ -248,6 +248,7 @@ test.describe('move a running call to the background (#1413), on a phone', () =>
     // must refuse and a 2.5s rule would have taken.
     await speak(page, [toolUse('toolu_e2e_open', 'echo first', false)])
     await expectStreaming(page)
+    await page.locator('.trace-block.live .trace-summary').click()
     await page.clock.runFor(200)
     await speak(page, [toolUse(MOVE_ID, 'sleep 300 && echo done', true)])
     // Prove the call landed before asserting anything is absent: without this
