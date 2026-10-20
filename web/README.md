@@ -87,6 +87,10 @@ current platform as a highlight, never a filter: all five rows are always on the
 page, and it only claims what this window can see (`isStandalone`), because a
 browser tab cannot know whether the app is installed on the device.
 
+Phone setup lives permanently in Settings → Other devices
+(`settings/SettingsDevices.vue`, anchor `#other-devices`); the Home setup card
+only links to it, and only on the computer running Ciaobot.
+
 
 The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quirks are addressed in code; do not undo them without reading why.
 
