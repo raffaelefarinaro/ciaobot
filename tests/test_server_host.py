@@ -280,20 +280,17 @@ _FOLDER_USAGE_KEYS = {
     "NSDownloadsFolderUsageDescription": "Downloads",
 }
 
-#: The uid the ownership record is written with in the tests that read one
-#: back. The reader checks the record's owner against this user's uid on
-#: macOS, and `os.getuid` does not exist on Windows, so the test patches the
-#: reader's own seam to the uid this process runs as - the one the record
-#: was written with.
-def _record_uid() -> int:
-    """This process's uid, the owner of the record the test writes.
+def _record_uid(record: Path) -> Callable[[], int]:
+    """A uid seam that answers with the ownership record's real owner.
 
-    ``os.getuid`` is read through ``getattr`` for the same reason the reader
-    reads it that way: it does not exist on Windows, where this test still
-    runs (it fakes the platform, and the reader then takes the macOS branch).
+    The reader compares the record's ``st_uid`` with this user's uid on macOS,
+    and ``os.getuid`` does not exist on Windows, where this test still runs
+    (it fakes the platform, and the reader then takes the macOS branch).
+    Reading the record's own ``st_uid`` keeps the comparison genuine on both:
+    the real uid on macOS, and ``0`` on Windows, which is what the test's own
+    record is owned by there.
     """
-    getuid: Callable[[], int] = getattr(os, "getuid")
-    return getuid()
+    return lambda: record.stat().st_uid
 
 
 def test_the_host_declares_the_folder_usage_strings() -> None:
@@ -325,11 +322,10 @@ def test_a_bundle_with_the_folder_usage_strings_still_verifies(
     from ciao import server_host
 
     # The record reader checks the owner against this user's uid on macOS,
-    # and `os.getuid` does not exist on Windows. The reader's own seam is
-    # patched to the uid the record was written with - the one this process
-    # runs as - so the check it makes is the one the test means to exercise
-    # (and the same isolation #1666 applied to the service test).
-    monkeypatch.setattr(server_host, "_getuid", _record_uid)
+    # and `os.getuid` does not exist on Windows. The seam is patched to the
+    # uid the record was written with - the record's own owner - so the check
+    # it makes is the one the test means to exercise (and the same isolation
+    # #1666 applied to the service test).
 
     bundle = tmp_path / server_host.APP_NAME
     for relative in (
@@ -358,6 +354,7 @@ def test_a_bundle_with_the_folder_usage_strings_still_verifies(
     record = tmp_path / "server-host.json"
     record.write_text(json.dumps(snapshot.to_record()), encoding="utf-8")
     os.chmod(record, 0o600)
+    monkeypatch.setattr(server_host, "_getuid", _record_uid(record))
     verified = server_host.verify_owned_host(
         bundle, ownership_path=record, runner=_plist_runner()
     )
