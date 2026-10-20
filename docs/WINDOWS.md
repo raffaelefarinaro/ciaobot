@@ -24,7 +24,7 @@ irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install
 
 When it finishes it prints a one-time sign-in link and opens it in your browser.
 The link signs you in once. Do not share it. If you lose it, run
-`ciao setup-url --workspace <your workspace folder>` for a new one.
+`ciao setup-url --workspace <your workspace folder>` for a new one. If the installer created your password, it also tells you that Ciaobot shows it once on Home on this computer.
 
 `iex` cannot take arguments, so to pass an option run the script as a script
 block:

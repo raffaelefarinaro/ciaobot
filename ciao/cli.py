@@ -1101,6 +1101,7 @@ def setup_workspace(
     )
     name = requested_name or "personal"
 
+    generated_password = not auth_token and "PWA_AUTH_TOKEN" not in existing_env
     token = auth_token or secrets.token_urlsafe(32)
     desired_env: list[tuple[str, str]] = [
         ("PWA_AUTH_TOKEN", token),
@@ -1155,6 +1156,16 @@ def setup_workspace(
         written.append(
             write_setup_marker(root / RUNTIME_DIR_NAME, vault_mode=vault_mode)
         )
+    if generated_password:
+        # Home shows the generated password once, on this computer.
+        from ciao.setup_marker import write_welcome_pending
+
+        written.append(write_welcome_pending(root / RUNTIME_DIR_NAME))
+    elif auth_token:
+        # A chosen password replaces any generated one the card would show.
+        from ciao.setup_marker import clear_welcome_pending
+
+        clear_welcome_pending(root / RUNTIME_DIR_NAME)
 
     runtime_root = root / RUNTIME_DIR_NAME
 
@@ -1643,6 +1654,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         print(
             "\nPassword protection is on. No --auth-token was given, so a random "
             f"password was written to {root / '.env'} (PWA_AUTH_TOKEN).\n"
+            "Ciaobot also shows it once on Home on this computer.\n"
             "Open Ciaobot with the login URL below and change it in "
             "Settings -> PWA password."
         )
