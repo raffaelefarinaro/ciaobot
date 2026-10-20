@@ -36,7 +36,7 @@ from ciao.setup_marker import RUNTIME_DIR_NAME
 from ciao.setup_status import detect_nested_workspaces
 from ciao.macos_service import default_launch_agents_dir, hosted_service_python, load_server_plist
 from ciao.jsonio import write_private_text
-from ciao.os_support.private import open_private
+from ciao.os_support.private import make_private, open_private
 from ciao.os_support.console import use_utf8_stdio
 from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.shell_hints import path_hint, path_hint_note
@@ -438,6 +438,7 @@ def _ensure_setup_token(workspace: Path) -> str:
     if path.exists():
         token = path.read_text(encoding="utf-8").strip()
         if token:
+            make_private(path)  # a file from an older version may be world-readable
             return token
     return _rotate_setup_token(workspace)
 
@@ -1687,10 +1688,17 @@ def _setup_url_command(args: argparse.Namespace) -> int:
 
     root = Path(args.workspace).expanduser().resolve()
     port = _pwa_port_from_env(root, args.port)
-    if args.rotate:
-        token = _rotate_setup_token(root)
-    else:
-        token = _ensure_setup_token(root)
+    try:
+        if args.rotate:
+            token = _rotate_setup_token(root)
+        else:
+            token = _ensure_setup_token(root)
+    except FileExistsError:
+        print(
+            "Could not write the setup token: another process created it at the same time. Run `ciao setup-url` again.",
+            file=sys.stderr,
+        )
+        return 1
     print(f"Workspace: {root}")
     print(f"http://localhost:{port}/?setup={token}")
     return 0

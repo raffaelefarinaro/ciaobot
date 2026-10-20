@@ -169,6 +169,16 @@ def _desktop_available() -> bool:
     return True
 
 
+def _open_failed_response() -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": "Could not open a browser on this computer. Run `ciao setup-url` in a terminal instead.",
+            "reason": "open_failed",
+        },
+        status_code=409,
+    )
+
+
 async def auth_host_sign_in(request: Request) -> JSONResponse:
     """Open a one-time sign-in page in the host's default browser.
 
@@ -237,7 +247,10 @@ async def auth_host_sign_in(request: Request) -> JSONResponse:
         )
     _last_host_sign_in = now
 
-    minted = mint_setup_token(request)
+    try:
+        minted = mint_setup_token(request)
+    except FileExistsError:
+        return _open_failed_response()
     if minted is None:
         return JSONResponse(
             {"error": "No workspace is configured.", "reason": "no_workspace"}, status_code=409
@@ -263,13 +276,7 @@ async def auth_host_sign_in(request: Request) -> JSONResponse:
         page.unlink(missing_ok=True)
         token_path.unlink(missing_ok=True)
         logger.warning("host sign-in could not open a browser: %s", exc)
-        return JSONResponse(
-            {
-                "error": "Could not open a browser on this computer. Run `ciao setup-url` in a terminal instead.",
-                "reason": "open_failed",
-            },
-            status_code=409,
-        )
+        return _open_failed_response()
     asyncio.get_running_loop().call_later(
         _SIGN_IN_PAGE_TTL_SECONDS, lambda: page.unlink(missing_ok=True)
     )

@@ -61,8 +61,10 @@ def _make_app(tmp_path, serializer, *, bootstrap_mode=False) -> Starlette:
     return app
 
 
-def _client(app, base_url="http://localhost:8443", peer="127.0.0.1") -> TestClient:
-    return TestClient(app, base_url=base_url, client=(peer, 5555))
+def _client(
+    app, base_url="http://localhost:8443", peer="127.0.0.1", **kwargs
+) -> TestClient:
+    return TestClient(app, base_url=base_url, client=(peer, 5555), **kwargs)
 
 
 _HOST_ORIGIN = {"Origin": "http://localhost:8443"}
@@ -249,3 +251,17 @@ def test_existing_world_readable_token_file_is_recreated_private(tmp_path, seria
 
     assert response.status_code == 200
     assert is_private(token_file)
+
+
+def test_token_create_race_is_an_open_failure_not_a_500(tmp_path, serializer, opened, monkeypatch):
+    def raced(*args, **kwargs):
+        raise FileExistsError("setup-token")
+
+    monkeypatch.setattr("ciao.web.auth.open_private", raced)
+    client = _client(_make_app(tmp_path, serializer), raise_server_exceptions=False)
+
+    response = client.post("/api/auth/host-sign-in", headers=_HOST_ORIGIN)
+
+    assert response.status_code == 409
+    assert response.json()["reason"] == "open_failed"
+    assert opened == []
