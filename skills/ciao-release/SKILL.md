@@ -238,7 +238,7 @@ task files in `skills/ciao-release/tasks/`:
 skills/ciao-release/tasks/01-boot-and-home.md        first paint, workspace, what-needs-you
 skills/ciao-release/tasks/02-chat-and-turns.md       start a chat, real turns, streaming, stop
 skills/ciao-release/tasks/03-archive-and-memory.md   archive, reopen, the archived footer
-skills/ciao-release/tasks/04-projects-and-schedule.md  a plain app project, an isolated vault note completion, a schedule row
+skills/ciao-release/tasks/04-projects-and-schedule.md  an app project with a scaffolded vault note, an isolated vault note completion, a schedule row
 skills/ciao-release/tasks/05-settings-and-assets.md  every Settings route loads, the scoped asset lists
 ```
 
