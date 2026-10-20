@@ -480,3 +480,39 @@ def test_ci_has_no_path_filter_job_and_still_runs_the_macos_job() -> None:
         "if: github.event_name != 'pull_request' || github.base_ref == 'main'"
         in workflow
     )
+
+
+def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
+    # A develop PR waits on the two parallel Linux jobs and on the Windows
+    # import and win32 mypy gates. The Windows suites take over a quarter of
+    # an hour on a hosted runner, so they share the macOS job's gate: pushes
+    # to develop and release PRs into main.
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    jobs = re.split(r"(?m)^  (?=[a-z-]+:\n)", workflow.split("\njobs:\n", 1)[1])
+    by_name = {job.split(":", 1)[0]: job for job in jobs if job.strip()}
+
+    assert "pytest -n auto tests/" in by_name["linux-server"]
+    assert "npm test" not in by_name["linux-server"]
+    assert "npm test" in by_name["linux-web"]
+    assert "npm run build" in by_name["linux-web"]
+
+    windows = by_name["windows"]
+    assert (
+        "WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}"
+        in windows
+    )
+    steps = dict(re.findall(r"(?ms)^    - name: ([^\n]+)\n(.*?)(?=^    - |\Z)", windows))
+    full = "if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}"
+    for name in ("Import every ciao module", "Python static type check (win32)"):
+        assert "WINDOWS_FULL" not in steps[name], f"{name!r} must run on every PR"
+    for name in (
+        "Windows backend tests",
+        "Windows frontend tests",
+        "Build install.ps1 offline fixture",
+        "Build install.ps1 end-to-end fixture",
+        "install.ps1 offline verification and analyzer (advisory)",
+        "install.ps1 end-to-end install and uninstall (advisory)",
+    ):
+        assert full in steps[name], f"{name!r} is not gated on WINDOWS_FULL"

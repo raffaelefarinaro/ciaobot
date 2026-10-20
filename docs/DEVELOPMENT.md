@@ -302,8 +302,9 @@ while the server is running, because the live schedule store may be writing it.
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.
 - **`main`** is release-only. Direct pushes and merges to `main` are blocked; only release PRs land there.
 - **CI** (`.github/workflows/ci.yml`) runs on pushes to `develop` and on pull requests into `develop` or `main`.
-  Every PR runs the `linux-server` job: `mypy ciao`, `pytest -n auto tests/`,
-  `npm test`, `npm run build` and a package smoke test, in about 5 minutes. The
+  Every PR runs two Linux jobs in parallel: `linux-server` (`mypy ciao`,
+  `pytest -n auto tests/` and a package smoke test, about 4 minutes) and
+  `linux-web` (`npm test` and `npm run build`, about 3 minutes). The
   full macOS `test` job (coverage, browser tests, and the engine wheel this
   branch would publish, installed into a throwaway venv and cold-started — the
   launchd, installer, engine-update and migration coverage — about 18 minutes)
@@ -313,11 +314,16 @@ while the server is running, because the live schedule store may be writing it.
   no diff for it to react to; a macOS-only regression in a `develop` PR shows up
   on the post-merge push run instead.
   The `windows` job (`windows-latest`, every PR and push) is blocking since
-  #696's C9: it imports every `ciao` module, runs `mypy ciao` (natively win32),
-  `pytest -n auto tests/` and `npm test`, and fails on any of the four. Every
-  gate runs even after an earlier one failed, the job summary lists the four
-  counts and the failing tests by name, and the full logs are in its
-  `windows-results` artifact. Its install.ps1 steps (dry runs under both
+  #696's C9. On every run it imports every `ciao` module and runs `mypy ciao`
+  (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate:
+  on pushes and PRs into `main` it also runs `pytest -n auto --durations=30
+  tests/` and `npm test`, which take about 15 minutes on a hosted runner, so a
+  PR into `develop` skips them and waits about 2 minutes. A Windows test
+  failure therefore surfaces on the post-merge push run, and `/ciao-release`
+  will not cut while that run is red. The job fails on any gate that ran. Every
+  gate runs even after an earlier one failed, the job summary lists the counts
+  and the failing tests by name, and the full logs are in its
+  `windows-results` artifact. Its install.ps1 steps (full runs only) (dry runs under both
   PowerShell hosts, the analyzer, and a real end-to-end install and
   `-Uninstall`) stay advisory: a hosted runner has no interactive logon, so a
   task that does not start there is a datum, not a verdict. Known flaky
