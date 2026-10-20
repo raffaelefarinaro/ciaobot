@@ -576,6 +576,29 @@ def _harness(tmp_path: Path, *, host_archive: Path | None = None) -> dict[str, A
         'exit 0\n',
     )
     _write_exec(fakebin / "osascript", "#!/bin/sh\nexit 1\n")
+    # `plutil` reads one key out of a plist. The installer asks it for the
+    # installed host's bundle version, so the stub answers with the version
+    # the test wrote into the plist, the way the real tool does. It is a
+    # script, not a binary, so it works on the Linux CI runner too.
+    _write_exec(
+        fakebin / "plutil",
+        "#!/bin/sh\n"
+        "# `plutil -extract CFBundleVersion raw -o - <plist>`\n"
+        'plist=""\n'
+        'for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        '        -*) continue ;;\n'
+        '        *) plist="$arg" ;;\n'
+        '    esac\n'
+        'done\n'
+        'if [ -f "$plist" ]; then\n'
+        f'    exec "{sys.executable}" -c '
+        "'import plistlib,sys; "
+        "print(plistlib.load(open(sys.argv[1],\"rb\")).get(\"CFBundleVersion\",\"\"))' "
+        '"$plist"\n'
+        'fi\n'
+        'exit 1\n',
+    )
     _write_exec(
         fakebin / "pgrep",
         '#!/bin/sh\n'
@@ -769,6 +792,74 @@ def test_a_first_host_install_does_not_warn_about_permissions(tmp_path: Path) ->
     assert result.returncode == 0, result.stderr
     assert "Ciaobot Server host installed and recorded." in result.stdout
     assert "Accessibility" not in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_replacing_a_superseded_host_warns_about_permissions(
+    tmp_path: Path,
+) -> None:
+    # A superseded host is replaced by the new one (#1659). The replacement
+    # changes the signed bytes macOS granted Accessibility/Automation to, so the
+    # user is told once that macOS will ask again.
+    #
+    # The revision is the constant, not a literal: a copy of the number here
+    # would stop matching on the next revision bump, and the warning is exactly
+    # what a user needs then.
+    from ciao.server_host import HOST_REVISION, LEGACY_HOST_REVISION
+
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    _write_host_plist(harness["home"], str(LEGACY_HOST_REVISION))
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "Ciaobot Server host installed and recorded." in result.stdout
+    assert "Accessibility" in result.stderr
+    assert "Automation" in result.stderr
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_a_current_revision_host_does_not_warn_about_permissions(
+    tmp_path: Path,
+) -> None:
+    # A host that is already the current revision is not replaced, so nothing
+    # changed and nothing is warned about.
+    from ciao.server_host import HOST_REVISION
+
+    host_archive = tmp_path / "host-build" / SERVER_HOST_FILENAME
+    host_archive.parent.mkdir(parents=True)
+    host_archive.write_bytes(b"the signed universal host archive")
+    harness = _harness(tmp_path, host_archive=host_archive)
+    _write_host_plist(harness["home"], str(HOST_REVISION))
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert "Ciaobot Server host installed and recorded." in result.stdout
+    assert "Accessibility" not in result.stderr
+
+
+def _write_host_plist(home: Path, revision: str) -> Path:
+    """A host bundle's Info.plist, with the given host revision."""
+    installed = home / "Applications" / "Ciaobot Server.app" / "Contents"
+    installed.mkdir(parents=True, exist_ok=True)
+    plist = installed / "Info.plist"
+    with plist.open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "local.ciaobot.server",
+                "CFBundleExecutable": "Ciaobot Server",
+                "CFBundleVersion": revision,
+                "CFBundleShortVersionString": revision,
+            },
+            handle,
+        )
+    return plist
 
 
 @runs_the_sh_installer

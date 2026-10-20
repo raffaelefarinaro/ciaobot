@@ -177,6 +177,51 @@ def _target(tmp_path: Path) -> Path:
     return tmp_path / "Applications" / APP_NAME
 
 
+def _make_superseded_bundle(root: Path) -> Path:
+    """A host bundle of the superseded revision, with the old identity fields."""
+    bundle = root / APP_NAME
+    (bundle / "Contents" / "MacOS").mkdir(parents=True)
+    (bundle / "Contents" / "Resources").mkdir(parents=True)
+    (bundle / "Contents" / "_CodeSignature").mkdir(parents=True)
+    (bundle / _EXE_REL).write_bytes(b"revision-two-host-binary")
+    (bundle / _ICON_REL).write_bytes(b"indigo-icns-bytes")
+    (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
+    info = BUILD.bundle_info()
+    info["CFBundleVersion"] = "2"
+    info["CFBundleShortVersionString"] = "2"
+    info[BUILD.HOST_PROTOCOL_KEY] = 1
+    with (bundle / _PLIST_REL).open("wb") as handle:
+        plistlib.dump(info, handle)
+    return bundle
+
+
+def _write_superseded_record(path: Path, bundle: Path) -> Path:
+    """The owner-only record a revision-2 installation would have written."""
+    document: dict[str, Any] = {
+        "schema": 1,
+        "bundle_path": os.fspath(bundle),
+        "bundle_id": BUNDLE_ID,
+        "host_revision": 2,
+        "host_protocol": 1,
+        "executable_sha256": hashlib.sha256(
+            (bundle / _EXE_REL).read_bytes()
+        ).hexdigest(),
+        "per_arch_cdhashes": dict(_CDHASH),
+        "bundle_files": {
+            _PLIST_REL: hashlib.sha256((bundle / _PLIST_REL).read_bytes()).hexdigest(),
+            _EXE_REL: hashlib.sha256((bundle / _EXE_REL).read_bytes()).hexdigest(),
+            _ICON_REL: hashlib.sha256((bundle / _ICON_REL).read_bytes()).hexdigest(),
+            _CODESIGN_REL: hashlib.sha256(
+                (bundle / _CODESIGN_REL).read_bytes()
+            ).hexdigest(),
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    return path
+
+
 # ── the digest and size gate ─────────────────────────────────────────────────
 
 
@@ -506,6 +551,194 @@ def test_install_refuses_a_revision_one_host_without_touching_it(
     assert caught.value.code == server_host_install.HOST_EXISTS
     assert legacy_exe.read_bytes() == exe_before
     assert record.read_bytes() == record_before
+    assert runner.commands == []
+
+
+@requires_posix_uid
+def test_install_replaces_a_superseded_revision_two_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The upgrade path for the revision bump (#1659). Without it the bump
+    # silently de-installs the host on every existing Mac: the revision-2
+    # record is refused, the installer says "a host already exists", and the
+    # engine install continues without a host at all.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    old_bundle = _make_superseded_bundle(target.parent)
+    record = _write_superseded_record(
+        tmp_path / "records" / "server-host.json", old_bundle
+    )
+    old_exe = (old_bundle / _EXE_REL).read_bytes()
+    runner = _FakeRunner()
+
+    snapshot = server_host_install.install_server_host(
+        archive, entry, bundle_path=target, ownership_path=record, runner=runner
+    )
+
+    # The new host is in place, and the record vouches for it.
+    assert snapshot.host_revision == 3
+    assert snapshot.bundle_path == os.path.realpath(target)
+    assert (target / _EXE_REL).read_bytes() == b"universal-host-binary"
+    assert read_host_ownership(record) == snapshot
+    # The old bundle is gone, not left lying beside the new one.
+    assert not (target.parent / f"{APP_NAME}.old").exists()
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_install_restores_the_superseded_host_when_the_replacement_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A replacement that fails must leave the Mac exactly as it was: the old
+    # bundle and the old record, together, so the host still verifies.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    old_bundle = _make_superseded_bundle(target.parent)
+    record = _write_superseded_record(
+        tmp_path / "records" / "server-host.json", old_bundle
+    )
+    old_exe = (old_bundle / _EXE_REL).read_bytes()
+    record_before = record.read_bytes()
+    runner = _FakeRunner()
+    real_rename = os.rename
+
+    def refuse_the_new_bundle(src: Any, dst: Any) -> None:
+        # Moving the superseded host aside succeeds; the rename of the new
+        # bundle onto the target fails, which is the point at which the old
+        # host and its record have to come back. The rollback's own rename
+        # (the moved-aside copy back onto the target) is not refused.
+        if os.fspath(dst) == os.fspath(target) and os.path.basename(
+            os.fspath(src)
+        ) == APP_NAME:
+            raise OSError(errno.EPERM, "Operation not permitted")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(server_host_install.os, "rename", refuse_the_new_bundle)
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive, entry, bundle_path=target, ownership_path=record, runner=runner
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+
+    # The old bundle is back, byte for byte, and so is its record.
+    assert target.is_dir()
+    assert (target / _EXE_REL).read_bytes() == old_exe
+    assert record.read_bytes() == record_before
+    # The old host still verifies against its own record: the pair was
+    # restored, not half of it.
+    assert server_host.verify_superseded_host(
+        target, ownership_path=record, runner=_FakeRunner()
+    ) is not None
+    # The staging directory is gone: nothing of this run survives.
+    assert sorted(item.name for item in target.parent.iterdir()) == [APP_NAME]
+
+
+@requires_posix_uid
+def test_a_failed_rollback_names_where_the_superseded_host_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A rollback that cannot put the old host back stops there and says where
+    # the host is. The old bundle is kept, not deleted: the user must be able
+    # to find it and put it back by hand.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    old_bundle = _make_superseded_bundle(target.parent)
+    record = _write_superseded_record(
+        tmp_path / "records" / "server-host.json", old_bundle
+    )
+    old_exe = (old_bundle / _EXE_REL).read_bytes()
+    runner = _FakeRunner()
+    real_rename = os.rename
+
+    def refuse_every_rename_to_the_target(src: Any, dst: Any) -> None:
+        # Both the new bundle's rename and the rollback's own rename fail.
+        if os.fspath(dst) == os.fspath(target):
+            raise OSError(errno.EPERM, "Operation not permitted")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(
+        server_host_install.os, "rename", refuse_every_rename_to_the_target
+    )
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive, entry, bundle_path=target, ownership_path=record, runner=runner
+        )
+    assert caught.value.code == server_host_install.INSTALL_FAILED
+    # The error names where the old host is, so the user can find it.
+    assert "it is kept at" in str(caught.value)
+    assert "superseded host" in str(caught.value)
+
+    # The old bundle is kept somewhere on disk, whole, and nowhere
+    # half-installed: the staging copy named in the error is still there.
+    kept = [
+        candidate
+        for candidate in target.parent.glob("**/superseded")
+        if (candidate / _EXE_REL).is_file()
+        and (candidate / _EXE_REL).read_bytes() == old_exe
+    ]
+    assert kept, "the superseded host was not kept anywhere"
+    # The error names that path, so the user can find it.
+    assert str(kept[0]) in str(caught.value)
+    # The target itself holds no half-installed bundle.
+    assert not target.exists() or not (target / _EXE_REL).exists()
+
+
+@requires_posix_uid
+def test_install_refuses_a_host_it_cannot_prove_it_owns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The replacement path must not weaken the refusal: a bundle at the target
+    # whose record does not prove it is ours is still refused and left
+    # untouched.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    archive, _bundle, entry = _fixture(tmp_path)
+    target = _target(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    foreign = target.parent / APP_NAME
+    (foreign / "Contents").mkdir(parents=True)
+    (foreign / "marker").write_text("someone else's host")
+    record = tmp_path / "records" / "server-host.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    # A record that names a different bundle: it proves nothing about this one.
+    record.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "bundle_path": os.fspath(tmp_path / "elsewhere" / APP_NAME),
+                "bundle_id": BUNDLE_ID,
+                "host_revision": 2,
+                "host_protocol": 1,
+                "executable_sha256": "a" * 64,
+                "per_arch_cdhashes": dict(_CDHASH),
+                "bundle_files": {
+                    _PLIST_REL: "a" * 64,
+                    _EXE_REL: "a" * 64,
+                    _ICON_REL: "a" * 64,
+                    _CODESIGN_REL: "a" * 64,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(record, 0o600)
+    marker = (foreign / "marker").read_text()
+    runner = _FakeRunner()
+
+    with pytest.raises(server_host_install.ServerHostInstallError) as caught:
+        server_host_install.install_server_host(
+            archive, entry, bundle_path=target, ownership_path=record, runner=runner
+        )
+    assert caught.value.code == server_host_install.HOST_EXISTS
+    assert (foreign / "marker").read_text() == marker
+    # A foreign bundle never reaches a native probe.
     assert runner.commands == []
 
 
@@ -1060,8 +1293,8 @@ def test_select_skips_a_host_this_engine_cannot_install(
     # verify_manifest follows. The selector's refusal becomes a spoken skip.
     future = _host_entry(
         filename="ciaobot-server-host-macos-universal-v2.tar.gz",
-        host_revision=2,
-        host_protocol=2,
+        host_revision=4,
+        host_protocol=3,
     )
     manifest, signature = _signed_manifest(tmp_path, future)
     public_key = (tmp_path / "public-key.txt").read_text(encoding="utf-8")
