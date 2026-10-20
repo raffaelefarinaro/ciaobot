@@ -1633,6 +1633,11 @@ if [ "$no_start" -eq 0 ]; then
     echo "Open Ciaobot: $url"
     echo "This link signs you in once. Do not share it."
 fi
+# `ciao setup` leaves this marker only when it generated the password itself
+# (ciao.setup_marker.WELCOME_PENDING_FILENAME); the app shows it once on Home.
+if [ "$migrate_path" != client ] && [ -f "$workspace/.runtime/welcome-pending" ]; then
+    echo "Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager."
+fi
 case ":${PATH:-}:" in
     *":$bin_dir:"*) ;;
     *) echo "Add ciao to your PATH: $uv tool update-shell" ;;
