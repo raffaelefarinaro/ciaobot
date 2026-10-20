@@ -419,6 +419,7 @@ case "${1:-}" in
             exit 143
         fi
         if [ -f "$HOME/fail-ciao-setup" ]; then exit 1; fi
+        if [ -f "$HOME/setup-generates-password" ]; then mkdir -p "$HOME/Ciaobot/.runtime" && : > "$HOME/Ciaobot/.runtime/welcome-pending"; fi
         # `ciao setup` reporting a workspace whose memory regions could not be
         # set up: its own exit code, with the warning on stderr, and every other
         # step of the workspace in place.
@@ -639,6 +640,37 @@ def _run_installer(
 def _log(harness: dict[str, Any], name: str) -> str:
     path: Path = harness["home"] / name
     return path.read_text(encoding="utf-8") if path.exists() else ""
+
+
+WELCOME_LINE = (
+    "Your Ciaobot password was created for you. Ciaobot shows it once on Home "
+    "on this computer: save it in your password manager."
+)
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_says_where_the_generated_password_is_shown(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    home: Path = harness["home"]
+    (home / "setup-generates-password").write_text("", encoding="utf-8")
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert WELCOME_LINE in result.stdout
+    assert f"  workspace: {home / 'Ciaobot'}" in result.stdout
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_installer_is_quiet_about_a_password_it_did_not_generate(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+
+    result = _run_installer(harness, "--version", VERSION, "--no-start")
+
+    assert result.returncode == 0, result.stderr
+    assert WELCOME_LINE not in result.stdout
 
 
 @runs_the_sh_installer

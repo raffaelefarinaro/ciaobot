@@ -391,3 +391,18 @@ def test_non_ascii_wrong_current_password_is_403_not_500(tmp_path: Path) -> None
 def test_non_ascii_current_password_that_matches_works(tmp_path: Path) -> None:
     client = TestClient(_app(tmp_path, token="pässwörd"), client=("10.0.0.9", 5555))
     assert _wrong(client, "pässwörd").status_code == 200
+
+
+def test_password_change_clears_welcome_pending(tmp_path: Path) -> None:
+    from ciao.setup_marker import welcome_pending, write_welcome_pending
+
+    write_welcome_pending(tmp_path / ".runtime")
+    client = TestClient(_app(tmp_path, token="old-secret"), client=("127.0.0.1", 5555))
+
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter2-new", "current_password": "old-secret"},
+    )
+
+    assert res.status_code == 200
+    assert welcome_pending(tmp_path / ".runtime") is False
