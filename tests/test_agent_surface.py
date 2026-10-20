@@ -350,6 +350,105 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         assert response.json()["error"]["code"] == "plan_mode_read_only"
 
 
+def test_task_delete_cli_mapping() -> None:
+    """One task id and the revision read with it; nothing that widens the blast radius."""
+    parser = agent_cli.build_parser()
+    assert agent_cli.resolve(
+        parser.parse_args(["task", "delete", "a" * 32, "--revision", "rev1"])
+    ) == ("task_delete", {"task_id": "a" * 32, "expected_revision": "rev1"})
+
+    for argv in (
+        ["task", "delete", "a" * 32],
+        ["task", "delete", "--revision", "rev1"],
+    ):
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(argv)
+        assert excinfo.value.code == 2
+    for flag in ("--force", "--workspace", "--path"):
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(
+                ["task", "delete", "a" * 32, "--revision", "rev1", flag, "x"]
+            )
+        assert excinfo.value.code == 2
+
+
+def test_task_delete_is_destructive_and_mutating(tmp_path: Path) -> None:
+    from ciao import mcp_server
+
+    service = _task_service(tmp_path)
+    assert "task_delete" in service.operation_table
+    assert (
+        mcp_server.OPERATIONS_BY_NAME["task_delete"].annotations
+        == mcp_server._DESTRUCTIVE
+    )
+
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Remove me"}).json()["data"]
+        response = _post(
+            client,
+            token,
+            "task_delete",
+            {"task_id": created["id"], "expected_revision": created["revision"]},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "ok": True,
+            "data": {"id": created["id"], "deleted": True},
+        }
+        gone = _post(client, token, "task_get", {"task_id": created["id"]})
+    assert gone.status_code == 422
+    assert gone.json()["error"]["code"] == "task_not_found"
+
+
+def test_plan_mode_cannot_delete_task(tmp_path: Path) -> None:
+    """The normal read-only refusal, plus the token and scope refusals, write nothing."""
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        created = _post(client, token, "task_create", {"title": "Still here"}).json()["data"]
+        path = (
+            service.control_plane.config.workspace_vault_root("personal")
+            / "Workspace"
+            / "Tasks"
+            / f"{created['id']}.md"
+        )
+        before = path.read_bytes()
+        service.control_plane.pcm.chat.mode = "plan"
+
+        denied = _post(
+            client,
+            token,
+            "task_delete",
+            {"task_id": created["id"], "expected_revision": created["revision"]},
+        )
+        assert denied.status_code == 422
+        assert denied.json()["error"]["code"] == "plan_mode_read_only"
+        assert path.read_bytes() == before
+
+        unauthenticated = _post(
+            client,
+            "",
+            "task_delete",
+            {"task_id": created["id"], "expected_revision": created["revision"]},
+        )
+        assert unauthenticated.status_code == 401
+        assert unauthenticated.json()["error"]["code"] == "unauthorized"
+
+        # Leave plan mode so the next refusal is the scope, not the gate.
+        service.control_plane.pcm.chat.mode = "auto"
+        other_workspace = _token(service, "chat-w", workspace="work")
+        cross = _post(
+            client,
+            other_workspace,
+            "task_delete",
+            {"task_id": created["id"], "expected_revision": created["revision"]},
+        )
+        assert cross.status_code == 422
+        assert cross.json()["error"]["code"] == "task_not_found"
+        assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -449,6 +548,10 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
         (
             ["task", "update", "a1b2", "--revision", "rev1", "--status", "in_review"],
             ("task_update", {"task_id": "a1b2", "expected_revision": "rev1", "status": "in_review"}),
+        ),
+        (
+            ["task", "delete", "a1b2", "--revision", "rev1"],
+            ("task_delete", {"task_id": "a1b2", "expected_revision": "rev1"}),
         ),
         (
             ["task", "move", "a1b2", "--to", "in_progress", "--revision", "rev1"],
@@ -551,6 +654,7 @@ def test_every_documented_command_parses(tmp_path: Path) -> None:
         "chat continue": ["--chat", "c"], "project create": ["--name", "n"], "project restore": ["s"],
         "project complete": ["p"], "project delete": ["p"], "task create": ["--title", "t"],
         "task get": ["a" * 32], "task update": ["a" * 32, "--revision", "r"],
+        "task delete": ["a" * 32, "--revision", "r"],
         "task move": ["a" * 32, "--to", "in_progress", "--revision", "r"],
         "task complete": ["a" * 32, "--revision", "r"],
         "task delegate": ["a" * 32, "--revision", "r"],

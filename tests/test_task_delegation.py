@@ -947,6 +947,52 @@ async def test_a_finished_turn_settles_ready_for_review_and_never_done(
     assert row["assignee"] == "agent"
 
 
+async def test_a_deleted_task_is_not_recreated_when_its_linked_turn_ends(
+    tmp_path: Path,
+) -> None:
+    """Deleting the task record during its turn leaves it deleted (#1607).
+
+    The watcher settles the attempt and asks to flag the task for review; both
+    are writes against a record that may be gone by then. A missing task must
+    stay missing — no callback may recreate the file, start another turn or
+    synthesize a completion. This is the precondition for exposing task
+    deletion to the agent surface.
+    """
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Delete me while the turn runs")
+    outcome = _delegate(plane, task)
+    _agent_says_done(plane)
+    path = _tasks_dir(plane) / f"{task['id']}.md"
+    current = _get_task(plane, task["id"])
+    assert path.is_file()
+
+    plane.workspace_task_delete(
+        "personal", task["id"], expected_revision=current["revision"]
+    )
+    assert not path.exists()
+
+    # A follow-up turn in the delegated chat re-attaches through the same
+    # callback. A missing task must not make that path recreate one either.
+    pcm.answer_in_chat("chat-1", "Follow-up after deletion")
+    assert not path.exists()
+
+    await _end_turns(pcm)
+
+    assert not path.exists(), "a watcher recreated the deleted task"
+    assert plane.workspace_task_list("personal") == []
+    with pytest.raises(ControlPlaneError) as excinfo:
+        _get_task(plane, task["id"])
+    assert excinfo.value.code == "task_not_found"
+    # The attempt still settles: deleting the card does not leave a turn
+    # recorded as running forever.
+    attempt = _attempt_store(plane).get(outcome["attempt"]["attempt_id"])
+    assert attempt.state == "ready_for_review"
+    # No callback started another chat, and the only turns are the delegation
+    # and the follow-up this test started itself.
+    assert len(_creates(pcm)) == 1
+    assert len(_starts(pcm)) == 2
+
+
 async def test_a_finished_turn_without_a_report_ignores_a_leftover_permission_card(
     tmp_path: Path,
 ) -> None:

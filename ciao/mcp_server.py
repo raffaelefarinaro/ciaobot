@@ -1110,6 +1110,30 @@ async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revisi
     )
 
 
+async def _op_task_delete(service: CiaoMcpService, task_id: str,
+                          expected_revision: str) -> dict[str, Any]:
+    """Permanently remove one task record the user asked you to delete.
+
+    Args:
+        task_id: The task's 32-hex id, from `task_list` or `task_get`.
+        expected_revision: The `revision` you read. A stale one removes
+            nothing — re-read rather than resending the same revision.
+
+    This removes only that task file, including the notes, history and
+    delegation log stored inside it. It does not delete or archive linked
+    chats, stop a running turn, discard attempt history, or complete the
+    task. Deletion is permanent and has no trash: do it only at the user's
+    request, and tell them the record is gone for good.
+    """
+    return await service._invoke(
+        "task_delete",
+        lambda cp, p: cp.task_delete(
+            p, task_id, expected_revision=expected_revision
+        ),
+        mutating=True,
+    )
+
+
 async def _op_task_delegate(service: CiaoMcpService, task_id: str,
                             expected_revision: str,
                             project_id: str | None = None) -> dict[str, Any]:
@@ -1467,6 +1491,9 @@ OPERATIONS: tuple[Operation, ...] = (
     Operation("task_get", _READ, _op_task_get.__doc__ or "", _op_task_get),
     Operation("task_create", _WRITE, _op_task_create.__doc__ or "", _op_task_create),
     Operation("task_update", _WRITE, _op_task_update.__doc__ or "", _op_task_update),
+    # `_DESTRUCTIVE`, because the record is unlinked with no trash. The agent
+    # may act only on the user's own request; removal is not completion.
+    Operation("task_delete", _DESTRUCTIVE, _op_task_delete.__doc__ or "", _op_task_delete),
     # `_WRITE`, not `_DESTRUCTIVE`: the store is the authority on agent
     # completion and refuses it, so this operation carries no reachable
     # destructive effect for an agent caller.
