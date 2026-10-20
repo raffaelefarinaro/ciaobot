@@ -43,7 +43,10 @@ def _workspace(root: Path) -> Path:
 def _plan(source: Path, target: Path | str, **kwargs: Any) -> workspace_move.MovePlan:
     defaults: dict[str, Any] = {
         "registered": source,
-        "python": "/opt/ciao/bin/python",
+        # A real, executable python: the host checks that the interpreter it
+        # is given exists and is runnable, so the plan checks the same thing
+        # before it lifts a refusal.
+        "python": sys.executable,
         "platform": "darwin",
         "state_dir": source.parent / "state",
     }
@@ -127,6 +130,33 @@ def test_plan_refuses_a_protected_folder_for_an_interpreter_the_host_refuses(
         home / "Documents" / "new",
         host=_verified_host(),
         python="/opt/ciao/bin/ciao",
+    )
+    assert not result.ok
+    assert any("background job" in r for r in result.refusals), result.refusals
+
+
+def test_plan_refuses_a_protected_folder_for_an_interpreter_that_does_not_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The host refuses a python that is not there to run, so the plan must
+    # keep refusing too: a plan that lifted the refusal for a move the host
+    # would refuse to launch sends the operator to a prompt that never
+    # appears.
+    #
+    # The path is named like a python on purpose: a name the host's *name*
+    # rule would accept, so the refusal can only come from the check that the
+    # file is there and runnable.
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr("ciao.setup_status.sys.platform", "darwin")
+
+    plain = _workspace(home / "old")
+    result = _plan(
+        plain,
+        home / "Documents" / "new",
+        host=_verified_host(),
+        python=str(tmp_path / "bin" / "python"),
     )
     assert not result.ok
     assert any("background job" in r for r in result.refusals), result.refusals
@@ -962,7 +992,11 @@ def test_the_mac_move_job_shares_the_engine_bundle_ids(tmp_path: Path, monkeypat
 #: The host the move runs under. The bundle path is a POSIX path, because the
 #: host's own argv rules are POSIX paths and a Windows ``tmp_path`` is not one.
 _HOST_BUNDLE = "/Users/me/Applications/Ciaobot Server.app"
-_HOST_PYTHON = "/opt/ciaobot/tool/bin/python"
+#: The interpreter the host would run. It has to be a real, executable python:
+#: the host's own parser checks that, so a path that does not exist would be
+#: refused at launch - and the move checks the same thing before it lifts the
+#: refusal, so the plan and the job can never disagree.
+_HOST_PYTHON = sys.executable
 
 
 def _verified_host(*, host_protocol: int = HOST_PROTOCOL) -> HostOwnership:

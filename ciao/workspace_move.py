@@ -448,6 +448,12 @@ def plan(
         # grant the user gives the host covers the move too (#1658). Without
         # one the job is a bare interpreter macOS never prompts for: the
         # folder stays refused.
+        #
+        # The plan and the spawn each verify the host for themselves, so a
+        # host that stops verifying between the two leaves the plan warning
+        # and the job running as a bare interpreter. That fails closed: the
+        # move cannot reach a protected folder without the host, and the
+        # denial path below reports it.
         through_host = _host_can_run_move(host, python)
         for label, path in (("destination", target), ("workspace", source)):
             protected = tcc_protected_location(path)
@@ -1108,15 +1114,26 @@ def _host_can_run_move(host: HostOwnership | None, python: str) -> bool:
 
     Only a host that speaks the protocol with the ``run-move`` operation can
     run the move: an older host has no such operation, and the move job would
-    be told to run something the host refuses. The interpreter must also be one
-    the host would accept, so this answer and the rendered command can never
-    disagree.
+    be told to run something the host refuses. The interpreter must also be
+    one the host would accept, so this answer and the rendered command can
+    never disagree.
+
+    The host's own parser checks that the interpreter *exists* and is
+    executable, not only that its name looks like a python. This checks the
+    same thing, so the plan never lifts the refusal for a move the host
+    would refuse to launch.
     """
     if host is None or host.host_protocol < MOVE_HOST_PROTOCOL:
         return False
     try:
-        host_interpreter(PurePosixPath(python))
+        interpreter = host_interpreter(PurePosixPath(python))
     except ServerHostError:
+        return False
+    try:
+        candidate = Path(interpreter)
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            return False
+    except OSError:
         return False
     return True
 
@@ -1351,6 +1368,13 @@ def _is_privacy_denial(exc: BaseException, platform: str | None = None) -> bool:
     (:func:`ciao.workspace_access.check_workspace_access`): a privacy denial
     is ``EPERM`` on macOS, while ``EACCES`` is an ordinary permission error
     that has nothing to do with a privacy grant.
+
+    ``EPERM`` is not exclusively a TCC refusal on macOS - a sticky-bit or
+    immutable-flag rename can raise it too. The convention is deliberately the
+    engine's own: a refusal is reported as a denial with the folder named
+    and the place to allow it, which is the actionable answer in the case
+    that actually happens here (the move touching a protected home folder),
+    and a rare non-TCC ``EPERM`` still ends in the same rollback.
     """
     return (
         (platform or sys.platform) == "darwin"
