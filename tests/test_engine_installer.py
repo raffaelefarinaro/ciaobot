@@ -3434,3 +3434,25 @@ def test_ordinary_install_still_creates_its_workspace(tmp_path: Path) -> None:
     )
     assert "migrated" not in _log(harness, "ciao-calls.log")
     assert not (home / ".local/state/ciaobot/migration").exists()
+
+
+@runs_the_sh_installer
+@needs_local_tools
+def test_migrate_host_reports_a_workspace_access_denial(tmp_path: Path) -> None:
+    # A macOS Files & Folders denial keeps the engine from ever answering. The
+    # supervisor records why outside the workspace; the abort reason names it.
+    harness = _harness(tmp_path)
+    _desktop_install(harness, tmp_path)
+    (harness["home"] / "startup-version").write_text("0.0.1\n", encoding="utf-8")
+    line = "macOS denied Ciaobot Server access to /w: allow it in System Settings."
+    record = harness["home"] / ".local/state/ciaobot/workspace-access-denied.txt"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(line + "\n", encoding="utf-8")
+    untouched = _replaced_state(harness)
+
+    result = _run_installer(harness, "--version", VERSION, "--migrate")
+
+    assert result.returncode == 1
+    assert line in result.stderr
+    assert _migration_receipt(harness)["phase"] == "rolled_back"
+    assert _replaced_state(harness) == untouched

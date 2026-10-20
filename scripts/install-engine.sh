@@ -1531,11 +1531,21 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
         attempt=$((attempt + 1))
         "$SLEEP" 1
     done
+    # Written by the supervisor when macOS denies the workspace; the path is
+    # ciao.workspace_access.denial_path() (DENIAL_FILE_NAME): keep both in sync.
+    access_denied=$(cat "$HOME/.local/state/ciaobot/workspace-access-denied.txt" 2>/dev/null || true)
     if [ "$healthy" -eq 0 ]; then
         if [ "$migrate_path" = host ]; then
+            if [ -n "$access_denied" ]; then
+                abort_install "$access_denied"
+            fi
             abort_install "the new engine did not answer on http://localhost:$port with version $version within ${health_attempts}s; check: $ciao service status"
         fi
-        echo "Ciaobot engine installer: the engine is still starting; check: ciao service status" >&2
+        if [ -n "$access_denied" ]; then
+            echo "Ciaobot engine installer: $access_denied" >&2
+        else
+            echo "Ciaobot engine installer: the engine is still starting; check: ciao service status" >&2
+        fi
     fi
 fi
 
