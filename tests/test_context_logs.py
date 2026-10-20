@@ -74,10 +74,42 @@ async def test_context_logs_bounds_lines(tmp_path: Path) -> None:
     (tmp_path / ".runtime" / "server_errors.log").write_text("a\nb\nc\nd\ne\n")
 
     two = await plane.context_logs(principal, lines=2)
-    assert two["data"]["error_log"] == "d\ne\n"
+    body = _body(two["data"]["error_log"], "ciao-log")
+    assert body.rstrip("\n").endswith("d\ne")
+    assert "c" not in body
     assert (await plane.context_logs(principal, lines=0))["data"]["lines"] == 1
     assert (await plane.context_logs(principal, lines=10**6))["data"]["lines"] == 1000
 
 
 def test_tail_service_log_is_empty_without_a_file(tmp_path: Path) -> None:
     assert tail_service_log(tmp_path) == ""
+
+
+def _body(text: str, tag: str) -> str:
+    start = text.index(f"<{tag} ")
+    start = text.index(">\n", start) + 2
+    return text[start : text.rindex(f"\n</{tag}>")]
+
+
+async def test_context_logs_redacts_and_fences(tmp_path: Path) -> None:
+    pcm, plane, project = _setup(tmp_path)
+    chat = pcm.create_chat(project.project_id, title="diag")
+    (tmp_path / ".runtime" / "server_errors.log").write_text("api_key=SECRET123\n")
+
+    data = (await plane.context_logs(_principal(chat.chat_id, project.project_id)))["data"]
+
+    assert "SECRET123" not in data["error_log"]
+    assert '<ciao-log name="error_log">' in data["error_log"]
+    assert data["service_log"] == ""
+
+
+async def test_context_logs_caps_characters_keeping_the_end(tmp_path: Path) -> None:
+    pcm, plane, project = _setup(tmp_path)
+    chat = pcm.create_chat(project.project_id, title="diag")
+    (tmp_path / ".runtime" / "server_errors.log").write_text("x " * 40_000 + "THE-END\n")
+
+    data = (await plane.context_logs(_principal(chat.chat_id, project.project_id)))["data"]
+
+    body = _body(data["error_log"], "ciao-log")
+    assert len(body) <= 64_000
+    assert body.rstrip("\n").endswith("THE-END")
