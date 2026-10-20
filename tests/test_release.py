@@ -845,7 +845,7 @@ def test_main_apply_writes_and_stages_provider_record(
     assert result == 0
     add_commands = [cmd for cmd in commands if cmd[:2] == ["git", "add"]]
     assert len(add_commands) == 1
-    assert "ciao/stock/provider-versions.json" in add_commands[0][2:]
+    assert str(release_mod.PROVIDER_RECORD_RELPATH) in add_commands[0][2:]
     import json
 
     from ciao.provider_versions import validate_record
