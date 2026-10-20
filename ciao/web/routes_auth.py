@@ -85,12 +85,26 @@ async def auth_check(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+def _on_host(request: Request) -> bool:
+    """A browser on the computer running Ciaobot, with an exact same-origin source.
+
+    `host_browser_request` compares host names only, so the port-exact
+    Origin/Referer check is added here. The same predicate backs the `on_host`
+    flag, so the UI never offers a path the server would refuse.
+    """
+    from ciao.web.auth import _same_origin_source
+    from ciao.web.routes_api import host_browser_request
+
+    return host_browser_request(request) and _same_origin_source(request)
+
+
 async def auth_settings_get(request: Request) -> JSONResponse:
-    """Return whether a PWA password is configured (never the password)."""
+    """Return whether a PWA password is configured (never the password) and whether this browser is on the host."""
     config = request.app.state.config
     return JSONResponse(
         {
             "password_configured": bool(str(getattr(config, "pwa_auth_token", "") or "").strip()),
+            "on_host": _on_host(request),
         }
     )
 
@@ -98,10 +112,12 @@ async def auth_settings_get(request: Request) -> JSONResponse:
 async def auth_settings_update(request: Request) -> JSONResponse:
     """Set or change the PWA password.
 
-    Body: ``{ "password": str, "current_password": str }``.
+    Body: ``{ "password": str, "current_password"?: str }``.
 
-    Password protection is always on, so ``current_password`` is always
-    required. A forgotten password is recovered from ``PWA_AUTH_TOKEN`` in the
+    Password protection is always on. ``current_password`` is required unless
+    the request comes from a browser on the host (``host_browser_request`` plus
+    an exact same-origin source), which still needs the session. A request
+    relayed by ``tailscale serve`` or any local proxy is not the host. A forgotten password is recovered from ``PWA_AUTH_TOKEN`` in the
     workspace ``.env``, or with a one-time ``ciao setup-url`` login. A missing
     or wrong ``current_password`` is 400/403, never 401: 401 means the session
     is gone, and the PWA sends the browser to /login on it.
@@ -120,17 +136,25 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     current_token = str(getattr(config, "pwa_auth_token", "") or "")
     new_password = str(body.get("password") or "")
     current_password = str(body.get("current_password") or "")
+    on_host = _on_host(request)
 
-    if not current_password:
-        return JSONResponse(
-            {"error": "Enter your current password.", "code": "current_password_required"},
-            status_code=400,
-        )
-    if not hmac.compare_digest(current_password, current_token):
-        return JSONResponse(
-            {"error": "Current password is incorrect.", "code": "wrong_current_password"},
-            status_code=403,
-        )
+    if on_host:
+        if not new_password.strip():
+            return JSONResponse(
+                {"error": "Enter a new password.", "code": "new_password_required"},
+                status_code=400,
+            )
+    else:
+        if not current_password:
+            return JSONResponse(
+                {"error": "Enter your current password.", "code": "current_password_required"},
+                status_code=400,
+            )
+        if not hmac.compare_digest(current_password, current_token):
+            return JSONResponse(
+                {"error": "Current password is incorrect.", "code": "wrong_current_password"},
+                status_code=403,
+            )
 
     token_to_store = new_password.strip() or current_token
     if not token_to_store:
@@ -144,6 +168,7 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     _write_env_values(_env_path(config), {"PWA_AUTH_TOKEN": token_to_store})
     config.pwa_auth_token = token_to_store
     request.app.state.serializer = make_serializer(token_to_store)
+    logger.info("PWA password changed (on_host=%s)", on_host)
 
     response = JSONResponse(
         {

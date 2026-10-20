@@ -9,6 +9,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.web.auth import SESSION_COOKIE, AuthMiddleware, make_serializer
+from tests.test_auth_security import _TAILSCALE_SERVE_HEADERS
 from ciao.web.routes_auth import auth_settings_get, auth_settings_update
 from ciao.os_support.private import is_private
 
@@ -33,7 +34,7 @@ def test_auth_settings_get(tmp_path: Path) -> None:
     client = TestClient(_app(tmp_path, token="old-secret"))
     res = client.get("/api/auth/settings")
     assert res.status_code == 200
-    assert res.json() == {"password_configured": True}
+    assert res.json() == {"password_configured": True, "on_host": False}
 
 
 def test_auth_settings_change_writes_only_the_token(tmp_path: Path) -> None:
@@ -77,8 +78,8 @@ def test_auth_settings_change_requires_current_password(tmp_path: Path) -> None:
     assert ok.json()["password_configured"] is True
 
 
-def test_auth_settings_change_needs_the_current_password_from_loopback_too(tmp_path: Path) -> None:
-    """Protection is always on: there is no first-password path without proof."""
+def test_loopback_peer_without_a_loopback_host_needs_the_current_password(tmp_path: Path) -> None:
+    """A loopback peer is not the host unless Host also names loopback."""
     app = _app(tmp_path, token="old-secret")
     client = TestClient(app, client=("127.0.0.1", 5555))
 
@@ -136,3 +137,163 @@ def test_auth_settings_change_from_remote_peer_still_works(tmp_path: Path) -> No
     )
     assert res.status_code == 200
     assert app.state.config.pwa_auth_token == "new-secret"
+
+
+HOST_URL = "http://localhost:8443"
+HOST_PEER = ("127.0.0.1", 5555)
+
+
+def _app_with_middleware(tmp_path: Path, token: str = "old-secret") -> Starlette:
+    serializer = make_serializer(token)
+    app = Starlette(
+        routes=[
+            Route("/api/auth/settings", auth_settings_get, methods=["GET"]),
+            Route("/api/auth/settings", auth_settings_update, methods=["POST"]),
+        ],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = SimpleNamespace(pwa_auth_token=token, workspace_root=tmp_path)
+    app.state.serializer = serializer
+    return app
+
+
+def _cookie(app: Starlette) -> dict[str, str]:
+    return {SESSION_COOKIE: app.state.serializer.dumps({"user": "owner"})}
+
+
+def test_auth_settings_get_reports_on_host_for_a_host_browser(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path), base_url=HOST_URL, client=HOST_PEER)
+    assert client.get("/api/auth/settings").json()["on_host"] is True
+
+
+def test_auth_settings_get_is_not_on_host_through_tailscale_serve(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path), base_url=HOST_URL, client=HOST_PEER)
+    res = client.get("/api/auth/settings", headers=_TAILSCALE_SERVE_HEADERS)
+    assert res.json()["on_host"] is False
+
+
+def test_auth_settings_get_is_not_on_host_for_a_cross_origin_referer(tmp_path: Path) -> None:
+    """The flag uses the same predicate as the change, so the UI never offers a refused path."""
+    client = TestClient(_app(tmp_path), base_url=HOST_URL, client=HOST_PEER)
+    res = client.get("/api/auth/settings", headers={"Origin": "http://localhost:9999"})
+    assert res.json()["on_host"] is False
+
+
+def test_host_browser_changes_the_password_without_the_current_one(tmp_path: Path) -> None:
+    app = _app_with_middleware(tmp_path)
+    client = TestClient(app, base_url=HOST_URL, client=HOST_PEER)
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter22"},
+        cookies=_cookie(app),
+        headers={"Origin": HOST_URL},
+    )
+    assert res.status_code == 200
+    assert "PWA_AUTH_TOKEN=hunter22" in (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "ciao_session=" in res.headers.get("set-cookie", "")
+
+
+def test_host_browser_ignores_a_wrong_current_password(tmp_path: Path) -> None:
+    app = _app_with_middleware(tmp_path)
+    client = TestClient(app, base_url=HOST_URL, client=HOST_PEER)
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter22", "current_password": "nope"},
+        cookies=_cookie(app),
+        headers={"Origin": HOST_URL},
+    )
+    assert res.status_code == 200
+    assert app.state.config.pwa_auth_token == "hunter22"
+
+
+def test_host_browser_with_a_different_port_origin_still_needs_the_current_password(tmp_path: Path) -> None:
+    """host_browser_request ignores ports; the exemption must not."""
+    app = _app(tmp_path)
+    client = TestClient(app, base_url=HOST_URL, client=HOST_PEER)
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter22"},
+        headers={"Origin": "http://localhost:9999"},
+    )
+    assert res.status_code == 400
+    assert res.json()["code"] == "current_password_required"
+    assert app.state.config.pwa_auth_token == "old-secret"
+
+
+def test_host_browser_still_needs_a_session(tmp_path: Path) -> None:
+    app = _app_with_middleware(tmp_path)
+    client = TestClient(app, base_url=HOST_URL, client=HOST_PEER)
+    res = client.post(
+        "/api/auth/settings", json={"password": "hunter22"}, headers={"Origin": HOST_URL}
+    )
+    assert res.status_code == 401
+    assert app.state.config.pwa_auth_token == "old-secret"
+    assert not (tmp_path / ".env").exists()
+
+
+def test_tailscale_serve_caller_still_needs_the_current_password(tmp_path: Path) -> None:
+    app = _app_with_middleware(tmp_path)
+    url = "https://mini.tail1.ts.net"
+    client = TestClient(app, base_url=url, client=HOST_PEER)
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter22"},
+        cookies=_cookie(app),
+        headers={**_TAILSCALE_SERVE_HEADERS, "Origin": url},
+    )
+    assert res.status_code == 400
+    assert res.json()["code"] == "current_password_required"
+    assert app.state.config.pwa_auth_token == "old-secret"
+
+    client = TestClient(app, base_url=HOST_URL, client=HOST_PEER)
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter22"},
+        cookies=_cookie(app),
+        headers={"X-Forwarded-For": "100.1.2.3", "Origin": HOST_URL},
+    )
+    assert res.status_code == 400
+    assert app.state.config.pwa_auth_token == "old-secret"
+
+
+def test_remote_peer_still_needs_the_current_password(tmp_path: Path) -> None:
+    app = _app_with_middleware(tmp_path)
+    client = TestClient(app, base_url=HOST_URL, client=("10.0.0.9", 5555))
+    headers = {"Origin": HOST_URL}
+    res = client.post(
+        "/api/auth/settings", json={"password": "hunter22"}, cookies=_cookie(app), headers=headers
+    )
+    assert res.status_code == 400
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter22", "current_password": "wrong"},
+        cookies=_cookie(app),
+        headers=headers,
+    )
+    assert res.status_code == 403
+    assert app.state.config.pwa_auth_token == "old-secret"
+
+
+def test_rebound_host_on_loopback_peer_is_not_on_host(tmp_path: Path) -> None:
+    app = _app_with_middleware(tmp_path)
+    url = "http://evil.example:8443"
+    client = TestClient(app, base_url=url, client=HOST_PEER)
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter22"},
+        cookies=_cookie(app),
+        headers={"Origin": url},
+    )
+    assert res.status_code == 400
+    assert app.state.config.pwa_auth_token == "old-secret"
+
+
+def test_host_browser_needs_a_new_password(tmp_path: Path) -> None:
+    app = _app_with_middleware(tmp_path)
+    client = TestClient(app, base_url=HOST_URL, client=HOST_PEER)
+    res = client.post(
+        "/api/auth/settings", json={}, cookies=_cookie(app), headers={"Origin": HOST_URL}
+    )
+    assert res.status_code == 400
+    assert res.json()["code"] == "new_password_required"
+    assert not (tmp_path / ".env").exists()

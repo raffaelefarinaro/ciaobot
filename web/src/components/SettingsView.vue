@@ -467,7 +467,7 @@
           <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
           <template v-else>
             <div class="settings-form-panel">
-              <label class="settings-field">
+              <label v-if="!authSettings.on_host" class="settings-field">
                 <span class="ws-label">Current password</span>
                 <input
                   id="auth-current-password"
@@ -481,6 +481,7 @@
                 />
                 <span v-if="authCurrentPasswordError" id="auth-current-password-error" class="hint hint--warn" role="alert">{{ authCurrentPasswordError }}</span>
               </label>
+              <p v-if="authSettings.on_host" class="hint">You're on the computer running Ciaobot, so you don't need the current password here.</p>
               <label class="settings-field">
                 <span class="ws-label">New password</span>
                 <input
@@ -4299,6 +4300,7 @@ async function fetchLocalStatus() {
 // ── PWA password (Settings → home) ─────────────────────────────────────
 interface AuthSettings {
   password_configured: boolean
+  on_host?: boolean
 }
 
 const authSettings = ref<AuthSettings | null>(null)
@@ -4310,12 +4312,13 @@ const authSettingsSaving = ref(false)
 const authSettingsResult = ref('')
 const authSettingsError = ref(false)
 
-// Protection is always on, so this card only changes the password, and the
-// server always asks for the current one.
+// Protection is always on, so this card only changes the password. The server
+// asks for the current one except from a browser on the computer running
+// Ciaobot, which reports `on_host`.
 const canSaveAuthSettings = computed(() => {
   if (!authSettings.value) return false
   if (!authNewPassword.value.trim()) return false
-  if (!authCurrentPassword.value) return false
+  if (!authSettings.value.on_host && !authCurrentPassword.value) return false
   return true
 })
 
@@ -4334,11 +4337,11 @@ async function saveAuthSettings() {
   authSettingsError.value = false
   authCurrentPasswordError.value = ''
   try {
-    const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', {
-      password: authNewPassword.value,
-      current_password: authCurrentPassword.value,
-    })
+    const body: Record<string, string> = { password: authNewPassword.value }
+    if (!authSettings.value.on_host) body.current_password = authCurrentPassword.value
+    const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', body)
     authSettings.value = {
+      ...authSettings.value,
       password_configured: res.password_configured,
     }
     authCurrentPassword.value = ''

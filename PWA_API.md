@@ -6,7 +6,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 ## Auth And Browser Security
 
-- Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is always required). A missing current password is 400 `current_password_required`, a wrong one 403 `wrong_current_password`; neither is 401, which is reserved for a missing session. A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login.
+- Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is required, except from a browser on the host: loopback TCP peer with no reverse-proxy headers, loopback `Host`, exact same-origin `Origin`/`Referer` - the session is still required; `tailscale serve` callers are not the host). A missing current password is 400 `current_password_required`, a wrong one 403 `wrong_current_password`; neither is 401, which is reserved for a missing session. A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login.
 - `POST /api/auth` accepts `{"token": "<PWA_AUTH_TOKEN>"}` and returns an HttpOnly `ciao_session` cookie.
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
@@ -30,7 +30,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth` | Login with `PWA_AUTH_TOKEN` |
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
-| GET, POST | `/api/auth/settings` | Read whether a password is configured, or change the PWA password (`current_password` required) |
+| GET, POST | `/api/auth/settings` | Read whether a password is configured and whether this browser is on the host (`on_host`), or change the PWA password (`current_password` required unless on the host) |
 | GET | `/api/projects` | List projects. Each carries `repo_path` and `repo`: `{path, branch, dirty, missing, instructions}` or `null` when unlinked. `instructions` is `{name, chars}` for the AGENTS.md (CLAUDE.md when there is no AGENTS.md) that code mode injects, `chars` being the injected text's length after the 20,000-character cap, or `null` when there is none or the folder is missing |
 | POST | `/api/projects` | Create project. Optional `repo_path` links a local git checkout (absolute path to its top level; 400 with the reason otherwise) |
 | PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project. PATCH accepts `repo_path` (`""` unlinks) |
