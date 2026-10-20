@@ -43,13 +43,17 @@ jobs:
       run: mypy ciao
     - name: Linux backend tests
       run: pytest -n auto tests/
-    - name: Smoke-test installed package
-      run: ciao package-smoke --skip-frontend
 
+  # The package smoke installs the wheel and serves the packaged PWA, so it
+  # runs here, after the build has written ciao/web/static.
   linux-web:
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+        cache: 'pip'
     - uses: actions/setup-node@v7
       with:
         node-version: '22'
@@ -64,6 +68,10 @@ jobs:
     - name: Build PWA
       working-directory: web
       run: npm run build
+    - name: Install Python package
+      run: python -m pip install -e .
+    - name: Smoke-test installed package
+      run: ciao package-smoke --skip-frontend
 
   windows:
     runs-on: windows-latest

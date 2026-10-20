@@ -497,6 +497,9 @@ def test_develop_prs_run_linux_split_and_only_fast_windows_gates() -> None:
     assert "npm test" not in by_name["linux-server"]
     assert "npm test" in by_name["linux-web"]
     assert "npm run build" in by_name["linux-web"]
+    # The smoke serves the packaged PWA, so it must follow the build.
+    web = by_name["linux-web"]
+    assert web.index("npm run build") < web.index("ciao package-smoke --skip-frontend")
 
     windows = by_name["windows"]
     assert (
