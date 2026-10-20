@@ -99,3 +99,13 @@ def test_the_receipt_records_that_it_was_born_this_way(tmp_path: Path) -> None:
     assert receipt["born_per_root"] is True
     assert receipt["origin"] == "born"
     assert receipt["moves"] == []
+
+
+def test_a_fresh_setup_has_nothing_to_review(tmp_path: Path) -> None:
+    from ciao.vault_review import generate_candidates
+
+    _fresh(tmp_path)
+
+    assert generate_candidates(
+        tmp_path / "personal" / "memory-vault", workspace="personal", write_queue=False
+    ) == []

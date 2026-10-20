@@ -5,10 +5,12 @@ from __future__ import annotations
 import hmac
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao.setup_marker import RUNTIME_DIR_NAME, clear_welcome_pending
 from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
 
 logger = logging.getLogger(__name__)
@@ -102,7 +104,9 @@ async def auth_settings_update(request: Request) -> JSONResponse:
 
     Password protection is always on, so ``current_password`` is always
     required. A forgotten password is recovered from ``PWA_AUTH_TOKEN`` in the
-    workspace ``.env``, or with a one-time ``ciao setup-url`` login.
+    workspace ``.env``, or with a one-time ``ciao setup-url`` login. A missing
+    or wrong ``current_password`` is 400/403, never 401: 401 means the session
+    is gone, and the PWA sends the browser to /login on it.
     """
     from ciao.web.auth import MIN_PWA_PASSWORD_LENGTH, make_serializer
     from ciao.web.routes_api import _env_path, _write_env_values
@@ -119,10 +123,15 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     new_password = str(body.get("password") or "")
     current_password = str(body.get("current_password") or "")
 
-    if not current_password or not hmac.compare_digest(current_password, current_token):
+    if not current_password:
         return JSONResponse(
-            {"error": "Current password is required (and must match)"},
-            status_code=401,
+            {"error": "Enter your current password.", "code": "current_password_required"},
+            status_code=400,
+        )
+    if not hmac.compare_digest(current_password, current_token):
+        return JSONResponse(
+            {"error": "Current password is incorrect.", "code": "wrong_current_password"},
+            status_code=403,
         )
 
     token_to_store = new_password.strip() or current_token
@@ -135,6 +144,8 @@ async def auth_settings_update(request: Request) -> JSONResponse:
         )
 
     _write_env_values(_env_path(config), {"PWA_AUTH_TOKEN": token_to_store})
+    # The generated password the welcome card would show is no longer the password.
+    clear_welcome_pending(Path(config.workspace_root) / RUNTIME_DIR_NAME)
     config.pwa_auth_token = token_to_store
     request.app.state.serializer = make_serializer(token_to_store)
 

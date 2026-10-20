@@ -6229,7 +6229,7 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     name that will be assigned to the selected folder.
     """
     from ciao.cli import detect_vault_mode
-    from ciao.setup_status import detect_nested_workspaces
+    from ciao.setup_status import cloud_sync_warning, detect_nested_workspaces
 
     guard = _setup_fs_guard(request)
     if guard is not None:
@@ -6255,6 +6255,7 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
         "mode": mode,
         "vault_root": str(vault_root),
         "existing_workspaces": nested,
+        "cloud_sync_warning": cloud_sync_warning(target),
     })
 
 
@@ -6323,11 +6324,14 @@ def _workspace_move_guard(request: Request) -> JSONResponse | None:
 async def workspace_move_status_endpoint(request: Request) -> JSONResponse:
     """Where the workspace is, whether this browser may move it, and the last move."""
     from ciao import workspace_move
+    from ciao.setup_status import cloud_sync_warning
 
     op = await asyncio.to_thread(workspace_move.read_operation)
+    root = Path(request.app.state.config.workspace_root).resolve()
     return JSONResponse(
         {
-            "workspace_root": str(Path(request.app.state.config.workspace_root).resolve()),
+            "workspace_root": str(root),
+            "cloud_sync_warning": cloud_sync_warning(root),
             "local": _workspace_move_local(request),
             # On Linux the service account cannot stop its own root-owned
             # unit; the administrator moves it with `sudo ciao workspace-move`.

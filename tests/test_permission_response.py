@@ -387,3 +387,348 @@ async def test_denial_retracts_the_tool_card_before_v2_consumes_the_request(
     )
     tool_event = next(event for event in events if event.get("type") == "tool_use")
     assert "file_touch" not in tool_event
+
+
+class _PostClient:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, object]] = []
+
+    async def post(self, path: str, json: object = None, **_: object) -> SimpleNamespace:
+        self.posts.append((path, json))
+        return SimpleNamespace(status_code=204, text="")
+
+
+def _asked(request_id: str, session_id: str, action: str, command: str, call: str) -> dict:
+    return {"type": "permission.asked", "data": {
+        "id": request_id, "sessionID": session_id, "action": action,
+        "resources": [command], "metadata": {"command": command},
+        "source": {"type": "tool", "messageID": "msg_1", "id": call},
+    }}
+
+
+def _opencode_chat(
+    tmp_path: Path, asked: list[dict]
+) -> tuple[ProjectChatManager, object, OpencodeProvider]:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    provider = OpencodeProvider(tmp_path)
+    provider._client = _PostClient()  # type: ignore[assignment]
+    provider._session_id = "ses_1"
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
+    pcm._broker.register(chat.chat_id, ChatStream("hi"))
+    for event in asked:
+        for stream_event in provider._event_to_stream(event):
+            pcm._notify_permission(chat.chat_id, stream_event)
+    return pcm, chat, provider
+
+
+_PARALLEL_ASKED = [
+    _asked("per_grep", "ses_1", "grep", "TODO", "call_g"),
+    _asked("per_shell", "ses_1", "shell", "git status --short", "call_s"),
+]
+
+
+@pytest.mark.asyncio
+async def test_parallel_opencode_permissions_both_reach_the_provider(tmp_path: Path) -> None:
+    pcm, chat, provider = _opencode_chat(tmp_path, _PARALLEL_ASKED)
+
+    first = await pcm.respond_permission(
+        chat.chat_id, request_id="per_grep", approved=True, session_id="ses_1"
+    )
+    second = await pcm.respond_permission(
+        chat.chat_id, request_id="per_shell", approved=True, session_id="ses_1"
+    )
+
+    assert first.ok and second.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_1/permission/per_grep/reply", {"decision": "once"}),
+        ("/api/session/ses_1/permission/per_shell/reply", {"decision": "once"}),
+    ]
+    assert provider._permission_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_older_permission_reply_keeps_newer_slot(tmp_path: Path) -> None:
+    pcm, chat, _provider = _opencode_chat(tmp_path, _PARALLEL_ASKED)
+
+    await pcm.respond_permission(
+        chat.chat_id, request_id="per_grep", approved=True, session_id="ses_1"
+    )
+
+    assert json.loads(chat.pending_permission)["request_id"] == "per_shell"
+
+
+@pytest.mark.asyncio
+async def test_child_session_permission_reply_uses_child_session(tmp_path: Path) -> None:
+    pcm, chat, provider = _opencode_chat(
+        tmp_path, [_asked("per_child", "ses_child", "shell", "gh issue list", "call_c")]
+    )
+
+    result = await pcm.respond_permission(
+        chat.chat_id, request_id="per_child", approved=True, session_id="ses_child"
+    )
+
+    assert result.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_child/permission/per_child/reply", {"decision": "once"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parallel_claude_permissions_both_reach_the_gate(tmp_path: Path) -> None:
+    from claude_agent_sdk.types import PermissionResultAllow, ToolPermissionContext
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t")
+    gate = pcm._get_provider(chat.chat_id).provider.permission_gate
+    pcm._broker.register(chat.chat_id, ChatStream("hi"))
+    gate.set_emit(lambda ev: pcm._notify_permission(chat.chat_id, ev))
+
+    def ctx(tool_use_id: str) -> ToolPermissionContext:
+        return ToolPermissionContext(
+            signal=None, suggestions=[], tool_use_id=tool_use_id, agent_id=None
+        )
+
+    first = asyncio.create_task(gate.handle("Grep", {}, ctx("tu-a")))
+    second = asyncio.create_task(gate.handle("Bash", {}, ctx("tu-b")))
+    await asyncio.sleep(0)
+
+    assert (await pcm.respond_permission(chat.chat_id, request_id="tu-a", approved=True)).ok
+    assert isinstance(await asyncio.wait_for(first, 1), PermissionResultAllow)
+    assert json.loads(chat.pending_permission)["request_id"] == "tu-b"
+    assert (await pcm.respond_permission(chat.chat_id, request_id="tu-b", approved=True)).ok
+    assert isinstance(await asyncio.wait_for(second, 1), PermissionResultAllow)
+
+
+_CHILD_THEN_NEWER = [
+    _asked("per_child", "ses_child", "shell", "gh issue list", "call_c"),
+    _asked("per_newer", "ses_1", "shell", "git status --short", "call_n"),
+]
+
+
+@pytest.mark.asyncio
+async def test_child_request_outside_the_slot_is_approved_without_a_client_session(
+    tmp_path: Path,
+) -> None:
+    pcm, chat, provider = _opencode_chat(tmp_path, _CHILD_THEN_NEWER)
+    chat.session_id = "ses_1"
+
+    result = await pcm.respond_permission(chat.chat_id, request_id="per_child", approved=True)
+
+    assert result.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_child/permission/per_child/reply", {"decision": "once"})
+    ]
+    assert json.loads(chat.pending_permission)["request_id"] == "per_newer"
+
+
+@pytest.mark.asyncio
+async def test_child_request_outside_the_slot_denial_retracts_its_own_call(
+    tmp_path: Path,
+) -> None:
+    pcm, chat, _provider = _opencode_chat(tmp_path, _CHILD_THEN_NEWER)
+    chat.session_id = "ses_1"
+    stream = pcm._broker.get(chat.chat_id)
+    stream.publish({  # type: ignore[union-attr]
+        "type": "tool_use", "tool_name": "shell", "tool_use_id": "call_c",
+        "file_touch": {"file_path": "notes.md", "action": "created"},
+    })
+
+    result = await pcm.respond_permission(chat.chat_id, request_id="per_child", approved=False)
+
+    assert result.ok
+    assert any(
+        ev.get("type") == "tool_denied" and ev.get("tool_use_id") == "call_c"
+        for ev in stream.buffered_events()  # type: ignore[union-attr]
+    )
+
+
+@pytest.mark.asyncio
+async def test_child_request_outside_the_slot_resolves_other_tabs(tmp_path: Path) -> None:
+    pcm, chat, _provider = _opencode_chat(tmp_path, _CHILD_THEN_NEWER)
+    chat.session_id = "ses_1"
+    stream = pcm._broker.get(chat.chat_id)
+    other_tab: asyncio.Queue[dict] = asyncio.Queue()
+    stream._subs.add(other_tab)  # type: ignore[union-attr,arg-type]
+
+    result = await pcm.respond_permission(chat.chat_id, request_id="per_child", approved=True)
+
+    assert result.ok
+    live = [other_tab.get_nowait() for _ in range(other_tab.qsize())]
+    assert {
+        "type": "permission_resolved", "request_id": "per_child", "session_id": "ses_child",
+    } in live
+
+
+class _FormClient(_PostClient):
+    async def delete(self, path: str, **_: object) -> SimpleNamespace:
+        self.posts.append((f"DELETE {path}", None))
+        return SimpleNamespace(status_code=204, text="")
+
+
+def _form(form_id: str, session_id: str) -> dict:
+    return {"type": "form.created", "data": {"form": {
+        "id": form_id, "sessionID": session_id, "title": "Choice",
+        "fields": [{"key": "value", "title": "Value", "type": "string"}],
+    }}}
+
+
+def _forms_chat(tmp_path: Path, created: list[dict]):
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="t", provider="opencode")
+    chat.session_id = "ses_1"
+    provider = OpencodeProvider(tmp_path)
+    provider._client = _FormClient()  # type: ignore[assignment]
+    provider._session_id = "ses_1"
+    pcm._providers[chat.chat_id] = SimpleNamespace(provider=provider)  # type: ignore[assignment]
+    pcm._broker.register(chat.chat_id, ChatStream("hi"))
+    for event in created:
+        for ev in provider._event_to_stream(event):
+            # As chat_streaming does: the newest form owns the persisted slot.
+            chat.pending_question = json.dumps({
+                **json.loads(ev.tool_input),
+                "request_id": ev.request_id, "session_id": ev.session_id,
+            })
+    return pcm, chat, provider
+
+
+_PARALLEL_FORMS = [_form("frm_a", "ses_1"), _form("frm_b", "ses_1")]
+
+
+@pytest.mark.asyncio
+async def test_parallel_opencode_forms_both_reach_the_provider(tmp_path: Path) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    first = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+    )
+    second = await pcm.respond_question(
+        chat.chat_id, request_id="frm_b", answers={"value": ["two"]}, session_id="ses_1"
+    )
+
+    assert first.ok and second.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_1/form/frm_a/reply", {"answer": {"value": "one"}}),
+        ("/api/session/ses_1/form/frm_b/reply", {"answer": {"value": "two"}}),
+    ]
+    assert provider._question_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_older_form_reply_keeps_newer_slot(tmp_path: Path) -> None:
+    pcm, chat, _provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+    stream = pcm._broker.get(chat.chat_id)
+    other_tab: asyncio.Queue[dict] = asyncio.Queue()
+    stream._subs.add(other_tab)  # type: ignore[union-attr,arg-type]
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+    )
+
+    assert result.ok
+    assert json.loads(chat.pending_question)["request_id"] == "frm_b"
+    live = [other_tab.get_nowait() for _ in range(other_tab.qsize())]
+    assert {
+        "type": "question_resolved", "request_id": "frm_a", "session_id": "ses_1",
+    } in live
+
+
+@pytest.mark.asyncio
+async def test_older_form_cancel_reaches_the_provider(tmp_path: Path) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_a", answers={}, action="cancel", session_id="ses_1"
+    )
+
+    assert result.ok
+    assert ("DELETE /api/session/ses_1/form/frm_a", None) in provider._client.posts  # type: ignore[attr-defined]
+    assert not provider.has_question_request("frm_a")
+    assert json.loads(chat.pending_question)["request_id"] == "frm_b"
+
+
+@pytest.mark.asyncio
+async def test_child_session_form_reply_uses_child_session(tmp_path: Path) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, [_form("frm_child", "ses_child")])
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_child", answers={"value": ["x"]},
+        session_id="ses_child",
+    )
+
+    assert result.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_child/form/frm_child/reply", {"answer": {"value": "x"}})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_child_form_outside_the_slot_is_answered_without_a_client_session(
+    tmp_path: Path,
+) -> None:
+    pcm, chat, provider = _forms_chat(
+        tmp_path, [_form("frm_child", "ses_child"), _form("frm_newer", "ses_1")]
+    )
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_child", answers={"value": ["x"]}
+    )
+
+    assert result.ok
+    assert provider._client.posts == [  # type: ignore[attr-defined]
+        ("/api/session/ses_child/form/frm_child/reply", {"answer": {"value": "x"}})
+    ]
+    assert json.loads(chat.pending_question)["request_id"] == "frm_newer"
+
+
+@pytest.mark.asyncio
+async def test_held_form_from_another_session_is_still_stale(tmp_path: Path) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    result = await pcm.respond_question(
+        chat.chat_id, request_id="frm_b", answers={"value": ["x"]}, session_id="ses_old"
+    )
+
+    assert result.ok
+    assert provider._client.posts == []  # type: ignore[attr-defined]
+    assert provider.has_question_request("frm_b")
+    assert json.loads(chat.pending_question)["session_id"] == "ses_1"
+
+
+@pytest.mark.asyncio
+async def test_question_reply_outcome_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pcm, chat, _provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    with caplog.at_level("INFO", logger="ciao.web.project_chats"):
+        await pcm.respond_question(
+            chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
+        )
+
+    assert "question reply frm_a session=ses_1 action=reply: delivered" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_question_reply_log_omits_the_error_text(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    async def reject(path: str, json: object = None, **_: object) -> SimpleNamespace:
+        return SimpleNamespace(status_code=400, text="bad value: SECRET-ANSWER")
+
+    provider._client.post = reject  # type: ignore[attr-defined]
+
+    with caplog.at_level("INFO", logger="ciao.web.project_chats"):
+        result = await pcm.respond_question(
+            chat.chat_id, request_id="frm_a", answers={"value": ["SECRET-ANSWER"]},
+            session_id="ses_1",
+        )
+
+    assert not result.ok
+    assert "failed" in caplog.text
+    assert "SECRET-ANSWER" not in caplog.text

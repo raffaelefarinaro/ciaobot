@@ -596,6 +596,31 @@ export function describeToolStep(line: string): string {
   return summary ? `${name} ${summary}` : name
 }
 
+const PERMISSION_LINE_PREFIX = '\u{1F6A7} Permission: '
+/** The trace line a permission request paints. The store writes it and the live label reads it, so both must use this. */
+export function permissionActivityLine(toolName: string, message: string): string {
+  return `${PERMISSION_LINE_PREFIX}${toolName} - ${message}`
+}
+export function isPermissionActivityLine(line: string): boolean {
+  return line.trim().startsWith(PERMISSION_LINE_PREFIX)
+}
+/** The live step for a tool entry's last line. A permission line whose request is no longer open is history (#1618): report the call before it, or nothing if that call was denied or there is none. */
+export function liveToolStep(
+  lines: string[],
+  ids: ReadonlyArray<string | undefined> | undefined,
+  openPermissionLines: ReadonlySet<string>,
+  deniedToolUseIds: ReadonlySet<string>,
+): string {
+  let at = lines.length - 1
+  while (at >= 0 && isPermissionActivityLine(lines[at]) && !openPermissionLines.has(lines[at].trim())) at--
+  if (at < 0) return ''
+  if (at < lines.length - 1) {
+    const id = ids?.[at]
+    if (id && deniedToolUseIds.has(id)) return ''
+  }
+  return describeToolStep(lines[at])
+}
+
 /** True when the turn's chosen reply is narration cut off by reasoning, i.e.
  *  the turn was interrupted mid-thought and the text is not a real answer. A
  *  substantive or delivered reply followed by a reasoning-only step (OpenCode

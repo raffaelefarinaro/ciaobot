@@ -1,5 +1,5 @@
 <template>
-  <div class="card">
+  <div id="other-devices" class="card">
     <div class="settings-card-header">
       <h2 class="section-title">Other devices</h2>
       <p class="hint">

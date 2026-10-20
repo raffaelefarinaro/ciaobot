@@ -212,7 +212,10 @@ test.describe('Done behind a tab', () => {
     await open(page, 'task-lanes-done-drop')
     await page.locator('.task-card', { hasText: 'Plan the offsite' }).dragTo(toggle(page))
     await expect(page.getByRole('dialog')).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Complete without note' })).toBeVisible()
+    const actions = page.locator('.task-resolution-sheet .form-actions button')
+    await expect(actions).toHaveCount(2)
+    await expect(actions).toHaveText(['Mark done', 'Cancel'])
+    await expect(page.getByRole('button', { name: 'Mark done' })).toBeVisible()
   })
 
   test('completing from the editor with Done collapsed leaves focus on the Done tab', async ({ page }) => {
@@ -226,7 +229,8 @@ test.describe('Done behind a tab', () => {
     await page.locator('.task-card', { hasText: 'Plan the offsite' }).locator('.task-open').focus()
     await page.keyboard.press('Enter')
     await page.getByRole('radio', { name: 'Done', exact: true }).click()
-    await page.getByRole('button', { name: 'Complete without note' }).click()
+    await expect(page.locator('.task-resolution-sheet .form-actions button')).toHaveText(['Mark done', 'Cancel'])
+    await page.getByRole('button', { name: 'Mark done' }).click()
     await expect(page.locator('#task-detail-name')).toHaveCount(0)
     await expect(toggle(page)).toBeFocused()
   })

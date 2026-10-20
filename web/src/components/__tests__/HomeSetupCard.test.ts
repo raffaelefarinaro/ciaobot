@@ -15,13 +15,15 @@ import {
 
 // Hoisted so the mocked factories can read them: a mock factory runs while the
 // test file's imports resolve, before the module body has run.
-const state = vi.hoisted(() => ({ pushEnabled: false, pushSupported: true }))
+const state = vi.hoisted(() => ({ pushEnabled: false, pushSupported: true, loopback: true }))
 
 vi.mock('../../lib/push', () => ({
   pushSupported: () => state.pushSupported,
   isPushEnabled: async () => state.pushEnabled,
   enablePush: vi.fn(),
 }))
+
+vi.mock('../../lib/loopback', () => ({ isLoopbackPage: () => state.loopback }))
 
 const IPHONE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
@@ -48,6 +50,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   state.pushEnabled = false
   state.pushSupported = true
+  state.loopback = true
   localStorage.clear()
   resetHomeNoticeWindows()
   _resetInstallPromptForTests()
@@ -93,7 +96,7 @@ describe('HomeSetupCard', () => {
     view.unmount()
     const fresh = await mountCard()
     expect(fresh.text()).toContain('Installed on this device')
-    expect(fresh.findComponent(RouterLinkStub).exists()).toBe(false)
+    expect(fresh.findAllComponents(RouterLinkStub).some(l => l.props('to') === '/settings#install-app')).toBe(false)
   })
 
   it('shows the native Install button when the browser offered a prompt', async () => {
@@ -285,5 +288,43 @@ describe('HomeSetupCard', () => {
     expect(view.text()).toContain('Install the app first')
     // Enabling from a Safari tab on iOS silently never delivers anything.
     expect(hasButton(view, 'Enable')).toBe(false)
+  })
+
+  it('shows the phone setup row on the computer running Ciaobot', async () => {
+    const view = await mountCard()
+
+    expect(view.text()).toContain('Use on your phone')
+    expect(view.text()).toContain('Install Tailscale')
+    expect(view.text()).toContain('Add to Home Screen')
+    expect(
+      view.findAllComponents(RouterLinkStub).some(l => l.props('to') === '/settings#other-devices'),
+    ).toBe(true)
+  })
+
+  it('hides the phone setup row on a remote browser', async () => {
+    state.loopback = false
+    const view = await mountCard()
+
+    expect(view.text()).toContain('Set up this device')
+    expect(view.text()).not.toContain('Use on your phone')
+  })
+
+  it('hides the phone setup row on a phone', async () => {
+    const original = navigator.userAgent
+    Object.defineProperty(navigator, 'userAgent', { value: IPHONE_UA, configurable: true })
+    try {
+      const view = await mountCard()
+      expect(view.text()).not.toContain('Use on your phone')
+    } finally {
+      Object.defineProperty(navigator, 'userAgent', { value: original, configurable: true })
+    }
+  })
+
+  it('the phone row does not keep a finished card up', async () => {
+    installedOnDevice.value = true
+    state.pushEnabled = true
+    const view = await mountCard()
+
+    expect(view.find('.home-setup').exists()).toBe(false)
   })
 })

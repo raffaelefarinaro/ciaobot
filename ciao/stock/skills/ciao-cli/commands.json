@@ -36,6 +36,7 @@
   "task get": "task_get",
   "task create": "task_create",
   "task update": "task_update",
+  "task delete": "task_delete",
   "task move": "task_action",
   "task complete": "task_action",
   "schedule list": "schedules_list",
