@@ -426,12 +426,14 @@ def plan(
     if platform == "darwin":
         from ciao.setup_status import tcc_protected_location
 
-        protected = tcc_protected_location(target)
-        if protected:
-            result.refusals.append(
-                f"The destination is inside ~/{protected}, which macOS privacy protection "
-                "blocks the background engine from reading. Choose another folder, e.g. ~/ciaobot."
-            )
+        for label, path in (("destination", target), ("workspace", source)):
+            protected = tcc_protected_location(path)
+            if protected:
+                result.refusals.append(
+                    f"The {label} is inside ~/{protected}. The move runs as a background job "
+                    "that macOS privacy protection keeps out of that folder, so Ciaobot cannot "
+                    "move a workspace into or out of it."
+                )
     if registered is None and platform.startswith("linux"):
         result.refusals.append(
             f"No Ciaobot unit names a workspace in {LINUX_UNIT_DIR / LINUX_UNIT}, so there is "

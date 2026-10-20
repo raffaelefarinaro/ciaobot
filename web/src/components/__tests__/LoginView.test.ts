@@ -658,6 +658,26 @@ describe('LoginView setup wizard tests', () => {
     expect(plain.find('#setup-workspace-cloud-warning').exists()).toBe(false)
   })
 
+  it('shows the macOS access note for a protected folder', async () => {
+    const mockInspect = (extra: Record<string, unknown>) => {
+      mockApiGet.mockImplementation((path: string) => {
+        if (path.startsWith('/api/setup/inspect-folder')) {
+          return Promise.resolve({ mode: 'scratch', existing_workspaces: [], ...extra })
+        }
+        return Promise.resolve({ configured: false, bootstrap: true, mode: 'bootstrap', providers: {} })
+      })
+    }
+    mockInspect({ macos_access_note: 'macOS asks to let "Ciaobot Server" access your Documents folder.' })
+    const noted = await mountLoginView()
+    const note = noted.find('#setup-workspace-macos-access-note')
+    expect(note.exists()).toBe(true)
+    expect(note.text()).toContain('Ciaobot Server')
+
+    mockInspect({})
+    const plain = await mountLoginView()
+    expect(plain.find('#setup-workspace-macos-access-note').exists()).toBe(false)
+  })
+
   describe('sign in on this computer', () => {
     const configured = { configured: true, bootstrap: false, mode: 'configured', providers: {} }
 

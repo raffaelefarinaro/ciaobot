@@ -4621,3 +4621,43 @@ def test_ensure_setup_token_tightens_an_older_world_readable_file(tmp_path: Path
 
     assert cli._ensure_setup_token(tmp_path) == "old-token"
     assert is_private(token_path)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="renders a macOS hosted plist")
+def test_setup_command_prints_the_macos_access_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    from tests.test_server_host_activation import _verified_host
+
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    args = [
+        "setup",
+        "--workspace",
+        str(home / "Documents" / "ws"),
+        "--auth-token",
+        "test-token",
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(tmp_path / "Applications"),
+        "--python",
+        _fake_python(tmp_path),
+    ]
+
+    host = _verified_host()
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: host)
+    assert cli.main(args) == 0
+    err = capsys.readouterr().err
+    assert "Note:" in err and "Ciaobot Server" in err
+
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: None)
+    other = [*args[:2], str(home / "Documents" / "ws2"), *args[3:], "--yes"]
+    assert cli.main(other) == 1
+    err = capsys.readouterr().err
+    assert "Ciaobot Server" in err and "Error:" in err
+    assert not (home / "Documents" / "ws2").exists()
