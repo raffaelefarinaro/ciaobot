@@ -76,6 +76,17 @@ def test_system_prompt_keeps_diagnostic_entrypoint_compact() -> None:
     assert ".runtime/job_runs.jsonl" in append
     assert ".runtime/ciao.stderr.log" not in append
     assert "Public GitHub issues" in append
+    assert "ciao context logs" in append
+
+
+def test_system_prompt_states_workspace_scope_limits() -> None:
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "file_access=workspace only" in append
+    assert "Do not probe them" in append
+    assert "Settings → Workspaces → Edit → File access" in append
+    assert "`gh` is not signed in" in append
 
 
 def test_system_prompt_includes_project_canonical_doc_notes() -> None:
