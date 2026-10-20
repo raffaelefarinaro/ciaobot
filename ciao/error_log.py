@@ -184,6 +184,17 @@ def tail_debug_log(workspace_root: Path, lines: int = 200) -> str:
     return _tail_log(workspace_root / ".runtime" / DEBUG_LOG_NAME, lines)
 
 
+SERVICE_STDERR_LOG_NAME = "ciao.stderr.log"
+
+
+def tail_service_log(workspace_root: Path, lines: int = 200) -> str:
+    """Last *lines* of the service's stderr log (macOS LaunchAgent / Windows service), or "".
+
+    A Linux service logs to journald, so this is empty there.
+    """
+    return _tail_log(workspace_root / ".runtime" / SERVICE_STDERR_LOG_NAME, lines)
+
+
 def _tail_log(log_path: Path, lines: int) -> str:
     try:
         with log_path.open("r", encoding="utf-8", errors="replace") as f:

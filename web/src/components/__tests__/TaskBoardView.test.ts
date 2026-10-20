@@ -294,7 +294,7 @@ describe('TaskBoardView', () => {
     ;(open.element as HTMLElement).focus()
     await open.trigger('keydown', { key: 'ArrowRight', shiftKey: true })
     await flushPromises()
-    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
     await flushPromises()
     await nextTick()
     // Done is collapsed, so the card left the view: focus goes to its lane neighbour.
@@ -305,7 +305,7 @@ describe('TaskBoardView', () => {
     apiPost.mockResolvedValue({ workspace: 'personal', task: { ...task({ id: 'held2', status: 'done' }), revision: NEXT_REVISION, body: '' } })
     await last.trigger('keydown', { key: 'ArrowRight', shiftKey: true })
     await flushPromises()
-    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
     await flushPromises()
     await nextTick()
     expect(document.activeElement).toBe(wrapper.get('.task-done-toggle').element)
@@ -438,7 +438,7 @@ describe('TaskBoardView', () => {
     await dragCard(wrapper, 'Ship the board', 3)
     expect(apiPost).not.toHaveBeenCalled()
     expect(wrapper.get('.task-resolution-sheet').text()).toContain('Complete with resolution')
-    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
     await flushPromises()
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
       workspace: 'personal',
@@ -475,7 +475,7 @@ describe('TaskBoardView', () => {
     await card(wrapper, 'Ship the board').get('button[aria-label="Mark Ship the board done"]').trigger('click')
     await flushPromises()
     await nextTick()
-    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
     await flushPromises()
     await nextTick()
 
@@ -1107,7 +1107,7 @@ describe('TaskBoardView', () => {
     expect(apiPatch).not.toHaveBeenCalled()
     expect(apiPost).not.toHaveBeenCalled()
     expect(wrapper.get('[data-status="done"]').attributes('aria-checked')).toBe('false')
-    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
     await flushPromises()
     await nextTick()
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
@@ -1444,6 +1444,120 @@ describe('TaskBoardView', () => {
     wrapper.unmount()
   })
 
+  it('offers one enabled completion action and Cancel, with no separate no-note button', async () => {
+    const wrapper = await mountBoard()
+    mockShipDetail()
+    await openResolutionSheet(wrapper)
+
+    const actions = wrapper.get('.task-resolution-sheet .form-actions')
+    // One primary action and Cancel. The note is optional, so an empty draft
+    // leaves the primary action available.
+    expect(actions.findAll('button').map((b) => b.text())).toEqual(['Mark done', 'Cancel'])
+    expect(actions.get('.btn-primary').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('.task-resolution-sheet').text()).not.toContain('Complete without note')
+    wrapper.unmount()
+  })
+
+  it('completes without a resolution when the note is left blank', async () => {
+    const wrapper = await mountBoard()
+    mockShipDetail()
+    apiPost.mockResolvedValue({ workspace: 'personal', task: { ...task({ status: 'done' }), revision: NEXT_REVISION, body: '' } })
+    await openResolutionSheet(wrapper)
+
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
+    await flushPromises()
+    await nextTick()
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
+      workspace: 'personal',
+      expected_revision: NEXT_REVISION,
+      resolution: '',
+    })
+    wrapper.unmount()
+  })
+
+  it('completes without a resolution when the note is only whitespace', async () => {
+    const wrapper = await mountBoard()
+    mockShipDetail()
+    apiPost.mockResolvedValue({ workspace: 'personal', task: { ...task({ status: 'done' }), revision: NEXT_REVISION, body: '' } })
+    await openResolutionSheet(wrapper)
+    await wrapper.get('#task-resolution-text').setValue('   \n\t ')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
+    await flushPromises()
+    await nextTick()
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
+      workspace: 'personal',
+      expected_revision: NEXT_REVISION,
+      resolution: '',
+    })
+    wrapper.unmount()
+  })
+
+  it('preserves a nonblank note exactly as typed', async () => {
+    const wrapper = await mountBoard()
+    mockShipDetail()
+    apiPost.mockResolvedValue({ workspace: 'personal', task: { ...task({ status: 'done' }), revision: NEXT_REVISION, body: '' } })
+    await openResolutionSheet(wrapper)
+    await wrapper.get('#task-resolution-text').setValue('  Checked the export by hand  \n')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
+    await flushPromises()
+    await nextTick()
+
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect((apiPost.mock.calls[0]![1] as Record<string, unknown>).resolution)
+      .toBe('  Checked the export by hand  \n')
+    wrapper.unmount()
+  })
+
+  it('leaves edit-resolution text untouched, including a whitespace-only draft', async () => {
+    const done = task({
+      id: 'ship', status: 'done', completed_at: '2026-03-01T12:00:00+00:00', has_resolution: true,
+    })
+    const wrapper = await mountBoard([done])
+    const read = {
+      workspace: 'personal',
+      task: {
+        ...done, revision: NEXT_REVISION, body: '', resolution: 'Checked it',
+        completions: [{ id: 'a'.repeat(32), completed_at: '2026-03-01T12:00:00+00:00', resolution: 'Checked it', edited_at: null, attempt_id: '' }],
+        delegation_log: '',
+      },
+    }
+    apiGet.mockImplementation((url: string) => Promise.resolve(
+      url.startsWith('/api/tasks/ship?') ? read
+        : url.includes('/api/tasks?') ? { workspace: 'personal', tasks: [done] } : {},
+    ))
+
+    apiPatch.mockResolvedValue({
+      workspace: 'personal',
+      task: { ...done, revision: THIRD_REVISION, body: '', resolution: '  ' },
+    })
+
+    await card(wrapper, 'Ship the board').get('.task-open').trigger('click')
+    await flushPromises()
+    await nextTick()
+    await wrapper.get('.task-resolution').findAll('button').find((b) => b.text() === 'Edit resolution')!.trigger('click')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.get('.task-resolution-sheet').text()).toContain('Edit resolution')
+    expect(wrapper.get('.task-resolution-sheet .form-actions').findAll('button').map((b) => b.text()))
+      .toEqual(['Save resolution', 'Cancel'])
+    await wrapper.get('#task-resolution-text').setValue('  ')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
+    await flushPromises()
+    await nextTick()
+
+    expect(apiPatch).toHaveBeenCalledWith('/api/tasks/ship', {
+      workspace: 'personal',
+      expected_revision: NEXT_REVISION,
+      resolution: '  ',
+    })
+    expect(apiPost).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('keeps the resolution draft when the complete request conflicts, and Refresh task keeps it too', async () => {
     const wrapper = await mountBoard()
     mockShipDetail()
@@ -1469,6 +1583,18 @@ describe('TaskBoardView', () => {
     expect((wrapper.get('#task-resolution-text').element as HTMLTextAreaElement).value).toBe('Draft note')
     expect(wrapper.find('.task-resolution-sheet .task-action-error').exists()).toBe(false)
     expect(apiPost).toHaveBeenCalledTimes(1)
+
+    // The retained draft is retryable: the next submit sends it unchanged.
+    apiPost.mockResolvedValue({
+      workspace: 'personal',
+      task: { ...task({ status: 'done' }), revision: THIRD_REVISION, body: '' },
+    })
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
+    await flushPromises()
+    await nextTick()
+    expect(apiPost).toHaveBeenCalledTimes(2)
+    expect(apiPost.mock.calls[1]![1]).toMatchObject({ expected_revision: NEXT_REVISION, resolution: 'Draft note' })
+    expect(wrapper.find('.task-resolution-sheet').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -2250,7 +2376,13 @@ describe('TaskBoardView', () => {
       expect(approve.attributes('aria-label')).toBe('Approve and mark done')
       await approve.trigger('click')
       await flushPromises()
-      await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+      // The review-ready sheet keeps its Approve done label, and the note is
+      // optional there too: one primary action plus Cancel.
+      const sheet = wrapper.get('.task-resolution-sheet')
+      expect(sheet.findAll('.form-actions button').map((b) => b.text()))
+        .toEqual(['Approve done', 'Cancel'])
+      expect(sheet.get('.form-actions .btn-primary').attributes('disabled')).toBeUndefined()
+      await sheet.get('form').trigger('submit')
       await flushPromises()
 
       // One request, the completion route — no attempt gesture in between.
@@ -2300,7 +2432,7 @@ describe('TaskBoardView', () => {
       expect(control, 'Approve Done in the editor').toBeTruthy()
       await control!.trigger('click')
       await flushPromises()
-      await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+      await wrapper.get('.task-resolution-sheet form').trigger('submit')
       await flushPromises()
 
       expect(apiPost).toHaveBeenCalledWith('/api/tasks/doing/complete', {
@@ -2545,7 +2677,7 @@ describe('TaskBoardView', () => {
 
     await card(wrapper, 'Broke halfway').get('.task-check').trigger('click')
     await flushPromises()
-    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
     await flushPromises()
 
     expect(askConfirm).toHaveBeenCalledTimes(1)
@@ -2563,7 +2695,7 @@ describe('TaskBoardView', () => {
 
     await card(wrapper, 'Never delegated').get('.task-check').trigger('click')
     await flushPromises()
-    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
     await flushPromises()
 
     expect(askConfirm).not.toHaveBeenCalled()
@@ -2605,7 +2737,7 @@ describe('TaskBoardView', () => {
 
     await wrapper.get('.task-status-opt[data-status="done"]').trigger('click')
     await flushPromises()
-    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
     await flushPromises()
 
     expect(askConfirm).toHaveBeenCalledTimes(1)
@@ -2625,7 +2757,7 @@ describe('TaskBoardView', () => {
 
     await wrapper.get('.task-status-opt[data-status="done"]').trigger('click')
     await flushPromises()
-    await wrapper.get('.task-resolution-sheet').findAll('button').find((b) => b.text() === 'Complete without note')!.trigger('click')
+    await wrapper.get('.task-resolution-sheet form').trigger('submit')
     await flushPromises()
 
     expect(wrapper.get('.task-resolution-sheet .task-action-error').text()).toContain('the attempt could not be detached')

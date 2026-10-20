@@ -37,7 +37,7 @@ Options:
 
 | Option | What it does |
 |---|---|
-| `-Workspace <folder>` | Put the workspace (your notes, memory and settings) in this folder instead of `%USERPROFILE%\Ciaobot`. |
+| `-Workspace <folder>` | Put the workspace (your notes, memory and settings) in this folder instead of `%USERPROFILE%\Ciaobot`. Avoid a folder inside OneDrive: sync conflicts can damage Ciaobot's files and history, and setup prints a warning if you choose one. |
 | `-NoStart` | Install the engine but do not register the logon task, do not start it and do not print a sign-in link. The installer prints the two commands that finish the job later. |
 | `-Uninstall` | Remove what the installer added (see Uninstall). Your workspace is kept. |
 | `-Version <x.y.z>` | Install a specific release instead of the latest. |

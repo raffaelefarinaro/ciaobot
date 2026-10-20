@@ -114,7 +114,9 @@ async def auth_settings_update(request: Request) -> JSONResponse:
 
     Password protection is always on, so ``current_password`` is always
     required. A forgotten password is recovered from ``PWA_AUTH_TOKEN`` in the
-    workspace ``.env``, or with a one-time ``ciao setup-url`` login.
+    workspace ``.env``, or with a one-time ``ciao setup-url`` login. A missing
+    or wrong ``current_password`` is 400/403, never 401: 401 means the session
+    is gone, and the PWA sends the browser to /login on it.
     """
     from ciao.web.auth import MIN_PWA_PASSWORD_LENGTH, make_serializer
     from ciao.web.routes_api import _env_path, _write_env_values
@@ -131,10 +133,15 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     new_password = str(body.get("password") or "")
     current_password = str(body.get("current_password") or "")
 
-    if not current_password or not hmac.compare_digest(current_password, current_token):
+    if not current_password:
         return JSONResponse(
-            {"error": "Current password is required (and must match)"},
-            status_code=401,
+            {"error": "Enter your current password.", "code": "current_password_required"},
+            status_code=400,
+        )
+    if not hmac.compare_digest(current_password, current_token):
+        return JSONResponse(
+            {"error": "Current password is incorrect.", "code": "wrong_current_password"},
+            status_code=403,
         )
 
     token_to_store = new_password.strip() or current_token

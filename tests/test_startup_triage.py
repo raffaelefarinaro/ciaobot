@@ -247,6 +247,7 @@ def test_triage_prompt_defers_issue_filing_to_the_operator() -> None:
     assert "gh issue list" in TRIAGE_PROMPT
     assert "issues/new?title=" in TRIAGE_PROMPT
     assert "Action needed:" in TRIAGE_PROMPT
+    assert "ciao context logs" in TRIAGE_PROMPT
 
 
 def test_triage_prompt_fences_the_report_and_keeps_steps_after_it() -> None:
