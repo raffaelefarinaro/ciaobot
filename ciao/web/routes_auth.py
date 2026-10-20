@@ -17,6 +17,13 @@ _login_attempts: dict[str, list[tuple[float, int]]] = {}
 _MAX_LOGIN_ATTEMPTS = 10
 _LOGIN_WINDOW_SECONDS = 60
 
+# Wrong current-password attempts on POST /api/auth/settings, per client IP.
+# Separate from the login counter: a signed-in session can still be used to
+# guess the password, and a successful login must not reset this budget.
+_password_change_failures: dict[str, list[float]] = {}
+_MAX_PASSWORD_CHANGE_FAILURES = 5
+_PASSWORD_CHANGE_WINDOW_SECONDS = 15 * 60
+
 
 def _check_login_rate_limit(client_ip: str) -> bool:
     """Return True if the IP is within the rate limit, False if blocked."""
@@ -33,6 +40,21 @@ def _check_login_rate_limit(client_ip: str) -> bool:
     return True
 
 
+def _token_matches(supplied: str, expected: str) -> bool:
+    # compare_digest raises TypeError on non-ASCII str, so compare bytes.
+    return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _recent_password_change_failures(client_ip: str) -> list[float]:
+    window_start = datetime.now(UTC).timestamp() - _PASSWORD_CHANGE_WINDOW_SECONDS
+    recent = [t for t in _password_change_failures.get(client_ip, []) if t > window_start]
+    if recent:
+        _password_change_failures[client_ip] = recent
+    else:
+        _password_change_failures.pop(client_ip, None)
+    return recent
+
+
 async def auth_login(request: Request) -> JSONResponse:
     app = request.app
     client_ip = request.client.host if request.client else "unknown"
@@ -41,7 +63,7 @@ async def auth_login(request: Request) -> JSONResponse:
     body = await request.json()
     token = str(body.get("token", "") or "")
 
-    if not hmac.compare_digest(token, app.state.config.pwa_auth_token):
+    if not _token_matches(token, app.state.config.pwa_auth_token):
         return JSONResponse({"error": "invalid token"}, status_code=401)
     signed = app.state.serializer.dumps({"user": "owner"})
     response = JSONResponse({"ok": True})
@@ -138,6 +160,7 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     new_password = str(body.get("password") or "")
     current_password = str(body.get("current_password") or "")
     on_host = _on_host(request)
+    client_ip = request.client.host if request.client else "unknown"
 
     if on_host:
         if not new_password.strip():
@@ -151,7 +174,18 @@ async def auth_settings_update(request: Request) -> JSONResponse:
                 {"error": "Enter your current password.", "code": "current_password_required"},
                 status_code=400,
             )
-        if not hmac.compare_digest(current_password, current_token):
+        recent = _recent_password_change_failures(client_ip)
+        if len(recent) >= _MAX_PASSWORD_CHANGE_FAILURES:
+            return JSONResponse(
+                {
+                    "error": "Too many wrong attempts. Wait a few minutes and try again.",
+                    "code": "rate_limited",
+                },
+                status_code=429,
+            )
+        if not _token_matches(current_password, current_token):
+            recent.append(datetime.now(UTC).timestamp())
+            _password_change_failures[client_ip] = recent
             return JSONResponse(
                 {"error": "Current password is incorrect.", "code": "wrong_current_password"},
                 status_code=403,
@@ -169,6 +203,7 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     _write_env_values(_env_path(config), {"PWA_AUTH_TOKEN": token_to_store})
     config.pwa_auth_token = token_to_store
     request.app.state.serializer = make_serializer(token_to_store)
+    _password_change_failures.pop(client_ip, None)
     logger.info("PWA password changed (on_host=%s)", on_host)
 
     response = JSONResponse(

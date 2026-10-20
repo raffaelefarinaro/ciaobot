@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 from types import SimpleNamespace
 
 from starlette.applications import Starlette
@@ -9,6 +11,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.web.auth import SESSION_COOKIE, AuthMiddleware, make_serializer
+from ciao.web import routes_auth
 from ciao.web.routes_auth import auth_settings_get, auth_settings_update
 from ciao.os_support.private import is_private
 from tests.test_auth_security import _TAILSCALE_SERVE_HEADERS
@@ -297,3 +300,95 @@ def test_host_browser_needs_a_new_password(tmp_path: Path) -> None:
     assert res.status_code == 400
     assert res.json()["code"] == "new_password_required"
     assert not (tmp_path / ".env").exists()
+
+
+@pytest.fixture(autouse=True)
+def _reset_password_change_failures():
+    routes_auth._password_change_failures.clear()
+    yield
+    routes_auth._password_change_failures.clear()
+
+
+def _wrong(client: TestClient, current: str = "wrong"):
+    return client.post(
+        "/api/auth/settings",
+        json={"password": "new-secret", "current_password": current},
+    )
+
+
+def test_sixth_attempt_after_five_wrong_ones_is_rate_limited(tmp_path: Path) -> None:
+    app = _app(tmp_path, token="old-secret")
+    client = TestClient(app, client=("10.0.0.9", 5555))
+    for _ in range(5):
+        assert _wrong(client).status_code == 403
+
+    res = _wrong(client, "old-secret")
+
+    assert res.status_code == 429
+    assert res.json() == {
+        "error": "Too many wrong attempts. Wait a few minutes and try again.",
+        "code": "rate_limited",
+    }
+    assert app.state.config.pwa_auth_token == "old-secret"
+
+
+def test_missing_current_password_does_not_count_as_a_failure(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path), client=("10.0.0.9", 5555))
+    for _ in range(8):
+        res = client.post("/api/auth/settings", json={"password": "new-secret"})
+        assert res.status_code == 400
+        assert res.json()["code"] == "current_password_required"
+    assert _wrong(client, "old-secret").status_code == 200
+
+
+def test_successful_change_clears_the_failure_counter(tmp_path: Path) -> None:
+    app = _app(tmp_path, token="old-secret")
+    client = TestClient(app, client=("10.0.0.9", 5555))
+    for _ in range(4):
+        assert _wrong(client).status_code == 403
+    assert _wrong(client, "old-secret").status_code == 200
+    assert "10.0.0.9" not in routes_auth._password_change_failures
+    for _ in range(5):
+        assert _wrong(client).status_code == 403
+
+
+def test_failures_expire_after_the_window(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path), client=("10.0.0.9", 5555))
+    routes_auth._password_change_failures["10.0.0.9"] = [
+        0.0 for _ in range(routes_auth._MAX_PASSWORD_CHANGE_FAILURES)
+    ]
+    assert _wrong(client, "old-secret").status_code == 200
+
+
+def test_other_ips_are_not_limited(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    for _ in range(5):
+        assert _wrong(TestClient(app, client=("10.0.0.9", 1))).status_code == 403
+    assert _wrong(TestClient(app, client=("10.0.0.10", 1)), "old-secret").status_code == 200
+
+
+def test_host_session_is_never_rate_limited(tmp_path: Path) -> None:
+    app = _app_with_middleware(tmp_path)
+    client = TestClient(app, base_url=HOST_URL, client=HOST_PEER)
+    routes_auth._password_change_failures["127.0.0.1"] = [
+        routes_auth.datetime.now(routes_auth.UTC).timestamp() for _ in range(10)
+    ]
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter22"},
+        cookies=_cookie(app),
+        headers={"Origin": HOST_URL},
+    )
+    assert res.status_code == 200
+
+
+def test_non_ascii_wrong_current_password_is_403_not_500(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path), client=("10.0.0.9", 5555))
+    res = _wrong(client, "pässwörd\u2603")
+    assert res.status_code == 403
+    assert res.json()["code"] == "wrong_current_password"
+
+
+def test_non_ascii_current_password_that_matches_works(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path, token="pässwörd"), client=("10.0.0.9", 5555))
+    assert _wrong(client, "pässwörd").status_code == 200

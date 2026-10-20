@@ -137,6 +137,11 @@ def _setup_token_client(
     return TestClient(app, base_url=base_url, client=peer)
 
 
+def test_login_with_a_non_ascii_token_is_401_not_500() -> None:
+    res = _auth_client().post("/api/auth", json={"token": "pässwörd\u2603"})
+    assert res.status_code == 401
+
+
 def test_login_cookie_is_secure_and_host_only() -> None:
     resp = _auth_client().post("/api/auth", json={"token": "test-token"})
 
