@@ -508,7 +508,9 @@ class ChatStreaming:
                                 )
                                 or ""
                             )
-                            if provider_session:
+                            # A request from a task/subagent child session keeps its
+                            # own session: the reply must be addressed there (#1617).
+                            if provider_session and not payload.get("session_id"):
                                 payload["session_id"] = provider_session
                         if payload:
                             apply_file_touches_to_payload(

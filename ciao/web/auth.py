@@ -5,6 +5,8 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import logging
+import os
+import secrets
 from pathlib import Path
 
 from itsdangerous import URLSafeTimedSerializer, BadSignature
@@ -12,6 +14,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.websockets import WebSocket
+
+from ciao.os_support.private import open_private
 
 
 logger = logging.getLogger(__name__)
@@ -51,12 +55,14 @@ _PUBLIC_API = {
 # `/api/admin/drain` and `/api/admin/drain/cancel` are the update coordinator's own drain handshake,
 # driven by `ciao update apply` before it bootstraps the detached updater job.
 # `/api/admin/restart-blockers` is the `ciao service` restart/stop gate (reason-tagged).
+# `/api/auth/host-sign-in` mints a one-time setup token and opens it in the host's own browser; it returns no credential.
 # All are gated on the peer address plus a loopback `Host` and, when present, a same-origin `Origin`/`Referer`: the peer makes a caller local, and the Host check refuses a DNS-rebound page, whose Host is the attacker's name. A request that fails takes the normal session path.
 _LOOPBACK_ONLY_API = {
     "/api/menubar-chats",
     "/api/admin/drain",
     "/api/admin/drain/cancel",
     "/api/admin/restart-blockers",
+    "/api/auth/host-sign-in",
 }
 
 # The names local callers use for the engine (`http://localhost:<port>`).
@@ -261,6 +267,23 @@ def _setup_token_path(request: Request) -> Path | None:
     return Path(workspace_root).expanduser() / ".runtime" / "setup-token"
 
 
+def mint_setup_token(request: Request) -> tuple[str, Path] | None:
+    """Write a fresh one-time ``.runtime/setup-token`` (owner-only) and return it with its path; None without a workspace.
+
+    The file is recreated on every mint so an older, looser-mode file is never reused.
+    """
+    token_path = _setup_token_path(request)
+    if token_path is None:
+        return None
+    token = secrets.token_urlsafe(24)
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.unlink(missing_ok=True)
+    fd = open_private(token_path, os.O_WRONLY | os.O_EXCL, follow_symlinks=False)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write(token + "\n")
+    return token, token_path
+
+
 def _redeem_setup_token(request: Request, token: str):
     if request.method.upper() not in {"GET", "HEAD"}:
         return JSONResponse({"error": "method not allowed"}, status_code=405)
@@ -270,7 +293,8 @@ def _redeem_setup_token(request: Request, token: str):
     if token_path is None or not token_path.exists():
         return JSONResponse({"error": "invalid setup token"}, status_code=401)
     expected = token_path.read_text(encoding="utf-8").strip()
-    if not expected or not hmac.compare_digest(token, expected):
+    # Compare bytes: compare_digest raises TypeError on a non-ASCII str.
+    if not expected or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
         return JSONResponse({"error": "invalid setup token"}, status_code=401)
 
     signed = request.app.state.serializer.dumps({"user": "owner"})

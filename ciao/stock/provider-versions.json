@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "ciaobot": "1.6.0",
+  "recorded": "",
+  "providers": {
+    "opencode": {
+      "status": "untested",
+      "reason": "not_recorded"
+    },
+    "claude": {
+      "status": "untested",
+      "reason": "not_recorded"
+    }
+  }
+}

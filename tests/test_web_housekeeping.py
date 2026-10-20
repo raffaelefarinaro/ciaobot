@@ -356,3 +356,25 @@ def test_a_poll_inside_the_window_starts_no_second_scan(tmp_path: Path) -> None:
             client.get("/api/housekeeping")
 
     scan.assert_not_called()
+
+
+def test_housekeeping_lists_provider_update_tile(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    client = _client(_config(tmp_path))
+    below = {
+        "state": "below_tested",
+        "installed": "2.0.32",
+        "tested": "2.1.0",
+        "command": "opencode upgrade 2.1.0",
+        "terminal_action": "opencode-update",
+    }
+    client.app.state.provider_checks_fetcher = lambda: {"opencode": below}
+    tiles = [a for a in client.get("/api/housekeeping").json()["actions"] if a["kind"] == "provider-update"]
+    assert [t["id"] for t in tiles] == ["provider-update:opencode"]
+    assert tiles[0]["terminal_action"] == "opencode-update"
+    assert tiles[0]["command"] == "opencode upgrade 2.1.0"
+
+    resp = client.post("/api/housekeeping/provider-update:opencode/dismiss")
+    assert resp.status_code == 200
+    assert not [a for a in resp.json()["actions"] if a["kind"] == "provider-update"]
+    assert client.post("/api/housekeeping/provider-update:nope/dismiss").status_code == 404

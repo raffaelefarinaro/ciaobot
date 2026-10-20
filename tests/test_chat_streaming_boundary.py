@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncGenerator, Coroutine
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
     ImageAttachment,
+    PermissionRequestEvent,
     ResultEvent,
     StreamEvent,
     ThinkingEvent,
@@ -723,3 +725,79 @@ async def test_cancel_during_repo_location_refresh_still_finishes_the_turn(
     assert host._broker.get("chat-1") is None
     done = [e for e in host.published if e["type"] == "chat_streaming_done"]
     assert len(done) == 1
+
+
+async def _drive_events(tmp_path: Path, events: list[StreamEvent]):
+    host = _DriveHost(events, tmp_path)
+    host._providers["chat-1"] = SimpleNamespace(
+        provider=SimpleNamespace(current_session_id="ses_parent")
+    )
+    host._notify_question = lambda *_a, **_k: None  # type: ignore[attr-defined]
+    host._notify_permission = lambda *_a, **_k: None  # type: ignore[attr-defined]
+    streaming = ChatStreaming(cast(ChatStreamingHost, host))
+    stream = ChatStream(prompt_text="hello")
+    host._broker.register("chat-1", stream)
+    await streaming.drive(
+        chat_id="chat-1",
+        project_id="project-1",
+        prompt="hello",
+        images=None,
+        turn_index=None,
+        chat_meta=host.chat,
+        stream=stream,
+        is_retry=False,
+        unattended=False,
+    )
+    return host, stream
+
+
+@pytest.mark.asyncio
+async def test_child_request_frames_keep_their_own_session(tmp_path: Path) -> None:
+    host, stream = await _drive_events(
+        tmp_path,
+        [
+            ToolUseEvent(
+                type="tool_use",
+                tool_name="AskUserQuestion",
+                tool_input='{"questions": [{"id": "value", "question": "Pick"}]}',
+                tool_use_id="frm_child",
+                request_id="frm_child",
+                session_id="ses_child",
+            ),
+            PermissionRequestEvent(
+                type="system",
+                message="Approve use of shell?",
+                tool_name="shell",
+                tool_input="ls",
+                request_id="per_child",
+                session_id="ses_child",
+            ),
+            ResultEvent(type="result", result="done"),
+        ],
+    )
+
+    frames = {f["type"]: f for f in stream.buffered_events()}
+    assert frames["tool_use"]["session_id"] == "ses_child"
+    assert frames["permission_request"]["session_id"] == "ses_child"
+    assert json.loads(host.chat.pending_question)["session_id"] == "ses_child"
+
+
+@pytest.mark.asyncio
+async def test_frames_without_a_session_get_the_provider_session(
+    tmp_path: Path,
+) -> None:
+    _host, stream = await _drive_events(
+        tmp_path,
+        [
+            ToolUseEvent(
+                type="tool_use",
+                tool_name="shell",
+                tool_input="ls",
+                tool_use_id="call_1",
+            ),
+            ResultEvent(type="result", result="done"),
+        ],
+    )
+
+    frames = {f["type"]: f for f in stream.buffered_events()}
+    assert frames["tool_use"]["session_id"] == "ses_parent"

@@ -8512,23 +8512,24 @@ class ProjectChatManager:
                 "OpenCode returned an invalid form acknowledgement",
                 True,
             )
-        if result.ok:
-            logger.info(
-                "question reply %s session=%s action=%s: delivered",
-                request_id, session_id, action,
-            )
-            self._clear_question_state(chat_id, request_id, expected_session)
-            return result
-        if (
-            not result.retryable
+        # A reply that lost the race (another tab answered or cancelled, V2
+        # 409/404) changed nothing; clearing the matching form is idempotent.
+        stale = (
+            not result.ok
+            and not result.retryable
             and result.error == "Question request is no longer active"
-        ):
+        )
+        if result.ok or stale:
+            already_resolved = stale or result.already_resolved
             logger.info(
-                "question reply %s session=%s action=%s: already-resolved",
+                "question reply %s session=%s action=%s: %s",
                 request_id, session_id, action,
+                "already-resolved" if already_resolved else "delivered",
             )
             self._clear_question_state(chat_id, request_id, expected_session)
-            return QuestionResponseResult(True)
+            if already_resolved:
+                return QuestionResponseResult(True, already_resolved=True)
+            return result
         logger.info(
             "question reply %s session=%s action=%s: failed",
             request_id, session_id, action,

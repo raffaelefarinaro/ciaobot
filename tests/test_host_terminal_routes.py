@@ -210,6 +210,34 @@ def test_headless_host_is_409_with_reason(tmp_path: Path, monkeypatch: pytest.Mo
     assert response.json()["reason"] == "unavailable_headless"
 
 
+def test_update_action_not_applicable_is_409(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao import provider_versions
+
+    client, rec, _ = _client(tmp_path, monkeypatch)
+
+    def launch(folder: Path, *, action: str | None, runtime_dir: Path) -> str:
+        host_terminal.action_command(action or "")
+        return rec.launch(folder, action=action, runtime_dir=runtime_dir)
+
+    monkeypatch.setattr(host_terminal, "launch", launch)
+    monkeypatch.setattr(
+        provider_versions, "current_checks", lambda: {"opencode": {"state": "current"}}
+    )
+    response = client.post(PATH, json={"action": "opencode-update"}, headers=_signed(client))
+    assert response.status_code == 409
+    assert response.json()["reason"] == "not_applicable"
+    assert rec.launches == []
+
+
+def test_a_lookup_error_from_launch_is_not_reported_as_not_applicable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, rec, _ = _client(tmp_path, monkeypatch)
+    rec.launch_error = LookupError("something else")
+    with pytest.raises(LookupError):
+        client.post(PATH, json={"action": "gws-install"}, headers=_signed(client))
+
+
 def test_launch_oserror_is_500(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client, rec, _ = _client(tmp_path, monkeypatch)
     rec.launch_error = OSError("boom")

@@ -9438,16 +9438,20 @@ def _housekeeping_context(request: Request) -> "operator_actions.DetectionContex
     The package-status fetcher is the cached one the app already owns (see
     ``make_cached_package_status`` in ``app.py``), so detection never blocks
     on GitHub. The schedule manager, when present, exposes the missed one-time
-    reminders.
+    reminders. ``provider_checks_fetcher`` is the cached, offline provider-CLI
+    check (``provider_versions.make_cached_checks``); absent, the provider
+    update tile stays silent.
     """
     from ciao import operator_actions
 
     config = request.app.state.config
     fetcher = getattr(request.app.state, "package_status_fetcher", None)
+    provider = getattr(request.app.state, "provider_checks_fetcher", None)
     return operator_actions.DetectionContext(
         config=config,
         schedule_store=getattr(request.app.state, "schedule_manager", None),
         package_status=fetcher if callable(fetcher) else None,
+        provider_checks=provider if callable(provider) else None,
     )
 
 
@@ -9539,7 +9543,8 @@ async def run_housekeeping_action(request: Request) -> JSONResponse:
 async def dismiss_housekeeping_action(request: Request) -> JSONResponse:
     """Record a "not now" for one action, then re-detect and return the list.
 
-    Only ask-style actions (e.g. the GitHub star nudge) accept a dismissal; it
+    Only ask-style and advisory actions (the GitHub star nudge, a provider
+    update) accept a dismissal; it
     writes a suppression receipt so the tile stops surfacing for a while. The
     response shape mirrors ``run_housekeeping_action`` so the client re-renders
     the strip the same way. Unknown id is 404, never 500.

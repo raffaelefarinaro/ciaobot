@@ -20,6 +20,7 @@ from ciao.migration_notices import reset_links_cache, resolve_links
 from ciao.operator_actions import (
     DetectionContext,
     detect_actions,
+    dismiss_action,
     run_action,
 )
 
@@ -1394,3 +1395,211 @@ def test_the_runtime_root_setup_wrote_stays_silent(tmp_path: Path, value: str) -
     )
 
     assert "legacy-env-ignored" not in _kinds(_context(tmp_path, config=config))
+
+
+# -- provider update tiles (#1592) --------------------------------------------
+
+
+class _FakeProviderChecks:
+    """A provider-check callable with the ``invalidate`` hook the real cache has."""
+
+    def __init__(self, checks: dict[str, dict[str, str]]) -> None:
+        self.checks = checks
+        self.after_invalidate: dict[str, dict[str, str]] | None = None
+        self.invalidations = 0
+
+    def __call__(self) -> dict[str, dict[str, str]]:
+        return self.checks
+
+    def invalidate(self) -> None:
+        self.invalidations += 1
+        if self.after_invalidate is not None:
+            self.checks = self.after_invalidate
+
+
+def _below_tested(tested: str = "2.1.0", installed: str = "2.0.32") -> dict[str, str]:
+    return {
+        "state": "below_tested",
+        "installed": installed,
+        "tested": tested,
+        "command": "opencode upgrade " + tested,
+        "terminal_action": "opencode-update",
+    }
+
+
+def _provider_tiles(context: DetectionContext) -> list:
+    return [a for a in detect_actions(context) if a.kind == "provider-update"]
+
+
+def test_provider_update_silent_without_checks(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    assert _provider_tiles(_context(tmp_path)) == []
+
+
+def test_provider_update_tile_for_below_tested_opencode(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    checks = _FakeProviderChecks({"opencode": _below_tested()})
+    tiles = _provider_tiles(_context(tmp_path, provider_checks=checks))
+    assert len(tiles) == 1
+    tile = tiles[0]
+    assert tile.id == "provider-update:opencode"
+    assert "OpenCode 2.0.32 is older than 2.1.0, the version this Ciaobot release was tested with." in tile.detail
+    assert tile.terminal_action == "opencode-update"
+    assert tile.command == "opencode upgrade 2.1.0"
+    assert tile.run_label == "Check again"
+    assert tile.dismiss_label == "Not now"
+    assert tile.blocking is False
+    payload = tile.as_dict()
+    assert payload["terminal_action"] == "opencode-update"
+    assert payload["command"] == "opencode upgrade 2.1.0"
+
+
+@pytest.mark.parametrize(
+    "check",
+    [
+        {"state": "current", "installed": "2.1.0", "tested": "2.1.0"},
+        {"state": "bundled", "tested": "2.1.0"},
+        {"state": "unsupported", "tested": "2.1.0"},
+        {"state": "untested"},
+    ],
+)
+def test_provider_update_silent_for_current_bundled_unsupported_untested(
+    tmp_path: Path, check: dict[str, str]
+) -> None:
+    _starred(tmp_path)
+    context = _context(tmp_path, provider_checks=_FakeProviderChecks({"opencode": check}))
+    assert _provider_tiles(context) == []
+
+
+def test_provider_update_dismiss_hides_for_that_target_only(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    checks = _FakeProviderChecks({"opencode": _below_tested()})
+    context = _context(tmp_path, provider_checks=checks)
+    result, summary = dismiss_action("provider-update:opencode", context)
+    assert result == {"dismissed": "2.1.0"}
+    assert summary == "Hidden until a newer tested version ships."
+    assert _provider_tiles(context) == []
+    receipt = json.loads((_runtime(tmp_path) / "provider-update-dismissals.json").read_text(encoding="utf-8"))
+    assert receipt == {"opencode": "2.1.0"}
+    checks.checks = {"opencode": _below_tested(tested="2.2.0")}
+    assert [t.id for t in _provider_tiles(context)] == ["provider-update:opencode"]
+
+
+def test_provider_update_dismissals_keep_other_providers_and_ignore_junk(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    path = _runtime(tmp_path) / "provider-update-dismissals.json"
+    path.write_text(json.dumps({"claude": "2.0.0", "opencode": 5, "x": ["y"]}), encoding="utf-8")
+    checks = _FakeProviderChecks({"opencode": _below_tested()})
+    context = _context(tmp_path, provider_checks=checks)
+    assert len(_provider_tiles(context)) == 1
+    dismiss_action("provider-update:opencode", context)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"claude": "2.0.0", "opencode": "2.1.0"}
+    path.write_text("not json", encoding="utf-8")
+    assert len(_provider_tiles(context)) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_update_check_again_invalidates_and_clears(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    checks = _FakeProviderChecks({"opencode": _below_tested()})
+    checks.after_invalidate = {"opencode": {"state": "current", "installed": "2.1.0", "tested": "2.1.0"}}
+    context = _context(tmp_path, provider_checks=checks)
+    assert len(_provider_tiles(context)) == 1
+    result, summary = await run_action("provider-update:opencode", context)
+    assert checks.invalidations == 1
+    assert result == {"state": "current"}
+    assert "up to date" in summary
+    assert _provider_tiles(context) == []
+
+
+@pytest.mark.asyncio
+async def test_provider_update_check_again_reports_still_older(tmp_path: Path) -> None:
+    checks = _FakeProviderChecks({"opencode": _below_tested()})
+    result, summary = await run_action("provider-update:opencode", _context(tmp_path, provider_checks=checks))
+    assert result == {"state": "below_tested"}
+    assert summary == "OpenCode 2.0.32 is still older than 2.1.0."
+
+
+def test_provider_update_detection_is_idempotent(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    context = _context(tmp_path, provider_checks=_FakeProviderChecks({"opencode": _below_tested()}))
+    first = [a.as_dict() for a in detect_actions(context)]
+    second = [a.as_dict() for a in detect_actions(context)]
+    assert first == second
+    assert first
+
+
+@pytest.mark.asyncio
+async def test_provider_update_unknown_provider_is_value_error(tmp_path: Path) -> None:
+    checks = _FakeProviderChecks({"opencode": _below_tested()})
+    context = _context(tmp_path, provider_checks=checks)
+    with pytest.raises(ValueError):
+        await run_action("provider-update:nope", context)
+    with pytest.raises(ValueError):
+        dismiss_action("provider-update:nope", context)
+    assert not (_runtime(tmp_path) / "provider-update-dismissals.json").exists()
+
+
+def test_provider_update_dismiss_without_a_current_check_is_value_error(tmp_path: Path) -> None:
+    context = _context(
+        tmp_path,
+        provider_checks=_FakeProviderChecks({"opencode": {"state": "current", "installed": "2.1.0", "tested": "2.1.0"}}),
+    )
+    with pytest.raises(ValueError):
+        dismiss_action("provider-update:opencode", context)
+    with pytest.raises(ValueError):
+        dismiss_action("provider-update:claude", _context(tmp_path))
+
+
+def test_provider_update_a_broken_probe_is_silent(tmp_path: Path) -> None:
+    _starred(tmp_path)
+
+    def boom() -> dict:
+        raise RuntimeError("probe failed")
+
+    assert _provider_tiles(_context(tmp_path, provider_checks=boom)) == []
+
+
+def test_provider_update_dismiss_with_a_raising_probe_is_value_error(tmp_path: Path) -> None:
+    def boom() -> dict:
+        raise RuntimeError("probe failed")
+
+    with pytest.raises(ValueError):
+        dismiss_action("provider-update:opencode", _context(tmp_path, provider_checks=boom))
+    assert not (_runtime(tmp_path) / "provider-update-dismissals.json").exists()
+
+
+def test_provider_update_unreadable_receipt_is_logged_and_tile_still_shows(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _starred(tmp_path)
+    path = _runtime(tmp_path) / "provider-update-dismissals.json"
+    path.write_text("{}", encoding="utf-8")
+    real = Path.read_text
+
+    def deny(self: Path, *args, **kwargs):
+        if self.name == "provider-update-dismissals.json":
+            raise PermissionError("denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    context = _context(tmp_path, provider_checks=_FakeProviderChecks({"opencode": _below_tested()}))
+    with caplog.at_level("WARNING"):
+        assert len(_provider_tiles(context)) == 1
+    assert "provider-update-dismissals.json" in caplog.text
+
+
+def test_provider_update_tile_for_system_claude_below_tested(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    claude = {
+        "state": "below_tested",
+        "installed": "2.0.0",
+        "tested": "2.1.0",
+        "command": "claude update",
+        "terminal_action": "claude-update",
+    }
+    tiles = _provider_tiles(_context(tmp_path, provider_checks=_FakeProviderChecks({"claude": claude})))
+    assert [t.id for t in tiles] == ["provider-update:claude"]
+    assert tiles[0].title == "Update Claude Code"
+    assert tiles[0].command == "claude update"
+    assert tiles[0].terminal_action == "claude-update"
