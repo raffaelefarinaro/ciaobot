@@ -61,9 +61,9 @@ def _near(text: str, anchor: str, needle: str, window: int = 400) -> bool:
 def _says(text: str, pattern: str) -> bool:
     """Whether the text matches ``pattern`` in a whitespace-tolerant way.
 
-    A regex beats a chain of literal `not in` checks here: "the partial reply
-    stays", "a partial reply is kept" and "partial replies remain" are one
-    obsolete claim, and a literal list would let a rephrasing through.
+    A regex beats a chain of literal `not in` checks here: one obsolete claim
+    can be phrased several ways ("no partial bubble", "leaves no partial
+    reply"), and a literal list would let a rephrasing through.
     """
     return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
@@ -213,14 +213,17 @@ def test_project_walk_separates_app_create_from_vault_completion() -> None:
 
 
 def test_chat_walk_checks_in_flight_stop_without_requiring_a_partial_bubble() -> None:
-    """The chat shows the final reply only, so Stop must be caught while the turn runs.
+    """A stopped turn keeps the text it streamed as its reply, so Stop must be caught while the turn runs.
 
-    Since #1395 a turn renders one bubble — the final reply. Commentary and
-    partial output live in the Activity trace, so Stop leaves no partial
-    bubble behind and there is nothing to keep. The task must prove continuity
-    with a reply that is allowed to finish, then stop a *separate* turn while
-    it is still in flight, and report a prompt stop, a free composer and no
-    leftover spinner. A reply that finished before the click proves nothing
+    Commentary and intermediate text live in the Activity trace, but a user
+    Stop is normalized into a non-error result carrying the text the client
+    already rendered (#1223), and the client shows that text as the turn's
+    one reply bubble, without an error card and without an unread badge. So a
+    stopped turn has a reply to keep, and a missing one is a finding. The
+    task must prove continuity with a reply that is allowed to finish, then
+    stop a *separate* turn while it is still in flight, and report a prompt
+    stop, a free composer, no leftover spinner and the streamed text kept as
+    the turn's reply. A reply that finished before the click proves nothing
     about Stop: that checkpoint is BLOCKED when no in-flight stop can be
     exercised.
     """
@@ -240,8 +243,10 @@ def test_chat_walk_checks_in_flight_stop_without_requiring_a_partial_bubble() ->
     # delay stands in for an in-flight turn.
     assert "proves nothing" in lowered
     assert "retry once" in lowered
-    assert "fixed" in lowered
-    assert _near(plain, "fixed", "second")
+    # The old instruction was "wait about three seconds so the reply is
+    # mid-stream"; the fixed-delay phrasing is rejected in both of its forms.
+    assert _omits(plain, r"(?:wait|after)\s+(?:about\s+)?(?:a\s+)?fixed\s+(?:three|3)[\s-]*seconds?")
+    assert _omits(plain, r"(?:wait|after)\s+(?:about\s+)?(?:a\s+)?(?:three|3)[\s-]*seconds?\b")
     assert "BLOCKED" in text
 
     # The outcome: prompt stop, usable composer, no stuck spinner.
@@ -250,15 +255,20 @@ def test_chat_walk_checks_in_flight_stop_without_requiring_a_partial_bubble() ->
     assert "enabled" in lowered
     assert "spinner" in lowered
 
-    # Only the final reply is a bubble; everything else is Activity.
-    assert "final reply" in lowered
-    assert "activity" in lowered
-    assert "no partial" in lowered
+    # The stopped turn's streamed text survives as that turn's reply, and a
+    # missing one is a finding.
+    assert "kept as" in lowered
+    assert "still in the transcript" in lowered
+    assert "reply bubble" in lowered
+    assert "missing stopped reply is a finding" in lowered
 
-    # The obsolete expectations are gone. The prose may still have to *say*
-    # there is no partial reply, so the old demands are what is rejected.
-    assert _omits(plain, r"partial\s+repl(?:y|ies)\s+(?:stays|remains?|is\s+kept|kept)")
-    assert _omits(plain, r"partial\s+repl(?:y|ies)\s+is\s+not\s+discarded")
+    # Commentary belongs in Activity, beside that reply.
+    assert "activity" in lowered
+
+    # The claim we just removed must not come back: a stopped turn does keep
+    # its streamed text, so the prose must not claim there is no bubble.
+    assert _omits(plain, r"no\s+partial\s+(?:final\s+)?bubble")
+    assert _omits(plain, r"leaves\s+no\s+partial\s+reply")
 
 
 def test_home_walk_requires_update_tile_only_for_newer_published_version() -> None:

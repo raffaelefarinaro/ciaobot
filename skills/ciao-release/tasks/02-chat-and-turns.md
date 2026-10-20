@@ -77,18 +77,20 @@ Confirm, after the click:
 - the turn ends **promptly** rather than running to completion,
 - the composer is usable again immediately (the button is back to *Send
   message*, the textarea accepts text),
-- no leftover spinner: the *Working* activity row is gone, no activity spinner
-  keeps turning, and the stopped turn shows its collapsed Activity row.
+- no leftover spinner: the *Working* activity row is gone and no activity
+  spinner keeps turning,
+- the text the stopped turn had already streamed is still in the transcript as
+  that turn's reply — one bubble, not an error card, and not marked unread.
+  This is intended: a Stop keeps what the client already rendered, so a
+  missing stopped reply is a finding.
 
-**There is no partial final bubble to keep.** A turn renders one bubble — the
-final reply — and everything else the model said on the way there (commentary,
-intermediate text) belongs in the **Activity** trace. Stopping a turn
-therefore leaves no partial reply in the transcript, and that is correct
-behaviour, not a lost answer: the replies that had already completed stay as
-bubbles, and the stopped turn's activity stays in the collapsed Activity row
-beside them. Do not report a missing partial bubble as a finding.
+Commentary and intermediate text from the turn belong in its **Activity** row
+(collapsed by default) beside that reply. If the turn had produced no text
+before the click there is no reply bubble; its activity (if any) still shows
+in the Activity row. Do not require a second "partial" bubble alongside the
+reply.
 
-**Report** each of the three separately. A stop button that leaves the composer
+**Report** each of the four separately. A stop button that leaves the composer
 dead is a different bug from one that ignores the click, and the report should
 not collapse them.
 
@@ -120,8 +122,8 @@ returns the contents is a finding.
   streaming without layout jump, nothing overlapping the composer.
 - `02-chat-04-stopped.png` — after stop. Look for: the turn ended (no
   *Working* row, no leftover spinner), the composer enabled and back to
-  *Send message*, the earlier completed reply still on screen. There is no
-  partial final bubble to look for.
+  *Send message*, the earlier completed reply still on screen, and the text
+  the stopped turn had streamed still present as its reply bubble.
 
 ## Verdict
 
@@ -132,10 +134,10 @@ Record:
 - Did the turn complete, in how long?
 - Any toast, scroll jump, stuck spinner or error card.
 - Continuity: the second turn answered in the context of the first.
-- Stop behaviour, stated per the three points above (ends promptly; composer
-  usable immediately; no leftover spinner), and whether the stop was caught on
-  a turn that was still in flight. State **BLOCKED** if no in-flight stop could
-  be exercised.
+- Stop behaviour, stated per the four points above (ends promptly; composer
+  usable immediately; no leftover spinner; the streamed text kept as the
+  turn's reply), and whether the stop was caught on a turn that was still in
+  flight. State **BLOCKED** if no in-flight stop could be exercised.
 - The chat URL, so the operator can open it.
 
 Leave this chat open. Task 03 archives it.
