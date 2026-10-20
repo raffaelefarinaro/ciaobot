@@ -369,7 +369,7 @@ One-time GitHub setup for a fresh clone or repo admin:
 ./scripts/configure-github-branches.sh
 ```
 
-That sets `develop` as the default branch and enables pull-request + CI requirements on `develop` and `main`.
+That sets `develop` as the default branch and protects both branches. `develop` requires `linux-server`, `linux-web` and `windows`, with admins exempt so the post-release sync PR can merge. `main` takes changes only through a pull request and requires those three plus the macOS `test` job, for admins too.
 
 ### GitHub code scanning
 
