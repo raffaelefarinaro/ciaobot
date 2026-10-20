@@ -640,28 +640,6 @@
                         label="Install in Terminal"
                       />
                     </p>
-                    <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">
-                      <p class="provider-release-note">Older than {{ conn.release_check.tested }}, the version this Ciaobot release was tested with. Update with:</p>
-                      <code class="provider-release-command">{{ conn.release_check.command }}</code>
-                      <div class="provider-release-actions">
-                        <button
-                          type="button"
-                          class="btn-small btn-chip"
-                          @click="providerCommandCopy.copy(String(connKey), conn.release_check.command || '')"
-                        >{{ providerCommandCopy.stateOf(String(connKey)) === 'copied' ? 'Copied' : 'Copy' }}</button>
-                        <HostTerminalButton
-                          v-if="conn.release_check.terminal_action"
-                          :action="conn.release_check.terminal_action"
-                          variant="small"
-                          label="Update in Terminal"
-                          :aria-label="`Update ${conn.label || connKey} in Terminal`"
-                          @not-applicable="fetchProviderKeys()"
-                        />
-                        <span v-if="providerCommandCopy.stateOf(String(connKey)) === 'failed'" class="provider-release-failed" role="status">Copy failed; select the command above.</span>
-                      </div>
-                    </div>
-                    <p v-else-if="conn.release_check?.state === 'current'" class="set-row-sub">Tested with {{ conn.release_check.tested }}</p>
-                    <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                     <p
                       v-if="conn.auth !== 'not_installed' && conn.path_command"
                       class="set-row-sub"
@@ -716,6 +694,29 @@
                     </DropdownMenuRoot>
                   </div>
                 </div>
+                <!-- Full width, after the head: inside .set-row-main it shares a line with Connected / Verify and clips at phone width. -->
+                <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">
+                  <p class="provider-release-note">Older than {{ conn.release_check.tested }}, the version this Ciaobot release was tested with. Update with:</p>
+                  <code class="provider-release-command">{{ conn.release_check.command }}</code>
+                  <div class="provider-release-actions">
+                    <button
+                      type="button"
+                      class="btn-small btn-chip"
+                      @click="providerCommandCopy.copy(String(connKey), conn.release_check.command || '')"
+                    >{{ providerCommandCopy.stateOf(String(connKey)) === 'copied' ? 'Copied' : 'Copy' }}</button>
+                    <HostTerminalButton
+                      v-if="conn.release_check.terminal_action"
+                      :action="conn.release_check.terminal_action"
+                      variant="small"
+                      label="Update in Terminal"
+                      :aria-label="`Update ${conn.label || connKey} in Terminal`"
+                      @not-applicable="fetchProviderKeys()"
+                    />
+                    <span v-if="providerCommandCopy.stateOf(String(connKey)) === 'failed'" class="provider-release-failed" role="status">Copy failed; select the command above.</span>
+                  </div>
+                </div>
+                <p v-else-if="conn.release_check?.state === 'current'" class="set-row-sub">Tested with {{ conn.release_check.tested }}</p>
+                <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
                     <span class="ws-label set-subrow-label">Default model</span>
