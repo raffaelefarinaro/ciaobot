@@ -1027,9 +1027,10 @@ async function submitCreate() {
 // ── Resolution ────────────────────────────────────────────────────────────
 //
 // A completion's note. Every Done gesture opens this sheet first. The note is
-// optional only through "Complete without note". Submit sends the status and the
-// note in one POST, so a note never lands without the completion it belongs to.
-// Cancel posts nothing. A failed write keeps the draft.
+// optional: an empty or whitespace-only draft completes without a resolution, and
+// nonblank text is sent as typed. Submit sends the status and the note in one
+// POST, so a note never lands without the completion it belongs to. Cancel posts
+// nothing. A failed write keeps the draft.
 
 type ResolutionMode = 'complete' | 'edit'
 
@@ -1111,7 +1112,11 @@ function resetResolution() {
 async function submitResolution() {
   const task = resolutionTask.value
   if (!task || resolutionBusy.value) return
-  const text = resolutionDraft.value
+  // Completion's note is optional; edit-resolution keeps the draft exactly as
+  // typed, including an empty or whitespace-only note.
+  const text = resolutionMode.value === 'complete' && !resolutionDraft.value.trim()
+    ? ''
+    : resolutionDraft.value
   // With Done collapsed the completed card leaves the view, and its focus with it:
   // read its lane neighbour now, before the write re-renders the lane.
   const handoff = resolutionMode.value === 'complete' && !doneShown.value && columnsShown.value
@@ -1181,12 +1186,6 @@ function focusHandoffFor(taskId: string): string {
   const item = paneEl.value?.querySelector(`li[data-task-id="${taskId}"]`)
   const neighbour = item?.nextElementSibling ?? item?.previousElementSibling
   return neighbour?.getAttribute('data-task-id') ?? ''
-}
-
-/** Complete with an empty resolution. The blank is the user's explicit choice. */
-async function completeWithoutNote() {
-  resolutionDraft.value = ''
-  await submitResolution()
 }
 
 /**
@@ -2742,7 +2741,7 @@ const today = localDateKey()
       </div>
     </div>
 
-    <!-- Resolution sheet: one note for one completion. Cancel posts nothing. -->
+    <!-- Resolution sheet: one completion action, with an optional note. Cancel posts nothing. -->
     <div v-if="resolutionOpen && resolutionTask" class="modal-backdrop" @click.self="closeResolution">
       <div
         ref="resolutionEl"
@@ -2776,15 +2775,8 @@ const today = localDateKey()
             <button
               type="submit"
               class="btn-primary"
-              :disabled="resolutionBusy || (resolutionMode === 'complete' && !resolutionDraft.trim())"
-            >{{ resolutionBusy ? 'Saving…' : resolutionSubmitLabel }}</button>
-            <button
-              v-if="resolutionMode === 'complete'"
-              type="button"
-              class="btn-small"
               :disabled="resolutionBusy"
-              @click="completeWithoutNote"
-            >Complete without note</button>
+            >{{ resolutionBusy ? 'Saving…' : resolutionSubmitLabel }}</button>
             <button type="button" class="btn-small" :disabled="resolutionBusy" @click="closeResolution">Cancel</button>
           </div>
         </form>

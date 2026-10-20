@@ -163,6 +163,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     context = _verbs(nouns.add_parser("context", help="Workspace, project and chat context."))
     context.add_parser("get", help="Return the active workspace, project, chat and server status.")
+    logs = context.add_parser("logs", help="Return Ciaobot's version and recent error, debug and service log tails.")
+    logs.add_argument("--lines", type=int, default=200, help="Lines per log, 1-1000.")
 
     memory = _verbs(nouns.add_parser("memory", help="Bounded native-guide memory."))
     memory.add_parser("status", help="Memory usage and diagnostics.")
@@ -306,6 +308,9 @@ def build_parser() -> argparse.ArgumentParser:
     tupdate.add_argument("--due", default=None, metavar="YYYY-MM-DD")
     tupdate.add_argument("--assignee", default=None, choices=["user", "agent"])
     tupdate.add_argument("--status", default=None, choices=["backlog", "in_progress", "in_review", "done"])
+    tdelete = task.add_parser("delete", help="Permanently remove one task; its chats and runs stay.")
+    tdelete.add_argument("task_id")
+    tdelete.add_argument("--revision", required=True, help="The revision you read; a stale one removes nothing.")
     tmove = task.add_parser("move", help="Set a task's column.")
     tmove.add_argument("task_id")
     tmove.add_argument("--to", required=True, choices=["backlog", "in_progress", "in_review", "done"])
@@ -539,6 +544,8 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
     if noun == "help":
         return None
     if noun == "context":
+        if verb == "logs":
+            return "context_logs", {"lines": args.lines}
         return "context_get", {}
     if noun == "memory":
         if verb == "status":
@@ -676,6 +683,11 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
             if body is not None:
                 arguments["body"] = body
             return "task_update", arguments
+        if verb == "delete":
+            return "task_delete", {
+                "task_id": args.task_id,
+                "expected_revision": args.revision,
+            }
         if verb == "move":
             return "task_action", {
                 "action": "move",

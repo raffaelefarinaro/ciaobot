@@ -11,10 +11,12 @@ tests cover the grace marker and the catch-up suppression it drives.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from ciao.schedules import ScheduleManager, ScheduleStore
+from ciao.schedules import ScheduleManager, ScheduleStore, compute_last_expected_run
+from ciao.web.routes_api import _enrich_schedule
 from ciao.setup_marker import (
     SETUP_CATCH_UP_GRACE,
     catch_up_grace_active,
@@ -138,6 +140,7 @@ async def test_after_grace_system_routines_catch_up_normally(tmp_path: Path) -> 
         now=now_utc - SETUP_CATCH_UP_GRACE - timedelta(hours=1),
     )
     store = ScheduleStore(runtime_root, include_system=True)
+    store.record_system_first_seen(now_utc - SETUP_CATCH_UP_GRACE - timedelta(hours=1))
     mgr, dispatched = _make_manager(store)
 
     grace_active = catch_up_grace_active(runtime_root, now=now_utc)
@@ -152,6 +155,47 @@ async def test_after_grace_system_routines_catch_up_normally(tmp_path: Path) -> 
     ]
     assert set(fired) == set(system_ids)
     assert set(dispatched) == set(system_ids)
+
+
+async def _setup_day_store(tmp_path: Path, t0: datetime):
+    runtime_root = tmp_path / ".runtime"
+    write_setup_marker(runtime_root, now=t0)
+    store = ScheduleStore(
+        runtime_root, include_system=True, workspace_names=lambda: ["personal"]
+    )
+    mgr, dispatched = _make_manager(store)
+    await mgr.catch_up(now=t0, skip_system=True)
+    return runtime_root, store, dispatched
+
+
+async def test_fresh_install_does_not_report_system_routines_missed(
+    tmp_path: Path,
+) -> None:
+    t0 = datetime(2026, 1, 19, 14, 0, tzinfo=UTC)
+    runtime_root, store, _ = await _setup_day_store(tmp_path, t0)
+    later = t0 + timedelta(hours=5)
+
+    system = [e for e in store.list_entries() if e.scope == "system"]
+    assert system
+    for entry in system:
+        assert compute_last_expected_run(entry, now=later) is None
+        assert _enrich_schedule(entry, now=later)["missed"] is False
+
+    state = json.loads(
+        (runtime_root / "system_schedules_state.json").read_text(encoding="utf-8")
+    )
+    row = state["schedules"]["system-memory-curation@personal"]
+    assert row["first_seen_at"] == "2026-01-19T14:00:00Z"
+
+
+async def test_a_slot_after_first_seen_is_still_missed(tmp_path: Path) -> None:
+    t0 = datetime(2026, 1, 19, 14, 0, tzinfo=UTC)
+    _, store, _ = await _setup_day_store(tmp_path, t0)
+    now2 = datetime(2026, 1, 21, 14, 0, tzinfo=UTC)
+
+    entry = store.get("system-memory-curation@personal")
+    assert entry is not None
+    assert _enrich_schedule(entry, now=now2)["missed"] is True
 
 
 async def _drain() -> None:

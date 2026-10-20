@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { enablePush, isPushEnabled, pushSupported } from '../lib/push'
-import { installInstructions, isIos, isStandalone, SETUP_CARD_DISMISSED_KEY } from '../lib/pwaPlatform'
+import { installInstructions, isAndroid, isIos, isIpadDesktopMode, isStandalone, SETUP_CARD_DISMISSED_KEY } from '../lib/pwaPlatform'
 import { canPromptInstall, installed, installedAppProbed, installedOnDevice, promptInstall } from '../lib/installPrompt'
+import { isLoopbackPage } from '../lib/loopback'
 import { errorMessage } from '../lib/errorMessage'
 import HomeNoticeWindow from './HomeNoticeWindow.vue'
 import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
@@ -46,6 +47,10 @@ const installedHint = computed(() => standalone.value || installed.value
   ? 'Installed'
   : 'Installed on this device. Open it from its icon instead of this tab.')
 const needsInstallFirst = computed(() => isIos() && !standalone.value)
+/** Phone setup is something you do *from* the computer running Ciaobot: a
+ *  phone or a remote browser is already the other device. Informational, so
+ *  it never counts toward `complete`. */
+const showPhoneStep = isLoopbackPage() && !isIos() && !isAndroid() && !isIpadDesktopMode()
 
 /** Both real steps are finished (or cannot be finished here). */
 const complete = computed(() => installDone.value && (pushOn.value || !pushAvailable.value || denied.value))
@@ -160,6 +165,17 @@ function hide() {
           @click="enable"
         >Enable</button>
       </li>
+      <li v-if="showPhoneStep" class="home-setup-step">
+        <div class="home-setup-text">
+          <strong>Use on your phone</strong>
+          <ol class="home-setup-substeps hint">
+            <li>Install Tailscale on this computer and your phone, signed in to the same account.</li>
+            <li>Make Ciaobot reachable from the phone: Settings shows the address and the one command.</li>
+            <li>On the phone, open the address or scan its QR code, sign in with your Ciaobot password, then Add to Home Screen.</li>
+          </ol>
+        </div>
+        <RouterLink class="home-setup-link" to="/settings#other-devices">Phone setup</RouterLink>
+      </li>
     </ol>
     <p v-if="error" class="action-result" role="alert">{{ error }}</p>
     </HomeNoticeWindow>
@@ -191,6 +207,7 @@ function hide() {
   flex: 1 1 14rem;
 }
 .home-setup-step[data-done="true"] strong { color: var(--fg3); }
+.home-setup-substeps { margin: 2px 0 0; padding-left: 1.25em; display: grid; gap: 2px; }
 .home-setup-link { white-space: nowrap; }
 @media (pointer: coarse) {
   .home-setup-link { display: inline-flex; align-items: center; min-height: var(--touch); }

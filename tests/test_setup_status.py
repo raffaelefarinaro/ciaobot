@@ -2278,3 +2278,85 @@ def test_provider_rows_carry_their_terminal_action(tmp_path, monkeypatch) -> Non
 
     assert claude["auth"] == "not_installed"
     assert claude["terminal_action"] == "claude-install"
+
+
+def test_cloud_synced_location_recognises_sync_folders(tmp_path) -> None:
+    from ciao.setup_status import cloud_synced_location
+
+    home = tmp_path / "h"
+    mac = home / "Library" / "CloudStorage"
+    cases = [
+        ("darwin", home / "Library/Mobile Documents/com~apple~CloudDocs/ws", "iCloud Drive"),
+        ("darwin", mac / "GoogleDrive-me@x.com/My Drive/ws", "Google Drive"),
+        ("darwin", mac / "Dropbox/ws", "Dropbox"),
+        ("darwin", mac / "OneDrive-Personal/ws", "OneDrive"),
+        ("darwin", mac / "Nextcloud/ws", "a cloud-synced folder"),
+        ("darwin", home / "Dropbox (Acme)/ws", "Dropbox"),
+        ("darwin", home / "OneDrive - Contoso/ws", "OneDrive"),
+        ("darwin", home / "dropbox" / "ws", "Dropbox"),
+        ("darwin", home / "Ciaobot", None),
+        ("darwin", home, None),
+        ("darwin", mac, None),
+        ("darwin", home / "Library/Application Support/x", None),
+        ("linux", home / "Dropbox/ws", "Dropbox"),
+        ("linux", home / "Library/Mobile Documents/x", None),
+        ("win32", home / "iCloudDrive/ws", "iCloud Drive"),
+    ]
+    for platform, path, expected in cases:
+        assert cloud_synced_location(path, platform=platform, home=home, env={}) == expected, path
+
+    corp = tmp_path / "corp"
+    assert (
+        cloud_synced_location(corp / "ws", platform="win32", home=home, env={"OneDrive": str(corp)})
+        == "OneDrive"
+    )
+    assert cloud_synced_location(corp / "ws", platform="win32", home=home, env={}) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_cloud_synced_location_follows_symlinks(tmp_path) -> None:
+    from ciao.setup_status import cloud_synced_location
+
+    home = tmp_path / "h"
+    real = home / "Library" / "CloudStorage" / "Dropbox"
+    (real / "ws").mkdir(parents=True)
+    (home / "Dropbox").symlink_to(real)
+    assert cloud_synced_location(home / "Dropbox" / "ws", platform="darwin", home=home) == "Dropbox"
+
+
+def test_cloud_sync_warning_names_the_service_and_is_empty_otherwise(tmp_path) -> None:
+    from ciao.setup_status import cloud_sync_warning
+
+    home = tmp_path / "h"
+    path = home / "Dropbox" / "ws"
+    warning = cloud_sync_warning(path, platform="darwin", home=home)
+    assert "Dropbox" in warning
+    assert str(path) in warning
+    assert cloud_sync_warning(home / "Ciaobot", platform="darwin", home=home) == ""
+
+
+def test_setup_inspect_folder_reports_cloud_sync_warning(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "notes"
+    target.mkdir()
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["cloud_sync_warning"] == ""
+
+    monkeypatch.setattr("ciao.setup_status.cloud_sync_warning", lambda path, **kw: "SYNCED")
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["cloud_sync_warning"] == "SYNCED"
+
+
+def test_setup_warns_when_the_workspace_is_in_a_synced_folder(monkeypatch, capsys) -> None:
+    from ciao import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.delenv("CIAO_ENGINE_PATH", raising=False)
+    synced = Path.home() / "Dropbox" / "ws"
+    assert cli.main(["setup", "--workspace", str(synced)]) == 0
+    err = capsys.readouterr().err
+    assert "Warning:" in err and "Dropbox" in err
+
+    assert cli.main(["setup", "--workspace", str(Path.home() / "plain")]) == 0
+    assert "Dropbox" not in capsys.readouterr().err
