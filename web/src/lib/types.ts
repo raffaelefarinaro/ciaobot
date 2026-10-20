@@ -412,6 +412,9 @@ export interface SubagentTranscript {
   is_async?: boolean
   status?: 'running' | 'completed' | 'failed' | 'stopped' | ''
   turn_index?: number
+  // Run length in milliseconds, when the provider can report it without the
+  // transcript (opencode child sessions carry their own timestamps).
+  duration_ms?: number | null
 }
 
 // One live subagent from `/api/subagents/running`. Same dispatch metadata as
