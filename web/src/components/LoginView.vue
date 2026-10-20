@@ -400,7 +400,7 @@
           <span class="wordmark wordmark--md">ciaobot</span>
         </p>
         <h1 class="login-title">Enter your password</h1>
-        <p class="login-lede">Use the Ciaobot password for this computer. The installer picks one for you; you can change it in Settings.</p>
+        <p class="login-lede">Enter your Ciaobot password. The installer picks one for you; you can change it in Settings.</p>
         <label class="login-label" for="login-token">Password</label>
         <div class="login-row">
           <input
@@ -422,11 +422,10 @@
         </div>
         <p v-if="error" id="login-error" class="login-error" role="alert">{{ error }}</p>
         <div v-if="onHost" class="login-host">
-          <button type="button" class="login-host-signin" :disabled="hostSignInBusy" @click="hostSignIn">
+          <button type="button" class="login-host-signin" :aria-disabled="hostSignInBusy ? 'true' : undefined" @click="hostSignIn">
             {{ hostSignInBusy ? 'Opening…' : 'Sign in on this computer' }}
           </button>
-          <p v-if="hostSignInStatus" class="login-host-status" role="status">{{ hostSignInStatus }}</p>
-          <code v-if="hostSignInFallback" class="login-host-command">ciao setup-url --workspace ~/Ciaobot</code>
+          <p class="login-host-status" role="status" aria-live="polite">{{ hostSignInStatus }}<template v-if="hostSignInFallback"> <code class="login-host-command">ciao setup-url --workspace ~/Ciaobot</code> If your Ciaobot folder is somewhere else, put its path after --workspace.</template></p>
         </div>
         <a
           class="login-help"
@@ -681,11 +680,11 @@ const hostSignInStatus = ref('')
 const hostSignInFallback = ref(false)
 const HOST_SIGN_IN_POLL_MS = 2000
 const HOST_SIGN_IN_POLL_LIMIT_MS = 120_000
-let hostSignInTimer: ReturnType<typeof setInterval> | null = null
+let hostSignInTimer: ReturnType<typeof setTimeout> | null = null
 
 function stopHostSignInPoll() {
   if (hostSignInTimer !== null) {
-    clearInterval(hostSignInTimer)
+    clearTimeout(hostSignInTimer)
     hostSignInTimer = null
   }
 }
@@ -693,18 +692,25 @@ function stopHostSignInPoll() {
 function startHostSignInPoll() {
   stopHostSignInPoll()
   const startedAt = Date.now()
-  hostSignInTimer = setInterval(async () => {
+  const tick = async () => {
     await auth.check()
+    // Unmount (or a new poll) cleared the handle while the check was in flight.
+    if (hostSignInTimer === null) return
     if (auth.authenticated) {
       stopHostSignInPoll()
       window.location.replace('/')
     } else if (Date.now() - startedAt >= HOST_SIGN_IN_POLL_LIMIT_MS) {
       stopHostSignInPoll()
+      hostSignInStatus.value = 'If a signed-in tab opened in another browser, use that one.'
+    } else {
+      hostSignInTimer = setTimeout(tick, HOST_SIGN_IN_POLL_MS)
     }
-  }, HOST_SIGN_IN_POLL_MS)
+  }
+  hostSignInTimer = setTimeout(tick, HOST_SIGN_IN_POLL_MS)
 }
 
 async function hostSignIn() {
+  if (hostSignInBusy.value) return
   hostSignInBusy.value = true
   hostSignInStatus.value = ''
   hostSignInFallback.value = false
@@ -1152,7 +1158,6 @@ onUnmounted(() => {
   margin-top: 18px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
   align-items: flex-start;
 }
 .login-host-signin {
@@ -1167,11 +1172,14 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .login-host-signin:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-.login-host-signin:disabled { opacity: 0.6; cursor: default; }
+.login-host-signin:hover:not([aria-disabled='true']) { background: var(--bg3); }
+.login-host-signin[aria-disabled='true'] { opacity: 0.6; cursor: default; }
 .login-host-status { margin: 0; color: var(--fg2); font-size: var(--text-sm); }
+.login-host-status:not(:empty) { margin-top: 8px; }
 .login-host-command {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   font-size: var(--text-sm);
+  font-variant-ligatures: none;
   user-select: all;
   overflow-wrap: anywhere;
 }
