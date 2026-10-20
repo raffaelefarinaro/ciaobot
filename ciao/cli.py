@@ -1047,6 +1047,30 @@ def setup_workspace(
                         "CIAO_ALLOW_LAUNCH_AGENT_REPOINT=1 to allow, or pass "
                         "launch_agents_dir to isolate."
                     )
+    # The one host decision, shared by the guard below and the plist write
+    # further down, so the check and the write can never disagree.
+    host: HostOwnership | None = None
+    if write_launchd and sys.platform != "win32":
+        from ciao.setup_status import tcc_protected_location
+
+        host = _verified_host_if_installed()
+        # Non-None only on macOS.
+        protected = tcc_protected_location(root)
+        if protected and host is None:
+            tcc_launch_dir = (
+                Path(launch_agents_dir)
+                if launch_agents_dir is not None
+                else service_backend.current_backend().agents_dir()
+            )
+            if not _existing_hosted_definition_serves(tcc_launch_dir, root):
+                raise RuntimeError(
+                    f"{root} is inside ~/{protected}. macOS lets the background engine into "
+                    "that folder only when it runs as the Ciaobot Server app, and no verified "
+                    "Ciaobot Server is installed on this Mac, so the engine would fail with "
+                    "'Operation not permitted'. Re-run the Ciaobot installer to add it, or "
+                    "choose a folder outside ~/Desktop, ~/Documents and ~/Downloads, such as "
+                    "~/Ciaobot."
+                )
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     setup_selected_vault = vault_root is not None
@@ -1439,7 +1463,6 @@ def setup_workspace(
             # the installed definition is already hosted and serves this
             # workspace, it is left exactly as it is: re-rendering would silently
             # downgrade a live hosted job to the direct shape.
-            host = _verified_host_if_installed()
             if host is None and _existing_hosted_definition_serves(launch_dir, root):
                 # A hosted definition already owns this workspace; setup is a
                 # faithful no-op for the service definition, not a downgrade.
@@ -1579,20 +1602,6 @@ def _setup_command(args: argparse.Namespace) -> int:
     # running it inside the source checkout, or re-pointing an already
     # configured workspace to the current directory. --yes overrides.
     if not args.yes:
-        from ciao.setup_status import tcc_protected_location
-
-        protected = tcc_protected_location(root)
-        if protected:
-            print(
-                f"Error: {root} is inside ~/{protected}, which macOS privacy "
-                "protection blocks the background launchd agent from reading "
-                "(the server and menu bar fail with 'Operation not permitted').\n"
-                "Choose a workspace outside ~/Desktop, ~/Documents, and "
-                "~/Downloads (e.g. ~/ciaobot), or grant Full Disk Access to the "
-                "interpreter and re-run with --yes.",
-                file=sys.stderr,
-            )
-            return 1
         if _looks_like_source_checkout(root):
             print(
                 f"Error: {root} looks like the Ciaobot source checkout, not a "
@@ -1648,6 +1657,11 @@ def _setup_command(args: argparse.Namespace) -> int:
         return 1
     for path in written:
         print(path)
+    from ciao.setup_status import macos_access_note
+
+    access_note = macos_access_note(root)
+    if access_note:
+        print(f"Note: {access_note}", file=sys.stderr)
     for failure in sync_failures:
         print(
             f"Warning: {failure}. Skills were synced; fix the error and "
@@ -6360,20 +6374,22 @@ def _register_launchd_service(workspace: Path) -> Path:
     root = _validate_service_workspace(workspace)
     from ciao.setup_status import tcc_protected_location
 
+    # Activation (E2): a verified host selects the hosted service, otherwise the
+    # direct shape is written. The only caller registers when no definition is
+    # installed, so there is no hosted definition here to preserve.
+    host = _verified_host_if_installed()
     protected = tcc_protected_location(root)
-    if protected:
+    if protected and host is None:
         raise RuntimeError(
-            f"{root} is inside ~/{protected}, which launchd cannot read. "
-            "Move the workspace out of Desktop/Documents/Downloads first."
+            f"{root} is inside ~/{protected}. macOS lets the background engine into that "
+            "folder only when it runs as the Ciaobot Server app, and no verified Ciaobot "
+            "Server is installed on this Mac. Re-run the Ciaobot installer, or move the "
+            "workspace out of Desktop/Documents/Downloads first."
         )
 
     runtime_root = root / RUNTIME_DIR_NAME
     launch_dir = default_launch_agents_dir()
     resolved_engine = os.environ.get("CIAO_ENGINE_PATH", "").strip() or sys.executable
-    # Activation (E2): a verified host selects the hosted service, otherwise the
-    # direct shape is written. The only caller registers when no definition is
-    # installed, so there is no hosted definition here to preserve.
-    host = _verified_host_if_installed()
     host_python = _host_engine_interpreter(resolved_engine) if host is not None else None
     try:
         return _write_launchd_plist(
@@ -6500,8 +6516,9 @@ def _validate_service_workspace(workspace: Path) -> Path:
 
     The two checks `_register_launchd_service` makes before writing a plist: a
     Ciaobot workspace has been set up, and the app's own source checkout never
-    is one. The macOS TCC check is left out -- it names launchd and macOS
-    privacy protection, neither of which exists on Windows.
+    is one. The macOS TCC check is left out -- it lives in
+    `_register_launchd_service` and applies only to a Mac with no verified
+    Ciaobot Server host; it names macOS privacy protection, which Windows lacks.
     """
     from ciao.setup_marker import is_set_up_workspace
 

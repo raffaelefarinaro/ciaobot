@@ -102,6 +102,12 @@
             class="hint hint--warn"
             role="note"
           >{{ cloudSyncWarning }}</span>
+          <span
+            v-if="macosAccessNote"
+            id="setup-workspace-macos-access-note"
+            class="hint"
+            role="note"
+          >{{ macosAccessNote }}</span>
         </div>
 
         <div class="form-group">
@@ -512,6 +518,7 @@ const advancedOpen = ref(false)
 const folderInspecting = ref(false)
 const detectedWorkspaces = ref<string[]>([])
 const cloudSyncWarning = ref('')
+const macosAccessNote = ref('')
 let inspectToken = 0
 
 async function inspectWorkspaceFolder(rawPath: string) {
@@ -519,6 +526,7 @@ async function inspectWorkspaceFolder(rawPath: string) {
   if (!path) {
     detectedWorkspaces.value = []
     cloudSyncWarning.value = ''
+    macosAccessNote.value = ''
     folderInspecting.value = false
     return
   }
@@ -529,16 +537,19 @@ async function inspectWorkspaceFolder(rawPath: string) {
       mode: string
       existing_workspaces: string[]
       cloud_sync_warning?: string
+      macos_access_note?: string
     }>(`/api/setup/inspect-folder?path=${encodeURIComponent(path)}`)
     if (token !== inspectToken) return
     detectedWorkspaces.value = data.existing_workspaces || []
     cloudSyncWarning.value = data.cloud_sync_warning || ''
+    macosAccessNote.value = data.macos_access_note || ''
   } catch {
     // Network or guard error: fall back to the text field, the same as
     // before this probe existed.
     if (token !== inspectToken) return
     detectedWorkspaces.value = []
     cloudSyncWarning.value = ''
+    macosAccessNote.value = ''
   } finally {
     if (token === inspectToken) folderInspecting.value = false
   }

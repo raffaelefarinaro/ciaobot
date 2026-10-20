@@ -428,6 +428,70 @@ def test_existing_hosted_definition_is_preserved_only_while_its_host_exists(
     assert cli._existing_hosted_definition_serves(agents, workspace) is False
 
 
+def _fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return home
+
+
+def test_setup_refuses_a_protected_workspace_without_a_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _fake_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: None)
+    workspace = home / "Documents" / "ws"
+
+    with pytest.raises(RuntimeError, match="Ciaobot Server"):
+        cli.setup_workspace(workspace, launch_agents_dir=tmp_path / "LaunchAgents")
+
+    assert not workspace.exists()
+
+
+@macos_host_shape_only
+def test_setup_writes_a_hosted_definition_for_a_protected_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _fake_home(tmp_path, monkeypatch)
+    host = _verified_host()
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: host)
+    monkeypatch.setattr(sys, "executable", _ENGINE_PYTHON)
+    agents = tmp_path / "LaunchAgents"
+
+    cli.setup_workspace(
+        home / "Documents" / "ws", launch_agents_dir=agents, python_path=_ENGINE_PYTHON
+    )
+
+    data = _load_plist(agents / "com.ciao.server.plist")
+    assert data["ProgramArguments"] == _hosted_expected(host, _ENGINE_PYTHON)
+
+
+@macos_host_shape_only
+def test_setup_keeps_an_existing_hosted_definition_for_a_protected_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _fake_home(tmp_path, monkeypatch)
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    workspace = (home / "Documents" / "ws").resolve()
+    workspace.mkdir()
+    bundle = _host_bundle(tmp_path)
+    cli._write_launchd_plist(
+        workspace=workspace,
+        launch_agents_dir=agents,
+        port=8443,
+        host=_verified_host(str(bundle)),
+        host_python="/opt/ciaobot/venv/bin/python",
+    )
+    plist = agents / "com.ciao.server.plist"
+    before = plist.read_bytes()
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: None)
+
+    cli.setup_workspace(workspace, launch_agents_dir=agents, python_path=sys.executable)
+
+    assert plist.read_bytes() == before
+
+
 def test_register_launchd_service_selects_the_verified_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -179,6 +179,22 @@ in System Settings. That is why ordinary engine updates must keep these bytes
 unchanged, and why a host upgrade is a separate, explicit, warned action. The
 builder and tests never edit TCC and never remove a grant.
 
+## Workspaces in Desktop, Documents and Downloads
+
+Step 1 of #1577 (2026-10-20, macOS 27.0.1, v1.6.0) on a real Mac: the
+launchd-started host gets the "Ciaobot Server would like to access files in your
+Documents folder" prompt without any `NS*FolderUsageDescription` key. Allow
+covers the supervisor, the engine and the agent children, and survives logout
+and login. A direct (bare-Python) definition gets no prompt and no grant, so
+`setup_workspace` and `_register_launchd_service` still refuse a protected
+folder when no verified host is installed, and workspace move (a bare-Python
+launchd job) refuses a protected source and destination.
+
+The usage strings are deliberately absent from the host `Info.plist`: adding
+them changes the signed bytes, which is a host revision (see above). Not yet
+verified: whether the grant survives a host revision (a re-signed bundle). Check
+it in the release walk of the next host revision.
+
 ## Tests
 
 `tests/test_server_host.py` runs the pure checks everywhere (identity distinct
