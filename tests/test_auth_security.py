@@ -347,6 +347,7 @@ _LOOPBACK_ONLY_ROUTES = [
     ("POST", "/api/admin/drain"),
     ("POST", "/api/admin/drain/cancel"),
     ("GET", "/api/admin/restart-blockers"),
+    ("POST", "/api/auth/host-sign-in"),
 ]
 
 
