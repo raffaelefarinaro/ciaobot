@@ -695,6 +695,29 @@
                     </DropdownMenuRoot>
                   </div>
                 </div>
+                <!-- Full width, after the head: inside .set-row-main it shares a line with Connected / Verify and clips at phone width. -->
+                <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">
+                  <p class="provider-release-note">Older than {{ conn.release_check.tested }}, the version this Ciaobot release was tested with. Update with:</p>
+                  <code class="provider-release-command">{{ conn.release_check.command }}</code>
+                  <div class="provider-release-actions">
+                    <button
+                      type="button"
+                      class="btn-small btn-chip"
+                      @click="providerCommandCopy.copy(String(connKey), conn.release_check.command || '')"
+                    >{{ providerCommandCopy.stateOf(String(connKey)) === 'copied' ? 'Copied' : 'Copy' }}</button>
+                    <HostTerminalButton
+                      v-if="conn.release_check.terminal_action"
+                      :action="conn.release_check.terminal_action"
+                      variant="small"
+                      label="Update in Terminal"
+                      :aria-label="`Update ${conn.label || connKey} in Terminal`"
+                      @not-applicable="fetchProviderKeys()"
+                    />
+                    <span v-if="providerCommandCopy.stateOf(String(connKey)) === 'failed'" class="provider-release-failed" role="status">Copy failed; select the command above.</span>
+                  </div>
+                </div>
+                <p v-else-if="conn.release_check?.state === 'current'" class="set-row-sub">Tested with {{ conn.release_check.tested }}</p>
+                <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
                     <span class="ws-label set-subrow-label">Default model</span>
@@ -2054,6 +2077,7 @@ import {
 } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
+import { useCommandCopy } from '../composables/useCommandCopy'
 import UpdateProgressView from './UpdateProgressView.vue'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -3064,6 +3088,8 @@ function providerBringsCounts(providerId: string, conn: ProviderConnection): str
 }
 
 
+
+const providerCommandCopy = useCommandCopy()
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
   if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'opencode' ? 'opencode' : 'Claude Code'} on this computer?`, {
@@ -5487,6 +5513,21 @@ a.btn-secondary {
   justify-content: flex-start;
   gap: var(--space-2);
 }
+.provider-release-check { display: flex; flex-direction: column; gap: var(--space-2); }
+.provider-release-note { margin: 0; }
+.provider-release-command {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
+.provider-release-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.provider-release-failed { color: var(--fg3); }
 .provider-connection-detail {
   display: flex;
   flex-wrap: wrap;

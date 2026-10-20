@@ -69,6 +69,22 @@ describe('HostTerminalButton', () => {
     expect(wrapper.get('button').attributes('disabled')).toBeUndefined()
   })
 
+  it('tells its parent when the engine says there is nothing to update', async () => {
+    vi.mocked(api.post).mockRejectedValue({ status: 409, payload: { ok: false, reason: 'not_applicable', error: 'opencode-update: nothing to update' } })
+    const wrapper = await mountButton({ action: 'skills-update' })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('not-applicable')).toHaveLength(1)
+  })
+
+  it('does not emit not-applicable for other failures', async () => {
+    vi.mocked(api.post).mockRejectedValue({ status: 409, payload: { ok: false, reason: 'no_terminal', error: 'x' } })
+    const wrapper = await mountButton({ action: 'skills-update' })
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('not-applicable')).toBeUndefined()
+  })
+
   it('disables itself while the launch is in flight', async () => {
     let resolve: (v: unknown) => void = () => {}
     vi.mocked(api.post).mockReturnValue(new Promise((r) => { resolve = r }))

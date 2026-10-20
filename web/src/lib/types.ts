@@ -910,6 +910,8 @@ export type HostTerminalAction =
   | 'opencode-login'
   | 'gws-install'
   | 'skills-update'
+  | 'opencode-update'
+  | 'claude-update'
 
 /** `GET /api/host/terminal`. */
 export interface HostTerminalCapabilities {
@@ -925,6 +927,15 @@ export interface HostTerminalLaunchResult {
   ok: boolean
   platform: string
   launched: string
+}
+
+/** What `ciao/provider_versions.py::release_check` says about an installed CLI. */
+export interface ProviderReleaseCheck {
+  state: 'untested' | 'bundled' | 'unsupported' | 'unknown' | 'below_tested' | 'current'
+  tested?: string
+  installed?: string
+  command?: string
+  terminal_action?: HostTerminalAction
 }
 
 export interface ProviderConnection {
@@ -950,6 +961,8 @@ export interface ProviderConnection {
   path_command?: string
   /** Terminal action that runs the command shown for this row, when the engine offers one. */
   terminal_action?: HostTerminalAction
+  /** How the installed CLI compares with the version this release was tested with. */
+  release_check?: ProviderReleaseCheck
   /** Desktop app found while the CLI is missing. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */
@@ -1308,6 +1321,10 @@ export interface OperatorAction {
   /** A precondition the install cannot get past on its own: unmissable and not
    *  dismissible. Deliberately not an app-wide lock. */
   blocking: boolean
+  /** Host-terminal action the strip may offer on the engine's computer. */
+  terminal_action?: HostTerminalAction
+  /** The same command as copyable text. */
+  command?: string
 }
 
 export interface HousekeepingResponse {
