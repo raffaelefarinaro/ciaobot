@@ -87,6 +87,14 @@ def test_baseline_authoring_does_not_ship_as_optional_skills() -> None:
     assert not skills.joinpath("sop-authoring/SKILL.md").is_file()
 
 
+def test_support_works_under_workspace_scope() -> None:
+    support = resources.files("ciao.stock").joinpath("skills/ciao-support/SKILL.md").read_text(encoding="utf-8")
+    assert "ciao context logs" in support
+    assert "file_access=workspace only" in support
+    assert "api.github.com/search/issues" in support
+    assert "issues/new?title=" in support
+
+
 def test_support_checks_for_a_released_fix_before_new_issue() -> None:
     support = resources.files("ciao.stock").joinpath("skills/ciao-support/SKILL.md").read_text(encoding="utf-8")
     assert "https://github.com/raffaelefarinaro/ciaobot/releases" in support
