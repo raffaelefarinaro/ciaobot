@@ -3020,14 +3020,16 @@ function scrollToChatProvidersIfLinked(): void {
 }
 watch(() => route.fullPath, scrollToChatProvidersIfLinked)
 
-// The Home setup card's "How to install" lands on /settings#install-app; the
-// card is mounted with the home tab, so only the scroll needs waiting for.
+// Home links land on these home-tab cards (#install-app from the setup
+// card's "How to install", #other-devices from "Phone setup"); the cards
+// are mounted with the home tab, so only the scroll needs waiting for.
+const HOME_TAB_ANCHORS = new Set(['#install-app', '#other-devices'])
 watch(
   () => route.hash,
   hash => {
-    if (hash !== '#install-app') return
+    if (!HOME_TAB_ANCHORS.has(hash)) return
     void nextTick(() => {
-      document.getElementById('install-app')?.scrollIntoView?.({ block: 'start' })
+      document.getElementById(hash.slice(1))?.scrollIntoView?.({ block: 'start' })
     })
   },
   { immediate: true },
@@ -6262,7 +6264,7 @@ a.btn-secondary {
   .provider-brings > summary::before { transition: none; }
 }
 /* /settings/providers scrolls here; keep the card clear of the pane header. */
-#chat-providers, #install-app { scroll-margin-top: var(--space-4); }
+#chat-providers, #install-app, #other-devices { scroll-margin-top: var(--space-4); }
 .provider-brings > summary:hover { color: var(--fg); }
 .provider-brings > summary:focus-visible {
   outline: 2px solid var(--accent);
