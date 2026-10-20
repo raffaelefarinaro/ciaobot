@@ -3779,10 +3779,12 @@ class CiaoControlPlane:
     ) -> dict[str, Any]:
         """Remove one task record from one workspace, revision-checked.
 
-        User-only, and deliberately not an agent operation: there is no
-        ``ciao task delete`` verb and no operation entry for one. A record is
-        the user's own Markdown file, so removing it is a decision the person
-        who owns the vault makes, exactly as completion is.
+        Shared by the PWA's session route and the agent's own ``ciao task
+        delete``, because the user may ask an agent to remove a task. It is
+        permanent and removes only that record, including the notes, history
+        and log stored inside its file: it does not delete or archive linked
+        chats, stop a running turn, discard attempt history, or mark anything
+        done. Completion remains user-only; removal is not completion.
         """
         clean = str(task_id or "").strip()
         self._task_call(
@@ -5334,6 +5336,32 @@ class CiaoControlPlane:
                 changes=changes,
                 body=body,
                 actor="agent",
+            )
+        )
+
+    def task_delete(
+        self,
+        principal: AgentPrincipal,
+        task_id: str,
+        *,
+        expected_revision: str,
+    ) -> dict[str, Any]:
+        """Permanently remove one task in the calling chat's workspace.
+
+        Only the task record goes; its chats and running work stay where they
+        are. The store still requires the revision the caller read. Deletion is
+        attended-only: an unattended scheduled turn cannot permanently remove
+        the user's record.
+        """
+        if self._unattended_turn(principal):
+            raise ControlPlaneError(
+                "unattended_forbidden", "Task deletion requires an attended turn."
+            )
+        return _ok(
+            self.workspace_task_delete(
+                self._workspace(principal),
+                task_id,
+                expected_revision=expected_revision,
             )
         )
 

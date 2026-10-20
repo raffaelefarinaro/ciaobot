@@ -48,6 +48,15 @@ class _Pcm:
                 project_id="project-dupe", name="Shared", workspace="work"
             ),
         }
+        self.chats = {
+            "chat-1": SimpleNamespace(
+                chat_id="chat-1",
+                project_id="project-home",
+                archived=False,
+                user_turn_count=1,
+                user_turn_unattended={},
+            )
+        }
 
     def _workspace_vault_root(self, workspace: str) -> Path:
         return self.config.workspace_vault_root(workspace)
@@ -62,8 +71,8 @@ class _Pcm:
             if workspace is None or project.workspace == workspace
         ]
 
-    def get_chat(self, _chat_id: str):
-        return None
+    def get_chat(self, chat_id: str):
+        return self.chats.get(chat_id)
 
     def get_active_stream(self, _chat_id: str):
         return None
@@ -512,6 +521,128 @@ def test_a_malformed_id_is_never_removed_as_a_path(tmp_path: Path) -> None:
         plane.workspace_task_delete("personal", "../keep-me", expected_revision="x")
     assert excinfo.value.code == "task_invalid"
     assert outside.read_text(encoding="utf-8") == "not a task\n"
+
+
+# The agent's removal door over the same workspace-scoped service as the PWA.
+# It removes one record, not a cascade: no chat, turn or completion is touched.
+
+
+def test_agent_task_delete_removes_only_the_requested_record(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    doomed = plane.task_create(principal, title="Remove me", body="Temporary.")["data"]
+    keeper = plane.task_create(principal, title="Keep me", body="Still here.")["data"]
+    chat = plane.pcm.get_chat("chat-1")
+    linked = plane.workspace_task_link_chat(
+        "personal",
+        doomed["id"],
+        expected_revision=doomed["revision"],
+        chat_id="chat-1",
+    )
+
+    removed = plane.task_delete(
+        principal, doomed["id"], expected_revision=linked["revision"]
+    )
+
+    assert removed == {
+        "ok": True,
+        "data": {"id": doomed["id"], "deleted": True},
+    }
+    tasks = _tasks_dir(plane, "personal")
+    assert not (tasks / f"{doomed['id']}.md").exists()
+    assert (tasks / f"{keeper['id']}.md").is_file()
+    assert plane.task_get(principal, keeper["id"])["data"]["title"] == "Keep me"
+    # The deletion is task-only: the linked chat record is untouched.
+    assert plane.pcm.get_chat("chat-1") is chat
+    assert chat.archived is False
+
+
+def test_agent_task_delete_refuses_an_unattended_turn(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Not from a schedule")["data"]
+    path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
+    before = path.read_bytes()
+    chat = plane.pcm.get_chat("chat-1")
+    chat.user_turn_count = 2
+    chat.user_turn_unattended = {"1": True}
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_delete(
+            principal, created["id"], expected_revision=created["revision"]
+        )
+    assert excinfo.value.code == "unattended_forbidden"
+    assert path.read_bytes() == before
+
+    # The guard reads the current turn: an attended turn may still delete.
+    chat.user_turn_unattended = {}
+    removed = plane.task_delete(
+        principal, created["id"], expected_revision=created["revision"]
+    )
+    assert removed["data"] == {"id": created["id"], "deleted": True}
+    assert not path.exists()
+
+
+def test_agent_task_delete_is_workspace_scoped(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    personal = _principal("personal")
+    work = _principal("work")
+    mine = plane.task_create(personal, title="Personal work")["data"]
+    theirs = plane.task_create(work, title="Work")["data"]
+    outside = tmp_path / "keep-me.md"
+    outside.write_text("not a task\n", encoding="utf-8")
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_delete(
+            personal, theirs["id"], expected_revision=theirs["revision"]
+        )
+    assert excinfo.value.code == "task_not_found"
+    assert plane.task_get(work, theirs["id"])["data"]["title"] == "Work"
+
+    for task_id in ("../keep-me", "chat-1"):
+        with pytest.raises(ControlPlaneError) as excinfo:
+            plane.task_delete(personal, task_id, expected_revision=mine["revision"])
+        assert excinfo.value.code == "task_invalid", task_id
+    assert outside.read_text(encoding="utf-8") == "not a task\n"
+    assert plane.task_get(personal, mine["id"])["data"]["title"] == "Personal work"
+
+
+def test_agent_task_delete_requires_current_revision(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Guard me")["data"]
+    path = _tasks_dir(plane, "personal") / f"{created['id']}.md"
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_delete(principal, created["id"], expected_revision="  ")
+    assert excinfo.value.code == "task_invalid"
+    assert path.is_file()
+
+    updated = plane.task_update(
+        principal,
+        created["id"],
+        expected_revision=created["revision"],
+        changes={"due": "2026-10-05"},
+    )["data"]
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_delete(
+            principal, created["id"], expected_revision=created["revision"]
+        )
+    assert excinfo.value.code == "task_revision_conflict"
+    assert excinfo.value.retryable is True
+    assert path.is_file()
+
+    removed = plane.task_delete(
+        principal, created["id"], expected_revision=updated["revision"]
+    )
+    assert removed["data"] == {"id": created["id"], "deleted": True}
+    assert not path.exists()
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_delete(
+            principal, created["id"], expected_revision=updated["revision"]
+        )
+    assert excinfo.value.code == "task_not_found"
+
 
 # ── Resolutions, the read shape and the delegation log ─────────────────────
 
