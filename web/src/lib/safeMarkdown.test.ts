@@ -28,6 +28,39 @@ describe('safe markdown rendering', () => {
     expect(html).toContain('href="/tasks/9920898d" target="_blank"')
   })
 
+  it('keeps supported page and anchor links in the app instead of opening a new tab', () => {
+    const html = renderMarkdown(
+      '[Tasks](/tasks) [Automations](/schedules) [Memory](/memory/map) ' +
+      '[Settings](/settings) [Workspaces](/settings/workspaces) ' +
+      '[New workspace](/settings/workspaces#new-workspace) [Home](/)',
+    )
+
+    expect(html).toContain('<a href="/tasks">Tasks</a>')
+    expect(html).toContain('<a href="/schedules">Automations</a>')
+    expect(html).toContain('<a href="/memory/map">Memory</a>')
+    expect(html).toContain('<a href="/settings">Settings</a>')
+    expect(html).toContain('<a href="/settings/workspaces">Workspaces</a>')
+    expect(html).toContain('<a href="/settings/workspaces#new-workspace">New workspace</a>')
+    expect(html).toContain('<a href="/">Home</a>')
+    expect(html).not.toContain('target="_blank"')
+  })
+
+  it('leaves unknown app paths, queries and external sites as ordinary links', () => {
+    const html = renderMarkdown(
+      '[unknown](/settings/unknown) [query](/settings?tab=models) ' +
+      '[api](/api/settings) [external](https://example.com/settings/workspaces)',
+    )
+
+    for (const href of [
+      '/settings/unknown',
+      '/settings?tab=models',
+      '/api/settings',
+      'https://example.com/settings/workspaces',
+    ]) {
+      expect(html, href).toContain(`href="${href}" target="_blank" rel="noopener noreferrer"`)
+    }
+  })
+
   it('resolves relative markdown images through the workspace image endpoint', () => {
     const html = renderFileMarkdown('![Logo](assets/logo.png)', {
       resolveImageSrc: (href) => `/api/workspace-image?path=${encodeURIComponent(`/workspace/${href}`)}`,

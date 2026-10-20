@@ -46,6 +46,10 @@ def _now_utc() -> datetime:
     return datetime.now(UTC).replace(second=0, microsecond=0)
 
 
+def _utc_stamp(when: datetime) -> str:
+    return when.astimezone(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 ARCHIVE_POLICIES = {"manual", "auto"}
@@ -109,6 +113,14 @@ SYSTEM_STATE_FIELDS = {
     "provider",
     "archive_policy",
 }
+# Overlay key recording when this install first materialized a system row.
+# Not in SYSTEM_STATE_FIELDS: it is not an entry attribute, it becomes the
+# row's `created_at`, the floor `compute_last_expected_run` uses so a slot
+# from before the routine existed here is never "missed".
+SYSTEM_FIRST_SEEN_KEY = "first_seen_at"
+# `created_at` for a row whose overlay predates SYSTEM_FIRST_SEEN_KEY: its
+# history is real, so its missed/catch-up behaviour is left unchanged.
+SYSTEM_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 
 # Separator between a packaged system routine's id and the workspace it was
 # fanned out for: `system-memory-curation@work`. Chosen because no generated or
@@ -1412,12 +1424,20 @@ class ScheduleStore:
         ``list_entries`` drops runtime rows with ``scope == "system"``, so the
         set cannot be extended by writing to ``schedules.json``. Deriving also
         means a newly added workspace gets its row with no migration.
+
+        ``created_at`` is the row's first-seen time on this install, so a slot
+        from before the row existed here is never reported missed. It comes from
+        the overlay's ``first_seen_at``; an overlay without one predates the key
+        and keeps the epoch floor; no overlay at all means never seen, so it is
+        "now" in memory only (stamping is ``record_system_first_seen``'s job,
+        reads never write).
         """
         state = self._load_system_state()
+        now_stamp = _utc_stamp(_now_utc())
         entries: list[ScheduleEntry] = []
         for definition in self._load_system_definitions():
             per_workspace = bool(definition.get("per_workspace"))
-            item = {"chat_id": 0, "created_at": "1970-01-01T00:00:00Z", **definition}
+            item = {"chat_id": 0, "created_at": SYSTEM_LEGACY_CREATED_AT, **definition}
             targets: list[str | None] = []
             if per_workspace:
                 targets = list(self._fanout_workspaces())
@@ -1440,6 +1460,13 @@ class ScheduleStore:
                 for key, value in overlay.items():
                     if key in allowed and hasattr(entry, key):
                         setattr(entry, key, value)
+                first_seen = overlay.get(SYSTEM_FIRST_SEEN_KEY)
+                if isinstance(first_seen, str) and first_seen.strip():
+                    entry.created_at = first_seen.strip()
+                elif overlay:
+                    entry.created_at = SYSTEM_LEGACY_CREATED_AT
+                else:
+                    entry.created_at = now_stamp
                 entry.scope = "system"
                 entry.editable = False
                 entry.removable = False
@@ -1470,6 +1497,28 @@ class ScheduleStore:
         if legacy_id == schedule_id:
             return {}
         return state.get(legacy_id, {})
+
+    def record_system_first_seen(self, now: datetime) -> list[str]:
+        """Persist `first_seen_at` for system rows with no stored state yet.
+
+        Returns the schedule ids stamped. A no-op without include_system. A row
+        inheriting a legacy overlay is never stamped: writing its direct key
+        would cut the inheritance and re-enable a disabled routine.
+        """
+        if not self._include_system:
+            return []
+        with self._lock:
+            state = self._load_system_state()
+            stamp = _utc_stamp(now)
+            stamped: list[str] = []
+            for entry in self._system_entries():
+                legacy_id = system_base_id(entry.schedule_id)
+                if not self._system_overlay(state, entry.schedule_id, legacy_id):
+                    state[entry.schedule_id] = {SYSTEM_FIRST_SEEN_KEY: stamp}
+                    stamped.append(entry.schedule_id)
+            if stamped:
+                self._save_system_state(state)
+            return stamped
 
     def _load_system_definitions(self) -> list[dict]:
         """The packaged system-routine definitions, read once per process.
@@ -1608,6 +1657,7 @@ class ScheduleStore:
         current = state.setdefault(entry.schedule_id, {})
         for field in SYSTEM_STATE_FIELDS:
             current[field] = getattr(entry, field)
+        current.setdefault(SYSTEM_FIRST_SEEN_KEY, entry.created_at)
         self._save_system_state(state)
 
     def _serialize_entry(self, entry: ScheduleEntry) -> dict:
@@ -2198,6 +2248,7 @@ class ScheduleManager:
         if self._is_node_active is not None and not self._is_node_active():
             return
         current = now or _now_utc()
+        self._store.record_system_first_seen(current)
         for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
@@ -2360,6 +2411,9 @@ class ScheduleManager:
         # failed; do that before reading any status below.
         self.reconcile_interrupted_runs()
         current = now or _now_utc()
+        # Even under skip_system: the post-setup grace startup is exactly when
+        # a fresh install's rows must be stamped.
+        self._store.record_system_first_seen(current)
         fired: list[str] = []
         for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.
