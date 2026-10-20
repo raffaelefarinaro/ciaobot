@@ -72,6 +72,23 @@ rtk proxy git status --short                          # must be empty
 A non-zero count means `develop` is ahead of the remote: push it, or stop. A
 dirty tree stops the cut (`--apply` refuses — see traps).
 
+**The post-merge CI run must be green on every platform.** A develop PR runs
+only Linux plus the fast Windows gates (imports, win32 mypy); the Windows
+pytest and vitest suites and the macOS job (browser tests, engine cold-start)
+run on the push to `develop` after merge. That push run is the only place
+those suites ran on what you are about to ship:
+
+```bash
+gh run list --repo raffaelefarinaro/ciaobot --workflow ci.yml --branch develop \
+  --event push --limit 1 --json headSha,status,conclusion,url
+```
+
+`headSha` must equal `git rev-parse origin/develop`, `status` must be
+`completed` and `conclusion` `success`. A run still in progress means wait; a
+red one stops the cut. File the failure as an issue, fix it on `develop`, and
+start again from the top of this step. The release PR into `main` re-runs the
+full matrix, but finding a Windows break there means fixing it mid-cut.
+
 **Decide scope with the user.** Run `gh pr list --state open` and
 `gh issue list --state open` on `raffaelefarinaro/ciaobot`, show the result, and
 ask which open PRs should land in this release. Merge the chosen ones into

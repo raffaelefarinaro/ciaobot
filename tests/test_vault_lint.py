@@ -984,3 +984,33 @@ def test_a_vault_category_is_lint_clean_and_lints_its_folder(tmp_path: Path) -> 
     disabled = vault_lint.run_validation(vault)
     assert [error["kind"] for error in disabled["frontmatter_errors"]] == ["unknown_type"]
     assert disabled["orphans"] == []
+
+
+_PROJECT_NOTE = "---\ntype: project\nstatus: active\ntags: [project]\n---\n\n# Note\n"
+
+
+def test_the_general_project_note_is_not_an_orphan(tmp_path):
+    vault = tmp_path / "memory-vault"
+    for rel in ("projects/active/general/general.md", "projects/active/other/other.md"):
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text(_PROJECT_NOTE, encoding="utf-8")
+
+    issues = vault_lint.run_validation(vault)
+
+    assert "projects/active/general/general.md" not in issues["orphans"]
+    assert "projects/active/other/other.md" in issues["orphans"]
+
+
+def test_the_general_project_note_is_exempt_in_a_shared_vault(tmp_path):
+    vault = tmp_path / "memory-vault"
+    for rel in (
+        "personal/projects/active/general/general.md",
+        "personal/projects/active/other/other.md",
+    ):
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text(_PROJECT_NOTE, encoding="utf-8")
+
+    issues = vault_lint.run_validation(vault)
+
+    assert "personal/projects/active/general/general.md" not in issues["orphans"]
+    assert "personal/projects/active/other/other.md" in issues["orphans"]
