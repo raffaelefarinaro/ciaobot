@@ -164,16 +164,9 @@ const statusLabel = computed(() => {
 async function refresh(): Promise<void> {
   loading.value = true
   try {
-    // Fetch this agent alone. Only if that turns up nothing do we pay for the
-    // whole set — which covers ids the narrow fetch cannot resolve on its own
-    // (an opencode child, or a stale link to an agent the parent never named).
+    // Fetch this agent alone. The unfiltered endpoint is metadata only now, so
+    // falling back to the whole set could not fill in a missing transcript.
     await store.loadSubagent(props.chatId, props.agentId)
-    // A row with no messages counts as a miss too, not just a missing row: a
-    // host that answers the narrowed fetch with an empty transcript would
-    // otherwise pin "No captured turns" here forever, because the row exists.
-    // Off the poll timer, so an agent that genuinely has no turns costs one
-    // extra fetch per visit, not one every four seconds.
-    if (!subagent.value?.messages.length) await store.loadSubagents(props.chatId)
   } finally {
     loading.value = false
   }

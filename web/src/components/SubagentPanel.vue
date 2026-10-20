@@ -45,6 +45,9 @@ function statusWord(status: SubagentTranscript['status']): string {
 }
 
 function duration(sub: SubagentTranscript): string {
+  // The provider's own run length, when it can report one without the
+  // transcript (an opencode row carries no messages).
+  if (typeof sub.duration_ms === 'number') return formatDuration(sub.duration_ms)
   const times = sub.messages
     .map(m => Date.parse(m.timestamp))
     .filter(t => Number.isFinite(t))
