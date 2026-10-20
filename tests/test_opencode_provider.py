@@ -1410,6 +1410,7 @@ async def test_permission_reply_for_an_unknown_request_is_refused(tmp_path):
 async def test_question_reply_for_an_already_settled_request_is_idempotent(tmp_path):
     result = await _provider(tmp_path).send_question_response("nope", {})
     assert result.ok is True
+    assert result.already_resolved is True
 
 
 def test_tool_use_id_for_unknown_request_is_empty(tmp_path):
@@ -1483,6 +1484,28 @@ class _RecordingPermissionClient:
 class _YieldingPermissionClient(_RecordingPermissionClient):
     async def post(self, path, json=None):
         self.calls.append((path, json))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        class _Response:
+            status_code = self.status_code
+
+        return _Response()
+
+
+class _YieldingFormClient(_RecordingPermissionClient):
+    async def post(self, path, json=None):
+        self.calls.append((path, json))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        class _Response:
+            status_code = self.status_code
+
+        return _Response()
+
+    async def delete(self, path):
+        self.calls.append((path, {}))
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
@@ -1727,6 +1750,137 @@ async def test_form_reply_404_is_reported_as_no_longer_active(tmp_path):
     assert result.retryable is False
     assert result.error == "Question request is no longer active"
     assert "frm_gone" not in provider._question_requests
+
+
+_RACE_FORM = {"form": {
+    "id": "frm_race", "sessionID": "ses_1", "title": "Pick",
+    "fields": [{"key": "q", "title": "Which?", "type": "string"}],
+}}
+
+
+def _race_provider(tmp_path, status_code=200):
+    provider = _provider(tmp_path)
+    client = _YieldingFormClient(status_code=status_code)
+    provider._client = client  # type: ignore[assignment]
+    _convert(provider, "form.created", _RACE_FORM)
+    return provider, client
+
+
+@pytest.mark.asyncio
+async def test_concurrent_form_replies_post_once(tmp_path):
+    provider, client = _race_provider(tmp_path)
+
+    a, b = await asyncio.gather(
+        provider.send_question_response("frm_race", {"q": ["a"]}),
+        provider.send_question_response("frm_race", {"q": ["b"]}),
+    )
+
+    assert client.calls == [
+        ("/api/session/ses_1/form/frm_race/reply", {"answer": {"q": "a"}})
+    ]
+    assert a.ok is True and a.already_resolved is False
+    assert b.ok is True and b.already_resolved is True
+    assert provider._question_requests == {}
+    assert provider._question_inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_form_reply_and_cancel_make_one_call(tmp_path):
+    provider, client = _race_provider(tmp_path)
+
+    reply, cancel = await asyncio.gather(
+        provider.send_question_response("frm_race", {"q": ["a"]}),
+        provider.send_question_response("frm_race", {}, cancel=True),
+    )
+
+    assert client.calls == [
+        ("/api/session/ses_1/form/frm_race/reply", {"answer": {"q": "a"}})
+    ]
+    assert reply.ok is True
+    assert cancel.ok is True and cancel.already_resolved is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_form_cancel_and_reply_make_one_call(tmp_path):
+    provider, client = _race_provider(tmp_path)
+
+    cancel, reply = await asyncio.gather(
+        provider.send_question_response("frm_race", {}, cancel=True),
+        provider.send_question_response("frm_race", {"q": ["a"]}),
+    )
+
+    assert client.calls == [("/api/session/ses_1/form/frm_race", {})]
+    assert cancel.ok is True
+    assert reply.ok is True and reply.already_resolved is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_form_reply_shares_a_retryable_failure(tmp_path):
+    provider, client = _race_provider(tmp_path, status_code=500)
+
+    reply, cancel = await asyncio.gather(
+        provider.send_question_response("frm_race", {"q": ["a"]}),
+        provider.send_question_response("frm_race", {}, cancel=True),
+    )
+
+    assert len(client.calls) == 1
+    assert reply.ok is False and reply.retryable is True
+    assert cancel.ok is False and cancel.retryable is True
+    assert "frm_race" in provider._question_requests
+    assert provider._question_inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_form_reply_409_is_already_resolved(tmp_path):
+    provider, _client = _race_provider(tmp_path, status_code=409)
+
+    result = await provider.send_question_response("frm_race", {"q": ["a"]})
+
+    assert result.ok is True
+    assert result.already_resolved is True
+    assert "frm_race" not in provider._question_requests
+
+
+@pytest.mark.asyncio
+async def test_form_cancel_409_is_already_resolved(tmp_path):
+    provider, _client = _race_provider(tmp_path, status_code=409)
+
+    result = await provider.send_question_response("frm_race", {}, cancel=True)
+
+    assert result.ok is True
+    assert result.already_resolved is True
+    assert "frm_race" not in provider._question_requests
+
+
+@pytest.mark.asyncio
+async def test_cancelled_form_reply_releases_the_waiter(tmp_path):
+    class _HangingClient(_RecordingPermissionClient):
+        async def post(self, path, json=None):
+            self.calls.append((path, json))
+            await asyncio.Event().wait()
+
+    provider = _provider(tmp_path)
+    client = _HangingClient()
+    provider._client = client  # type: ignore[assignment]
+    _convert(provider, "form.created", _RACE_FORM)
+
+    winner = asyncio.create_task(
+        provider.send_question_response("frm_race", {"q": ["a"]})
+    )
+    await asyncio.sleep(0)
+    loser = asyncio.create_task(
+        provider.send_question_response("frm_race", {}, cancel=True)
+    )
+    await asyncio.sleep(0)
+    winner.cancel()
+    result = await asyncio.wait_for(loser, 1)
+
+    assert result.ok is False
+    assert result.retryable is True
+    assert result.error == "Question reply was interrupted"
+    assert "frm_race" in provider._question_requests
+    assert provider._question_inflight == {}
+    assert len(client.calls) == 1
 
 
 @pytest.mark.asyncio
