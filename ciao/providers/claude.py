@@ -995,12 +995,29 @@ class ClaudeProvider(BaseSDKProvider):
         return delivery_id
 
     async def disconnect(self) -> None:
-        if self._client is not None:
+        # Take the client out of the slot *before* awaiting its close, so
+        # exactly one caller owns the close.
+        #
+        # The SDK's `disconnect()` is not idempotent: it clears its query only
+        # after the await, and `Query._close_impl()` has no `_closed` guard, so
+        # two callers both run the teardown and both call
+        # `transport.close()`. That transport's `close()` guards
+        # `if not self._process: return` only on entry, so two concurrent
+        # closes both pass the guard; the first then clears `_process` and the
+        # second reads `returncode` off None and raises
+        # `AttributeError: 'NoneType' object has no attribute 'returncode'`.
+        #
+        # Two callers met because the engine's teardown disconnects the
+        # provider while a fire-and-forget close (the chat-cleanup disconnects
+        # in ciao/web/project_chats.py) is still in flight, and because the
+        # slot used to be cleared only after the await, so the second caller
+        # read the same client out of it.
+        client, self._client = self._client, None
+        if client is not None:
             try:
-                await self._client.disconnect()
+                await client.disconnect()
             except _CLAUDE_OP_ERRORS:
                 logger.debug("Claude disconnect failed; dropping client anyway")
-            self._client = None
         self._connected = False
         self._turn_open = False
         self._steers_pending.clear()
@@ -1022,10 +1039,13 @@ class ClaudeProvider(BaseSDKProvider):
         """
         if self._client is not client:
             return
+        # Clear the slot before the close starts, so this and disconnect() are
+        # both single-owner: whichever takes the client out of the slot owns
+        # closing it, and the other finds nothing to close.
+        self._client = None
         task = asyncio.ensure_future(self._close_dead_client(client))
         self._closing_tasks.add(task)
         task.add_done_callback(self._closing_tasks.discard)
-        self._client = None
         self._connected = False
         self._session_id = None
         self._pending_quota = {}
