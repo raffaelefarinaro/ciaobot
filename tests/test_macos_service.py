@@ -546,11 +546,14 @@ def test_service_start_registers_a_protected_workspace_under_the_host(
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: host)
     monkeypatch.setattr(sys, "executable", _ENGINE_PYTHON)
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
     monkeypatch.delenv("CIAO_ENGINE_PATH", raising=False)
+    calls: list[list[str]] = []
     monkeypatch.setattr(
         macos_service,
         "_launchctl",
-        lambda args, runner=None: subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
+        lambda args, runner=None: calls.append(list(args))
+        or subprocess.CompletedProcess(["launchctl", *args], 0, "", ""),
     )
 
     rc = cli.main(["service", "start", "--workspace", str(workspace), "--json"])
@@ -562,6 +565,9 @@ def test_service_start_registers_a_protected_workspace_under_the_host(
     with plist_path.open("rb") as handle:
         argv = plistlib.load(handle)["ProgramArguments"]
     assert argv == _hosted_expected(host, _ENGINE_PYTHON)
+    gui_domains = [arg for call in calls for arg in call if arg.startswith("gui/")]
+    assert gui_domains
+    assert all(arg == "gui/501" or arg.startswith("gui/501/") for arg in gui_domains)
 
 
 @launchd_only
