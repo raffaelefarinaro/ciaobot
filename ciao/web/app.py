@@ -194,6 +194,12 @@ from ciao.web.routes_push import (
 )
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
 from ciao.web.routes_host_terminal import host_terminal_launch, host_terminal_status
+from ciao.web.routes_welcome import (
+    welcome_dismiss,
+    welcome_open_folder,
+    welcome_password,
+    welcome_status,
+)
 from ciao.web.routes_import import (
     import_batch_cancel,
     import_batch_delete,
@@ -467,6 +473,11 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # host-only: session + host_browser_request; never in _LOOPBACK_ONLY_API
         Route("/api/host/terminal", host_terminal_status, methods=["GET"]),
         Route("/api/host/terminal", host_terminal_launch, methods=["POST"]),
+        # host-only reads/opens: session + host_browser_request; never in _LOOPBACK_ONLY_API
+        Route("/api/welcome", welcome_status, methods=["GET"]),
+        Route("/api/welcome/password", welcome_password, methods=["GET"]),
+        Route("/api/welcome/open-folder", welcome_open_folder, methods=["POST"]),
+        Route("/api/welcome/dismiss", welcome_dismiss, methods=["POST"]),
         Route("/api/libreoffice-status", libreoffice_status_endpoint, methods=["GET"]),
         # File snapshots — History and Diff tabs in the file viewer.
         Route("/api/file-history", file_history, methods=["GET"]),

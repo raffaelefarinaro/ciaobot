@@ -664,3 +664,40 @@ def test_setup_workspace_existing_mode_keeps_scaffolded_vault(
     assert (ws / "memory-vault" / "MEMORY.md").is_file()
     # No adapt-in-place scaffold at the folder root.
     assert not (ws / "MEMORY.md").exists()
+
+
+def test_setup_workspace_marks_a_generated_password_pending(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    setup_workspace(
+        ws,
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert (ws / ".runtime" / "welcome-pending").is_file()
+
+
+def test_setup_workspace_with_auth_token_does_not_mark_pending(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    setup_workspace(
+        ws,
+        auth_token="chosen-pass",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert not (ws / ".runtime" / "welcome-pending").exists()
+
+
+def test_setup_workspace_rerun_keeps_existing_token_unmarked(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / ".env").write_text("PWA_AUTH_TOKEN=mine\n", encoding="utf-8")
+    setup_workspace(
+        ws,
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert not (ws / ".runtime" / "welcome-pending").exists()
+    assert "PWA_AUTH_TOKEN=mine" in (ws / ".env").read_text(encoding="utf-8")
