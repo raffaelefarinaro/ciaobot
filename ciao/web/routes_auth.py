@@ -124,9 +124,11 @@ async def auth_check(request: Request) -> JSONResponse:
 def _on_host(request: Request) -> bool:
     """A browser on the computer running Ciaobot, with an exact same-origin source.
 
-    `host_browser_request` compares host names only, so the port-exact
-    Origin/Referer check is added here. The same predicate backs the `on_host`
-    flag, so the UI never offers a path the server would refuse.
+    `host_browser_request` already refuses a browser origin that is not this
+    engine's exact origin (scheme, host and effective port); the
+    `_same_origin_source` conjunct is kept here as defense in depth. The same
+    predicate backs the `on_host` flag, so the UI never offers a path the
+    server would refuse.
     """
     from ciao.web.auth import _same_origin_source
     from ciao.web.routes_api import host_browser_request

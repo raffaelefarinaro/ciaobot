@@ -5939,7 +5939,7 @@ def _host_name(value: str) -> str:
 
 
 def _localhost_request(request: Request) -> bool:
-    """True when the TCP peer is this machine AND the Host names loopback.
+    """True when the TCP peer is this machine AND the Host names a local address.
 
     The peer check is what makes it local: during first run the server binds
     0.0.0.0, and a LAN client can send ``Host: localhost`` freely. The Host
@@ -5951,8 +5951,10 @@ def _localhost_request(request: Request) -> bool:
     name = _host_name(request.headers.get("host", ""))
     if not name:
         name = (request.url.hostname or "").rstrip(".").lower()
-    # 0.0.0.0 counts as loopback: a browser pointed at it can only reach the
-    # viewer's own machine (users copy it from the uvicorn bind-address log).
+    # 0.0.0.0 is an accepted local Host spelling, not a loopback network
+    # address: a browser pointed at it can only reach the viewer's own machine
+    # (users copy it from the uvicorn bind-address log). It is accepted only
+    # because the peer above is a real loopback TCP peer.
     return name in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
@@ -6329,7 +6331,8 @@ def host_browser_request(request: Request) -> bool:
     and effective port — a page on `http://localhost:3000` is a different
     origin from `http://localhost:8443`, and it is not this engine's own page.
     `Origin` is the browser's declaration and wins; `Referer` is only read
-    when there is no `Origin`. A request with neither is not a browser request
+    when there is no `Origin`. An empty header carries no origin information,
+    so it reads as absent. A request with neither is not a browser request
     and keeps the peer/Host gating alone.
 
     Narrows a session route; grants nothing by itself (AuthMiddleware still requires the session).

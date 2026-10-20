@@ -139,10 +139,20 @@ _ORIGIN_CASES: list[tuple[str, dict[str, object], bool]] = [
     ("matching origin over ipv6", {"host": "[::1]:8443", "origin": "http://[::1]:8443"}, True),
     # The installed-user spelling: 0.0.0.0 is a local Host, not a loopback address.
     ("the 0.0.0.0 host spelling", {"host": "0.0.0.0:8443", "origin": "http://0.0.0.0:8443"}, True),
+    # ...and that spelling is not a port bypass.
+    ("the 0.0.0.0 host spelling with a cross-port origin", {"host": "0.0.0.0:8443", "origin": "http://0.0.0.0:3000"}, False),
     # A default port is the same origin as the explicit standard port.
     ("a default port", {"host": "localhost", "origin": "http://localhost"}, True),
     ("an explicit standard port", {"host": "localhost:80", "origin": "http://localhost"}, True),
     ("a default port against an explicit standard port", {"host": "localhost", "origin": "http://localhost:80"}, True),
+    # The same for https, in both directions: the effective port, not the text.
+    ("an https default port against an explicit 443", {"host": "localhost", "scheme": "https", "origin": "https://localhost:443"}, True),
+    ("an explicit 443 against an https default port", {"host": "localhost:443", "scheme": "https", "origin": "https://localhost"}, True),
+    # The scheme must match the one the request arrived on.
+    ("a matching https origin", {"scheme": "https", "origin": "https://localhost:8443"}, True),
+    ("an http origin against an https request", {"scheme": "https", "origin": "http://localhost:8443"}, False),
+    # The dev server proxies /api with the browser's own Host and Origin.
+    ("the vite dev origin", {"host": "localhost:5173", "origin": "http://localhost:5173"}, True),
     # Cross-port, cross-scheme and cross-host are all refusals.
     ("a cross-port origin", {"origin": "http://localhost:3000"}, False),
     ("a cross-scheme origin on the same port", {"origin": "https://localhost:8443"}, False),
@@ -154,14 +164,21 @@ _ORIGIN_CASES: list[tuple[str, dict[str, object], bool]] = [
     ("an unparseable origin", {"origin": "http://[::1"}, False),
     ("a credential-bearing origin", {"origin": "http://user:pw@localhost:8443"}, False),
     ("an origin that is not a url", {"origin": "localhost:8443"}, False),
-    # A hostile Origin wins over a good Referer.
+    # A hostile Origin wins over a good Referer...
     ("a hostile origin with a good referer", {"origin": "http://localhost:3000", "referer": "http://localhost:8443/page"}, False),
+    # ...and a good Origin wins over a hostile Referer.
+    ("a matching origin with a hostile referer", {"origin": "http://localhost:8443", "referer": "http://evil.example/page"}, True),
     # Referer is only read when Origin is absent.
     ("a matching referer", {"referer": "http://localhost:8443/page"}, True),
     ("a cross-port referer", {"referer": "http://localhost:3000/page"}, False),
     ("a cross-scheme referer", {"referer": "https://localhost:8443/page"}, False),
+    # An empty Origin carries no origin information, so it reads as absent and
+    # the peer/Host gating alone decides (as `auth._same_origin_source` does).
+    ("an empty origin header", {"origin": ""}, True),
+    ("an empty origin header with a cross-port referer", {"origin": "", "referer": "http://localhost:3000/page"}, False),
     # No browser headers at all: the peer/Host gating decides.
     ("no origin and no referer", {}, True),
+    ("no origin and no referer from a remote peer", {"peer": "100.64.0.7"}, False),
 ]
 
 
@@ -206,6 +223,23 @@ def test_host_browser_request_does_not_trust_a_forwarded_host() -> None:
         origin="http://app.example",
         extra_headers=(("X-Forwarded-Host", "app.example"),),
     )
+    assert host_browser_request(request) is False
+
+
+def test_bootstrap_setup_still_accepts_a_same_host_cross_port_origin() -> None:
+    """First-run setup keeps its own, looser rule: bootstrap is out of scope here.
+
+    `_setup_finish_origin_allowed` compares host names only, so a setup request
+    from another local port is still accepted. This pins that on purpose: a
+    future "reuse the exact-origin helper everywhere" refactor must break this
+    test rather than change first-run setup silently.
+    """
+    from ciao.web.routes_api import _setup_finish_origin_allowed
+
+    request = _request(origin="http://localhost:3000")
+    assert _setup_finish_origin_allowed(request) is True
+    # The exact-origin helper refuses the same request, which is what makes the
+    # difference between the two rules visible.
     assert host_browser_request(request) is False
 
 
@@ -401,6 +435,17 @@ def test_cross_port_referer_sees_not_on_host_on_get(tmp_path: Path, monkeypatch:
     body = client.get(PATH, headers=headers).json()
     assert body["available"] is False and body["reason"] == "not_on_host"
     assert body["actions"] == []
+    assert rec.capability_calls == []
+
+
+def test_cross_scheme_origin_sees_not_on_host_on_get(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page on the same host and port but the other scheme is a different origin."""
+    client, rec, _ = _client(tmp_path, monkeypatch)
+    headers = {**_signed(client, "https://localhost:8443")}
+    body = client.get(PATH, headers=headers).json()
+    assert body["available"] is False and body["reason"] == "not_on_host"
+    assert body["actions"] == []
+    # The refusal must not reach the native capability probe.
     assert rec.capability_calls == []
 
 

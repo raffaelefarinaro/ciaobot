@@ -103,12 +103,15 @@ carried by the session.
 - There is no native capability of any kind left: the macOS app and its shell
   are retired (`#579`), so a remote browser gets nothing a local one does not,
   and `trigger_app_update` does not exist. A browser is a local control path only
-  through session routes that also require the host: `/api/workspace-move*`,
+  through session routes that also require the host: `/api/workspace-move/dirs`,
+  `/api/workspace-move/plan`, `POST /api/workspace-move`,
   `/api/host/terminal`, `GET /api/welcome/password`, `POST /api/welcome/open-folder`,
   `POST /api/settings/providers/{provider}/connect` and `POST /api/auth/settings`
   (current-password exemption only)
   check the loopback peer, a local `Host` and an exact same-origin `Origin`
   (scheme, host and effective port);
+  `GET /api/workspace-move` is session-only and reports `local: false` for a
+  non-host browser;
   `/api/workspace-open` checks the loopback peer only. Each refuses a non-host
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
   `command` to run on the host.

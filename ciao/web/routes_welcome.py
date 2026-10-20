@@ -44,8 +44,9 @@ NOT_ON_HOST = "The password is shown on the computer running Ciaobot."
 
 
 def _host_request(request: Request) -> bool:
-    # host_browser_request ignores ports; the exact-origin check keeps another
-    # localhost app (a dev server on :3000) from reading the password.
+    # host_browser_request refuses a cross-port or cross-scheme origin itself,
+    # so another localhost app (a dev server on :3000) cannot read the
+    # password; the _same_origin_source conjunct is defense in depth.
     return host_browser_request(request) and _same_origin_source(request)
 
 

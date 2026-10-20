@@ -199,6 +199,7 @@ def test_dismiss_clears_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def test_password_refused_for_a_different_port_origin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A different local port is a different origin, so it is not the host."""
     _mark(tmp_path)
     client, _ = _client(tmp_path, monkeypatch)
     res = client.get(
@@ -211,6 +212,7 @@ def test_password_refused_for_a_different_port_origin(
 def test_open_folder_refused_for_a_different_port_origin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A different local port is a different origin, so it is not the host."""
     client, opened = _client(tmp_path, monkeypatch)
     res = client.post(
         "/api/welcome/open-folder", headers=_signed(client, origin="http://localhost:3000")
