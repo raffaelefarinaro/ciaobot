@@ -51,6 +51,7 @@ from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mu
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
+from ciao.port_in_use import BIND_PHASE
 from ciao.web.auth import LOOPBACK_HOST_NAMES, is_loopback_client
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
@@ -5789,6 +5790,10 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
 
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
+    # The port the engine binds is taken (#1654): the engine could not start,
+    # and a client has to be able to tell that from "still starting" without
+    # reading the phase's prose.
+    payload["port_in_use"] = _port_in_use(payload.get("phases"))
     latest_version, update_available = await _cached_update_hint(request)
     payload.update({
         "version": __version__,
@@ -5797,6 +5802,18 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
         "update_available": update_available,
     })
     return JSONResponse(payload)
+
+
+def _port_in_use(phases: object) -> bool:
+    """Whether a failed bind phase is among the reported phases."""
+    if not isinstance(phases, list):
+        return False
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        if phase.get("name") == BIND_PHASE and phase.get("status") == "failed":
+            return True
+    return False
 
 
 async def _refresh_update_hint(app: Any, fetcher: Callable[[], dict[str, object]]) -> None:

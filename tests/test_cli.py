@@ -1499,6 +1499,54 @@ def test_setup_url_reads_port_from_env(tmp_path: Path, capsys) -> None:
     assert "http://localhost:9999/?setup=" in capsys.readouterr().out
 
 
+def test_service_start_reports_the_port_when_the_engine_cannot_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """`ciao service start` has to name the port, not just "it failed".
+
+    The engine leaves with the port-in-use exit code when it could not bind
+    its port. The CLI reads that code off the launchd job and turns it back
+    into the sentence the operator needs: which port is taken, and the two
+    ways out.
+    """
+    import subprocess
+
+    from ciao import macos_service
+    from ciao.port_in_use import PORT_IN_USE_EXIT_CODE
+
+    runtime = macos_service.DesktopRuntime(
+        workspace=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "workspace" / ".runtime"),
+        port=8443,
+        server_plist=str(tmp_path / "LaunchAgents" / "com.ciao.server.plist"),
+        python_path="/opt/ciao/bin/python3",
+    )
+    Path(runtime.server_plist).parent.mkdir(parents=True, exist_ok=True)
+    Path(runtime.server_plist).write_bytes(b"")
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_service, "discover_runtime", lambda **_: runtime)
+
+    def _run(command, **_kwargs):
+        printed = (
+            "gui/501/com.ciao.server = {\n"
+            "\tstate = not running\n"
+            f"\tlast exit code = {PORT_IN_USE_EXIT_CODE}\n"
+            "}\n"
+            if command[1] == "print"
+            else ""
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=printed, stderr="")
+
+    monkeypatch.setattr(macos_service, "_launchctl", lambda args, runner=None: _run(["launchctl", *args]))
+
+    assert cli.main(["service", "start"]) == 1
+
+    err = capsys.readouterr().err
+    assert "8443" in err
+    assert "already in use" in err
+    assert "PWA_PORT" in err
+
+
 def test_auth_print_only_outputs_terminal_command(capsys) -> None:
     assert cli.main(["auth", "opencode", "--print-only"]) == 0
 

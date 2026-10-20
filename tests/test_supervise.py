@@ -347,6 +347,38 @@ def test_access_denied_returns_78_without_launching(
     assert "macOS denied Ciaobot Server access" in capsys.readouterr().err
 
 
+def test_a_port_in_use_exit_is_not_relaunched_and_holds_the_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A taken port must not become a respawn loop (#1654).
+
+    The engine left with the port-in-use code, having already said why. The
+    supervisor does not relaunch it — and it does not exit either: the
+    service manager owns this process, and a service manager that respawns
+    on every exit (launchd's ``KeepAlive``) would put the engine straight
+    back into the same failure, forever. So the supervisor holds the job
+    until it is stopped.
+    """
+    monkeypatch.chdir(tmp_path)
+    held: list[str] = []
+    slept, sleep = _recording_sleep()
+
+    code = supervise(
+        child_argv=_counter_child(tmp_path, supervise_module.PORT_IN_USE_EXIT_CODE),
+        sleep=sleep,
+        hold=lambda: held.append("held"),
+    )
+
+    assert code == 0
+    # One launch: the engine is not put back into the same failure.
+    assert _launches(tmp_path) == 1
+    # And the job is held, so the service manager does not respawn it.
+    assert held == ["held"]
+    err = capsys.readouterr().err
+    assert "PWA_PORT" in err
+    assert "ciao service start" in err
+
+
 def test_access_granted_runs_the_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(supervise_module, "check_workspace_access", lambda: None)
     slept, sleep = _recording_sleep()
