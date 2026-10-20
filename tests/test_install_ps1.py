@@ -807,6 +807,34 @@ def test_uninstall_keeps_the_bin_dir_on_path_while_anything_is_still_in_it() -> 
     assert "Kept $PathEntry on your PATH: it still holds $names." in undo
 
 
+def test_install_ps1_reads_the_port_reason_and_drops_the_dead_link() -> None:
+    # #1669: a taken port left the engine unable to serve, and the installer
+    # still printed "Open Ciaobot: <url>" - a link nothing was listening on.
+    # The engine records the reason outside the workspace (it cannot serve the
+    # endpoint that would report it), so the installer reads that record and
+    # names the port, and a port failure means no link at all.
+    assert "function Read-PortInUseReason" in SCRIPT_TEXT
+    # Asked of the wheel, so the record's path has one owner rather than a
+    # copy here that could drift from ciao/port_in_use.py.
+    assert "from ciao.port_in_use import read_port_in_use" in SCRIPT_TEXT
+    assert "$portReason = Read-PortInUseReason $uv $wheel" in SCRIPT_TEXT
+    # The port failure sets the flag, and the link is gated on it.
+    port_block = SCRIPT_TEXT[SCRIPT_TEXT.index("if ($portReason) {"):]
+    assert "$engineReady = $false" in port_block[: port_block.index("} else {")]
+    assert "if ($engineReady) {" in SCRIPT_TEXT
+    link_at = SCRIPT_TEXT.index('Write-Host "Open Ciaobot: $url"')
+    assert SCRIPT_TEXT.index("if ($engineReady) {") < link_at
+    # Only a port failure suppresses the link. A slow first boot and a
+    # signed-out account keep it: the task is registered, so the engine comes
+    # up, and the link signs the person in when it does.
+    ready_default = SCRIPT_TEXT.index("$engineReady = $true")
+    port_check = SCRIPT_TEXT.index("if ($portReason) {")
+    assert ready_default < port_check, "the flag must default to ready, so only the port failure clears it"
+    assert "$engineReady = $false" not in SCRIPT_TEXT[:port_check], (
+        "nothing before the port check may clear the flag"
+    )
+
+
 def test_install_ps1_does_not_wait_for_an_engine_that_cannot_start_yet() -> None:
     # #903: the logon task is InteractiveToken, so with no Windows session for
     # this account (SSH, runas, never signed in) nothing can start until the next

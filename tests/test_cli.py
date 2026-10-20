@@ -1525,6 +1525,11 @@ def test_service_start_reports_the_port_when_the_engine_cannot_bind(
     Path(runtime.server_plist).write_bytes(b"")
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.setattr(macos_service, "discover_runtime", lambda **_: runtime)
+    # The test fakes the platform, and the macOS path then asks launchd for
+    # the job in this user's domain - a uid `os.getuid` cannot give on
+    # Windows, where the test still runs. The domain is not what is under
+    # test here, so it is fixed (the same isolation #1666 applied).
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
 
     def _run(command, **_kwargs):
         printed = (

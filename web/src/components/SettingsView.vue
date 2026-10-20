@@ -2378,6 +2378,7 @@ interface WorkspaceMoveOperation {
   target: string
   error: string
   updated_at: string
+  denied?: boolean
 }
 
 interface WorkspaceMoveStatus {
