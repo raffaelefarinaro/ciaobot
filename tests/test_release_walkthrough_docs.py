@@ -14,6 +14,7 @@ a missing instruction.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,11 +22,59 @@ ROOT = Path(__file__).resolve().parents[1]
 TASKS = ROOT / "skills" / "ciao-release" / "tasks"
 SETTINGS_TASK = TASKS / "05-settings-and-assets.md"
 PROJECTS_TASK = TASKS / "04-projects-and-schedule.md"
+CHAT_TASK = TASKS / "02-chat-and-turns.md"
 HOME_TASK = TASKS / "01-boot-and-home.md"
 
 
 def _flow(path: Path) -> str:
     return " ".join(path.read_text(encoding="utf-8").split())
+
+
+def _plain(path: Path) -> str:
+    """The same text with Markdown emphasis and code ticks removed.
+
+    The assertions that name a control ("Complete action", "Delete project")
+    must not depend on the emphasis a writer happens to put around the name.
+    """
+    raw = path.read_text(encoding="utf-8").replace("*", "").replace("`", "")
+    return " ".join(raw.split())
+
+
+def _near(text: str, anchor: str, needle: str, window: int = 400) -> bool:
+    """Whether ``needle`` appears within ``window`` characters of any ``anchor``.
+
+    A phrase that merely occurs somewhere in the task is not enough: "absent"
+    only says something about the ••• menu when it sits next to the ••• menu.
+    Every occurrence of the anchor is considered, so the anchor may be named
+    more than once. Matching is case-insensitive.
+    """
+    haystack = text.lower()
+    needle = needle.lower()
+    at = haystack.find(anchor.lower())
+    while at >= 0:
+        if needle in haystack[max(0, at - window): at + window]:
+            return True
+        at = haystack.find(anchor.lower(), at + 1)
+    return False
+
+
+def _says(text: str, pattern: str) -> bool:
+    """Whether the text matches ``pattern`` in a whitespace-tolerant way.
+
+    A regex beats a chain of literal `not in` checks here: "the partial reply
+    stays", "a partial reply is kept" and "partial replies remain" are one
+    obsolete claim, and a literal list would let a rephrasing through.
+    """
+    return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+
+def _omits(text: str, pattern: str) -> bool:
+    """Whether the text does *not* match ``pattern``.
+
+    The negative half of the contract: a phrase that must not reappear,
+    whatever it is wrapped around.
+    """
+    return not _says(text, pattern)
 
 
 def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
@@ -94,22 +143,50 @@ def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
 
 
 def test_project_walk_separates_app_create_from_vault_completion() -> None:
-    """A plain app project has no Complete; completing a vault note is a separate, isolated flow.
+    """Sidebar creation scaffolds a vault note; completing a vault note is a separate, isolated flow.
 
-    The old task created a sidebar project, marked it Complete, and required its
-    row to leave the sidebar — neither is reachable: `ProjectView` offers only
-    *Delete project* on a project with no vault folder, and a completed vault
-    note moves the note, not an unrelated project. The instructions must split
-    the two, gate on the server's `completable` flag, verify the completed path
-    and retained body, and report BLOCKED when no isolated workspace exists.
+    Since #1350 a project created from the sidebar's `+` is vault-backed: the
+    server scaffolds the project's vault note and binds it, so `ProjectView`
+    offers a *Complete* action and drops the ••• *Delete project* menu, which
+    is rendered only for a project with no `vault_folder`. The task must
+    describe that shipped UX and keep completion on an isolated synthetic
+    note, gated on the server's `completable` flag, with the completed path
+    and retained body verified and BLOCKED reported when no isolated
+    workspace exists.
     """
     text = _flow(PROJECTS_TASK)
-    lowered = text.lower()
+    plain = _plain(PROJECTS_TASK)
+    lowered = plain.lower()
 
-    # The plain app project is its own smoke step, and is left intact.
-    assert "plain app project" in lowered
-    assert "Delete project" in text
-    assert "leave this project" in lowered and "untouched" in lowered
+    # The app project is vault-backed: creation scaffolds its vault note.
+    assert "scaffold" in lowered
+    assert "vault note" in lowered
+    assert "vault-backed" in lowered
+    assert "sidebar" in lowered
+
+    # Its page offers Complete, because it has a vault folder.
+    assert "complete action" in lowered
+    # The walkthrough has to *require* that action, not merely mention it:
+    # "need not offer a Complete action" would leave the fixture unverified.
+    assert _near(plain, "complete action", "must offer")
+    # The page's ••• menu is rendered only without a vault folder, so it is
+    # absent here, and the walkthrough has to look for its absence next to
+    # the menu it is talking about.
+    assert "•••" in text
+    assert "delete project" in lowered
+    assert _near(plain, "delete project", "absent")
+    assert "absent" in lowered
+
+    # The obsolete plain-project expectations are gone.
+    assert "plain app project" not in lowered
+    assert _omits(plain, r"no\s+complete\s+action")
+    assert _omits(plain, r"offers?\s+only\s+delete\s+project")
+    assert _omits(plain, r"show(?:s|n)?\s+only\s+delete\s+project")
+    assert _omits(plain, r"menu\s+offers?\s+only")
+
+    # The fixture is left alone: neither Complete nor Delete is pressed.
+    assert "untouched" in lowered
+    assert "do not press" in lowered
 
     # Completion is a vault note under projects/, reached from To decide.
     assert "/memory/review?show=revisit" in text
@@ -126,10 +203,62 @@ def test_project_walk_separates_app_create_from_vault_completion() -> None:
     assert "retained" in lowered
     assert "no cleanup" in lowered or "nothing at all in the real workspace" in lowered
 
+    # Completing the unrelated synthetic note must not remove the app project.
+    assert "still in the sidebar" in lowered
+
     # The blanket "the sidebar row must disappear" assertion is gone.
     assert "leaves the sidebar" not in lowered
     assert "row gone from the sidebar" not in lowered
     assert "sidebar cleared" not in lowered
+
+
+def test_chat_walk_checks_in_flight_stop_without_requiring_a_partial_bubble() -> None:
+    """The chat shows the final reply only, so Stop must be caught while the turn runs.
+
+    Since #1395 a turn renders one bubble — the final reply. Commentary and
+    partial output live in the Activity trace, so Stop leaves no partial
+    bubble behind and there is nothing to keep. The task must prove continuity
+    with a reply that is allowed to finish, then stop a *separate* turn while
+    it is still in flight, and report a prompt stop, a free composer and no
+    leftover spinner. A reply that finished before the click proves nothing
+    about Stop: that checkpoint is BLOCKED when no in-flight stop can be
+    exercised.
+    """
+    text = _flow(CHAT_TASK)
+    plain = _plain(CHAT_TASK)
+    lowered = plain.lower()
+
+    # Continuity first: the short reply is allowed to finish.
+    assert "still here" in text
+    assert "let it finish" in lowered
+
+    # The stop turn is separate and has to be caught while it runs.
+    assert "separate" in lowered
+    assert "in flight" in lowered
+    assert _near(plain, "separate", "in flight")
+    # A reply that was already finished is not proof of Stop, and no fixed
+    # delay stands in for an in-flight turn.
+    assert "proves nothing" in lowered
+    assert "retry once" in lowered
+    assert "fixed" in lowered
+    assert _near(plain, "fixed", "second")
+    assert "BLOCKED" in text
+
+    # The outcome: prompt stop, usable composer, no stuck spinner.
+    assert "promptly" in lowered
+    assert "composer" in lowered
+    assert "enabled" in lowered
+    assert "spinner" in lowered
+
+    # Only the final reply is a bubble; everything else is Activity.
+    assert "final reply" in lowered
+    assert "activity" in lowered
+    assert "no partial" in lowered
+
+    # The obsolete expectations are gone. The prose may still have to *say*
+    # there is no partial reply, so the old demands are what is rejected.
+    assert _omits(plain, r"partial\s+repl(?:y|ies)\s+(?:stays|remains?|is\s+kept|kept)")
+    assert _omits(plain, r"partial\s+repl(?:y|ies)\s+is\s+not\s+discarded")
 
 
 def test_home_walk_requires_update_tile_only_for_newer_published_version() -> None:
