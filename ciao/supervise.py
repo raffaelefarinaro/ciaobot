@@ -13,6 +13,7 @@ from typing import IO, Any
 
 from ciao.config import RESTART_EXIT_CODE
 from ciao.os_support.processes import ProcessTree, tree_spawn_options
+from ciao.workspace_access import ACCESS_DENIED_EXIT, check_workspace_access
 
 CRASH_LOOP_MAX_RESTARTS = 5      # consecutive restart exits tolerated before waiting
 CRASH_LOOP_WINDOW_S = 60.0       # a child that outran this did real work: not a crash loop
@@ -71,7 +72,15 @@ def supervise(
     ``sleep`` defaults to waiting on the stop event so a stop request cuts a
     backoff short; ``clock`` times each child run, which is what tells a crash
     loop from a long-lived engine that merely asked to restart.
+
+    On macOS a TCC-denied workspace returns ``ACCESS_DENIED_EXIT`` without
+    launching the child (see ``ciao.workspace_access``).
     """
+    denied = check_workspace_access()
+    if denied is not None:
+        if sys.stderr is not None:
+            print(denied, file=sys.stderr, flush=True)
+        return ACCESS_DENIED_EXIT
     stop = threading.Event()
     # The task action is `pythonw.exe`, which has no console: sys.stderr is
     # None there and everything the child writes would go nowhere. The log files
