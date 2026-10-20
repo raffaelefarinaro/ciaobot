@@ -1617,6 +1617,9 @@ class OpencodeProvider(BaseSDKProvider):
         # same id waits for this outcome instead of posting a second decision.
         self._permission_inflight: dict[str, asyncio.Future[QuestionResponseResult]] = {}
         self._question_requests: dict[str, _PendingRequest] = {}
+        # Form replies/cancels awaiting V2. A concurrent reply or cancel for the
+        # same id waits for this outcome instead of sending a second answer.
+        self._question_inflight: dict[str, asyncio.Future[QuestionResponseResult]] = {}
         self._tool_calls: dict[str, str] = {}
         self._settled_tool_ids: set[str] = set()
         self._mcp_token: str = ""
@@ -1628,6 +1631,10 @@ class OpencodeProvider(BaseSDKProvider):
         # reconciles replace it wholesale (#1391).
         self._background_shells: set[str] = set()
         self._background_children: set[str] = set()
+        # Task/subagent sessions spawned under a parent session (any depth),
+        # child id -> parent session. Only their permission/form requests are
+        # surfaced (#1617). Outlives a turn; cleared by `disconnect`.
+        self._child_sessions: dict[str, str] = {}
         self._background_changed = asyncio.Event()
         # Monotonic time of the last event seen from the server; the idle
         # reaper bounds its "work outstanding" protection with it.
@@ -1804,9 +1811,13 @@ class OpencodeProvider(BaseSDKProvider):
                 changed = True
         elif kind == "session.created":
             child_id = str(props.get("sessionID") or "")
+            parent_id = str(props.get("parentID") or "")
+            root = parent_id if parent_id == session_id else self._child_sessions.get(parent_id, "")
+            if child_id and child_id != session_id and root == session_id:
+                self._child_sessions[child_id] = session_id
             if (
                 child_id
-                and str(props.get("parentID") or "") == session_id
+                and parent_id == session_id
                 and child_id not in self._background_children
             ):
                 self._background_children.add(child_id)
@@ -1818,6 +1829,27 @@ class OpencodeProvider(BaseSDKProvider):
                 changed = True
         if changed:
             self._background_changed.set()
+
+    def _is_child_session(self, candidate: str, session_id: str) -> bool:
+        """Whether ``candidate`` is a task/subagent session of ``session_id``'s chat."""
+        if not candidate or candidate == session_id:
+            return False
+        return (
+            self._child_sessions.get(candidate) == session_id
+            or candidate in self._background_children
+        )
+
+    def _admits_child_request(self, kind: str, event_session: str, session_id: str) -> bool:
+        """A child session's permission/form lifecycle event belongs to this chat (#1617)."""
+        admitted = kind in _SESSION_REQUEST_EVENTS and self._is_child_session(
+            event_session, session_id
+        )
+        if admitted and kind in {"permission.asked", "form.created"}:
+            logger.info(
+                "opencode child-session %s from %s surfaced for parent %s",
+                kind, event_session, session_id,
+            )
+        return admitted
 
     async def refresh_background_shells(self) -> int:
         """Reconcile ``_background_shells`` with ``GET /api/shell``; return the count.
@@ -2068,9 +2100,12 @@ class OpencodeProvider(BaseSDKProvider):
                 form = props.get("form")
                 if not event_session and isinstance(form, Mapping):
                     event_session = str(form.get("sessionID") or "")
-                if event_session and event_session != session_id:
-                    continue
                 kind = str(event.get("type") or "")
+                if event_session and event_session != session_id:
+                    if self._admits_child_request(kind, event_session, session_id):
+                        for converted in self._event_to_stream(event):
+                            yield converted
+                    continue
                 if kind == "session.inbox.enqueued":
                     pending_inbox.add(str(props.get("inboxID") or ""))
                     continue
@@ -2406,6 +2441,7 @@ class OpencodeProvider(BaseSDKProvider):
         self._settled_tool_ids.clear()
         self._background_shells.clear()
         self._background_children.clear()
+        self._child_sessions.clear()
         self._background_changed.set()
         self._turn_open = False
         self._owned_delivery_seen = False
@@ -2988,8 +3024,11 @@ class OpencodeProvider(BaseSDKProvider):
         except httpx.HTTPError as exc:
             logger.debug("OpenCode form cancellation failed", exc_info=True)
             return QuestionResponseResult(False, str(exc), True)
-        if response.status_code in {200, 204, 409}:
+        if response.status_code in {200, 204}:
             return QuestionResponseResult(True)
+        if response.status_code == 409:
+            # V2 already settled this form (another answer or cancel won).
+            return QuestionResponseResult(True, already_resolved=True)
         if response.status_code == 404:
             return QuestionResponseResult(
                 False, "Question request is no longer active", False
@@ -3017,8 +3056,11 @@ class OpencodeProvider(BaseSDKProvider):
         except httpx.HTTPError as exc:
             logger.debug("OpenCode form reply failed", exc_info=True)
             return QuestionResponseResult(False, str(exc), True)
-        if response.status_code in {200, 204, 409}:
+        if response.status_code in {200, 204}:
             return QuestionResponseResult(True)
+        if response.status_code == 409:
+            # V2 already settled this form (another answer or cancel won).
+            return QuestionResponseResult(True, already_resolved=True)
         if response.status_code == 404:
             return QuestionResponseResult(
                 False, "Question request is no longer active", False
@@ -3050,19 +3092,40 @@ class OpencodeProvider(BaseSDKProvider):
                 False, "Question request belongs to another session", False
             )
         if pending is None:
-            # A duplicate reply after the SSE form.replied/cancelled event is
-            # idempotently successful; there is nothing left to mutate.
-            return QuestionResponseResult(True)
+            # The form was already settled (SSE form.replied/cancelled, or
+            # another tab's answer finished first): this reply changed nothing.
+            return QuestionResponseResult(True, already_resolved=True)
         if self._client is None:
             return QuestionResponseResult(False, "OpenCode is not connected", False)
-        if cancel:
-            result = await self._reject_question(pending)
-        else:
+        inflight = self._question_inflight.get(request_id)
+        if inflight is not None:
+            # Another tab's reply or cancel is already in flight. Its outcome
+            # decides ours: success means this one did nothing; failure keeps
+            # the card retryable.
+            outcome = await asyncio.shield(inflight)
+            if outcome.ok:
+                return QuestionResponseResult(True, already_resolved=True)
+            return outcome
+        answer: dict[str, FormValue] = {}
+        if not cancel:
             try:
                 answer = _validate_form_answer(pending, answers)
             except _FormValidationError as exc:
                 return QuestionResponseResult(False, str(exc), False)
-            result = await self._reply_question(pending, answer)
+        future: asyncio.Future[QuestionResponseResult] = (
+            asyncio.get_running_loop().create_future()
+        )
+        self._question_inflight[request_id] = future
+        result = QuestionResponseResult(False, "Question reply was interrupted", True)
+        try:
+            if cancel:
+                result = await self._reject_question(pending)
+            else:
+                result = await self._reply_question(pending, answer)
+        finally:
+            self._question_inflight.pop(request_id, None)
+            if not future.done():
+                future.set_result(result)
         if result.ok or result.error == "Question request is no longer active":
             self._question_requests.pop(request_id, None)
         return result
@@ -3273,7 +3336,26 @@ class OpencodeProvider(BaseSDKProvider):
     async def _reload_pending_requests(
         self, client: httpx.AsyncClient, session_id: str
     ) -> list[StreamEvent]:
-        """Recover V2 permission/form requests missed during an SSE outage."""
+        """Recover V2 permission/form requests missed during an SSE outage.
+
+        Reads the parent session and its live or request-holding child
+        sessions (#1617); finished children are not polled.
+        """
+        held = {
+            p.session_id
+            for p in (*self._permission_requests.values(), *self._question_requests.values())
+            if self._is_child_session(p.session_id, session_id)
+        }
+        children = sorted((self._background_children | held) - {session_id})
+        events: list[StreamEvent] = []
+        for sid in (session_id, *children):
+            events.extend(await self._reload_session_requests(client, sid))
+        return events
+
+    async def _reload_session_requests(
+        self, client: httpx.AsyncClient, session_id: str
+    ) -> list[StreamEvent]:
+        """Recover one session's V2 permission/form requests."""
         events: list[StreamEvent] = []
         permission_seen: set[str] = set()
         permission_loaded = False
@@ -3973,10 +4055,14 @@ class OpencodeProvider(BaseSDKProvider):
                         form = props.get("form")
                         if isinstance(form, Mapping):
                             event_session = str(form.get("sessionID") or "")
+                    kind = str(event.get("type") or "")
                     if event_session and event_session != session_id:
+                        if self._admits_child_request(kind, event_session, session_id):
+                            for converted in self._event_to_stream(event):
+                                saw_output = True
+                                yield converted
                         continue
 
-                    kind = str(event.get("type") or "")
                     if kind == "session.inbox.delivered":
                         inbox_id = str(props.get("inboxID") or "")
                         if inbox_id == message_id or inbox_id in self._steer_ids_owned:

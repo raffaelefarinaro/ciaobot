@@ -9,14 +9,14 @@ import SettingsView from '../SettingsView.vue'
 
 afterEach(() => vi.restoreAllMocks())
 
-async function mountSettings() {
+async function mountSettings(onHost?: boolean) {
   setActivePinia(createPinia())
   const stub = defineComponent({ render: () => h('div') })
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/settings', component: stub }] })
   await router.push('/settings')
   await router.isReady()
   vi.spyOn(api, 'get').mockImplementation(async (path) => {
-    if (path === '/api/auth/settings') return { password_configured: true } as never
+    if (path === '/api/auth/settings') return (onHost === undefined ? { password_configured: true } : { password_configured: true, on_host: onHost }) as never
     throw new Error('Unrelated settings data unavailable in this test')
   })
   const wrapper = mount(SettingsView, {
@@ -66,6 +66,21 @@ it('shows "Current password is incorrect." inline and keeps the new password', a
   }
 })
 
+it('shows the rate-limit message inline under the current password', async () => {
+  const wrapper = await mountSettings()
+  try {
+    const message = 'Too many wrong attempts. Wait a few minutes and try again.'
+    vi.spyOn(api, 'post').mockRejectedValue(
+      Object.assign(new Error(message), { status: 429, payload: { error: message, code: 'rate_limited' } }),
+    )
+    await fillAndSave(wrapper)
+    expect(wrapper.find('#auth-current-password-error').text()).toBe(message)
+    expect(cardResult(wrapper)).toBeNull()
+  } finally {
+    wrapper.unmount()
+  }
+})
+
 it('reports other failures in the result line', async () => {
   const wrapper = await mountSettings()
   try {
@@ -75,6 +90,40 @@ it('reports other failures in the result line', async () => {
     await fillAndSave(wrapper)
     expect(cardResult(wrapper)?.textContent).toContain('disk full')
     expect(wrapper.find('#auth-current-password-error').exists()).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('hides the current password on the host and saves without it', async () => {
+  const wrapper = await mountSettings(true)
+  try {
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true, password_configured: true } as never)
+    expect(wrapper.find('#auth-current-password').exists()).toBe(false)
+    expect(wrapper.text()).toContain("You're on the computer running Ciaobot, so you don't need the current password here.")
+    const save = () => wrapper.findAll('button').find(b => b.text() === 'Save password')!
+    expect(save().attributes('disabled')).toBeDefined()
+    await wrapper.find('input[autocomplete="new-password"]').setValue('hunter22')
+    expect(save().attributes('disabled')).toBeUndefined()
+    await save().trigger('click')
+    await flushPromises()
+    expect(post).toHaveBeenCalledWith('/api/auth/settings', { password: 'hunter22' })
+    // The card keeps knowing it is on the host after saving.
+    expect(wrapper.find('#auth-current-password').exists()).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('asks for the current password off the host', async () => {
+  const wrapper = await mountSettings(false)
+  try {
+    expect(wrapper.find('#auth-current-password').exists()).toBe(true)
+    const save = () => wrapper.findAll('button').find(b => b.text() === 'Save password')!
+    await wrapper.find('input[autocomplete="new-password"]').setValue('hunter22')
+    expect(save().attributes('disabled')).toBeDefined()
+    await wrapper.find('#auth-current-password').setValue('old')
+    expect(save().attributes('disabled')).toBeUndefined()
   } finally {
     wrapper.unmount()
   }
