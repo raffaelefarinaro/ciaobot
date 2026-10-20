@@ -136,3 +136,18 @@ def test_auth_settings_change_from_remote_peer_still_works(tmp_path: Path) -> No
     )
     assert res.status_code == 200
     assert app.state.config.pwa_auth_token == "new-secret"
+
+
+def test_password_change_clears_welcome_pending(tmp_path: Path) -> None:
+    from ciao.setup_marker import welcome_pending, write_welcome_pending
+
+    write_welcome_pending(tmp_path / ".runtime")
+    client = TestClient(_app(tmp_path, token="old-secret"), client=("127.0.0.1", 5555))
+
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "hunter2-new", "current_password": "old-secret"},
+    )
+
+    assert res.status_code == 200
+    assert welcome_pending(tmp_path / ".runtime") is False

@@ -35,8 +35,8 @@ carried by the session.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update
-  coordinator's drain handshake, and `/api/admin/restart-blockers` (the
-  reason-tagged list `ciao service` gates restart/stop on). It requires a loopback TCP source address, a loopback `Host` (`localhost`, `127.0.0.1`, `::1`) and, when the request carries `Origin` or `Referer`, one naming this exact origin, for every method. The peer address is what makes a caller local; the `Host` check refuses a DNS-rebound page on this machine, which is a loopback peer whose `Origin` matches its own (attacker-chosen) `Host`. A request that fails takes the normal session path, so Settings still reads restart blockers with its session. A loopback peer carrying
+  coordinator's drain handshake, `/api/admin/restart-blockers` (the
+  reason-tagged list `ciao service` gates restart/stop on), and `POST /api/auth/host-sign-in` (it mints a one-time setup token and opens it, through an owner-only file, in the host's own default browser; it returns nothing a caller could reuse, so another local user or process can at most open a tab on the owner's screen, 10 s cooldown; the redirect port is the socket's own listening port, never the Host header's, and the token file is recreated owner-only on every mint). It requires a loopback TCP source address, a loopback `Host` (`localhost`, `127.0.0.1`, `::1`) and, when the request carries `Origin` or `Referer`, one naming this exact origin, for every method. The peer address is what makes a caller local; the `Host` check refuses a DNS-rebound page on this machine, which is a loopback peer whose `Origin` matches its own (attacker-chosen) `Host`. A request that fails takes the normal session path, so Settings still reads restart blockers with its session. A loopback peer carrying
   reverse-proxy headers (`Forwarded`, `Via`, any `X-Forwarded-*`,
   `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, any
   `Tailscale-*`) is not local: `tailscale serve` and
@@ -56,6 +56,14 @@ carried by the session.
   terminals. The body carries an action id or a chat/project id, never a command
   or a path. `GET` reports `not_on_host` (200) to a signed-in remote browser so it
   can hide the buttons; `POST` answers 403.
+- The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
+  need the session *and* `host_browser_request`, and are not in
+  `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails
+  `is_loopback_client` (the `Tailscale-*`/`X-Forwarded-For` headers) and the
+  loopback `Host` check. The password is returned only while
+  `.runtime/welcome-pending` exists; dismissing or changing the password deletes
+  it. An SSH port-forward looks local, and anyone with SSH to the host can
+  already read `.env`.
 - Model-authored HTML is served from `/api/workspace-html` under a sandboxing
   CSP (`sandbox allow-scripts`, no `allow-same-origin`, `connect-src 'none'`,
   `form-action 'none'`), so an artifact cannot reach the API or the local-only
@@ -67,7 +75,8 @@ carried by the session.
   are retired (`#579`), so a remote browser gets nothing a local one does not,
   and `trigger_app_update` does not exist. A browser is a local control path only
   through session routes that also require the host: `/api/workspace-move*`,
-  `/api/host/terminal` and `POST /api/settings/providers/{provider}/connect`
+  `/api/host/terminal`, `GET /api/welcome/password`, `POST /api/welcome/open-folder`
+  and `POST /api/settings/providers/{provider}/connect`
   check the loopback peer, a loopback `Host` and a same-host `Origin`;
   `/api/workspace-open` checks the loopback peer only. Each refuses a non-host
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in

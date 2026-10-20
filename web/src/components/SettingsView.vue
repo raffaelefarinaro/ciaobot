@@ -991,12 +991,21 @@
               </div>
             </div>
 
+            <p v-if="workspaceLinkStatus" class="hint hint--warn workspace-link-status" role="status">
+              {{ workspaceLinkStatus }}
+            </p>
+
             <div class="workspace-list set-list">
               <div
                 v-for="form in workspaceForms"
                 :key="form.name"
+                :id="`workspace-row-${form.name}`"
                 class="workspace-card set-row"
-                :class="{ 'workspace-card--open': openWorkspace === form.name }"
+                :class="{
+                  'workspace-card--open': openWorkspace === form.name,
+                  'workspace-card--target': workspaceLinkTarget === form.name,
+                }"
+                @animationend.self="clearWorkspaceLinkHighlight(form.name)"
               >
                 <div class="workspace-card-header set-row-head">
                   <span class="set-dot" aria-hidden="true" :style="{ '--swatch': workspaceSwatch(form.color) }"></span>
@@ -1085,9 +1094,14 @@
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field set-subrow">
+                  <label class="settings-field set-subrow" :id="`workspace-file-access-row-${form.name}`">
                     <span class="ws-label set-subrow-label">File access</span>
-                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.agent_fs_scope" :disabled="workspacesSaving === form.name">
+                    <select
+                      :id="`workspace-file-access-${form.name}`"
+                      class="routine-input routine-select workspace-select set-subrow-control"
+                      v-model="form.agent_fs_scope"
+                      :disabled="workspacesSaving === form.name"
+                    >
                       <option value="">{{ fsScopeDefaultOptionLabel }}</option>
                       <option value="workspace">Workspace only</option>
                       <option value="machine">Whole machine</option>
@@ -2080,6 +2094,7 @@ import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
 import type { ModelSection } from '../lib/modelSections'
 import { isLoopbackHostname } from '../lib/loopback'
 import { settingsTabLabel } from '../lib/settingsNav'
+import { parseWorkspaceFileAccessHref } from '../lib/appLinks'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
@@ -3760,6 +3775,81 @@ const workspaceBaseline = ref<Record<string, string>>({})
 // bound to it: `form.name` is the row's identity (baseline, key, PATCH path),
 // and changing it mid-edit would re-key the card and lose focus.
 const workspaceNameDraft = ref('')
+// A File access link (`/settings/workspaces?workspace=NAME#file-access`) only
+// locates the control. This is the status shown when it cannot: an unknown
+// workspace, or another row's unsaved draft in the way. It names the target,
+// never a value, and never claims a setting changed.
+const workspaceLinkStatus = ref('')
+// The row being pointed at, so the CSS animation has one source of truth.
+const workspaceLinkTarget = ref<string | null>(null)
+// Bumped on every route resolution so a delayed list load from a superseded
+// link cannot open, scroll to or focus the wrong row.
+let workspaceLinkRequest = 0
+const WORKSPACE_LINK_OFFSET = 16
+
+function clearWorkspaceLinkHighlight(name: string): void {
+  if (workspaceLinkTarget.value === name) workspaceLinkTarget.value = null
+}
+
+function scrollToWorkspaceFileAccess(name: string): void {
+  const body = bodyEl.value
+  if (!body) return
+  // Scope both lookups to the owning pane, and measure the field row itself:
+  // the card header can be in view while the File access control is still
+  // below the fold.
+  const row = body.querySelector<HTMLElement>(`#workspace-file-access-row-${name}`)
+  const control = body.querySelector<HTMLElement>(`#workspace-file-access-${name}`)
+  if (!row || !control) return
+  // Only the settings pane scrolls. Its scrollTop is the truth; a measured
+  // offset keeps this correct whatever else has rendered above the row.
+  // scrollIntoView is deliberately not used: on a nested pane iOS Safari can
+  // scroll the wrong ancestor.
+  const offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top
+  const top = Math.max(0, body.scrollTop + offset - WORKSPACE_LINK_OFFSET)
+  const reduce = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  body.scrollTo({ top, behavior: reduce ? 'auto' : 'smooth' })
+  control.focus({ preventScroll: true })
+  workspaceLinkTarget.value = name
+}
+
+async function applyWorkspaceFileAccessLink(fullPath: string): Promise<void> {
+  const request = ++workspaceLinkRequest
+  // A navigation clears what an earlier link said; a missing target and the
+  // row it pointed at must not outlive the address that produced them.
+  workspaceLinkStatus.value = ''
+  workspaceLinkTarget.value = null
+  const name = parseWorkspaceFileAccessHref(fullPath)
+  if (!name || currentTab.value !== 'workspaces') return
+  await loadSettingsTab('workspaces')
+  if (request !== workspaceLinkRequest) return
+  await nextTick()
+  if (request !== workspaceLinkRequest) return
+  // A failed load is an error, not a claim that the workspace is missing.
+  if (workspacesError.value) return
+  const form = workspaceForms.value.find(f => f.name === name)
+  if (!form) {
+    workspaceLinkStatus.value = `No workspace named "${name}" exists. No settings changed.`
+    return
+  }
+  const openName = openWorkspace.value
+  if (openName && openName !== name) {
+    const openForm = workspaceForms.value.find(f => f.name === openName)
+    // One editor and one name draft are open at a time. Switching would
+    // discard what the user typed, so ask them to save or discard first.
+    if (openForm && workspaceDirty(openForm)) {
+      workspaceLinkStatus.value =
+        `Save or discard your changes to "${openName}" before opening File access for "${name}".`
+      return
+    }
+  }
+  // Already open: keep its draft exactly as it is. Re-initialising here would
+  // silently undo an edit to the name the link happens to name.
+  if (openWorkspace.value !== name) openWorkspaceEditor(name)
+  await nextTick()
+  if (request !== workspaceLinkRequest) return
+  scrollToWorkspaceFileAccess(name)
+}
 
 function openWorkspaceEditor(name: string): void {
   openWorkspace.value = name
@@ -4086,6 +4176,16 @@ function loadSettingsTab(tab: string): Promise<void> {
   tabLoads.set(key, request)
   return request
 }
+
+// File access links are checked on every navigation, including the direct load
+// of one. `loadSettingsTab` is cached, so a link that arrives with the tab
+// costs no second fetch, and a link that arrives before the first list does
+// waits for that same load instead of opening a row that is not there yet.
+watch(
+  () => route.fullPath,
+  path => { void applyWorkspaceFileAccessLink(path) },
+  { immediate: true },
+)
 
 onMounted(() => {
   loadAppearanceSettings()
@@ -5850,6 +5950,22 @@ a.btn-secondary {
   flex-direction: column;
   border-radius: 0;
   background: transparent;
+}
+/* A File access link briefly tints the row it found. The animation carries no
+   meaning: the focus ring on the select is the durable cue, and reduced motion
+   keeps that while dropping the tint. */
+.workspace-card--target {
+  animation: workspace-link-target 1.6s var(--ease);
+}
+@keyframes workspace-link-target {
+  0% { background-color: color-mix(in srgb, var(--accent) 14%, transparent); }
+  100% { background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-card--target { animation: none; }
+}
+.workspace-link-status {
+  margin: var(--space-2) 0;
 }
 /* The unsaved new workspace keeps a light frame: it is a draft form, and it
    has to read as not-yet-real next to the saved rows. */

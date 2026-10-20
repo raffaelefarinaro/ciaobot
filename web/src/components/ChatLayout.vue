@@ -114,6 +114,7 @@
                     <HomeNoticeReopen />
                     <HousekeepingStrip />
                   </template>
+                  <HomeWelcomeCard />
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                   <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -275,6 +276,7 @@
                   <HomeNoticeReopen />
                   <HousekeepingStrip />
                 </template>
+                <HomeWelcomeCard />
                 <HomeSetupCard />
                 <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                 <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -343,6 +345,7 @@ import HomeIntake from './HomeIntake.vue'
 import HomeReviewSummary from './HomeReviewSummary.vue'
 import HousekeepingStrip from './HousekeepingStrip.vue'
 import HomeSetupCard from './HomeSetupCard.vue'
+import HomeWelcomeCard from './HomeWelcomeCard.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
@@ -1695,6 +1698,7 @@ onBeforeUnmount(() => {
    heading and row spacing inside each section is untouched. */
 .home-main > :deep(.housekeeping),
 .home-main > :deep(.update-tasks),
+.home-main > :deep(.home-welcome),
 .home-main > :deep(.home-setup),
 .home-main > :deep(.home-notice-reopen),
 .home-main > :deep(.home-recent),

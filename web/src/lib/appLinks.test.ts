@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const push = vi.hoisted(() => vi.fn(async (_href: string) => undefined))
 vi.mock('../router', () => ({ router: { push } }))
 
-import { handleAppLinkClick, isAppRouteHref } from './appLinks'
+import { handleAppLinkClick, isAppRouteHref, parseWorkspaceFileAccessHref } from './appLinks'
 
 const ID = '0123456789abcdef0123456789abcdef'
 
@@ -109,6 +109,56 @@ describe('isAppRouteHref', () => {
   })
 })
 
+// The one workspace address an assistant may hand over: it locates a row's
+// File access control and never acts on it. Only an exact name the engine
+// accepts is a target; every extra parameter or other fragment is not.
+function workspaceTarget(name: string): string {
+  return `/settings/workspaces?workspace=${name}#file-access`
+}
+
+describe('a workspace File access link', () => {
+  it('parses the exact target with every name the engine accepts', () => {
+    for (const name of ['personal', 'Work_2', 'a-b', 'A'.repeat(64)]) {
+      expect(parseWorkspaceFileAccessHref(workspaceTarget(name)), name).toBe(name)
+      expect(isAppRouteHref(workspaceTarget(name)), name).toBe(true)
+    }
+  })
+
+  it('rejects names the engine would refuse', () => {
+    for (const name of [
+      '',
+      '-work',
+      '_work',
+      'work space',
+      'work%2F..%2Fapi',
+      'a'.repeat(65),
+    ]) {
+      expect(parseWorkspaceFileAccessHref(workspaceTarget(name)), name).toBeNull()
+      expect(isAppRouteHref(workspaceTarget(name)), name).toBe(false)
+    }
+  })
+
+  it('rejects extra parameters, other fragments and other pages', () => {
+    for (const href of [
+      '/settings/workspaces?workspace=personal&action=save#file-access',
+      '/settings/workspaces?workspace=personal&workspace=work#file-access',
+      '/settings/workspaces?workspace=personal#file-access&action=save',
+      '/settings/workspaces?workspace=personal#file_access',
+      '/settings/workspaces?workspace=personal#file-access/',
+      '/settings/workspaces?workspace=personal',
+      '/settings/workspaces#file-access',
+      '/settings/workspaces/?workspace=personal#file-access',
+      '/settings/models?workspace=personal#file-access',
+      `https://example.com/settings/workspaces?workspace=personal#file-access`,
+      `//example.com/settings/workspaces?workspace=personal#file-access`,
+      '/settings/workspaces?workspace=../api/x#file-access',
+    ]) {
+      expect(parseWorkspaceFileAccessHref(href), href).toBeNull()
+      expect(isAppRouteHref(href), href).toBe(false)
+    }
+  })
+})
+
 describe('handleAppLinkClick', () => {
   it('routes a click on a task link in place, from inside the label', async () => {
     const a = anchor(`/tasks/${ID}`)
@@ -124,6 +174,15 @@ describe('handleAppLinkClick', () => {
     expect(handleAppLinkClick(event)).toBe(true)
     expect(event.defaultPrevented).toBe(true)
     await vi.waitFor(() => expect(push).toHaveBeenCalledWith('/settings/workspaces#new-workspace'))
+  })
+
+  it('routes a click on a workspace File access link in place', async () => {
+    const href = workspaceTarget('work')
+    const a = anchor(href)
+    const event = click(a.querySelector('strong')!)
+    expect(handleAppLinkClick(event)).toBe(true)
+    expect(event.defaultPrevented).toBe(true)
+    await vi.waitFor(() => expect(push).toHaveBeenCalledWith(href))
   })
 
   it('handles the click an Enter press on a focused link produces', async () => {
