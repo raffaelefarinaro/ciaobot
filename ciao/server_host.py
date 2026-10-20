@@ -72,6 +72,7 @@ __all__ = [
     "ICON_NAME",
     "LEGACY_HOST_PROTOCOL",
     "LEGACY_HOST_REVISION",
+    "MOVE_HOST_PROTOCOL",
     "MINIMUM_SYSTEM_VERSION",
     "NATIVE_TIMEOUT_SECONDS",
     "SCHEMA_VERSION",
@@ -82,6 +83,8 @@ __all__ = [
     "default_bundle_path",
     "default_ownership_path",
     "host_service_argv",
+    "host_move_argv",
+    "host_interpreter",
     "inspect_host_bundle",
     "parse_service_command",
     "read_host_ownership",
@@ -109,6 +112,12 @@ MINIMUM_SYSTEM_VERSION = "13.0"
 LEGACY_HOST_REVISION = 2
 #: The protocol the superseded revision spoke.
 LEGACY_HOST_PROTOCOL = 1
+
+#: The first host protocol that carries the ``run-move`` operation, so the
+#: workspace move can run as a descendant of the host (#1658). A host below it
+#: has no such operation: the move job stays a bare interpreter and the move
+#: keeps refusing a protected folder.
+MOVE_HOST_PROTOCOL = 2
 
 #: The host's own stop grace and the launchd ``ExitTimeOut`` a service plist must
 #: exceed so launchd does not sweep the job group out from under the host's stop.
@@ -288,6 +297,18 @@ def _python_interpreter(value: object) -> str:
     return interpreter
 
 
+def host_interpreter(python: PurePath) -> str:
+    """The interpreter a host would run, or a refusal.
+
+    The host's own parser demands an absolute, normalized path whose basename
+    is ``python``, ``python3`` or ``python3.N``. This exposes that rule to a
+    caller that must answer "can this host run a child with this interpreter?"
+    *before* it renders a command, so the answer and the rendering can never
+    disagree.
+    """
+    return _python_interpreter(os.fspath(python))
+
+
 def _parse_direct(program: str, argv: tuple[str, ...]) -> ServiceCommand:
     base = PurePosixPath(program).name
     if _PYTHON_RE.fullmatch(base):
@@ -412,6 +433,62 @@ def host_service_argv(bundle_path: PurePath, python: PurePath) -> tuple[str, ...
     interpreter = _python_interpreter(os.fspath(python))
     host = PurePosixPath(bundle) / "Contents" / "MacOS" / EXECUTABLE_NAME
     return (os.fspath(host), "serve", "--python", interpreter)
+
+
+#: The operation id the engine mints for a move: a timestamp plus six hex
+#: characters. The host accepts any plain identifier, so this is the shape
+#: :func:`host_move_argv` is given.
+_MOVE_OPERATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def host_move_argv(
+    bundle_path: PurePath,
+    python: PurePath,
+    operation: str,
+    state_dir: PurePath,
+) -> tuple[str, ...]:
+    """Render the exact hosted command for the workspace move.
+
+    The ``run-move`` shape :func:`parse_service_command` accepts:
+    ``[<host>, "run-move", "--python", <abs python>, "--operation", <id>,
+    "--state-dir", <abs dir>]``. The host spawns a fixed child
+    (``[python, -I, -m, ciao.workspace_move, run, --operation, <id>,
+    --state-dir, <dir>]``), so a macOS folder grant the user gave the host
+    covers the move too (#1658).
+
+    Strictly syntax and rendering, like :func:`host_service_argv`: this runs no
+    subprocess and proves nothing about the bytes behind the names. A caller
+    must confirm the bundle with :func:`verify_owned_host` *before* it renders
+    or runs this command, and the operation id must be a plain identifier so
+    the host's own parser cannot read it as an option.
+    """
+    bundle = _absolute_posix(
+        os.fspath(bundle_path), what="the bundle path", code=INVALID_COMMAND
+    )
+    if PurePosixPath(bundle).name != APP_NAME:
+        raise ServerHostError(
+            f"the bundle must be named {APP_NAME!r}: {bundle!r}", code=INVALID_COMMAND
+        )
+    interpreter = _python_interpreter(os.fspath(python))
+    if not isinstance(operation, str) or not _MOVE_OPERATION_RE.fullmatch(operation):
+        raise ServerHostError(
+            f"the move operation must be a plain identifier: {operation!r}",
+            code=INVALID_COMMAND,
+        )
+    state = _absolute_posix(
+        os.fspath(state_dir), what="the state directory", code=INVALID_COMMAND
+    )
+    host = PurePosixPath(bundle) / "Contents" / "MacOS" / EXECUTABLE_NAME
+    return (
+        os.fspath(host),
+        "run-move",
+        "--python",
+        interpreter,
+        "--operation",
+        operation,
+        "--state-dir",
+        state,
+    )
 
 
 # ── The ownership snapshot ──────────────────────────────────────────────────
