@@ -1558,3 +1558,48 @@ def test_provider_update_a_broken_probe_is_silent(tmp_path: Path) -> None:
         raise RuntimeError("probe failed")
 
     assert _provider_tiles(_context(tmp_path, provider_checks=boom)) == []
+
+
+def test_provider_update_dismiss_with_a_raising_probe_is_value_error(tmp_path: Path) -> None:
+    def boom() -> dict:
+        raise RuntimeError("probe failed")
+
+    with pytest.raises(ValueError):
+        dismiss_action("provider-update:opencode", _context(tmp_path, provider_checks=boom))
+    assert not (_runtime(tmp_path) / "provider-update-dismissals.json").exists()
+
+
+def test_provider_update_unreadable_receipt_is_logged_and_tile_still_shows(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _starred(tmp_path)
+    path = _runtime(tmp_path) / "provider-update-dismissals.json"
+    path.write_text("{}", encoding="utf-8")
+    real = Path.read_text
+
+    def deny(self: Path, *args, **kwargs):
+        if self.name == "provider-update-dismissals.json":
+            raise PermissionError("denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", deny)
+    context = _context(tmp_path, provider_checks=_FakeProviderChecks({"opencode": _below_tested()}))
+    with caplog.at_level("WARNING"):
+        assert len(_provider_tiles(context)) == 1
+    assert "provider-update-dismissals.json" in caplog.text
+
+
+def test_provider_update_tile_for_system_claude_below_tested(tmp_path: Path) -> None:
+    _starred(tmp_path)
+    claude = {
+        "state": "below_tested",
+        "installed": "2.0.0",
+        "tested": "2.1.0",
+        "command": "claude update",
+        "terminal_action": "claude-update",
+    }
+    tiles = _provider_tiles(_context(tmp_path, provider_checks=_FakeProviderChecks({"claude": claude})))
+    assert [t.id for t in tiles] == ["provider-update:claude"]
+    assert tiles[0].title == "Update Claude Code"
+    assert tiles[0].command == "claude update"
+    assert tiles[0].terminal_action == "claude-update"

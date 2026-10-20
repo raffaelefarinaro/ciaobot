@@ -792,8 +792,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     # Cache the GitHub release lookup so opening Settings repeatedly does not
     # exhaust the API rate limit (especially on shared/NAT egress IPs).
     app.state.package_status_fetcher = make_cached_package_status()
-    # Offline provider-CLI check, cached for 60 s; backs the Home provider tile.
-    app.state.provider_checks_fetcher = make_cached_checks()
+    # Offline provider-CLI check, cached for 10 min (Check again invalidates); backs the Home provider tile.
+    app.state.provider_checks_fetcher = make_cached_checks(ttl=600.0)
     # Filled in off the request path by /api/startup-status so the menu bar can
     # show an available release without that endpoint ever waiting on GitHub.
     app.state.update_hint = ("", False)

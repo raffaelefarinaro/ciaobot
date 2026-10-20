@@ -246,7 +246,10 @@ def _read_provider_dismissals(context: DetectionContext) -> dict[str, str]:
         return {}
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
     except (OSError, ValueError):
+        logger.warning("operator actions: could not read %s", path, exc_info=True)
         return {}
     if not isinstance(loaded, dict):
         return {}
@@ -345,7 +348,11 @@ def _run_provider_recheck(context: DetectionContext, provider: str) -> tuple[dic
 
 def _dismiss_provider_update(context: DetectionContext, provider: str) -> tuple[dict[str, Any], str]:
     """Hide the tile for the target version it currently shows, and no newer one."""
-    check = _provider_checks(context).get(provider) or {}
+    try:
+        check = _provider_checks(context).get(provider) or {}
+    except Exception as exc:  # noqa: BLE001 — a broken probe is not a 500
+        logger.exception("operator actions: provider check failed")
+        raise ValueError(f"could not check {provider}: {exc}") from exc
     tested = check.get("tested")
     if check.get("state") != "below_tested" or not isinstance(tested, str) or not tested:
         raise ValueError(f"no provider update to dismiss for {provider}")
