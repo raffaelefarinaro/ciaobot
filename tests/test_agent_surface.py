@@ -97,6 +97,12 @@ def test_plan_mode_gate_applies_through_the_cli_surface(tmp_path: Path) -> None:
     assert response.json()["error"]["code"] == "plan_mode_read_only"
 
 
+def test_context_logs_is_a_read() -> None:
+    from ciao import mcp_server
+
+    assert mcp_server.OPERATIONS_BY_NAME["context_logs"].annotations == mcp_server._READ
+
+
 def test_rare_admin_operations_dispatch_on_cli_only(tmp_path: Path) -> None:
     """S2 removed the rare-admin group from the MCP catalog but the dispatcher
     must still run them as `ciao <noun> <verb>` commands."""
@@ -354,6 +360,8 @@ def test_plan_mode_gates_every_task_write(tmp_path: Path) -> None:
     ("argv", "expected"),
     [
         (["context", "get"], ("context_get", {})),
+        (["context", "logs"], ("context_logs", {"lines": 200})),
+        (["context", "logs", "--lines", "50"], ("context_logs", {"lines": 50})),
         (["memory", "status"], ("memory_status", {})),
         (
             ["memory", "update", "--region", "profile", "--action", "replace", "--match", "old", "--entry", "new"],
