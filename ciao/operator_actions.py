@@ -27,6 +27,8 @@ Contract, enforced in tests
 3. Every action offers at least one of ``run_label`` / ``chat_prompt``. An
    action with neither is a notice and belongs in the Settings audit.
 4. No detector walks the vault (the ``scan_vault`` spy in the tests proves it).
+5. An advisory provider tile is dismissible per target version, and the receipt
+   never silences a newer target.
 """
 
 from __future__ import annotations
@@ -94,6 +96,11 @@ class OperatorAction:
     # an uncommitted vault, and locking the app would take away the assistant the
     # operator needs to fix it. Prominent, permanent, and retryable beats modal.
     blocking: bool = False
+    # A host-terminal action id (``ciao.host_terminal``) the client may offer
+    # when the browser is on the host, and the same command as copyable text,
+    # always shown beside it. Only the provider-update tile sets them.
+    terminal_action: str = ""
+    command: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         """Serializable form for the API payload."""
@@ -115,6 +122,8 @@ class OperatorAction:
             "dismiss_label": self.dismiss_label,
             "primary": self.primary,
             "blocking": self.blocking,
+            "terminal_action": self.terminal_action,
+            "command": self.command,
         }
 
 
@@ -128,13 +137,17 @@ class DetectionContext:
     object exposing ``list_entries()`` (a ScheduleManager or ScheduleStore).
     ``package_status`` is a zero-arg callable returning the package-status dict
     from ``package_version.package_status``, pre-cached; when omitted the
-    package detector declines to guess and stays silent.
+    package detector declines to guess and stays silent. ``provider_checks`` is
+    the same idea for the provider CLIs: a zero-arg callable returning
+    ``{provider: release_check dict}`` (``provider_versions.make_cached_checks``)
+    that may expose ``invalidate()``; ``None`` keeps the provider detector silent.
     """
 
     config: Any
     runtime_dir: Path | None = None
     schedule_store: Any = None
     package_status: Callable[[], dict[str, Any]] | None = None
+    provider_checks: Any = None
     now: datetime | None = None
 
     @property
@@ -210,6 +223,134 @@ def _detect_package_update(context: DetectionContext) -> list[OperatorAction]:
             primary="view",
         )
     ]
+
+
+# -- provider update ---------------------------------------------------------
+
+_PROVIDER_UPDATE_SEVERITY = 40
+_PROVIDER_LABELS = {"opencode": "OpenCode", "claude": "Claude Code"}
+_PROVIDER_DISMISSALS = "provider-update-dismissals.json"
+_PROVIDER_ACTION_PREFIX = "provider-update:"
+
+
+def _provider_dismissals_path(context: DetectionContext) -> Path | None:
+    runtime = context.runtime
+    if runtime is None:
+        return None
+    return Path(runtime) / _PROVIDER_DISMISSALS
+
+
+def _read_provider_dismissals(context: DetectionContext) -> dict[str, str]:
+    path = _provider_dismissals_path(context)
+    if path is None:
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    return {
+        key: value
+        for key, value in loaded.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+
+
+def _write_provider_dismissal(context: DetectionContext, provider: str, target: str) -> None:
+    path = _provider_dismissals_path(context)
+    if path is None:
+        return
+    receipt = _read_provider_dismissals(context)
+    receipt[provider] = target
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(receipt), encoding="utf-8", newline="")
+    except OSError:
+        logger.exception("operator actions: could not write provider dismissal")
+
+
+def _provider_checks(context: DetectionContext) -> dict[str, dict[str, str]]:
+    checks = context.provider_checks() if context.provider_checks is not None else {}
+    return checks if isinstance(checks, dict) else {}
+
+
+def _detect_provider_updates(context: DetectionContext) -> list[OperatorAction]:
+    """One advisory tile per provider CLI older than the release-tested version.
+
+    Reads the cached check, so a warm cache spawns nothing; with no checker wired
+    the condition is unknown and the detector stays silent. "Not now" is a receipt
+    keyed to the tested version it was pressed for, so a release that tests a newer
+    version shows the tile again.
+    """
+    if context.provider_checks is None:
+        return []
+    try:
+        checks = _provider_checks(context)
+    except Exception:  # noqa: BLE001 — a broken probe must not fail the strip
+        logger.exception("operator actions: provider check failed")
+        return []
+    dismissed = _read_provider_dismissals(context)
+    actions: list[OperatorAction] = []
+    for provider in sorted(_PROVIDER_LABELS):
+        check = checks.get(provider)
+        if not isinstance(check, dict) or check.get("state") != "below_tested":
+            continue
+        tested = str(check.get("tested", ""))
+        if dismissed.get(provider) == tested:
+            continue
+        label = _PROVIDER_LABELS[provider]
+        actions.append(
+            OperatorAction(
+                id=f"{_PROVIDER_ACTION_PREFIX}{provider}",
+                kind="provider-update",
+                severity=_PROVIDER_UPDATE_SEVERITY,
+                title=f"Update {label}",
+                detail=(
+                    f"{label} {check.get('installed', '')} is older than {tested}, "
+                    "the version this Ciaobot release was tested with."
+                ),
+                glyph="▲",
+                workspace="",
+                terminal_action=str(check.get("terminal_action", "")),
+                command=str(check.get("command", "")),
+                run_label="Check again",
+                dismiss_label="Not now",
+            )
+        )
+    return actions
+
+
+def _provider_of(action_id: str) -> str:
+    provider = action_id.removeprefix(_PROVIDER_ACTION_PREFIX)
+    if provider not in _PROVIDER_LABELS:
+        raise ValueError(f"unknown operator action id: {action_id}")
+    return provider
+
+
+def _run_provider_recheck(context: DetectionContext, provider: str) -> tuple[dict[str, Any], str]:
+    """Drop the cached check and read it again, so a finished update clears the tile."""
+    invalidate = getattr(context.provider_checks, "invalidate", None)
+    if callable(invalidate):
+        invalidate()
+    check = _provider_checks(context).get(provider) or {}
+    state = str(check.get("state", "unknown"))
+    label = _PROVIDER_LABELS[provider]
+    if state != "below_tested":
+        return {"state": state}, f"{label} is up to date."
+    return {"state": state}, (
+        f"{label} {check.get('installed', '')} is still older than {check.get('tested', '')}."
+    )
+
+
+def _dismiss_provider_update(context: DetectionContext, provider: str) -> tuple[dict[str, Any], str]:
+    """Hide the tile for the target version it currently shows, and no newer one."""
+    check = _provider_checks(context).get(provider) or {}
+    tested = check.get("tested")
+    if check.get("state") != "below_tested" or not isinstance(tested, str) or not tested:
+        raise ValueError(f"no provider update to dismiss for {provider}")
+    _write_provider_dismissal(context, provider, tested)
+    return {"dismissed": tested}, "Hidden until a newer tested version ships."
 
 
 # -- GitHub star nudge ------------------------------------------------------
@@ -1085,6 +1226,7 @@ def _detect_legacy_env_ignored(context: DetectionContext) -> list[OperatorAction
 _DETECTORS: list[Callable[[DetectionContext], list[OperatorAction]]] = [
     _detect_workspace_unmigrated,
     _detect_package_update,
+    _detect_provider_updates,
     _detect_vault_vocabulary,
     _detect_unmigrated_links,
     _detect_missed_schedules,
@@ -1111,6 +1253,8 @@ async def run_action(action_id: str, context: DetectionContext) -> tuple[dict[st
     """
     if action_id == "package-update":
         return _run_package_update(context)
+    if action_id.startswith(_PROVIDER_ACTION_PREFIX):
+        return _run_provider_recheck(context, _provider_of(action_id))
     if action_id == "github-star":
         return await _run_github_star(context)
     if action_id == "vault-vocabulary":
@@ -1130,9 +1274,11 @@ def dismiss_action(action_id: str, context: DetectionContext) -> tuple[dict[str,
     """Record a "not now" for one action id.
 
     Same contract as :func:`run_action`: returns ``(result, summary_text)`` and
-    raises :class:`ValueError` for an unknown id. Only ask-style actions accept
-    a dismissal; a machine condition is never dismissed, only fixed.
+    raises :class:`ValueError` for an unknown id. Only ask-style and advisory
+    actions accept a dismissal; a machine condition is never dismissed, only fixed.
     """
+    if action_id.startswith(_PROVIDER_ACTION_PREFIX):
+        return _dismiss_provider_update(context, _provider_of(action_id))
     if action_id == "github-star":
         return _dismiss_github_star(context)
     raise ValueError(f"unknown operator action id: {action_id}")

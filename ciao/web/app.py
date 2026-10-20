@@ -19,6 +19,7 @@ from starlette.responses import FileResponse, Response
 
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao.package_version import make_cached_package_status
+from ciao.provider_versions import make_cached_checks
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
 from ciao.web.routes_mcp import (
     mcp_status_endpoint,
@@ -791,6 +792,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     # Cache the GitHub release lookup so opening Settings repeatedly does not
     # exhaust the API rate limit (especially on shared/NAT egress IPs).
     app.state.package_status_fetcher = make_cached_package_status()
+    # Offline provider-CLI check, cached for 60 s; backs the Home provider tile.
+    app.state.provider_checks_fetcher = make_cached_checks()
     # Filled in off the request path by /api/startup-status so the menu bar can
     # show an available release without that endpoint ever waiting on GitHub.
     app.state.update_hint = ("", False)
