@@ -54,6 +54,7 @@ it('shows "Current password is incorrect." inline and keeps the new password', a
     )
     const newPassword = await fillAndSave(wrapper)
     expect(wrapper.find('#auth-current-password-error').text()).toBe('Current password is incorrect.')
+    expect(document.activeElement).toBe(wrapper.find('#auth-current-password').element)
     expect(wrapper.find('#auth-current-password').attributes('aria-invalid')).toBe('true')
     expect((newPassword.element as HTMLInputElement).value).toBe('hunter22')
     expect(cardResult(wrapper)).toBeNull()
