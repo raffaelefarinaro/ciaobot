@@ -996,7 +996,7 @@ def _opencode_untested_reason(probe: ProviderProbe) -> tuple[str, str] | None:
         if probe.note and "not found" not in probe.note:
             return "unreadable", f"could not be read ({probe.note})"
         return "not_installed", "is not installed"
-    if "-" in version or not STABLE_VERSION_RE.match(version):
+    if "-" in version or not STABLE_VERSION_RE.fullmatch(version):
         return "unpublished", f"{version} is not a stable version"
     if _server_version_error({"version": version}) is not None:
         return "unreadable", f"{version} is outside the supported 2.0.16+ / 2.x contract"

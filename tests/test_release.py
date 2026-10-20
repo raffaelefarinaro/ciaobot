@@ -915,3 +915,22 @@ def test_main_rejects_refresh_with_skip_provider_versions(tmp_path: Path) -> Non
                 "--skip-provider-versions",
             ]
         )
+
+
+@pytest.mark.parametrize("failure", ["rc1", "timeout"])
+def test_probe_bundled_claude_reports_unreadable_sdk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import subprocess
+
+    def fake_run(cmd, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(cmd, 30)
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(release_mod.subprocess, "run", fake_run)
+
+    probe = release_mod._probe_bundled_claude(tmp_path)
+
+    assert probe.installed is None
+    assert probe.note.startswith("claude_agent_sdk unreadable")

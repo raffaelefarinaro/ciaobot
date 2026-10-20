@@ -10,8 +10,8 @@ from __future__ import annotations
 import importlib.resources
 import json
 import re
-from datetime import date
 from collections.abc import Mapping
+from datetime import date
 from typing import Any
 
 SCHEMA_VERSION = 1
