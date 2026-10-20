@@ -454,6 +454,37 @@ describe('a provider update tile', () => {
     expect(copy.text()).toBe('Copied')
   })
 
+  it('says the copy failed, in text, when the clipboard is refused', async () => {
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
+    useHousekeepingStore().actions = [providerUpdate()]
+    const wrapper = mountStrip()
+    await nextTick()
+
+    await wrapper.get('.housekeeping-command button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.housekeeping-command [role=status]').text()).toBe('Copy failed; select the command above.')
+    expect(wrapper.get('.housekeeping-command button').text()).toBe('Copy')
+  })
+
+  it('reverts Copied and the failure note after a moment', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+      useHousekeepingStore().actions = [providerUpdate()]
+      const wrapper = mountStrip()
+      await nextTick()
+      const copy = wrapper.get('.housekeeping-command button')
+      await copy.trigger('click')
+      await flushPromises()
+      expect(copy.text()).toBe('Copied')
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(copy.text()).toBe('Copy')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('dismisses a provider update with Not now', async () => {
     const store = useHousekeepingStore()
     store.actions = [providerUpdate()]

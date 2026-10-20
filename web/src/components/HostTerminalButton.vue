@@ -80,7 +80,7 @@ async function launch() {
 .host-terminal-link:hover { text-decoration-color: currentColor; }
 .host-terminal-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
 .host-terminal-status,
-.host-terminal-error { display: block; font-size: var(--text-sm); }
+.host-terminal-error { display: block; margin-left: var(--space-2); font-size: var(--text-sm); }
 .host-terminal-status { color: var(--fg3); }
 .host-terminal-error { color: var(--error); }
 @media (pointer: coarse) {

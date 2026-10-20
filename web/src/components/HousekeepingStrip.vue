@@ -7,7 +7,7 @@ import type { OperatorAction, UpdateTaskRow } from '../lib/types'
 import { renderMarkdown } from '../lib/safeMarkdown'
 import HomeNoticeWindow from './HomeNoticeWindow.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
-import { writeClipboard } from '../lib/codeCopy'
+import { useCommandCopy } from '../composables/useCommandCopy'
 import { useHomeNoticeWindows } from '../composables/useHomeNoticeWindows'
 
 const housekeeping = useHousekeepingStore()
@@ -15,12 +15,7 @@ const projectStore = useProjectStore()
 const noticeWindows = useHomeNoticeWindows()
 
 const chatBusy = ref(false)
-const copiedId = ref('')
-
-async function copyCommand(action: OperatorAction): Promise<void> {
-  // Only claim a copy that happened; the command stays selectable text.
-  if (action.command && await writeClipboard(action.command)) copiedId.value = action.id
-}
+const commandCopy = useCommandCopy()
 
 /** Actions grouped by the workspace they concern, shared ones first.
  *
@@ -550,7 +545,8 @@ watch(
          <div class="housekeeping-detail" v-html="renderedDetail(action.detail)" @click="onDetailClick"></div>
          <p v-if="action.command" class="housekeeping-command">
            <code>{{ action.command }}</code>
-           <button type="button" class="btn-small btn-chip" @click="copyCommand(action)">{{ copiedId === action.id ? 'Copied' : 'Copy' }}</button>
+           <button type="button" class="btn-small btn-chip" @click="commandCopy.copy(action.id, action.command)">{{ commandCopy.stateOf(action.id) === 'copied' ? 'Copied' : 'Copy' }}</button>
+           <span v-if="commandCopy.stateOf(action.id) === 'failed'" class="housekeeping-command-note" role="status">Copy failed; select the command above.</span>
          </p>
       </div>
       <div class="housekeeping-actions">
@@ -811,6 +807,7 @@ watch(
   margin: var(--space-2) 0 0;
   font-size: var(--text-sm);
 }
+.housekeeping-command-note { color: var(--fg3); }
 .housekeeping-command code {
   min-width: 0;
   overflow-wrap: anywhere;

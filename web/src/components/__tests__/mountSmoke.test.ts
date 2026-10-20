@@ -863,6 +863,46 @@ describe('component mount smoke', () => {
     }
   })
 
+  const belowTested = {
+    opencode: { state: 'below_tested', installed: '2.0.32', tested: '2.1.0', command: 'opencode upgrade 2.1.0', terminal_action: 'opencode-update' },
+  }
+
+  it('SettingsView says the copy failed, in text, when the clipboard is refused', async () => {
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } })
+    const { wrapper, restore } = await mountModelsWith(belowTested)
+    try {
+      const row = providerRow(wrapper, /opencode/i)
+      await row.get('.provider-release-check button').trigger('click')
+      await flushPromises()
+      expect(row.get('.provider-release-check [role=status]').text()).toBe('Copy failed; select the command above.')
+      expect(row.get('.provider-release-check button').text()).toBe('Copy')
+    } finally {
+      wrapper.unmount()
+      restore()
+      vi.unstubAllGlobals()
+      vi.restoreAllMocks()
+    }
+  })
+
+  it('SettingsView reverts Copied after a moment', async () => {
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+    const { wrapper, restore } = await mountModelsWith(belowTested)
+    vi.useFakeTimers()
+    try {
+      const button = providerRow(wrapper, /opencode/i).get('.provider-release-check button')
+      await button.trigger('click')
+      await flushPromises()
+      expect(button.text()).toBe('Copied')
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(button.text()).toBe('Copy')
+    } finally {
+      vi.useRealTimers()
+      wrapper.unmount()
+      restore()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('SettingsView says Tested with for a current provider', async () => {
     const { wrapper, restore } = await mountModelsWith({
       opencode: { state: 'current', installed: '2.1.0', tested: '2.1.0' },
