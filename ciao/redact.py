@@ -17,7 +17,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 _OPAQUE_BLOB_RE = re.compile(r"^[A-Za-z0-9+/=_-]{40,}$")
 
 # `scheme://user:pass@host` and `scheme://token@host`: a credential-bearing URL.
-_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@")
+_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s]*@")
 
 
 def redact_secret_line(line: str) -> str:

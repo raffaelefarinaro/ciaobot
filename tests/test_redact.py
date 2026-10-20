@@ -25,3 +25,14 @@ def test_plain_text_unchanged_and_newline_preserved() -> None:
     assert redact_text("hello\nworld\n") == "hello\nworld\n"
     assert redact_text("a\r\npassword: x\n") == "a\r\npassword: [redacted]\n"
     assert redact_text("") == ""
+
+
+def test_url_userinfo_password_containing_at_sign_fully_redacted() -> None:
+    assert redact_text("https://u:p@ss@host/x") == "https://[redacted]@host/x"
+
+
+def test_two_urls_on_one_line_both_redacted() -> None:
+    assert (
+        redact_text("https://a:b@h1/x https://c:d@h2/y")
+        == "https://[redacted]@h1/x https://[redacted]@h2/y"
+    )
