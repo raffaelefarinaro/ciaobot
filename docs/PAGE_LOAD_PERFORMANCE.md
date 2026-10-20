@@ -26,7 +26,7 @@ verified in the working tree on the same investigation date.
 
 Cold asset downloads dominate Home loading in the synthetic browser experiments.
 The implementation compresses hashed JS/CSS, loads chat and file viewers on demand,
-and prefetches chat code for deep links. Startup progress shares a four-second
+and prefetches chat code for deep links. Startup progress shares a ten-second
 request deadline with engine monitoring and waits 180 ms before displaying its
 curtain. Large-catalog work remains a separate, conditional investigation.
 The installed origin's encoding and real-device waterfall still need measurement.
@@ -61,7 +61,7 @@ responses, and identity range responses. Compression excludes API streams and
 unhashed files. The first file-viewer mount initializes its watchers, subsequent
 opens retain the mounted modal, and closing restores focus to the current opener.
 Startup display timing does not create an extra polling loop; in-flight status
-requests are shared, abort after four seconds, and ignore stale startup callbacks.
+requests are shared, abort after ten seconds, and ignore stale startup callbacks.
 Authentication recovery remains owned by the engine monitor.
 
 Verification passed: `mypy ciao` (204 files), full backend tests (8,329 passed,

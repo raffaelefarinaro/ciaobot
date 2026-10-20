@@ -820,6 +820,22 @@ export const useProjectStore = defineStore('projects', () => {
   const lastChatFrameAt: Record<string, number> = {}
   const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
 
+  // The engine's own proof of life, read off the awareness socket. A frame it
+  // sent is stronger evidence than any HTTP probe: it cannot be faked by a
+  // slow path, because the server pushes it. The engine monitor consults it
+  // so that a remote origin whose requests time out (a phone on a cellular
+  // tailnet, a laptop on a relay) is never reported as a dead computer.
+  let lastEngineAliveAt = 0
+  // Three keepalive periods: enough that a single dropped frame is noise,
+  // short enough that a genuinely stopped engine stops counting as alive.
+  const ENGINE_ALIVE_WINDOW_MS = 15000
+
+  /** Did the engine send us a frame in the last `windowMs`? */
+  function engineSeenAliveWithin(windowMs: number = ENGINE_ALIVE_WINDOW_MS): boolean {
+    if (!lastEngineAliveAt) return false
+    return nowMs() - lastEngineAliveAt <= windowMs
+  }
+
   // ── Unacknowledged sends ────────────────────────────────────────────
   // A send is handed to the per-chat WebSocket fire-and-forget: WS frames
   // have no delivery guarantee, and WKWebView suspension can close the
@@ -4126,12 +4142,15 @@ export const useProjectStore = defineStore('projects', () => {
       opened = true
       eventsWsFailureStreak = 0
       lastEventsFrameAt = nowMs()
+      // The engine accepted the socket: it is up and serving.
+      lastEngineAliveAt = nowMs()
     }
 
     ws.onmessage = (ev) => {
       if (toRaw(eventsSocket.value) !== ws) return
       // Any frame (including the server keepalive) proves the socket is live.
       lastEventsFrameAt = nowMs()
+      lastEngineAliveAt = nowMs()
       let msg: EventsWsMessage
       try { msg = JSON.parse(ev.data) } catch { return }
       // An auth challenge is not an awareness event, and the keepalive is
@@ -6417,6 +6436,7 @@ export const useProjectStore = defineStore('projects', () => {
     loadMessages, loadSubagents, loadSubagent, refreshRunningSubagents, setSubagentViewActive,
     canLoadOlder, isLoadingOlder, loadOlderMessages, expandMessagePart,
     connectWs, disconnectWs, connectEventsWs, reconnectNow,
+    engineSeenAliveWithin,
     beginServerRestart, restoreState,
     pushToast, pushErrorToast, dismissToast, fixError, restoreDraft,
     packageStatus, checkPackageStatus,

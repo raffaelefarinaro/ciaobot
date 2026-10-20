@@ -362,6 +362,28 @@ describe('reconnectNow', () => {
     expect(fakeSockets.length).toBe(countBefore + 1)
     expect(fakeSockets[fakeSockets.length - 1].url).toContain('/ws/events')
   })
+
+  // The engine monitor needs to tell "the engine is gone" from "the path is
+  // slow". A frame the engine pushed on the awareness socket settles it: a
+  // slow HTTP probe against a socket that just delivered one is the path.
+  test('reports the engine alive only while the awareness socket keeps talking', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+
+    // Nothing has arrived yet: an empty socket is not proof of life.
+    expect(store.engineSeenAliveWithin()).toBe(false)
+
+    store.connectEventsWs()
+    const eventsSocket = fakeSockets[fakeSockets.length - 1]
+    expect(eventsSocket.url).toContain('/ws/events')
+    // The handshake completed, so the engine is up.
+    expect(store.engineSeenAliveWithin()).toBe(true)
+
+    // A frame refreshes it; a window that has passed does not.
+    eventsSocket.onmessage?.({ data: JSON.stringify({ type: 'keepalive' }) })
+    expect(store.engineSeenAliveWithin()).toBe(true)
+    expect(store.engineSeenAliveWithin(0)).toBe(false)
+  })
 })
 
 describe('streaming started reconnect guard', () => {
