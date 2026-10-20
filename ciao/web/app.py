@@ -40,6 +40,7 @@ from ciao.web.agent_assets import (
 from ciao.web.commands import list_commands_endpoint, rate_limits_endpoint
 from ciao.web.routes_auth import (
     auth_check,
+    auth_host_sign_in,
     auth_login,
     auth_logout,
     auth_settings_get,
@@ -391,6 +392,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/auth/check", auth_check, methods=["GET"]),
         Route("/api/auth/settings", auth_settings_get, methods=["GET"]),
         Route("/api/auth/settings", auth_settings_update, methods=["POST"]),
+        Route("/api/auth/host-sign-in", auth_host_sign_in, methods=["POST"]),
         # Projects
         Route("/api/workspaces", list_workspaces, methods=["GET"]),
         Route("/api/workspaces", upsert_workspace_setting, methods=["POST"]),
