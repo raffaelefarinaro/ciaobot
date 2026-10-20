@@ -454,6 +454,7 @@ ciao dev
 - Frontend: `http://localhost:5173`
 - Dev backend: `http://127.0.0.1:8543`
 - `ciao dev` intentionally avoids `localhost:8443` because editor/webview proxy processes can hijack that port and serve stale UI.
+- The login page's *Sign in on this computer* (`POST /api/auth/host-sign-in`) cannot be exercised through `:5173`: the Vite proxy forwards `Host: localhost:5173` to `:8543`, and the route refuses a Host port that differs from its listening socket (the guard against redirecting the one-time token to another local port), so it answers 403 `not_on_host`. Check it against a built engine (`npm run build`, then `http://localhost:8543`). Do not relax that check for dev.
 - A development backend refuses to start when another Ciaobot backend already owns the same runtime directory. Stop the launchd service first, or use a separate `CIAO_RUNTIME_ROOT`; changing only the port is not sufficient because both servers would otherwise mutate the same project/chat registry.
 
 ## Testing
