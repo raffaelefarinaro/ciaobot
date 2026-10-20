@@ -1240,6 +1240,9 @@ class QuestionResponseResult:
     retryable: bool = True
     delivered_as_message: bool = False
     expired: bool = False
+    # The request was already answered (another tab won, or V2 returned 409):
+    # nothing was applied for this reply; the caller should clear its card.
+    already_resolved: bool = False
 
 
 class _FormValidationError(ValueError):
@@ -1603,6 +1606,9 @@ class OpencodeProvider(BaseSDKProvider):
         # marker, so the request's ``context_primed`` cannot be trusted after one.
         self._core_dropped = False
         self._permission_requests: dict[str, _PendingRequest] = {}
+        # Permission replies whose POST is awaiting V2. A concurrent reply to the
+        # same id waits for this outcome instead of posting a second decision.
+        self._permission_inflight: dict[str, asyncio.Future[QuestionResponseResult]] = {}
         self._question_requests: dict[str, _PendingRequest] = {}
         self._tool_calls: dict[str, str] = {}
         self._settled_tool_ids: set[str] = set()
@@ -2897,8 +2903,11 @@ class OpencodeProvider(BaseSDKProvider):
         except httpx.HTTPError as exc:
             logger.debug("OpenCode permission reply failed", exc_info=True)
             return QuestionResponseResult(False, str(exc), True)
-        if response.status_code in {200, 204, 409}:
+        if response.status_code in {200, 204}:
             return QuestionResponseResult(True)
+        if response.status_code == 409:
+            # V2 already applied another decision to this request.
+            return QuestionResponseResult(True, already_resolved=True)
         if response.status_code == 404:
             # OpenCode dropped the request (e.g. idle reclaim); treat it as stale.
             return QuestionResponseResult(
@@ -2926,9 +2935,27 @@ class OpencodeProvider(BaseSDKProvider):
             )
         if pending is None or self._client is None:
             return QuestionResponseResult(False, "Permission request is no longer active", False)
-        result = await self._reply_permission(
-            pending, "once" if approved else "reject", message
+        inflight = self._permission_inflight.get(request_id)
+        if inflight is not None:
+            # Another tab's reply is already posting. Its outcome decides ours:
+            # success means this reply did nothing; failure keeps the card retryable.
+            outcome = await asyncio.shield(inflight)
+            if outcome.ok:
+                return QuestionResponseResult(True, already_resolved=True)
+            return outcome
+        future: asyncio.Future[QuestionResponseResult] = (
+            asyncio.get_running_loop().create_future()
         )
+        self._permission_inflight[request_id] = future
+        result = QuestionResponseResult(False, "Permission reply was interrupted", True)
+        try:
+            result = await self._reply_permission(
+                pending, "once" if approved else "reject", message
+            )
+        finally:
+            self._permission_inflight.pop(request_id, None)
+            if not future.done():
+                future.set_result(result)
         if result.ok or result.error == "Permission request is no longer active":
             self._permission_requests.pop(request_id, None)
         return result
