@@ -179,7 +179,7 @@ async def auth_host_sign_in(request: Request) -> JSONResponse:
     """
     global _last_host_sign_in
     from ciao.os_support.private import open_private
-    from ciao.web.auth import _setup_token_path, _split_host, mint_setup_token
+    from ciao.web.auth import _split_host, mint_setup_token
     from ciao.web.routes_api import _open_path_with_default_app, host_browser_request
 
     if not host_browser_request(request):
@@ -203,6 +203,29 @@ async def auth_host_sign_in(request: Request) -> JSONResponse:
             },
             status_code=409,
         )
+    server = request.scope.get("server")
+    if not server or not server[1]:
+        return JSONResponse(
+            {
+                "error": "Could not work out which port Ciaobot is listening on. Run `ciao setup-url` in a terminal instead.",
+                "reason": "open_failed",
+            },
+            status_code=409,
+        )
+    # The redirect port is the socket's own, never the Host header's: that header is caller-controlled.
+    name, header_port = _split_host(request.headers.get("host", ""))
+    if header_port is not None and header_port != server[1]:
+        return JSONResponse(
+            {
+                "error": "Signing in without the password only works in a browser on the computer running Ciaobot.",
+                "reason": "not_on_host",
+            },
+            status_code=403,
+        )
+    if name in ("", "0.0.0.0"):
+        name = "localhost"
+    host = f"[{name}]" if ":" in name else name
+    url_base = f"http://{host}:{server[1]}"
     now = time.monotonic()
     if now - _last_host_sign_in < _HOST_SIGN_IN_COOLDOWN_SECONDS:
         return JSONResponse(
@@ -214,21 +237,14 @@ async def auth_host_sign_in(request: Request) -> JSONResponse:
         )
     _last_host_sign_in = now
 
-    token = mint_setup_token(request)
-    if token is None:
+    minted = mint_setup_token(request)
+    if minted is None:
         return JSONResponse(
             {"error": "No workspace is configured.", "reason": "no_workspace"}, status_code=409
         )
-    token_path = _setup_token_path(request)
-    assert token_path is not None  # mint_setup_token succeeded
+    token, token_path = minted
     runtime_dir = token_path.parent
-
-    name, port = _split_host(request.headers.get("host", ""))
-    if name == "0.0.0.0":
-        name = "localhost"
-    host = f"[{name}]" if ":" in name else name
-    netloc = f"{host}:{port}" if port else host
-    url = f"http://{netloc}/?setup={token}"
+    url = f"{url_base}/?setup={token}"
 
     for stale in runtime_dir.glob(_SIGN_IN_PAGE_GLOB):
         stale.unlink(missing_ok=True)

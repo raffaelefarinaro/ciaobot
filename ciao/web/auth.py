@@ -267,17 +267,21 @@ def _setup_token_path(request: Request) -> Path | None:
     return Path(workspace_root).expanduser() / ".runtime" / "setup-token"
 
 
-def mint_setup_token(request: Request) -> str | None:
-    """Write a fresh one-time ``.runtime/setup-token`` (owner-only) and return it; None without a workspace."""
+def mint_setup_token(request: Request) -> tuple[str, Path] | None:
+    """Write a fresh one-time ``.runtime/setup-token`` (owner-only) and return it with its path; None without a workspace.
+
+    The file is recreated on every mint so an older, looser-mode file is never reused.
+    """
     token_path = _setup_token_path(request)
     if token_path is None:
         return None
     token = secrets.token_urlsafe(24)
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = open_private(token_path, os.O_WRONLY | os.O_TRUNC)
+    token_path.unlink(missing_ok=True)
+    fd = open_private(token_path, os.O_WRONLY | os.O_EXCL, follow_symlinks=False)
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
         handle.write(token + "\n")
-    return token
+    return token, token_path
 
 
 def _redeem_setup_token(request: Request, token: str):

@@ -4578,3 +4578,18 @@ def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
         workspace="client-a",
     ).entries[0]
     assert entry.verified == date(2024, 1, 5)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_rotate_setup_token_writes_an_owner_only_file(tmp_path):
+    from ciao.os_support.private import is_private
+
+    token_path = tmp_path / ".runtime" / "setup-token"
+    token_path.parent.mkdir()
+    token_path.write_text("old\n", encoding="utf-8")
+    os.chmod(token_path, 0o644)
+
+    token = cli._rotate_setup_token(tmp_path)
+
+    assert token_path.read_text(encoding="utf-8") == token + "\n"
+    assert is_private(token_path)

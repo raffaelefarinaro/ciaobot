@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -213,3 +215,37 @@ def test_ipv6_loopback_host_builds_a_bracketed_url(tmp_path, serializer, opened)
 
     assert response.status_code == 200
     assert "http://[::1]:8443/?setup=" in opened[0].read_text(encoding="utf-8")
+
+
+def test_host_header_port_is_ignored(tmp_path, serializer, opened):
+    client = _client(_make_app(tmp_path, serializer))
+
+    response = client.post("/api/auth/host-sign-in", headers={"Host": "localhost:9999"})
+
+    assert response.status_code == 403
+    assert response.json()["reason"] == "not_on_host"
+    assert opened == []
+    assert not _token_file(tmp_path).exists()
+
+
+def test_portless_host_uses_the_socket_port(tmp_path, serializer, opened):
+    client = _client(_make_app(tmp_path, serializer))
+
+    response = client.post("/api/auth/host-sign-in", headers={"Host": "localhost"})
+
+    assert response.status_code == 200
+    assert "http://localhost:8443/?setup=" in opened[0].read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_existing_world_readable_token_file_is_recreated_private(tmp_path, serializer, opened):
+    token_file = _token_file(tmp_path)
+    token_file.parent.mkdir()
+    token_file.write_text("old\n", encoding="utf-8")
+    os.chmod(token_file, 0o644)
+    client = _client(_make_app(tmp_path, serializer))
+
+    response = client.post("/api/auth/host-sign-in", headers=_HOST_ORIGIN)
+
+    assert response.status_code == 200
+    assert is_private(token_file)
