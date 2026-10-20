@@ -620,6 +620,9 @@ async def test_parallel_opencode_forms_both_reach_the_provider(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_older_form_reply_keeps_newer_slot(tmp_path: Path) -> None:
     pcm, chat, _provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+    stream = pcm._broker.get(chat.chat_id)
+    other_tab: asyncio.Queue[dict] = asyncio.Queue()
+    stream._subs.add(other_tab)  # type: ignore[union-attr,arg-type]
 
     result = await pcm.respond_question(
         chat.chat_id, request_id="frm_a", answers={"value": ["one"]}, session_id="ses_1"
@@ -627,6 +630,10 @@ async def test_older_form_reply_keeps_newer_slot(tmp_path: Path) -> None:
 
     assert result.ok
     assert json.loads(chat.pending_question)["request_id"] == "frm_b"
+    live = [other_tab.get_nowait() for _ in range(other_tab.qsize())]
+    assert {
+        "type": "question_resolved", "request_id": "frm_a", "session_id": "ses_1",
+    } in live
 
 
 @pytest.mark.asyncio
@@ -703,3 +710,25 @@ async def test_question_reply_outcome_is_logged(
         )
 
     assert "question reply frm_a session=ses_1 action=reply: delivered" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_question_reply_log_omits_the_error_text(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pcm, chat, provider = _forms_chat(tmp_path, _PARALLEL_FORMS)
+
+    async def reject(path: str, json: object = None, **_: object) -> SimpleNamespace:
+        return SimpleNamespace(status_code=400, text="bad value: SECRET-ANSWER")
+
+    provider._client.post = reject  # type: ignore[attr-defined]
+
+    with caplog.at_level("INFO", logger="ciao.web.project_chats"):
+        result = await pcm.respond_question(
+            chat.chat_id, request_id="frm_a", answers={"value": ["SECRET-ANSWER"]},
+            session_id="ses_1",
+        )
+
+    assert not result.ok
+    assert "failed" in caplog.text
+    assert "SECRET-ANSWER" not in caplog.text

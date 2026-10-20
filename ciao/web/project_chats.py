@@ -8405,8 +8405,8 @@ class ProjectChatManager:
             self._clear_question_state(chat_id, request_id, expected_session)
             return QuestionResponseResult(True)
         logger.info(
-            "question reply %s session=%s action=%s: failed (%s)",
-            request_id, session_id, action, result.error,
+            "question reply %s session=%s action=%s: failed",
+            request_id, session_id, action,
         )
         return result
 
