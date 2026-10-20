@@ -2655,3 +2655,40 @@ def test_an_unchecked_note_carries_no_verification_state(tmp_path: Path) -> None
     assert payload["verification"] is None
     assert payload["pending_verification"] is None
     assert payload["retirement_offered"] is True
+
+
+def _project_note(root: Path, name: str, frontmatter: str) -> None:
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\n{frontmatter}---\n\n# Note\n", encoding="utf-8")
+
+
+def test_the_general_project_note_is_not_queued_as_unlinked(tmp_path: Path) -> None:
+    full = "type: project\nstatus: active\ntags: [project]\n"
+    _project_note(tmp_path, "projects/active/general/general.md", full)
+    _project_note(tmp_path, "projects/active/other/other.md", full)
+
+    paths = [
+        c.path
+        for c in generate_candidates(
+            tmp_path, workspace="personal", now=_PINNED, write_queue=False
+        )
+    ]
+
+    assert "memory-vault/projects/active/other/other.md" in paths
+    assert "memory-vault/projects/active/general/general.md" not in paths
+
+
+def test_the_general_project_note_still_carries_other_signals(tmp_path: Path) -> None:
+    _project_note(tmp_path, "projects/active/general/general.md", "type: project\n")
+
+    candidates = {
+        c.path: c
+        for c in generate_candidates(
+            tmp_path, workspace="personal", now=_PINNED, write_queue=False
+        )
+    }
+
+    candidate = candidates["memory-vault/projects/active/general/general.md"]
+    assert "weak_provenance" in candidate.signals
+    assert "unlinked" not in candidate.signals
