@@ -8,9 +8,16 @@ permission rules, event payloads, and model catalog, so carrying both wire
 contracts would duplicate every provider operation.
 
 **One server process per active chat.** A shared server is tempting because
-OpenCode isolates chats as sessions, but Ciaobot scopes its control-plane MCP
-token per chat, while OpenCode configures MCP at server scope. Per-session
-agent, model, and permission rules keep chat behavior isolated.
+OpenCode isolates chats as sessions, and Ciaobot injects no MCP configuration
+of its own: MCP comes from the user's own OpenCode config, exactly as Claude
+reads it from ``.mcp.json``. What ties a server to one chat is process-scoped,
+not session-scoped: the chat's bearer capability (``CIAO_AGENT_TOKEN``, minted
+per chat) travels in the server's environment, ``OPENCODE_SERVER_PASSWORD`` is
+per server, the filesystem sandbox wraps the server process, and
+``OPENCODE_CONFIG_CONTENT`` (linked-repo skills) is read at startup. A token
+rotation or scope change therefore restarts this chat's server. Per-session
+agent, model, and permission rules are OpenCode's own and keep chat behavior
+isolated.
 
 The V2 wire contract is verified against the server's own OpenAPI document at
 ``/openapi.json`` on startup. Readiness and the installed major version come
