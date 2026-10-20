@@ -8,6 +8,13 @@ from pathlib import Path
 # in PWA_API.md → Agent recipes. Each entry needs a one-line reason so future
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
+    "/api/welcome/open-folder": (
+        "Home welcome card's Show in Finder; host-only (session + host_browser_request), "
+        "opens the workspace root, takes no path"
+    ),
+    "/api/welcome/dismiss": (
+        "Home welcome card's close control; deletes .runtime/welcome-pending for every device"
+    ),
     "/api/host/terminal": (
         "browser Open/Run in Terminal button; host-only (session + loopback peer + "
         "loopback Host), takes an action id or a chat/project id, never a command or a path"
