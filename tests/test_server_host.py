@@ -279,6 +279,12 @@ _FOLDER_USAGE_KEYS = {
     "NSDownloadsFolderUsageDescription": "Downloads",
 }
 
+#: The uid the ownership record is written with in the tests that read one
+#: back. The reader checks the record's owner against this user's uid on
+#: macOS, and `os.getuid` does not exist on Windows, so the test patches the
+#: reader's own seam to a fixed value.
+_RECORD_UID = 501
+
 
 def test_the_host_declares_the_folder_usage_strings() -> None:
     # macOS shows the explanation line it is given; with no key for a folder the
@@ -307,6 +313,13 @@ def test_a_bundle_with_the_folder_usage_strings_still_verifies(
     # inspector reads the identity fields, and the record matches the bytes.
     monkeypatch.setattr(sys, "platform", "darwin")
     from ciao import server_host
+
+    # The record reader checks the owner against this user's uid on macOS,
+    # and `os.getuid` does not exist on Windows. The reader's own seam is
+    # patched to the uid the record is written with, so the check it makes is
+    # the one the test means to exercise (and the same isolation #1666
+    # applied to the service test).
+    monkeypatch.setattr(server_host, "_getuid", lambda: _RECORD_UID)
 
     bundle = tmp_path / server_host.APP_NAME
     for relative in (
