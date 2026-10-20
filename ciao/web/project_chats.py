@@ -553,6 +553,11 @@ class ChatInfo:
     # provider transcripts store them as ordinary user messages; history reads
     # this back so the PWA draws a notice card. Absent key = typed by the person.
     user_turn_origin: dict = field(default_factory=dict)
+    # Map of user-turn index (as str) → the client send id the PWA minted for
+    # that turn. The engine answers a repeated send id with a duplicate echo
+    # instead of starting a second turn, so a recovery resend cannot double a
+    # message that already landed.
+    user_turn_send_ids: dict = field(default_factory=dict)
     # Relative workspace path to the archived markdown transcript.
     # Set when archive_chat() succeeds; cleared on new_session().
     archive_path: str = ""
@@ -1072,6 +1077,7 @@ class ProjectChatManager:
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 user_turn_steered=dict(cd.get("user_turn_steered", {})),
                 user_turn_origin=dict(cd.get("user_turn_origin", {})),
+                user_turn_send_ids=dict(cd.get("user_turn_send_ids", {})),
                 archive_path=cd.get("archive_path", ""),
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
                 retry_prompt=cd.get("retry_prompt", ""),
@@ -1193,6 +1199,7 @@ class ProjectChatManager:
                     "user_turn_unattended": c.user_turn_unattended,
                     "user_turn_steered": c.user_turn_steered,
                     "user_turn_origin": c.user_turn_origin,
+                    "user_turn_send_ids": c.user_turn_send_ids,
                     "archive_path": c.archive_path,
                     "retry_status": c.retry_status,
                     "retry_prompt": c.retry_prompt,
@@ -3769,6 +3776,11 @@ class ProjectChatManager:
                 fork.user_turn_images[str(copied_turn_index)] = copied_refs
             else:
                 row.pop("images", None)
+            # The forked turn keeps the send id the original client minted, so
+            # a frame that repeats it is still recognised as a duplicate.
+            copied_send_id = str(row.get("send_id") or "")
+            if copied_send_id:
+                fork.user_turn_send_ids[str(copied_turn_index)] = copied_send_id
             copied_turn_index += 1
         fork.user_turn_count = copied_turn_index
         fork.turn_index_base = copied_turn_index
@@ -5958,6 +5970,15 @@ class ProjectChatManager:
         """Return the in-flight ChatStream for this chat, if any."""
         return self._broker.get(chat_id)
 
+    def has_pending_send(self, chat_id: str, send_id: str) -> bool:
+        """True when the chat's live queue already holds this client send id."""
+        if not send_id:
+            return False
+        stream = self._broker.get(chat_id)
+        if stream is None:
+            return False
+        return stream.has_pending_send(send_id)
+
     def queue_message(
         self,
         chat_id: str,
@@ -5966,12 +5987,16 @@ class ProjectChatManager:
         entry_id: str | None = None,
         delivery: str = "queue",
         origin: str = "",
+        send_id: str = "",
     ) -> bool:
         """Append a user message to the active stream's pending queue.
 
         ``delivery="steer"`` marks it for injection into the running turn; the
         caller then awaits ``steer_queue`` to dispatch it. ``origin`` tags an
         engine-written message (see ``start_stream``); it rides on the entry.
+        ``send_id`` is the client send id: a queue entry that already holds
+        that id is the same logical send, so it is refused instead of queued
+        twice.
 
         Returns True if queued, False if there's no active stream (caller
         should fall through to `start_stream`).
@@ -5986,6 +6011,10 @@ class ProjectChatManager:
             # already decided it is finished: queueing there is a message the
             # user is told was accepted and that no turn will ever pick up.
             return False
+        if send_id and stream.has_pending_send(send_id):
+            # The same logical send is already waiting in this queue. A second
+            # frame for it would turn one message into two turns.
+            return False
         image_refs: list[str] = []
         for img in images or []:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
@@ -5994,7 +6023,8 @@ class ProjectChatManager:
         if delivery not in QUEUE_DELIVERIES:
             delivery = "queue"
         resolved_id = stream.enqueue(
-            text, image_refs, entry_id=entry_id, delivery=delivery, origin=origin
+            text, image_refs, entry_id=entry_id, delivery=delivery, origin=origin,
+            send_id=send_id,
         )
         stream.publish({
             "type": "queued",
@@ -6003,6 +6033,7 @@ class ProjectChatManager:
             "images": image_refs,
             "delivery": delivery,
             "waiting": False,
+            **({"send_id": send_id} if send_id else {}),
         })
         return True
 
@@ -6253,6 +6284,7 @@ class ProjectChatManager:
                 chat.user_turn_images.pop(key, None)
                 chat.user_turn_unattended.pop(key, None)
                 chat.user_turn_steered.pop(key, None)
+                chat.user_turn_send_ids.pop(key, None)
                 cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
                 self._streaming.discard_turn_perf(chat_id, turn_index)
             else:
@@ -7136,6 +7168,7 @@ class ProjectChatManager:
         unattended: bool = False,
         compact: bool = False,
         origin: str = "",
+        send_id: str = "",
     ) -> ChatStream:
         """Start (or return the in-flight) ChatStream for this chat.
 
@@ -7153,6 +7186,10 @@ class ProjectChatManager:
 
         ``origin`` (a ``TURN_ORIGINS`` value) tags a turn the engine wrote, so
         history and the echo let the PWA draw a notice card, not a user bubble.
+
+        ``send_id`` is the client send id for this turn. The engine records it
+        per user turn, so a later frame carrying the same id is answered with
+        a duplicate echo instead of starting a second turn.
         """
         if origin and origin not in TURN_ORIGINS:
             raise ValueError(f"unknown turn origin {origin!r}")
@@ -7275,6 +7312,8 @@ class ProjectChatManager:
                 chat_meta.user_turn_unattended[str(turn_index)] = True
             if origin:
                 chat_meta.user_turn_origin[str(turn_index)] = origin
+            if send_id:
+                chat_meta.user_turn_send_ids[str(turn_index)] = send_id
             self._streaming.start_turn_perf(chat_id, turn_index)
 
         # First buffered event: echo the user prompt so any client subscribing
@@ -7292,6 +7331,8 @@ class ProjectChatManager:
             echo_payload["origin"] = origin
         if turn_index is not None:
             echo_payload["turn_index"] = turn_index
+        if send_id:
+            echo_payload["send_id"] = send_id
         if sent_at_iso:
             echo_payload["sent_at"] = sent_at_iso
         if not compact:
@@ -7349,6 +7390,35 @@ class ProjectChatManager:
             compact=compact,
         )
         return stream
+
+    def find_turn_by_send_id(self, chat_id: str, send_id: str) -> dict | None:
+        """The user turn a client send id already owns, if any.
+
+        The newest turn wins: a send id is minted per logical send, and the
+        engine records it per turn, so the last turn carrying it is the one a
+        repeated frame would duplicate. Returns the turn index and the
+        recorded send time, or None when the id owns no turn yet.
+        """
+        if not send_id:
+            return None
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        send_ids = chat.user_turn_send_ids
+        for key in sorted(
+            send_ids.keys(),
+            key=lambda k: int(k) if str(k).isdigit() else -1,
+            reverse=True,
+        ):
+            if send_ids.get(key) != send_id:
+                continue
+            turn_index = int(key)
+            timing = chat.user_turn_timings.get(key) or chat.user_turn_timings.get(turn_index)
+            sent_at = ""
+            if isinstance(timing, dict):
+                sent_at = str(timing.get("sent_at") or "")
+            return {"turn_index": turn_index, "sent_at": sent_at}
+        return None
 
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
@@ -9411,6 +9481,7 @@ class ProjectChatManager:
                     except OSError:
                         logger.exception("Failed to unlink image %s", ref)
         chat.user_turn_images = {}
+        chat.user_turn_send_ids = {}
         chat.user_turn_count = 0
 
     def resolve_image_ref(self, ref: str) -> ImageAttachment | None:

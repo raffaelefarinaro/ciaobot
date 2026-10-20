@@ -70,6 +70,10 @@ export type PreparedMessage = {
   imageRefs?: string[]
   fileComments: PendingComment[]
   chatComments: PendingChatComment[]
+  // The client send id for this logical send. A recovery resend reuses the
+  // id it already has, so the engine can tell it apart from a deliberate
+  // repeat of the same text. Minted by the store when it is absent.
+  sendId?: string
 }
 
 /**

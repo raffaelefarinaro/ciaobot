@@ -218,6 +218,12 @@ def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
         tool = str(raw.get("tool", "")).strip()
         if tool:
             entry["tool"] = tool
+        # The client send id the engine recorded for the turn. A fork keeps
+        # it, so a frame repeating that send is still recognised as a
+        # duplicate of a turn the fork already owns.
+        send_id = str(raw.get("send_id", "")).strip()
+        if send_id:
+            entry["send_id"] = send_id
         rows.append(entry)
     return rows
 

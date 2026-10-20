@@ -109,6 +109,8 @@ def _flushed_entry(entry: dict) -> dict:
     }
     if entry.get("origin"):
         flushed["origin"] = str(entry["origin"])
+    if entry.get("send_id"):
+        flushed["send_id"] = str(entry["send_id"])
     return flushed
 
 
@@ -767,6 +769,7 @@ class ChatStream:
         entry_id: str | None = None,
         delivery: str = "queue",
         origin: str = "",
+        send_id: str = "",
     ) -> str:
         """Queue a user message to flush after this stream finishes.
 
@@ -777,6 +780,8 @@ class ChatStream:
         ``delivery`` is ``"queue"`` (a follow-up turn) or ``"steer"`` (handed
         to the running turn by ``ProjectChatManager.steer_queue``).
         ``steer_id`` stays empty until that dispatch.
+        ``send_id`` is the client send id, so a repeated frame for the same
+        logical send is recognised instead of queued twice.
         """
         self._pending_id_seq += 1
         resolved_id = entry_id or f"q-{self._pending_id_seq}-{uuid.uuid4().hex[:8]}"
@@ -789,8 +794,16 @@ class ChatStream:
         }
         if origin:
             entry["origin"] = origin
+        if send_id:
+            entry["send_id"] = send_id
         self._pending.append(entry)
         return resolved_id
+
+    def has_pending_send(self, send_id: str) -> bool:
+        """True when a queued entry already carries this client send id."""
+        if not send_id:
+            return False
+        return any(entry.get("send_id") == send_id for entry in self._pending)
 
     def drain_one(self) -> dict | None:
         """Return and remove the next queued message, or None if empty."""

@@ -941,6 +941,184 @@ describe('unacknowledged send recovery', () => {
     expect(frames).toHaveLength(1)
     expect(JSON.parse(frames[0]).text).toBe('survived the refresh')
   })
+
+  test('treats a transcript row without turn_index as proof of delivery', async () => {
+    // An archived / transcript-fallback /messages row carries no turn_index,
+    // so the old check ("a delivered row is one with a turn_index") could
+    // never prove delivery: the send was re-sent 1.5s later and the user saw
+    // the same message twice.
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-transcript'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'delivered anyway', sent_at: '2026-08-22T10:00:00Z' },
+          ],
+          total: 1,
+          offset: 0,
+          limit: 50,
+          hasMore: false,
+          nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'delivered anyway')
+    expect(sentMessageFrames()).toHaveLength(1)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // No resend: the transcript row proved the send landed.
+    expect(sentMessageFrames()).toHaveLength(1)
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+  })
+
+  test('does not resend a send older than 30 s', async () => {
+    // A stale send must not be re-sent on a later reconnect: the turn it
+    // belonged to may have been answered long ago, and a resend now would
+    // repeat the message in a chat that has moved on.
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-stale'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [], total: 0, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'very old message')
+    expect(sentMessageFrames()).toHaveLength(1)
+
+    vi.useFakeTimers()
+    try {
+      // Age the tracked send past the resend window.
+      vi.setSystemTime(Date.now() + 31_000)
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    // No second frame went out.
+    expect(sentMessageFrames()).toHaveLength(1)
+    // The user is told the message did not make it.
+    const notices = (store.messages[chatId] || []).filter(
+      m => m.role === 'system' && m.content.includes("didn't reach the engine"),
+    )
+    expect(notices).toHaveLength(1)
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+  })
+
+  test('reuses the same send_id when it retries', async () => {
+    // The retry is the same logical send, so it carries the same id: the
+    // engine can tell it apart from a deliberate repeat of the same text.
+    const store = useProjectStore()
+    const chatId = 'chat-unacked-same-id'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [], total: 0, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'retry me')
+    const firstId = JSON.parse(sentMessageFrames()[0]).send_id
+    expect(firstId).toBeTruthy()
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentMessageFrames()
+    expect(frames).toHaveLength(2)
+    expect(JSON.parse(frames[1]).send_id).toBe(firstId)
+  })
+})
+
+describe('duplicate send suppression', () => {
+  test('a duplicate echo clears the tracking, the streaming state and reloads once', async () => {
+    // The engine owns the send id already (a recovery resend of a delivered
+    // message). It answers with a duplicate echo instead of starting a second
+    // turn: the client settles, and one background reload brings the
+    // authoritative transcript back.
+    const store = useProjectStore()
+    const chatId = 'chat-duplicate-echo'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'already there', sent_at: '2026-10-20T12:20:40Z', turn_index: 0 },
+          ],
+          total: 1, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'already there')
+    const sendId = JSON.parse(
+      fakeSockets[0].send.mock.calls.map((c: unknown[]) => String(c[0]))
+        .find(raw => JSON.parse(raw).type === 'message') as string,
+    ).send_id
+    expect(sendId).toBeTruthy()
+    // The optimistic bubble carries the id: it is the client's own copy.
+    const optimistic = (store.messages[chatId] || []).find(m => m.role === 'user')
+    expect(optimistic?.send_id).toBe(sendId)
+
+    apiGet.mockClear()
+    store.streaming[chatId] = true
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'already there',
+        send_id: sendId,
+        duplicate: true,
+        turn_index: 0,
+      }),
+    })
+    await nextTick()
+
+    // The tracking is cleared, the streaming state is settled, and exactly one
+    // background reload ran.
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'] || '{}')[chatId]).toBeUndefined()
+    expect(store.streaming[chatId]).toBe(false)
+    const reloads = apiGet.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/messages'))
+    expect(reloads).toHaveLength(1)
+    // Nothing new was rendered: the turn is already on screen.
+    const userMsgs = (store.messages[chatId] || []).filter(m => m.role === 'user')
+    expect(userMsgs).toHaveLength(1)
+  })
 })
 
 describe('deferred message sends', () => {
@@ -1694,6 +1872,80 @@ describe('result frames and unread state', () => {
     expect(last?.is_error).toBeFalsy()
     expect(store.streaming[chatId]).toBe(false)
     expect(store.unread[chatId]).toBeUndefined()
+  })
+
+  test('a replayed result does not append a second final answer', () => {
+    // The broker replays the whole event buffer to every new subscriber, so a
+    // reconnect receives the terminal `result` of a turn the reload already
+    // hydrated from /messages. Rendering it again showed the reply twice,
+    // both copies carrying the same footer.
+    const store = useProjectStore()
+    const chatId = 'c-replayed-result'
+    store.activeChatId = 'some-other-chat'
+    store.messages[chatId] = [
+      { role: 'user', content: 'summarise the offer', timestamp: '2026-10-20T12:20:40Z', turn_index: 0 },
+      {
+        role: 'assistant',
+        content: 'Here is the summary.',
+        timestamp: '2026-10-20T12:21:14Z',
+        duration_ms: 179000,
+        phase: 'final_answer',
+      },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Here is the summary.',
+        is_error: false,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+        duration_ms: 179000,
+      }),
+    })
+
+    const answers = store.messages[chatId].filter(
+      m => m.role === 'assistant' && m.phase === 'final_answer',
+    )
+    expect(answers).toHaveLength(1)
+    expect(store.streaming[chatId]).toBe(false)
+  })
+
+  test('a result replayed after a cold hydrate renders no second answer', async () => {
+    // The reported case: a page reload hydrated the finished turn from
+    // /messages, and the broker's replay of the terminal result added a
+    // second copy of the same answer, footer included. A hydrated answer
+    // carries no `phase`, so the dedup cannot rely on it.
+    const store = useProjectStore()
+    const chatId = 'c-replayed-cold'
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'summarise the offer', sent_at: '2026-10-20T12:20:40Z', turn_index: 0 },
+        { i: 1, role: 'assistant', content: 'Here is the summary.', sent_at: '2026-10-20T12:21:14Z', duration_ms: 179000 },
+      ],
+      total: 2, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+    store.connectWs(chatId)
+    await store.loadMessages(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'Here is the summary.',
+        is_error: false,
+        effective_model: 'opus',
+        usage: {},
+        session_id: 's1',
+        duration_ms: 179000,
+      }),
+    })
+
+    const answers = store.messages[chatId].filter(m => m.role === 'assistant')
+    expect(answers).toHaveLength(1)
+    expect(answers[0].content).toBe('Here is the summary.')
+    expect(store.streaming[chatId]).toBe(false)
   })
 })
 
@@ -2901,6 +3153,56 @@ describe('optimistic user bubble reconciliation', () => {
     expect(msgs.length).toBe(2)
     expect(msgs.at(-1)?.content).toBe('Done — hardened the parser.')
     expect(msgs.at(-1)?.role).toBe('assistant')
+  })
+
+  test('an envelope reload leaves one bubble when it meets the optimistic copy', async () => {
+    // The optimistic bubble sits above the indexed rows, so the window's own
+    // copy of that turn lands beside it instead of replacing it. The leftover
+    // prune drops the orphaned bubble: one send, one bubble.
+    const store = useProjectStore()
+    const chatId = 'chat-envelope-orphan'
+    store.messages[chatId] = [
+      { role: 'user', content: 'prior', timestamp: '2026-10-20T12:00:00Z', i: 0 },
+      { role: 'user', content: 'say hi', timestamp: '', turn_index: undefined },
+      { role: 'assistant', content: 'reply', timestamp: '2026-10-20T12:00:30Z', i: 1 },
+    ]
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'prior', sent_at: '2026-10-20T12:00:00Z' },
+        { i: 1, role: 'assistant', content: 'reply', sent_at: '2026-10-20T12:00:30Z' },
+        { i: 2, role: 'user', content: 'say hi', sent_at: '2026-10-20T12:20:40Z' },
+      ],
+      total: 3, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(m => m.role === 'user' && m.content === 'say hi')
+    expect(userMsgs).toHaveLength(1)
+  })
+
+  test('a second identical send keeps two bubbles', async () => {
+    // A deliberate repeat is not a duplicate: the server holds the message
+    // twice, so the transcript must show it twice.
+    const store = useProjectStore()
+    const chatId = 'chat-envelope-repeat'
+    store.messages[chatId] = [
+      { role: 'user', content: 'again', timestamp: '2026-10-20T12:20:40Z', i: 0 },
+      { role: 'user', content: 'again', timestamp: '', turn_index: undefined },
+      { role: 'user', content: 'again', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'again', sent_at: '2026-10-20T12:20:40Z' },
+        { i: 1, role: 'user', content: 'again', sent_at: '2026-10-20T12:25:19Z' },
+      ],
+      total: 2, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(m => m.role === 'user' && m.content === 'again')
+    expect(userMsgs).toHaveLength(2)
   })
 })
 

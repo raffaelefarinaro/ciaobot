@@ -21,6 +21,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -84,6 +85,12 @@ _ATTACH_POLL_SECONDS = 0.5
 # entry ids are client-chosen short strings.
 _MAX_QUEUE_FRAME_IDS = 100
 _MAX_QUEUE_ENTRY_ID_LEN = 128
+
+# A client send id is compared byte-for-byte, logged, and persisted in chat
+# metadata, so it is restricted to a token alphabet: no whitespace, control
+# characters or quotes can reach a log line or the metadata file.
+_MAX_SEND_ID_LEN = 64
+_SEND_ID_UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 async def _attach_streams(websocket: WebSocket, pcm, chat_id: str) -> None:
@@ -404,6 +411,51 @@ async def ws_chat(websocket: WebSocket) -> None:
                         break
                     continue
 
+                # Idempotency. The client mints a send id per logical send and
+                # puts it on the frame, so a recovery resend of a message the
+                # engine already owns is answered with a duplicate echo
+                # instead of starting a second turn. A deliberate repeat of
+                # the same text carries a fresh id and is never suppressed.
+                send_id = _SEND_ID_UNSAFE.sub("", str(msg.get("send_id") or ""))[:_MAX_SEND_ID_LEN]
+                owned_turn = (
+                    pcm.find_turn_by_send_id(chat_id, send_id)
+                    if send_id
+                    else None
+                )
+                duplicate = bool(send_id) and (
+                    owned_turn is not None
+                    or bool(pcm.has_pending_send(chat_id, send_id))
+                )
+                logger.debug(
+                    "ws send chat=%s send_id=%s len=%d images=%d duplicate=%s",
+                    chat_id,
+                    send_id,
+                    len(str(text or "")),
+                    len(images or []),
+                    duplicate,
+                )
+                if duplicate:
+                    logger.info(
+                        "Suppressing duplicate send %s for chat %s", send_id, chat_id
+                    )
+                    duplicate_payload: dict = {
+                        "type": "user_echo",
+                        "duplicate": True,
+                        "text": text,
+                        "images": [img.original_filename for img in images or []],
+                        "send_id": send_id,
+                    }
+                    if owned_turn is not None:
+                        duplicate_payload["turn_index"] = owned_turn.get("turn_index")
+                        sent_at = str(owned_turn.get("sent_at") or "")
+                        if sent_at:
+                            duplicate_payload["sent_at"] = sent_at
+                    try:
+                        await websocket.send_json(duplicate_payload)
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
+                    continue
+
                 # Concurrent-send handling. A message sent while a stream is in
                 # flight is buffered. It flushes as the next turn, or, when the
                 # client marks it `delivery: "steer"`, is handed to the running
@@ -415,10 +467,30 @@ async def ws_chat(websocket: WebSocket) -> None:
                         chat_id, text, images=images or None,
                         entry_id=str(msg.get("entry_id")) if msg.get("entry_id") else None,
                         delivery=delivery,
+                        send_id=send_id,
                     )
                     if handled:
                         if delivery == "steer":
                             await pcm.steer_queue(chat_id)
+                        continue
+                    if send_id and pcm.has_pending_send(chat_id, send_id):
+                        # The queue took the same logical send between the
+                        # duplicate check above and this call. Queueing it
+                        # again would make one message two turns, so answer
+                        # with the duplicate echo instead of starting one.
+                        logger.info(
+                            "Suppressing duplicate send %s for chat %s", send_id, chat_id
+                        )
+                        try:
+                            await websocket.send_json({
+                                "type": "user_echo",
+                                "duplicate": True,
+                                "text": text,
+                                "images": [img.original_filename for img in images or []],
+                                "send_id": send_id,
+                            })
+                        except (WebSocketDisconnect, RuntimeError):
+                            break
                         continue
                     # Else: the stream raced-finish between check and queue;
                     # fall through to start a new stream below.
@@ -433,7 +505,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                 # the turn never started and the client's optimistic bubble
                 # was wiped by the reconnecting history reload.
                 try:
-                    pcm.start_stream(chat_id, text, images=images or None)
+                    pcm.start_stream(chat_id, text, images=images or None, send_id=send_id)
                 except RestartDrainingError as exc:
                     # Not a chat failure — the server is draining for
                     # restart. Tell the client so it can show the restart
