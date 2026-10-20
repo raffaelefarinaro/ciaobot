@@ -34,6 +34,7 @@ PLATFORM_MACOS, PLATFORM_WINDOWS, PLATFORM_LINUX, PLATFORM_OTHER = (
 GWS_INSTALL_COMMAND = "npm install -g @googleworkspace/cli"
 SKILLS_UPDATE_COMMAND = "npx skills update -g -y"
 
+
 class NothingToUpdate(Exception):
     """An ``*-update`` action was requested but the provider is not older than tested."""
 
