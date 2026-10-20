@@ -621,7 +621,77 @@ const subagentRoute = computed(() => {
 // composer, and no `aria-busy` to say it was on its way. The pane skeleton is
 // what covers the gap; the real transcript takes over as soon as the entry
 // arrives.
-const chatRoutePending = computed(() => Boolean(route.params.chatId) && !store.activeChat)
+//
+// "The catalog has not caught up yet" is a statement about a lookup that is
+// still running, so the pending state is bound to that lookup and not to the
+// absence of a chat. A route that names a chat which does not exist — a dead
+// deep link, a chat deleted in another tab, a chat the poll dropped from the
+// catalog — has nothing to wait for: the lookup settles, finds nothing, and
+// the skeleton must not be the terminal state. Otherwise the pane would say
+// "Loading conversation" forever for a conversation that will never arrive,
+// and the user is left with a placeholder they cannot dismiss. Once the
+// lookup is done, the pane falls back to the home empty state, which is what
+// it showed before the skeleton existed.
+//
+// The ref holds the id of the chat the pane is waiting for, not a flag: two
+// lookups can overlap (the boot's deep-link open and a route change while
+// that one is still running), and a flag cleared by the older one would drop
+// the skeleton while the newer lookup is still in flight.
+const chatLookupPendingId = ref<string | null>(null)
+
+// The route names a chat, so the pane waits for it — until the chat is on
+// screen (the arrival watcher below ends the wait) or until a lookup for it
+// comes back empty (it does not exist, and no amount of waiting changes that).
+watch(
+  () => (route.params.chatId as string) || '',
+  (id) => {
+    if (!id) {
+      chatLookupPendingId.value = null
+      return
+    }
+    // A chat that is already on screen is not on its way: the wait ends the
+    // moment it is there, and a later disappearance is a fact, not a lag.
+    if (store.activeChat?.chat_id === id) {
+      chatLookupPendingId.value = null
+      return
+    }
+    chatLookupPendingId.value = id
+  },
+  { immediate: true },
+)
+
+// The chat arrived: the wait is over. If it leaves again later (deleted in
+// another tab, dropped from the catalog by the poll), the pane falls back to
+// the home empty state instead of keeping a placeholder for a conversation
+// that is gone.
+watch(
+  () => store.activeChat?.chat_id ?? null,
+  (id) => {
+    if (id && id === chatLookupPendingId.value) chatLookupPendingId.value = null
+  },
+)
+
+// The lookup the pane is waiting for. It either produces the chat — the
+// arrival watcher ends the wait and the transcript takes over — or it does
+// not, and then the chat does not exist: the wait ends and the pane falls
+// back to the home empty state, as it did before the skeleton existed.
+async function openChatFromRoute(chatId: string) {
+  try {
+    await store.openChatFromDeepLink(chatId)
+  } finally {
+    // The chat arrived: the arrival watcher has already ended the wait, and
+    // the lookup is not the one the pane is waiting on any more.
+    if (chatLookupPendingId.value === chatId && store.activeChat?.chat_id !== chatId) {
+      chatLookupPendingId.value = null
+    }
+  }
+}
+
+const chatRoutePending = computed(() => {
+  const id = (route.params.chatId as string) || ''
+  if (!id || store.activeChat) return false
+  return chatLookupPendingId.value === id
+})
 const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
@@ -906,7 +976,10 @@ onMounted(async () => {
     // layout mounts, so a reload of `/` arrives here with that chat selected.
     clearRetainedChatView()
   } else if (chatId && store.activeChatId !== chatId) {
-    await store.openChatFromDeepLink(chatId)
+    // The lookup is marked as running for as long as it takes: the pane shows
+    // the skeleton while the catalog is still being asked, and falls back to
+    // the home empty state once the answer is in and it is not this chat.
+    await openChatFromRoute(chatId)
   }
   // Auto-collapse sidebar on mobile when a chat is active
   if (isMobile.value && store.activeChat) {
@@ -934,8 +1007,12 @@ watch(
       return
     }
     if (!store.bootstrapped) return
-    if (store.activeChatId !== id) void store.openChatFromDeepLink(id)
-    else void store.markRead(id)
+    if (store.activeChatId !== id) {
+      // Same as the boot's deep-link open: the skeleton covers the lookup,
+      // and a route that names a chat which does not exist ends on the home
+      // empty state rather than on a permanent "Loading conversation".
+      void openChatFromRoute(id)
+    } else void store.markRead(id)
     if (isMobile.value) sidebarCollapsed.value = true
   }
 )
@@ -1230,7 +1307,12 @@ function onShortcutKeydown(e: KeyboardEvent) {
     if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
     if (!store.activeChat) return
     e.preventDefault()
-    chatPanelRef.value?.archiveActiveChat()
+    // The ref is on `<ChatPanel>`, but while the chunk is in flight the
+    // loading component is what the ref resolves to, and it has none of
+    // ChatPanel's methods. Guarding the ref alone left `archiveActiveChat`
+    // an "is not a function" throw in exactly the window the skeleton
+    // covers (#1651).
+    chatPanelRef.value?.archiveActiveChat?.()
     return
   }
 
@@ -1251,7 +1333,9 @@ function onShortcutKeydown(e: KeyboardEvent) {
   if (matchesShortcut(e, 'modelPicker')) {
     if (!store.activeChat) return
     e.preventDefault()
-    chatPanelRef.value?.toggleModelPicker()
+    // Same as the archive chord above: the ref can be the loading
+    // component, which has no model picker to open.
+    chatPanelRef.value?.toggleModelPicker?.()
     return
   }
 
