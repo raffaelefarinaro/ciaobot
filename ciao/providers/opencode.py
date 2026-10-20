@@ -1946,8 +1946,8 @@ class OpencodeProvider(BaseSDKProvider):
         if isinstance(children_result, Exception):
             return []
         # A transient failure of the auxiliary activity map must not discard
-        # successfully fetched children. ``None`` means activity is unknown;
-        # the conservative counter will fall back to message timing.
+        # successfully fetched children. ``None`` means activity is unknown, and
+        # the conservative counter treats an unknown child as still running.
         active_ids = (
             None
             if isinstance(active_result, Exception)
