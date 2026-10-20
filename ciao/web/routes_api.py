@@ -6320,12 +6320,13 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
 # computer running Ciaobot only: browsing folders and moving the install are
 # filesystem operations a phone or a remote browser has no business making.
 # "Local" is the setup routes' rule (`_localhost_request`: a loopback TCP peer
-# whose Host names loopback) plus an exact same-origin Origin, so a
-# DNS-rebound page on this machine cannot ride the session cookie.
+# whose Host names a local address, including the accepted 0.0.0.0 spelling)
+# plus an exact same-origin Origin, so a DNS-rebound page on this machine
+# cannot ride the session cookie.
 
 
 def host_browser_request(request: Request) -> bool:
-    """A browser on the computer running Ciaobot: loopback TCP peer, loopback Host, exact same-origin Origin/Referer.
+    """A browser on the computer running Ciaobot: loopback TCP peer, local Host, exact same-origin Origin/Referer.
 
     The browser's own origin must match this request's origin in scheme, host
     and effective port — a page on `http://localhost:3000` is a different

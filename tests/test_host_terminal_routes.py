@@ -170,6 +170,7 @@ _ORIGIN_CASES: list[tuple[str, dict[str, object], bool]] = [
     ("a matching origin with a hostile referer", {"origin": "http://localhost:8443", "referer": "http://evil.example/page"}, True),
     # Referer is only read when Origin is absent.
     ("a matching referer", {"referer": "http://localhost:8443/page"}, True),
+    ("a matching https referer", {"referer": "https://localhost:8443/page", "scheme": "https"}, True),
     ("a cross-port referer", {"referer": "http://localhost:3000/page"}, False),
     ("a cross-scheme referer", {"referer": "https://localhost:8443/page"}, False),
     # An empty Origin carries no origin information, so it reads as absent and
