@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from starlette.responses import FileResponse, Response
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao.package_version import make_cached_package_status
 from ciao.provider_versions import make_cached_checks
+from ciao.terminal_auth import TerminalGrantStore
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
 from ciao.web.routes_mcp import (
     mcp_status_endpoint,
@@ -196,6 +198,7 @@ from ciao.web.routes_push import (
 )
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
 from ciao.web.routes_host_terminal import host_terminal_launch, host_terminal_status
+from ciao.web.routes_terminal import terminal_status, terminal_unlock
 from ciao.web.routes_welcome import (
     welcome_dismiss,
     welcome_open_folder,
@@ -476,6 +479,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # host-only: session + host_browser_request; never in _LOOPBACK_ONLY_API
         Route("/api/host/terminal", host_terminal_status, methods=["GET"]),
         Route("/api/host/terminal", host_terminal_launch, methods=["POST"]),
+        Route("/api/terminal/unlock", terminal_unlock, methods=["POST"]),
+        Route("/api/terminal/status", terminal_status, methods=["GET"]),
         # host-only reads/opens: session + host_browser_request; never in _LOOPBACK_ONLY_API
         Route("/api/welcome", welcome_status, methods=["GET"]),
         Route("/api/welcome/password", welcome_password, methods=["GET"]),
@@ -798,6 +803,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
     app.state.serializer = serializer
     app.state.config = config
+    app.state.terminal_clock = time.monotonic
+    app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
     # Runtime-mutable settings store (Settings → Models tab). None in
     # tests that build the app without one; the route 503s in that case.
     app.state.app_settings = app_settings
