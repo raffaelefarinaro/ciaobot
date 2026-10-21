@@ -248,6 +248,93 @@ describe('ChatPanel retry from error bubble', () => {
     wrapper.unmount()
   })
 
+  // A deliberate retry is a new turn the user asked for, so it is tagged as
+  // one: the engine records the tag per turn and the PWA can tell it apart
+  // from what the user typed. The tag is the only thing the client chooses.
+  it('tags the resend as a retry', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.messages['chat-1'] = [
+      {
+        role: 'user',
+        content: 'Check the video',
+        timestamp: '2026-08-08T15:51:00Z',
+        images: ['web_5a4d7145.png'],
+      },
+      {
+        role: 'assistant',
+        content: 'Error: this model does not support image input',
+        timestamp: '2026-08-08T15:51:01Z',
+        is_error: true,
+      },
+    ]
+    sendMessage.mockResolvedValue()
+    await flushPromises()
+
+    const retryBtn = wrapper.findAll('.retry-btn').find(b => b.text() === 'Retry')
+    expect(retryBtn).toBeTruthy()
+    await retryBtn!.trigger('click')
+    await flushPromises()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    const [, text, prepared] = sendMessage.mock.calls[0]
+    expect(text).toBe('Check the video')
+    expect(prepared.origin).toBe('retry')
+    // The failed turn's images travel with the retry.
+    expect(prepared.imageRefs).toEqual(['web_5a4d7145.png'])
+    wrapper.unmount()
+  })
+
+  it('leaves the composer draft and the staged attachments alone', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.messages['chat-1'] = [
+      {
+        role: 'user',
+        content: 'Check the video',
+        timestamp: '2026-08-08T15:51:00Z',
+      },
+      {
+        role: 'assistant',
+        content: 'Error: connection refused',
+        timestamp: '2026-08-08T15:51:01Z',
+        is_error: true,
+      },
+    ]
+    // Something else is being written and something else is staged: a retry
+    // is not a fresh send, so it must not drain either.
+    store.pendingImages = ['staged.png']
+    await wrapper.get('textarea.chat-input').setValue('half typed')
+    sendMessage.mockResolvedValue()
+    await flushPromises()
+
+    const retryBtn = wrapper.findAll('.retry-btn').find(b => b.text() === 'Retry')
+    expect(retryBtn).toBeTruthy()
+    await retryBtn!.trigger('click')
+    await flushPromises()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    const draft = wrapper.get('textarea.chat-input').element as HTMLTextAreaElement
+    expect(draft.value).toBe('half typed')
+    expect(store.pendingImages).toEqual(['staged.png'])
+    wrapper.unmount()
+  })
+
+  it('sends an ordinary message with no retry origin', async () => {
+    const { wrapper, sendMessage } = await mountPanel()
+    sendMessage.mockResolvedValue()
+    await flushPromises()
+
+    await wrapper.get('textarea.chat-input').setValue('a fresh message')
+    await wrapper.get('.send-btn').trigger('click')
+    await flushPromises()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    const [, text, prepared] = sendMessage.mock.calls[0]
+    expect(text).toBe('a fresh message')
+    // No prepared message, so no tag: an ordinary send is unchanged.
+    expect(prepared).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('passes the prior text (not the whole bubble object) to fixError', async () => {
     const { wrapper, store, sendMessage } = await mountPanel()
     store.messages['chat-1'] = [
@@ -663,6 +750,8 @@ describe('ChatPanel recovery model picker', () => {
     expect(text).toBe('Check the video')
     // The failed turn's images travel with the retry.
     expect(prepared.imageRefs).toEqual(['web_5a4d7145.png'])
+    // The picker retries through the same helper, so the turn is tagged too.
+    expect(prepared.origin).toBe('retry')
     // The composer is not drained by a recovery.
     expect(store.pendingImages).toEqual([])
     wrapper.unmount()

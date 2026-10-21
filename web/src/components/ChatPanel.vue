@@ -4593,10 +4593,19 @@ function retryFromError(errorIdx: number) {
   // from the live composer) and pass `prepared` to skip the
   // consumePreparedAttachments drain — a retry must not erase whatever
   // the user has currently staged for a fresh send.
+  // The turn is tagged as a retry: it is a new turn the user asked to run
+  // again, and the engine records the tag per turn. The tag is the only
+  // thing the client chooses; the text never decides it.
   return store.sendMessage(
     chat.value.chat_id,
     prior.text,
-    { composed: prior.text, imageRefs: prior.images.length ? prior.images : undefined, fileComments: [], chatComments: [] },
+    {
+      composed: prior.text,
+      imageRefs: prior.images.length ? prior.images : undefined,
+      fileComments: [],
+      chatComments: [],
+      origin: 'retry',
+    },
   )
 }
 

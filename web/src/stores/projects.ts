@@ -855,7 +855,7 @@ export const useProjectStore = defineStore('projects', () => {
   // in the same burst to a dying socket is rare next to the common
   // single-message case, and the queue path already persists server-side
   // when its frame arrives.
-  interface UnackedSend { id: string; text: string; images?: string[]; at: number; attempts: number }
+  interface UnackedSend { id: string; text: string; images?: string[]; at: number; attempts: number; origin?: 'retry' }
   const unackedSends: Record<string, UnackedSend> = {}
   const unackedRecoveryTimers: Record<string, ReturnType<typeof setTimeout>> = {}
   // Grace before declaring a send lost: a turn that DID start replays its
@@ -969,13 +969,16 @@ export const useProjectStore = defineStore('projects', () => {
     // tracking via the echoed user_echo. Empty comment buckets: the original
     // send already consumed them via consumePreparedAttachments.
     // The same send id rides on: this is the same logical send, so the
-    // engine can recognise it instead of running a second turn for it.
+    // engine can recognise it instead of running a second turn for it. The
+    // retry tag rides with it, so a resend of a deliberate retry is still
+    // recorded as one.
     sendMessage(chatId, unacked.text, {
       composed: unacked.text,
       imageRefs: unacked.images,
       fileComments: [],
       chatComments: [],
       sendId: unacked.id,
+      origin: unacked.origin,
     })
   }
 
@@ -1636,6 +1639,10 @@ export const useProjectStore = defineStore('projects', () => {
                   images: Array.isArray(row.images) ? row.images.map(String) : undefined,
                   at: typeof row.at === 'number' ? row.at : Date.now(),
                   attempts: typeof row.attempts === 'number' ? row.attempts : 0,
+                  // Only the exact 'retry' tag is restored. Any other value
+                  // is dropped, never defaulted: an engine origin must not
+                  // ride the wire just because a cache named one.
+                  origin: row.origin === 'retry' ? 'retry' : undefined,
                 }
               }
             }
@@ -4778,11 +4785,14 @@ export const useProjectStore = defineStore('projects', () => {
   // the invariant the `user_echo` handler relies on to reconcile an
   // optimistic bubble rather than duplicate the turn.
   type PendingUserMessage = ChatMessage & { pendingSend?: true }
-  interface DeferredSend { composed: string; images?: string[] }
+  interface DeferredSend { composed: string; images?: string[]; origin?: 'retry' }
   const deferredSends: Record<string, DeferredSend[]> = {}
 
   function sameDeferredPayload(a: DeferredSend, b: DeferredSend): boolean {
     if (a.composed.trim() !== b.composed.trim()) return false
+    // A deliberate retry is a new intent, so it never collapses into a
+    // pending ordinary send of the same words.
+    if ((a.origin || '') !== (b.origin || '')) return false
     const ai = a.images || []
     const bi = b.images || []
     return ai.length === bi.length && ai.every((v, i) => v === bi[i])
@@ -4813,6 +4823,7 @@ export const useProjectStore = defineStore('projects', () => {
       content: entry.composed,
       timestamp: new Date().toISOString(),
       images: entry.images,
+      origin: entry.origin,
       pendingSend: true,
     }
     msgs.push(bubble)
@@ -4830,7 +4841,10 @@ export const useProjectStore = defineStore('projects', () => {
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i] as PendingUserMessage
       if (m.role !== 'user' || !m.pendingSend) continue
-      if (sameDeferredPayload({ composed: m.content || '', images: m.images }, entry)) return i
+      // The tag is part of the payload: a pending retry bubble is the
+      // retry's own, never an ordinary send's.
+      const origin = m.origin === 'retry' ? 'retry' : undefined
+      if (sameDeferredPayload({ composed: m.content || '', images: m.images, origin }, entry)) return i
     }
     return -1
   }
@@ -4913,11 +4927,11 @@ export const useProjectStore = defineStore('projects', () => {
     // attachment bundle now, before a retry callback can read another
     // message's staged attachments from the shared composer bucket.
     if (!prepared) consumePreparedAttachments(chatId, message)
-    const { composed, imageRefs } = message
+    const { composed, imageRefs, origin } = message
     // Only a retry can own an optimistic pending bubble / registry entry: the
     // first call either sends straight away or creates them below.
     const wasDeferred = _deferredAttempt > 0
-    const deferredEntry: DeferredSend = { composed, images: imageRefs }
+    const deferredEntry: DeferredSend = { composed, images: imageRefs, origin }
     const ws = sockets.value[chatId]
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       if (!wasDeferred) {
@@ -4977,10 +4991,17 @@ export const useProjectStore = defineStore('projects', () => {
     // A tracked entry for a DIFFERENT message is not this send: it gets its
     // own id, and the tracked entry keeps its id for its own retry.
     const tracked = unackedSends[chatId]
-    const trackedIsThisSend = Boolean(tracked && tracked.text === composed)
+    // A deliberate retry is a new intent, not a repeat of the tracked send:
+    // it never inherits the tracked id, even when the words are identical.
+    // The tag is the only thing that says "new intent" — never the text.
+    const isRetry = origin === 'retry'
     const sendId = message.sendId
-      ?? (trackedIsThisSend ? tracked?.id : undefined)
+      ?? (tracked && tracked.text === composed && !isRetry ? tracked.id : undefined)
       ?? newSendId()
+    // The tracked entry survives only when this send IS that entry, which the
+    // id decides: the recovery resend keeps its attempt count, so the
+    // one-retry cap holds.
+    const trackedIsThisSend = Boolean(tracked && tracked.id === sendId)
 
     if (alreadyStreaming) {
       // Queue: don't push to the main messages list yet. Queued messages live
@@ -5006,6 +5027,7 @@ export const useProjectStore = defineStore('projects', () => {
         type: 'message', text: composed, mode: 'queue', delivery, send_id: sendId,
       }
       if (imageRefs) payload.images = imageRefs
+      if (origin) payload.origin = origin
       payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
       onSent?.()
@@ -5023,6 +5045,8 @@ export const useProjectStore = defineStore('projects', () => {
         content: composed,
         timestamp: new Date().toISOString(),
         images: imageRefs,
+        // A deliberate retry is tagged, so the bubble says what the turn is.
+        origin,
         // The id marks this bubble as the client's own optimistic copy, so
         // the server's copy of the same turn is never mistaken for it.
         send_id: sendId,
@@ -5042,13 +5066,16 @@ export const useProjectStore = defineStore('projects', () => {
 
     const payload: Record<string, unknown> = { type: 'message', text: composed, send_id: sendId }
     if (imageRefs) payload.images = imageRefs
+    // A deliberate retry is tagged on the wire, so the engine records the
+    // turn as a retry and echoes the tag back.
+    if (origin) payload.origin = origin
     // Track until the server proves receipt. Cleared by the echoed user_echo,
     // by the turn showing up in /messages, or recovered once on reconnect.
     // An identical pending entry (the recovery path resending this very
     // message) keeps its attempt count so the one-retry cap holds.
     if (!trackedIsThisSend) {
       unackedSends[chatId] = {
-        id: sendId, text: composed, images: imageRefs, at: Date.now(), attempts: 0,
+        id: sendId, text: composed, images: imageRefs, at: Date.now(), attempts: 0, origin,
       }
       persistUnackedSends()
     }
