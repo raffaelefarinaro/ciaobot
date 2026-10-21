@@ -36,7 +36,7 @@ from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import routes_chat
 from ciao.web.chat_broker import ChatStream
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import SEND_ID_HISTORY_TURNS, ProjectChatManager
 from ciao.web.routes_chat import ws_chat
 from tests.session import signed_in
 
@@ -449,6 +449,78 @@ async def test_send_id_survives_a_metadata_reload(tmp_path: Path) -> None:
     assert found_again["turn_index"] == 0
     # An unknown id owns no turn.
     assert reloaded.find_turn_by_send_id(chat.chat_id, "s-unknown") is None
+
+
+async def test_the_send_id_history_is_bounded(tmp_path: Path) -> None:
+    """The recorded send ids are a recent window, not the whole chat.
+
+    The map exists to recognise a duplicate resend, and the PWA stops
+    resending a send older than 30 s, so dedup only needs the recent
+    sends. Without a bound the map grew with every turn of every chat,
+    and it is persisted with the chat metadata.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("sendids", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="send-id-window")
+    # The turn is recorded by the send path; the provider drive is not what
+    # this test is about.
+    pcm._streaming.start_drive = lambda **_kwargs: None
+
+    total = SEND_ID_HISTORY_TURNS + 6
+    for index in range(total):
+        stream = pcm.start_stream(chat.chat_id, f"turn {index}", send_id=f"s-{index}")
+        # The next send must open a new turn, so the finished stream is not
+        # reused by the broker.
+        stream.finish()
+
+    chat_info = pcm.get_chat(chat.chat_id)
+    assert chat_info is not None
+    assert len(chat_info.user_turn_send_ids) == SEND_ID_HISTORY_TURNS
+    # The oldest turns are gone; the newest is still found.
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-0") is None
+    found = pcm.find_turn_by_send_id(chat.chat_id, f"s-{total - 1}")
+    assert found is not None
+    assert found["turn_index"] == total - 1
+
+
+async def test_a_key_that_is_not_a_turn_owns_no_send(tmp_path: Path) -> None:
+    """Only a decimal turn index names a turn.
+
+    The engine writes decimal turn indices, and a key that is not one does
+    not name a turn, so it cannot own a send id — and looking it up must
+    not raise either.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("sendids", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="send-id-keys")
+    chat_info = pcm.get_chat(chat.chat_id)
+    assert chat_info is not None
+    chat_info.user_turn_send_ids = {"not-a-turn": "s-1", "0": "s-0"}
+
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-1") is None
+    found = pcm.find_turn_by_send_id(chat.chat_id, "s-0")
+    assert found is not None
+    assert found["turn_index"] == 0
+
+
+async def test_the_newest_turn_wins_when_a_send_id_is_recorded_twice(
+    tmp_path: Path,
+) -> None:
+    """A send id on two turns is owned by the newer one.
+
+    The engine records the id per turn, so the last turn carrying it is the
+    one a repeated frame would duplicate.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("sendids", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="send-id-twice")
+    chat_info = pcm.get_chat(chat.chat_id)
+    assert chat_info is not None
+    chat_info.user_turn_send_ids = {"3": "s-1", "0": "s-1"}
+
+    found = pcm.find_turn_by_send_id(chat.chat_id, "s-1")
+    assert found is not None
+    assert found["turn_index"] == 3
 
 
 async def test_the_history_row_does_not_carry_the_send_id(
