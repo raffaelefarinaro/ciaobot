@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
  * A user turn the engine wrote (a finished background run, lost background
- * tasks, an automation run, a resumed task, a webhook event, an update task),
- * drawn as a collapsed notice instead of a user bubble.
+ * tasks, an automation run, a resumed task, a webhook event, an update task,
+ * a retried request), drawn as a collapsed notice instead of a user bubble.
  *
  * ChatPanel draws this once {@link parseInjectedPrompt} has recognised the turn
  * from its recorded origin. The raw prompt stays reachable behind its own
@@ -40,6 +40,7 @@ const ICONS: Record<InjectedPrompt['kind'], AppIconName> = {
   task_resume: 'doc',
   webhook: 'comment',
   update_task: 'spark',
+  retry: 'activity',
 }
 
 const summary = computed(() => summarizeInjectedPrompt(props.prompt, props.chatTitle))
@@ -157,6 +158,19 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
         <div class="injected-card-prose" v-html="md(raw)"></div>
       </template>
 
+      <!-- A retry repeats the request that is already in the transcript, so
+           the card says what happened and keeps the request one disclosure
+           away. The generic full-prompt toggle stays out: it would show the
+           same words a second time. -->
+      <template v-else-if="prompt.kind === 'retry'">
+        <p class="injected-card-note">The same request is running again as a new attempt.</p>
+        <details class="injected-card-original">
+          <summary>Show original request</summary>
+          <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
+          <div class="injected-card-prose" v-html="md(raw)"></div>
+        </details>
+      </template>
+
       <template v-if="hasRawToggle">
         <button
           type="button"
@@ -271,6 +285,23 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 .injected-card-prose { max-height: 320px; overflow: auto; margin-top: 8px; line-height: 1.5; }
 .injected-card-prose :deep(> :first-child) { margin-top: 0; }
 .injected-card-prose :deep(> :last-child) { margin-bottom: 0; }
+.injected-card-note { margin: 8px 0 0; line-height: 1.5; }
+.injected-card-original { margin-top: 4px; }
+.injected-card-original > summary {
+  /* list-item keeps the native disclosure triangle, the only cue it opens. */
+  display: list-item;
+  min-height: 32px;
+  padding: 4px 0;
+  border-radius: var(--radius-xs);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.injected-card-original > summary:hover { color: var(--fg); }
+.injected-card-original > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .injected-pill {
   padding: 0 8px;
   border: 1px solid var(--border);
@@ -316,5 +347,6 @@ pre {
     min-height: var(--touch);
   }
   .injected-card-link { display: inline-flex; align-items: center; }
+  .injected-card-original > summary { min-height: var(--touch); padding: 12px 0; }
 }
 </style>
