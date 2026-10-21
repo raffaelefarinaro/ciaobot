@@ -85,6 +85,23 @@ carried by the session.
   An SSH local forward counts as the host; that caller can already read `.env`.
   Any password change re-keys the session signer, so every other device is
   signed out and must sign in with the new password.
+- The browser terminal's grant (`ciao_terminal`) is revoked by the auth
+  actions, and it is revoked by the *bearer*, never by the session. A
+  `POST /api/auth/logout` revokes the grant that request presents and
+  nothing else: two browsers signed in inside the same second can hold
+  byte-identical `ciao_session` cookies, so the login cookie cannot name
+  a browser, and revoking "the grant for this session" would end another
+  browser's terminal. A logout that presents no terminal cookie revokes
+  nothing. A *successful* `POST /api/auth/settings` password change ends
+  **every** grant, on every browser, and clears the `ciao_terminal` cookie
+  — the password is the terminal's own credential, so every browser has to
+  unlock again, including the one that made the change. A refused password
+  change ends nothing. The grant is revoked here; the terminal socket's own
+  re-check against this store is the terminal-stream child's work and does
+  not exist yet, so no socket is closed by this today. The signed session
+  cookie remains required for every route either way, and neither action
+  names a user or a device: there are no per-device identities to revoke
+  against.
 - The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
   need the session *and* `host_browser_request`, and are not in
   `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails
