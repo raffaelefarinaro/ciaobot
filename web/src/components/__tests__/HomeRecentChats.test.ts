@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { useProjectStore } from '../../stores/projects'
 import { useFileViewerStore } from '../../stores/fileViewer'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
@@ -871,4 +873,58 @@ it('files a chat whose last turn failed under needs you with the error and next 
   expect(needsYou.text()).toContain('Failed turn')
   expect(needsYou.text()).toContain('usage limit reached · switch model or retry')
   wrapper.unmount()
+})
+
+// The naming placeholder: one bar, one class name, and a name that reaches
+// assistive tech. Home used to carry its own shimmer rule, so the same class
+// name meant two different bars.
+describe('the naming placeholder on Home', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+  })
+
+  async function mountWithPendingTitle() {
+    const store = seedChats()
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'naming', project_id: 'personal-project', title: 'New Chat',
+        title_status: 'pending',
+        created_at: timestamp(30), last_activity_at: timestamp(30), last_read_at: timestamp(30),
+        archived: false, local: true,
+      },
+    ] as unknown as typeof store.chats
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+    return wrapper
+  }
+
+  it('shows the shared placeholder and names the row once', async () => {
+    const wrapper = await mountWithPendingTitle()
+    const row = wrapper.findAll('.home-chat-item').find(item => item.find('.title-shimmer').exists())!
+    expect(row).toBeTruthy()
+    const bar = row.get('.title-shimmer')
+    // A bare span is role=generic, which cannot be named: the bar is hidden
+    // from assistive tech and the name travels as text beside it.
+    expect(bar.attributes('aria-hidden')).toBe('true')
+    expect(bar.attributes('aria-label')).toBeUndefined()
+    expect(bar.attributes('title')).toBe('Naming conversation')
+    const names = row.findAll('.sr-only').filter(node => node.text() === 'Naming conversation')
+    expect(names).toHaveLength(1)
+    // Once, and only once, so a screen reader does not hear it twice.
+    expect(row.text().split('Naming conversation').length - 1).toBe(1)
+    // The placeholder stands in for the title, so the temporary one never shows.
+    expect(row.text()).not.toContain('New Chat')
+    wrapper.unmount()
+  })
+
+  it('loads the shared placeholder stylesheet instead of keeping its own bar', () => {
+    const here = join(__dirname, '..')
+    const source = readFileSync(join(here, 'HomeRecentChats.vue'), 'utf8')
+    expect(source).toContain('<style scoped src="./titleShimmer.css">')
+    // One class name, one bar: the local rule is gone.
+    expect(source).not.toMatch(/\.title-shimmer\s*\{/)
+  })
 })

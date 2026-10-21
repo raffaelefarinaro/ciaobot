@@ -80,7 +80,7 @@
                     <span
                       v-if="chat.title_status === 'pending'"
                       class="title-shimmer"
-                      aria-label="Naming conversation"
+                      aria-hidden="true"
                       title="Naming conversation"
                     />
                     <span
@@ -88,6 +88,10 @@
                       class="home-chat-title"
                       :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
+                    <!-- A bare span is role=generic, which cannot be named: the
+                         bar is hidden from assistive tech and the name travels
+                         as text beside it. -->
+                    <span v-if="chat.title_status === 'pending'" class="sr-only">Naming conversation</span>
                     <span
                       v-if="taskSignals.isTaskChat(chat)"
                       class="home-chat-task"
@@ -1291,15 +1295,8 @@ defineExpose({ onArrow })
   text-transform: uppercase;
 }
 
-.title-shimmer {
-  width: 45%;
-  height: 14px;
-  flex: 1;
-  border-radius: 4px;
-  background: linear-gradient(90deg, var(--border) 25%, var(--bg3) 50%, var(--border) 75%);
-  background-size: 200% 100%;
-  animation: home-shimmer 1.2s ease-in-out infinite;
-}
+/* The naming placeholder comes from the shared stylesheet (titleShimmer.css),
+   the same bar the sidebar's rows and the chat header use. */
 
 .mm-shimmer-line {
   display: block;
@@ -1339,7 +1336,8 @@ defineExpose({ onArrow })
 @media (prefers-reduced-motion: reduce) {
   .home-chat-item,
   .home-chat-title { transition: none; }
-  .title-shimmer { animation: none; }
   .home-lane-new-spinner { animation: none; }
 }
 </style>
+
+<style scoped src="./titleShimmer.css"></style>
