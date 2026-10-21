@@ -4727,8 +4727,8 @@ async function applyModelChoice(
   try {
     if (handover) {
       // The handover route reads only the provider and model; the thinking
-    // level is applied by the PATCH below, so it is not sent here.
-    await store.handoverChat(chatId, { provider: updates.provider, model: updates.model })
+      // level is applied by the PATCH below, so it is not sent here.
+      await store.handoverChat(chatId, { provider: updates.provider, model: updates.model })
       if (staged !== null) {
         // The handover keeps the chat's own thinking level; the staged one
         // belongs to the retry, so it goes on top. Best effort: the handover

@@ -52,9 +52,14 @@ const ChatCommentPopoverStub = defineComponent({
 // so the stub renders the slots and answers with `select`.
 const ModelSelectorStub = defineComponent({
   name: 'ModelSelectorStub',
+  props: { labelledBy: { type: String, default: '' }, describedBy: { type: String, default: '' } },
   emits: ['select', 'close', 'update:modelValue'],
-  setup(_, { slots }) {
-    return () => h('div', { class: 'model-selector-stub' }, [
+  setup(props, { slots }) {
+    return () => h('div', {
+      class: 'model-selector-stub',
+      'aria-labelledby': props.labelledBy || undefined,
+      'aria-describedby': props.describedBy || undefined,
+    }, [
       // Mirror the real child: an absent header slot renders no band at all.
       slots.header ? h('div', { class: 'model-selector__header' }, slots.header()) : null,
       slots.footer?.(),
@@ -545,6 +550,11 @@ describe('ChatPanel recovery model picker', () => {
     expect(wrapper.find('.model-picker-recovery__title').text()).toBe('Choose a model to retry immediately')
     expect(wrapper.find('.model-picker-recovery__note').text()).toContain('may incur usage charges')
     expect(wrapper.find('.model-picker-recovery__note').text()).toContain('Thinking applies to that retry')
+    // The listbox is named by the heading and the search field describes
+    // itself with the consequence, so the warning is not visual-only.
+    const stub = wrapper.getComponent({ name: 'ModelSelectorStub' })
+    expect(stub.attributes('aria-labelledby')).toBe('model-picker-recovery-title')
+    expect(stub.attributes('aria-describedby')).toBe('model-picker-recovery-note')
     wrapper.unmount()
   })
 
@@ -568,6 +578,10 @@ describe('ChatPanel recovery model picker', () => {
     expect(wrapper.find('.model-picker-recovery').exists()).toBe(false)
     // No empty header band above the search field either.
     expect(wrapper.find('.model-selector__header').exists()).toBe(false)
+    // And nothing points at the recovery wording that is not there.
+    const stub = wrapper.getComponent({ name: 'ModelSelectorStub' })
+    expect(stub.attributes('aria-labelledby')).toBeUndefined()
+    expect(stub.attributes('aria-describedby')).toBeUndefined()
     wrapper.unmount()
   })
 
