@@ -311,6 +311,10 @@ def build_parser() -> argparse.ArgumentParser:
     tdelete = task.add_parser("delete", help="Permanently remove one task; its chats and runs stay.")
     tdelete.add_argument("task_id")
     tdelete.add_argument("--revision", required=True, help="The revision you read; a stale one removes nothing.")
+    tdelete.add_argument("--reason-file", default=None, metavar="FILE", help=(
+        "Optional text file holding why you are deleting it, in the user's words "
+        "if they gave one: @file.txt or a plain path."
+    ))
     tmove = task.add_parser("move", help="Set a task's column.")
     tmove.add_argument("task_id")
     tmove.add_argument("--to", required=True, choices=["backlog", "in_progress", "in_review", "done"])
@@ -340,6 +344,10 @@ def build_parser() -> argparse.ArgumentParser:
     tattempt.add_argument(
         "action", choices=["stop", "resume", "retry", "detach"]
     )
+    tattempt.add_argument("--reason-file", default=None, metavar="FILE", help=(
+        "Optional, for `detach` of a result that is ready for review: "
+        "why it is being released."
+    ))
 
     schedule = _verbs(nouns.add_parser("schedule", help="Schedules in the active workspace."))
     schedule.add_parser("list", help="List schedules with their next run.")
@@ -684,10 +692,11 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 arguments["body"] = body
             return "task_update", arguments
         if verb == "delete":
-            return "task_delete", {
-                "task_id": args.task_id,
-                "expected_revision": args.revision,
-            }
+            arguments = {"task_id": args.task_id, "expected_revision": args.revision}
+            reason = _task_body(args.reason_file, flag="--reason-file")
+            if reason is not None:
+                arguments["reason"] = reason
+            return "task_delete", arguments
         if verb == "move":
             return "task_action", {
                 "action": "move",
@@ -718,10 +727,11 @@ def resolve(args: argparse.Namespace) -> tuple[str, dict[str, Any]] | None:
                 "summary": _task_body(args.summary_file, flag="--summary-file") or "",
             }
         if verb == "attempt":
-            return "task_attempt_action", {
-                "attempt_id": args.attempt_id,
-                "action": args.action,
-            }
+            arguments = {"attempt_id": args.attempt_id, "action": args.action}
+            reason = _task_body(args.reason_file, flag="--reason-file")
+            if reason is not None:
+                arguments["reason"] = reason
+            return "task_attempt_action", arguments
         # `complete` stays its own verb even though the store refuses it: the
         # refusal is the answer, and the agent needs a name for it to report
         # rather than another route it has to guess at.

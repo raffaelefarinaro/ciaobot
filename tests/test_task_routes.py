@@ -32,6 +32,7 @@ from starlette.testclient import TestClient
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import CiaoControlPlane
 from ciao.task_board import TaskBoardStore
+from ciao.task_decisions import read_decisions
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_tasks import (
     task_attempt_action,
@@ -1584,3 +1585,139 @@ def test_link_chat_route_links_and_unlinks(world) -> None:
     )
     assert unlinked.status_code == 200, unlinked.text
     assert unlinked.json()["task"]["linked_chats"] == []
+
+
+# ── Decision reasons (#1726) ───────────────────────────────────────────
+
+
+def _delete(client: TestClient, cookies: dict[str, str], task: dict, **extra):
+    return client.request(
+        "DELETE",
+        f"/api/tasks/{task['id']}",
+        json={"workspace": "personal", "expected_revision": task["revision"], **extra},
+        cookies=cookies,
+    )
+
+
+def _task_file(config: CiaoConfig, task: dict) -> Path:
+    return config.workspace_vault_root("personal") / "Workspace" / "Tasks" / f"{task['id']}.md"
+
+
+def test_delete_with_a_reason_persists_the_decision_row(world) -> None:
+    client, cookies, config, _pcm = world
+    created = _create(client, cookies, title="Dismissed")
+    response = _delete(client, cookies, created, reason="wrong person")
+    assert response.status_code == 200, response.text
+    rows = read_decisions(config.workspace_vault_root("personal"))
+    assert len(rows) == 1
+    assert (rows[0]["kind"], rows[0]["reason"]) == ("delete", "wrong person")
+    assert (rows[0]["actor"], rows[0]["via"]) == ("user", "pwa")
+    assert rows[0]["task_id"] == created["id"]
+
+
+@pytest.mark.parametrize("reason", [5, None])
+def test_delete_with_a_non_string_reason_is_a_400_and_keeps_the_file(world, reason) -> None:
+    client, cookies, config, _pcm = world
+    created = _create(client, cookies, title="Keep")
+    response = _delete(client, cookies, created, reason=reason)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task"
+    assert _task_file(config, created).is_file()
+    assert read_decisions(config.workspace_vault_root("personal")) == []
+
+
+def test_delete_with_an_overlong_reason_is_a_400(world) -> None:
+    client, cookies, config, _pcm = world
+    created = _create(client, cookies, title="Keep")
+    response = _delete(client, cookies, created, reason="x" * 1001)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task"
+    assert _task_file(config, created).is_file()
+
+
+def test_complete_with_a_reason_on_a_plain_task_is_a_400_invalid_action_and_the_task_stays_open(
+    world,
+) -> None:
+    client, cookies, config, _pcm = world
+    created = _create(client, cookies, title="Plain")
+    response = client.post(
+        f"/api/tasks/{created['id']}/complete",
+        json={"workspace": "personal", "expected_revision": created["revision"], "reason": "x"},
+        cookies=cookies,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_action"
+    row = client.get(f"/api/tasks/{created['id']}?workspace=personal", cookies=cookies).json()["task"]
+    assert row["status"] == "backlog"
+    assert read_decisions(config.workspace_vault_root("personal")) == []
+
+
+def test_complete_rejects_a_non_string_reason(world) -> None:
+    client, cookies, _config, _pcm = world
+    created = _create(client, cookies, title="Plain")
+    response = client.post(
+        f"/api/tasks/{created['id']}/complete",
+        json={"workspace": "personal", "expected_revision": created["revision"], "reason": 5},
+        cookies=cookies,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task"
+
+
+def test_the_complete_route_records_an_approve_row_with_the_reason(world) -> None:
+    client, cookies, config, pcm = world
+    task = _create(client, cookies, title="Ready for review")
+    _delegate(client, cookies, task, pcm)
+    before = _settle(client, cookies, pcm, task["id"], report="done")
+    done = client.post(
+        f"/api/tasks/{task['id']}/complete",
+        json={"workspace": "personal", "expected_revision": before["revision"], "reason": "good as is"},
+        cookies=cookies,
+    )
+    assert done.status_code == 200, done.text
+    rows = read_decisions(config.workspace_vault_root("personal"))
+    assert [(row["kind"], row["reason"]) for row in rows] == [("approve", "good as is")]
+
+
+def test_detach_route_accepts_a_reason_and_other_verbs_refuse_it(world) -> None:
+    client, cookies, config, pcm = world
+    task = _create(client, cookies, title="Reject me")
+    attempt_id = _delegate(client, cookies, task, pcm).json()["attempt"]["attempt_id"]
+    base = f"/api/tasks/{task['id']}/attempt/{attempt_id}"
+
+    refused = client.post(f"{base}/stop", json={"workspace": "personal", "reason": "x"}, cookies=cookies)
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["error"]["code"] == "invalid_action"
+    wrong_type = client.post(f"{base}/detach", json={"workspace": "personal", "reason": 5}, cookies=cookies)
+    assert wrong_type.status_code == 400, wrong_type.text
+    assert wrong_type.json()["error"]["code"] == "invalid_task"
+
+    _settle(client, cookies, pcm, task["id"], report="done")
+    detached = client.post(
+        f"{base}/detach", json={"workspace": "personal", "reason": "not a task"}, cookies=cookies
+    )
+    assert detached.status_code == 200, detached.text
+    rows = read_decisions(config.workspace_vault_root("personal"))
+    assert [(row["kind"], row["reason"]) for row in rows] == [("reject", "not a task")]
+
+
+def test_patch_still_refuses_a_reason_key(world) -> None:
+    client, cookies, _config, _pcm = world
+    created = _create(client, cookies, title="Patch me")
+    response = client.patch(
+        f"/api/tasks/{created['id']}",
+        json={"workspace": "personal", "expected_revision": created["revision"], "reason": "x"},
+        cookies=cookies,
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_task_field"
+
+
+def test_task_rows_carry_created_by_null_for_a_user_filed_task(world) -> None:
+    client, cookies, _config, _pcm = world
+    created = _create(client, cookies, title="Mine")
+    assert created["created_by"] is None
+    listed = client.get("/api/tasks?workspace=personal", cookies=cookies).json()["tasks"]
+    assert [row["created_by"] for row in listed] == [None]
+    got = client.get(f"/api/tasks/{created['id']}?workspace=personal", cookies=cookies).json()["task"]
+    assert got["created_by"] is None
