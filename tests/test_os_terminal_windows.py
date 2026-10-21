@@ -27,6 +27,7 @@ import re
 import sys
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -2144,6 +2145,189 @@ def test_a_real_ctrl_c_cancels_the_pending_line_and_the_shell_lives(
         assert (
             dropped.encode("utf-8") not in produced
         ), "the cancelled line must not run: the shell kept it in its buffer"
+        assert terminal.poll() is None, "the shell must survive the interrupt"
+    finally:
+        terminal.close()
+
+
+# ── the interrupt gap (#1721) ───────────────────────────────────────────────
+
+
+def _console_state_command(label: str) -> bytes:
+    """The command that reports the console's input state.
+
+    Two values come back, in this order:
+
+    * the marker, followed by ``[Console]::IsInputRedirected`` — whether the
+      shell's *standard* input is the console's own ``CONIN$`` (False) or
+      something else (True). It cannot fail, so the marker always arrives
+      and the test always knows the command ran;
+    * ``[Console]::TreatControlCAsInput`` — the console's
+      ``ENABLE_PROCESSED_INPUT`` flag read backwards (True means the flag is
+      off, and the console host then hands 0x03 to the shell as an ordinary
+      character instead of raising a Ctrl+C control event for it). Reading
+      it needs a console handle, so it may fail; the shell then prints an
+      error and the test records the flag as unreadable.
+
+    The marker is written as code points and turned back into text by the
+    shell, so the text the test waits for cannot be the echo of the command.
+    The command stays short on purpose: a shell that reads the line in the
+    console's cooked mode stops at 254 characters.
+    """
+    codes = ",".join(f"[char]{ord(char)}" for char in label)
+    command = (
+        f"Write-Output ('CIAO' + (-join @({codes})) + '-END ' + "
+        "[Console]::IsInputRedirected); "
+        "Write-Output ([Console]::TreatControlCAsInput)"
+    )
+    return (command + "\r").encode("utf-8")
+
+
+def _nested_console_state_command(label: str) -> bytes:
+    """A child shell that reports the state and then waits.
+
+    The child samples the console while the parent shell is busy with it,
+    which is the state a foreground program runs under. The command is
+    quoted for the outer shell, which passes it to the child as one
+    argument, and the child's own path is absolute so the terminal's PATH
+    cannot decide whether it starts at all.
+    """
+    codes = ",".join(f"[char]{ord(char)}" for char in label)
+    inner = (
+        f"Write-Output ('CIAO' + (-join @({codes})) + '-END ' + "
+        "[Console]::IsInputRedirected); "
+        "Write-Output ([Console]::TreatControlCAsInput); Start-Sleep 300"
+    )
+    shell = tw._resolve_powershell()
+    assert shell, "powershell.exe is not on the machine's terminal PATH"
+    # The call operator: the path has spaces in it, and the outer shell is
+    # PowerShell, which needs to be told that the quoted path is a program.
+    return f'& "{shell}" -NoProfile -Command "{inner}"\r'.encode("utf-8")
+
+
+def _console_state(produced: bytes, marker: bytes) -> tuple[str, str]:
+    """The two values the shell reported: redirected, and the input flag.
+
+    ``redirected`` is ``True``/``False`` (the shell's standard input is not
+    the console's) and ``processed`` is ``on``/``off``/``unreadable`` (the
+    console's ``ENABLE_PROCESSED_INPUT``).
+    """
+    text = produced.split(marker, 1)[1].decode("utf-8", "replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    redirected = lines[0] if lines else ""
+    processed = "unreadable"
+    for line in lines[1:]:
+        if line in ("True", "False"):
+            # .NET reads the flag backwards: TreatControlCAsInput is True
+            # when ENABLE_PROCESSED_INPUT is off.
+            processed = "off" if line == "True" else "on"
+            break
+    return redirected, processed
+
+
+def _drain(terminal: tw.WindowsTerminalProcess, seconds: float) -> bytes:
+    """Take what the terminal has produced, until it goes quiet.
+
+    The quiet is what makes this safe to use before looking for the
+    prompt: a prompt left over from an earlier command would otherwise be
+    mistaken for the one the interrupt brings back.
+    """
+    collected = b""
+    deadline = time.monotonic() + seconds
+    quiet = 0.0
+    while time.monotonic() < deadline:
+        item = terminal.read(65536)
+        if item is None:
+            time.sleep(0.05)
+            quiet += 0.05
+            if quiet >= 0.3:
+                break
+            continue
+        if item == b"":
+            break
+        collected += item
+        quiet = 0.0
+    return collected
+
+
+def _wait_for(
+    terminal: tw.WindowsTerminalProcess, needle: bytes, timeout: float
+) -> bytes:
+    """Collect output until ``needle`` shows up; empty when it does not."""
+    collected = b""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        item = terminal.read(65536)
+        if item is None:
+            time.sleep(0.05)
+            continue
+        if item == b"":
+            break
+        collected += item
+        if needle in collected:
+            return collected
+    return b""
+
+
+@_windows_only
+def test_the_console_state_behind_the_interrupt_is_measured(tmp_path: Path) -> None:
+    """Measure what decides whether 0x03 interrupts a running program.
+
+    Windows' console host turns the 0x03 byte into a Ctrl+C control event
+    only when the console's input mode has ``ENABLE_PROCESSED_INPUT`` set
+    (the console host's ``HandleGenericKeyEvent`` asks
+    ``IsInProcessedInputMode()`` first), and the event is then delivered to
+    every process attached to the console. The mode belongs to the
+    *client*: the console host never writes it, the only writer is the
+    client's ``SetConsoleMode``, and the client's own line editor is what
+    clears the flag while it owns the prompt.
+
+    So the two things that decide the outcome are the console's input mode
+    and the shell's own standard handles. This test reports both, from
+    inside the pseudoconsole, and reports what the 0x03 byte did to a
+    running program. It asserts that the measurement is possible and that
+    the shell survives; the numbers are the evidence #1721 needs, and they
+    are reported as a warning so they land in the CI log.
+    """
+    label = "S"
+    marker = f"CIAO{label}-END ".encode("utf-8")
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The state the shell's own line editor works under.
+        terminal.write(_console_state_command(label))
+        produced = _read_until(terminal, marker) + _drain(terminal, 2.0)
+        at_prompt = _console_state(produced, marker)
+        assert at_prompt[0] in (
+            "True",
+            "False",
+        ), f"the shell did not report its console state: {produced[-400:]!r}"
+
+        # The state a foreground program runs under: a child shell samples
+        # it and then waits, so the parent is busy with a program.
+        terminal.write(_nested_console_state_command(label))
+        produced = _read_until(terminal, marker, timeout=30) + _drain(terminal, 2.0)
+        in_foreground = _console_state(produced, marker)
+        assert in_foreground[0] in (
+            "True",
+            "False",
+        ), f"the child shell did not report the console state: {produced[-400:]!r}"
+
+        # The byte, and what it did to the running program. The queue is
+        # emptied first: a prompt left over from an earlier command would
+        # look like the one the interrupt brings back.
+        _drain(terminal, 2.0)
+        terminal.write(b"\x03")
+        interrupted = bool(_wait_for(terminal, b"> ", timeout=20))
+
+        report = (
+            f"#1721 console state: at the prompt, standard input redirected "
+            f"{at_prompt[0]}, ENABLE_PROCESSED_INPUT {at_prompt[1]}; during "
+            f"a foreground program, standard input redirected "
+            f"{in_foreground[0]}, ENABLE_PROCESSED_INPUT {in_foreground[1]}; "
+            f"0x03 ended the running program: {interrupted}"
+        )
+        print(report)
+        warnings.warn(report, stacklevel=1)
         assert terminal.poll() is None, "the shell must survive the interrupt"
     finally:
         terminal.close()
