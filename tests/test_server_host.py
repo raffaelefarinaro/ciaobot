@@ -280,17 +280,43 @@ _FOLDER_USAGE_KEYS = {
     "NSDownloadsFolderUsageDescription": "Downloads",
 }
 
-def _record_uid(record: Path) -> Callable[[], int]:
-    """A uid seam that answers with the ownership record's real owner.
+def _record_stat(
+    record: Path, *, uid: int | None = None, mode: int = 0o600
+) -> Callable[[str | os.PathLike[str]], os.stat_result]:
+    """An ``lstat`` that gives the ownership record the simulated macOS owner and mode.
 
-    The reader compares the record's ``st_uid`` with this user's uid on macOS,
-    and ``os.getuid`` does not exist on Windows, where this test still runs
-    (it fakes the platform, and the reader then takes the macOS branch).
-    Reading the record's own ``st_uid`` keeps the comparison genuine on both:
-    the real uid on macOS, and ``0`` on Windows, which is what the test's own
-    record is owned by there.
+    The reader's owner/mode half is macOS-only in production, and these tests
+    fake ``sys.platform`` to exercise it on any host. Two facts a real file
+    cannot supply off macOS: ``os.getuid`` does not exist on Windows, and
+    ``os.chmod`` cannot make POSIX owner-only bits there (``st_mode`` reports
+    ``0o666``). This wrapper answers for the record path only - preserving the
+    real file type, device and inode, size and timestamps, which the reader
+    compares against the open descriptor and the record's bytes - and
+    substitutes the owner and permission bits the simulated macOS expects.
+    Every other path is delegated to the real ``lstat``.
     """
-    return lambda: record.stat().st_uid
+    real_lstat = os.lstat
+
+    def lstat(path: str | os.PathLike[str]) -> os.stat_result:
+        info = real_lstat(path)
+        if Path(path) != record:
+            return info
+        return os.stat_result(
+            (
+                (info.st_mode & 0o170000) | mode,
+                info.st_ino,
+                info.st_dev,
+                info.st_nlink,
+                info.st_uid if uid is None else uid,
+                info.st_gid,
+                info.st_size,
+                info.st_atime,
+                info.st_mtime,
+                info.st_ctime,
+            )
+        )
+
+    return lstat
 
 
 def test_the_host_declares_the_folder_usage_strings() -> None:
@@ -321,11 +347,11 @@ def test_a_bundle_with_the_folder_usage_strings_still_verifies(
     monkeypatch.setattr(sys, "platform", "darwin")
     from ciao import server_host
 
-    # The record reader checks the owner against this user's uid on macOS,
-    # and `os.getuid` does not exist on Windows. The seam is patched to the
-    # uid the record was written with - the record's own owner - so the check
-    # it makes is the one the test means to exercise (and the same isolation
-    # #1666 applied to the service test).
+    # The record reader also checks the owner and the mode on macOS. The
+    # record's own owner is this user on macOS and `0` on Windows, and the
+    # simulated stat supplies owner-only mode, so both checks are the ones the
+    # test means to exercise (the same isolation #1666 applied to the service
+    # test).
 
     bundle = tmp_path / server_host.APP_NAME
     for relative in (
@@ -354,11 +380,51 @@ def test_a_bundle_with_the_folder_usage_strings_still_verifies(
     record = tmp_path / "server-host.json"
     record.write_text(json.dumps(snapshot.to_record()), encoding="utf-8")
     os.chmod(record, 0o600)
-    monkeypatch.setattr(server_host, "_getuid", _record_uid(record))
+    owner = record.stat().st_uid
+    monkeypatch.setattr(server_host, "_getuid", lambda: owner)
+    monkeypatch.setattr(server_host.os, "lstat", _record_stat(record, uid=owner))
     verified = server_host.verify_owned_host(
         bundle, ownership_path=record, runner=_plist_runner()
     )
     assert verified == snapshot
+
+
+def test_the_ownership_record_refuses_a_foreign_owner_on_a_simulated_macos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The synthetic stat must not turn the owner check into a formality: a
+    # record whose simulated owner is not this user is refused, on Windows too.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    from ciao import server_host
+
+    record = tmp_path / "server-host.json"
+    record.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(server_host, "_getuid", lambda: 501)
+    monkeypatch.setattr(server_host.os, "lstat", _record_stat(record, uid=502))
+
+    with pytest.raises(server_host.ServerHostError) as caught:
+        server_host.read_host_ownership(record)
+    assert caught.value.code == server_host.INVALID_OWNERSHIP
+
+
+def test_the_ownership_record_refuses_a_group_readable_mode_on_a_simulated_macos(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ...and neither may it excuse a record that grants group or other access.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    from ciao import server_host
+
+    record = tmp_path / "server-host.json"
+    record.write_text("{}", encoding="utf-8")
+    owner = record.stat().st_uid
+    monkeypatch.setattr(server_host, "_getuid", lambda: owner)
+    monkeypatch.setattr(
+        server_host.os, "lstat", _record_stat(record, uid=owner, mode=0o644)
+    )
+
+    with pytest.raises(server_host.ServerHostError) as caught:
+        server_host.read_host_ownership(record)
+    assert caught.value.code == server_host.INVALID_OWNERSHIP
 
 
 def _plist_runner() -> Any:
