@@ -3,6 +3,7 @@
     <!-- The sections are listed in the sidebar (like Settings' tabs), so the
          header only names where you are: no mode switch, no tab row. -->
     <PaneHeader :page-tag="`Memory · ${SECTION_LABELS[mm.section]}`" @open-sidebar="emit('open-sidebar')" />
+    <MemoryHowItWorks />
 
     <!-- Import conversations (#1029, C5) is a section of its own, not a card
          above the graph: a listing can be hundreds of rows long and the
@@ -393,6 +394,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, toRaw, watch } from 'vue'
 import PaneHeader from './PaneHeader.vue'
 import MemoryGuideBudget from './MemoryGuideBudget.vue'
+import MemoryHowItWorks from './MemoryHowItWorks.vue'
 import MemoryCategoriesPanel from './MemoryCategoriesPanel.vue'
 import ProposalReviewPanel from './ProposalReviewPanel.vue'
 import VaultReviewPanel from './VaultReviewPanel.vue'
