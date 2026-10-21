@@ -8,6 +8,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 - Browser-terminal access (`GET /api/terminal/status`, `POST /api/terminal/unlock`) always requires a signed session, including on loopback. Terminal policy additionally requires the request's exact scheme, hostname and effective port: POST needs a bare `Origin` (no path, query or fragment); GET may use a same-origin page `Referer`, whose path and query are the page's own and are permitted, while a fragment is refused (browsers strip it before sending). Userinfo — including empty userinfo such as `http://@host` — missing/null origins and mismatches are refused. Remote access requires effective HTTPS; plain HTTP is allowed only for a direct loopback peer without proxy headers and a loopback Host. Unlock accepts exactly `{password}` in at most 4096 body bytes (password at most 1024 UTF-8 bytes), checks the password with bounded per-address failures, and returns a 15-minute grant only in a host-only HttpOnly SameSite=Strict cookie (`Secure` over HTTPS). No bearer appears in JSON. Responses are `no-store`. These routes launch no shell; session and stream integration are separate.
 - The terminal routes answer with two different envelopes, and a client must not assume one of them. A refusal from the terminal's own policy is `{"ok": false, "reason": ..., "error": ...}`; a refusal from the ordinary `AuthMiddleware` origin check — which runs first on a state-changing request and can answer before the terminal handler is reached at all — is `{"error": "forbidden origin"}`, with no `reason` key. The terminal's policy is intentionally stricter than the app's general rule (it also refuses userinfo and a non-bare `Origin`), so the two are not expected to accept the same set of requests.
+- The browser terminal's session routes (`GET`/`POST /api/terminal/sessions`, `DELETE /api/terminal/sessions/{session_id}`) carry the same door, in the same order: the terminal policy, then the signed session, then a fresh grant. A request that is not this engine's own page never has its body read, and a browser that has not unlocked the terminal never reaches a session — no grant is `403 locked` on all three routes. They name a *target*, never a folder and never a command: exactly one of `chat_id` or `project_id`, and the folder comes from the engine's own resolution. Every response is `no-store`, and a session record carries no output bytes and no connection id.
 
 - Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is required, except from a browser on the host: loopback TCP peer with no reverse-proxy headers, loopback `Host`, exact same-origin `Origin`/`Referer` - the session is still required; `tailscale serve` callers are not the host). A change re-keys the session signer: every other device is signed out, and only the browser that made the change gets a new cookie. A successful change also ends **every** terminal grant, on every browser, and clears the `ciao_terminal` cookie: the password is the terminal's own credential, so every browser has to unlock the terminal again with the new password — including the browser that made the change. A refused change (a missing or wrong current password, a too-short new password) ends no grant and clears no terminal cookie. A missing current password is 400 `current_password_required`, a wrong one 403 `wrong_current_password`; neither is 401, which is reserved for a missing session. After 5 wrong current passwords from one client IP within 15 minutes, further changes from that IP are 429 `rate_limited` (even with the right password) until the window passes; a successful change clears the count, a missing current password does not count, and host browsers, which send no current password, are never limited. A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login or the login page's *Sign in on this computer*.
 - `POST /api/auth` accepts `{"token": "<PWA_AUTH_TOKEN>"}` and returns an HttpOnly `ciao_session` cookie.
@@ -84,6 +85,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/host/terminal` | Can this browser open a terminal on the engine's machine: {available, platform, reason, terminal, actions}; a non-host browser (wrong peer, wrong `Host`, or a browser origin that is not this engine's exact origin) gets available:false, reason:"not_on_host" |
 | GET | `/api/terminal/status` | Signed session + terminal origin/transport policy; returns {available, reason, platform, host, unlock_expires_in, detached_ttl_seconds}. Status grants nothing and includes no credential. |
 | POST | `/api/terminal/unlock` | Browser password re-entry: exactly {password}; 200 {ok:true, expires_in:900} plus HttpOnly grant cookie; 400 malformed body, 401 unsigned session, 403 policy/wrong password, 413 body over cap, 429 rate limit or grant capacity. Never launches a shell. |
+| GET | `/api/terminal/sessions?chat_id=` \| `?project_id=` | The terminal sessions opened for exactly one target: {sessions:[info]}. `info` is {session_id, folder, cols, rows, seq, attached, exited, exit_code} — no output bytes and no connection id. Exactly one of `chat_id`/`project_id` must be named (400 otherwise), and an unknown target is a 404. |
+| POST | `/api/terminal/sessions` | Open a shell for one target: exactly {"chat_id"} or exactly {"project_id"}; 200 {session:info}. The body never names a folder or a command — the folder comes from the engine's own resolution, and the window from the manager. 400 bad_request (a body that is not exactly one target, or a target that names nothing), 403 locked (the browser has not unlocked the terminal), 404 not_found, 409 capacity (the manager is full) or folder_missing, 500 spawn_failed. |
+| DELETE | `/api/terminal/sessions/{session_id}` | End a session: the shell is closed and the record removed; 200 {ok:true}. 400 bad_request (not a session id), 404 not_found, 409 closed. |
 | POST | `/api/host/terminal` | Open a terminal on the engine's machine: {"action": <id>} runs one allowlisted command, {"open":"folder", chat_id?\|project_id?} opens the chat's code-mode worktree, the project repo or the workspace agent root; 200 {ok, platform, launched}; 403 not_on_host; 409 unavailable_headless / no_terminal_found / unsupported_platform / folder_missing / not_applicable (an update action when the provider is not older than the tested version); 400 unknown_action |
 | GET | `/api/welcome` | Is the one-time welcome card pending: {pending:false}, or {pending:true, workspace_root, provider, provider_label, on_host, platform}; never carries the password; `Cache-Control: no-store` |
 | GET | `/api/welcome/password` | {password} while the welcome marker exists and this is a host browser (loopback peer, local `Host`, exact same-origin `Origin`); 403 {reason:"not_on_host"} otherwise, 404 when nothing is pending; `Cache-Control: no-store` |
@@ -313,6 +317,41 @@ curl -sS -c /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/auth" 
 ```
 
 Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer host-match check is skipped when those headers are absent, so plain curl works.
+
+**Browser terminal sessions**
+
+`/api/terminal/sessions` opens, lists and ends the shells the browser terminal runs. The three routes carry the terminal's own door: the request must declare this engine's exact `Origin` (a `curl` sends it explicitly — the terminal's policy, unlike the app's, refuses a request that declares no source at all), it must carry the signed session cookie, and it must carry a live terminal grant. The grant comes from `POST /api/terminal/unlock`, which asks for the terminal's own password and leaves its cookie in the same jar; without it every one of the three routes answers `403 locked`.
+
+The body and the query name a *target*, never a folder and never a command: exactly one of `chat_id` or `project_id`, and the engine resolves the folder itself. A record answers `{session_id, folder, cols, rows, seq, attached, exited, exit_code}` — no output bytes and no connection id.
+
+```bash
+# Unlock the terminal (its own password, not the dashboard one). The grant
+# cookie lands in the jar next to the session cookie.
+curl -sS -c /tmp/ciao.jar -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/terminal/unlock" \
+  -H "origin: http://localhost:${PWA_PORT:-8443}" \
+  -H 'content-type: application/json' \
+  -d "{\"password\":\"$TERMINAL_PASSWORD\"}"
+
+# The sessions opened for one chat, and the ones opened for one project.
+curl -sS -b /tmp/ciao.jar \
+  "http://localhost:${PWA_PORT:-8443}/api/terminal/sessions?chat_id=$CHAT_ID"
+curl -sS -b /tmp/ciao.jar \
+  "http://localhost:${PWA_PORT:-8443}/api/terminal/sessions?project_id=$PROJECT_ID"
+
+# Open one. The shell is started in the folder the engine resolves for
+# that target; the window is the manager's own.
+curl -sS -b /tmp/ciao.jar -X POST \
+  "http://localhost:${PWA_PORT:-8443}/api/terminal/sessions" \
+  -H "origin: http://localhost:${PWA_PORT:-8443}" \
+  -H 'content-type: application/json' \
+  -d "{\"chat_id\":\"$CHAT_ID\"}"
+
+# End it: the shell is closed and the record removed. A second end is a 404.
+curl -sS -b /tmp/ciao.jar -X DELETE \
+  "http://localhost:${PWA_PORT:-8443}/api/terminal/sessions/$SESSION_ID" \
+  -H "origin: http://localhost:${PWA_PORT:-8443}"
+```
 
 **Vault note review**
 
