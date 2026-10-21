@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
@@ -3059,28 +3060,176 @@ class ProjectChatManager:
             "project": project.to_dict() if project else None,
         }
 
-    def delete_project(self, project_id: str) -> bool:
+    def _remove_project_vault_entry(self, project: ProjectInfo) -> dict[str, Any]:
+        """Remove a vault-backed project's folder, cleaning the links into it.
+
+        The folder under ``projects/active/<stem>/`` goes from disk, and the
+        inbound links to its notes are dissolved first, so nothing is left
+        pointing at a note that no longer exists. A failure leaves the project
+        row in place and rolls the staged link cleanup back, so the delete can
+        be retried instead of the project being half-gone.
+
+        Returns the cleanup report: ``{vault_entry_removed, removed_notes,
+        removed_files, edited_backlinks}``.
+        """
+        report: dict[str, Any] = {
+            "vault_entry_removed": False,
+            "removed_notes": 0,
+            "removed_files": 0,
+            "edited_backlinks": [],
+        }
+        vault_folder = project.vault_folder or ""
+        if not chat_service._VAULT_FOLDER_RE.fullmatch(vault_folder):
+            raise ValueError(f"Invalid vault_folder {vault_folder!r} stored on project.")
+        if not self._is_known_workspace(project.workspace):
+            raise ValueError(f"Unknown workspace {project.workspace!r}.")
+
+        active_root = self._vault_active_root(project.workspace).resolve()
+        raw_entry = active_root / vault_folder
+        entry = raw_entry.resolve()
+        # Refuse to act if the resolved path escapes the active root (a
+        # symlink pointing out of the projects tree), the same shape
+        # `complete_project` uses.
+        if not entry.is_relative_to(active_root):
+            raise ValueError(
+                f"vault_folder {vault_folder!r} resolves outside the projects tree."
+            )
+        if raw_entry.is_symlink():
+            # A symlink is never followed: the delete is about one folder, and
+            # a link is a name that points somewhere else.
+            raise ValueError(f"Project folder {str(raw_entry)!r} is a symlink.")
+        if not entry.exists():
+            # Already gone: the row can still go, and the report says no entry
+            # was removed.
+            return report
+        if not entry.is_dir():
+            raise ValueError(f"Project folder {str(entry)!r} is not a directory.")
+
+        # The note ids the vault scan renders are the prefix plus the
+        # vault-relative path, so the scan target that owns this folder also
+        # owns the ids. Guessing a prefix would strip the links of the wrong
+        # vault (or none), so an unmatched folder is refused.
+        target_root: Path | None = None
+        prefix: Path | None = None
+        for candidate_root, _name, candidate_prefix in self._config.vault_scan_targets():
+            root = Path(candidate_root).expanduser().resolve()
+            if entry.is_relative_to(root):
+                target_root = root
+                prefix = Path(candidate_prefix)
+                break
+        if target_root is None or prefix is None:
+            raise ValueError(
+                f"Project folder {str(entry)!r} is not inside a scanned vault."
+            )
+
+        notes = sorted(entry.rglob("*.md"))
+        deleted_paths = [
+            f"{prefix.as_posix()}/{note.relative_to(target_root).as_posix()}"
+            for note in notes
+        ]
+        # Counted before the cleanup, so the report describes the folder the
+        # user had, not what the staging left behind.
+        files = [p for p in entry.rglob("*") if p.is_file()]
+
+        # Probe the parent directory before any note is rewritten: an
+        # unwritable folder used to fail only at the final removal, by which
+        # point every live link to the notes had been dissolved.
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=entry.parent, prefix=".ciao-delete-", suffix=".probe"
+            ):
+                pass
+        except OSError as exc:
+            raise ValueError(f"delete failed: {exc}") from exc
+
+        from ciao.vault_index import strip_references_many
+
+        # The cleanup is staged and committed before the folder goes, so a
+        # removal that fails has to put the rewritten notes back: otherwise
+        # the links stay dissolved while the notes they named are still on
+        # disk, and the user sees a delete that half-happened.
+        undo: dict[str, str] = {}
+        try:
+            edited = strip_references_many(
+                target_root, deleted_paths, path_prefix=prefix, undo=undo
+            )
+        except OSError as exc:
+            raise ValueError(f"backlink cleanup failed: {exc}") from exc
+
+        try:
+            shutil.rmtree(entry)
+        except OSError as exc:
+            # Roll the staged link cleanup back, so the vault is exactly as it
+            # was: the folder is still there, and so are the links into it.
+            for path, text in undo.items():
+                Path(path).write_text(text, encoding="utf-8", newline="")
+            raise ValueError(f"delete failed: {exc}") from exc
+
+        report["vault_entry_removed"] = True
+        report["removed_notes"] = len(notes)
+        report["removed_files"] = len(files)
+        report["edited_backlinks"] = edited
+        return report
+
+    def delete_project(
+        self, project_id: str, *, delete_vault: bool = False
+    ) -> dict[str, Any]:
+        """Delete a project, optionally with the vault entry that backs it.
+
+        Without ``delete_vault`` a vault-backed project is refused: deleting
+        the row alone would be undone by auto-discovery on the next
+        ``list_projects()`` call. The default stays guarded so an agent
+        (through the control plane or MCP) cannot silently ``rmtree`` a
+        folder of memory; the PWA passes the flag because the user confirmed
+        it in a dialog.
+
+        With ``delete_vault`` the folder under ``projects/active/<stem>/`` is
+        removed and the inbound links to its notes are cleaned, BEFORE the
+        row goes. That order matters: a failed filesystem step leaves the
+        project row intact and retryable (and rolls the link cleanup back),
+        and a removed folder can never be re-discovered as a fresh project.
+
+        Returns ``{deleted, vault_entry_removed, removed_notes, removed_files,
+        edited_backlinks}``.
+        """
         project = self._projects.get(project_id)
         if project is None:
-            return False
+            return {
+                "deleted": False,
+                "vault_entry_removed": False,
+                "removed_notes": 0,
+                "removed_files": 0,
+                "edited_backlinks": [],
+            }
         if project.is_auto or project.kind == "memory":
             raise ValueError(
                 f"The {project.name} project is auto-managed and cannot be deleted."
             )
+        report: dict[str, Any] = {
+            "vault_entry_removed": False,
+            "removed_notes": 0,
+            "removed_files": 0,
+            "edited_backlinks": [],
+        }
         if project.vault_folder:
-            # Block deletion of vault-backed projects: auto-discovery would be
-            # immediately re-create them on the next list_projects() call,
-            # leaving the user with a project that won't stay deleted.
-            # Use complete_project to move the vault entry to completed/, or
-            # remove the vault entry directly and refresh.
-            ws_root = self._display_path(self._vault_active_root(project.workspace))
-            raise ValueError(
-                f"Project '{project.name}' is backed by vault entry "
-                f"'{project.vault_folder}'. Use Complete to move it to "
-                f"completed/, or remove {ws_root}/"
-                f"{project.vault_folder} (folder or .md) and refresh."
-            )
-        return self._remove_project(project_id)
+            if not delete_vault:
+                # Block deletion of vault-backed projects: auto-discovery would
+                # immediately re-create them on the next list_projects() call,
+                # leaving the user with a project that won't stay deleted.
+                # The in-app Delete removes the entry; Complete moves it to
+                # completed/ instead.
+                ws_root = self._display_path(self._vault_active_root(project.workspace))
+                raise ValueError(
+                    f"Project '{project.name}' is backed by vault entry "
+                    f"'{project.vault_folder}'. Use Delete to remove the entry "
+                    f"and the project, or Complete to move it to completed/ "
+                    f"({ws_root}/{project.vault_folder})."
+                )
+            # The entry goes first: a failure here raises and leaves the row
+            # in place, so the delete can be retried.
+            report.update(self._remove_project_vault_entry(project))
+        deleted = self._remove_project(project_id)
+        return {"deleted": deleted, **report}
 
     def _remove_project(self, project_id: str) -> bool:
         """Internal removal: pops the project, archives its chats, persists,
