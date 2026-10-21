@@ -158,7 +158,8 @@ function careLabel(row: ProposalHistoryRow): string {
 function predictionLine(row: ProposalHistoryRow): string {
   const p = row.prediction
   if (!p) return ''
-  return `Predicted ${p.verdict}, ${row.action}`
+  const decided = row.action === 'accepted' ? 'accepted' : 'dismissed'
+  return `Predicted ${p.verdict}, ${decided}`
 }
 
 function predictionBadge(row: ProposalHistoryRow): { cls: string; text: string } {

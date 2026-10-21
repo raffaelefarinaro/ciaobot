@@ -99,7 +99,8 @@ from ciao.schedules import (
     was_dispatched_since,
 )
 from ciao.setup_status import setup_status
-from ciao.cli import _auth_command_for_provider, _trusted_registry
+from ciao.cli import _auth_command_for_provider
+from ciao.install_discovery import trusted_registry
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_index import (
     Entry,
@@ -8117,7 +8118,7 @@ async def proposals_handover(request: Request) -> JSONResponse:
     # The same check the unattended run's gate makes: only the installed service
     # definition is trusted, so a Linux/systemd install cannot act at all.
     trusted = await asyncio.to_thread(
-        _trusted_registry, workspace, Path(config.workspace_vault_root(workspace))
+        trusted_registry, workspace, Path(config.workspace_vault_root(workspace))
     )
     return JSONResponse(
         {

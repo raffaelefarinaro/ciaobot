@@ -1909,7 +1909,7 @@ def test_proposals_handover_reports_whether_acting_is_available(
 ) -> None:
     config = _config(tmp_path)
     client = _client(config)
-    monkeypatch.setattr("ciao.web.routes_api._trusted_registry", lambda name, vault: None)
+    monkeypatch.setattr("ciao.web.routes_api.trusted_registry", lambda name, vault: None)
     body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
     assert body["acting_available"] is False
 
@@ -1919,7 +1919,7 @@ def test_proposals_handover_reports_whether_acting_is_available(
         seen.append((name, vault))
         return config
 
-    monkeypatch.setattr("ciao.web.routes_api._trusted_registry", trusted)
+    monkeypatch.setattr("ciao.web.routes_api.trusted_registry", trusted)
     body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
     assert body["acting_available"] is True
     assert seen == [("personal", config.workspace_vault_root("personal"))]

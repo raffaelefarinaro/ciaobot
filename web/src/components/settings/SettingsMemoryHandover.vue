@@ -31,9 +31,8 @@
       </p>
 
       <p v-if="!data.acting_available" class="handover-note" role="status">
-        Handover cannot act on this install: the nightly run only trusts the installed service
-        definition, which this install does not have. Your choice is kept, but Workspace care
-        will keep predicting only.
+        Handover cannot act on this install: there is no installed service that registers this
+        workspace at this vault. Your choice is kept; Workspace care keeps predicting only.
       </p>
 
       <div class="handover-evidence">
@@ -54,9 +53,7 @@
           </p>
         </template>
         <p v-if="data.agreement.suggest_handover" class="handover-line" role="status">
-          Workspace care has matched your decision {{ data.agreement.matched }} of
-          {{ data.agreement.decided }} times ({{ percent }}%). You could let it dismiss suggestions
-          it predicts you'd dismiss.
+          You could let it dismiss suggestions it predicts you'd dismiss.
         </p>
         <button type="button" class="set-link set-link--quiet" :disabled="loading" @click="load()">
           {{ loading ? 'Refreshing...' : 'Refresh' }}
@@ -75,7 +72,7 @@
             name="memory-handover"
             :value="option.value"
             :checked="selected === option.value"
-            :disabled="saving || !data.acting_available"
+            :disabled="saving || (option.value !== 'off' && !data.acting_available)"
             @change="choose(option.value)"
           />
           <span class="handover-option-text">
@@ -172,7 +169,7 @@ async function choose(value: MemoryHandover): Promise<void> {
   saving.value = true
   try {
     await projectStore.updateWorkspace(name, { memory_handover: value })
-    saving.value = false
+    saving.value = false // load() only adopts the saved value while not saving
     await load()
   } catch (e) {
     saveError.value = apiErrorMessage(e, 'The setting could not be saved.')

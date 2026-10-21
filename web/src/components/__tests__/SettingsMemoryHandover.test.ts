@@ -96,7 +96,8 @@ describe('SettingsMemoryHandover', () => {
   it('shows the suggestion only when the server says so, and never saves on its own', async () => {
     apiGet.mockResolvedValue(response({}, { decided: 20, matched: 20, rate: 1, suggest_handover: true }))
     const view = await mountCard()
-    expect(view.text()).toContain('matched your decision 20 of 20 times (100%)')
+    expect(view.text()).toContain('You could let it dismiss suggestions it predicts')
+    expect(view.text()).not.toContain('matched your decision')
     expect(projectStore.updateWorkspace).not.toHaveBeenCalled()
     expect(apiPatch).not.toHaveBeenCalled()
     expect(radio(view, 'off').element).toHaveProperty('checked', true)
@@ -144,9 +145,14 @@ describe('SettingsMemoryHandover', () => {
     apiGet.mockResolvedValue(response({ acting_available: false, handover: 'dismiss' }))
     const view = await mountCard()
     expect(view.text()).toContain('cannot act on this install')
-    for (const value of ['off', 'dismiss', 'all']) {
-      expect(radio(view, value).attributes('disabled')).toBeDefined()
-    }
+    expect(view.text()).toContain('no installed service that registers this workspace at this vault')
+    // Off stays reachable so a saved dismiss/all can always be turned back off.
+    expect(radio(view, 'off').attributes('disabled')).toBeUndefined()
+    expect(radio(view, 'dismiss').attributes('disabled')).toBeDefined()
+    expect(radio(view, 'all').attributes('disabled')).toBeDefined()
+    await radio(view, 'off').setValue(true)
+    await flushPromises()
+    expect(projectStore.updateWorkspace).toHaveBeenCalledWith('personal', { memory_handover: 'off' })
     expect(view.text()).toContain('No decisions with a prediction yet')
   })
 

@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 
 from ciao import dev, gws_wrapper, package_smoke, proposal_kinds, public_release, release, service_backend
+from ciao.install_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
     EXIT_TIMEOUT_SECONDS,
@@ -5041,7 +5042,7 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     # Not written under the queue lock: the PWA writes the region and then takes
     # the queue lock, and the region write takes the guide lock. The guide comes
     # from the installed registry the gate just verified, not from --workspace.
-    trusted = _trusted_registry(name, vault)
+    trusted = trusted_registry(name, vault)
     if trusted is None or name is None:
         print("handover refused: the installed registry changed underneath", file=sys.stderr)
         return 1
@@ -5385,44 +5386,6 @@ def _workspace_handover(workspace: Path, name: str | None) -> str:
     return handover
 
 
-def _trusted_registry(name: str | None, vault: Path) -> CiaoConfig | None:
-    """The installed engine's registry, if it registers *name* at exactly *vault*.
-
-    The handover gate decides what an unattended agent may write into the
-    always-loaded regions, so it must not read a registry the agent can name.
-    ``--workspace``, ``CIAO_WORKSPACE`` and ``CIAO_RUNTIME_ROOT`` are caller
-    inputs and are dropped here: the install comes only from the service
-    definition (:func:`ciao.install_discovery.discover_workspace`), and nothing
-    is guessed when there is none. ``None`` when no install is found, the name
-    is not registered there, or the registered vault is not the one in hand.
-    """
-    if name is None:
-        return None
-    from ciao.config import CiaoConfig, installed_workspace_env
-    from ciao.install_discovery import discover_workspace
-
-    base = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in ("CIAO_WORKSPACE", "CIAO_RUNTIME_ROOT")
-    }
-    installed = discover_workspace(base)
-    if installed is None:
-        return None
-    # A placeholder keeps a read-only resolution from minting a session secret.
-    env_source = installed_workspace_env({**base, "CIAO_WORKSPACE": str(installed)})
-    if not env_source.get("PWA_AUTH_TOKEN", "").strip():
-        env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
-    config = CiaoConfig.from_env(env_source)
-    if config.workspace(name) is None:
-        return None
-    try:
-        registered_vault = Path(config.workspace_vault_root(name)).resolve()
-    except (OSError, ValueError):
-        return None
-    return config if registered_vault == vault.resolve() else None
-
-
 def _proposal_needle(args: argparse.Namespace) -> str | None:
     """The proposal text or substring from the argument or ``--text-file``.
 
@@ -5517,7 +5480,7 @@ def _handover_gate(
     if bullet.decider == "you":
         return "the row is marked decide: you"
     # The queue lives at <vault>/Workspace/Memory-Proposals.md.
-    trusted = _trusted_registry(name, queue.parent.parent)
+    trusted = trusted_registry(name, queue.parent.parent)
     if trusted is None:
         return "the installed engine does not register this workspace at this vault"
     registered = trusted.workspace(name or "")

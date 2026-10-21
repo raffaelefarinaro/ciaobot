@@ -2028,14 +2028,6 @@ export interface ProposalDismissOlderResponse {
 /** Who made the decision: through the app, the curation agent, or on its own. */
 export type ProposalHistoryVia = 'pwa' | 'agent' | 'auto' | ''
 
-/**
- * One decided proposal from `GET /api/proposals/history`. Read side of the
- * per-workspace decision sidecar `record_dismissal`/`record_promotion` write
- * in `ciao/memory_proposals.py`. `outcome` qualifies `action`: an "accepted"
- * row with `outcome: "duplicate"` or `"suppressed"` was recognized as already
- * known rather than freshly written, and `"swept"` marks an expiry dismissal.
- * Legacy sidecar rows predate `ts`/`via` and surface with both blank.
- */
 export type MemoryHandover = 'off' | 'dismiss' | 'all'
 
 export interface ProposalPrediction {
@@ -2068,6 +2060,14 @@ export interface HandoverResponse {
   agreement: HandoverAgreement
 }
 
+/**
+ * One decided proposal from `GET /api/proposals/history`. Read side of the
+ * per-workspace decision sidecar `record_dismissal`/`record_promotion` write
+ * in `ciao/memory_proposals.py`. `outcome` qualifies `action`: an "accepted"
+ * row with `outcome: "duplicate"` or `"suppressed"` was recognized as already
+ * known rather than freshly written, and `"swept"` marks an expiry dismissal.
+ * Legacy sidecar rows predate `ts`/`via` and surface with both blank.
+ */
 export interface ProposalHistoryRow {
   id: string
   ts: string
