@@ -123,6 +123,12 @@ describe('InjectedPromptCard', () => {
 
     await wrapper.get('.injected-card-toggle').trigger('click')
     expect(wrapper.get('.injected-card-toggle').attributes('aria-expanded')).toBe('true')
+    // The note is duration-free and adds what the header does not: the same
+    // card has to read correctly while the attempt runs, after it settles and
+    // after it failed, because a reloaded turn keeps the same copy.
+    expect(wrapper.get('.injected-card-note').text()).toBe(
+      'The request above was sent again unchanged.',
+    )
     const details = wrapper.get('details.injected-card-original')
     expect(wrapper.get('details.injected-card-original summary').text()).toBe('Show original request')
     // The disclosure starts closed, and the native element is the control, so

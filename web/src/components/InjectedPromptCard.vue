@@ -163,7 +163,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
            away. The generic full-prompt toggle stays out: it would show the
            same words a second time. -->
       <template v-else-if="prompt.kind === 'retry'">
-        <p class="injected-card-note">The same request is running again as a new attempt.</p>
+        <p class="injected-card-note">The request above was sent again unchanged.</p>
         <details class="injected-card-original">
           <summary>Show original request</summary>
           <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->

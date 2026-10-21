@@ -1,5 +1,6 @@
 // Parses user turns the engine wrote into a chat (wakes, automation runs,
-// resumes, webhooks, update tasks) into typed records for InjectedPromptCard.
+// resumes, webhooks, update tasks) and the retries the user asked for into
+// typed records for InjectedPromptCard.
 // Pure: no state and no Vue imports. The formats mirror the Python builders
 // named next to each pattern; change them together.
 import type { TurnOrigin } from './types'

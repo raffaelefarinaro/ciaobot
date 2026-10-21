@@ -977,6 +977,36 @@ describe('ChatPanel retry turn rendering', () => {
     localStorage.clear()
   })
 
+  it('draws the live optimistic retry as the same notice, not a second bubble', async () => {
+    // While the retry streams, the store's own bubble already carries the
+    // origin and a send id. The transcript must show the notice once and no
+    // duplicate user bubble for the same turn.
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      {
+        role: 'user',
+        content: ORIGINAL,
+        timestamp: '2026-08-08T15:51:00Z',
+        turn_index: 0,
+      },
+      {
+        role: 'user',
+        content: ORIGINAL,
+        timestamp: '2026-08-08T15:52:00Z',
+        turn_index: 1,
+        origin: 'retry',
+        send_id: 'send-retry-live',
+      },
+    ]
+    await flushPromises()
+
+    expect(wrapper.findAll('.injected-card--retry')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('send-retry-live')
+    const bubbles = wrapper.findAll('.message-wrap.user')
+    expect(bubbles).toHaveLength(1)
+    expect(bubbles[0].text()).toContain(ORIGINAL)
+  })
+
   it('draws a persisted retry turn as a notice and keeps the request in one bubble', async () => {
     const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
