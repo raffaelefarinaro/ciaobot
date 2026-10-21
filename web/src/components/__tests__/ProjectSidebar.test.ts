@@ -891,14 +891,43 @@ describe('ProjectSidebar accessible context menus', () => {
     store.chats[0].repo_location = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
   }
 
-  it('lets the branch chip stand in for code when both apply', async () => {
+  it('shows only the code badge when code mode and a worktree both apply', async () => {
     worktreeChat(true)
     const wrapper = await mountSidebar()
     await flushPromises()
-    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
+    const code = wrapper.get('.chat-code-tag')
+    expect(code.text()).toBe('code')
+    expect(code.attributes('title')).toContain('feat-x')
+    expect(code.attributes('title')).toContain('/r/app-wt')
+    expect(code.attributes('aria-label')).toContain('feat-x')
+    expect(code.attributes('aria-label')).toContain('/r/app-wt')
+    expect(wrapper.find('.chat-repo-tag').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the dimmed branch tag when code mode is off', async () => {
+    worktreeChat(false)
+    const wrapper = await mountSidebar()
+    await flushPromises()
     const chip = wrapper.get('.chat-repo-tag')
-    expect(chip.attributes('title')).toBe('Code mode · Worktree: /r/app-wt')
-    expect(chip.classes()).not.toContain('chat-repo-tag--code-off')
+    expect(chip.text()).toBe('⑂ feat-x')
+    expect(chip.classes()).toContain('chat-repo-tag--code-off')
+    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the repository facts in the row title, where a hidden badge cannot hide them', async () => {
+    worktreeChat(true)
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    const badge = wrapper.get('.chat-code-tag')
+    // A fine pointer hides the row's marks while its actions show, so the
+    // facts the badge carries live in the row's own title too.
+    expect(wrapper.find('.chat-code-tag').exists()).toBe(true)
+    expect(wrapper.get('.chat-item').attributes('title'))
+      .toBe(`Menu chat\nDrag to move to another project\n${badge.attributes('title')}`)
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('feat-x')
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('/r/app-wt')
     wrapper.unmount()
   })
 
