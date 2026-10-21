@@ -46,8 +46,8 @@
             <li>The pass is a chat of its own. Open it from Home to read it or steer it.</li>
             <li>Facts it is sure of are written straight away.</li>
             <li>Facts it is unsure of wait in To decide.</li>
-            <li>Each night, Workspace care settles what it can.</li>
-            <li>Each week, it also re-checks old notes, tidies the vault and reviews your guide. It only suggests; it never edits the guide.</li>
+            <li>Each night, Workspace care settles what it can and re-checks notes that have gone too long without a check.</li>
+            <li>Each week, it also tidies the vault, reviews your guide and distills your decisions into rules. It only suggests; it never edits the guide.</li>
           </ol>
 
           <h3 class="mhw-sub">What is not saved</h3>
@@ -59,7 +59,7 @@
           </ul>
 
           <h3 class="mhw-sub">Who decides each tag</h3>
-          <p class="mhw-intro">Every suggestion has a tag. A suggestion marked Needs you is always yours, whatever its tag.</p>
+          <p class="mhw-intro">Every suggestion has a tag. Nightly leaves a suggestion for you when it is marked decide: you, or when it could not settle it.</p>
           <div class="mhw-table-wrap">
             <table class="mhw-table">
               <caption class="sr-only">Who decides each tag</caption>

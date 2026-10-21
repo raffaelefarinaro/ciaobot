@@ -99,7 +99,7 @@
         </li>
         <li>
           <h3>Open the memory pass if you like</h3>
-          <p>The pass is a chat of its own, in a Memory project the sidebar doesn't list, running on the model you chose in <strong>Settings → Models</strong>. You can open it from Home, read what it did, and answer it or steer it like any other chat.</p>
+          <p>The pass is a chat of its own, in a Memory project the sidebar doesn't list, running on the model you chose in <strong>Settings → Models &amp; providers</strong>. You can open it from Home, read what it did, and answer it or steer it like any other chat.</p>
         </li>
         <li>
           <h3>File what's sure, queue what isn't</h3>
@@ -128,7 +128,7 @@
 
     <section id="tags">
       <h2>Who settles each suggestion</h2>
-      <p>Every suggestion in <strong>To decide</strong> carries a tag. The memory pass also marks each one <em>nightly</em> (more context, such as other chats or notes, would settle it) or <em>you</em> (it is a judgement about your identity or preferences), with a one-line reason. A suggestion marked <strong>Needs you</strong> is always yours, whatever its tag.</p>
+      <p>Every suggestion in <strong>To decide</strong> carries a tag. The memory pass also marks each one <em>nightly</em> (more context, such as other chats or notes, would settle it) or <em>you</em> (it is a judgement about your identity or preferences), with a one-line reason. Nightly leaves a suggestion for you when it is marked decide: you, or when it could not settle it.</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Tag</th><th>What it is</th><th>Who decides</th></tr></thead>
@@ -137,7 +137,7 @@
             <tr><td><code>people</code></td><td>Something about a person</td><td>Workspace care updates that person's note</td></tr>
             <tr><td><code>learnings</code></td><td>A lesson for next time</td><td>Workspace care adds it to the learnings list</td></tr>
             <tr><td><code>review</code></td><td>A question with no home yet</td><td>Workspace care decides what it is. A judgement call becomes a yes/no question for you.</td></tr>
-            <tr><td><code>memory</code></td><td>A rule for every chat</td><td>You. Workspace care records a guess; it acts on it only if you allow it (see Memory handover below).</td></tr>
+            <tr><td><code>memory</code></td><td>A rule for every chat</td><td>You. Workspace care records a guess; it acts on it only if you allow it (see <a href="#nightly">Memory handover</a> below).</td></tr>
             <tr><td><code>profile</code></td><td>About you: identity, style</td><td>You, same as above.</td></tr>
           </tbody>
         </table>
@@ -170,7 +170,7 @@
         <figcaption>Memory → To decide. Nothing about you lands in core memory without evidence or your OK.</figcaption>
       </figure>
       <h3>Review history and undo supported changes</h3>
-      <p><strong>History</strong> records memory decisions and shows before/after details for writes with receipts. <strong>Undo</strong> is available where a reversible receipt exists; older records and some batch entries are view-only. A change the nightly run settled itself reads <em>Filed by Workspace care</em> and can be undone from the row.</p>
+      <p><strong>History</strong> records memory decisions and shows before/after details for writes with receipts. <strong>Undo</strong> is available where a reversible receipt exists; older records and some batch entries are view-only. A memory or profile change that Workspace care applied itself under Memory handover reads <em>Filed by Workspace care</em> (or <em>Dismissed by Workspace care</em>), and an accepted one can be undone from the row.</p>
       <h3>Retire notes without losing them</h3>
       <p>Old or unused notes are flagged for your decision, not automatically deleted. Review the evidence, keep a note, or move it to the retired list. Retired notes remain restorable until you explicitly choose permanent deletion; there is no timed purge.</p>
       <h3>Tell it directly</h3>
@@ -185,9 +185,9 @@
       <ul>
         <li>Files the suggestions tagged <em>project</em>, <em>people</em> and <em>learnings</em>, and decides the <em>review</em> ones. A judgement call comes back to you as a yes/no question.</li>
         <li>For every <em>memory</em> and <em>profile</em> suggestion it records a guess (would you accept or dismiss it?) and leaves the suggestion for you. The guess is never a decision.</li>
-        <li>Leaves anything marked <strong>Needs you</strong> alone.</li>
+        <li>Leaves alone anything marked <em>decide: you</em>, and escalates what it cannot settle.</li>
         <li>Tidies core memory only when a part reaches about 85% of its limit: it merges duplicates, drops expired facts and moves project-only facts into their project. Every line it removes is copied first to <code>Memory-Consolidations.md</code>, the undo log.</li>
-        <li>Re-checks notes that have gone too long without a check, and flags the rest.</li>
+        <li>Re-checks notes, and single facts inside them, that have gone too long without a check, and flags the rest.</li>
       </ul>
       <h3>Memory handover</h3>
       <p><strong>Settings → General → Memory handover</strong> is the one switch that lets it do more for <em>memory</em> and <em>profile</em>, per workspace: <em>Off</em> (guess only), <em>Dismiss</em>, or <em>Dismiss and accept</em>, which lets queued text reach core memory, up to five changes per run, each with Undo in History. The settings card shows how often its guesses matched yours first. It cannot act on installs without a trusted service definition (Linux), and says so.</p>
@@ -205,7 +205,7 @@
       <h2>The weekly pass</h2>
       <p>About once a week the same run also does the slower work. It is review-only where it matters:</p>
       <ul>
-        <li>Re-verifies notes that are going stale, fact by fact.</li>
+        <li>Goes through the notes the vault flags as candidates to retire or merge (unchecked too long, unlinked, possible duplicates) and reports them. It never retires or deletes one.</li>
         <li>Tidies the workspace: rebuilds the search index and fixes dead links and wrong note types.</li>
         <li>Reviews the body of your workspace guide and files suggestions. It never edits the guide itself.</li>
         <li>Reads your recent decisions and updates <code>Memory-Review-Rules.md</code> and <code>Task-Rules.md</code> when there are at least five new ones. A rule that would change a verdict is asked as a yes/no first.</li>
