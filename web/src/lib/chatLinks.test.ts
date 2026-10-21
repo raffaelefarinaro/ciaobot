@@ -80,6 +80,32 @@ describe('linkifyChatIds', () => {
     }
   })
 
+  it('does not mistake a scheme-less query for the mention', () => {
+    for (const text of [
+      'example.com/?to=@chat/chat-0123abcd',
+      '?to=@chat/chat-0123abcd',
+      'x=@chat/chat-0123abcd',
+    ]) {
+      const el = host(linkifyChatIds(`<p>${text}</p>`, KNOWN))
+      expect(el.querySelector('a.chat-link'), text).toBeNull()
+      expect(el.textContent, text).toBe(text)
+    }
+  })
+
+  it('links a mention whose @ opens the token', () => {
+    for (const text of [
+      '@chat/chat-0123abcd',
+      'see (@chat/chat-0123abcd now',
+      'first line\n@chat/chat-0123abcd',
+    ]) {
+      const el = host(linkifyChatIds(`<p>${text}</p>`, KNOWN))
+      expect(
+        el.querySelector('a.chat-link')?.getAttribute('data-chat-id'),
+        text,
+      ).toBe('chat-0123abcd')
+    }
+  })
+
   it('leaves an unknown id plain', () => {
     // Well formed, so only the known-list lookup can keep it plain.
     const html = '<p>chat-ffffffff is not a chat I know</p>'
