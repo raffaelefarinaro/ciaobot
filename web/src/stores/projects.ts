@@ -4783,7 +4783,10 @@ export const useProjectStore = defineStore('projects', () => {
   // the send-out path can promote that exact bubble in place instead of
   // pushing a second copy. It deliberately carries no `turn_index`, which is
   // the invariant the `user_echo` handler relies on to reconcile an
-  // optimistic bubble rather than duplicate the turn.
+  // optimistic bubble rather than duplicate the turn. The promotion stamps
+  // the bubble with the same `send_id` the frame carries, so the echo
+  // recognises the promoted bubble as this send instead of pushing a second
+  // copy of the same turn.
   type PendingUserMessage = ChatMessage & { pendingSend?: true }
   interface DeferredSend { composed: string; images?: string[]; origin?: 'retry' }
   const deferredSends: Record<string, DeferredSend[]> = {}
@@ -4852,11 +4855,17 @@ export const useProjectStore = defineStore('projects', () => {
   // The frame is on the wire (or the send was abandoned): this is an ordinary
   // optimistic bubble now. Clearing the marker keeps a later deferred send
   // from promoting or deleting a bubble that is not its own, and guarantees
-  // no bubble can stay "pending" forever.
-  function settlePendingSendBubble(chatId: string, entry: DeferredSend): boolean {
+  // no bubble can stay "pending" forever. When the frame carried a send id,
+  // the bubble gets it too: the `user_echo` reconciliation matches bubbles by
+  // send id, so a promoted bubble that never learned the id could not be
+  // recognised and the echo pushed a second copy of the same turn. An
+  // abandoned send has no id to stamp, and keeps none.
+  function settlePendingSendBubble(chatId: string, entry: DeferredSend, sendId?: string): boolean {
     const idx = findPendingSendBubble(chatId, entry)
     if (idx === -1) return false
-    delete (messages.value[chatId][idx] as PendingUserMessage).pendingSend
+    const bubble = messages.value[chatId][idx] as PendingUserMessage
+    delete bubble.pendingSend
+    if (sendId) bubble.send_id = sendId
     return true
   }
 
@@ -5038,7 +5047,7 @@ export const useProjectStore = defineStore('projects', () => {
     // in place rather than pushing a second copy. `settlePending…` returns
     // false when a history reload wiped it, in which case we push fresh.
     if (wasDeferred) dropDeferredSend(chatId, deferredEntry)
-    if (!wasDeferred || !settlePendingSendBubble(chatId, deferredEntry)) {
+    if (!wasDeferred || !settlePendingSendBubble(chatId, deferredEntry, sendId)) {
       const msgs = messages.value[chatId] || []
       msgs.push({
         role: 'user',
