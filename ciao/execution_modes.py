@@ -132,6 +132,19 @@ CREDENTIAL_DENY_PATTERNS: tuple[str, ...] = (
     "**/secrets/**",
 )
 
+_CREDENTIAL_DIR_NAMES = frozenset({".runtime", "secrets"})
+
+
+def is_credential_adjacent(path: Path) -> bool:
+    """True when *path* (already resolved) names a credential store: a `.env`
+    file or `.env.*` variant, or anything at any depth under a `.runtime` or
+    `secrets` directory. `Path.match` cannot express this — it is
+    right-anchored and treats `**` as one segment (#1746)."""
+    name = path.name
+    if name == ".env" or name.startswith(".env."):
+        return True
+    return any(part in _CREDENTIAL_DIR_NAMES for part in path.parts)
+
 
 def _runtime_root_patterns(
     runtime_root: object,

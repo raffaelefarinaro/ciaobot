@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ciao.agent_surface import AGENT_TOKEN_ENV, AGENT_URL_ENV
-from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
+from ciao.execution_modes import is_credential_adjacent
 
 #: Top-level words ``ciao.cli.main`` hands to this module unconditionally.
 #: ``run`` and ``gws`` are operator commands too (the server launcher and the
@@ -462,7 +462,7 @@ def _handover_messages(raw: str | None) -> list[dict[str, Any]] | None:
             # `cat` anyway; this path must not make it cheaper.
             candidate = Path(raw[1:]).expanduser()
             resolved = candidate.resolve()
-            if any(resolved.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS):
+            if is_credential_adjacent(resolved):
                 raise UsageError(
                     f"--messages refuses credential-adjacent paths ({raw[1:]}): "
                     "pass the content inline instead."
@@ -498,7 +498,7 @@ def _task_body(raw: str | None, *, flag: str = "--body-file") -> str | None:
         resolved = path.resolve()
     except OSError as exc:
         raise UsageError(f"{flag} cannot be read: {exc}") from exc
-    if any(resolved.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS):
+    if is_credential_adjacent(resolved):
         raise UsageError(
             f"{flag} refuses credential-adjacent paths ({path}): "
             "pass the content in a workspace file instead."

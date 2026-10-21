@@ -1075,3 +1075,24 @@ def test_cli_escalate_refuses_a_credential_adjacent_reason_file(tmp_path: Path, 
         assert rc == 2
         assert "credential" in capsys.readouterr().err
         assert queue.read_bytes() == before
+
+
+def test_cli_dismiss_refuses_a_nested_runtime_or_env_variant_reason_file(
+    tmp_path: Path, capsys
+) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+    before = queue.read_bytes()
+    nested = tmp_path / ".runtime" / "a" / "b" / "file.txt"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("s3cret-token", encoding="utf-8")
+    env_local = tmp_path / ".env.local"
+    env_local.write_text("TOKEN=s3cret", encoding="utf-8")
+
+    for path in (nested, env_local):
+        rc = cli.main(_dismiss_args(tmp_path, vault, "--reason-file", str(path)))
+        assert rc == 2
+        assert "credential" in capsys.readouterr().err
+        assert queue.read_bytes() == before
+        assert _no_sidecar(queue)
