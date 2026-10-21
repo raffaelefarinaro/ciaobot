@@ -47,6 +47,8 @@ from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
 
 if TYPE_CHECKING:
+    import uvicorn
+
     from ciao.provider_service import ProviderService
 
 logger = logging.getLogger(__name__)
@@ -293,6 +295,25 @@ def _bind_or_fail(
     # The port is free, so a record of an earlier bind failure is stale.
     clear_port_in_use()
     return None
+
+
+async def _mark_bound_when_serving(
+    server: "uvicorn.Server",
+    tracker: StartupTracker,
+    *,
+    poll_interval: float = 0.05,
+) -> None:
+    """Finish the bind phase once uvicorn is serving, not when it stops.
+
+    ``Server.started`` is set at the end of ``Server.startup``, after the
+    listening socket is bound and lifespan startup has run. The phase is
+    done at that point, so ``overall_ready`` reflects a running engine. If
+    ``serve()`` ends before that (a bind failure), the caller cancels this
+    watcher and the phase stays in progress.
+    """
+    while not server.started:
+        await asyncio.sleep(max(0.0, poll_interval))
+    tracker.done(BIND_PHASE)
 
 
 def _open_browser_when_ready(url: str) -> None:
@@ -1508,12 +1529,13 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         _shutdown_backup,
     ]
 
+    bind_watch = asyncio.create_task(_mark_bound_when_serving(server, tracker))
     try:
         await server.serve()
     except RestartRequested as exc:
         return int(exc.args[0]) if exc.args else RESTART_EXIT_CODE
-    if server.started:
-        tracker.done(BIND_PHASE)
+    finally:
+        bind_watch.cancel()
     if restart_flag[0] is not None:
         return restart_flag[0]
     return 0
