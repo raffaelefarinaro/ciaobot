@@ -8,6 +8,10 @@ from pathlib import Path
 # in PWA_API.md → Agent recipes. Each entry needs a one-line reason so future
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
+    "/api/terminal/unlock": (
+        "browser-only password re-entry; signed session and exact origin/transport "
+        "policy, grant travels only in an HttpOnly cookie, never a command or path"
+    ),
     "/api/welcome/open-folder": (
         "Home welcome card's Show in Finder; host-only (session + host_browser_request), "
         "opens the workspace root, takes no path"
