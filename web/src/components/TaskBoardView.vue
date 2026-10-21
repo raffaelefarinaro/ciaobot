@@ -46,7 +46,9 @@ import { useModalFocus } from '../composables/useModalFocus'
 import { useProjectStore } from '../stores/projects'
 import { useTaskBoardStore, type TaskChanges } from '../stores/taskBoard'
 import { useTaskSignalsStore } from '../stores/taskSignals'
-import { askConfirm, pendingConfirm } from '../lib/confirm'
+import { askConfirm, askConfirmReason, pendingConfirm } from '../lib/confirm'
+import { cleanReason } from '../lib/decisionReasons'
+import DecisionReason from './DecisionReason.vue'
 import { renderUserMarkdown } from '../lib/safeMarkdown'
 import {
   TASK_DUE_FILTERS,
@@ -801,6 +803,7 @@ async function submitDelegate() {
 async function actOnAttempt(
   task: Task,
   action: 'stop' | 'detach' | 'resume' | 'retry',
+  reason?: string,
 ) {
   // A settled attempt still linked to its task is acted on through its own id,
   // which is the one `live_attempt_id` deliberately does not carry.
@@ -808,9 +811,22 @@ async function actOnAttempt(
   if (!attemptId || busyTaskId.value === task.id) return
   board.clearError()
   busyTaskId.value = task.id
-  await board.attemptAction(workspace.value, task.id, attemptId, action)
+  await board.attemptAction(workspace.value, task.id, attemptId, action, reason)
   busyTaskId.value = ''
   if (board.error) load()
+}
+
+/**
+ * Release a result that is ready for review without approving it, with an
+ * optional reason. The plain Detach stays one click; this is the variant that
+ * asks "why" first (#1730), and the field is skippable.
+ */
+async function rejectResult(task: Task) {
+  const { confirmed, reason } = await askConfirmReason(
+    'Release this result without approving it? The chat and the agent\'s report stay; the task goes back to In progress.',
+    { title: 'Reject result', confirmLabel: 'Reject' },
+  )
+  if (confirmed) await actOnAttempt(task, 'detach', reason)
 }
 
 /**
@@ -1041,6 +1057,7 @@ const resolutionField = ref<HTMLTextAreaElement | null>(null)
 const resolutionMode = ref<ResolutionMode>('complete')
 const resolutionTaskId = ref('')
 const resolutionDraft = ref('')
+const resolutionReason = ref('')
 const resolutionError = ref('')
 const resolutionBusy = ref(false)
 /** The result of the last "Review resolution for learnings", said beside the detail. */
@@ -1072,6 +1089,7 @@ function openResolution(task: Task, mode: ResolutionMode, draft = '') {
   resolutionTaskId.value = task.id
   resolutionMode.value = mode
   resolutionDraft.value = draft
+  resolutionReason.value = ''
   resolutionError.value = ''
   resolutionOpen.value = true
 }
@@ -1099,6 +1117,7 @@ function resetResolution() {
   resolutionOpen.value = false
   resolutionTaskId.value = ''
   resolutionDraft.value = ''
+  resolutionReason.value = ''
   resolutionError.value = ''
 }
 
@@ -1145,7 +1164,10 @@ async function submitResolution() {
     }
     saved = resolutionMode.value === 'edit'
       ? await board.update(workspace.value, task.id, revision, { resolution: text })
-      : await board.complete(workspace.value, task.id, revision, text)
+      : await board.complete(
+        workspace.value, task.id, revision, text,
+        isReviewReady(task) ? cleanReason(resolutionReason.value) : undefined,
+      )
   } finally {
     resolutionBusy.value = false
   }
@@ -1792,16 +1814,16 @@ async function deleteTask() {
   const task = detailTask.value
   if (!task || detailSaving.value) return
   cancelAutosave()
-  const ok = await askConfirm(
+  const { confirmed, reason } = await askConfirmReason(
     `"${task.title}" will be deleted from this workspace. The record is a file in your vault and this unlinks it — there is no trash.`,
     { title: 'Delete task', confirmLabel: 'Delete', destructive: true },
   )
-  if (!ok) return
+  if (!confirmed) return
   const revision = board.revisionOf(task.id)
   if (!revision) return
   board.clearError()
   detailSaving.value = true
-  const removed = await board.remove(workspace.value, task.id, revision)
+  const removed = await board.remove(workspace.value, task.id, revision, reason)
   detailSaving.value = false
   if (removed) void closeDetail({ discard: true })
   // A refused delete is a stale revision or a file already gone; re-read so the
@@ -2651,6 +2673,13 @@ const today = localDateKey()
                 :disabled="detailSaving || board.saving"
                 @click="markDone(detailTask!)"
               >Approve Done</button>
+              <button
+                v-if="detailTask && isReviewReady(detailTask)"
+                type="button"
+                class="btn-chip task-chip"
+                :disabled="detailSaving || board.saving"
+                @click.stop="rejectResult(detailTask!)"
+              >Reject…</button>
               <!-- Deliberately not a second Resume/Retry pair here: this control
                    already opens the preview in the mode the row calls for, and the
                    preview names both ways out. A duplicate that opened a sheet and a
@@ -2757,6 +2786,12 @@ const today = localDateKey()
               :disabled="resolutionBusy"
             ></textarea>
           </div>
+          <DecisionReason
+            v-if="resolutionMode === 'complete' && resolutionTask && isReviewReady(resolutionTask)"
+            id-prefix="task-approve"
+            v-model="resolutionReason"
+            :disabled="resolutionBusy"
+          />
           <div v-if="resolutionError" class="task-action-error" role="alert">
             <span>{{ resolutionError }}</span>
             <button type="button" class="btn-chip task-chip" :disabled="resolutionBusy" @click="refreshResolutionTask">Refresh task</button>

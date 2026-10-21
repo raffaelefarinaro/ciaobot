@@ -1966,3 +1966,36 @@ def test_pass_prompt_requires_a_decider_on_every_queued_item() -> None:
         "identity or preferences",
     ):
         assert phrase in prompt, phrase
+
+
+# ── Review rules (#1745) ──────────────────────────────────────────────────
+
+
+def test_every_prompt_variant_carries_the_fenced_rules_when_present_and_is_unchanged_when_absent(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    chat = _pass_chat(manager)
+    variants = (
+        "",
+        chat_service.TASK_COMPLETION_SOURCE,
+        chat_service.PROJECT_CLOSURE_SOURCE,
+    )
+    baselines = {}
+    for source_kind in variants:
+        chat.helper = {**chat.helper, "source_kind": source_kind}
+        baselines[source_kind] = manager._memory_pass._prompt_for(chat)
+        assert "memory-review-rules" not in baselines[source_kind]
+
+    workspace = manager._memory_pass._workspace_of(chat)
+    vault = Path(manager._config.workspace_vault_root(workspace))
+    (vault / "Workspace").mkdir(parents=True, exist_ok=True)
+    (vault / "Workspace" / "Memory-Review-Rules.md").write_text(
+        "<!-- ciao:rules:start source=0123456789abcdef -->\n- **Drop** one-offs <!-- rule:chip:one-off verdict=drop -->\n<!-- ciao:rules:end -->\n",
+        encoding="utf-8",
+    )
+    for source_kind in variants:
+        chat.helper = {**chat.helper, "source_kind": source_kind}
+        prompt = manager._memory_pass._prompt_for(chat)
+        assert prompt.startswith(baselines[source_kind])
+        assert "<memory-review-rules>\n- **Drop** one-offs" in prompt

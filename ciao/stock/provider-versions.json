@@ -1,15 +1,17 @@
 {
   "schema": 1,
-  "ciaobot": "1.6.0",
-  "recorded": "",
+  "ciaobot": "1.6.1",
+  "recorded": "2026-10-21",
   "providers": {
     "opencode": {
-      "status": "untested",
-      "reason": "not_recorded"
+      "status": "tested",
+      "version": "2.1.2",
+      "package": "@opencode/cli"
     },
     "claude": {
-      "status": "untested",
-      "reason": "not_recorded"
+      "status": "tested",
+      "version": "2.1.306",
+      "source": "claude-agent-sdk 0.2.170"
     }
   }
 }

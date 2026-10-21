@@ -553,6 +553,18 @@ def test_restore_carries_the_claude_ai_connectors_switch(tmp_path):
     assert config.workspaces["work"].claude_ai_connectors is False
 
 
+def test_workspace_archive_restore_resets_memory_handover_to_off(tmp_path):
+    """Handover is deliberately not carried through an archive: a restore fails closed."""
+    client, config, _pcm, _store = _app(tmp_path, rerooted=True)
+    config.workspaces["work"].memory_handover = "all"
+    archived = client.post("/api/workspaces/work/archive").json()["archived"]
+
+    restored = client.post("/api/workspaces/archived/restore", json={"id": archived["id"]})
+
+    assert restored.status_code == 200, restored.json()
+    assert config.workspaces["work"].memory_handover == "off"
+
+
 def test_restore_refuses_a_taken_name(tmp_path):
     client, config, _pcm, _store = _app(tmp_path, rerooted=True)
     archived = client.post("/api/workspaces/work/archive").json()["archived"]

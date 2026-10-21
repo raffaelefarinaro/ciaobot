@@ -941,7 +941,7 @@ describe('talk about it', () => {
     await flushPromises()
 
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss'])
+    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss', 'Why?'])
 
     const store = useProposalsStore()
     const act = vi.spyOn(store, 'act')
@@ -978,7 +978,7 @@ describe('talk about it', () => {
     await flushPromises()
 
     const labels = wrapper.findAll('.pr-actions button').map((b) => b.text())
-    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat'])
+    expect(labels).toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat', 'Why?'])
     await wrapper
       .findAll('.pr-actions button')
       .find((b) => b.text() === 'Open chat')!
@@ -995,7 +995,7 @@ describe('talk about it', () => {
     projects.chats = chats
     await flushPromises()
     expect(reloaded.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat'])
+      .toEqual(['Review', 'Dismiss', 'Edit first', 'Open chat', 'Why?'])
     await testArchiveDropsLink(reloaded)
   })
 
@@ -1005,7 +1005,7 @@ describe('talk about it', () => {
     projects.chats.find((c) => c.chat_id === 'chat-d')!.archived = true
     await flushPromises()
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss'])
+      .toEqual(['Review', 'Dismiss', 'Edit first', 'Discuss', 'Why?'])
     wrapper.unmount()
   }
 })
@@ -1595,6 +1595,238 @@ describe('decision card', () => {
     wrapper.unmount()
   })
 
+  describe('the optional Why field', () => {
+    async function expandWhy(wrapper: ReturnType<typeof mount>) {
+      await wrapper.find('.pr-card-why-toggle').trigger('click')
+      await flushPromises()
+    }
+
+    it('is collapsed and Save posts the same body as before when untouched', async () => {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = await openCard()
+
+      const toggle = wrapper.find('.pr-card-why-toggle')
+      expect(toggle.text()).toBe('Why? (optional)')
+      expect(toggle.attributes('aria-expanded')).toBe('false')
+      expect(wrapper.find('.decision-reason').exists()).toBe(false)
+
+      await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+      await flushPromises()
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', { expected_revision: 'rev-1' })
+      wrapper.unmount()
+    })
+
+    it('sends a chip plus free text as reason on Save', async () => {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = await openCard()
+      await expandWhy(wrapper)
+      expect(wrapper.find('.pr-card-why-toggle').attributes('aria-expanded')).toBe('true')
+
+      const chip = wrapper.findAll('.decision-reason .btn-chip').find(b => b.text() === 'one-off')!
+      await chip.trigger('click')
+      await wrapper.find('.decision-reason textarea').setValue('one-off, only this chat')
+      await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', {
+        expected_revision: 'rev-1',
+        reason: 'one-off, only this chat',
+      })
+      wrapper.unmount()
+    })
+
+    it('sends the reason when Dismiss is clicked from the card', async () => {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = await openCard()
+      await expandWhy(wrapper)
+      await wrapper.find('.decision-reason textarea').setValue('already known')
+
+      const dismiss = wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Dismiss')!
+      await dismiss.trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', { reason: 'already known' })
+      wrapper.unmount()
+    })
+
+    it('sends no reason when Dismiss is clicked from the row without a card', async () => {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+      await flushPromises()
+
+      const dismiss = wrapper.findAll('.pr-row button').find(b => b.text() === 'Dismiss')!
+      await dismiss.trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', {})
+      wrapper.unmount()
+    })
+
+    async function mountRow() {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+      await flushPromises()
+      return wrapper
+    }
+
+    async function typeRowReason(wrapper: ReturnType<typeof mount>, text: string) {
+      const toggle = wrapper.find('.pr-row .pr-row-why')
+      expect(toggle.attributes('aria-expanded')).toBe('false')
+      await toggle.trigger('click')
+      expect(wrapper.find('.pr-row .pr-row-why').attributes('aria-expanded')).toBe('true')
+      await wrapper.find('.pr-row-reason textarea').setValue(text)
+    }
+
+    it('offers Why? on the row and posts the reason with the row Dismiss', async () => {
+      const wrapper = await mountRow()
+      await typeRowReason(wrapper, 'already known')
+
+      await wrapper.findAll('.pr-row button').find(b => b.text() === 'Dismiss')!.trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', { reason: 'already known' })
+      wrapper.unmount()
+    })
+
+    it('posts the reason with the row primary accept', async () => {
+      const wrapper = await mountRow()
+      await typeRowReason(wrapper, 'one-off')
+
+      await wrapper.find('.pr-row .pr-row-accept').trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', {
+        expected_revision: 'rev-1',
+        reason: 'one-off',
+      })
+      wrapper.unmount()
+    })
+
+    it('an untouched row accept posts exactly the revision', async () => {
+      const wrapper = await mountRow()
+
+      await wrapper.find('.pr-row .pr-row-accept').trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', { expected_revision: 'rev-1' })
+      wrapper.unmount()
+    })
+
+    it('a refused row accept does not leak its reason onto a later Dismiss', async () => {
+      const wrapper = await mountRow()
+      await typeRowReason(wrapper, 'one-off')
+      apiPost.mockRejectedValueOnce(new Error('refused'))
+
+      await wrapper.find('.pr-row .pr-row-accept').trigger('click')
+      await flushPromises()
+      apiPost.mockResolvedValue({} as never)
+      await wrapper.findAll('.pr-row button').find(b => b.text() === 'Dismiss')!.trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/row-1/dismiss', {})
+      wrapper.unmount()
+    })
+
+    it('batch accept and dismiss never carry a reason typed on a row', async () => {
+      apiGet.mockImplementation((url: string) => {
+        if (url.startsWith('/api/proposals/history')) return Promise.resolve({ rows: [], total: 0, truncated: false })
+        if (url.startsWith('/api/proposals/row-1/preview')) return Promise.resolve({ ok: true, preview: preview() })
+        return Promise.resolve({ rows: [row(), row({ id: 'row-2', text: 'Another fact' })] })
+      })
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+      await flushPromises()
+      await typeRowReason(wrapper, 'typed on a row')
+
+      await enterSelectMode(wrapper)
+      await wrapper.find('.pr-group-select input').setValue(true)
+      await nextTick()
+      await wrapper.find('.pr-batch .btn-primary').trigger('click')
+      await flushPromises()
+      await wrapper.find('.pr-batch .btn-chip').trigger('click')
+      await flushPromises()
+
+      const batchBodies = apiPost.mock.calls
+        .filter(([path]) => path === '/api/proposals/batch')
+        .map(([, body]) => body as Record<string, unknown>)
+      expect(batchBodies.length).toBeGreaterThanOrEqual(1)
+      for (const body of batchBodies) expect(body).not.toHaveProperty('reason')
+      wrapper.unmount()
+    })
+
+    describe('a deferred accept', () => {
+      const deferred = Object.assign(new Error('could not decide'), {
+        status: 409,
+        payload: {
+          error: 'nothing was written',
+          deferred: true,
+          reason: 'reconcile unavailable for ciao:memory',
+          competing: ['Office is in Zurich. [2026-01-01]'],
+        },
+      })
+
+      async function deferWith(reason: string) {
+        mockQueue({ text: 'Remember the other thing' })
+        const wrapper = await openCard()
+        if (reason) {
+          await expandWhy(wrapper)
+          await wrapper.find('.decision-reason textarea').setValue(reason)
+        }
+        apiPost.mockRejectedValueOnce(deferred)
+        await wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Check first')!.trigger('click')
+        await flushPromises()
+        apiPost.mockResolvedValue({} as never)
+        await wrapper.find('.pr-actions--deferred .mr-btn:not(.mr-btn--quiet)').trigger('click')
+        await flushPromises()
+        return wrapper
+      }
+
+      it('retries with the reason, the revision and the approved wording', async () => {
+        const wrapper = await deferWith('yes everywhere')
+        expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/row-1/accept?reconcile=1', {
+          expected_revision: 'rev-1',
+          text: 'Remember the other thing',
+          reason: 'yes everywhere',
+        })
+        wrapper.unmount()
+      })
+
+      it('omits the reason on the retry when none was given', async () => {
+        const wrapper = await deferWith('')
+        expect(apiPost).toHaveBeenLastCalledWith('/api/proposals/row-1/accept?reconcile=1', {
+          expected_revision: 'rev-1',
+          text: 'Remember the other thing',
+        })
+        wrapper.unmount()
+      })
+    })
+
+    it('discards the reason on Cancel', async () => {
+      mockQueue()
+      const wrapper = await openCard()
+      await expandWhy(wrapper)
+      await wrapper.find('.decision-reason textarea').setValue('typed then abandoned')
+
+      const cancel = wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Cancel')!
+      await cancel.trigger('click')
+      await flushPromises()
+      await wrapper.find('.pr-row .pr-edit-first').trigger('click')
+      await flushPromises()
+      await wrapper.findAll('.pr-card button').find(b => b.text() === 'Cancel edit')!.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('.pr-card-why-toggle').attributes('aria-expanded')).toBe('false')
+      await expandWhy(wrapper)
+      expect((wrapper.find('.decision-reason textarea').element as HTMLTextAreaElement).value).toBe('')
+      wrapper.unmount()
+    })
+  })
+
   it('re-renders the card from the conflict response instead of writing', async () => {
     // The destination moved while the card was on screen. The server refuses
     // and hands back a refreshed preview; showing THAT is the whole point, so
@@ -1912,7 +2144,7 @@ describe('reconcile before writing', () => {
     await nextTick()
     expect(wrapper.find('.pr-actions--deferred').exists()).toBe(false)
     expect(wrapper.findAll('.pr-actions button').map((b) => b.text()))
-      .toEqual(['Add entry', 'Dismiss', 'Edit first', 'Discuss'])
+      .toEqual(['Add entry', 'Dismiss', 'Edit first', 'Discuss', 'Why?'])
     wrapper.unmount()
   })
 

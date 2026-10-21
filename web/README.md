@@ -61,7 +61,15 @@ web/
     components/*.css      stylesheets two panes share, each pulled in with
                            `<style scoped src>` (overviewSections.css, chatTrace.css)
     components/settings/  panels split out of SettingsView.vue (the host's start-at-sign-in row is
-                           SettingsEngineLogin.vue), plus the scoped CSS they share with it
+                           SettingsEngineLogin.vue; SettingsMemoryHandover.vue is the Memory handover card:
+                           agreement rate and the operator-only per-workspace handover choice), plus the
+                           scoped CSS they share with it
+    components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
+                           MemoryMapView under the header (so every Memory section shows it). Its open
+                           state is the only storage, `ciao.memory.howOpen` ('1'/'0', read and written in
+                           try/catch). The tag table is static data (`TAG_ROWS`), labelled through
+                           `kindLabel`, and is cross-checked against the nightly and memory-pass prompts
+                           in `ciao/stock/skills/ciao-memory/references/`
     stores/               Pinia stores (auth, projects, tasks, taskBoard, webhooks, fileViewer, itemPeek), and store
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
@@ -393,3 +401,6 @@ above still has to be walked by hand on a real phone before a release.
 The MCP Settings panel shows provider-native configuration separately from per-chat connection states returned by `/api/mcp/status`. No running observable session means connection not checked, and unreadable configuration/provider status is unknown.
 
 - The To decide filter chips are by change type, by reason, and *Needs you* (`decideFilter` in the proposals store, separate from `kindFilter` because History shares that one). *Needs you* keeps rows whose `decider` is not `nightly`, so rows with no decider count, and the chip shows only when at least one row is marked `nightly`. A row shows its `decider` and a one-line `decide_reason`, rendered as text.
+- An optional reason is offered from the row's *Why?* link (when the row can be accepted and is not a rehome) and from the decision card's collapsed *Why? (optional)* field, never required: the shared `DecisionReason` with the memory chips from `lib/memoryDecisionReasons.ts`, held per row in the panel (`reasonById`) and discarded by Cancel. It is sent as `reason` only when non-empty, with that row's Save/accept and Dismiss (and the retry of a deferred accept), never on the batch bar; a refused accept clears it, the deferral keeping its own copy for the retry. History renders a row's `reason` as text (`.ph-reason`), never markup.
+- History shows a row's `prediction` under its text as predicted against decided, with a muted *Matched* or *Missed* badge (a miss is information, never an error) and the prediction `reason` as text. A `[memory]`/`[profile]` row the nightly run settled itself (`via: agent`) reads *Filed by Workspace care* (accepted) or *Dismissed by Workspace care* (dismissed), badges *Acted on prediction*, and offers *Undo* from the row when its change is undoable. The To decide queue never shows a prediction on a pending row, so the agreement rate stays unbiased.
+- Settings → *Memory handover* (`SettingsMemoryHandover.vue`) loads `GET /api/proposals/handover?workspace=` for the active workspace and saves only `{ memory_handover }` through `PATCH /api/workspaces/{name}`. It never saves on its own: the suggestion is text. Choosing *Dismiss and accept* asks for confirmation, and the card says that it lets queued text reach always-loaded memory, with Undo in History and a cap of 5 changes per run. When the response's `acting_available` is false (a Linux/systemd install, where the gate trusts no service definition) the card says handover cannot act on this install and disables the options.

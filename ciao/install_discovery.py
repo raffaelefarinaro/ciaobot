@@ -16,9 +16,14 @@ would recreate what the operator deleted.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ciao.config import CiaoConfig
 
 
 def _platform() -> str:
@@ -80,3 +85,40 @@ def _discover_windows() -> Path | None:
     if workspace is None:
         return None
     return workspace if workspace.is_dir() else None
+
+
+def trusted_registry(name: str | None, vault: Path) -> CiaoConfig | None:
+    """The installed engine's registry, if it registers *name* at exactly *vault*.
+
+    The handover gate decides what an unattended agent may write into the
+    always-loaded regions, so it must not read a registry the agent can name.
+    ``--workspace``, ``CIAO_WORKSPACE`` and ``CIAO_RUNTIME_ROOT`` are caller
+    inputs and are dropped here: the install comes only from the service
+    definition (:func:`discover_workspace`), and nothing
+    is guessed when there is none. ``None`` when no install is found, the name
+    is not registered there, or the registered vault is not the one in hand.
+    """
+    if name is None:
+        return None
+    from ciao.config import CiaoConfig, installed_workspace_env
+
+    base = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("CIAO_WORKSPACE", "CIAO_RUNTIME_ROOT")
+    }
+    installed = discover_workspace(base)
+    if installed is None:
+        return None
+    # A placeholder keeps a read-only resolution from minting a session secret.
+    env_source = installed_workspace_env({**base, "CIAO_WORKSPACE": str(installed)})
+    if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+        env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
+    config = CiaoConfig.from_env(env_source)
+    if config.workspace(name) is None:
+        return None
+    try:
+        registered_vault = Path(config.workspace_vault_root(name)).resolve()
+    except (OSError, ValueError):
+        return None
+    return config if registered_vault == vault.resolve() else None

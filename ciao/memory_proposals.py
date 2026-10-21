@@ -1774,6 +1774,7 @@ def record_dismissal(
     receipt_id: str = "",
     learning_id: str = "",
     finding: str = "",
+    reason: str = "",
     once: bool = False,
 ) -> bool:
     """Record a decided proposal so the queue stops re-asking about it.
@@ -1816,6 +1817,7 @@ def record_dismissal(
         receipt_id=receipt_id,
         learning_id=learning_id,
         finding=finding,
+        reason=reason,
         once=once,
     )
 
@@ -1833,6 +1835,7 @@ def record_promotion(
     receipt_id: str = "",
     learning_id: str = "",
     finding: str = "",
+    reason: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1858,6 +1861,7 @@ def record_promotion(
         receipt_id=receipt_id,
         learning_id=learning_id,
         finding=finding,
+        reason=reason,
         once=once,
         history_only=history_only,
     )
@@ -1877,6 +1881,7 @@ def _record_decision(
     receipt_id: str = "",
     learning_id: str = "",
     finding: str = "",
+    reason: str = "",
     once: bool = False,
     history_only: bool = False,
 ) -> bool:
@@ -1927,6 +1932,10 @@ def _record_decision(
         entry["learning_id"] = learning_id
     if finding:
         entry["finding"] = finding
+    if reason:
+        # One line: _sidecar_entries splits on str.splitlines(), which also
+        # breaks on U+2028/U+2029/U+0085 that ensure_ascii=False writes raw.
+        entry["reason"] = _one_line(reason)
     if history_only:
         # Ledger-only row: it records that a pass ran and decided nothing new,
         # so the dedupe readers must not treat it as a decision. Without this
@@ -2074,8 +2083,10 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
 
     Normalizes both the current sidecar shape and the legacy ``.dismissed.log``
     text-only rows into one shape: ``{ts, action, via, kind, text, source,
-    destination, outcome, proposal_id, receipt_id, learning_id, finding, log,
-    seq}``. ``receipt_id`` is empty for every row written before it was
+    destination, outcome, proposal_id, receipt_id, learning_id, finding,
+    reason, log, seq}``. ``reason`` is the optional single-line "why" recorded
+    with the decision, empty for every decision recorded without one.
+    ``receipt_id`` is empty for every row written before it was
     recorded, and for every decision made outside the receipt protocol, and
     ``learning_id``/``finding`` are empty for every decision about a whole row
     rather than one derived finding. This is the read side of the decision
@@ -2120,6 +2131,7 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
                     "receipt_id": str(entry.get("receipt_id", "")),
                     "learning_id": str(entry.get("learning_id", "")),
                     "finding": str(entry.get("finding", "")),
+                    "reason": str(entry.get("reason", "")),
                     "log": suffix,
                     "seq": seq,
                 }

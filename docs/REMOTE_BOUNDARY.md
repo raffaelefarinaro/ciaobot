@@ -133,8 +133,28 @@ carried by the session.
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
   `command` to run on the host.
 
+- **Memory handover widens what unattended text can reach.** At `memory_handover: all`
+  (operator-only, `PATCH /api/workspaces/{name}`), the nightly run may accept a
+  queued `[memory]`/`[profile]` fact into the always-loaded `AGENTS.md` regions, and
+  that queued text can originate in untrusted sources (imported chats, fetched
+  pages). The exposure is bounded, not removed: the write goes through the
+  event-shape and duplicate guards, at most five facts per curation run (counted
+  from the sidecar's `via: agent` accepts since the live lease began, and only
+  while a lease is live), only for a row the run predicted accept and that is not
+  `decide: you`, and every accept leaves an undo receipt in History. The acting
+  commands read the setting only from the installed engine's registry (found
+  through the service definition, ignoring `--workspace`, `CIAO_WORKSPACE` and
+  `CIAO_RUNTIME_ROOT`) and refuse unless that registry maps the workspace to the
+  vault being written. A run that can already execute shell could end and retake
+  its lease to reset the cap, as it could edit the registry; the file-tool deny
+  patterns and the operator's Undo are the remaining controls.
+
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.
+
+### Residual: forged decision rows (#1745)
+
+An agent with vault write access can forge the `via=pwa` memory rows and `actor=user` task rows the weekly rules pass reads as operator decisions. This is bounded: the resulting `Memory-Review-Rules.md` and `Task-Rules.md` only shape what memory review proposes and how tasks are filed, are linted on write and again on read, and are fenced as evidence. They never accept, promote or change permissions.
 
 ## Verification
 

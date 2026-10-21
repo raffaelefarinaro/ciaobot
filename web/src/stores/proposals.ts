@@ -497,7 +497,7 @@ export const useProposalsStore = defineStore('proposals', () => {
     id: string,
     action: 'accept' | 'dismiss',
     workspace = '',
-    opts?: { expectedRevision?: string; text?: string; reconcile?: boolean },
+    opts?: { expectedRevision?: string; text?: string; reconcile?: boolean; reason?: string },
   ): Promise<{ ok: boolean; error?: string; conflict?: boolean; payload?: unknown }> {
     setBusy(id, true)
     error.value = ''
@@ -516,6 +516,8 @@ export const useProposalsStore = defineStore('proposals', () => {
       // older client rely on.
       if (opts?.expectedRevision) body.expected_revision = opts.expectedRevision
       if (opts?.text) body.text = opts.text
+      // Single-row decisions only: the batch bar never sends one.
+      if (opts?.reason) body.reason = opts.reason
       await api.post<ProposalBatchResponse>(`/api/proposals/${id}/${action}${query}`, body)
       const stale = action === 'accept' ? dropSiblingPreviews([id]) : []
       await fetch({ force: true })

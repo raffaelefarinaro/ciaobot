@@ -57,6 +57,8 @@ export interface WorkspaceInfo {
   disallowed_tools?: string[] | null
   // Whether the workspace's Claude chats load the claude.ai connectors. Missing → on.
   claude_ai_connectors?: boolean
+  /** Operator-only; absent or 'off': shadow verdicts only. */
+  memory_handover?: MemoryHandover
   gws_profile: string
   // PWA accent preset: amber | pink | cyan | emerald | violet. Missing → amber (Ciao orange).
   color?: string
@@ -1458,6 +1460,8 @@ export interface Task {
    * instead of looking the chat up.
    */
   chat_archived?: boolean
+  /** `'agent'` for a task the agent filed, else `null`. Nothing renders it. */
+  created_by?: 'agent' | null
 }
 
 /**
@@ -2024,6 +2028,38 @@ export interface ProposalDismissOlderResponse {
 /** Who made the decision: through the app, the curation agent, or on its own. */
 export type ProposalHistoryVia = 'pwa' | 'agent' | 'auto' | ''
 
+export type MemoryHandover = 'off' | 'dismiss' | 'all'
+
+export interface ProposalPrediction {
+  verdict: 'accept' | 'dismiss'
+  reason: string
+  ts: string
+  match: boolean
+}
+
+export interface HandoverAgreement {
+  decided: number
+  matched: number
+  /** Null with no decisions. */
+  rate: number | null
+  window: number
+  min_decisions: number
+  threshold: number
+  predicted_accept: number
+  accept_matched: number
+  predicted_dismiss: number
+  dismiss_matched: number
+  suggest_handover: boolean
+}
+
+export interface HandoverResponse {
+  workspace: string
+  handover: MemoryHandover
+  /** Whether the unattended run can act on this install at all (false on Linux/systemd). */
+  acting_available: boolean
+  agreement: HandoverAgreement
+}
+
 /**
  * One decided proposal from `GET /api/proposals/history`. Read side of the
  * per-workspace decision sidecar `record_dismissal`/`record_promotion` write
@@ -2050,6 +2086,8 @@ export interface ProposalHistoryRow {
   learning_id?: string
   /** Which finding within that learning, when the decision named one. */
   finding?: string
+  /** The operator's optional "why" (or the agent's, when `via` is `agent`). Absent or empty when none was given. Evidence text: render as text, never markup. */
+  reason?: string
   /** The archive transcript this fact came from, when one is still on disk. */
   source_path?: string
   /** The receipt that performed this decision. ABSENT — not falsy — for every
@@ -2057,6 +2095,8 @@ export interface ProposalHistoryRow {
    * "No change snapshot available" rather than offering an undo it cannot
    * honour. */
   change?: ProposalHistoryChange
+  /** Present only for a [memory]/[profile] row the nightly run predicted before it was decided. ABSENT, not null, otherwise. */
+  prediction?: ProposalPrediction
   /**
    * The `note_edit` record behind this decision, when the server could still
    * read it. ABSENT for a `note_edit` whose sidecar is gone or unreadable —

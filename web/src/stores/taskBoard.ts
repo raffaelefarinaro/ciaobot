@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../lib/api'
+import { cleanReason } from '../lib/decisionReasons'
 import {
   isTaskInvalidRow,
   taskApiErrorMessage,
@@ -45,6 +46,12 @@ function tasksUrl(workspace: string): string {
 
 function taskUrl(taskId: string): string {
   return `/api/tasks/${encodeURIComponent(taskId)}`
+}
+
+/** The optional decision reason as a body fragment: trimmed, and absent when blank. */
+function reasonBody(reason?: string): { reason?: string } {
+  const clean = cleanReason(reason ?? '')
+  return clean ? { reason: clean } : {}
 }
 
 /**
@@ -449,6 +456,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     taskId: string,
     expectedRevision: string,
     resolution?: string,
+    reason?: string,
   ): Promise<TaskDetail | null> {
     if (!workspace || !taskId) return null
     descriptionSeq++
@@ -459,6 +467,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
         workspace,
         expected_revision: expectedRevision,
         ...(resolution === undefined ? {} : { resolution }),
+        ...reasonBody(reason),
       })
       // Approving a reviewed result releases the linkage and closes the card, so
       // whatever history was held is about an attempt that no longer holds this
@@ -613,7 +622,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
    * collides across them means a late filter would drop a real row there without
    * deleting anything. See {@link drawingWorkspace}.
    */
-  async function remove(workspace: string, taskId: string, expectedRevision: string): Promise<boolean> {
+  async function remove(workspace: string, taskId: string, expectedRevision: string, reason?: string): Promise<boolean> {
     if (!workspace || !taskId) return false
     // The record this read is about is about to be gone: its answer has nowhere
     // to go, and putting it back would resurrect a file the vault has lost.
@@ -621,7 +630,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     saving.value = true
     error.value = ''
     try {
-      await api.del(taskUrl(taskId), { workspace, expected_revision: expectedRevision })
+      await api.del(taskUrl(taskId), { workspace, expected_revision: expectedRevision, ...reasonBody(reason) })
       // The record the held history belongs to is gone.
       if (described.value?.id === taskId) described.value = null
       if (attemptsTaskId.value === taskId) resetAttempts()
@@ -717,6 +726,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     taskId: string,
     attemptId: string,
     action: 'stop' | 'resume' | 'retry' | 'detach',
+    reason?: string,
   ): Promise<TaskAttempt | null> {
     if (!workspace || !taskId || !attemptId) return null
     descriptionSeq++
@@ -725,7 +735,7 @@ export const useTaskBoardStore = defineStore('taskBoard', () => {
     try {
       const data = await api.post<TaskAttemptActionResponse | null>(
         `/api/tasks/${encodeURIComponent(taskId)}/attempt/${encodeURIComponent(attemptId)}/${action}`,
-        { workspace },
+        { workspace, ...reasonBody(reason) },
       )
       // The board moved to another workspace while this gesture was in flight: the
       // rows on screen are the other one's, and a late detach would filter this

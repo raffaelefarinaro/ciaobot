@@ -4714,3 +4714,57 @@ def test_setup_command_prints_the_macos_access_note(
     err = capsys.readouterr().err
     assert "Ciaobot Server" in err and "Error:" in err
     assert not (home / "Documents" / "ws2").exists()
+
+
+def _handover_registry(root: Path, vault: Path, handover: str | None) -> None:
+    entry: dict[str, str] = {"name": "work", "vault_root": str(vault)}
+    if handover is not None:
+        entry["memory_handover"] = handover
+    (root / ".runtime" / "workspaces.json").write_text(
+        json.dumps({"work": entry}), encoding="utf-8"
+    )
+
+
+def test_curation_begin_reports_the_workspace_handover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def begin(case: str, handover: str | None, *, elsewhere: bool = False) -> dict[str, Any]:
+        (tmp_path / case).mkdir()
+        root, vault = _registered_install(tmp_path / case)
+        _handover_registry(root, vault, handover)
+        if elsewhere:
+            vault = root / "memory-vault" / "elsewhere"
+            (vault / "Workspace").mkdir(parents=True)
+        monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+        monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+        rc = cli.main([
+            "curation-begin",
+            "--workspace", str(root),
+            "--vault-root", str(vault),
+            "--holder", "test",
+            "--json",
+        ])
+        assert rc == 0
+        payload: dict[str, Any] = json.loads(capsys.readouterr().out)
+        return payload
+
+    assert begin("dismiss", "dismiss")["handover"] == "dismiss"
+    assert begin("unset", None)["handover"] == "off"
+    assert begin("elsewhere", "all", elsewhere=True)["handover"] == "off"
+
+
+def test_curation_plan_text_prints_the_handover_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, vault = _registered_install(tmp_path)
+    _stale_fact_note(vault)
+    _handover_registry(root, vault, "all")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(root))
+
+    rc = cli.main([
+        "curation-plan", "--workspace", str(root), "--vault-root", str(vault),
+    ])
+
+    assert rc == 0
+    assert "Handover: all" in capsys.readouterr().out

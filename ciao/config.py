@@ -357,6 +357,22 @@ def coerce_agent_fs_scope(raw: object) -> str | None:
     )
 
 
+MEMORY_HANDOVERS: tuple[str, ...] = ("off", "dismiss", "all")
+DEFAULT_MEMORY_HANDOVER = "off"
+
+
+def coerce_memory_handover(raw: object) -> str:
+    """Normalize a workspace handover. Missing/empty -> "off"; anything else unknown raises ValueError."""
+    if raw is None:
+        return DEFAULT_MEMORY_HANDOVER
+    cleaned = str(raw).strip()
+    if not cleaned:
+        return DEFAULT_MEMORY_HANDOVER
+    if cleaned in MEMORY_HANDOVERS:
+        return cleaned
+    raise ValueError(f"memory_handover must be one of: {', '.join(MEMORY_HANDOVERS)}")
+
+
 @dataclass(slots=True)
 class WorkspaceConfig:
     """Config for one logical chat workspace."""
@@ -381,6 +397,9 @@ class WorkspaceConfig:
     # default_agent_fs_scope() on whichever platform reads it. Only an explicit
     # value is persisted, so the platform default is never frozen into storage.
     agent_fs_scope: str | None = None
+    # Whether Workspace care may act on its own [memory]/[profile] verdicts
+    # (off, dismiss, all). Operator-only: never set from an agent surface.
+    memory_handover: str = DEFAULT_MEMORY_HANDOVER
 
     def effective_agent_fs_scope(self) -> str:
         """The scope the agent runs under: the explicit choice, else the platform default."""
@@ -418,6 +437,10 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         agent_fs_scope = coerce_agent_fs_scope(data.get("agent_fs_scope"))
     except ValueError:
         agent_fs_scope = None
+    try:
+        memory_handover = coerce_memory_handover(data.get("memory_handover"))
+    except ValueError:
+        memory_handover = DEFAULT_MEMORY_HANDOVER
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
@@ -429,6 +452,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         gws_profile=str(data.get("gws_profile", "")).strip(),
         color=color,
         agent_fs_scope=agent_fs_scope,
+        memory_handover=memory_handover,
     )
 
 
@@ -1098,6 +1122,8 @@ class CiaoConfig:
             # so it keeps following the platform it loads on.
             if workspace.agent_fs_scope is not None:
                 row["agent_fs_scope"] = workspace.agent_fs_scope
+            if workspace.memory_handover != DEFAULT_MEMORY_HANDOVER:
+                row["memory_handover"] = workspace.memory_handover
             payload.append(row)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="")

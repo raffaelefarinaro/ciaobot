@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 
 from ciao import dev, gws_wrapper, package_smoke, proposal_kinds, public_release, release, service_backend
+from ciao.install_discovery import trusted_registry
 from ciao.server_host import (
     BUNDLE_ID,
     EXIT_TIMEOUT_SECONDS,
@@ -4148,6 +4149,67 @@ def _resolve_workspace_and_vaults(
 MEMORY_PROPOSALS_DEFAULT_LIMIT = 20
 
 
+def _decisions_digest_command(args: argparse.Namespace) -> int:
+    """Print the operator's recent decisions grouped for the weekly rules pass.
+
+    Read-only. Operator decisions only; agent-made ones are counted, never listed.
+    """
+    from datetime import UTC, datetime
+
+    from ciao import decision_rules
+
+    _workspace, vault = _resolve_workspace_and_vault(args)
+    digest = decision_rules.build_digest(vault, today=datetime.now(UTC).date())
+    if args.json:
+        json.dump(digest, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    for kind in decision_rules.KINDS:
+        section = digest[kind]
+        print(
+            f"{kind}: {section['rows']} operator decisions, {len(section['groups'])} groups, "
+            f"rules file {'present' if section['file_present'] else 'absent'}"
+        )
+    return 0
+
+
+def _task_rules_command(args: argparse.Namespace) -> int:
+    """Print the operator's distilled task rules, fenced, or nothing when absent."""
+    from ciao import decision_rules
+
+    _workspace, vault = _resolve_workspace_and_vault(args)
+    text = decision_rules.load_for_prompt(vault, decision_rules.TASK_RULES_NAME)
+    if text:
+        print(text)
+    return 0
+
+
+def _decision_rules_write_command(args: argparse.Namespace) -> int:
+    """Write one rules note's managed section from a body file."""
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from datetime import UTC, datetime
+
+    from ciao import decision_rules
+
+    body = _read_persisted_text_file(args.body_file, "--body-file")
+    if body is None:
+        return 2
+    _workspace, vault = _resolve_workspace_and_vault(args)
+    try:
+        result = decision_rules.write_managed(vault, args.kind, body, today=datetime.now(UTC).date())
+    except (decision_rules.RulesError, OSError) as exc:
+        print(f"ciao decision-rules-write: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        json.dump(result, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+    else:
+        print(f"{result['file']}: wrote {result['chars']} characters")
+    return 0
+
+
 def _memory_proposals_command(args: argparse.Namespace) -> int:
     """List pending memory proposals in a workspace's review queue.
 
@@ -4167,6 +4229,17 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
     workspace, vault = _resolve_workspace_and_vault(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
     rows = list_proposals(path)
+    from ciao.proposal_predictions import REGION_KINDS, latest_predictions, prediction_key
+
+    predictions = latest_predictions(path)
+    for row in rows:
+        pred = (
+            predictions.get(prediction_key(row["kind"], row["text"]))
+            if row["kind"] in REGION_KINDS
+            else None
+        )
+        row["predicted"] = pred["verdict"] if pred else ""
+        row["predicted_reason"] = pred["reason"] if pred else ""
     window = rows[args.offset : args.offset + args.limit]
     page = page_of("proposals", window, total=len(rows), offset=args.offset, limit=args.limit)
     if args.json:
@@ -4182,7 +4255,12 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
                 if row["decider"]
                 else ""
             )
-            print(f"- [{row['kind']}] {row['text']}{tag}{decide}")
+            predicted = (
+                f" (predicted: {row['predicted']}; {row['predicted_reason']})"
+                if row["predicted"]
+                else ""
+            )
+            print(f"- [{row['kind']}] {row['text']}{tag}{decide}{predicted}")
         if "next_offset" in page:
             print(
                 f"Showing {args.offset + 1}-{page['next_offset']} of {len(rows)}; "
@@ -4339,11 +4417,10 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         print("--decide-reason-file needs --decide", file=sys.stderr)
         return 2
     if reason_file:
-        try:
-            decide_reason = " ".join(Path(reason_file).read_text(encoding="utf-8").split())
-        except (OSError, UnicodeError) as exc:
-            print(f"could not read {reason_file}: {exc}", file=sys.stderr)
+        decide_text = _read_persisted_text_file(reason_file, "--decide-reason-file")
+        if decide_text is None:
             return 2
+        decide_reason = " ".join(decide_text.split())
         if not decide_reason:
             print("the decide reason is empty", file=sys.stderr)
             return 2
@@ -4417,6 +4494,40 @@ def _observation_context(args: argparse.Namespace) -> tuple[Path, str] | int:
         print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
         return 1
     return vault_root, workspace
+
+
+def _read_persisted_text_file(path: str, flag: str) -> str | None:
+    """The text of a file whose contents are persisted into the vault.
+
+    ``None`` after printing why not. A reason file is written to the
+    vault-tracked proposal queue or decision sidecar, so a path that names a
+    credential store (``.env``, the runtime directory) is refused, the same
+    check ``agent_cli._task_body`` applies. At most ``MAX_REASON * 4 + 1``
+    characters are read so a huge file is never loaded whole; the caller's own
+    length check then refuses an over-long reason.
+    """
+    from ciao.execution_modes import is_credential_adjacent
+    from ciao.task_decisions import MAX_REASON
+
+    target = Path(path).expanduser()
+    try:
+        resolved = target.resolve()
+    except OSError as exc:
+        print(f"{flag} cannot be read: {exc}", file=sys.stderr)
+        return None
+    if is_credential_adjacent(resolved):
+        print(
+            f"{flag} refuses credential-adjacent paths ({path}): "
+            "pass the content in a workspace file instead.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        with resolved.open(encoding="utf-8") as handle:
+            return handle.read(MAX_REASON * 4 + 1)
+    except (OSError, UnicodeError) as exc:
+        print(f"could not read {path}: {exc}", file=sys.stderr)
+        return None
 
 
 def _read_argv_safe(value: str, path: str, what: str) -> str | None:
@@ -4626,8 +4737,14 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         remove_proposal_by_substring,
     )
 
-    workspace, vault = _resolve_workspace_and_vault(args)
+    workspace, vault, _registry_root, name = _resolve_workspace_and_vaults(args)
     path = vault / "Workspace" / "Memory-Proposals.md"
+    if args.handover and args.promoted:
+        print(
+            "--handover dismisses a row; it cannot be combined with --promoted",
+            file=sys.stderr,
+        )
+        return 2
     # Same resolution as `memory-proposal-add`. A proposal's text is arbitrary
     # user prose, so putting it in argv is the hazard `--text-file` exists to
     # avoid there; a dismissal names the same text and needed the same door.
@@ -4654,6 +4771,20 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     if not needle:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
+    # Validated before the queue lock so a bad reason mutates nothing.
+    from ciao.task_decisions import clean_reason
+
+    reason = ""
+    reason_file = (args.reason_file or "").strip()
+    if reason_file:
+        reason_text = _read_persisted_text_file(reason_file, "--reason-file")
+        if reason_text is None:
+            return 2
+        try:
+            reason = clean_reason(reason_text)
+        except ValueError as exc:
+            print(f"could not use the reason in {reason_file}: {exc}", file=sys.stderr)
+            return 2
     # Two needle forms, because rows reach the queue two ways:
     # `memory-proposal-add` flattens what it writes, while the Workspace care schedule prompt
     # appends `[review]` questions directly and may keep repeated whitespace.
@@ -4715,6 +4846,11 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        if args.handover:
+            refusal = _handover_gate(workspace, name, path, parsed, "dismiss")
+            if refusal:
+                print(f"handover refused: {refusal}", file=sys.stderr)
+                return 1
         resolved_text = parsed.text
         resolved_kind = parsed.kind
         # The removal keeps using the caller's needle (in whichever form
@@ -4775,6 +4911,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         text=removed_text,
         kind=kind,
         via="agent",
+        reason=reason,
     )
     if args.json:
         # `text` is the resolved bullet, not the caller's needle: a row can be
@@ -4827,10 +4964,10 @@ def _memory_proposal_escalate_command(args: argparse.Namespace) -> int:
     if not reason_file:
         print("--reason-file is required (one line saying why only you can decide)", file=sys.stderr)
         return 2
-    reason = _read_argv_safe("", reason_file, "the reason")
-    if reason is None:
+    reason_text = _read_persisted_text_file(reason_file, "--reason-file")
+    if reason_text is None:
         return 2
-    reason = " ".join(reason.split())
+    reason = " ".join(reason_text.split())
     if not reason:
         print("the escalation reason is empty", file=sys.stderr)
         return 2
@@ -4848,6 +4985,221 @@ def _memory_proposal_escalate_command(args: argparse.Namespace) -> int:
         _emit_json({"escalated": True, "text": text, "workspace": str(workspace)})
     else:
         print(f"Escalated [{kind}] proposal to decide: you.")
+    return 0
+
+
+def _memory_proposal_predict_command(args: argparse.Namespace) -> int:
+    """Record the verdict the run would give one queued region row, without acting.
+
+    Not a decision: the queue is untouched, no receipt is written and History
+    gets no row until the operator decides. The prediction is what later lets
+    History show predicted against actual.
+    """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.proposal_predictions import REGION_KINDS, record_prediction
+
+    workspace, vault, _registry_root, _name = _resolve_workspace_and_vaults(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    needle = _proposal_needle(args)
+    if needle is None:
+        return 2
+    reason_file = (args.reason_file or "").strip()
+    if not reason_file:
+        print("--reason-file is required (one line saying why)", file=sys.stderr)
+        return 2
+    reason_text = _read_persisted_text_file(reason_file, "--reason-file")
+    if reason_text is None:
+        return 2
+    reason = " ".join(reason_text.split())
+    if not reason:
+        print("the prediction reason is empty", file=sys.stderr)
+        return 2
+    matched = _match_one_row(path, needle)
+    if matched is None:
+        print(
+            f"No unique memory proposal matched {_clip(needle)!r} "
+            "(the text may be ambiguous or absent).",
+            file=sys.stderr,
+        )
+        return 1
+    bullet, _removal_needle = matched
+    if bullet.kind not in REGION_KINDS:
+        print(
+            "predictions are only recorded for [memory] and [profile] rows",
+            file=sys.stderr,
+        )
+        return 1
+    recorded = record_prediction(
+        path,
+        kind=bullet.kind,
+        text=bullet.text,
+        verdict=args.verdict,
+        reason=reason,
+    )
+    if args.json:
+        _emit_json(
+            {
+                "recorded": recorded,
+                "kind": bullet.kind,
+                "verdict": args.verdict,
+                "text": bullet.text,
+                "workspace": str(workspace),
+            }
+        )
+    elif recorded:
+        print(f"Recorded predicted {args.verdict} for [{bullet.kind}] proposal.")
+    else:
+        print("Already recorded.")
+    return 0
+
+
+def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
+    """Accept one queued ``[memory]``/``[profile]`` row into its region as the agent.
+
+    Refused unless the operator's handover is ``all``, the run stored an accept
+    prediction for the row and the row is not ``decide: you``. The write goes
+    through the same guarded path the PWA accept uses, so the fact gets the
+    event-shape guard, the duplicate check, the learned-at stamp and an undo
+    receipt that History offers.
+    """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao import proposal_actions
+    from ciao.fact_candidates import external_anchor
+    from ciao.memory_proposals import accept_region_fact, remove_proposal_by_substring
+    from ciao.memory_receipts import QueueReceiptUnavailable, queue_lock, queue_resolution
+    from ciao.memory_tool import ensure_regions
+
+    workspace, vault, _registry_root, name = _resolve_workspace_and_vaults(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    needle = _proposal_needle(args)
+    if needle is None:
+        return 2
+    no_match = (
+        f"No unique memory proposal matched {_clip(needle)!r} "
+        "(the text may be ambiguous or absent)."
+    )
+    with queue_lock(path):
+        matched = _match_one_row(path, needle)
+        if matched is None:
+            print(no_match, file=sys.stderr)
+            return 1
+        bullet, removal_needle = matched
+        refusal = _handover_gate(workspace, name, path, bullet, "accept")
+        if refusal:
+            print(f"handover refused: {refusal}", file=sys.stderr)
+            return 1
+        # At most HANDOVER_ACCEPT_CAP accepts per curation run, counted from the
+        # sidecar's agent decisions since the live lease began. The lease is
+        # server-written state, so the count cannot be reset from the argument
+        # list; a run with no live lease may not accept at all.
+        refusal = _handover_accept_budget(vault, path)
+        if refusal:
+            print(f"handover refused: {refusal}", file=sys.stderr)
+            return 1
+    # Not written under the queue lock: the PWA writes the region and then takes
+    # the queue lock, and the region write takes the guide lock. The guide comes
+    # from the installed registry the gate just verified, not from --workspace.
+    trusted = trusted_registry(name, vault)
+    if trusted is None or name is None:
+        print("handover refused: the installed registry changed underneath", file=sys.stderr)
+        return 1
+    guide = guide_path(trusted.agent_root(name))
+    try:
+        ensure_regions(guide)
+    except (OSError, ValueError) as exc:
+        print(f"could not prepare {guide}: {exc}", file=sys.stderr)
+        return 1
+    receipt: dict[str, Any] = {}
+    try:
+        outcome, _written = accept_region_fact(
+            guide_path=guide,
+            target=bullet.kind,
+            text=bullet.text,
+            vault_root=vault,
+            actor="agent",
+            source="cli",
+            workspace=name or "",
+            source_section=external_anchor(bullet.source) or "review",
+            receipt_out=receipt,
+        )
+    except (ValueError, OSError) as exc:
+        print(f"could not write ciao:{bullet.kind}: {exc}", file=sys.stderr)
+        return 1
+    if outcome not in ("written", "duplicate"):
+        messages = {
+            "unshaped": "this reads as an event, not a standing rule; it stays queued",
+            "conflict": f"ciao:{bullet.kind} changed while this was being applied; retry",
+            "deferred": (
+                f"this fact may supersede an entry already in ciao:{bullet.kind}; "
+                "it stays queued"
+            ),
+        }
+        print(
+            f"handover refused: {messages.get(outcome, f'could not write ciao:{bullet.kind}')}",
+            file=sys.stderr,
+        )
+        return 1
+    with queue_lock(path):
+        again = _match_one_row(path, needle)
+        if (
+            again is None
+            or again[0].kind != bullet.kind
+            or again[0].text != bullet.text
+        ):
+            print(
+                "the fact was written but the queue row moved; it stays queued",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            with queue_resolution(
+                path,
+                removed_text=bullet.text,
+                kind=bullet.kind,
+                promoted=True,
+                actor="agent",
+                source="cli",
+                workspace=name or "",
+                vault_root=vault,
+            ):
+                removed = remove_proposal_by_substring(path, again[1])
+        except QueueReceiptUnavailable as exc:
+            print(
+                f"the memory receipt journal is unavailable; "
+                f"the proposal was not removed: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    if removed is None:
+        print(no_match, file=sys.stderr)
+        return 1
+    proposal_actions.record_decision(
+        path,
+        action="accept",
+        text=removed[1],
+        kind=removed[0],
+        via="agent",
+        source=bullet.source,
+        destination=f"ciao:{bullet.kind}",
+        outcome="duplicate" if outcome == "duplicate" else "written",
+        receipt_id=str(receipt.get("id", "")),
+    )
+    if args.json:
+        _emit_json(
+            {
+                "accepted": True,
+                "text": removed[1],
+                "region": bullet.kind,
+                "receipt_id": str(receipt.get("id", "")),
+                "workspace": str(workspace),
+            }
+        )
+    else:
+        print(f"Accepted [{bullet.kind}] proposal into ciao:{bullet.kind}.")
     return 0
 
 
@@ -5059,6 +5411,14 @@ def _curation_agent_root(workspace: Path, name: str | None) -> Path:
     """
     if name is None:
         return workspace
+    config = _installed_config(workspace)
+    if config.workspace(name) is None:
+        return workspace
+    return config.agent_root(name)
+
+
+def _installed_config(workspace: Path) -> CiaoConfig:
+    """The install's workspace registry, read without minting a session secret."""
     from ciao.config import CiaoConfig, installed_workspace_env
 
     env_source = installed_workspace_env(os.environ)
@@ -5067,10 +5427,131 @@ def _curation_agent_root(workspace: Path, name: str | None) -> Path:
         # A read-only resolution must not mint a session secret (see
         # `_resolve_workspace_and_vaults`).
         env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
-    config = CiaoConfig.from_env(env_source)
-    if config.workspace(name) is None:
-        return workspace
-    return config.agent_root(name)
+    return CiaoConfig.from_env(env_source)
+
+
+def _workspace_handover(workspace: Path, name: str | None) -> str:
+    """The operator's Memory handover for a registered workspace, else ``"off"``.
+
+    Always re-read from the registry at call time: it is the operator's
+    setting, so no argument, environment value or ``curation-begin`` output is
+    trusted for it.
+    """
+    if name is None:
+        return "off"
+    config = _installed_config(workspace)
+    registered = config.workspace(name)
+    if registered is None:
+        return "off"
+    handover: str = registered.memory_handover
+    return handover
+
+
+def _proposal_needle(args: argparse.Namespace) -> str | None:
+    """The proposal text or substring from the argument or ``--text-file``.
+
+    ``None`` after printing why not (the caller exits 2).
+    """
+    text_file = (args.text_file or "").strip()
+    needle = (args.text or "").strip()
+    if needle and text_file:
+        print(
+            "pass the substring either as text or via --text-file, not both",
+            file=sys.stderr,
+        )
+        return None
+    if text_file:
+        # Refuses credential-adjacent paths, like every other persisted-text flag.
+        read = _read_persisted_text_file(text_file, "--text-file")
+        if read is None:
+            return None
+        needle = read.strip()
+    if not needle:
+        print("a proposal text or unique substring is required", file=sys.stderr)
+        return None
+    return needle
+
+
+def _handover_accept_budget(vault: Path, queue: Path) -> str:
+    """``""`` while this curation run may still accept, else why not."""
+    from ciao.curation_run import active_lease
+    from ciao.proposal_predictions import HANDOVER_ACCEPT_CAP, count_agent_accepts_since
+
+    lease = active_lease(vault)
+    if lease is None:
+        return "accepting needs a live curation run (take the lease with curation-begin)"
+    try:
+        started = datetime.datetime.fromisoformat(str(lease.get("started_at", "")))
+    except ValueError:
+        return "the curation lease has no readable start time"
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=datetime.UTC)
+    if count_agent_accepts_since(queue, started) >= HANDOVER_ACCEPT_CAP:
+        return f"this curation run already accepted its cap of {HANDOVER_ACCEPT_CAP} facts"
+    return ""
+
+
+def _clip(needle: str, limit: int = 80) -> str:
+    """At most *limit* characters of a needle, for an error message."""
+    flat = " ".join(needle.split())
+    return flat if len(flat) <= limit else flat[:limit] + "..."
+
+
+def _match_one_row(path: Path, needle: str) -> tuple[Any, str] | None:
+    """The one queued bullet ``needle`` names, with the needle form to remove it by.
+
+    Both needle forms are resolved to row identities and unioned, as
+    ``memory-proposal-dismiss`` does: exactly one row or nothing.
+    """
+    from ciao.memory_proposals import find_proposal_matches
+    from ciao.proposal_kinds import parse_bullet
+
+    flattened = " ".join(needle.split())
+    raw_matches = find_proposal_matches(path, needle)
+    flat_matches = (
+        find_proposal_matches(path, flattened) if flattened != needle else raw_matches
+    )
+    union = set(raw_matches) | set(flat_matches)
+    if len(union) != 1:
+        return None
+    try:
+        line = path.read_text(encoding="utf-8").splitlines()[next(iter(union))]
+    except (OSError, UnicodeError, IndexError):
+        return None
+    bullet = parse_bullet(line)
+    if bullet is None:
+        return None
+    removal_needle = flattened if (not raw_matches and flat_matches) else needle
+    return bullet, removal_needle
+
+
+def _handover_gate(
+    workspace: Path, name: str | None, queue: Path, bullet: Any, verdict: str
+) -> str:
+    """``""`` when the run may act on *bullet* with *verdict*, else why not."""
+    from ciao.proposal_predictions import (
+        REGION_KINDS,
+        handover_allows,
+        latest_predictions,
+        prediction_key,
+    )
+
+    if bullet.kind not in REGION_KINDS:
+        return "only [memory] and [profile] rows can be handed over"
+    if bullet.decider == "you":
+        return "the row is marked decide: you"
+    # The queue lives at <vault>/Workspace/Memory-Proposals.md.
+    trusted = trusted_registry(name, queue.parent.parent)
+    if trusted is None:
+        return "the installed engine does not register this workspace at this vault"
+    registered = trusted.workspace(name or "")
+    handover = registered.memory_handover if registered is not None else "off"
+    if not handover_allows(handover, verdict):
+        return f"the workspace handover is {handover}, which does not allow {verdict}"
+    predicted = latest_predictions(queue).get(prediction_key(bullet.kind, bullet.text))
+    if predicted is None or predicted.get("verdict") != verdict:
+        return f"no stored {verdict} prediction for this row"
+    return ""
 
 
 def _curation_config(workspace: Path, vault: Path, name: str) -> Any:
@@ -5104,7 +5585,9 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
 
     workspace, vault, guide, budget, registry_root, name = _curation_context(args)
     state = load_state(vault)
+    handover = _workspace_handover(workspace, name)
     worklist = build_worklist(
+        handover=handover,
         vault_root=vault,
         guide_path=guide,
         workspace_dir=workspace,
@@ -5129,6 +5612,7 @@ def _curation_plan(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
     payload: dict[str, Any] = {
         "workspace": str(workspace),
         "vault_root": str(vault),
+        "handover": handover,
         **worklist.as_dict(),
         **plan.as_dict(),
         "last_run": state.last_run,
@@ -5145,6 +5629,7 @@ def _print_curation(payload: dict[str, Any], *, as_json: bool) -> None:
         print("Nothing to curate: every mechanical check is clear.")
         return
     print(f"Weekly pass due: {'yes' if payload.get('weekly_due') else 'no'}")
+    print(f"Handover: {payload['handover']}")
     for item in payload.get("planned", []):
         print(f"- [{item['pass']}] {item['label']} ({item['count']}) — {item['reason']}")
         for key in item["keys"]:
@@ -7740,6 +8225,87 @@ def build_parser() -> argparse.ArgumentParser:
     )
     memory_proposals_parser.set_defaults(func=_memory_proposals_command)
 
+    decisions_digest_parser = subparsers.add_parser(
+        "decisions-digest",
+        help="Group the operator's recent memory and task decisions for the weekly rules pass.",
+        description=(
+            "Read-only. Emits the operator's decisions of the last 180 days grouped by "
+            "reason chip, kind and task state, with counts, sanitised excerpts and "
+            "ready-made citations. Agent-made decisions are only counted."
+        ),
+    )
+    decisions_digest_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    decisions_digest_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    decisions_digest_parser.add_argument(
+        "--json", action="store_true", help="Emit the full digest as JSON."
+    )
+    decisions_digest_parser.set_defaults(func=_decisions_digest_command)
+
+    task_rules_parser = subparsers.add_parser(
+        "task-rules",
+        help="Print the operator's distilled task preferences (Workspace/Task-Rules.md).",
+        description=(
+            "Read-only. Prints Workspace/Task-Rules.md fenced as evidence of the "
+            "operator's preferences, never orders; prints nothing when the file is "
+            "absent or fails its checks. Run it before filing a task."
+        ),
+    )
+    task_rules_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    task_rules_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    task_rules_parser.set_defaults(func=_task_rules_command)
+
+    decision_rules_write_parser = subparsers.add_parser(
+        "decision-rules-write",
+        help="Write the managed section of Memory-Review-Rules.md or Task-Rules.md.",
+        description=(
+            "The only way the weekly pass writes a rules note. Replaces only the span "
+            "between the ciao:rules markers; refuses a body over 2500 characters, a "
+            "malformed fence, an uncited or unknown rule, or an unapproved verdict flip."
+        ),
+    )
+    decision_rules_write_parser.add_argument("kind", choices=["memory", "task"])
+    decision_rules_write_parser.add_argument(
+        "--body-file",
+        required=True,
+        help="File holding the managed rule lines.",
+    )
+    decision_rules_write_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    decision_rules_write_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    decision_rules_write_parser.add_argument(
+        "--json", action="store_true", help="Emit the structured result as JSON."
+    )
+    decision_rules_write_parser.set_defaults(func=_decision_rules_write_command)
+
     memory_proposal_add_parser = subparsers.add_parser(
         "memory-proposal-add",
         help="File a fact into a workspace's memory-proposal review queue.",
@@ -7981,6 +8547,26 @@ def build_parser() -> argparse.ArgumentParser:
             "instead of dismissed."
         ),
     )
+    memory_proposal_dismiss_parser.add_argument(
+        "--reason-file",
+        default="",
+        help=(
+            "Read an optional one-line reason for this decision from this file "
+            "(at most 1000 characters; a multi-line file is flattened to one "
+            "line). Recorded in History beside the "
+            "decision, for the accept (--promoted) and the dismissal alike."
+        ),
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--handover",
+        action="store_true",
+        help=(
+            "Settle a [memory]/[profile] row the run predicted dismiss, as the "
+            "workspace's handover setting allows. Refused unless handover is "
+            "dismiss or all, a stored dismiss prediction exists and the row is "
+            "not decide: you."
+        ),
+    )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
 
     memory_proposal_escalate_parser = subparsers.add_parser(
@@ -8026,6 +8612,96 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit the structured result as JSON instead of text.",
     )
     memory_proposal_escalate_parser.set_defaults(func=_memory_proposal_escalate_command)
+
+    memory_proposal_predict_parser = subparsers.add_parser(
+        "memory-proposal-predict",
+        help="Record the verdict the run would give a queued [memory]/[profile] row.",
+        description=(
+            "Records a predicted verdict and its reason for one pending "
+            "[memory]/[profile] proposal, matched by a unique text substring. "
+            "A prediction is not a decision: the bullet stays queued and "
+            "leaves no History row until the operator decides."
+        ),
+    )
+    memory_proposal_predict_parser.add_argument(
+        "text",
+        nargs="?",
+        default="",
+        help="Proposal text or unique substring. Omit when --text-file supplies it.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--text-file",
+        default="",
+        help="Read the substring from this file instead of the argument.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--verdict",
+        required=True,
+        choices=("accept", "dismiss"),
+        help="What the run would do with the row.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--reason-file",
+        default="",
+        help="Read the one-line reason for the verdict from this file.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_predict_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_predict_parser.set_defaults(func=_memory_proposal_predict_command)
+
+    memory_proposal_accept_parser = subparsers.add_parser(
+        "memory-proposal-accept",
+        help="Accept one queued [memory]/[profile] row into its region as the agent.",
+        description=(
+            "Accept one [memory]/[profile] row into its bounded region on the "
+            "agent's behalf. Refused unless handover is `all` and a stored "
+            "accept prediction exists."
+        ),
+    )
+    memory_proposal_accept_parser.add_argument(
+        "text",
+        nargs="?",
+        default="",
+        help="Proposal text or unique substring. Omit when --text-file supplies it.",
+    )
+    memory_proposal_accept_parser.add_argument(
+        "--text-file",
+        default="",
+        help="Read the substring from this file instead of the argument.",
+    )
+    memory_proposal_accept_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_accept_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_accept_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_accept_parser.set_defaults(func=_memory_proposal_accept_command)
 
     curation_plan_parser = subparsers.add_parser(
         "curation-plan",

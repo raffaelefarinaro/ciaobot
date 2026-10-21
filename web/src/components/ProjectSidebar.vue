@@ -728,7 +728,7 @@
                     role="link"
                     :tabindex="chat.local === false ? -1 : 0"
                     :aria-disabled="chat.local === false"
-                    :title="chat.local === false ? `${chat.title}\nThis chat lives on another instance` : `${chat.title}\nDrag to move to another project`"
+                    :title="chatRowTitle(chat, project.repo)"
                   >
                     <span
                       v-if="chat.title_status === 'pending'"
@@ -742,14 +742,16 @@
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
                     <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
-                    <span v-if="isChatCodeModeOn(chat, project.repo) && !branchChip(chat, project.repo)" class="chat-code-tag" title="Code mode is on">code</span>
+                    <span
+                      v-if="isChatCodeModeOn(chat, project.repo)"
+                      class="chat-code-tag"
+                      :title="codeBadgeTitle(chat, project.repo)"
+                      :aria-label="codeBadgeTitle(chat, project.repo)"
+                    >code</span>
                     <span
                       v-if="branchChip(chat, project.repo)"
-                      class="chat-repo-tag"
-                      :class="{
-                        'chat-repo-tag--removed': branchChip(chat, project.repo)!.removed,
-                        'chat-repo-tag--code-off': branchChip(chat, project.repo)!.codeOff,
-                      }"
+                      class="chat-repo-tag chat-repo-tag--code-off"
+                      :class="{ 'chat-repo-tag--removed': branchChip(chat, project.repo)!.removed }"
                       :title="branchChip(chat, project.repo)!.title"
                     >{{ branchChip(chat, project.repo)!.label }}</span>
                     <ChatSignals
@@ -919,7 +921,7 @@ import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
-import { sidebarBranchChip } from '../lib/repoLocation'
+import { sidebarBranchChip, sidebarCodeBadgeTitle } from '../lib/repoLocation'
 import { isChatCodeModeOn } from '../lib/codeMode'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
@@ -1109,9 +1111,29 @@ function projectAttentionLabel(projectId: string): string {
   return parts.join(', ')
 }
 
-// The branch chip for a chat row, with code mode folded in.
+// The branch tag for a chat row. In code mode the row carries the compact
+// `code` badge instead, so the branch tag marks a code-off row only.
 function branchChip(chat: ChatInfo, repo: ProjectInfo['repo']) {
-  return sidebarBranchChip(repo, chat.repo_location, isChatCodeModeOn(chat, repo))
+  if (isChatCodeModeOn(chat, repo)) return null
+  return sidebarBranchChip(repo, chat.repo_location)
+}
+
+// The `code` badge's facts: the repository, the branch the chat works on and
+// the folder it works in. Undefined without a linked repository, which is also
+// when the badge does not render.
+function codeBadgeTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string | undefined {
+  if (!repo || !isChatCodeModeOn(chat, repo)) return undefined
+  return sidebarCodeBadgeTitle(repo, chat.repo_location)
+}
+
+// The chat row's own title: the chat's name, the row's guidance, and, in code
+// mode, the repository facts. A mouse hides the row's marks while its actions
+// show, so the facts live here too, where they stay reachable.
+function chatRowTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string {
+  if (chat.local === false) return `${chat.title}\nThis chat lives on another instance`
+  const guidance = `${chat.title}\nDrag to move to another project`
+  const facts = codeBadgeTitle(chat, repo)
+  return facts ? `${guidance}\n${facts}` : guidance
 }
 
 // Background command runs across this project's visible chats. A run can sit

@@ -265,6 +265,23 @@ def test_workspace_creation_rejects_a_symlinked_vault_folder(tmp_path):
     assert pcm.refresh_count == 0
 
 
+def test_workspace_creation_persists_or_refuses_memory_handover(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+
+    created = client.post("/api/workspaces", json={"name": "research", "memory_handover": "dismiss"})
+    assert created.status_code == 201
+    assert config.workspace("research").memory_handover == "dismiss"
+    stored = next(w for w in json.loads(registry.read_text()) if w["name"] == "research")
+    assert stored["memory_handover"] == "dismiss"
+
+    before = registry.read_bytes()
+    refused = client.post("/api/workspaces", json={"name": "other", "memory_handover": "everything"})
+    assert refused.status_code == 400
+    assert config.workspace("other") is None
+    assert registry.read_bytes() == before
+
+
 def test_workspace_creation_rejects_case_and_vault_owner_collisions(tmp_path):
     client, config, _pcm = _client(tmp_path)
     assert client.post("/api/workspaces", json={"name": "Research"}).status_code == 201
@@ -1810,6 +1827,40 @@ def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path, monkeypatch):
     )
     assert fresh.workspace("personal").agent_fs_scope is None
     assert fresh.workspace("personal").effective_agent_fs_scope() == "workspace"
+
+
+def test_workspace_memory_handover_defaults_off_persists_and_validates(tmp_path):
+    """The handover is operator-set per workspace, stored only when not off."""
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+
+    def stored_row() -> dict:
+        return next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")
+
+    assert config.workspace("personal").memory_handover == "off"
+    listed = client.get("/api/workspaces").json()
+    assert next(w for w in listed["workspaces"] if w["name"] == "personal")["memory_handover"] == "off"
+
+    patched = client.patch("/api/workspaces/personal", json={"memory_handover": "dismiss"})
+    assert patched.status_code == 200
+    updated = next(w for w in patched.json()["workspaces"] if w["name"] == "personal")
+    assert updated["memory_handover"] == "dismiss"
+    assert stored_row()["memory_handover"] == "dismiss"
+
+    # A save that does not mention it keeps it.
+    kept = client.patch("/api/workspaces/personal", json={"color": "cyan"})
+    assert kept.status_code == 200
+    assert config.workspace("personal").memory_handover == "dismiss"
+    assert stored_row()["memory_handover"] == "dismiss"
+
+    # Back to off removes the key from the file.
+    off = client.patch("/api/workspaces/personal", json={"memory_handover": "off"})
+    assert off.status_code == 200
+    assert "memory_handover" not in stored_row()
+
+    bad = client.patch("/api/workspaces/personal", json={"memory_handover": "everything"})
+    assert bad.status_code == 400
+    assert config.workspace("personal").memory_handover == "off"
 
 
 def test_missing_agent_fs_scope_loads_as_workspace(tmp_path, monkeypatch):

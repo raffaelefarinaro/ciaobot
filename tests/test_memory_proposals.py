@@ -1727,3 +1727,49 @@ def test_list_proposals_rows_carry_decider(tmp_path: Path) -> None:
     rows = mp.list_proposals(queue)
     assert (rows[0]["decider"], rows[0]["decide_reason"]) == ("you", "judgement")
     assert rows[1]["decider"] == ""
+
+
+def test_record_decision_stores_a_reason_and_read_decisions_returns_it(tmp_path: Path) -> None:
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+
+    assert mp.record_dismissal(queue, text="One.", kind="memory", via="pwa", reason="  tool quirk ")
+    assert mp.record_promotion(queue, text="Two.", kind="memory", via="pwa", reason="yes, everywhere")
+    assert mp.record_dismissal(queue, text="Three.", kind="memory", via="pwa")
+
+    rows = mp.read_decisions(queue)
+    assert [r["reason"] for r in rows] == ["tool quirk", "yes, everywhere", ""]
+    lines = mp.dismissed_log_path(queue).read_text(encoding="utf-8").splitlines()
+    assert "reason" not in json.loads(lines[2])
+
+
+def test_a_reason_with_unicode_line_separators_cannot_split_the_row(tmp_path: Path) -> None:
+    vault = tmp_path
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text("## 2026-09-01\n", encoding="utf-8")
+
+    assert mp.record_dismissal(
+        queue, text="Sep fact.", kind="memory", via="pwa", reason="a\u2028b\u2029c\u0085d\nnext"
+    )
+
+    rows = mp.read_decisions(queue)
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "a b c d next"
+    assert mp.was_dismissed(vault, "Sep fact.") is True
+
+
+def test_read_decisions_reason_is_empty_for_legacy_rows(tmp_path: Path) -> None:
+    queue = tmp_path / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    mp.dismissed_log_path(queue).write_text(
+        '{"kind": "memory", "text": "Legacy."}\n'
+        '{"promoted_at": "2026-01-01T00:00:00+00:00", "kind": "memory", "text": "Old accept."}\n',
+        encoding="utf-8",
+    )
+
+    rows = mp.read_decisions(queue)
+    assert [r["reason"] for r in rows] == ["", ""]
+    before = [mp.history_row_id(r, "personal") for r in rows]
+    with_reason = [mp.history_row_id({**r, "reason": "why"}, "personal") for r in rows]
+    assert before == with_reason

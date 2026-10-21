@@ -361,6 +361,9 @@
              actions; the only thing it cannot do alone is navigate to a chat,
              so it emits the setup chat's id for this view to open. -->
         <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
+        <!-- The operator's switch for the nightly run's own decisions. It owns
+             its data: nothing here is part of the workspace edit form. -->
+        <SettingsMemoryHandover />
 
         <SettingsInsights
           :routines="routines"
@@ -1065,7 +1068,7 @@
                   </label>
                   <p :id="`workspace-name-hint-${form.name}`" class="hint hint--compact set-subrow-hint">Letters, numbers, dashes, underscores.</p>
                   <div class="set-subrow">
-                    <span class="set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
+                    <span class="ws-label set-subrow-label" :id="`workspace-color-${form.name}`">Accent</span>
                     <div
                       class="workspace-color-swatches set-subrow-control"
                       role="radiogroup"
@@ -1126,8 +1129,13 @@
                   </div>
                   <p class="hint hint--compact set-subrow-hint">Load your Claude account's connectors (Slack, Jira, …) in this workspace's Claude chats.</p>
                   <label class="settings-field set-subrow">
-                    <span class="ws-label set-subrow-label" title="Which Google account this workspace uses. Accounts are added under Google Workspace below.">Google profile</span>
-                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
+                    <span class="ws-label set-subrow-label">Google profile</span>
+                    <select
+                      class="routine-input routine-select workspace-select set-subrow-control"
+                      v-model="form.gws_profile"
+                      :disabled="workspacesSaving === form.name"
+                      :aria-describedby="`workspace-gws-hint-${form.name}`"
+                    >
                       <option value="">No Google account</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
@@ -1137,6 +1145,7 @@
                       </option>
                     </select>
                   </label>
+                  <p :id="`workspace-gws-hint-${form.name}`" class="hint hint--compact set-subrow-hint">Which Google account this workspace uses. Accounts are added under Google Workspace below.</p>
                   <div class="workspace-edit-actions">
                     <button
                       v-if="workspaceDirty(form)"
@@ -1146,11 +1155,19 @@
                       @click="saveWorkspace(form.name)"
                     >{{ workspacesSaving === form.name ? 'Saving...' : 'Save changes' }}</button>
                     <button
+                      v-if="workspaceDirty(form)"
                       type="button"
-                      class="set-link set-link--quiet"
+                      class="btn-small workspace-discard"
                       :disabled="workspacesSaving === form.name"
                       @click="discardWorkspace(form.name)"
-                    >{{ workspaceDirty(form) ? 'Discard' : 'Done' }}</button>
+                    >Discard</button>
+                    <button
+                      v-else
+                      type="button"
+                      class="btn-small workspace-close"
+                      :disabled="workspacesSaving === form.name"
+                      @click="discardWorkspace(form.name)"
+                    >Close</button>
                   </div>
                 </div>
               </div>
@@ -2091,6 +2108,7 @@ import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
+import SettingsMemoryHandover from './settings/SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
 import type { ModelSection } from '../lib/modelSections'
 import { isLoopbackHostname } from '../lib/loopback'
@@ -5994,7 +6012,8 @@ a.btn-secondary {
 .workspace-edit-actions {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-2);
+  flex-wrap: wrap;
   padding-top: var(--space-3);
   border-top: 1px solid var(--border);
 }

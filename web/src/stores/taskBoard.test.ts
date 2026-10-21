@@ -166,6 +166,57 @@ describe('taskBoard store', () => {
     expect(store.described).toBeNull()
   })
 
+  describe('decision reasons (#1730)', () => {
+    it('remove sends the reason only when there is one', async () => {
+      const store = useTaskBoardStore()
+      del.mockResolvedValue({ workspace: 'personal', deleted: 'ship' })
+      await store.remove('personal', 'ship', REVISION, 'not mine')
+      expect(del).toHaveBeenLastCalledWith('/api/tasks/ship', {
+        workspace: 'personal', expected_revision: REVISION, reason: 'not mine',
+      })
+      await store.remove('personal', 'ship', REVISION)
+      expect(del).toHaveBeenLastCalledWith('/api/tasks/ship', {
+        workspace: 'personal', expected_revision: REVISION,
+      })
+      await store.remove('personal', 'ship', REVISION, '   ')
+      expect(del).toHaveBeenLastCalledWith('/api/tasks/ship', {
+        workspace: 'personal', expected_revision: REVISION,
+      })
+    })
+
+    it('complete sends the reason only when there is one', async () => {
+      const store = useTaskBoardStore()
+      post.mockResolvedValue(stored({ status: 'done' }))
+      await store.complete('personal', 'ship', REVISION, 'note', ' good as is ')
+      expect(post).toHaveBeenLastCalledWith('/api/tasks/ship/complete', {
+        workspace: 'personal', expected_revision: REVISION, resolution: 'note', reason: 'good as is',
+      })
+      await store.complete('personal', 'ship', REVISION, 'note')
+      expect(post).toHaveBeenLastCalledWith('/api/tasks/ship/complete', {
+        workspace: 'personal', expected_revision: REVISION, resolution: 'note',
+      })
+      await store.complete('personal', 'ship', REVISION, 'note', '\n ')
+      expect(post).toHaveBeenLastCalledWith('/api/tasks/ship/complete', {
+        workspace: 'personal', expected_revision: REVISION, resolution: 'note',
+      })
+    })
+
+    it('attemptAction sends the reason only when there is one', async () => {
+      const store = useTaskBoardStore()
+      post.mockResolvedValue({ attempt: attempt() })
+      await store.attemptAction('personal', 'ship', ATTEMPT_ID, 'detach', 'not a task')
+      expect(post).toHaveBeenLastCalledWith(
+        `/api/tasks/ship/attempt/${ATTEMPT_ID}/detach`,
+        { workspace: 'personal', reason: 'not a task' },
+      )
+      await store.attemptAction('personal', 'ship', ATTEMPT_ID, 'detach', '  ')
+      expect(post).toHaveBeenLastCalledWith(
+        `/api/tasks/ship/attempt/${ATTEMPT_ID}/detach`,
+        { workspace: 'personal' },
+      )
+    })
+  })
+
   it('does not let a late delete drop a real row on the new board', async () => {
     const store = useTaskBoardStore()
     await switchAway()

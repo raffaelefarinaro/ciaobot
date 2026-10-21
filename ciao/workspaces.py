@@ -16,9 +16,11 @@ from typing import Any, Iterable, cast
 
 from ciao import provider_registry
 from ciao.config import (
+    DEFAULT_MEMORY_HANDOVER,
     DEFAULT_WORKSPACE_COLOR,
     WorkspaceConfig,
     coerce_agent_fs_scope,
+    coerce_memory_handover,
     coerce_workspace_color,
 )
 
@@ -92,6 +94,10 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         agent_fs_scope = coerce_agent_fs_scope(getattr(workspace, "agent_fs_scope", None))
     except ValueError:
         agent_fs_scope = None
+    try:
+        memory_handover = coerce_memory_handover(workspace.memory_handover)
+    except ValueError:
+        memory_handover = DEFAULT_MEMORY_HANDOVER
     # A stored value naming a removed backend (e.g. pre-refactor "ollama") is
     # reported as the provider that actually runs the workspace. The PWA
     # renders this into a <select> limited to the provider options, so an
@@ -110,6 +116,7 @@ def workspace_to_dict(workspace: WorkspaceConfig, config: Any) -> dict:
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "color": color,
         "agent_fs_scope": agent_fs_scope,
+        "memory_handover": memory_handover,
     }
 
 
@@ -219,6 +226,12 @@ def workspace_from_request(
         agent_fs_scope = existing.agent_fs_scope
     else:
         agent_fs_scope = None
+    if "memory_handover" in data:
+        memory_handover = coerce_memory_handover(data.get("memory_handover"))
+    elif existing is not None:
+        memory_handover = existing.memory_handover
+    else:
+        memory_handover = DEFAULT_MEMORY_HANDOVER
     return WorkspaceConfig(
         name=name,
         # Vault locations are not an editable Settings field. Updating a
@@ -238,6 +251,7 @@ def workspace_from_request(
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
         color=color,
         agent_fs_scope=agent_fs_scope,
+        memory_handover=memory_handover,
     )
 
 

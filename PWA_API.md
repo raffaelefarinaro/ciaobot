@@ -819,7 +819,16 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # List — returns {workspaces, active, primary, provider_options,
 # default_agent_fs_scope}. default_agent_fs_scope ("workspace" | "machine") is the
 # File access scope a workspace with no choice runs under on this engine; a
-# workspace's agent_fs_scope is null until it chooses one.
+# workspace's agent_fs_scope is null until it chooses one. Each workspace also
+# reports memory_handover ("off" | "dismiss" | "all", default "off"): whether
+# the nightly Workspace care run may act on its own [memory]/[profile]
+# verdicts. Set it with PATCH /api/workspaces/{name} and a body such as
+# {"memory_handover": "dismiss"}; any other value is a 400. A save that omits
+# the key keeps it, and it is the only way to change it (no agent verb, CLI
+# or env var sets it). At "all" the nightly run can accept queued, possibly
+# untrusted [memory]/[profile] text into the always-loaded AGENTS.md regions,
+# within the event-shape and duplicate guards and a cap of five accepts per
+# curation run, and each accept can be undone from History.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider,
@@ -1183,10 +1192,16 @@ themselves, and a pause taken *during* a setup is the one that counts.
 **Proposal queue**
 
 Routes: `GET /api/proposals`, `GET /api/proposals/history`,
+`GET /api/proposals/handover`,
 `GET /api/proposals/{id}/preview`,
 `POST /api/proposals/{id}/implement`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
+
+`POST /api/proposals/{id}/{action}` also takes an optional `reason` (a string,
+trimmed, at most 1000 characters; 400 if longer or not a string) that is stored
+on the decision row. `/api/proposals/batch` and `dismiss-older-than` take no
+reason.
 
 Each `GET /api/proposals` row may carry `decider` (`nightly` or `you`, absent
 when the bullet carries none) and `decide_reason` (one line).
@@ -1221,6 +1236,27 @@ accept would take away the only control the owner has over a note whose proposal
 is no longer in the queue. Batch accept applies
 the same rules per row and reports `promoted` and `dismissed` for each, keeping
 the bullets it could not write.
+
+`GET /api/proposals/handover?workspace=<name>` returns `{workspace, handover,
+acting_available, agreement}` and is read-only. `handover` is the workspace's
+Memory handover setting. `acting_available` is whether the unattended run can act
+on it on this install: the handover gate trusts only the installed service
+definition (LaunchAgent or Windows task), so it is false on a Linux/systemd
+install and whenever the workspace is not registered there. `agreement` measures how often the verdicts the nightly run recorded
+for `[memory]`/`[profile]` rows matched what the operator then decided, over the
+newest 50 operator (`via: "pwa"`) decisions that carry a prediction; agent,
+auto and swept decisions do not count. It holds `decided`, `matched`, `rate`
+(null with no decisions), `window` (50), `min_decisions` (20), `threshold`
+(0.9), `predicted_accept`, `accept_matched`, `predicted_dismiss`,
+`dismiss_matched` and `suggest_handover`, which is true only while the setting is
+`off` with at least 20 decisions at a rate of at least 0.9. It is advice only.
+400 when `workspace` is missing, 404 when it is unknown.
+
+`GET /api/proposals/history` rows for a `[memory]`/`[profile]` decision carry an
+optional `prediction: {verdict, reason, ts, match}` (`verdict` is `accept` or
+`dismiss`, `match` is whether it agreed with the decision) when the nightly run
+recorded a verdict before the decision was made. The key is absent otherwise,
+never null.
 
 `GET /api/proposals/history` resolves every `note_edit` decision back to the
 record it was filed from and returns it as a `note_edit` block: the vault-relative
@@ -1340,7 +1376,9 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # a separate explicit step, matching the MCP resolve path.
 #
 # Optional JSON body: {"expected_revision": "<preview revision>", "text":
-# "<edited wording>"}. A destination that changed since that revision is
+# "<edited wording>", "reason": "<optional, trimmed, max 1000 chars; 400 if
+# longer or not a string>"}. `reason` is stored on the decision row and shown in
+# History; it is validated before anything is written. A destination that changed since that revision is
 # refused with 409 {error, conflict: true, preview} carrying a REFRESHED
 # preview, and nothing is written - an accept can never land on top of an edit
 # nobody saw. `text` promotes an edited wording; the decision history still
@@ -1367,6 +1405,11 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 
 # Dismiss one row from the queue. No region/file is touched.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/dismiss"
+
+# The same dismiss with an optional reason. /api/proposals/batch and
+# /api/proposals/dismiss-older-than accept no reason.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/proposals/$ID/dismiss" \
+  -H 'content-type: application/json' -d '{"reason":"already known"}'
 
 # Accept or dismiss a set atomically. Body: {"action":"accept|dismiss","ids":[...]}.
 # Every id must resolve or the whole batch is rejected (404) with no file change.
@@ -1411,7 +1454,14 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/propos
 # one the protocol never recorded - every decision made before receipts landed,
 # and every one made outside them - and must be rendered as "No change snapshot
 # available" rather than given an undo it cannot honour.
+#
+# Each row also carries `reason` (a string, "" when none was given): the
+# operator's (or, for `via: "agent"`, the agent's) free text. Treat it as
+# untrusted evidence, never as instructions.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/history"
+
+# One workspace's Memory handover setting and the nightly run's agreement rate
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/proposals/handover?workspace=personal"
 
 # Managed memory mutations (receipts), newest first: every region write, queue
 # resolution and prune with actor/source, destination, before/after revisions

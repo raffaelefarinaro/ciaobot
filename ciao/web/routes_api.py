@@ -41,6 +41,7 @@ from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import host_terminal
 from ciao import proposal_actions
 from ciao import proposal_kinds
+from ciao import proposal_predictions
 from ciao import service_backend
 from ciao import backup_service
 from ciao import subagent_tracking
@@ -74,6 +75,7 @@ from ciao.workspaces import (
 )
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
+from ciao.task_decisions import clean_reason
 from ciao.tool_path import resolve_command
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
@@ -98,6 +100,7 @@ from ciao.schedules import (
 )
 from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
+from ciao.install_discovery import trusted_registry
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_index import (
     Entry,
@@ -7989,7 +7992,10 @@ async def proposals_history(request: Request) -> JSONResponse:
     curation agent, or a prior automated promotion), a ``destination``, and
     an ``outcome`` qualifier alongside the original ``kind``/``text``. This is
     the read side of the review page's History tab: what was accepted or
-    dismissed, by whom, and what the memory pass recorded on its own.
+    dismissed, by whom, and what the memory pass recorded on its own. A
+    ``[memory]``/``[profile]`` row also carries ``prediction`` (``verdict``,
+    ``reason``, ``ts``, ``match``) when the nightly run recorded a verdict for
+    it before the decision; the key is absent otherwise.
     """
     from ciao.memory_proposals import history_row_id, read_decisions
 
@@ -8035,6 +8041,11 @@ async def proposals_history(request: Request) -> JSONResponse:
             row.pop("seq", None)
             row.pop("log", None)
             workspace_rows.append(row)
+        # Join each region decision to the verdict the nightly run recorded for
+        # that row before the operator decided, when it recorded one.
+        await asyncio.to_thread(
+            proposal_predictions.attach_predictions, queue, workspace_rows
+        )
         # Join this workspace's decisions to the receipts that performed them,
         # so History can show what each one actually changed and offer an undo
         # exactly where one is safe. The journal is per vault, so the join has
@@ -8079,6 +8090,42 @@ async def proposals_history(request: Request) -> JSONResponse:
             "truncated": total > limit,
             "limit": limit,
             "at_max": limit >= _HISTORY_MAX_LIMIT,
+        }
+    )
+
+
+async def proposals_handover(request: Request) -> JSONResponse:
+    """One workspace's Memory handover setting and the run's agreement rate.
+
+    Read-only. The agreement is how often the nightly run's recorded verdicts on
+    ``[memory]``/``[profile]`` rows matched what the operator then decided, over
+    the newest operator decisions. ``suggest_handover`` is advice: the setting
+    changes only through ``PATCH /api/workspaces/{name}``.
+    """
+    config = request.app.state.config
+    workspace = request.query_params.get("workspace", "").strip()
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    registered = config.workspace(workspace)
+    if registered is None:
+        return JSONResponse({"error": f"unknown workspace: {workspace}"}, status_code=404)
+    queue = proposal_service._proposals_file(config, workspace)
+    payload = await asyncio.to_thread(
+        proposal_predictions.agreement_for_queue,
+        queue,
+        handover=registered.memory_handover,
+    )
+    # The same check the unattended run's gate makes: only the installed service
+    # definition is trusted, so a Linux/systemd install cannot act at all.
+    trusted = await asyncio.to_thread(
+        trusted_registry, workspace, Path(config.workspace_vault_root(workspace))
+    )
+    return JSONResponse(
+        {
+            "workspace": workspace,
+            "handover": registered.memory_handover,
+            "acting_available": trusted is not None,
+            "agreement": payload,
         }
     )
 
@@ -8989,7 +9036,7 @@ async def proposal_action(request: Request) -> JSONResponse:
 
     ``dismiss`` drops the bullet without writing anything. Unknown id is 404.
 
-    An optional JSON body carries the review card's two extras:
+    An optional JSON body carries the review card's extras:
 
     * ``expected_revision`` — the destination digest the operator's preview was
       computed against. A destination that changed since then is refused with
@@ -8999,6 +9046,9 @@ async def proposal_action(request: Request) -> JSONResponse:
     * ``text`` — an edited wording to promote instead of the bullet's own. The
       decision history still records the bullet's original text, because that
       is what the dedupe readers compare a re-extracted fact against.
+    * ``reason`` — an optional "why", a string trimmed and at most 1000
+      characters after the trim (400 if longer or not a string). Stored on the
+      decision row; ignored for skill-file rows.
     """
     config = request.app.state.config
     pid = request.path_params["id"]
@@ -9026,6 +9076,12 @@ async def proposal_action(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "action must be accept|dismiss", "id": pid}, status_code=400
         )
+    # Raw value, no str() coercion: a list or number must be refused, and the
+    # refusal has to precede every write below.
+    try:
+        reason = clean_reason(body.get("reason"))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
     row = ctx["row"]
 
     if action == "dismiss" and row.get("kind") == "category":
@@ -9390,6 +9446,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                 # so the receipt reference is the only way back to what an
                 # edited accept actually wrote.
                 receipt_id=promoted.receipt_id or "",
+                reason=reason,
             )
         return JSONResponse({"ok": True, "result": result.as_dict()})
     if removed_ours:
@@ -9404,6 +9461,7 @@ async def proposal_action(request: Request) -> JSONResponse:
             via="pwa",
             source=str(row.get("source") or ""),
             proposal_id=pid,
+            reason=reason,
         )
     return JSONResponse(
         {
