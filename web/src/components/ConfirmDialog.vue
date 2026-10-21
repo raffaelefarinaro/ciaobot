@@ -18,6 +18,11 @@
           <DialogDescription as="p" class="confirm-message">
             {{ request?.message }}
           </DialogDescription>
+          <DecisionReason
+            v-if="request?.withReason"
+            id-prefix="confirm"
+            v-model="reasonText"
+          />
           <div class="confirm-actions">
             <DialogClose as-child>
               <button
@@ -54,13 +59,18 @@ import {
   DialogTitle,
 } from 'reka-ui'
 import { onKeyStroke } from '@vueuse/core'
-import { nextTick, onBeforeUnmount, ref } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { pendingConfirm } from '../lib/confirm'
+import DecisionReason from './DecisionReason.vue'
 
 const request = pendingConfirm
 const cancelButton = ref<HTMLButtonElement | null>(null)
 
+const reasonText = ref('')
+watch(request, () => { reasonText.value = '' })
+
 function accept() {
+  if (request.value) request.value.reason = reasonText.value
   request.value?.resolve(true)
 }
 
@@ -86,6 +96,10 @@ function onEscapeKeyDown(event: KeyboardEvent) {
 
 function onEnter(event: KeyboardEvent) {
   if (!request.value) return
+  // Enter in the reason field is a newline, and on a chip it toggles the chip.
+  const target = event.target
+  if (target instanceof HTMLTextAreaElement) return
+  if (target instanceof Element && target.closest('.decision-reason')) return
   event.preventDefault()
   accept()
 }
@@ -126,6 +140,9 @@ onBeforeUnmount(() => {
   margin: 0 0 var(--space-4);
   color: var(--fg2);
   white-space: pre-line;
+}
+.decision-reason {
+  margin-bottom: var(--space-4);
 }
 .confirm-actions {
   display: flex;

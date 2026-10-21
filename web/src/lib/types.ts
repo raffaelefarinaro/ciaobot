@@ -1458,6 +1458,8 @@ export interface Task {
    * instead of looking the chat up.
    */
   chat_archived?: boolean
+  /** `'agent'` for a task the agent filed, else `null`. Nothing renders it. */
+  created_by?: 'agent' | null
 }
 
 /**
