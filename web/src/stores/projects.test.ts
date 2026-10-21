@@ -1408,6 +1408,92 @@ describe('deferred send visibility and re-send de-duplication', () => {
     }
   })
 
+  test('a promoted deferred send keeps one bubble when its echo arrives', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-echo-send-id'
+      store.activeChatId = chatId
+
+      // The socket is down, so the send is deferred and rendered as a pending
+      // bubble. It carries no send id yet: none was minted.
+      store.sendMessage(chatId, 'one turn only')
+      expect(userBubbles(store, chatId, 'one turn only')).toHaveLength(1)
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      // The promotion put the send on the wire under a minted send id.
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      const sendId = frames[0].send_id as string
+      expect(sendId).toBeTruthy()
+
+      // The broker echoes the turn back with its server-assigned index and the
+      // send id the frame carried. The echo reconciliation matches bubbles by
+      // send id, so a promoted bubble that never learned the id cannot be
+      // recognised and the echo pushes a second copy of the same turn.
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_echo', text: 'one turn only', turn_index: 0, send_id: sendId,
+        }),
+      })
+
+      const bubbles = userBubbles(store, chatId, 'one turn only')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].turn_index).toBe(0)
+      expect(bubbles[0].send_id).toBe(sendId)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a promoted deferred send without a rendered bubble still pushes one', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-wiped-bubble'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'wiped pending')
+      expect(userBubbles(store, chatId, 'wiped pending')).toHaveLength(1)
+
+      // A history reload lands while the retry chain is still waiting and
+      // wipes the optimistic bubble.
+      store.messages[chatId] = []
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      const sendId = frames[0].send_id as string
+      expect(sendId).toBeTruthy()
+
+      // The promotion had no bubble to promote, so it pushed one instead —
+      // carrying the send id, so the echo settles it rather than adding a
+      // second copy.
+      const bubbles = userBubbles(store, chatId, 'wiped pending')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].send_id).toBe(sendId)
+
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_echo', text: 'wiped pending', turn_index: 0, send_id: sendId,
+        }),
+      })
+
+      const settled = userBubbles(store, chatId, 'wiped pending')
+      expect(settled).toHaveLength(1)
+      expect(settled[0].turn_index).toBe(0)
+      expect(settled[0].send_id).toBe(sendId)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
   test('a deferred send that lands mid-turn becomes one queue entry, not a bubble plus a chip', async () => {
     try {
       const store = useProjectStore()
