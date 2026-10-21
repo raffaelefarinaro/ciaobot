@@ -314,6 +314,9 @@ describe('ChatPanel naming placeholder', () => {
     expect(row.find('.close-btn').exists()).toBe(true)
     expect(row.find('.chat-title').exists()).toBe(true)
     expect(row.find('.chat-code-badge').exists()).toBe(true)
+    // Close, then title, then badge: the order the header documents.
+    const order = Array.from(row.element.children).map(el => el.className)
+    expect(order).toEqual(['btn-icon close-btn', 'pane-title chat-title', 'chat-code-badge'])
     // The project sits beside the row, never inside it, so a second line
     // under the title cannot drag the close control off the title's centre.
     // A named project is required here: General renders no crumb at all, and
