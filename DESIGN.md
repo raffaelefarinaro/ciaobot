@@ -149,7 +149,7 @@ The task board keeps the same status groups on every device: **To do, In progres
 
 The workspace editor keeps one consistent label/control row per field, with each explanation directly below its own field. Its compact saved summary remains above the editor. Dirty forms offer primary **Save changes** and neutral bordered **Discard**; clean forms offer neutral bordered **Close**, not a stranded Done link. Closing or discarding never saves or changes file-access permissions, and File access deep links only locate and focus the control.
 
-The Google Workspace card shows one next step, not the whole manual: completed steps are quiet status lines, the current step is the only one shown in full, and later instructions sit behind a closed native disclosure. Setup derivation is unchanged. The account form is a labelled row — visible Account name and Display name fields, one primary Add account action — and never triggers installation, a browser sign-in or a permission itself. Progress is derived per focus profile; the card hides once `gws` is installed and every linked account is ready.
+The Google Workspace card shows one next step, not the whole manual: completed steps are quiet status lines, the current step is the only one shown in full, and later instructions sit behind a closed native disclosure. Setup derivation is unchanged. The account form is a labelled row — visible Account name and Display name fields, one primary Add account action — and never triggers installation, a browser sign-in or a permission itself. Progress is derived per focus profile; the card hides once `gws` is installed and every account is signed in, unexpired and linked to a workspace.
 
 ## Colors
 
