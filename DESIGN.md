@@ -149,6 +149,8 @@ The task board keeps the same status groups on every device: **To do, In progres
 
 The workspace editor keeps one consistent label/control row per field, with each explanation directly below its own field. Its compact saved summary remains above the editor. Dirty forms offer primary **Save changes** and neutral bordered **Discard**; clean forms offer neutral bordered **Close**, not a stranded Done link. Closing or discarding never saves or changes file-access permissions, and File access deep links only locate and focus the control.
 
+The device-setup reminder uses quiet task labels at `--text-base`, weight 600, and one aligned action column. Installation help is a real navigation link styled as a neutral bordered action; notification Enable and a browser-provided Install action retain primary emphasis. On narrow panes, row actions become full-width touch targets. *Use on your phone* is a closed native disclosure containing the existing three instructions and the permanent Settings → Other devices link. Phone setup remains host-only and informational, never a completion requirement; closing the reminder still persists for this browser.
+
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
