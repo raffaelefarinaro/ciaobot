@@ -33,6 +33,11 @@ interface Props {
   // image-capability card's "Open picker" to land the user on the current
   // backend instead of the full cross-provider list.
   filterSection?: string
+  // Ids of a heading and a description rendered in the header slot, so the
+  // listbox and its search field can name and explain the picker instead of
+  // leaving that text visual-only.
+  labelledBy?: string
+  describedBy?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -45,6 +50,8 @@ const props = withDefaults(defineProps<Props>(), {
   placement: 'bottom-start',
   activeModels: () => [],
   triggerless: false,
+  labelledBy: '',
+  describedBy: '',
 })
 
 const emit = defineEmits<{
@@ -359,6 +366,7 @@ onMounted(() => {
             class="model-selector__listbox"
           role="listbox"
           :aria-multiselectable="multiple"
+          :aria-labelledby="labelledBy || undefined"
         >
           <div v-if="$slots.header" class="model-selector__header">
             <slot name="header" />
@@ -371,6 +379,7 @@ onMounted(() => {
               type="text"
               class="model-selector__search"
               placeholder="Search models"
+              :aria-describedby="describedBy || undefined"
               @keydown="onKeydown"
             />
           </div>

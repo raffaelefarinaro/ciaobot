@@ -55,7 +55,8 @@ const ModelSelectorStub = defineComponent({
   emits: ['select', 'close', 'update:modelValue'],
   setup(_, { slots }) {
     return () => h('div', { class: 'model-selector-stub' }, [
-      slots.header?.(),
+      // Mirror the real child: an absent header slot renders no band at all.
+      slots.header ? h('div', { class: 'model-selector__header' }, slots.header()) : null,
       slots.footer?.(),
     ])
   },
@@ -565,6 +566,8 @@ describe('ChatPanel recovery model picker', () => {
     await openComposerPicker(wrapper)
 
     expect(wrapper.find('.model-picker-recovery').exists()).toBe(false)
+    // No empty header band above the search field either.
+    expect(wrapper.find('.model-selector__header').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -667,6 +670,46 @@ describe('ChatPanel recovery model picker', () => {
     expect(handover).toHaveBeenCalledTimes(1)
     expect(handover.mock.calls[0][0]).toBe('chat-1')
     expect(handover.mock.calls[0][1]).toMatchObject({ model: 'openai/gpt-5.6', provider: 'opencode' })
+    expect(tryNow).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('applies a staged thinking level after a handover, before retrying', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    await wrapper.findAll('.thinking-chip').find(c => c.text() === 'High')!.trigger('click')
+    await flushPromises()
+    await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
+
+    // The handover route takes only the route; the level rides its own PATCH.
+    expect(handover.mock.calls[0][1]).toEqual({ provider: 'opencode', model: 'openai/gpt-5.6' })
+    expect(updateChat.mock.calls[0][1]).toMatchObject({ thinking_level: 'high' })
+    expect(updateChat.mock.invocationCallOrder[0]!).toBeLessThan(tryNow.mock.invocationCallOrder[0]!)
+    wrapper.unmount()
+  })
+
+  it('still retries at the provider default when the staged level cannot be saved', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    vi.spyOn(store, 'updateChat').mockRejectedValue(new Error('engine refused'))
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const toast = vi.spyOn(store, 'pushErrorToast')
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    await wrapper.findAll('.thinking-chip').find(c => c.text() === 'High')!.trigger('click')
+    await flushPromises()
+    await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
+
+    expect(toast).toHaveBeenCalled()
+    // The retry is not lost to a failed level write.
     expect(tryNow).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })

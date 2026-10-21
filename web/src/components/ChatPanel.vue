@@ -1139,16 +1139,18 @@
                 :filter-section="capabilityPickerSection"
                 placeholder="Model"
                 placement="top-start"
+                :labelled-by="isRecoveryPicker ? 'model-picker-recovery-title' : ''"
+                :described-by="isRecoveryPicker ? 'model-picker-recovery-note' : ''"
                 @select="selectModel"
                 @close="showModelPicker = false"
               >
                 <!-- Recovery only. Here a pick is not a model change but a
                      retry of the turn that failed, so the picker says so
                      before the user chooses. -->
-                <template #header>
-                  <div v-if="isRecoveryPicker" class="model-picker-recovery">
-                    <p class="model-picker-recovery__title">Choose a model to retry immediately</p>
-                    <p class="model-picker-recovery__note">
+                <template v-if="isRecoveryPicker" #header>
+                  <div class="model-picker-recovery">
+                    <p id="model-picker-recovery-title" class="model-picker-recovery__title">Choose a model to retry immediately</p>
+                    <p id="model-picker-recovery-note" class="model-picker-recovery__note">
                       Choosing a model retries the failed request and may incur usage charges. Thinking applies to that retry.
                     </p>
                   </div>
@@ -4724,7 +4726,9 @@ async function applyModelChoice(
 ): Promise<boolean> {
   try {
     if (handover) {
-      await store.handoverChat(chatId, updates)
+      // The handover route reads only the provider and model; the thinking
+    // level is applied by the PATCH below, so it is not sent here.
+    await store.handoverChat(chatId, { provider: updates.provider, model: updates.model })
       if (staged !== null) {
         // The handover keeps the chat's own thinking level; the staged one
         // belongs to the retry, so it goes on top. Best effort: the handover
