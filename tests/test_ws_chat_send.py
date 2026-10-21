@@ -703,21 +703,22 @@ def _duplicate_origin_app(
     return app
 
 
-def test_a_duplicate_send_echoes_the_recorded_origin() -> None:
+@pytest.mark.parametrize("recorded_origin", ["retry", "background_run"])
+def test_a_duplicate_send_echoes_the_recorded_origin(recorded_origin: str) -> None:
     """A repeat of a retry turn repeats the tag the engine recorded.
 
     The client that reconnects after a recovery resend must not lose the
     notice it was told about.
     """
     calls: list = []
-    client = signed_in(TestClient(_duplicate_origin_app(calls, "retry")))
+    client = signed_in(TestClient(_duplicate_origin_app(calls, recorded_origin)))
     with client.websocket_connect("/ws/chat/chat-1") as ws:
-        ws.send_text('{"type":"message","text":"try again","send_id":"s-1"}')
+        ws.send_text('{"type":"message","text":"try again","send_id":"s-1","origin":"retry"}')
         echo = ws.receive_json()
     assert echo["type"] == "user_echo"
     assert echo["duplicate"] is True
     assert echo["turn_index"] == 7
-    assert echo["origin"] == "retry"
+    assert echo["origin"] == recorded_origin
     # And the repeat started no second turn.
     assert calls == [], calls
 
@@ -751,4 +752,3 @@ def test_a_pending_duplicate_is_not_tagged_as_a_retry() -> None:
     assert echo["duplicate"] is True
     assert "origin" not in echo
     assert calls == [], calls
-

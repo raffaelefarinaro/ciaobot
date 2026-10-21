@@ -84,8 +84,8 @@ def remove_pending_list(items: list[dict], entry_id: str) -> bool:
 
 
 QUEUE_DELIVERIES = frozenset({"queue", "steer"})
-#: Who the engine wrote an injected user turn for, or that the user asked for
-#: a retry of. Recorded per turn in ``ChatInfo.user_turn_origin`` and sent on
+#: An engine-injected turn's source, or ``retry`` for a user-requested retry.
+#: Recorded per turn in ``ChatInfo.user_turn_origin`` and sent on
 #: ``user_echo`` / ``/messages`` so the PWA draws a notice card instead of a
 #: user bubble. Empty string = typed by the person.
 TURN_ORIGINS = frozenset({
@@ -118,8 +118,9 @@ def _flushed_entry(entry: dict) -> dict:
 def shared_origin(entries: list[dict]) -> str:
     """The origin every entry carries, or "" if any entry lacks it or they differ.
 
-    A steered or combined message counts as engine-written only when all of it
-    is: a person's words mixed in must stay a visible bubble.
+    A steered or combined message retains an engine origin or user-requested
+    retry tag only when every entry shares it. Mixed-in ordinary typed words
+    must stay a visible bubble.
     """
     origins = {str(e.get("origin") or "") for e in entries}
     if len(origins) != 1:
