@@ -4,19 +4,6 @@ import { api } from '../lib/api'
 import { readableTasks, taskRowsFrom } from '../lib/taskBoard'
 import type { ChatInfo, Task } from '../lib/types'
 
-/**
- * What the rest of the app needs to know about delegated board tasks.
- *
- * The board (`stores/taskBoard.ts`) is the editor and loads only on `/tasks`.
- * This store is the app-wide read: the active workspace's readable tasks, so the
- * sidebar can count the ones waiting for review, Home can put a chat whose agent
- * asked for input among the chats that need you, and a delegated chat can link
- * back to its task. It never writes; the board does.
- *
- * Best-effort like `proposals`: a failed read keeps the last rows rather than
- * blanking every signal. `reload` is called on workspace switch and whenever a
- * `tasks_changed` event arrives on `/ws/events`.
- */
 /** Title then id, so the same set of tasks always reads the same way. */
 function byTitleThenId(a: Task, b: Task): number {
   if (a.title !== b.title) return a.title < b.title ? -1 : 1
@@ -24,6 +11,20 @@ function byTitleThenId(a: Task, b: Task): number {
   return 0
 }
 
+/**
+ * What the rest of the app needs to know about board tasks: the ones a chat
+ * was delegated, and the ones a chat is only linked to.
+ *
+ * The board (`stores/taskBoard.ts`) is the editor and loads only on `/tasks`.
+ * This store is the app-wide read: the active workspace's readable tasks, so the
+ * sidebar can count the ones waiting for review, Home can put a chat whose agent
+ * asked for input among the chats that need you, and a chat can link back to its
+ * task. It never writes; the board does.
+ *
+ * Best-effort like `proposals`: a failed read keeps the last rows rather than
+ * blanking every signal. `reload` is called on workspace switch and whenever a
+ * `tasks_changed` event arrives on `/ws/events`.
+ */
 export const useTaskSignalsStore = defineStore('taskSignals', () => {
   const tasks = ref<Task[]>([])
   const loadedWorkspace = ref('')
