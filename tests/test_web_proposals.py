@@ -39,6 +39,7 @@ from ciao.web.routes_api import (
     proposal_implement,
     proposal_preview,
     proposals_batch,
+    proposals_handover,
     proposals_history,
 )
 
@@ -85,6 +86,7 @@ def _client(config: CiaoConfig, pcm: Any = None) -> TestClient:
         routes=[
             Route("/api/proposals", list_proposals, methods=["GET"]),
             Route("/api/proposals/history", proposals_history, methods=["GET"]),
+            Route("/api/proposals/handover", proposals_handover, methods=["GET"]),
             Route("/api/proposals/{id}/preview", proposal_preview, methods=["POST"]),
             # Before `{id}/{action}`, exactly as app.py orders them: Starlette
             # matches in order and would otherwise read "implement" as an action.
@@ -501,6 +503,7 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
     expected = {
         "/api/proposals",
         "/api/proposals/history",
+        "/api/proposals/handover",
         "/api/proposals/batch",
         "/api/proposals/dismiss-older-than",
         "/api/proposals/{id}/preview",
@@ -1800,6 +1803,133 @@ def _seed_history(config: CiaoConfig, workspace: str, entries: list[dict]) -> No
         "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
         encoding="utf-8",
     )
+
+
+def _predict(config: CiaoConfig, workspace: str, text: str, verdict: str, at: str) -> None:
+    """Write a prediction row with a chosen timestamp, as the nightly run would."""
+    from ciao.proposal_predictions import predictions_path
+
+    queue = config.workspace_vault_root(workspace) / "Workspace" / "Memory-Proposals.md"
+    sidecar = predictions_path(queue)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "predicted_at": at,
+        "kind": "memory",
+        "text": text,
+        "verdict": verdict,
+        "reason": "stable preference",
+    }
+    with sidecar.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def test_history_rows_carry_the_joined_prediction_and_match(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [{"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "One.", "via": "pwa"}],
+    )
+    _predict(config, "personal", "One.", "dismiss", "2026-09-01T09:00:00+00:00")
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert rows[0]["prediction"] == {
+        "verdict": "dismiss",
+        "reason": "stable preference",
+        "ts": "2026-09-01T09:00:00+00:00",
+        "match": False,
+    }
+
+
+def test_history_rows_without_a_prediction_have_no_prediction_key(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [{"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "One."}],
+    )
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert "prediction" not in rows[0]
+
+
+def test_history_does_not_join_a_prediction_made_after_the_decision(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [{"promoted_at": "2026-09-01T10:00:00+00:00", "kind": "memory", "text": "One."}],
+    )
+    _predict(config, "personal", "One.", "accept", "2026-09-01T10:00:01+00:00")
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert "prediction" not in rows[0]
+
+
+def _seed_agreeing_decisions(config: CiaoConfig, workspace: str, count: int) -> None:
+    entries = []
+    for i in range(count):
+        text = f"Fact number {i}."
+        entries.append(
+            {
+                "promoted_at": f"2026-09-01T10:{i:02d}:00+00:00",
+                "kind": "memory",
+                "text": text,
+                "via": "pwa",
+            }
+        )
+        _predict(config, workspace, text, "accept", f"2026-09-01T09:{i:02d}:00+00:00")
+    _seed_history(config, workspace, entries)
+
+
+def test_proposals_handover_returns_setting_and_agreement(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_agreeing_decisions(config, "personal", 20)
+    client = _client(config)
+
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+
+    assert body["workspace"] == "personal"
+    assert body["handover"] == "off"
+    assert body["agreement"]["decided"] == 20
+    assert body["agreement"]["rate"] == 1.0
+    assert body["agreement"]["suggest_handover"] is True
+
+    config.workspace("personal").memory_handover = "dismiss"
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+    assert body["handover"] == "dismiss"
+    assert body["agreement"]["suggest_handover"] is False
+
+
+def test_proposals_handover_validates_workspace(tmp_path: Path) -> None:
+    client = _client(_config(tmp_path))
+
+    assert client.get("/api/proposals/handover").status_code == 400
+    assert client.get("/api/proposals/handover", params={"workspace": "nope"}).status_code == 404
+
+
+def test_proposals_handover_requires_the_session(tmp_path: Path) -> None:
+    from itsdangerous import URLSafeTimedSerializer
+    from starlette.middleware import Middleware
+
+    from ciao.web.auth import SESSION_COOKIE, AuthMiddleware
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/proposals/handover", proposals_handover, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = _config(tmp_path)
+    client = TestClient(app, base_url="https://ciao.example")
+    url = "/api/proposals/handover?workspace=personal"
+
+    assert client.get(url).status_code == 401
+    client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
+    assert client.get(url).status_code == 200
 
 
 def test_history_row_ids_are_unique_across_workspaces(tmp_path: Path) -> None:

@@ -1812,6 +1812,40 @@ def test_agent_fs_scope_round_trips_and_rejects_unknown(tmp_path, monkeypatch):
     assert fresh.workspace("personal").effective_agent_fs_scope() == "workspace"
 
 
+def test_workspace_memory_handover_defaults_off_persists_and_validates(tmp_path):
+    """The handover is operator-set per workspace, stored only when not off."""
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+
+    def stored_row() -> dict:
+        return next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")
+
+    assert config.workspace("personal").memory_handover == "off"
+    listed = client.get("/api/workspaces").json()
+    assert next(w for w in listed["workspaces"] if w["name"] == "personal")["memory_handover"] == "off"
+
+    patched = client.patch("/api/workspaces/personal", json={"memory_handover": "dismiss"})
+    assert patched.status_code == 200
+    updated = next(w for w in patched.json()["workspaces"] if w["name"] == "personal")
+    assert updated["memory_handover"] == "dismiss"
+    assert stored_row()["memory_handover"] == "dismiss"
+
+    # A save that does not mention it keeps it.
+    kept = client.patch("/api/workspaces/personal", json={"color": "cyan"})
+    assert kept.status_code == 200
+    assert config.workspace("personal").memory_handover == "dismiss"
+    assert stored_row()["memory_handover"] == "dismiss"
+
+    # Back to off removes the key from the file.
+    off = client.patch("/api/workspaces/personal", json={"memory_handover": "off"})
+    assert off.status_code == 200
+    assert "memory_handover" not in stored_row()
+
+    bad = client.patch("/api/workspaces/personal", json={"memory_handover": "everything"})
+    assert bad.status_code == 400
+    assert config.workspace("personal").memory_handover == "off"
+
+
 def test_missing_agent_fs_scope_loads_as_workspace(tmp_path, monkeypatch):
     """A registry row with no agent_fs_scope loads unset (workspace here); a stored machine stays machine."""
     monkeypatch.setattr(sys, "platform", "linux")

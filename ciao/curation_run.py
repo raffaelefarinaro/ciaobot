@@ -338,25 +338,47 @@ def _proposal_subject(bullet: Any, dup: int) -> str:
     return "\x00".join((bullet.kind, bullet.target, bullet.source, str(dup), bullet.text))
 
 
-def _proposal_items(vault_root: Path) -> list[WorklistItem]:
+def _proposal_items(vault_root: Path, handover: str) -> list[WorklistItem]:
+    from ciao.proposal_predictions import (
+        REGION_KINDS,
+        handover_allows,
+        latest_predictions,
+        prediction_key,
+    )
     from ciao.proposal_tracking import walk_proposal_queue
 
     try:
         text = (vault_root / PROPOSALS_RELATIVE).read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return []
-    # `[memory]`/`[profile]` rows stay queued for the user by contract, so they
-    # are not work: counting them would make every workspace with one pending
-    # cross-project fact look busy forever, and the nightly run would spend a
-    # model turn re-reading a row it is forbidden to act on. They are skipped
-    # after the walk, not before it, so leaving one out cannot renumber a later
-    # duplicate's ordinal. A row escalated with `decide: you` likewise waits for
-    # the operator and is not nightly work; the item key never hashes the decider.
-    keys = tuple(
-        item_key(PASS_PROPOSALS, _proposal_subject(entry.bullet, entry.dup))
-        for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text)
-        if entry.bullet.kind not in {"memory", "profile"} and entry.bullet.decider != "you"
-    )
+    # `[memory]`/`[profile]` rows are work only to record a verdict for, or to
+    # act on one when the operator's handover setting allows it; otherwise they
+    # stay queued, so a workspace with one decided-but-waiting cross-project fact
+    # does not look busy forever. A `decide: you` row is predicted but never
+    # acted on. The walk covers every row and a skipped row is only left out of
+    # the keys, so leaving one out cannot renumber a later duplicate's ordinal.
+    # The stage is part of a region row's subject, so a row that moves from
+    # predict to act (or whose setting changes) gets a new key and an earlier
+    # `curation-progress` done-key cannot hide it. The item key never hashes the
+    # decider.
+    predictions = latest_predictions(vault_root / PROPOSALS_RELATIVE)
+    collected_keys: list[str] = []
+    for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text):
+        bullet = entry.bullet
+        subject = _proposal_subject(bullet, entry.dup)
+        if bullet.kind in REGION_KINDS:
+            predicted = predictions.get(prediction_key(bullet.kind, bullet.text))
+            if predicted is None:
+                stage = "predict"
+            elif bullet.decider != "you" and handover_allows(handover, predicted["verdict"]):
+                stage = f"act:{predicted['verdict']}"
+            else:
+                continue
+            subject = f"{subject}\x00{stage}"
+        elif bullet.decider == "you":
+            continue
+        collected_keys.append(item_key(PASS_PROPOSALS, subject))
+    keys = tuple(collected_keys)
     if not keys:
         return []
     return [
@@ -1362,8 +1384,13 @@ def build_worklist(
     memory_char_limit: int | None = None,
     user_char_limit: int | None = None,
     workspace: str | None,
+    handover: str = "off",
 ) -> Worklist:
     """Compute tonight's work from files alone.
+
+    ``handover`` is the workspace's Memory handover setting (off, dismiss, all);
+    it decides whether a ``[memory]``/``[profile]`` row with a stored verdict is
+    act work. The caller reads it from the registry, never from the model.
 
     ``category_registry`` is the category list the cluster pass measures the
     notes against, and it is required rather than loaded from ``vault_root``
@@ -1429,7 +1456,7 @@ def build_worklist(
     # run that proposes a category would not count the row it just proposed. The
     # order the worklist is PRESENTED in is :data:`PASS_ORDER` either way.
     collected.extend(_category_cluster_items(vault_root, registry=category_registry))
-    collected.extend(_proposal_items(vault_root))
+    collected.extend(_proposal_items(vault_root, handover))
     collected.extend(
         _region_items(
             guide_path,

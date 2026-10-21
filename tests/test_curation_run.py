@@ -348,12 +348,11 @@ def test_guide_review_is_weekly_but_not_a_required_hygiene_key(
     assert cr.read_last_full_pass(vault / cr.CURATION_LOG_RELATIVE) == "2026-09-01"
 
 
-def test_queued_region_facts_are_not_work(tmp_path: Path) -> None:
-    """`[memory]`/`[profile]` rows stay queued for the user by contract.
+def test_unpredicted_region_facts_are_predict_work(tmp_path: Path) -> None:
+    """`[memory]`/`[profile]` rows with no verdict on file are work: to predict one.
 
-    Counting them as work would make a workspace with one pending
-    cross-project fact look busy every night forever, and the run would spend
-    a model turn re-reading a row it is forbidden to act on.
+    They are still never acted on at handover off; the run only records what it
+    would do, so the operator's agreement number has something to measure.
     """
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
@@ -372,7 +371,10 @@ def test_queued_region_facts_are_not_work(tmp_path: Path) -> None:
         today=date(2026, 9, 19),
     )
 
-    assert worklist.empty
+    assert not worklist.empty
+    proposals = [item for item in worklist.items if item.pass_id == cr.PASS_PROPOSALS]
+    assert len(proposals) == 1
+    assert len(proposals[0].keys) == 2
 
 
 def test_proposals_sharing_one_sentence_are_separate_work(tmp_path: Path) -> None:
@@ -2885,14 +2887,31 @@ def test_the_care_prompt_proposes_observations_between_sections_4_and_5() -> Non
 # ── decider ────────────────────────────────────────────────────────────────
 
 
-def _worklist_for_queue(tmp_path: Path, queue_text: str) -> "cr.Worklist":
+def _worklist_for_queue(
+    tmp_path: Path,
+    queue_text: str,
+    *,
+    handover: str = "off",
+    predictions: tuple[tuple[str, str, str], ...] = (),
+) -> "cr.Worklist":
+    from ciao import proposal_predictions
+
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
     _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
     (vault / cr.PROPOSALS_RELATIVE).write_text(
         "# Memory proposals\n\n" + queue_text, encoding="utf-8", newline=""
     )
+    for kind, text, verdict in predictions:
+        proposal_predictions.record_prediction(
+            vault / cr.PROPOSALS_RELATIVE,
+            kind=kind,
+            text=text,
+            verdict=verdict,
+            reason="because",
+        )
     return cr.build_worklist(
+        handover=handover,
         vault_root=vault,
         workspace=vault.name,
         guide_path=guide,
@@ -2911,7 +2930,75 @@ def test_decide_you_rows_are_not_nightly_work(tmp_path: Path) -> None:
     nightly = _worklist_for_queue(tmp_path / "b", "- [people Mo] x  _(decide: nightly; r)_\n")
     assert not nightly.empty
     region = _worklist_for_queue(tmp_path / "c", "- [memory] x  _(decide: nightly; r)_\n")
-    assert region.empty
+    assert not region.empty
+
+
+def _proposal_keys(worklist: "cr.Worklist") -> tuple[str, ...]:
+    for item in worklist.items:
+        if item.pass_id == cr.PASS_PROPOSALS:
+            return item.keys
+    return ()
+
+
+def test_a_predicted_region_fact_is_not_work_when_handover_is_off(tmp_path: Path) -> None:
+    worklist = _worklist_for_queue(
+        tmp_path,
+        "- [memory] x\n",
+        handover="off",
+        predictions=(("memory", "x", "dismiss"),),
+    )
+    assert worklist.empty
+
+
+def test_a_predicted_dismiss_is_act_work_for_dismiss_and_all(tmp_path: Path) -> None:
+    for name, handover in (("a", "dismiss"), ("b", "all")):
+        (tmp_path / name).mkdir()
+        worklist = _worklist_for_queue(
+            tmp_path / name,
+            "- [memory] x\n",
+            handover=handover,
+            predictions=(("memory", "x", "dismiss"),),
+        )
+        assert len(_proposal_keys(worklist)) == 1
+
+
+def test_a_predicted_accept_is_act_work_only_for_all(tmp_path: Path) -> None:
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    for name, handover, expected in (("a", "off", 0), ("b", "dismiss", 0), ("c", "all", 1)):
+        worklist = _worklist_for_queue(
+            tmp_path / name,
+            "- [memory] x\n",
+            handover=handover,
+            predictions=(("memory", "x", "accept"),),
+        )
+        assert len(_proposal_keys(worklist)) == expected
+
+
+def test_decide_you_region_row_is_predicted_but_never_acted_on(tmp_path: Path) -> None:
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    row = "- [memory] x  _(decide: you; r)_\n"
+    unpredicted = _worklist_for_queue(tmp_path / "a", row, handover="all")
+    assert len(_proposal_keys(unpredicted)) == 1
+    predicted = _worklist_for_queue(
+        tmp_path / "b", row, handover="all", predictions=(("memory", "x", "accept"),)
+    )
+    assert predicted.empty
+
+
+def test_region_row_key_changes_between_predict_and_act_stage(tmp_path: Path) -> None:
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    predict = _worklist_for_queue(tmp_path / "a", "- [memory] x\n", handover="all")
+    act = _worklist_for_queue(
+        tmp_path / "b",
+        "- [memory] x\n",
+        handover="all",
+        predictions=(("memory", "x", "accept"),),
+    )
+    assert _proposal_keys(predict) != _proposal_keys(act)
+    assert len(_proposal_keys(predict)) == len(_proposal_keys(act)) == 1
 
 
 def test_item_key_ignores_the_decider() -> None:
