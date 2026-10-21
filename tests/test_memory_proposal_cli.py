@@ -1248,9 +1248,9 @@ def test_predict_refuses_a_credential_adjacent_reason_file(tmp_path: Path, capsy
     from ciao import cli
 
     vault, queue = _decider_queue(tmp_path, _REGION_BULLET)
-    secret = tmp_path / ".runtime" / "reason.txt"
-    secret.parent.mkdir()
-    secret.write_text("why", encoding="utf-8")
+    denied_path = tmp_path / ".runtime" / "reason.txt"
+    denied_path.parent.mkdir()
+    denied_path.write_text("why", encoding="utf-8")
 
     rc = cli.main([
         "memory-proposal-predict",
@@ -1258,7 +1258,7 @@ def test_predict_refuses_a_credential_adjacent_reason_file(tmp_path: Path, capsy
         "--vault-root", str(vault),
         "--text-file", str(_write(tmp_path, "needle.txt", _REGION_NEEDLE)),
         "--verdict", "accept",
-        "--reason-file", str(secret),
+        "--reason-file", str(denied_path),
     ])
 
     assert rc == 2
@@ -1679,11 +1679,11 @@ def test_new_commands_refuse_a_credential_adjacent_text_file(
     from ciao import cli
 
     root, vault, queue = _handover_install(tmp_path, "all", _REGION_BULLET)
-    secret = root / ".runtime" / "needle.txt"
-    secret.write_text(_REGION_NEEDLE, encoding="utf-8")
+    denied_path = root / ".runtime" / "needle.txt"
+    denied_path.write_text(_REGION_NEEDLE, encoding="utf-8")
     argv = [
         command, "--workspace", str(root), "--vault-root", str(vault),
-        "--text-file", str(secret),
+        "--text-file", str(denied_path),
     ]
     if command == "memory-proposal-predict":
         argv += ["--verdict", "accept", "--reason-file", str(_write(tmp_path, "r.txt", "why"))]
