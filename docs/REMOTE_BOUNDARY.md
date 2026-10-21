@@ -152,6 +152,10 @@ carried by the session.
 A second device installs its own engine and reads `GET /api/addresses` to find
 this one. There is nothing to unpair and no session to bridge.
 
+### Residual: forged decision rows (#1745)
+
+An agent with vault write access can forge the `via=pwa` memory rows and `actor=user` task rows the weekly rules pass reads as operator decisions. This is bounded: the resulting `Memory-Review-Rules.md` and `Task-Rules.md` only shape what memory review proposes and how tasks are filed, are linted on write and again on read, and are fenced as evidence. They never accept, promote or change permissions.
+
 ## Verification
 
 - `PYTHONPATH=$PWD python -m pytest -n auto tests/`

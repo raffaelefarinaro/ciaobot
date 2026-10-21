@@ -45,7 +45,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
-from ciao import skill_proposals
+from ciao import decision_rules, skill_proposals
 from ciao.entity_types import EntityTypeRegistry
 from ciao.vault_index import vault_relative
 from ciao.os_support.locks import lock_exclusive, unlock
@@ -86,6 +86,7 @@ PASS_LEARNINGS_CLEANUP = "learnings_cleanup"
 PASS_OBSERVATIONS = "observations"
 PASS_HYGIENE = "hygiene"
 PASS_GUIDE = "guide"
+PASS_RULES = "rules"
 PASS_LOGS = "logs"
 PASS_SKILL_PROPOSALS = "skill_proposals"
 
@@ -120,6 +121,10 @@ PASS_ORDER: tuple[str, ...] = (
     PASS_OBSERVATIONS,
     PASS_HYGIENE,
     PASS_GUIDE,
+    # Weekly, like the guide review, and independent of every pass before it: it
+    # only reads the two decision logs and writes two vault notes. It sits after
+    # the required hygiene keys so a short run never lets it delay them.
+    PASS_RULES,
     PASS_LOGS,
     PASS_SKILL_PROPOSALS,
 )
@@ -1328,6 +1333,29 @@ def _guide_items(*, weekly_due: bool) -> list[WorklistItem]:
     ]
 
 
+def _rules_items(vault_root: Path, *, weekly_due: bool, today: date) -> list[WorklistItem]:
+    """Weekly distillation of operator decisions into the two rules notes.
+
+    Planned per file only when it has enough operator decisions and they changed
+    since the note was last written, so a quiet vault plans nothing. It is not a
+    required hygiene key: skipping it never blocks ``last_full_pass``.
+    """
+    if not weekly_due:
+        return []
+    kinds = decision_rules.stale_kinds(vault_root, today=today)
+    if not kinds:
+        return []
+    return [
+        WorklistItem(
+            pass_id=PASS_RULES,
+            label="Distill operator decisions into review rules",
+            reason="the weekly pass is due and decisions changed since the rules were written",
+            keys=tuple(decision_rules.progress_key(kind) for kind in kinds),
+            weekly=True,
+        )
+    ]
+
+
 def _log_items(vault_root: Path) -> list[WorklistItem]:
     oversized: list[str] = []
     for relative in (CURATION_LOG_RELATIVE, WEEKLY_REVIEW_LOG_RELATIVE):
@@ -1542,6 +1570,7 @@ def build_worklist(
             notes.append(observation_note)
     collected.extend(_hygiene_items(weekly_due=weekly_due))
     collected.extend(_guide_items(weekly_due=weekly_due))
+    collected.extend(_rules_items(vault_root, weekly_due=weekly_due, today=today))
     collected.extend(_log_items(vault_root))
     collected.extend(_skill_proposal_items(vault_root))
 
