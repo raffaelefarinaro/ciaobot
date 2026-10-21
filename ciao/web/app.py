@@ -162,6 +162,7 @@ from ciao.web.routes_api import (
     proposal_implement,
     proposal_preview,
     proposals_batch,
+    proposals_handover,
     proposals_history,
     run_schedule_now,
     schedule_detail,
@@ -546,6 +547,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/agent-assets/audit", os_audit_endpoint, methods=["GET"]),
         Route("/api/proposals", list_proposals, methods=["GET"]),
         Route("/api/proposals/history", proposals_history, methods=["GET"]),
+        Route("/api/proposals/handover", proposals_handover, methods=["GET"]),
         Route("/api/proposals/batch", proposals_batch, methods=["POST"]),
         Route("/api/proposals/{id}/preview", proposal_preview, methods=["GET"]),
         # Before the `{action}` route: Starlette matches in order, and

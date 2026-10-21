@@ -32,6 +32,8 @@ _REQUIRED_BY_HANDLER: dict[Leaf, frozenset[str]] = {
     ("memory", "update"): frozenset({"--entry"}),
     ("memory-proposal-dismiss",): frozenset({"--text-file"}),
     ("memory-proposal-escalate",): frozenset({"--text-file", "--reason-file"}),
+    ("memory-proposal-predict",): frozenset({"--text-file", "--reason-file"}),
+    ("memory-proposal-accept",): frozenset({"--text-file"}),
     ("observation-add",): frozenset({"--about", "--source", "--text-file"}),
 }
 #: leaf -> (flags, required flags)

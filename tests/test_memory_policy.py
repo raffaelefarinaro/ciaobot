@@ -262,12 +262,20 @@ def test_the_core_prompt_points_at_the_same_block() -> None:
     assert "a note that fits none is a new-category question" in core
 
 
+def test_unattended_policy_summary_names_the_handover_exception() -> None:
+    summary = mp.unattended_policy().summary
+    assert "never promotes a NEW region fact" in summary
+    assert "handover=all" in summary
+    assert "undo receipt" in summary
+
+
 def test_curation_schedule_defers_and_never_hard_caps() -> None:
     skill = next(entry["prompt"] for entry in json.loads(_stock("schedules.json"))["schedules"] if entry["schedule_id"] == "system-memory-curation")
     assert "You are an unattended run: defer, never ask, never route around" in skill
     assert "The region cap is advisory." in skill
     # The consolidation contract the architecture test also pins must survive.
     assert "Do not promote new facts into the bounded" in skill
+    assert "unless `curation-begin` reports `handover: all`" in skill
     assert "Workspace/Memory-Consolidations.md" in skill
 
 

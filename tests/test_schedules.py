@@ -936,6 +936,7 @@ def test_curation_consolidates_regions_only_under_guardrails(tmp_path: Path) -> 
     prompt = _curation_text(entry.prompt)
     # Promotion stays forbidden; consolidation is required when needed.
     assert "Do not promote new facts into the bounded" in prompt
+    assert "unless `curation-begin` reports `handover: all`" in prompt
     assert "consolidate that region now" in prompt
     # Guardrail 1: nothing is dropped without an undo log entry.
     assert "Workspace/Memory-Consolidations.md" in prompt

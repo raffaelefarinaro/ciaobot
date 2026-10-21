@@ -153,7 +153,10 @@ The proposals queue is reviewed and dismissed through the PWA, with one
 deliberate CLI exception the nightly curation agent drives because one shell
 command beats a synchronous request per row: `ciao memory-proposal-add`,
 `ciao memory-proposals`, `ciao memory-proposal-dismiss --text-file <file> [--reason-file <file>]`, and
-`ciao memory-proposal-escalate --text-file <file> --reason-file <file>`.
+`ciao memory-proposal-escalate --text-file <file> --reason-file <file>`. For `[memory]`/`[profile]`
+rows the run records a verdict with `ciao memory-proposal-predict --text-file <file> --verdict accept|dismiss --reason-file <file>`
+and acts on it only as the operator's handover setting allows, through `ciao memory-proposal-dismiss --handover`
+and `ciao memory-proposal-accept --text-file <file>`.
 
 The skill-proposal queue has the same pair, for the same reason, and files
 rather than dismisses are the interesting half: `ciao skill-proposal-add NAME

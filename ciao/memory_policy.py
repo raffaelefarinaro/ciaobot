@@ -138,7 +138,9 @@ CONTEXT_POLICIES: tuple[MemoryWritePolicy, ...] = (
             "replacement, both through the undo log. It never promotes a NEW "
             "region fact, never retires/trashes or permanently deletes a note, "
             "and defers anything that needs a reviewer — including a retirement "
-            "verdict, which it files as a note_edit proposal instead of applying."
+            "verdict, which it files as a note_edit proposal instead of applying. "
+            "The one exception is operator-granted handover=all, where an "
+            "accept goes through the guarded region write with an undo receipt."
         ),
         writes_regions=True,
         writes_vault=True,
