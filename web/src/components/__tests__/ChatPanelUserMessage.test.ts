@@ -223,13 +223,13 @@ describe('ChatPanel chat references', () => {
     const { wrapper } = await mountPanel()
     const store = useProjectStore()
     store.messages['chat-1'] = [
-      { role: 'user', content: 'look at chat-fffffff please', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
+      { role: 'user', content: 'look at chat-ffffffff please', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
     ]
     await flushPromises()
 
     const user = wrapper.get('.message-wrap.user .message-content')
     expect(user.find('a.chat-link').exists()).toBe(false)
-    expect(user.text()).toContain('chat-fffffff')
+    expect(user.text()).toContain('chat-ffffffff')
   })
 
   it('shows the new title when the conversation is renamed', async () => {

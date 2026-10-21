@@ -154,7 +154,7 @@ The workspace editor keeps one consistent label/control row per field, with each
 The device-setup reminder uses quiet task labels at `--text-base`, weight 600, and one aligned action column. Installation help is a real navigation link styled as a neutral bordered action; notification Enable and a browser-provided Install action retain primary emphasis. On narrow panes, row actions become full-width touch targets. *Use on your phone* is a closed native disclosure containing the existing three instructions and the permanent Settings → Other devices link. Phone setup remains host-only and informational, never a completion requirement; closing the reminder still persists for this browser.
 
 
-A real chat reference in prose or inline code links to that conversation: the visible label is the chat's own title, the raw id stays in its tooltip and data, and the link opens in this tab. Only an exact id the reader can already reach becomes a link; an unknown, malformed or non-chat-looking id stays plain, and a path- or URL-embedded id is never rewritten. Existing links, code blocks and file links are left alone, and the title is escaped like any other text.
+A real chat reference links to that conversation: the visible label is the chat's own title, the raw id stays in its tooltip and data, and the link opens in this tab. This covers a bare id in prose or inline code and the app's own `@chat/<id>` mention (only the prefix stays plain). Only an id the reader's openable chat list knows becomes a link; an unknown, malformed or non-chat-looking id stays plain, and another path or URL that happens to contain one is never rewritten. Existing links, code blocks and file links are left alone, and the title is escaped like any other text.
 
 ## Colors
 

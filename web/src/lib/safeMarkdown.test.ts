@@ -326,9 +326,9 @@ describe('chat markdown chat references', () => {
   })
 
   it('leaves an unknown id plain', () => {
-    const html = renderMarkdown('see chat-fffffff', [], KNOWN)
+    const html = renderMarkdown('see chat-ffffffff', [], KNOWN)
     expect(html).not.toContain('chat-link')
-    expect(html).toContain('chat-fffffff')
+    expect(html).toContain('chat-ffffffff')
   })
 
   it('links a reference in a user bubble too', () => {

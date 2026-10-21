@@ -63,7 +63,10 @@ function findReferences(text: string, known: ReadonlyMap<string, string>): Refer
     const end = start + id.length
     const before = start > 0 ? text[start - 1] : ''
     const after = end < text.length ? text[end] : ''
-    if (before && TOKEN_CHAR.test(before)) continue
+    // The app's own mention (`@chat/<id>`) is the canonical way a message
+    // names a conversation, so its slash is the one path separator that does
+    // not disqualify the id; the `@chat/` prefix itself stays plain text.
+    if (before && TOKEN_CHAR.test(before) && !isAppMention(text, start)) continue
     if (after && TOKEN_CHAR.test(after)) continue
     if (isInsideUrl(text, start)) continue
     const title = known.get(id)
@@ -71,6 +74,18 @@ function findReferences(text: string, known: ReadonlyMap<string, string>): Refer
     found.push({ index: start, id, title })
   }
   return found
+}
+
+/**
+ * True when the id is the tail of the app's own `@chat/<id>` mention.
+ *
+ * The `@` has to open the token, so `notes/chat-0123abcd`, a URL path and an
+ * `@` inside a longer word are all still rejected.
+ */
+function isAppMention(text: string, index: number): boolean {
+  const at = index - '@chat/'.length
+  if (at < 0 || text.slice(at, index) !== '@chat/') return false
+  return at === 0 || !TOKEN_CHAR.test(text[at - 1]!)
 }
 
 /**

@@ -57,11 +57,35 @@ describe('linkifyChatIds', () => {
     expect(links[1]!.textContent).toBe('Release notes')
   })
 
+  it("links the app's own @chat/ mention and leaves the prefix as text", () => {
+    const el = host(linkifyChatIds('<p>see @chat/chat-0123abcd now</p>', KNOWN))
+    const link = el.querySelector('a.chat-link')
+    expect(link).not.toBeNull()
+    expect(link!.getAttribute('href')).toBe('/chat/chat-0123abcd')
+    expect(link!.textContent).toBe('Budget review')
+    // The mention prefix stays exactly as it was typed.
+    expect(el.textContent).toBe('see @chat/Budget review now')
+  })
+
+  it('does not mistake another path or a URL for the mention', () => {
+    for (const html of [
+      '<p>notes/chat-0123abcd</p>',
+      '<p>project/chat-0123abcd</p>',
+      '<p>x@chat/chat-0123abcd</p>',
+      '<p>https://example.test/chat-0123abcd</p>',
+      '<p>@chat/notes/chat-0123abcd</p>',
+    ]) {
+      const el = host(linkifyChatIds(html, KNOWN))
+      expect(el.querySelector('a.chat-link'), html).toBeNull()
+    }
+  })
+
   it('leaves an unknown id plain', () => {
-    const html = '<p>chat-fffffff is not a chat I know</p>'
+    // Well formed, so only the known-list lookup can keep it plain.
+    const html = '<p>chat-ffffffff is not a chat I know</p>'
     const out = linkifyChatIds(html, KNOWN)
     expect(out).not.toContain('chat-link')
-    expect(out).toContain('chat-fffffff')
+    expect(out).toContain('chat-ffffffff')
   })
 
   it('changes nothing when no chat is known', () => {
