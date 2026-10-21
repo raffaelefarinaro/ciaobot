@@ -235,7 +235,8 @@
           <TaskHandoverCard :handover="taskHandover.handover" :prompt="item.msg.content" :known-paths="knownFilePaths" />
         </div>
         <!-- A turn the engine wrote (a wake, an automation run, a resume, a webhook,
-             an update task) reads as a notice, not as something the reader typed. -->
+             an update task) or a request the user retried reads as a notice, not
+             as something the reader typed. -->
         <div
           v-else-if="item.kind === 'user' && injectedPrompts.get(item.msg)"
           class="message-wrap injected-prompt-wrap"
@@ -1806,7 +1807,7 @@ const taskHandover = computed<{ msg: ChatMessage; handover: TaskHandover } | nul
 })
 
 /** Engine-written user turns (wakes, automation runs, resumes, webhooks, update
- *  tasks), keyed by message identity like taskHandover. */
+ *  tasks) and a retried request, keyed by message identity like taskHandover. */
 const injectedPrompts = computed(() => {
   const map = new Map<ChatMessage, InjectedPrompt>()
   for (const m of store.activeMessages) {

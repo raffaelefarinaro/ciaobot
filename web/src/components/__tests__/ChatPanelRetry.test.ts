@@ -159,6 +159,9 @@ async function mountPanel(options: MountOptions = {}): Promise<{
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
+        // The real notice card, so a test can read what the reader sees: the
+        // stub would only carry the props.
+        InjectedPromptCard: false,
       },
     },
   })
@@ -951,6 +954,156 @@ describe('ChatPanel recovery model picker', () => {
     await flushPromises()
 
     expect(updateChat).toHaveBeenCalledWith('chat-1', { thinking_level: 'high' })
+    wrapper.unmount()
+  })
+})
+
+// A turn the engine recorded as a retry is a notice, not a second copy of the
+// request: the request stays in its own turn and the retry says so.
+describe('ChatPanel retry turn rendering', () => {
+  const ORIGINAL = 'Check the video'
+  const IMAGE = 'web_5a4d7145.png'
+
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: new MemoryStorage(),
+    })
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  it('draws the live optimistic retry as the same notice, not a second bubble', async () => {
+    // While the retry streams, the store's own bubble already carries the
+    // origin and a send id. The transcript must show the notice once and no
+    // duplicate user bubble for the same turn.
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      {
+        role: 'user',
+        content: ORIGINAL,
+        timestamp: '2026-08-08T15:51:00Z',
+        turn_index: 0,
+      },
+      {
+        role: 'user',
+        content: ORIGINAL,
+        timestamp: '2026-08-08T15:52:00Z',
+        turn_index: 1,
+        origin: 'retry',
+        send_id: 'send-retry-live',
+      },
+    ]
+    await flushPromises()
+
+    expect(wrapper.findAll('.injected-card--retry')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('send-retry-live')
+    const bubbles = wrapper.findAll('.message-wrap.user')
+    expect(bubbles).toHaveLength(1)
+    expect(bubbles[0].text()).toContain(ORIGINAL)
+  })
+
+  it('draws a persisted retry turn as a notice and keeps the request in one bubble', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      {
+        role: 'user',
+        content: ORIGINAL,
+        timestamp: '2026-08-08T15:51:00Z',
+        turn_index: 0,
+        images: [IMAGE],
+      },
+      {
+        role: 'assistant',
+        content: 'Error: connection refused',
+        timestamp: '2026-08-08T15:51:01Z',
+        is_error: true,
+      },
+      {
+        role: 'user',
+        content: ORIGINAL,
+        timestamp: '2026-08-08T15:52:00Z',
+        turn_index: 1,
+        origin: 'retry',
+        images: [IMAGE],
+      },
+    ]
+    await flushPromises()
+
+    // The retried turn is a notice, not another bubble.
+    const notice = wrapper.get('.injected-card--retry')
+    expect(notice.attributes('aria-label')).toBe('Retry started')
+    expect(wrapper.findAll('.injected-prompt-wrap')).toHaveLength(1)
+    // Collapsed by default: the repeated request is not read by accident.
+    expect(wrapper.find('.injected-card--retry .injected-card-body').exists()).toBe(false)
+
+    // The original request stays one full bubble.
+    expect(wrapper.findAll('.message-wrap.user')).toHaveLength(1)
+    expect(wrapper.get('.message-wrap.user .message-content').text()).toContain(ORIGINAL)
+    wrapper.unmount()
+  })
+
+  it('never turns an ordinary turn into a notice', async () => {
+    const { wrapper, store } = await mountPanel()
+    store.messages['chat-1'] = [
+      { role: 'user', content: ORIGINAL, timestamp: '2026-08-08T15:51:00Z', turn_index: 0 },
+    ]
+    await flushPromises()
+
+    expect(wrapper.find('.injected-card').exists()).toBe(false)
+    expect(wrapper.findAll('.message-wrap.user')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
+  it('finds the request and its images after an earlier retry notice', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    store.messages['chat-1'] = [
+      {
+        role: 'user',
+        content: ORIGINAL,
+        timestamp: '2026-08-08T15:51:00Z',
+        turn_index: 0,
+        images: [IMAGE],
+      },
+      {
+        role: 'assistant',
+        content: 'Error: connection refused',
+        timestamp: '2026-08-08T15:51:01Z',
+        is_error: true,
+      },
+      {
+        role: 'user',
+        content: ORIGINAL,
+        timestamp: '2026-08-08T15:52:00Z',
+        turn_index: 1,
+        origin: 'retry',
+        images: [IMAGE],
+      },
+      {
+        role: 'assistant',
+        content: 'Error: connection refused again',
+        timestamp: '2026-08-08T15:52:01Z',
+        is_error: true,
+      },
+    ]
+    sendMessage.mockResolvedValue()
+    await flushPromises()
+
+    const retryBtns = wrapper.findAll('.retry-btn').filter(b => b.text() === 'Retry')
+    expect(retryBtns).toHaveLength(2)
+    // The retry under the notice that follows it: the notice is in between.
+    await retryBtns[1]!.trigger('click')
+    await flushPromises()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    const [, text, prepared] = sendMessage.mock.calls[0]
+    expect(text).toBe(ORIGINAL)
+    expect(prepared.imageRefs).toEqual([IMAGE])
+    expect(prepared.origin).toBe('retry')
     wrapper.unmount()
   })
 })

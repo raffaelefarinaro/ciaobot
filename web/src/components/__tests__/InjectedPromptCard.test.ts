@@ -108,4 +108,48 @@ describe('InjectedPromptCard', () => {
     const wrapper = mountCard({ prompt: runPrompt, raw: 'raw', timestamp: '2026-10-19T10:00:00Z' })
     expect(wrapper.get('time.injected-card-time').attributes('datetime')).toBe('2026-10-19T10:00:00Z')
   })
+
+  // A retry is a turn the reader asked to run again, so it reads as a notice
+  // like the other engine-written turns, and the request it repeats stays one
+  // disclosure away instead of being a second copy of the same words.
+  it('draws a retry as a collapsed notice with the request behind a disclosure', async () => {
+    const wrapper = mountCard({ prompt: { kind: 'retry' }, raw: 'Check the video' })
+    const card = wrapper.get('.injected-card')
+    expect(card.classes()).toContain('injected-card--retry')
+    expect(card.attributes('aria-label')).toBe('Retry started')
+    // Collapsed by default: no body, no disclosure, nothing to read by accident.
+    expect(wrapper.find('.injected-card-body').exists()).toBe(false)
+    expect(wrapper.find('details.injected-card-original').exists()).toBe(false)
+
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-toggle').attributes('aria-expanded')).toBe('true')
+    // The note is duration-free and adds what the header does not: the same
+    // card has to read correctly while the attempt runs, after it settles and
+    // after it failed, because a reloaded turn keeps the same copy.
+    expect(wrapper.get('.injected-card-note').text()).toBe(
+      'This turn repeats the request above unchanged.',
+    )
+    const details = wrapper.get('details.injected-card-original')
+    expect(wrapper.get('details.injected-card-original summary').text()).toBe('Show original request')
+    // The disclosure starts closed, and the native element is the control, so
+    // it is keyboard operable without a custom handler.
+    expect(details.attributes('open')).toBeUndefined()
+    expect(details.element.tagName).toBe('DETAILS')
+    // The retry carries its own disclosure: the generic full-prompt toggle
+    // would show the same words twice.
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
+    expect(wrapper.get('details.injected-card-original .injected-card-prose').text())
+      .toContain('Check the video')
+  })
+
+  it('renders the repeated request as text, not as markup', async () => {
+    const wrapper = mountCard({
+      prompt: { kind: 'retry' },
+      raw: '<img src=x onerror="alert(1)">',
+    })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    const details = wrapper.get('details.injected-card-original')
+    expect(details.find('img').exists()).toBe(false)
+    expect(details.text()).toContain('<img src=x onerror="alert(1)">')
+  })
 })

@@ -1,5 +1,6 @@
 // Parses user turns the engine wrote into a chat (wakes, automation runs,
-// resumes, webhooks, update tasks) into typed records for InjectedPromptCard.
+// resumes, webhooks, update tasks) and the retries the user asked for into
+// typed records for InjectedPromptCard.
 // Pure: no state and no Vue imports. The formats mirror the Python builders
 // named next to each pattern; change them together.
 import type { TurnOrigin } from './types'
@@ -23,6 +24,7 @@ export type InjectedPrompt =
   | { kind: 'task_resume'; title: string; previousState: string }
   | { kind: 'webhook'; instructions: string; event: string }
   | { kind: 'update_task' }
+  | { kind: 'retry' }
 
 // Mirrors ProjectChatManager._build_background_wake_prompt (ciao/web/project_chats.py).
 export const BACKGROUND_WAKE_RE = /^\[Ciaobot\] (\d+) background runs? finished\./
@@ -152,6 +154,8 @@ function parseWebhook(content: string): InjectedPrompt {
  * Turn a user turn's text and engine-recorded origin into a typed record, or
  * null when it is an ordinary message. Only the two engine-built wake formats
  * are recognised without an origin (history recorded before the field existed).
+ * A retry is recognised by its recorded origin and by nothing else: the
+ * resend carries the request it repeats, so the text never says "retry".
  */
 export function parseInjectedPrompt(content: string | null | undefined, origin?: string): InjectedPrompt | null {
   if (!content) return null
@@ -170,6 +174,7 @@ export function parseInjectedPrompt(content: string | null | undefined, origin?:
     case 'task_resume': return parseTaskResume(content)
     case 'webhook': return parseWebhook(content)
     case 'update_task': return { kind: 'update_task' }
+    case 'retry': return { kind: 'retry' }
     default: return null
   }
 }
@@ -215,5 +220,7 @@ export function summarizeInjectedPrompt(prompt: InjectedPrompt, chatTitle?: stri
       return { label: 'Webhook', facts: chatTitle ?? '', tone: null }
     case 'update_task':
       return { label: 'Update task', facts: chatTitle ?? '', tone: null }
+    case 'retry':
+      return { label: 'Retry started', facts: 'Same request · new attempt', tone: null }
   }
 }
