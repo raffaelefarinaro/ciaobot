@@ -148,10 +148,56 @@ def test_same_origin_accepts_proxy_forwarded_host() -> None:
     proxy-declared X-Forwarded-Host makes the WS/state-change handshake pass."""
     from ciao.web.auth import _same_origin
 
-    req = _origin_req({"host": "localhost:8765", "x-forwarded-host": "app.example"})
+    # The engine is on http behind the proxy, the browser origin is https:
+    # the proxy-declared host matches on the host alone.
+    req = _origin_req(
+        {"host": "localhost:8765", "x-forwarded-host": "app.example"}, scheme="http"
+    )
     assert _same_origin(req, "https://app.example") is True
     # A genuine cross-origin still fails even with the forwarded host present.
     assert _same_origin(req, "https://evil.example") is False
+
+
+def test_proxy_forwarded_host_accepts_a_tls_terminated_origin() -> None:
+    """A TLS-terminating proxy presents http; the browser origin is https.
+
+    The proxy declares the public host in `X-Forwarded-Host`, and it may keep
+    it in `Host` as well (nginx's `proxy_set_header Host $host`). The
+    proxy-declared host carries the match, so the scheme the engine sees is
+    not the one that refuses the request.
+    """
+    from ciao.web.auth import _same_origin
+
+    req = _origin_req(
+        {"host": "localhost:8765", "x-forwarded-host": "app.example"}, scheme="http"
+    )
+    assert _same_origin(req, "https://app.example") is True
+
+    # The proxy keeps the public host in `Host` too, so the origin host is
+    # the request host as well: the proxy-declared host still comes first.
+    req = _origin_req(
+        {"host": "app.example", "x-forwarded-host": "app.example"}, scheme="http"
+    )
+    assert _same_origin(req, "https://app.example") is True
+    # A genuine cross-origin still fails even with the forwarded host present.
+    assert _same_origin(req, "https://evil.example") is False
+
+    client, serializer = _protected_client(base_url="http://localhost:8765")
+    resp = client.post(
+        "/api/demo",
+        cookies=_auth_cookie(serializer),
+        headers={"Origin": "https://app.example", "X-Forwarded-Host": "app.example"},
+    )
+    assert resp.status_code == 200
+
+    # The same request with the public host kept in `Host` as well.
+    client, serializer = _protected_client(base_url="http://app.example")
+    resp = client.post(
+        "/api/demo",
+        cookies=_auth_cookie(serializer),
+        headers={"Origin": "https://app.example", "X-Forwarded-Host": "app.example"},
+    )
+    assert resp.status_code == 200
 
 
 def test_same_origin_rejects_a_scheme_mismatch() -> None:
@@ -805,6 +851,40 @@ def test_loopback_only_routes_refuse_a_cross_site_origin(method, path, headers) 
     resp = client.request(method, path, headers=headers)
     assert resp.status_code == 403
     assert resp.json() == {"error": "forbidden origin"}
+
+
+def test_loopback_only_source_rejects_a_scheme_mismatch() -> None:
+    """The loopback-only path compares the scheme too.
+
+    `https://localhost:8443` is a different origin from the engine's
+    `http://localhost:8443`, so a loopback-only route refuses a request that
+    names it, even though the host and the port are the same.
+    """
+    req = _origin_req(
+        {"host": "localhost:8443", "origin": "https://localhost:8443"}, scheme="http"
+    )
+    assert auth._same_origin_source(req) is False
+    # The matching scheme is this engine's own origin, so the source passes.
+    req = _origin_req(
+        {"host": "localhost:8443", "origin": "http://localhost:8443"}, scheme="http"
+    )
+    assert auth._same_origin_source(req) is True
+
+    client, _ = _loopback_only_client("http://localhost:8443")
+    resp = client.request(
+        "GET",
+        "/api/admin/restart-blockers",
+        headers={"Origin": "https://localhost:8443"},
+    )
+    assert resp.status_code == 403
+    assert resp.json() == {"error": "forbidden origin"}
+
+    allowed = client.request(
+        "GET",
+        "/api/admin/restart-blockers",
+        headers={"Origin": "http://localhost:8443"},
+    )
+    assert allowed.status_code == 200
 
 
 @pytest.mark.parametrize("method,path", _LOOPBACK_ONLY_ROUTES)

@@ -156,10 +156,11 @@ def _normalise_scheme(scheme: str) -> str:
 def _same_origin(request: Request | WebSocket, origin: str) -> bool:
     """True when ``origin`` is the request's own origin.
 
-    For a same-host origin the scheme has to match the request's scheme as
-    well as the effective port: ``https://ciao.example:8443`` is a different
-    origin from ``http://ciao.example:8443``, so the engine refuses the one
-    that does not match the scheme it serves.
+    A direct request has to present this engine's own origin: the same host,
+    the same scheme and the same effective port. A request that carries a
+    proxy-declared ``X-Forwarded-Host`` naming the origin's host matches on
+    the host alone, because a TLS-terminating proxy legitimately presents
+    http to the engine while the browser's origin is https.
     """
     from urllib.parse import urlsplit
 
@@ -185,6 +186,17 @@ def _same_origin(request: Request | WebSocket, origin: str) -> bool:
         origin_port = parsed.port
     except ValueError:
         return False
+    # A proxy-declared host comes first. A browser cannot set
+    # `X-Forwarded-Host`, so only a fronting proxy does, and a proxy that
+    # forwards a client-supplied one is the configuration this boundary
+    # excludes (see `docs/REMOTE_BOUNDARY.md`). The host alone carries the
+    # match: a TLS-terminating proxy legitimately presents http to the engine
+    # while the browser's origin is https, and the port may differ across the
+    # proxy hop too.
+    if origin_host in _allowed_origin_hosts(request):
+        return True
+    # A direct request: the origin has to be this engine's own origin, in
+    # scheme, host and effective port.
     if origin_host == request_host:
         request_scheme = _normalise_scheme(request.url.scheme)
         if request_scheme != parsed.scheme:
@@ -192,11 +204,7 @@ def _same_origin(request: Request | WebSocket, origin: str) -> bool:
         return _effective_port(parsed.scheme, origin_port) == _effective_port(
             request_scheme, request_port
         )
-    # Reached under a proxy-declared host. This branch stays scheme-agnostic on
-    # purpose: a TLS-terminating proxy legitimately presents http to the engine
-    # while the browser's origin is https, so only the proxy-declared host is
-    # compared (the port may differ across the proxy hop too).
-    return origin_host in _allowed_origin_hosts(request)
+    return False
 
 
 def _state_change_origin_allowed(request: Request) -> bool:

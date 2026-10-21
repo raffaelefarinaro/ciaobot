@@ -398,7 +398,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_ENGINE_PATH` (internal): legacy override for the engine executable the
   CLI runs. It is still read by `ciao/cli.py`, and on Windows `ciao service start` uses it as the interpreter (`python.exe` or `pythonw.exe`) when it has to register the logon task, but nothing sets it any more
   (the bundled launcher that used to is gone), so an operator never needs to.
-- Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same host via `Origin` or `Referer`.
+- Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same origin (host, scheme and effective port) via `Origin` or `Referer`, or from a host a proxy declared in `X-Forwarded-Host`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 - There is one origin and one session: `/api/*` needs the signed `ciao_session` cookie (minus a small public allowlist), `/ws/*` handshakes are checked for same-origin and then the session, and state-changing requests must present a matching `Origin`/`Referer`. The loopback-only local feed (legacy route name, no native client) and the update drain stay gated on the TCP peer. There is no native capability of any kind on a remote browser; see `docs/REMOTE_BOUNDARY.md` for the remaining protocol and credential work.
 - Workspace HTML artifact previews use a stricter sandbox CSP: inline scripts/styles and `data:` images/fonts/audio/video are allowed, while network connections, `blob:` sources, and same-origin session access are blocked.
