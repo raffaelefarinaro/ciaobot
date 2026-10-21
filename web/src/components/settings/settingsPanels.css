@@ -800,8 +800,11 @@
   border-bottom: 1px solid var(--border);
 }
 /* As a workspace-editor sub-row the plain row's padding would otherwise win
-   over .set-subrow and pull the label out of line with its neighbours. */
-.settings-switch-row.set-subrow { padding-left: 16px; }
+   over .set-subrow and pull the label out of line with its neighbours. The
+   bottom rule goes too: every other sub-row keeps its help text directly
+   under its field, and a line between the row and that sentence reads as a
+   separator the other rows do not have. */
+.settings-switch-row.set-subrow { padding-left: 16px; border-bottom: none; }
 .settings-switch-row .hint {
   margin: 0;
   font-size: var(--text-sm);
