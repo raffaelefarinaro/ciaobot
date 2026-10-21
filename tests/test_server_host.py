@@ -338,12 +338,19 @@ def test_the_host_declares_the_folder_usage_strings() -> None:
     assert info["NSAccessibilityUsageDescription"] == BUILD.ACCESSIBILITY_USAGE
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the ownership record is a POSIX artifact: it names an absolute POSIX bundle path",
+)
 def test_a_bundle_with_the_folder_usage_strings_still_verifies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The three new keys are part of the sealed plist, so they change the
     # bundle's digest. Adding them must not break the ownership contract: the
     # inspector reads the identity fields, and the record matches the bytes.
+    # POSIX-only: the record names a POSIX bundle path and verify requires it
+    # to equal the inspected one, which on Windows is a backslash path. The
+    # uid/mode refusals still run on Windows through the two companions below.
     monkeypatch.setattr(sys, "platform", "darwin")
     from ciao import server_host
 
