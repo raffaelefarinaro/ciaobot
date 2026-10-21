@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
-import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { api } from '../../lib/api'
@@ -91,7 +91,24 @@ class MemoryStorage {
   clear(): void { this.values.clear() }
 }
 
-async function mountPanel(opts: { realRepoSection?: boolean } = {}): Promise<{ wrapper: VueWrapper }> {
+// Every panel this file mounts is torn down when its test ends. A panel that
+// outlives its test keeps its scroll-settle loop alive, and that loop calls
+// `store.canLoadOlder()` on a requestAnimationFrame: Pinia treats a setup
+// store's plain function as an action, and an action resets the one global
+// "active pinia" the next `useProjectStore()` reads. A leftover panel could
+// therefore hand the next test the previous test's store.
+enableAutoUnmount(afterEach)
+
+/**
+ * Mounts the panel on a pinia of its own and hands back that pinia's store.
+ *
+ * The store comes back with the wrapper on purpose: resolving it again inside
+ * a test would read the global active pinia, which a panel from an earlier
+ * test can replace (see the note above). Mutating a store the panel does not
+ * use is silent — the assertions then read a panel that never saw the
+ * change — and it is exactly what made this file fail on a loaded machine.
+ */
+async function mountPanel(opts: { realRepoSection?: boolean } = {}): Promise<{ wrapper: VueWrapper; store: ReturnType<typeof useProjectStore> }> {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
@@ -125,7 +142,7 @@ async function mountPanel(opts: { realRepoSection?: boolean } = {}): Promise<{ w
     },
   })
   await flushPromises()
-  return { wrapper }
+  return { wrapper, store }
 }
 
 describe('ChatPanel code mode rows', () => {
@@ -155,8 +172,7 @@ describe('ChatPanel code mode rows', () => {
   ]
 
   it('shows no code mode divider in the transcript', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.chats[0].code_mode = true
     store.messages['chat-1'] = turns()
     await flushPromises()
@@ -165,8 +181,7 @@ describe('ChatPanel code mode rows', () => {
   })
 
   it('locks the switch on with a hint once the chat has messages', async () => {
-    const { wrapper } = await mountPanel({ realRepoSection: true })
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel({ realRepoSection: true })
     store.projects[0].repo = { path: '/r/app', branch: 'main', dirty: false, missing: false, instructions: null }
     store.chats[0].code_mode = true
     store.chats[0].user_turn_count = 0
@@ -210,8 +225,7 @@ describe('ChatPanel code badge', () => {
   })
 
   it('shows a code badge beside the title only while code mode is on', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.projects[0].repo = REPO
     store.chats[0].code_mode = true
     await flushPromises()
@@ -225,16 +239,14 @@ describe('ChatPanel code badge', () => {
   })
 
   it('shows no badge for an unlinked chat in code mode', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.chats[0].code_mode = true
     await flushPromises()
     expect(wrapper.find('.chat-code-badge').exists()).toBe(false)
   })
 
   it('opens Chat details at the Repository section from the badge', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.projects[0].repo = REPO
     store.chats[0].code_mode = true
     await flushPromises()
@@ -265,8 +277,7 @@ describe('ChatPanel naming placeholder', () => {
   })
 
   it('shows the shared naming placeholder while the title is pending', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.projects[0].repo = REPO
     store.chats[0].code_mode = true
     store.chats[0].title = 'New Chat'
@@ -287,8 +298,7 @@ describe('ChatPanel naming placeholder', () => {
   })
 
   it('replaces the placeholder when the title settles', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.chats[0].title = 'New Chat'
     store.chats[0].title_status = 'pending'
     await flushPromises()
@@ -303,8 +313,7 @@ describe('ChatPanel naming placeholder', () => {
   })
 
   it('keeps the close control, the title and the code badge in one header row', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.projects[0].repo = REPO
     store.projects[0].name = 'Launch notes'
     store.chats[0].code_mode = true
@@ -333,8 +342,7 @@ describe('ChatPanel naming placeholder', () => {
   })
 
   it('still renames the title from the header', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     const rename = vi.spyOn(store, 'renameChat').mockResolvedValue()
     await flushPromises()
 
