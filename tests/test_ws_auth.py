@@ -69,6 +69,60 @@ def test_ws_rejects_cross_origin() -> None:
             pass
 
 
+def test_ws_rejects_a_scheme_mismatch() -> None:
+    """The handshake's origin has to carry the engine's own scheme.
+
+    The engine serves plain http here, so an `https` origin is a different
+    origin even when the host and the port match.
+    """
+    client = _signed_client(_events_app())
+
+    with pytest.raises(WebSocketDisconnect) as refused:
+        with client.websocket_connect(
+            "/ws/events", headers={"Origin": "https://testserver"}
+        ):
+            pass
+    assert refused.value.code == 4003
+
+    # The same host and the same port, only the scheme differs: the port
+    # cannot carry the refusal on its own.
+    with pytest.raises(WebSocketDisconnect) as refused:
+        with client.websocket_connect(
+            "/ws/events",
+            headers={
+                "Host": "testserver:8443",
+                "Origin": "https://testserver:8443",
+            },
+        ):
+            pass
+    assert refused.value.code == 4003
+
+    with client.websocket_connect(
+        "/ws/events", headers={"Origin": "http://testserver"}
+    ) as ws:
+        assert ws.receive_json()["type"] == "snapshot"
+
+
+def test_ws_accepts_a_tls_terminated_origin_behind_a_proxy() -> None:
+    """A TLS-terminating proxy presents ws; the browser origin is https.
+
+    The proxy declares the public host in `X-Forwarded-Host` and keeps it in
+    `Host` as well, so the origin host is the request host too: the
+    proxy-declared host carries the match, not the scheme the engine sees.
+    """
+    client = _signed_client(_events_app())
+
+    with client.websocket_connect(
+        "/ws/events",
+        headers={
+            "Host": "app.example",
+            "X-Forwarded-Host": "app.example",
+            "Origin": "https://app.example",
+        },
+    ) as ws:
+        assert ws.receive_json()["type"] == "snapshot"
+
+
 def test_event_published_while_the_snapshot_is_built_reaches_the_client() -> None:
     # A `chat_streaming_done` in the gap between the snapshot and the
     # subscription was lost, leaving the client's spinner on forever.

@@ -1114,7 +1114,7 @@ class ChatStreaming:
                     if turn_origin:
                         chat_meta2.user_turn_origin[str(turn_index2)] = turn_origin
                     if queued_send_id:
-                        chat_meta2.user_turn_send_ids[str(turn_index2)] = queued_send_id
+                        chat_meta2.record_send_id(turn_index2, queued_send_id)
                     self.start_turn_perf(chat_id, turn_index2)
                     self._host._save()
 

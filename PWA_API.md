@@ -9,6 +9,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - Browser-terminal access (`GET /api/terminal/status`, `POST /api/terminal/unlock`) always requires a signed session, including on loopback. Terminal policy additionally requires the request's exact scheme, hostname and effective port: POST needs a bare `Origin` (no path, query or fragment); GET may use a same-origin page `Referer`, whose path and query are the page's own and are permitted, while a fragment is refused (browsers strip it before sending). Userinfo — including empty userinfo such as `http://@host` — missing/null origins and mismatches are refused. Remote access requires effective HTTPS; plain HTTP is allowed only for a direct loopback peer without proxy headers and a loopback Host. Unlock accepts exactly `{password}` in at most 4096 body bytes (password at most 1024 UTF-8 bytes), checks the password with bounded per-address failures, and returns a 15-minute grant only in a host-only HttpOnly SameSite=Strict cookie (`Secure` over HTTPS). No bearer appears in JSON. Responses are `no-store`. These routes launch no shell; session and stream integration are separate.
 - The terminal routes answer with two different envelopes, and a client must not assume one of them. A refusal from the terminal's own policy is `{"ok": false, "reason": ..., "error": ...}`; a refusal from the ordinary `AuthMiddleware` origin check — which runs first on a state-changing request and can answer before the terminal handler is reached at all — is `{"error": "forbidden origin"}`, with no `reason` key. The terminal's policy is intentionally stricter than the app's general rule (it also refuses userinfo and a non-bare `Origin`), so the two are not expected to accept the same set of requests.
 - The browser terminal's session routes (`GET`/`POST /api/terminal/sessions`, `DELETE /api/terminal/sessions/{session_id}`) carry the same door, in the same order: the terminal policy, then the signed session, then a fresh grant. A request that is not this engine's own page never has its body read, and a browser that has not unlocked the terminal never reaches a session — no grant is `403 locked` on all three routes. They name a *target*, never a folder and never a command: exactly one of `chat_id` or `project_id`, and the folder comes from the engine's own resolution. Every response is `no-store`, and a session record carries no output bytes and no connection id.
+- The browser terminal's socket (`WS /ws/terminal/{session_id}`) carries the same door, in the same order, and every refusal is a close code rather than a body: `4403` for the terminal policy (a foreign origin, or plain HTTP from a remote browser), `4001` for a missing signed session, `4401` for a missing or revoked terminal grant, `4404` for a session that is gone. A handshake carries no credential in its query string — the signed session and the `ciao_terminal` grant travel in cookies only. The grant is re-checked while the socket is open (at most once a second, and again for every client message), so a revoked or expired grant closes the socket with `4401` rather than leaving a shell open behind it.
 
 - Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is required, except from a browser on the host: loopback TCP peer with no reverse-proxy headers, loopback `Host`, exact same-origin `Origin`/`Referer` - the session is still required; `tailscale serve` callers are not the host). A change re-keys the session signer: every other device is signed out, and only the browser that made the change gets a new cookie. A successful change also ends **every** terminal grant, on every browser, and clears the `ciao_terminal` cookie: the password is the terminal's own credential, so every browser has to unlock the terminal again with the new password — including the browser that made the change. A refused change (a missing or wrong current password, a too-short new password) ends no grant and clears no terminal cookie. A missing current password is 400 `current_password_required`, a wrong one 403 `wrong_current_password`; neither is 401, which is reserved for a missing session. After 5 wrong current passwords from one client IP within 15 minutes, further changes from that IP are 429 `rate_limited` (even with the right password) until the window passes; a successful change clears the count, a missing current password does not count, and host browsers, which send no current password, are never limited. A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login or the login page's *Sign in on this computer*.
 - `POST /api/auth` accepts `{"token": "<PWA_AUTH_TOKEN>"}` and returns an HttpOnly `ciao_session` cookie.
@@ -22,7 +23,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, cloud_sync_warning, macos_access_note}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present. `cloud_sync_warning` is a sentence when the folder is inside iCloud Drive, Dropbox, Google Drive or OneDrive, or in Desktop/Documents synced by iCloud, otherwise empty. `macos_access_note` is a sentence when the folder is inside ~/Desktop, ~/Documents or ~/Downloads on macOS, otherwise empty.
 - `/api/host/terminal` takes the normal session path (it is in neither the public nor the loopback-only allowlist, so a local process without a session gets 401) and then requires a browser on the engine's computer: loopback TCP peer, local `Host`, exact same-origin `Origin`/`Referer` (scheme, host and effective port). The body carries an action id or a chat/project id, never a command or a path; the `opencode-update` and `claude-update` actions resolve their target from the packaged provider record.
 - `/api/welcome/password` and `/api/welcome/open-folder` take the normal session path and then require a browser on the engine's computer (`host_browser_request`: loopback TCP peer with no proxy headers, local `Host`, exact same-origin `Origin`/`Referer`). They are in neither allowlist. The password is returned only while `.runtime/welcome-pending` exists, which `ciao setup` writes only when it generated the password; dismissing or changing the password deletes it.
-- State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
+- State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host, scheme and effective port, or name a host a proxy declared in `X-Forwarded-Host` (which matches on the host alone). Missing headers are accepted for non-browser clients.
 - The host-browser rule (`host_browser_request` in `ciao/web/routes_api.py`) is an exact-origin check, not a host-name check. It requires a loopback TCP peer (no reverse-proxy headers, so a proxied caller is not the host), a local `Host` (`localhost`, `127.0.0.1`, `::1`, or the accepted local spelling `0.0.0.0` that users copy from the bind-address log), and a browser origin matching the request's own origin in scheme, host and effective port. `Origin` takes precedence; `Referer` is read only when there is no `Origin`. A cross-port (`http://localhost:3000` against an engine on `:8443`), cross-scheme, cross-host, `null`, malformed or credential-bearing origin is a refusal. A request with neither header is not a browser request and keeps the peer/Host gating alone. It gates `/api/host/terminal` (`GET` and `POST`), `/api/workspace-move/dirs`, `/api/workspace-move/plan`, `POST /api/workspace-move`, `/api/welcome/password`, `/api/welcome/open-folder`, `POST /api/settings/providers/{provider}/connect` and the `POST /api/auth/settings` current-password exemption. `GET /api/workspace-move` is session-only and reports `local: false` for a non-host browser.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 - `POST /agent/v1/{op}` is the agent CLI's loopback transport (`ciao <noun> <verb>` inside a managed provider shell, see `docs/ARCHITECTURE.md` → `agent_surface.py` and `docs/AGENT_CLI.md`). It takes a scoped bearer capability (`CIAO_AGENT_TOKEN`) in an `Authorization: Bearer` header, runs the registered control-plane operation, and returns the same JSON envelope; it is not a browser or curl API and does not accept the session cookie.
@@ -221,6 +222,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/skills/import` | Import a skill from a validated zip (multipart `file`; validates zip-slip, one SKILL.md, frontmatter). A SKILL.md over the 15KB context budget imports with a note on `warnings`/`message` |
 | WS | `/ws/chat/{chat_id}` | Per-chat streaming socket |
 | WS | `/ws/events` | Global event socket |
+| WS | `/ws/terminal/{session_id}` | The browser terminal's byte stream: cookies only, the terminal policy + signed session + live grant before the socket is accepted, then `attach` → `ready` → replay → live `output` frames |
 
 ### AI OS audit response
 
@@ -316,7 +318,7 @@ curl -sS -c /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/auth" 
   -d "{\"token\":\"$PWA_AUTH_TOKEN\"}"
 ```
 
-Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer host-match check is skipped when those headers are absent, so plain curl works.
+Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer same-origin check is skipped when those headers are absent, so plain curl works.
 
 **Browser terminal sessions**
 
@@ -325,7 +327,9 @@ Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer ho
 The body and the query name a *target*, never a folder and never a command: exactly one of `chat_id` or `project_id`, and the engine resolves the folder itself. A record answers `{session_id, folder, cols, rows, seq, attached, exited, exit_code}` — no output bytes and no connection id.
 
 ```bash
-# Unlock the terminal (its own password, not the dashboard one). The grant
+# Unlock the terminal. It asks for the Ciaobot password again — the same
+# PWA_AUTH_TOKEN the dashboard login uses, re-entered so a signed-in tab
+# cannot open a shell by itself. The grant
 # cookie lands in the jar next to the session cookie.
 curl -sS -c /tmp/ciao.jar -b /tmp/ciao.jar -X POST \
   "http://localhost:${PWA_PORT:-8443}/api/terminal/unlock" \
@@ -351,6 +355,42 @@ curl -sS -b /tmp/ciao.jar -X POST \
 curl -sS -b /tmp/ciao.jar -X DELETE \
   "http://localhost:${PWA_PORT:-8443}/api/terminal/sessions/$SESSION_ID" \
   -H "origin: http://localhost:${PWA_PORT:-8443}"
+```
+
+**Browser terminal stream**
+
+`WS /ws/terminal/{session_id}` carries a session's bytes to the browser. It is a WebSocket, so `curl` cannot speak it: use a WebSocket client that can set the cookies and the `Origin` header. The credentials are the same ones the HTTP half uses — the signed session cookie and the `ciao_terminal` grant cookie, both from the jar above — and **nothing in the query string is a credential**.
+
+The handshake answers with a close code, never a body: `4403` (the terminal policy: a foreign origin, or plain HTTP from a remote browser), `4001` (no signed session), `4401` (no live grant), `4404` (no such session). Once accepted, the first client frame must arrive within five seconds and must be exactly the attach frame; anything else is `4403`.
+
+```text
+→ {"type":"attach","offset":0,"takeover":false}   # offset = bytes already consumed
+← {"type":"ready","session_id":"…","folder":"…","cols":80,"rows":24,
+   "seq":42,"replay_start":0,"truncated":false}
+← {"type":"output","start":0,"end":42,"data":"<strict base64>"}   # the replay, in chunks
+← {"type":"replay_end","seq":42,"truncated":false}
+← {"type":"output","start":42,"end":57,"data":"<strict base64>"}   # live output
+← {"type":"exit","code":0}                          # the shell ended
+→ {"type":"input","data":"<strict base64>"}        # at most 64 KiB decoded
+→ {"type":"resize","cols":120,"rows":40}
+→ {"type":"ping"}  ← {"type":"pong"}
+```
+
+The rules a client has to hold to:
+
+- **Offsets are absolute byte counts**, not indices: `[start, end)` is the half-open range the `data` covers, and `seq` is where the stream has reached. The client's own cursor advances only over the bytes the server actually sent — `ready.seq` is a snapshot, not a command to skip ahead.
+- **`truncated` means the bytes before `replay_start` are gone** (the ring holds 256 KiB). The client resets its renderer and replays from `replay_start`; it must not patch a gap. A live read that fell behind the ring is refused: the socket closes with `4413` and the client reconnects and replays.
+- **One controller per session.** The first attachment holds it; a second connection needs `"takeover": true` and is otherwise closed with `4409`, and a takeover displaces the old attachment with a `4409` of its own.
+- **A frame the protocol does not describe** — an unknown type, a missing or extra key, a bad base64 payload, an input over 64 KiB — is answered with `{"type":"error","reason":"bad_frame"}` and a `1002` close. Nothing is kept per frame.
+- **A refusal the manager makes about the frame** (a resize out of the window's bounds, a full input backlog) is `{"type":"error","reason":"invalid_size"|"capacity"}` and the socket stays open.
+- **A disconnect detaches; it never ends.** The shell keeps running and the session stays recoverable for its detached lifetime. Only `DELETE /api/terminal/sessions/{session_id}` kills a shell.
+
+```bash
+# The stream is a WebSocket: the same jar's cookies, the same Origin, and
+# the session id the HTTP half handed out.
+websocat -H="Origin: http://localhost:${PWA_PORT:-8443}" \
+  -H="Cookie: ciao_session=$SESSION_COOKIE; ciao_terminal=$TERMINAL_COOKIE" \
+  "ws://localhost:${PWA_PORT:-8443/ws/terminal/$SESSION_ID"
 ```
 
 **Vault note review**

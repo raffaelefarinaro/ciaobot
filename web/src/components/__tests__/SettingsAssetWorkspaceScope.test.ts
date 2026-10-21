@@ -26,6 +26,17 @@ const responses: Record<string, unknown> = {
   '/api/mcp/status': { workspace: 'personal', agent_root: '/workspace/personal', providers: [] },
   '/api/mcp/usage': {},
   '/api/settings/providers': { connections: {} },
+  // The home tab mounts the handover card, which reads its own payload.
+  '/api/proposals/handover': {
+    workspace: 'personal',
+    handover: 'off',
+    acting_available: true,
+    agreement: {
+      decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
+      predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
+      suggest_handover: false,
+    },
+  },
 }
 
 let paths: string[] = []
@@ -69,7 +80,8 @@ async function mountSettings(tab = 'skills') {
       { path: '/chat/:id', component: Stub },
     ],
   })
-  await router.push(`/settings/${tab}`)
+  // The home tab is the bare `/settings` route: it has no tab segment.
+  await router.push(tab === 'home' ? '/settings' : `/settings/${tab}`)
   await router.isReady()
   const host = document.createElement('div')
   document.body.appendChild(host)
@@ -83,7 +95,109 @@ async function mountSettings(tab = 'skills') {
   return { app, router, host }
 }
 
+// The Workspace health card of the home tab, the one the loader belongs to.
+function healthCard(host: HTMLElement): HTMLElement {
+  const card = Array.from(host.querySelectorAll<HTMLElement>('.card'))
+    .find(el => el.querySelector('.section-title')?.textContent?.trim() === 'Workspace health')
+  expect(card).toBeTruthy()
+  return card!
+}
+
 describe('Settings asset tabs are scoped to the active workspace', () => {
+  it('loads the agent assets on a direct load of the home tab, so the health card resolves', async () => {
+    const store = useProjectStore()
+    await store.fetchWorkspaces()
+    store.activeWorkspace = 'personal'
+    vi.mocked(api.get).mockImplementation(async (raw: string) => {
+      paths.push(raw)
+      if (raw.split('?')[0] === '/api/agent-assets') {
+        return {
+          subagents: [],
+          commands: [],
+          health: {
+            status: 'warn',
+            checks: [{
+              id: 'vault-writable',
+              title: 'Vault is not writable',
+              status: 'warn',
+              detail: 'The vault folder is read-only.',
+              path: '/srv/ciao/memory-vault',
+              action: 'Make the vault folder writable.',
+            }],
+          },
+        } as never
+      }
+      const path = raw.split('?')[0]
+      return (path in responses ? responses[path] : {}) as never
+    })
+
+    const { app, host } = await mountSettings('home')
+    try {
+      expect(paths).toContain('/api/agent-assets?workspace=personal')
+      // The card waits on the assets, so a home load that skips them leaves it
+      // on the loader for good.
+      await vi.waitFor(() => expect(host.querySelector('[aria-label="Scanning workspace health"]')).toBeNull())
+      const card = healthCard(host)
+      expect(card.querySelector('.badge')?.textContent?.trim()).toBe('warn')
+      expect(card.textContent).toContain('Vault is not writable')
+    } finally {
+      app.unmount()
+      host.remove()
+    }
+  })
+
+  it('refetches the agent assets when the workspace changes on the home tab', async () => {
+    const store = useProjectStore()
+    await store.fetchWorkspaces()
+    store.activeWorkspace = 'personal'
+    vi.mocked(api.get).mockImplementation(async (raw: string) => {
+      paths.push(raw)
+      if (raw.split('?')[0] === '/api/agent-assets') {
+        // The two workspaces answer with different reports, so the card's
+        // content says which root it is describing.
+        const work = raw.includes('workspace=work')
+        return {
+          subagents: [],
+          commands: [],
+          health: work
+            ? {
+                status: 'error',
+                checks: [{
+                  id: 'vault-writable',
+                  title: 'Work vault is not writable',
+                  status: 'error',
+                  detail: 'The work vault is read-only.',
+                  path: '/srv/ciao/work-vault',
+                  action: 'Make the work vault folder writable.',
+                }],
+              }
+            : { status: 'ok', checks: [] },
+        } as never
+      }
+      const path = raw.split('?')[0]
+      return (path in responses ? responses[path] : {}) as never
+    })
+
+    const { app, host } = await mountSettings('home')
+    try {
+      expect(paths).toContain('/api/agent-assets?workspace=personal')
+      paths = []
+      // The health card describes one workspace's root, so the switch has to
+      // reload the assets rather than keep the previous root's report.
+      store.activeWorkspace = 'work'
+      await nextTick()
+      await nextTick()
+      await Promise.resolve()
+      await nextTick()
+
+      expect(paths).toContain('/api/agent-assets?workspace=work')
+      await vi.waitFor(() => expect(healthCard(host).textContent).toContain('Work vault is not writable'))
+    } finally {
+      app.unmount()
+      host.remove()
+    }
+  })
+
   it('sends the selected workspace on the four scoped reads', async () => {
     const store = useProjectStore()
     await store.fetchWorkspaces()

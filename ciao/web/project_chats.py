@@ -480,6 +480,33 @@ class ProjectInfo:
         }
 
 
+# How many user turns keep their client send id. The map exists to spot a
+# duplicate resend, and the PWA stops resending a send older than 30 s, so
+# dedup only needs the recent sends. Left unbounded, the map grew with
+# every turn of every chat and was persisted with the chat metadata.
+SEND_ID_HISTORY_TURNS = 64
+
+
+def _prune_send_id_history(send_ids: dict) -> None:
+    """Keep only the newest `SEND_ID_HISTORY_TURNS` entries of a send-id map.
+
+    The keys are decimal turn indices, so they order by integer value. A key
+    that is not a decimal index does not name a turn and is dropped. The map
+    is pruned in place: the caller owns it.
+    """
+    indexed: list[tuple[int, str]] = []
+    for key in list(send_ids):
+        text = str(key)
+        if not text.isdecimal():
+            continue
+        indexed.append((int(text), text))
+    indexed.sort(reverse=True)
+    keep = {text for _, text in indexed[:SEND_ID_HISTORY_TURNS]}
+    for key in list(send_ids):
+        if str(key) not in keep:
+            del send_ids[key]
+
+
 @dataclass(slots=True)
 class ChatInfo:
     chat_id: str
@@ -740,6 +767,16 @@ class ChatInfo:
         if local is not None:
             d["local"] = local
         return d
+
+    def record_send_id(self, turn_index: int, send_id: str) -> None:
+        """Record the client send id of a user turn.
+
+        The map is kept to the recent turns: only those can be looked up
+        for a duplicate resend, so the older ones are dropped instead of
+        growing the chat metadata for the life of the chat.
+        """
+        self.user_turn_send_ids[str(turn_index)] = send_id
+        _prune_send_id_history(self.user_turn_send_ids)
 
 
 def chat_pin_payload(chat: ChatInfo) -> dict[str, Any]:
@@ -3161,8 +3198,31 @@ class ProjectChatManager:
         except OSError as exc:
             # Roll the staged link cleanup back, so the vault is exactly as it
             # was: the folder is still there, and so are the links into it.
+            #
+            # A note the removal already took is left alone: writing it back
+            # would put a note the user deleted on disk again, linking to a
+            # note that may be gone with it. Every restore is best-effort, so
+            # one unwritable note does not strand the notes after it: the
+            # failures are collected and named in the error instead of
+            # escaping as an OSError the delete route cannot answer.
+            unrestored: list[str] = []
             for path, text in undo.items():
-                Path(path).write_text(text, encoding="utf-8", newline="")
+                note_path = Path(path)
+                if not note_path.exists():
+                    continue
+                try:
+                    # Read it back first: a note that cannot be read is one
+                    # we cannot restore either, and the failure belongs to
+                    # this note instead of to the next one.
+                    note_path.read_text(encoding="utf-8")
+                    note_path.write_text(text, encoding="utf-8", newline="")
+                except OSError as restore_exc:
+                    unrestored.append(f"{path} ({restore_exc})")
+            if unrestored:
+                raise ValueError(
+                    f"delete failed: {exc}; could not restore "
+                    f"{len(unrestored)} note(s): {', '.join(unrestored)}"
+                ) from exc
             raise ValueError(f"delete failed: {exc}") from exc
 
         report["vault_entry_removed"] = True
@@ -7454,7 +7514,7 @@ class ProjectChatManager:
             if origin:
                 chat_meta.user_turn_origin[str(turn_index)] = origin
             if send_id:
-                chat_meta.user_turn_send_ids[str(turn_index)] = send_id
+                chat_meta.record_send_id(turn_index, send_id)
             self._streaming.start_turn_perf(chat_id, turn_index)
 
         # First buffered event: echo the user prompt so any client subscribing
@@ -7546,20 +7606,29 @@ class ProjectChatManager:
         if chat is None:
             return None
         send_ids = chat.user_turn_send_ids
-        for key in sorted(
-            send_ids.keys(),
-            key=lambda k: int(k) if str(k).isdigit() else -1,
-            reverse=True,
-        ):
-            if send_ids.get(key) != send_id:
+        # One pass over the map: the newest turn carrying the id wins, and a
+        # key that is not a decimal turn index names no turn at all.
+        found_key: str | None = None
+        found_index = -1
+        for key, recorded in send_ids.items():
+            if recorded != send_id:
                 continue
-            turn_index = int(key)
-            timing = chat.user_turn_timings.get(key) or chat.user_turn_timings.get(turn_index)
-            sent_at = ""
-            if isinstance(timing, dict):
-                sent_at = str(timing.get("sent_at") or "")
-            return {"turn_index": turn_index, "sent_at": sent_at}
-        return None
+            text = str(key)
+            if not text.isdecimal():
+                continue
+            turn_index = int(text)
+            if turn_index > found_index:
+                found_index = turn_index
+                found_key = text
+        if found_key is None:
+            return None
+        timing = chat.user_turn_timings.get(found_key) or chat.user_turn_timings.get(
+            found_index
+        )
+        sent_at = ""
+        if isinstance(timing, dict):
+            sent_at = str(timing.get("sent_at") or "")
+        return {"turn_index": found_index, "sent_at": sent_at}
 
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str

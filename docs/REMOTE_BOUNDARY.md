@@ -29,9 +29,16 @@ carried by the session.
   mode and only to a loopback TCP peer (`is_loopback_client`) whose `Host`
   also names loopback: first run binds 0.0.0.0, so the `Host` header alone
   would let a LAN client claim `localhost`. Every `/ws/*` handshake is checked for same-origin and
-  then for the session. Every state-changing `/api/*` request must present an
-  `Origin` or `Referer` that matches the request host, allowing for a
-  proxy-declared `X-Forwarded-Host`.
+  then for the session. Every state-changing `/api/*` request that carries an
+  `Origin` or `Referer` must present one that matches the request host, the
+  request scheme (normalising `ws`/`wss`) and the effective port; a request
+  with neither header is accepted, and the session cookie is the only control
+  there. A request that carries a
+  proxy-declared `X-Forwarded-Host` naming that origin's host is accepted on
+  the host alone: a TLS-terminating proxy legitimately presents http to the
+  engine while the browser's origin is https, and the port may differ across
+  the hop too. A browser cannot set `X-Forwarded-Host`, so only a fronting
+  proxy declares it.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update
@@ -96,12 +103,15 @@ carried by the session.
   **every** grant, on every browser, and clears the `ciao_terminal` cookie
   — the password is the terminal's own credential, so every browser has to
   unlock again, including the one that made the change. A refused password
-  change ends nothing. The grant is revoked here; the terminal socket's own
-  re-check against this store is the terminal-stream child's work and does
-  not exist yet, so no socket is closed by this today. The signed session
-  cookie remains required for every route either way, and neither action
-  names a user or a device: there are no per-device identities to revoke
-  against.
+  change ends nothing. The grant is revoked here, and the terminal socket
+  enforces it twice: a watchdog re-checks the store at most once a second
+  and closes the socket `4401`, and the receive loop re-checks on every
+  client frame, so a revoked grant ends the stream even between ticks. A
+  detached session's shell keeps running until its own 15-minute detached
+  TTL, which is what lets the browser unlock again and recover it. The
+  signed session cookie remains required for every route either way, and
+  neither action names a user or a device: there are no per-device
+  identities to revoke against.
 - The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
   need the session *and* `host_browser_request`, and are not in
   `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails

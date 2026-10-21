@@ -32,11 +32,12 @@ from starlette.websockets import WebSocketDisconnect
 from itsdangerous import URLSafeTimedSerializer
 
 from ciao.config import CiaoConfig
+from ciao.models import ResultEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web import routes_chat
 from ciao.web.chat_broker import ChatStream
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import SEND_ID_HISTORY_TURNS, ProjectChatManager
 from ciao.web.routes_chat import ws_chat
 from tests.session import signed_in
 
@@ -417,6 +418,16 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
+async def _wait_for(predicate, timeout: float = 2.0, step: float = 0.01) -> None:
+    """Poll `predicate()` until True or timeout (fails the test on timeout)."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(step)
+    raise AssertionError(f"timed out waiting for predicate {predicate!r}")
+
+
 async def test_send_id_survives_a_metadata_reload(tmp_path: Path) -> None:
     """The recorded send id is engine state, not request state.
 
@@ -449,6 +460,181 @@ async def test_send_id_survives_a_metadata_reload(tmp_path: Path) -> None:
     assert found_again["turn_index"] == 0
     # An unknown id owns no turn.
     assert reloaded.find_turn_by_send_id(chat.chat_id, "s-unknown") is None
+
+
+async def test_the_send_id_history_is_bounded(tmp_path: Path) -> None:
+    """The recorded send ids are a recent window, not the whole chat.
+
+    The map exists to recognise a duplicate resend, and the PWA stops
+    resending a send older than 30 s, so dedup only needs the recent
+    sends. Without a bound the map grew with every turn of every chat,
+    and it is persisted with the chat metadata.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("sendids", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="send-id-window")
+    # The turn is recorded by the send path; the provider drive is not what
+    # this test is about.
+    pcm._streaming.start_drive = lambda **_kwargs: None
+
+    total = SEND_ID_HISTORY_TURNS + 6
+    for index in range(total):
+        stream = pcm.start_stream(chat.chat_id, f"turn {index}", send_id=f"s-{index}")
+        # The next send must open a new turn, so the finished stream is not
+        # reused by the broker.
+        stream.finish()
+
+    chat_info = pcm.get_chat(chat.chat_id)
+    assert chat_info is not None
+    assert len(chat_info.user_turn_send_ids) == SEND_ID_HISTORY_TURNS
+    # The oldest turns are gone; the newest is still found.
+    assert pcm.find_turn_by_send_id(chat.chat_id, "s-0") is None
+    found = pcm.find_turn_by_send_id(chat.chat_id, f"s-{total - 1}")
+    assert found is not None
+    assert found["turn_index"] == total - 1
+
+
+async def test_a_queued_flush_prunes_the_send_id_history(tmp_path: Path) -> None:
+    """The queued follow-up path prunes the send-id map as well.
+
+    A queued message flushes into a turn of its own, and that turn records
+    the client's send id. The write goes through the same bounded map a
+    direct send uses, so a chat driven by queued messages is bounded too —
+    and a key that names no turn is dropped on the way.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("sendids", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="send-id-queued")
+    chat_info = pcm.get_chat(chat.chat_id)
+    assert chat_info is not None
+    # A map at its bound: 64 recorded ids, plus a key that names no turn.
+    chat_info.user_turn_send_ids = {
+        **{str(index): f"s-{index}" for index in range(SEND_ID_HISTORY_TURNS)},
+        "not-a-turn": "s-bad",
+    }
+    # The next turn is the one after the recorded ones.
+    chat_info.user_turn_count = SEND_ID_HISTORY_TURNS
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        """Fake provider: block the first turn until the test releases it."""
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="assistant answer",
+            session_id="sess-sid",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+    assert pcm.queue_message(chat.chat_id, "queued one", send_id="s-queued") is True
+    first_turn_ready.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The flushed turn owns the send id: a repeat of that frame is a
+    # duplicate, not a new turn.
+    found = pcm.find_turn_by_send_id(chat.chat_id, "s-queued")
+    assert found is not None, "the flushed turn must record the queued send id"
+
+    # And the map is still the newest 64 turns: the flushed turn's id is
+    # in, the oldest recorded one is out, and the malformed key is gone.
+    assert set(chat_info.user_turn_send_ids) == {
+        *(str(index) for index in range(1, SEND_ID_HISTORY_TURNS)),
+        str(SEND_ID_HISTORY_TURNS + 1),
+    }
+
+
+async def test_a_key_that_is_not_a_turn_owns_no_send(tmp_path: Path) -> None:
+    """Only a decimal turn index names a turn.
+
+    The engine writes decimal turn indices, and a key that is not one does
+    not name a turn, so it cannot own a send id — and looking it up must
+    not raise either. The persisted metadata can carry such a key, and the
+    next send prunes it away.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("sendids", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="send-id-keys")
+    chat_info = pcm.get_chat(chat.chat_id)
+    assert chat_info is not None
+    chat_info.user_turn_send_ids = {"not-a-turn": "s-1", "5": "s-5"}
+    pcm._save()
+
+    # A fresh manager over the same registry, as an engine restart would:
+    # the malformed key is persisted metadata, not just in-memory state.
+    config = pcm._config
+    reloaded = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, config.workspace_root, config.media_root),
+        transcript_store=TranscriptStore(
+            Path(config.state_path).parent,
+            Path(config.state_path).parent / "transcripts",
+        ),
+        path=pcm._path,
+    )
+    reloaded_chat = reloaded.get_chat(chat.chat_id)
+    assert reloaded_chat is not None
+    assert "not-a-turn" in reloaded_chat.user_turn_send_ids
+
+    # The lookup ignores a key that names no turn.
+    assert reloaded.find_turn_by_send_id(chat.chat_id, "s-1") is None
+    found = reloaded.find_turn_by_send_id(chat.chat_id, "s-5")
+    assert found is not None
+    assert found["turn_index"] == 5
+
+    # One real send records its own id and prunes the malformed key.
+    reloaded.start_stream(chat.chat_id, "hello", send_id="s-2")
+    assert "not-a-turn" not in reloaded_chat.user_turn_send_ids
+    assert reloaded_chat.user_turn_send_ids == {"0": "s-2", "5": "s-5"}
+
+
+async def test_the_newest_turn_wins_when_a_send_id_is_recorded_twice(
+    tmp_path: Path,
+) -> None:
+    """A send id on two turns is owned by the newer one.
+
+    The engine records the id per turn, so the last turn carrying it is the
+    one a repeated frame would duplicate. The older turn comes first in the
+    map, so a scan that stopped at the first match would answer with it —
+    and with the wrong send time.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("sendids", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="send-id-twice")
+    chat_info = pcm.get_chat(chat.chat_id)
+    assert chat_info is not None
+    chat_info.user_turn_send_ids = {"0": "s-1", "3": "s-1"}
+    chat_info.user_turn_timings = {
+        "0": {"sent_at": "2026-10-22T09:00:00Z"},
+        "3": {"sent_at": "2026-10-22T10:00:00Z"},
+    }
+
+    found = pcm.find_turn_by_send_id(chat.chat_id, "s-1")
+    assert found is not None
+    assert found["turn_index"] == 3
+    # The send time is the newer turn's, not the first match's.
+    assert found["sent_at"] == "2026-10-22T10:00:00Z"
 
 
 async def test_the_history_row_does_not_carry_the_send_id(

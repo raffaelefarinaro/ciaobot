@@ -28,14 +28,16 @@ def _auth_cookie(serializer: URLSafeTimedSerializer) -> dict[str, str]:
     return {SESSION_COOKIE: serializer.dumps({"user": "owner"})}
 
 
-def _protected_client() -> tuple[TestClient, URLSafeTimedSerializer]:
+def _protected_client(
+    base_url: str = "https://ciao.example",
+) -> tuple[TestClient, URLSafeTimedSerializer]:
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
         routes=[Route("/api/demo", _ok, methods=["GET", "POST"])],
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.serializer = serializer
-    return TestClient(app, base_url="https://ciao.example"), serializer
+    return TestClient(app, base_url=base_url), serializer
 
 
 def test_state_changing_request_rejects_cross_origin() -> None:
@@ -60,6 +62,51 @@ def test_state_changing_request_allows_matching_origin() -> None:
     assert resp.status_code == 200
 
 
+def test_state_changing_request_rejects_a_scheme_mismatch() -> None:
+    """The origin's scheme has to be the one the engine is serving.
+
+    A page on `https://ciao.example` is a different origin from the engine
+    on `http://ciao.example`, so its state-changing request is refused. The
+    same host and the same port with only the scheme changed is refused too:
+    there the port cannot carry the refusal on its own.
+    """
+    client, serializer = _protected_client(base_url="http://ciao.example")
+    cookies = _auth_cookie(serializer)
+
+    refused = client.post(
+        "/api/demo",
+        cookies=cookies,
+        headers={"Origin": "https://ciao.example"},
+    )
+    allowed = client.post(
+        "/api/demo",
+        cookies=cookies,
+        headers={"Origin": "http://ciao.example"},
+    )
+
+    assert refused.status_code == 403
+    assert allowed.status_code == 200
+
+    port_client, port_serializer = _protected_client(
+        base_url="http://ciao.example:8443"
+    )
+    port_cookies = _auth_cookie(port_serializer)
+
+    refused = port_client.post(
+        "/api/demo",
+        cookies=port_cookies,
+        headers={"Origin": "https://ciao.example:8443"},
+    )
+    allowed = port_client.post(
+        "/api/demo",
+        cookies=port_cookies,
+        headers={"Origin": "http://ciao.example:8443"},
+    )
+
+    assert refused.status_code == 403
+    assert allowed.status_code == 200
+
+
 def test_safe_request_does_not_require_origin() -> None:
     client, serializer = _protected_client()
     resp = client.get("/api/demo", cookies=_auth_cookie(serializer))
@@ -67,10 +114,10 @@ def test_safe_request_does_not_require_origin() -> None:
     assert resp.status_code == 200
 
 
-def _origin_req(headers: dict[str, str]) -> object:
+def _origin_req(headers: dict[str, str], scheme: str = "https") -> object:
     return SimpleNamespace(
         headers={k.lower(): v for k, v in headers.items()},
-        url=SimpleNamespace(hostname=None, port=None),
+        url=SimpleNamespace(hostname=None, port=None, scheme=scheme),
     )
 
 
@@ -101,10 +148,74 @@ def test_same_origin_accepts_proxy_forwarded_host() -> None:
     proxy-declared X-Forwarded-Host makes the WS/state-change handshake pass."""
     from ciao.web.auth import _same_origin
 
-    req = _origin_req({"host": "localhost:8765", "x-forwarded-host": "app.example"})
+    # The engine is on http behind the proxy, the browser origin is https:
+    # the proxy-declared host matches on the host alone.
+    req = _origin_req(
+        {"host": "localhost:8765", "x-forwarded-host": "app.example"}, scheme="http"
+    )
     assert _same_origin(req, "https://app.example") is True
     # A genuine cross-origin still fails even with the forwarded host present.
     assert _same_origin(req, "https://evil.example") is False
+
+
+def test_proxy_forwarded_host_accepts_a_tls_terminated_origin() -> None:
+    """A TLS-terminating proxy presents http; the browser origin is https.
+
+    The proxy declares the public host in `X-Forwarded-Host`, and it may keep
+    it in `Host` as well (nginx's `proxy_set_header Host $host`). The
+    proxy-declared host carries the match, so the scheme the engine sees is
+    not the one that refuses the request.
+    """
+    from ciao.web.auth import _same_origin
+
+    req = _origin_req(
+        {"host": "localhost:8765", "x-forwarded-host": "app.example"}, scheme="http"
+    )
+    assert _same_origin(req, "https://app.example") is True
+
+    # The proxy keeps the public host in `Host` too, so the origin host is
+    # the request host as well: the proxy-declared host still comes first.
+    req = _origin_req(
+        {"host": "app.example", "x-forwarded-host": "app.example"}, scheme="http"
+    )
+    assert _same_origin(req, "https://app.example") is True
+    # A genuine cross-origin still fails even with the forwarded host present.
+    assert _same_origin(req, "https://evil.example") is False
+
+    client, serializer = _protected_client(base_url="http://localhost:8765")
+    resp = client.post(
+        "/api/demo",
+        cookies=_auth_cookie(serializer),
+        headers={"Origin": "https://app.example", "X-Forwarded-Host": "app.example"},
+    )
+    assert resp.status_code == 200
+
+    # The same request with the public host kept in `Host` as well.
+    client, serializer = _protected_client(base_url="http://app.example")
+    resp = client.post(
+        "/api/demo",
+        cookies=_auth_cookie(serializer),
+        headers={"Origin": "https://app.example", "X-Forwarded-Host": "app.example"},
+    )
+    assert resp.status_code == 200
+
+
+def test_same_origin_rejects_a_scheme_mismatch() -> None:
+    """A same host and port is not enough: the scheme has to match too.
+
+    `https://ciao.example:8443` is a different origin from
+    `http://ciao.example:8443`, so an engine serving plain http refuses the
+    https origin, and an engine serving https refuses the http one.
+    """
+    from ciao.web.auth import _same_origin
+
+    http_req = _origin_req({"host": "ciao.example:8443"}, scheme="http")
+    assert _same_origin(http_req, "http://ciao.example:8443") is True
+    assert _same_origin(http_req, "https://ciao.example:8443") is False
+
+    https_req = _origin_req({"host": "ciao.example:8443"}, scheme="https")
+    assert _same_origin(https_req, "https://ciao.example:8443") is True
+    assert _same_origin(https_req, "http://ciao.example:8443") is False
 
 
 def _auth_client() -> TestClient:
@@ -740,6 +851,40 @@ def test_loopback_only_routes_refuse_a_cross_site_origin(method, path, headers) 
     resp = client.request(method, path, headers=headers)
     assert resp.status_code == 403
     assert resp.json() == {"error": "forbidden origin"}
+
+
+def test_loopback_only_source_rejects_a_scheme_mismatch() -> None:
+    """The loopback-only path compares the scheme too.
+
+    `https://localhost:8443` is a different origin from the engine's
+    `http://localhost:8443`, so a loopback-only route refuses a request that
+    names it, even though the host and the port are the same.
+    """
+    req = _origin_req(
+        {"host": "localhost:8443", "origin": "https://localhost:8443"}, scheme="http"
+    )
+    assert auth._same_origin_source(req) is False
+    # The matching scheme is this engine's own origin, so the source passes.
+    req = _origin_req(
+        {"host": "localhost:8443", "origin": "http://localhost:8443"}, scheme="http"
+    )
+    assert auth._same_origin_source(req) is True
+
+    client, _ = _loopback_only_client("http://localhost:8443")
+    resp = client.request(
+        "GET",
+        "/api/admin/restart-blockers",
+        headers={"Origin": "https://localhost:8443"},
+    )
+    assert resp.status_code == 403
+    assert resp.json() == {"error": "forbidden origin"}
+
+    allowed = client.request(
+        "GET",
+        "/api/admin/restart-blockers",
+        headers={"Origin": "http://localhost:8443"},
+    )
+    assert allowed.status_code == 200
 
 
 @pytest.mark.parametrize("method,path", _LOOPBACK_ONLY_ROUTES)
