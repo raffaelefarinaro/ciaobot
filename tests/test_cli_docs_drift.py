@@ -31,6 +31,7 @@ Leaf = tuple[str, ...]
 _REQUIRED_BY_HANDLER: dict[Leaf, frozenset[str]] = {
     ("memory", "update"): frozenset({"--entry"}),
     ("memory-proposal-dismiss",): frozenset({"--text-file"}),
+    ("memory-proposal-escalate",): frozenset({"--text-file", "--reason-file"}),
     ("observation-add",): frozenset({"--about", "--source", "--text-file"}),
 }
 #: leaf -> (flags, required flags)
@@ -234,7 +235,7 @@ def test_skill_tables_match_the_parsers() -> None:
 
 @pytest.mark.parametrize(
     "command",
-    ["memory-proposal-add", "observation-add", "skill-draft-add", "skill-draft-approve"],
+    ["memory-proposal-add", "memory-proposal-escalate", "observation-add", "skill-draft-add", "skill-draft-approve"],
 )
 def test_queue_filing_commands_are_documented(command: str) -> None:
     _, operator = _all_leaves()

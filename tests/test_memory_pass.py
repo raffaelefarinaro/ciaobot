@@ -1954,3 +1954,15 @@ def test_lesson_step_three_requires_origins_and_the_draft_ends_the_turn_in_step_
     step6, step7 = text.split("\n7. ")
     assert "the draft is where your turn ends" in step6
     assert step7 == "Report. Mention each filed proposal or draft in your closing list."
+
+
+def test_pass_prompt_requires_a_decider_on_every_queued_item() -> None:
+    """Every queued item carries a decider and reason, with the rubric to pick one."""
+    prompt = memory_pass.MEMORY_PASS_PROMPT
+    for phrase in (
+        "--decide nightly|you",
+        "--decide-reason-file",
+        "more context would settle it",
+        "identity or preferences",
+    ):
+        assert phrase in prompt, phrase
