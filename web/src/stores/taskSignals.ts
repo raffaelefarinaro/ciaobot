@@ -17,6 +17,13 @@ import type { ChatInfo, Task } from '../lib/types'
  * blanking every signal. `reload` is called on workspace switch and whenever a
  * `tasks_changed` event arrives on `/ws/events`.
  */
+/** Title then id, so the same set of tasks always reads the same way. */
+function byTitleThenId(a: Task, b: Task): number {
+  if (a.title !== b.title) return a.title < b.title ? -1 : 1
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1
+  return 0
+}
+
 export const useTaskSignalsStore = defineStore('taskSignals', () => {
   const tasks = ref<Task[]>([])
   const loadedWorkspace = ref('')
@@ -113,6 +120,35 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
     return chat.helper?.kind === 'task_delegation' || !!taskForChat(chat)
   }
 
+  /**
+   * The tasks a chat is linked to outside delegation (`task link-chat`).
+   *
+   * A link is a relation, not a lifecycle: the task was not delegated to this
+   * chat, the chat does not hold its attempt, and nothing about the task's
+   * state is this chat's to act on. It is the read path for a chat that
+   * worked on a task without running it — the delegation path
+   * (`taskForChat`) stays the one that answers "which task does this chat
+   * work on", because that answer feeds the completion and closure actions.
+   *
+   * The rows are the loaded workspace's, so a link in another workspace
+   * resolves nothing.
+   */
+  function linkedTasksForChat(chat: Pick<ChatInfo, 'chat_id'> | null | undefined): Task[] {
+    if (!chat?.chat_id) return []
+    const chatId = chat.chat_id
+    // `filter` copies, so the sort below never reorders the store's rows.
+    return tasks.value.filter(t => t.linked_chats.includes(chatId)).sort(byTitleThenId)
+  }
+
+  /**
+   * Whether a chat has a task in its origin: delegated to one, or linked to
+   * one. The two are different relations; this is the question that covers
+   * both, for a signal that reads the task rather than acts on it.
+   */
+  function isTaskChat(chat: Pick<ChatInfo, 'chat_id' | 'helper'>): boolean {
+    return isDelegatedChat(chat) || linkedTasksForChat(chat).length > 0
+  }
+
   /** Tasks the agent reported done that wait for review, in `workspace`. */
   function inReview(workspace: string): Task[] {
     if (workspace !== loadedWorkspace.value) return []
@@ -137,6 +173,8 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
     isWaitingOnUser,
     chatHoldsTask,
     isDelegatedChat,
+    linkedTasksForChat,
+    isTaskChat,
     inReview,
     inReviewCount,
     chatTaskWaitingOnUser,

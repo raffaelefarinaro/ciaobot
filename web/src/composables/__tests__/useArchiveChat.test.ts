@@ -110,4 +110,21 @@ describe('useArchiveChat', () => {
     expect(askConfirm).toHaveBeenCalledTimes(2)
     expect(archiveChat).toHaveBeenCalledTimes(2)
   })
+
+  it('a chat only linked to a task gets the plain archive confirmation', async () => {
+    askConfirm.mockResolvedValue(true)
+    useTaskSignalsStore().tasks = [task({ chat_id: '', linked_chats: ['linked-only'] })]
+    const linked = { chat_id: 'linked-only' } as ChatInfo
+    await expect(useArchiveChat().archiveChatWithTaskCheck(linked)).resolves.toBe(true)
+
+    // A link is a relation, not a delegation: the chat holds no task, so the
+    // task is never completed or detached on the way out.
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(askConfirm).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title: 'Archive chat' }))
+    expect(askArchiveTask).not.toHaveBeenCalled()
+    expect(archiveChat).toHaveBeenCalledWith('linked-only')
+    const held = useTaskSignalsStore().tasks[0]!
+    expect(held.status).toBe('in_progress')
+    expect(held.live_attempt_id).toBe('att-1')
+  })
 })

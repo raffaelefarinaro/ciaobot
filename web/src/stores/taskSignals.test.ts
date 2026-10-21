@@ -238,4 +238,73 @@ describe('useTaskSignalsStore', () => {
     expect(store.chatTaskWaitingOnUser(chat('chat-r'))).toBe(false)
     expect(store.chatTaskWaitingOnUser(chat('chat-plain'))).toBe(false)
   })
+
+  it('finds every task a chat is linked to, by title then id', async () => {
+    get.mockResolvedValue({
+      tasks: [
+        delegated({ id: 'zulu', title: 'Zulu', linked_chats: ['chat-2'] }),
+        delegated({ id: 'beta', title: 'Alpha', linked_chats: ['chat-2'] }),
+        delegated({ id: 'alpha', title: 'Alpha', linked_chats: ['chat-2', 'chat-9'] }),
+        delegated({ id: 'other', title: 'Other', linked_chats: ['chat-3'] }),
+      ],
+    })
+    const store = useTaskSignalsStore()
+    await store.reload('personal')
+
+    // The same links read the same way whatever order the API answered in.
+    expect(store.linkedTasksForChat(chat('chat-2')).map(t => t.id)).toEqual(['alpha', 'beta', 'zulu'])
+    expect(store.linkedTasksForChat(chat('chat-9')).map(t => t.id)).toEqual(['alpha'])
+    expect(store.linkedTasksForChat(chat('chat-3')).map(t => t.id)).toEqual(['other'])
+    expect(store.linkedTasksForChat(chat('chat-none'))).toEqual([])
+  })
+
+  it('resolves links in the loaded workspace only', async () => {
+    get.mockResolvedValueOnce({ tasks: [delegated({ id: 'personal-task', linked_chats: ['chat-1'] })] })
+    const store = useTaskSignalsStore()
+    await store.reload('personal')
+    expect(store.linkedTasksForChat(chat('chat-1')).map(t => t.id)).toEqual(['personal-task'])
+
+    // Another workspace's rows replace the held ones: the link is that
+    // workspace's, not this chat's.
+    get.mockResolvedValueOnce({ tasks: [delegated({ id: 'work-task', linked_chats: ['chat-1'] })] })
+    await store.reload('work')
+    expect(store.linkedTasksForChat(chat('chat-1')).map(t => t.id)).toEqual(['work-task'])
+  })
+
+  it('a linked chat is a task chat, but not a delegated one', async () => {
+    get.mockResolvedValue({
+      tasks: [delegated({ id: 'linked', chat_id: '', linked_chats: ['chat-2'] })],
+    })
+    const store = useTaskSignalsStore()
+    await store.reload('personal')
+
+    const linked = chat('chat-2')
+    expect(store.isTaskChat(linked)).toBe(true)
+    // A link is not a delegation: the task was not delegated to this chat.
+    expect(store.isDelegatedChat(linked)).toBe(false)
+    expect(store.taskForChat(linked)).toBeNull()
+  })
+
+  it('a delegated chat is a task chat, and an ordinary chat is not', async () => {
+    get.mockResolvedValue({ tasks: [delegated({ id: 'ship', chat_id: 'chat-1' })] })
+    const store = useTaskSignalsStore()
+    await store.reload('personal')
+
+    expect(store.isTaskChat(chat('chat-1', stamp('ship')))).toBe(true)
+    expect(store.isTaskChat(chat('chat-1'))).toBe(true)
+    expect(store.isTaskChat(chat('chat-plain'))).toBe(false)
+  })
+
+  it('a link alone never holds the task or makes it wait on the user', async () => {
+    get.mockResolvedValue({
+      tasks: [delegated({ id: 'linked', chat_id: '', attempt_state: 'needs_you', linked_chats: ['chat-2'] })],
+    })
+    const store = useTaskSignalsStore()
+    await store.reload('personal')
+
+    const linked = chat('chat-2')
+    const task = store.linkedTasksForChat(linked)[0]!
+    expect(store.chatHoldsTask(linked, task)).toBe(false)
+    expect(store.chatTaskWaitingOnUser(linked)).toBe(false)
+  })
 })
