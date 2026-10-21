@@ -5721,6 +5721,9 @@ export const useProjectStore = defineStore('projects', () => {
     const streamingEventTypes = new Set(['text_delta', 'tool_use', 'thinking', 'status', 'user_echo', 'token_usage'])
     const impliesStreaming = streamingEventTypes.has(event.type)
       && !(event.type === 'status' && event.message === 'stopped')
+      // A duplicate echo repeats a send the engine already owns; it must not
+      // put the spinner back on a finished turn.
+      && !(event.type === 'user_echo' && event.duplicate)
     if (impliesStreaming && !streaming.value[chatId]) {
       streaming.value[chatId] = true
       if (streamingText.value[chatId] === undefined) streamingText.value[chatId] = ''
@@ -5751,6 +5754,15 @@ export const useProjectStore = defineStore('projects', () => {
           // a turn that ran. Nothing to render — the transcript already holds
           // the turn — but the client state has to settle: the send is
           // delivered, and no turn is streaming.
+          // `streaming` is truthful here, so the last transcript user turn is the running one.
+          const runningTurn = streaming.value[chatId]
+            ? msgs.filter(m => m.role === 'user' && m.turn_index != null).at(-1)?.turn_index ?? null
+            : null
+          if (runningTurn != null && event.turn_index === runningTurn) {
+            // A recovery resend of the turn that is still running: the echo is a
+            // repeat, but this turn owns the live buffer. Only settle the send.
+            break
+          }
           clearStreamingState(chatId)
           void loadMessages(chatId, { background: true })
           break

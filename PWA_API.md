@@ -327,7 +327,9 @@ Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer ho
 The body and the query name a *target*, never a folder and never a command: exactly one of `chat_id` or `project_id`, and the engine resolves the folder itself. A record answers `{session_id, folder, cols, rows, seq, attached, exited, exit_code}` — no output bytes and no connection id.
 
 ```bash
-# Unlock the terminal (its own password, not the dashboard one). The grant
+# Unlock the terminal. It asks for the Ciaobot password again — the same
+# PWA_AUTH_TOKEN the dashboard login uses, re-entered so a signed-in tab
+# cannot open a shell by itself. The grant
 # cookie lands in the jar next to the session cookie.
 curl -sS -c /tmp/ciao.jar -b /tmp/ciao.jar -X POST \
   "http://localhost:${PWA_PORT:-8443}/api/terminal/unlock" \
