@@ -2198,10 +2198,21 @@ def test_a_real_close_kills_the_background_child(tmp_path: Path) -> None:
             ).encode("utf-8")
         )
         deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and not marker.exists():
-            time.sleep(0.1)
-        assert marker.exists(), "the background child never started"
-        child_pid = int(marker.read_text(encoding="utf-8").strip())
+        child_pid = 0
+        while time.monotonic() < deadline and child_pid == 0:
+            # `Set-Content` can leave the file present but unreadable for a
+            # moment — a file another process has open exists before its
+            # content can be read — so existence is not readiness: read in
+            # the loop and treat a refusal as "not written yet".
+            try:
+                text = marker.read_text(encoding="utf-8").strip()
+            except (PermissionError, FileNotFoundError):
+                time.sleep(0.1)
+                continue
+            child_pid = int(text) if text else 0
+            if child_pid == 0:
+                time.sleep(0.1)
+        assert child_pid, "the background child never started"
         assert _process_alive(child_pid), "the background child is not running"
     finally:
         terminal.close()
