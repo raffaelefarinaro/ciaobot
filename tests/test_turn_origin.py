@@ -390,3 +390,91 @@ def test_revert_steers_keeps_origin_on_the_entry() -> None:
     assert stream.revert_steers() == ["w"]
     assert stream.pending[0]["origin"] == "background_run"
     assert stream.drain_one()["origin"] == "background_run"
+
+
+# ── The retry origin ──────────────────────────────────────────────────────
+#
+# A retry the user asked for is their own message, but it is drawn as a
+# notice, so it carries the same durable tag the engine-written turns carry.
+
+
+async def test_start_stream_records_and_echoes_the_retry_origin(tmp_path: Path) -> None:
+    pcm, chat = _setup(tmp_path)
+    echoes = await asyncio.wait_for(
+        _run_turn(pcm, chat, "try again", origin="retry"), timeout=5.0
+    )
+    assert echoes[0]["origin"] == "retry"
+    assert chat.user_turn_origin == {"0": "retry"}
+
+
+def test_the_retry_origin_survives_save_and_reload(tmp_path: Path) -> None:
+    pcm, chat = _setup(tmp_path)
+    chat.user_turn_origin["2"] = "retry"
+    pcm._save()
+
+    stored = json.loads((tmp_path / ".runtime" / "web_projects.json").read_text())
+    assert stored["chats"][chat.chat_id]["user_turn_origin"] == {"2": "retry"}
+
+    pcm._chats.clear()
+    pcm._load()
+    reloaded = pcm.get_chat(chat.chat_id)
+    assert reloaded is not None
+    assert reloaded.user_turn_origin == {"2": "retry"}
+
+
+async def test_the_retry_origin_reaches_the_history_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reload reconciles the chat from history: the tag must be in it."""
+    pcm, chat = _setup(tmp_path)
+    chat.session_id = "sess-retry"
+    chat.user_turn_origin = {"1": "retry"}
+    fake_sdk = SimpleNamespace(
+        get_session_messages=lambda session_id, directory: [
+            _Msg("user", "typed prompt"),
+            _Msg("assistant", "working"),
+            _Msg("user", "retried prompt"),
+            _Msg("assistant", "done"),
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    users = [r for r in json.loads(response.body) if r["role"] == "user"]
+    assert "origin" not in users[0]
+    assert users[1]["origin"] == "retry"
+
+
+async def test_a_queued_retry_keeps_its_origin_when_it_becomes_a_turn(
+    tmp_path: Path,
+) -> None:
+    """A retry that waits for the running turn keeps its tag when it flushes."""
+    pcm, chat = _setup(tmp_path)
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        calls.append(prompt)
+        if len(calls) == 1:
+            await release.wait()
+        yield _result(chat)
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    captured: list[dict] = []
+    stream = pcm.start_stream(chat.chat_id, "initial")
+
+    async def consume() -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    consumer = asyncio.create_task(consume())
+    await _wait_for(lambda: any(e.get("type") == "user_echo" for e in captured))
+    assert pcm.queue_message(chat.chat_id, "try again", entry_id="q-r", origin="retry")
+    release.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    echoes = [e for e in captured if e.get("type") == "user_echo"]
+    assert len(echoes) == 2
+    assert "origin" not in echoes[0]
+    assert echoes[1]["origin"] == "retry"
+    assert chat.user_turn_origin == {"1": "retry"}
