@@ -18,13 +18,14 @@ const SECTIONS: ModelSection[] = [
   { key: 'ollama_local', label: 'Ollama local', models: ['llama3.1:latest'], badge: 'local' },
 ]
 
-function mountSelector(props: Record<string, unknown> = {}) {
+function mountSelector(props: Record<string, unknown> = {}, slots: Record<string, string> = {}) {
   return mount(ModelSelector, {
     attachTo: document.body,
     props: {
       sections: SECTIONS,
       ...props,
     },
+    slots,
   })
 }
 
@@ -256,6 +257,25 @@ describe('ModelSelector', () => {
     await flushPromises()
 
     expect(wrapper.emitted('close')).toEqual([[]])
+  })
+
+  // The chat's recovery picker carries its heading and its warning in the
+  // header slot, above the searchable list.
+  it('renders the header slot above the list', async () => {
+    const wrapper = mountSelector(
+      {},
+      { header: '<p class="picker-heading">Choose a model to retry immediately</p>' },
+    )
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    const header = wrapper.get('.model-selector__header')
+    expect(header.find('.picker-heading').text()).toBe('Choose a model to retry immediately')
+    // The heading comes before the search field and the options.
+    const listbox = wrapper.get('.model-selector__listbox')
+    const children = Array.from(listbox.element.children)
+    expect(children[0]?.classList.contains('model-selector__header')).toBe(true)
+    expect(children[1]?.classList.contains('model-selector__search-wrap')).toBe(true)
   })
 })
 

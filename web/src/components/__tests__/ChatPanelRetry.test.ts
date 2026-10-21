@@ -10,6 +10,10 @@ import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
 import ChatPanel from '../ChatPanel.vue'
 
+// The handover confirmation is a promise, not a dialog: the test answers it.
+const askConfirm = vi.hoisted(() => vi.fn())
+vi.mock('../../lib/confirm', () => ({ askConfirm }))
+
 const PaneHeaderStub = defineComponent({
   name: 'PaneHeaderStub',
   setup(_, { slots }) {
@@ -43,15 +47,36 @@ const ChatCommentPopoverStub = defineComponent({
   },
 })
 
+// The real ModelSelector is a Reka popover. The panel only needs its two
+// slots (the recovery heading and the thinking chips) and the select event,
+// so the stub renders the slots and answers with `select`.
+const ModelSelectorStub = defineComponent({
+  name: 'ModelSelectorStub',
+  emits: ['select', 'close', 'update:modelValue'],
+  setup(_, { slots }) {
+    return () => h('div', { class: 'model-selector-stub' }, [
+      slots.header?.(),
+      slots.footer?.(),
+    ])
+  },
+})
+
 const MODELS_RESPONSE = {
   models: ['haiku', 'sonnet', 'opus', 'fable'],
   default: 'sonnet',
   provider_models: { claude: ['haiku', 'sonnet', 'opus', 'fable'] },
   provider_defaults: { claude: 'sonnet' },
-  thinking_levels: {},
-  model_reasoning_levels: {},
+  thinking_levels: { claude: ['low', 'medium', 'high'] },
+  // opus cannot do 'high', fable can: the recovery validates a staged
+  // thinking level against the model the user picks.
+  model_reasoning_levels: {
+    sonnet: ['low', 'medium', 'high'],
+    opus: ['low', 'medium'],
+    fable: ['low', 'medium', 'high'],
+  },
   model_options: {},
   backends: { anthropic: true },
+  opencode_models: ['openai/gpt-5.6'],
 }
 
 function makeProject(): ProjectInfo {
@@ -66,7 +91,7 @@ function makeProject(): ProjectInfo {
   }
 }
 
-function makeChat(chatId: string): ChatInfo {
+function makeChat(chatId: string, overrides: Partial<ChatInfo> = {}): ChatInfo {
   return {
     chat_id: chatId,
     project_id: 'project-1',
@@ -77,6 +102,7 @@ function makeChat(chatId: string): ChatInfo {
     session_id: '',
     created_at: '',
     archived: false,
+    ...overrides,
   }
 }
 
@@ -88,7 +114,12 @@ class MemoryStorage {
   clear(): void { this.values.clear() }
 }
 
-async function mountPanel(): Promise<{
+interface MountOptions {
+  /** Overrides for the panel's chat (a locked bucket, an archived chat, ...). */
+  chat?: Partial<ChatInfo>
+}
+
+async function mountPanel(options: MountOptions = {}): Promise<{
   wrapper: VueWrapper
   store: ReturnType<typeof useProjectStore>
   sendMessage: ReturnType<typeof vi.spyOn>
@@ -97,7 +128,7 @@ async function mountPanel(): Promise<{
   setActivePinia(pinia)
   const store = useProjectStore()
   store.projects = [makeProject()]
-  store.chats = [makeChat('chat-1')]
+  store.chats = [makeChat('chat-1', options.chat)]
   store.activeChatId = 'chat-1'
   store.messages = { 'chat-1': [] }
   store.bootstrapped = true
@@ -117,7 +148,7 @@ async function mountPanel(): Promise<{
       plugins: [pinia],
       stubs: {
         PaneHeader: PaneHeaderStub,
-        ModelSelector: ChildStub,
+        ModelSelector: ModelSelectorStub,
         SubagentPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
@@ -423,6 +454,357 @@ describe('ChatPanel retry from error bubble', () => {
     messages.scrollTop = 100
     await wrapper.find('.messages').trigger('scroll')
     expect(messages.style.overflowAnchor).toBe('none')
+    wrapper.unmount()
+  })
+})
+
+// A recovery is the model picker opened from a failed turn: the retry card's
+// "Continue with..." and the error bubble's "Switch model". A pick there
+// retries that turn; the composer's own picker only changes the model.
+describe('ChatPanel recovery model picker', () => {
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: new MemoryStorage(),
+    })
+    localStorage.clear()
+    askConfirm.mockReset()
+    askConfirm.mockResolvedValue(true)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  function picker(wrapper: VueWrapper) {
+    return wrapper.findComponent(ModelSelectorStub)
+  }
+
+  async function pickModel(wrapper: VueWrapper, model: string, section = 'anthropic') {
+    picker(wrapper).vm.$emit('select', model, section)
+    await flushPromises()
+  }
+
+  async function openComposerPicker(wrapper: VueWrapper) {
+    const chip = wrapper.find('.model-picker-wrap.composer-model .composer-chip')
+    expect(chip.exists()).toBe(true)
+    await chip.trigger('click')
+    await flushPromises()
+  }
+
+  async function openCardRecovery(wrapper: VueWrapper) {
+    const btn = wrapper.findAll('.retry-card-actions .btn-small').find(b => b.text() === 'Continue with...')
+    expect(btn).toBeTruthy()
+    await btn!.trigger('click')
+    await flushPromises()
+  }
+
+  async function openErrorRecovery(wrapper: VueWrapper) {
+    const btn = wrapper.findAll('.retry-btn').find(b => b.text() === 'Switch model')
+    expect(btn).toBeTruthy()
+    await btn!.trigger('click')
+    await flushPromises()
+  }
+
+  function armPendingRetry(store: ReturnType<typeof useProjectStore>) {
+    store.chats[0].retry = {
+      status: 'pending',
+      next_at: '2026-10-22T10:00:00Z',
+      last_error: 'weekly usage limit',
+      attempts: 1,
+      interval_seconds: 3600,
+    }
+  }
+
+  function failWithUnsupportedModel(store: ReturnType<typeof useProjectStore>) {
+    store.messages['chat-1'] = [
+      {
+        role: 'user',
+        content: 'Check the video',
+        timestamp: '2026-08-08T15:51:00Z',
+        images: ['web_5a4d7145.png'],
+      },
+      {
+        role: 'assistant',
+        content: 'Error: this model does not support image input',
+        timestamp: '2026-08-08T15:51:01Z',
+        is_error: true,
+      },
+    ]
+  }
+
+  it('opens the recovery picker with its heading from the retry card', async () => {
+    const { wrapper, store } = await mountPanel()
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+
+    expect(wrapper.find('.model-picker-recovery__title').text()).toBe('Choose a model to retry immediately')
+    expect(wrapper.find('.model-picker-recovery__note').text()).toContain('may incur usage charges')
+    expect(wrapper.find('.model-picker-recovery__note').text()).toContain('Thinking applies to that retry')
+    wrapper.unmount()
+  })
+
+  it('opens the same recovery picker from the error bubble', async () => {
+    const { wrapper, store } = await mountPanel()
+    failWithUnsupportedModel(store)
+    await flushPromises()
+
+    await openErrorRecovery(wrapper)
+
+    expect(wrapper.find('.model-picker-recovery__title').text()).toBe('Choose a model to retry immediately')
+    expect(wrapper.find('.model-picker-recovery__note').text()).toContain('may incur usage charges')
+    wrapper.unmount()
+  })
+
+  it('keeps the composer picker free of the recovery heading', async () => {
+    const { wrapper } = await mountPanel()
+
+    await openComposerPicker(wrapper)
+
+    expect(wrapper.find('.model-picker-recovery').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('retries the deferred turn once when the recovery picker picks a model', async () => {
+    const { wrapper, store } = await mountPanel()
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    await pickModel(wrapper, 'opus')
+
+    expect(updateChat).toHaveBeenCalledTimes(1)
+    expect(updateChat.mock.calls[0][0]).toBe('chat-1')
+    expect(updateChat.mock.calls[0][1]).toMatchObject({ model: 'opus', provider: 'claude' })
+    expect(tryNow).toHaveBeenCalledTimes(1)
+    expect(tryNow).toHaveBeenCalledWith('chat-1')
+    wrapper.unmount()
+  })
+
+  it('retries in a recovery even when the picked model is the one already in use', async () => {
+    const { wrapper, store } = await mountPanel()
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    await pickModel(wrapper, 'sonnet')
+
+    expect(tryNow).toHaveBeenCalledTimes(1)
+    expect(tryNow).toHaveBeenCalledWith('chat-1')
+    wrapper.unmount()
+  })
+
+  it('never retries from the composer picker, even with a deferred retry waiting', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openComposerPicker(wrapper)
+    await pickModel(wrapper, 'opus')
+
+    expect(updateChat).toHaveBeenCalledTimes(1)
+    expect(tryNow).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('does nothing when the composer picker picks the model already in use', async () => {
+    const { wrapper, store } = await mountPanel()
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openComposerPicker(wrapper)
+    await pickModel(wrapper, 'sonnet')
+
+    expect(updateChat).not.toHaveBeenCalled()
+    expect(tryNow).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('resends the failed turn when the error bubble recovery picks a model', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    failWithUnsupportedModel(store)
+    sendMessage.mockResolvedValue()
+    await flushPromises()
+
+    await openErrorRecovery(wrapper)
+    await pickModel(wrapper, 'opus')
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    const [, text, prepared] = sendMessage.mock.calls[0]
+    expect(text).toBe('Check the video')
+    // The failed turn's images travel with the retry.
+    expect(prepared.imageRefs).toEqual(['web_5a4d7145.png'])
+    // The composer is not drained by a recovery.
+    expect(store.pendingImages).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('asks before a handover and retries only after it succeeded', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
+
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    // The existing handover confirmation is kept.
+    expect(askConfirm.mock.calls[0][0]).toContain('Hand over this chat to')
+    expect(handover).toHaveBeenCalledTimes(1)
+    expect(handover.mock.calls[0][0]).toBe('chat-1')
+    expect(handover.mock.calls[0][1]).toMatchObject({ model: 'openai/gpt-5.6', provider: 'opencode' })
+    expect(tryNow).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('changes no model and sends nothing when the handover is cancelled', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    const handover = vi.spyOn(store, 'handoverChat').mockResolvedValue(undefined as never)
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    askConfirm.mockResolvedValue(false)
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
+
+    expect(askConfirm).toHaveBeenCalledTimes(1)
+    expect(handover).not.toHaveBeenCalled()
+    expect(updateChat).not.toHaveBeenCalled()
+    expect(tryNow).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('sends nothing when the handover fails', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel({ chat: { session_id: 'sess-1' } })
+    const handover = vi.spyOn(store, 'handoverChat').mockRejectedValue(new Error('engine refused'))
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const toast = vi.spyOn(store, 'pushErrorToast')
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    await pickModel(wrapper, 'openai/gpt-5.6', 'opencode')
+
+    expect(handover).toHaveBeenCalledTimes(1)
+    expect(tryNow).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
+    // The failure is reported, not swallowed.
+    expect(toast).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('sends the turn once when the recovery is picked twice in a row', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    failWithUnsupportedModel(store)
+    sendMessage.mockResolvedValue()
+    await flushPromises()
+
+    await openErrorRecovery(wrapper)
+    const selector = picker(wrapper)
+    selector.vm.$emit('select', 'opus', 'anthropic')
+    selector.vm.$emit('select', 'opus', 'anthropic')
+    await flushPromises()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('drops the captured recovery when the chat changes', async () => {
+    const { wrapper, store, sendMessage } = await mountPanel()
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    failWithUnsupportedModel(store)
+    sendMessage.mockResolvedValue()
+    await flushPromises()
+
+    await openErrorRecovery(wrapper)
+    // The user moves to another chat before choosing a model.
+    store.chats.push(makeChat('chat-2'))
+    store.activeChatId = 'chat-2'
+    store.messages['chat-2'] = []
+    await flushPromises()
+
+    await pickModel(wrapper, 'opus')
+
+    // The retry belongs to the chat it was captured in: nothing is sent.
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(tryNow).not.toHaveBeenCalled()
+    // The pick itself is an ordinary model change on the chat now on screen.
+    expect(updateChat.mock.calls[0][0]).toBe('chat-2')
+    wrapper.unmount()
+  })
+
+  it('stages a thinking level and applies it when the chosen model supports it', async () => {
+    const { wrapper, store } = await mountPanel()
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    const high = wrapper.findAll('.thinking-chip').find(c => c.text() === 'High')
+    expect(high).toBeTruthy()
+    await high!.trigger('click')
+    await flushPromises()
+
+    // Staged only: nothing is saved and the picker stays open.
+    expect(updateChat).not.toHaveBeenCalled()
+    expect(store.chats[0].thinking_level).toBeUndefined()
+    expect(wrapper.find('.model-picker-recovery__title').exists()).toBe(true)
+
+    await pickModel(wrapper, 'fable')
+
+    expect(updateChat.mock.calls[0][1]).toMatchObject({ model: 'fable', thinking_level: 'high' })
+    expect(tryNow).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('falls back to the provider default when the chosen model cannot do the staged level', async () => {
+    const { wrapper, store } = await mountPanel()
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    const high = wrapper.findAll('.thinking-chip').find(c => c.text() === 'High')
+    await high!.trigger('click')
+    await flushPromises()
+
+    await pickModel(wrapper, 'opus')
+
+    expect(updateChat.mock.calls[0][1]).toMatchObject({ model: 'opus', thinking_level: '' })
+    wrapper.unmount()
+  })
+
+  it('saves the thinking level straight away outside a recovery', async () => {
+    const { wrapper, store } = await mountPanel()
+    const updateChat = vi.spyOn(store, 'updateChat').mockResolvedValue(undefined as never)
+
+    await openComposerPicker(wrapper)
+    const high = wrapper.findAll('.thinking-chip').find(c => c.text() === 'High')
+    expect(high).toBeTruthy()
+    await high!.trigger('click')
+    await flushPromises()
+
+    expect(updateChat).toHaveBeenCalledWith('chat-1', { thinking_level: 'high' })
     wrapper.unmount()
   })
 })

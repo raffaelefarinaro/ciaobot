@@ -410,7 +410,8 @@
             <button
               v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
               class="retry-btn fix-btn"
-              @click="toggleModelPicker"
+              :disabled="store.isStreaming"
+              @click="openRecoveryPicker(i)"
             >Switch model</button>
             <button
               v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
@@ -448,7 +449,8 @@
             <button
               v-else-if="errorBubbleAction(i, item.msg.content) === 'switch-model'"
               class="retry-btn fix-btn"
-              @click="toggleModelPicker"
+              :disabled="store.isStreaming"
+              @click="openRecoveryPicker(i)"
             >Switch model</button>
             <button
               v-else-if="errorBubbleAction(i, item.msg.content) === 'fix'"
@@ -479,7 +481,7 @@
           </div>
         </div>
         <div class="retry-card-actions">
-          <button class="btn-small" :disabled="store.isStreaming" @click="openHandoverPicker">Continue with...</button>
+          <button class="btn-small" :disabled="store.isStreaming" @click="openRecoveryPicker(null)">Continue with...</button>
           <button class="btn-small" :disabled="store.isStreaming" @click="tryRetryNow">Try now</button>
           <button class="btn-small" @click="stopRetry">Stop trying</button>
         </div>
@@ -1140,6 +1142,17 @@
                 @select="selectModel"
                 @close="showModelPicker = false"
               >
+                <!-- Recovery only. Here a pick is not a model change but a
+                     retry of the turn that failed, so the picker says so
+                     before the user chooses. -->
+                <template #header>
+                  <div v-if="isRecoveryPicker" class="model-picker-recovery">
+                    <p class="model-picker-recovery__title">Choose a model to retry immediately</p>
+                    <p class="model-picker-recovery__note">
+                      Choosing a model retries the failed request and may incur usage charges. Thinking applies to that retry.
+                    </p>
+                  </div>
+                </template>
                 <template #footer>
                   <div
                     v-if="showThinkingLevels"
@@ -1152,8 +1165,8 @@
                         :key="level"
                         type="button"
                         class="thinking-chip"
-                        :class="{ 'thinking-chip--active': (chat.thinking_level || '') === level }"
-                        :aria-pressed="(chat.thinking_level || '') === level"
+                        :class="{ 'thinking-chip--active': thinkingChipLevel === level }"
+                        :aria-pressed="thinkingChipLevel === level"
                         @click="selectThinking(level)"
                       >
                         {{ level ? level.charAt(0).toUpperCase() + level.slice(1) : 'Auto' }}
@@ -2213,6 +2226,58 @@ let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && store.activeMessages.length > 0 && !isNearBottom.value))
 const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
+
+// Which picker is open. 'normal' is the composer's model chip: a pick there
+// only changes the model. 'recovery' is opened from a failed turn - the
+// retry card's "Continue with..." or the error bubble's "Switch model" - and
+// a pick there retries that turn on the model the user chose.
+type PickerMode = 'normal' | 'recovery'
+
+interface RecoveryContext {
+  chatId: string
+  // The error bubble to resend. Null for a deferred retry, which the engine
+  // resumes on its own schedule.
+  errorIdx: number | null
+}
+
+const pickerMode = ref<PickerMode>('normal')
+const recoveryContext = ref<RecoveryContext | null>(null)
+// A recovery stages its thinking level instead of saving it: the level only
+// counts if the model the user picks supports it, and the picker stays open
+// until a model is picked.
+const stagedThinkingLevel = ref<string | null>(null)
+// One pick at a time. A second click while the first is still applying must
+// not start a second turn.
+const modelSelectBusy = ref(false)
+
+const isRecoveryPicker = computed(() => pickerMode.value === 'recovery')
+
+// The chip that reads as chosen: the staged level in a recovery (it belongs
+// to the retry, not to the chat yet), the chat's own level otherwise.
+const thinkingChipLevel = computed(() => {
+  if (pickerMode.value === 'recovery' && stagedThinkingLevel.value !== null) {
+    return stagedThinkingLevel.value
+  }
+  return chat.value?.thinking_level || ''
+})
+
+// A recovery belongs to the chat it was opened in: closing the picker,
+// switching chat or unmounting drops it, so a later pick cannot retry a turn
+// in another conversation.
+function resetPickerState() {
+  pickerMode.value = 'normal'
+  recoveryContext.value = null
+  stagedThinkingLevel.value = null
+}
+
+watch(() => chat.value?.chat_id, () => {
+  resetPickerState()
+})
+
+onBeforeUnmount(() => {
+  resetPickerState()
+})
+
 interface ContextProjectFile {
   path: string
   vault_path: string
@@ -4489,7 +4554,7 @@ function retryFromError(errorIdx: number) {
   // from the live composer) and pass `prepared` to skip the
   // consumePreparedAttachments drain — a retry must not erase whatever
   // the user has currently staged for a fresh send.
-  store.sendMessage(
+  return store.sendMessage(
     chat.value.chat_id,
     prior.text,
     { composed: prior.text, imageRefs: prior.images.length ? prior.images : undefined, fileComments: [], chatComments: [] },
@@ -4566,8 +4631,16 @@ async function stopRetry() {
   await store.stopChatRetry(chat.value.chat_id)
 }
 
-function openHandoverPicker() {
+// Open the picker for a recovery: the retry card's "Continue with..." or the
+// error bubble's "Switch model". The chat and the error bubble are captured
+// now, so the retry lands on the turn that failed even if the screen moves
+// while the picker is open.
+function openRecoveryPicker(errorIdx: number | null) {
+  if (!chat.value || chat.value.archived) return
   if (store.isStreaming) return
+  recoveryContext.value = { chatId: chat.value.chat_id, errorIdx }
+  pickerMode.value = 'recovery'
+  stagedThinkingLevel.value = null
   showModelPicker.value = true
 }
 
@@ -4579,7 +4652,16 @@ async function saveTitle() {
   editingTitle.value = false
 }
 function toggleModelPicker() {
-  showModelPicker.value = !showModelPicker.value
+  if (showModelPicker.value) {
+    showModelPicker.value = false
+    return
+  }
+  // The composer's chip is selection-only: a pick there changes the model
+  // and never retries.
+  pickerMode.value = 'normal'
+  recoveryContext.value = null
+  stagedThinkingLevel.value = null
+  showModelPicker.value = true
 }
 
 function tierAlias(model: string): TierAlias | null {
@@ -4630,12 +4712,67 @@ function bucketForSelectedModel(model: string): BucketKey {
 }
 
 
+// Put the chosen model on the chat. A provider change is a handover, and the
+// handover keeps the chat's own thinking level: the staged one belongs to
+// the retry, so it goes on top. Returns false when the change did not
+// happen, so nothing is retried after a failure.
+async function applyModelChoice(
+  chatId: string,
+  updates: { provider: ProviderKey; model: string; thinking_level?: string },
+  handover: boolean,
+  staged: string | null,
+): Promise<boolean> {
+  try {
+    if (handover) {
+      await store.handoverChat(chatId, updates)
+      if (staged !== null) {
+        // The handover keeps the chat's own thinking level; the staged one
+        // belongs to the retry, so it goes on top. Best effort: the handover
+        // itself already happened.
+        try {
+          await store.updateChat(chatId, { thinking_level: updates.thinking_level ?? '' })
+        } catch (e) {
+          store.pushErrorToast('Could not apply the thinking level', errorMessage(e))
+        }
+      }
+    } else {
+      await store.updateChat(chatId, updates)
+    }
+    return true
+  } catch (e) {
+    store.pushErrorToast('Could not switch model', errorMessage(e))
+    return false
+  }
+}
+
+// The second half of a recovery: the failed turn runs again on the model the
+// user just picked. A deferred retry resumes the engine's own schedule; an
+// error bubble resends the turn it failed on, with that turn's images.
+async function runRecovery(recovery: RecoveryContext) {
+  // The user may have moved to another chat while the picker was open: the
+  // retry belongs to the chat it was captured in.
+  if (chat.value?.chat_id !== recovery.chatId) return
+  if (recovery.errorIdx !== null) {
+    retryFromError(recovery.errorIdx)
+    return
+  }
+  await store.tryChatRetryNow(recovery.chatId)
+}
+
 async function selectModel(value: string | string[], sectionKey = '') {
+  // One pick at a time: a second click while the first is still applying
+  // must not start a second turn.
+  if (modelSelectBusy.value) return
   const model = Array.isArray(value) ? value[0] : value
   if (!model || !chat.value) {
     showModelPicker.value = false
     return
   }
+  // Capture the intent before the first await: the picker closes itself on a
+  // pick (which drops the recovery) and a confirmation dialog can sit over a
+  // chat that changes.
+  const recovery = pickerMode.value === 'recovery' ? recoveryContext.value : null
+  const chatId = chat.value.chat_id
   const sectionBucket: Partial<Record<string, BucketKey>> = {
     anthropic: 'claude',
     opencode: 'opencode',
@@ -4646,7 +4783,9 @@ async function selectModel(value: string | string[], sectionKey = '') {
   const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
   const currentEntry = canonicalTier(chat.value.model)
   const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
-  if (sameModelAndRoute) {
+  if (sameModelAndRoute && !recovery) {
+    // The composer's picker is selection-only: the model already in use is a
+    // no-op. In a recovery the same model still retries.
     showModelPicker.value = false
     return
   }
@@ -4663,43 +4802,75 @@ async function selectModel(value: string | string[], sectionKey = '') {
     model,
   }
   const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
-  if (
+  // A recovery's staged level belongs to the model the user is about to pick:
+  // when the catalog says that model cannot do it, the retry falls back to
+  // the provider default.
+  const staged = recovery ? stagedThinkingLevel.value : null
+  if (staged !== null) {
+    const providerLevels = modelsResponse.value?.thinking_levels?.[updates.provider]
+    const allowed = targetLevels?.length ? targetLevels : providerLevels
+    updates.thinking_level = (allowed?.length && staged && !allowed.includes(staged)) ? '' : staged
+  } else if (
     chat.value.thinking_level
     && targetLevels
     && !targetLevels.includes(chat.value.thinking_level)
   ) {
     updates.thinking_level = ''
   }
-  if (bucketLocked.value && targetRoute !== currentRoute) {
-    const ok = await askConfirm(
-      `Hand over this chat to ${bucketLabel(targetBucket)} / ${model}? The same visible chat will continue with a fresh provider session.`,
-      {
-        title: 'Hand over chat',
-        confirmLabel: 'Hand over',
-      },
-    )
-    if (!ok) return
-    // Picking a model from the pending-retry card's "Continue with..." is
-    // the whole point of switching model there: fire the retry immediately
-    // on the new provider instead of leaving it parked for a manual "Try now".
-    const hadPendingRetry = chat.value.retry?.status === 'pending'
-    const chatId = chat.value.chat_id
-    await store.handoverChat(chatId, updates)
-    showModelPicker.value = false
-    if (hadPendingRetry) {
-      await store.tryChatRetryNow(chatId)
+  modelSelectBusy.value = true
+  try {
+    // A recovery that keeps the model already in use and staged no thinking
+    // level has nothing to apply: only the retry is left to do.
+    if (!sameModelAndRoute || staged !== null) {
+      if (bucketLocked.value && targetRoute !== currentRoute) {
+        const ok = await askConfirm(
+          `Hand over this chat to ${bucketLabel(targetBucket)} / ${model}? The same visible chat will continue with a fresh provider session.`,
+          {
+            title: 'Hand over chat',
+            confirmLabel: 'Hand over',
+          },
+        )
+        // A cancelled handover changes no model and retries nothing.
+        if (!ok) return
+        // The user answered a dialog: the chat may have moved under it.
+        if (chat.value?.chat_id !== chatId) return
+        const applied = await applyModelChoice(chatId, updates, true, staged)
+        if (!applied) return
+      } else {
+        const applied = await applyModelChoice(chatId, updates, false, staged)
+        if (!applied) return
+      }
     }
-    return
+    // The model is in place. Only a recovery retries: the composer's picker
+    // never does, not even with a deferred retry waiting.
+    if (recovery) {
+      try {
+        await runRecovery(recovery)
+      } catch (e) {
+        store.pushErrorToast('Could not retry the failed turn', errorMessage(e))
+      }
+    }
+  } finally {
+    modelSelectBusy.value = false
+    showModelPicker.value = false
   }
-  await store.updateChat(chat.value.chat_id, updates)
-  showModelPicker.value = false
 }
 
 async function selectThinking(level: string) {
+  if (pickerMode.value === 'recovery') {
+    // A recovery stages the level for the retry: the model that is about to
+    // be picked may not support it, and the picker stays open until then.
+    stagedThinkingLevel.value = level
+    return
+  }
   // '' = provider default. Safe mid-chat: it never invalidates the
   // provider session, so no handover is involved.
-  await store.updateChat(chat.value.chat_id, { thinking_level: level })
-  showModelPicker.value = false
+  try {
+    await store.updateChat(chat.value.chat_id, { thinking_level: level })
+    showModelPicker.value = false
+  } catch (e) {
+    store.pushErrorToast('Could not change the thinking level', errorMessage(e))
+  }
 }
 
 /* Close picker on click outside or Escape */
@@ -4708,6 +4879,9 @@ watch(showModelPicker, (open) => {
     // A capability-card "Open picker" filtered the sections; drop the filter
     // so the next normal open shows the full list again.
     capabilityPickerSection.value = ''
+    // The picker closed: the recovery is over and its staged thinking level
+    // goes with it.
+    resetPickerState()
     return
   }
   // Refetched on every open, not only on mount: a provider whose catalog was
@@ -7363,6 +7537,28 @@ details[open] > .activity-summary::before {
   position: relative;
   display: inline-flex;
   align-items: center;
+}
+
+/* Recovery picker: here a pick is a retry of the failed turn, not a model
+   change, and the picker says so before the user chooses. */
+.model-picker-recovery {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-picker-recovery__title {
+  margin: 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.model-picker-recovery__note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  line-height: 1.4;
 }
 
 .thinking-levels {
