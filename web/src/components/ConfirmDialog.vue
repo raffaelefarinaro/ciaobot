@@ -141,6 +141,9 @@ onBeforeUnmount(() => {
   color: var(--fg2);
   white-space: pre-line;
 }
+.decision-reason {
+  margin-bottom: var(--space-4);
+}
 .confirm-actions {
   display: flex;
   flex-wrap: wrap;
