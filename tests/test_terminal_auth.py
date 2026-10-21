@@ -8,11 +8,14 @@ the only thing that decides grants — the routes that will use it come later.
 from __future__ import annotations
 
 import ast
+import base64
 import dataclasses
 import hashlib
+import hmac
 import inspect
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,6 +30,10 @@ from ciao.terminal_auth import (
     TerminalGrant,
     TerminalGrantStore,
 )
+
+#: A lone surrogate: what a hostile body can carry and what UTF-8 refuses.
+#: It is written as an escape so the source file itself stays valid UTF-8.
+_MALFORMED = "\ud800"
 
 
 class FakeClock:
@@ -44,6 +51,11 @@ class FakeClock:
 
 def _store(clock: FakeClock) -> TerminalGrantStore:
     return TerminalGrantStore(clock=clock)
+
+
+def _b64_bytes(value: str) -> bytes:
+    """The bytes behind a URL-safe base64 string, padding and all."""
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
 def _reachable_strings(value: object) -> list[str]:
@@ -116,7 +128,7 @@ def test_identical_login_cookies_get_distinct_grants() -> None:
     assert store.verify(second_token, "same-cookie") is not None
 
 
-def test_only_hashes_are_retained_and_repr_does_not_expose_bearer() -> None:
+def test_the_retained_state_holds_digests_and_not_the_bearer() -> None:
     clock = FakeClock()
     store = _store(clock)
 
@@ -131,8 +143,8 @@ def test_only_hashes_are_retained_and_repr_does_not_expose_bearer() -> None:
     assert "cookie-a" not in repr(grant)
     assert fingerprint not in repr(grant)
 
-    # The store keeps digests only: nothing it holds is the raw bearer or
-    # the raw login cookie.
+    # The store retains digests and safe metadata only: nothing it holds is
+    # the raw bearer or the raw login cookie.
     blobs = _reachable_strings(store) + _reachable_strings(grant)
     assert token not in blobs
     assert "cookie-a" not in blobs
@@ -142,6 +154,19 @@ def test_only_hashes_are_retained_and_repr_does_not_expose_bearer() -> None:
     # And no repr of the store or its records carries the bearer either.
     assert token not in repr(store)
     assert "cookie-a" not in repr(store)
+
+
+def test_the_bearer_is_256_bits_and_the_grant_id_is_128_bits() -> None:
+    """The sizes are the contract, checked by decoding, not by statistics."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    token, grant = store.issue("cookie-a")
+
+    assert len(_b64_bytes(token)) == 32
+    assert len(_b64_bytes(grant.grant_id)) == 16
+    # The grant id is not the bearer: it carries no authority on its own.
+    assert grant.grant_id != token
 
 
 def test_grant_expires_at_the_fixed_deadline() -> None:
@@ -162,6 +187,20 @@ def test_grant_expires_at_the_fixed_deadline() -> None:
     # And it stays dead afterwards.
     clock.advance(TERMINAL_UNLOCK_TTL_S)
     assert store.verify(token, "cookie-a") is None
+
+
+def test_verify_returns_the_original_timestamps_and_binding() -> None:
+    clock = FakeClock()
+    store = _store(clock)
+
+    token, grant = store.issue("cookie-a")
+    verified = store.verify(token, "cookie-a")
+
+    assert verified is not None
+    assert verified.grant_id == grant.grant_id
+    assert verified.issued_at == grant.issued_at
+    assert verified.expires_at == grant.expires_at
+    assert verified.session_fingerprint == grant.session_fingerprint
 
 
 def test_revoke_affects_only_the_presented_grant() -> None:
@@ -211,6 +250,56 @@ def test_issue_replaces_the_previous_token() -> None:
     assert excinfo.value.reason == "capacity"
 
 
+def test_a_renewal_at_capacity_replaces_the_grant_it_renews() -> None:
+    """At the bound, renewing one of the live grants still works."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    tokens = [store.issue(f"cookie-{index}")[0] for index in range(TERMINAL_MAX_GRANTS)]
+    assert store.retained_grant_count() == TERMINAL_MAX_GRANTS
+
+    renewed_token, _ = store.issue("cookie-0", replace_token=tokens[0])
+
+    # The renewal took the freed slot, so the count did not grow.
+    assert store.retained_grant_count() == TERMINAL_MAX_GRANTS
+    assert store.verify(tokens[0], "cookie-0") is None
+    assert store.verify(renewed_token, "cookie-0") is not None
+
+
+def test_a_foreign_replacement_does_not_revoke_or_free_a_slot() -> None:
+    """A replacement bound to another session is not ours to revoke."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    victim_token, _ = store.issue("cookie-victim")
+    for index in range(TERMINAL_MAX_GRANTS - 1):
+        store.issue(f"cookie-{index}")
+    assert store.retained_grant_count() == TERMINAL_MAX_GRANTS
+
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.issue("cookie-attacker", replace_token=victim_token)
+    assert excinfo.value.reason == "capacity"
+
+    # The victim is untouched and the foreign replacement freed no slot.
+    assert store.retained_grant_count() == TERMINAL_MAX_GRANTS
+    assert store.verify(victim_token, "cookie-victim") is not None
+
+
+def test_an_unknown_or_expired_replacement_token_is_a_no_op() -> None:
+    clock = FakeClock()
+    store = _store(clock)
+
+    existing_token, _ = store.issue("cookie-a")
+
+    # An unknown replacement is not an error and revokes nothing.
+    store.issue("cookie-a", replace_token="never-issued")
+    assert store.verify(existing_token, "cookie-a") is not None
+
+    # An expired replacement is a no-op too: there is nothing left to revoke.
+    clock.advance(TERMINAL_UNLOCK_TTL_S + 1)
+    store.issue("cookie-a", replace_token=existing_token)
+
+
 def test_grant_capacity_is_bounded_and_expired_entries_are_reclaimed() -> None:
     clock = FakeClock()
     store = _store(clock)
@@ -228,6 +317,29 @@ def test_grant_capacity_is_bounded_and_expired_entries_are_reclaimed() -> None:
     assert store.verify(token, "cookie-fresh") is not None
 
 
+def test_prune_removes_only_the_expired_grants() -> None:
+    """A prune removes the records whose deadline has passed, and no other.
+
+    The retained count is read before any ``verify``, because ``verify``
+    prunes too: a no-op prune would still look right through ``verify``.
+    """
+    clock = FakeClock()
+    store = _store(clock)
+
+    live_token, _ = store.issue("cookie-live")
+    clock.advance(TERMINAL_UNLOCK_TTL_S // 2)
+    dying_token, _ = store.issue("cookie-dying")
+    assert store.retained_grant_count() == 2
+
+    # The first grant is exactly at its deadline; the second is not.
+    clock.advance(TERMINAL_UNLOCK_TTL_S // 2)
+    store.prune()
+
+    assert store.retained_grant_count() == 1
+    assert store.verify(live_token, "cookie-live") is None
+    assert store.verify(dying_token, "cookie-dying") is not None
+
+
 def test_blank_session_cannot_receive_a_grant() -> None:
     clock = FakeClock()
     store = _store(clock)
@@ -236,6 +348,48 @@ def test_blank_session_cannot_receive_a_grant() -> None:
         with pytest.raises(TerminalAuthError) as excinfo:
             store.issue(blank)
         assert excinfo.value.reason == "invalid_session"
+
+
+def test_blank_verify_and_revoke_edges() -> None:
+    clock = FakeClock()
+    store = _store(clock)
+
+    token, _ = store.issue("cookie-a")
+
+    assert store.verify("", "cookie-a") is None
+    assert store.verify(token, "") is None
+    assert store.verify("   ", "cookie-a") is None
+    assert store.verify(token, "   ") is None
+
+    # A blank revocation revokes nothing and raises nothing.
+    store.revoke("")
+    store.revoke("   ")
+    assert store.verify(token, "cookie-a") is not None
+
+
+def test_malformed_credential_unicode_is_refused_not_raised() -> None:
+    """A credential that is not valid UTF-8 is a value, never an exception."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    token, _ = store.issue("cookie-a")
+
+    # A session that is not valid UTF-8 is refused, not raised on.
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.issue(_MALFORMED)
+    assert excinfo.value.reason == "invalid_session"
+
+    # A malformed bearer or cookie is simply not a grant.
+    assert store.verify(_MALFORMED, "cookie-a") is None
+    assert store.verify(token, _MALFORMED) is None
+
+    # A malformed bearer revokes nothing.
+    store.revoke(_MALFORMED)
+    assert store.verify(token, "cookie-a") is not None
+
+    # A malformed replacement token is a no-op, not an error.
+    store.issue("cookie-a", replace_token=_MALFORMED)
+    assert store.verify(token, "cookie-a") is not None
 
 
 # ── Password policy ───────────────────────────────────────────────────────
@@ -259,6 +413,61 @@ def test_password_comparison_handles_unicode_and_refuses_empty_expected() -> Non
     assert excinfo.value.reason == "rate_limited"
 
 
+def test_a_malformed_password_is_a_failure_and_reaches_the_limit() -> None:
+    """A password that is not valid UTF-8 fails, and it counts."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    # Matching malformed values must not authorize through surrogate encoding.
+    assert store.check_password("10.0.0.3", _MALFORMED, _MALFORMED) is False
+
+    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
+        assert store.check_password("10.0.0.1", _MALFORMED, "right") is False
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.check_password("10.0.0.1", "right", "right")
+    assert excinfo.value.reason == "rate_limited"
+
+    # The same holds for a malformed expected password.
+    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
+        assert store.check_password("10.0.0.2", "right", _MALFORMED) is False
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.check_password("10.0.0.2", "right", "right")
+    assert excinfo.value.reason == "rate_limited"
+
+
+def test_a_whitespace_only_expected_password_never_authenticates() -> None:
+    clock = FakeClock()
+    store = _store(clock)
+
+    for blank in ("", "   ", "\t\n"):
+        assert store.check_password("10.0.0.1", "anything", blank) is False
+        assert store.check_password("10.0.0.2", blank, blank) is False
+
+
+def test_a_password_with_significant_spaces_is_compared_byte_for_byte() -> None:
+    """Neither operand is stripped: the spaces are part of the password."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    assert store.check_password("10.0.0.1", " pass ", " pass ") is True
+    assert store.check_password("10.0.0.2", "pass", " pass ") is False
+    assert store.check_password("10.0.0.3", " pass", " pass ") is False
+    assert store.check_password("10.0.0.4", "pass ", " pass") is False
+
+
+def test_an_empty_supplied_password_fails_against_a_nonempty_expected() -> None:
+    clock = FakeClock()
+    store = _store(clock)
+
+    assert store.check_password("10.0.0.1", "", "right") is False
+    # And it counts as an attempt like any other.
+    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT - 1):
+        assert store.check_password("10.0.0.1", "", "right") is False
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.check_password("10.0.0.1", "right", "right")
+    assert excinfo.value.reason == "rate_limited"
+
+
 def test_five_failures_block_attempts_including_correct_password_until_window_expires() -> None:
     clock = FakeClock()
     store = _store(clock)
@@ -277,6 +486,51 @@ def test_five_failures_block_attempts_including_correct_password_until_window_ex
 
     clock.advance(TERMINAL_UNLOCK_FAIL_WINDOW_S + 1)
     assert store.check_password("10.0.0.1", "right", "right") is True
+
+
+def test_the_rolling_window_closes_at_its_exact_boundary() -> None:
+    clock = FakeClock()
+    store = _store(clock)
+
+    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
+        assert store.check_password("10.0.0.1", "wrong", "right") is False
+
+    # One second before the window closes the failures still count.
+    clock.advance(TERMINAL_UNLOCK_FAIL_WINDOW_S - 1)
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.check_password("10.0.0.1", "right", "right")
+    assert excinfo.value.reason == "rate_limited"
+
+    # At the boundary the oldest failure has aged out and the window is open.
+    clock.advance(1)
+    assert store.check_password("10.0.0.1", "right", "right") is True
+
+
+def test_the_rolling_window_expires_failures_one_by_one() -> None:
+    """Failures age out individually, so a staggered run frees the window."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    for _ in range(3):
+        assert store.check_password("10.0.0.1", "wrong", "right") is False
+    clock.advance(100)
+    for _ in range(2):
+        assert store.check_password("10.0.0.1", "wrong", "right") is False
+
+    # Five failures: the window is closed.
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.check_password("10.0.0.1", "right", "right")
+    assert excinfo.value.reason == "rate_limited"
+
+    # The three old failures age out; the two recent ones stay, so the count
+    # is exactly two. Three more failures therefore fit, and the fourth
+    # attempt is the one that closes the window again.
+    clock.advance(801)
+    for _ in range(3):
+        assert store.check_password("10.0.0.1", "wrong", "right") is False
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.check_password("10.0.0.1", "right", "right")
+    assert excinfo.value.reason == "rate_limited"
 
 
 def test_success_before_the_failure_limit_resets_that_clients_count() -> None:
@@ -325,11 +579,114 @@ def test_failure_buckets_are_bounded_without_evicting_live_limits() -> None:
     assert store.check_password("10.9.9.9", "right", "right") is True
 
 
+# ── The client identity the failures are counted against ──────────────────
+
+
+def test_two_spellings_of_one_address_share_a_failure_bucket() -> None:
+    """The bucket is the address, not the string the caller happened to pass."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
+        assert store.check_password("2001:0db8:0000:0000:0000:0000:0000:0001", "wrong", "right") is False
+
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.check_password("2001:db8::1", "right", "right")
+    assert excinfo.value.reason == "rate_limited"
+
+
+def test_an_ipv4_mapped_address_shares_the_ipv4_bucket() -> None:
+    clock = FakeClock()
+    store = _store(clock)
+
+    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
+        assert store.check_password("::ffff:10.0.0.1", "wrong", "right") is False
+
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.check_password("10.0.0.1", "right", "right")
+    assert excinfo.value.reason == "rate_limited"
+
+
+def test_the_ipv4_and_ipv6_loopbacks_are_separate_buckets() -> None:
+    """They are two different addresses, so they are two different budgets."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
+        assert store.check_password("127.0.0.1", "wrong", "right") is False
+
+    assert store.check_password("::1", "right", "right") is True
+
+
+def test_unusable_addresses_share_one_unknown_client_bucket() -> None:
+    """An address the server cannot parse is one bucket, not unbounded keys."""
+    clock = FakeClock()
+    store = _store(clock)
+
+    for _ in range(TERMINAL_UNLOCK_FAIL_LIMIT):
+        assert store.check_password("not-an-ip", "wrong", "right") is False
+
+    with pytest.raises(TerminalAuthError) as excinfo:
+        store.check_password("another-garbage", "right", "right")
+    assert excinfo.value.reason == "rate_limited"
+
+
+# ── The comparisons are constant-time and the digests are compared ─────────
+
+
+def test_the_password_comparison_goes_through_compare_digest(monkeypatch) -> None:
+    """The password bytes are compared with ``hmac.compare_digest``."""
+    from ciao import terminal_auth
+
+    real = hmac.compare_digest
+    calls: list[tuple[Any, Any]] = []
+
+    def spy(a: Any, b: Any) -> bool:
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(terminal_auth.hmac, "compare_digest", spy)
+    clock = FakeClock()
+    store = _store(clock)
+
+    assert store.check_password("10.0.0.1", "secret", "secret") is True
+
+    # Exactly one comparison: the password's bytes. The bearer lookup is a
+    # keyed digest lookup, not a scan over the stored digests.
+    assert calls == [(b"secret", b"secret")]
+
+
+def test_the_session_binding_comparison_goes_through_compare_digest(
+    monkeypatch,
+) -> None:
+    from ciao import terminal_auth
+
+    real = hmac.compare_digest
+    calls: list[tuple[Any, Any]] = []
+
+    def spy(a: Any, b: Any) -> bool:
+        calls.append((a, b))
+        return real(a, b)
+
+    monkeypatch.setattr(terminal_auth.hmac, "compare_digest", spy)
+    clock = FakeClock()
+    store = _store(clock)
+
+    token, _ = store.issue("cookie-a")
+    calls.clear()
+    assert store.verify(token, "cookie-a") is not None
+
+    # The session binding is compared over its digests, in constant time.
+    assert len(calls) == 1
+    left, right = calls[0]
+    assert isinstance(left, str) and isinstance(right, str)
+    assert left == hashlib.sha256("cookie-a".encode("utf-8")).hexdigest()
+
+
 # ── Nothing leaves the process ────────────────────────────────────────────
 
 
-def test_no_terminal_auth_data_is_written_or_logged(
-    tmp_path: Path,
+def test_no_terminal_auth_data_is_logged(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     clock = FakeClock()
@@ -346,79 +703,79 @@ def test_no_terminal_auth_data_is_written_or_logged(
     assert "expected-secret" not in logged
     assert "cookie-a" not in logged
 
-    # Nothing under the test's tree carries the bearer or either password.
-    for path in tmp_path.rglob("*"):
-        if not path.is_file():
-            continue
-        blob = path.read_bytes()
-        assert token.encode("utf-8") not in blob, path
-        assert b"supplied-secret" not in blob, path
-        assert b"expected-secret" not in blob, path
-        assert b"cookie-a" not in blob, path
 
-
-def test_the_module_has_no_file_writing_code_path() -> None:
-    """The store is in memory only: it cannot open a file, so it writes none."""
-    from ciao import terminal_auth
-
-    path = Path(inspect.getfile(terminal_auth))
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(path))
-
-    forbidden: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Name):
-            name = func.id
-        elif isinstance(func, ast.Attribute):
-            name = func.attr
-        else:
-            continue
-        if name in {
-            "open",
-            "write_text",
-            "write_bytes",
-            "mkdir",
-            "makedirs",
-            "replace",
-            "rename",
-            "unlink",
-            "remove",
-            "rmdir",
-            "touch",
-            "mkstemp",
-        }:
-            forbidden.add(f"{name} (line {node.lineno})")
-
-    assert not forbidden, (
-        "ciao/terminal_auth.py must stay in memory: it writes no file, so it "
-        f"must not call {sorted(forbidden)}"
-    )
-
-
-def test_the_module_cannot_log() -> None:
-    """No logger, no log call: there is no path from a grant to the log."""
+def test_the_module_depends_on_no_filesystem_or_logging_module() -> None:
+    """What this checks, exactly: this module's own imports contain nothing
+    that opens files, writes logs, spawns a process or talks to the network,
+    and it calls no builtin that opens a file or starts a logger. It is a
+    statement about this module's dependency list and its own call sites,
+    not a proof that no I/O is possible.
+    """
     from ciao import terminal_auth
 
     path = Path(inspect.getfile(terminal_auth))
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
+    forbidden_modules = {
+        "os",
+        "pathlib",
+        "io",
+        "logging",
+        "tempfile",
+        "shutil",
+        "glob",
+        "subprocess",
+        "socket",
+        "urllib",
+        "http",
+        "requests",
+        "sqlite3",
+        "pickle",
+        "shelve",
+    }
     imported: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module)
+    assert not (imported & forbidden_modules), (
+        "ciao/terminal_auth.py must stay in memory: it imports "
+        f"{sorted(imported & forbidden_modules)}"
+    )
 
-    assert "logging" not in imported
-    assert not any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr in {"debug", "info", "warning", "error", "exception"}
-        for node in ast.walk(tree)
-    ), "ciao/terminal_auth.py must not log a grant, a token or a password"
+    forbidden_calls = {
+        "open",
+        "write_text",
+        "write_bytes",
+        "mkdir",
+        "makedirs",
+        "replace",
+        "rename",
+        "unlink",
+        "remove",
+        "rmdir",
+        "touch",
+        "mkstemp",
+        "mkdtemp",
+        "NamedTemporaryFile",
+        "TemporaryFile",
+        "getLogger",
+        "basicConfig",
+    }
+    called: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name):
+            called.add(func.id)
+        elif isinstance(func, ast.Attribute):
+            called.add(func.attr)
+    assert not (called & forbidden_calls), (
+        "ciao/terminal_auth.py must stay in memory and silent: it calls "
+        f"{sorted(called & forbidden_calls)}"
+    )
 
 
 # ── The constants the contract fixes ───────────────────────────────────────
@@ -440,4 +797,4 @@ def test_a_grant_is_a_frozen_public_record() -> None:
     _, grant = store.issue("cookie-a")
     assert isinstance(grant, TerminalGrant)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        grant.grant_id = "other"  # type: ignore[misc]
+        setattr(grant, "grant_id", "other")
