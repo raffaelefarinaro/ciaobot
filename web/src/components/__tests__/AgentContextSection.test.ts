@@ -33,9 +33,42 @@ describe('AgentContextSection', () => {
 
   it('heads the file list with Always loaded', async () => {
     const wrapper = await mountSection()
-    const sub = wrapper.get('.agent-context-sub')
-    expect(sub.text()).toBe('Always loaded')
-    expect(sub.element.nextElementSibling?.classList.contains('rail-list')).toBe(true)
+    const label = wrapper.get('.rail-label')
+    expect(label.text()).toBe('Always loaded')
+    expect(label.element.nextElementSibling?.classList.contains('rail-list')).toBe(true)
+  })
+
+  it('gives context usage and always loaded their own headings', async () => {
+    const wrapper = await mountSection({ contextPct: 42 })
+    const sections = wrapper.findAll('section.rail-section')
+    expect(sections).toHaveLength(2)
+    const usage = sections[0]
+    const always = sections[1]
+    const usageLabel = usage.get('.rail-label')
+    const alwaysLabel = always.get('.rail-label')
+    expect(usageLabel.text()).toBe('Context usage')
+    expect(alwaysLabel.text()).toBe('Always loaded')
+    // Each group is named by its own heading.
+    expect(usage.attributes('aria-labelledby')).toBe(usageLabel.attributes('id'))
+    expect(always.attributes('aria-labelledby')).toBe(alwaysLabel.attributes('id'))
+    expect(alwaysLabel.attributes('id')).toBe('agent-context-label')
+    // The file list belongs to the always-loaded group, not to the usage one.
+    expect(usage.find('.rail-list').exists()).toBe(false)
+    expect(always.find('.rail-list').exists()).toBe(true)
+  })
+
+  it('describes reported context usage in words', async () => {
+    const wrapper = await mountSection({ contextPct: 56 })
+    expect(wrapper.get('.agent-context-usage-note').text()).toBe('56% of context window used')
+  })
+
+  it('keeps usage unknown rather than inventing a percentage', async () => {
+    const wrapper = await mountSection({ contextPct: null })
+    expect(wrapper.find('.agent-context-usage-note').exists()).toBe(false)
+    expect(wrapper.find('[role="meter"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('of context window used')
+    // The always-loaded group stands on its own without a reported figure.
+    expect(wrapper.get('.rail-label').text()).toBe('Always loaded')
   })
 
   it('lists the guide and the project brief with their sizes', async () => {

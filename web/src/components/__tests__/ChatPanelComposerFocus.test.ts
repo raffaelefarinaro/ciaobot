@@ -206,7 +206,7 @@ describe('composer focus on opening a chat', () => {
     await wrapper.get('.chat-empty-knowledge').trigger('click')
     await nextTick()
     const context = wrapper.get('#chat-work-rail .chat-rail-agent-context')
-    expect(context.text()).toContain('Agent context')
+    expect(context.text()).toContain('Always loaded')
     expect(document.activeElement).toBe(context.element)
     // General with no description or doc sends no brief, so there is no row.
     expect(context.text()).not.toContain('Project brief')
@@ -238,7 +238,7 @@ describe('composer focus on opening a chat', () => {
     expect(drawer.attributes('aria-modal')).toBe('true')
     expect(drawer.get('button[aria-label="Hide chat details"]').element).toBe(document.activeElement)
     expect(drawer.find('[role="tab"]').exists()).toBe(false)
-    expect(drawer.text()).toContain('Agent context')
+    expect(drawer.text()).toContain('Always loaded')
     expect(drawer.text()).toContain('Files')
 
     pressKey('Escape')
