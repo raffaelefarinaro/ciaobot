@@ -498,7 +498,7 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
 
     from ciao.web import app as app_module
 
-    registered = set(re.findall(r'Route\("(/api/proposals[^"]*)"', pathlib.Path(app_module.__file__).read_text()))
+    registered = set(re.findall(r'Route\("(/api/proposals[^"]*)"', pathlib.Path(app_module.__file__).read_text(encoding="utf-8")))
 
     expected = {
         "/api/proposals",
@@ -514,7 +514,7 @@ def test_the_real_app_serves_every_documented_proposal_route() -> None:
     # Every registered route must also appear in PWA_API.md, or the drift above
     # is only drift in one direction. Substring, not set equality: the prose
     # around each route names its path in curl examples too.
-    api_doc = pathlib.Path("PWA_API.md").read_text()
+    api_doc = pathlib.Path("PWA_API.md").read_text(encoding="utf-8")
     missing = {path for path in expected if path not in api_doc}
     assert not missing, f"PWA_API.md does not document: {missing}"
 
