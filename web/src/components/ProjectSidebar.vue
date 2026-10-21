@@ -523,7 +523,7 @@
               <span
                 v-if="chat.title_status === 'pending'"
                 class="title-shimmer"
-                aria-label="Naming conversation"
+                aria-hidden="true"
                 title="Naming conversation"
               />
               <span
@@ -531,6 +531,10 @@
                 class="recent-title"
                 :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
               >{{ chat.title }}</span>
+              <!-- A bare span is role=generic, which cannot be named: the bar
+                   is hidden from assistive tech and the name travels as text
+                   beside it. -->
+              <span v-if="chat.title_status === 'pending'" class="sr-only">Naming conversation</span>
               <ChatSignals
                 :chat-id="chat.chat_id"
                 density="row"
@@ -733,7 +737,7 @@
                     <span
                       v-if="chat.title_status === 'pending'"
                       class="title-shimmer"
-                      aria-label="Naming conversation"
+                      aria-hidden="true"
                       title="Naming conversation"
                     />
                     <span
@@ -741,6 +745,11 @@
                       class="chat-title"
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
+                    <!-- A bare span is role=generic, which cannot be named: the
+                         bar is hidden from assistive tech and the name travels
+                         as text beside it. The row is not a live region; only
+                         the chat header announces the naming. -->
+                    <span v-if="chat.title_status === 'pending'" class="sr-only">Naming conversation</span>
                     <span
                       v-if="taskSignals.isTaskChat(chat)"
                       class="chat-task-tag"
