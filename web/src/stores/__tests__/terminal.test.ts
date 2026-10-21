@@ -80,6 +80,20 @@ class FakeWebSocket {
     this.onopen?.()
   }
 
+  /**
+   * Answer the attach with the terminal's ready frame.
+   *
+   * The transport being open is not the terminal being live: the engine says
+   * the session is ready in its own frame, and the client waits for it.
+   */
+  ready(sessionId = 's1', overrides: Record<string, unknown> = {}) {
+    this.receive({
+      type: 'ready', session_id: sessionId, folder: '/tmp', cols: 80, rows: 24,
+      seq: 0, replay_start: 0, truncated: false,
+      ...overrides,
+    })
+  }
+
   /** Deliver one server frame. */
   receive(frame: unknown) {
     const data = typeof frame === 'string' ? frame : JSON.stringify(frame)
@@ -214,6 +228,761 @@ afterEach(() => {
   }
   vi.useRealTimers()
   vi.restoreAllMocks()
+})
+
+describe('primary review regressions', () => {
+  it('refuses a rebound renderer without letting an old reset corrupt a successor', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    const events: string[] = []
+    const write = view.renderer.write
+    view.renderer.write = (bytes) => {
+      events.push(new TextDecoder().decode(bytes))
+      return write(bytes)
+    }
+    view.renderer.reset = () => { events.push('reset') }
+    store.attachRenderer(view.renderer)
+    const first = fakeSockets.at(-1)!
+    first.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    first.ready('s1', { seq: 5, replay_start: 2, truncated: true })
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s2') })
+    await store.createSession()
+    ;(view.renderer as { sessionId: string }).sessionId = 's2'
+    store.detachRenderer(view.renderer)
+    store.attachRenderer(view.renderer)
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(events).toEqual(['hello', 'reset'])
+    expect(store.error).toContain('cannot be reused')
+  })
+
+  it('does not render the in-flight prefix twice when hidden and resumed before acknowledgement', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    fakeSockets.at(-1)!.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    fakeSockets.at(-1)!.receive({ type: 'output', start: 5, end: 10, data: b64('world') })
+    store.hide()
+    await store.open({ chatId: 'chat-1' })
+    const resumed = fakeSockets.at(-1)!
+    expect(resumed.ofType('attach')[0]?.offset).toBe(0)
+    resumed.receive({ type: 'output', start: 0, end: 10, data: b64('helloworld') })
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(view.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['hello', 'world'])
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+  })
+
+  it('keeps the in-flight bytes in the output bound after hiding', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const first = fakeSockets.at(-1)!
+    const chunk = new Uint8Array(64 * 1024)
+    first.receive({ type: 'output', start: 0, end: chunk.length, data: encodeTerminalBytes(chunk) })
+    first.receive({
+      type: 'output', start: chunk.length, end: chunk.length * 2, data: encodeTerminalBytes(chunk),
+    })
+
+    // Hiding discards only the queued tail. The prefix is already being
+    // written and must remain in the bound until that write settles.
+    store.hide()
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    await store.open({ chatId: 'chat-1' })
+    const resumed = fakeSockets.at(-1)!
+    expect(resumed.ofType('attach')[0]?.offset).toBe(chunk.length)
+
+    // Sixteen 64 KiB chunks fit exactly. The seventeenth must not fit; a
+    // hidden in-flight prefix must not have made the accounting negative.
+    for (let i = 1; i <= 17; i += 1) {
+      resumed.receive({
+        type: 'output', start: i * chunk.length, end: (i + 1) * chunk.length,
+        data: encodeTerminalBytes(chunk),
+      })
+    }
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(store.error).toContain('faster than the terminal')
+  })
+
+  it('does not reset a detached renderer while its prior write is still pending', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const ws = fakeSockets.at(-1)!
+    ws.receive({ type: 'output', start: 0, end: 10, data: b64('helloworld') })
+    ws.receive({ type: 'ready', session_id: 's1', folder: '/repo', cols: 80, rows: 24,
+      seq: 10, replay_start: 5, truncated: true })
+    store.detachRenderer(view.renderer)
+    expect(view.resets).toBe(0)
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(view.resets).toBe(1)
+  })
+
+  it('keeps a confirmed renderer offset when another session is selected and then leaves', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1')
+    store.attachRenderer(view.renderer)
+    fakeSockets.at(-1)!.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s2') })
+    await store.createSession()
+    store.selectSession('s1')
+    expect(fakeSockets.at(-1)?.ofType('attach')[0]?.offset).toBe(5)
+  })
+
+  it('replays a queued tail discarded by hide instead of silently dropping it', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const first = fakeSockets.at(-1)!
+    first.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    first.receive({ type: 'output', start: 5, end: 10, data: b64('world') })
+    store.hide()
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    await store.open({ chatId: 'chat-1' })
+    const resumed = fakeSockets.at(-1)!
+    expect(resumed.ofType('attach')[0]?.offset).toBe(5)
+    resumed.receive({ type: 'output', start: 5, end: 10, data: b64('world') })
+    expect(view.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['hello', 'world'])
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+  })
+
+  it('does not acknowledge duplicate output before the renderer resolves', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const output = { type: 'output', start: 0, end: 5, data: b64('hello') }
+    fakeSockets[0].receive(output)
+    fakeSockets[0].receive(output)
+    await store.reconnect()
+    expect(fakeSockets.at(-1)?.ofType('attach')[0]?.offset).toBe(0)
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+  })
+
+  it('does not close the successor socket when an older End request completes', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s1') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s1').renderer)
+    const ending = deferred<unknown>()
+    apiDel.mockReturnValueOnce(ending.promise)
+    const request = store.endSession()
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s2') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s2').renderer)
+    const successor = fakeSockets.at(-1)
+    ending.resolve({ ok: true })
+    await request
+    expect(store.activeSession?.session_id).toBe('s2')
+    expect(successor?.closed).toBe(false)
+  })
+
+  it('limits reconnects that open but never complete the terminal ready handshake', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s1').renderer)
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      fakeSockets.at(-1)?.close(1006)
+      await vi.advanceTimersByTimeAsync(5000)
+    }
+    expect(fakeSockets.length).toBeLessThanOrEqual(9)
+    expect(store.phase).toBe('error')
+  })
+})
+
+// ── Ownership races ──────────────────────────────────────────────────────
+//
+// The store owns one connection and one surface at a time. These are the
+// races where the old one answers after the new one took over: a late write,
+// a late close, a late HTTP reply. None of them may touch the successor.
+
+describe('terminal store ownership races', () => {
+  async function started() {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    return store
+  }
+
+  it('renders the replayed bytes once when a reconnect races an old write', async () => {
+    const store = await started()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const first = fakeSockets[0]
+    first.ready()
+    first.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The connection is replaced while the first write is still in flight.
+    // The engine replays the same five bytes from the acknowledged offset.
+    await store.reconnect()
+    const second = fakeSockets[1]
+    second.ready()
+    second.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The old write resolves now. The bytes must reach the screen once, not
+    // twice, and the acknowledged cursor must match what was rendered.
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(view.writes).toHaveLength(1)
+    expect(new TextDecoder().decode(view.writes[0])).toBe('hello')
+    await store.reconnect()
+    expect(fakeSockets[2].ofType('attach')[0]).toEqual({
+      type: 'attach', offset: 5, takeover: false,
+    })
+  })
+
+  it('leaves the successor live when an old write fails', async () => {
+    const store = await started()
+    const failing: { fail: () => void } = { fail: () => {} }
+    const view = {
+      sessionId: 's1',
+      reset() {},
+      write() {
+        return new Promise<void>((_resolve, reject) => {
+          failing.fail = () => reject(new Error('write failed'))
+        })
+      },
+    }
+    store.attachRenderer(view)
+    fakeSockets[0].receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // A new surface takes over before the old write fails.
+    const successor = makeRenderer('s1')
+    store.attachRenderer(successor.renderer)
+    const live = fakeSockets[fakeSockets.length - 1]
+    failing.fail()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The failure belonged to the old surface. The successor is live.
+    expect(store.phase).not.toBe('error')
+    expect(store.error).not.toContain('could not be written')
+    expect(live.closed).toBe(false)
+  })
+
+  it('respects the acknowledged bytes when the same surface is detached and reattached', async () => {
+    const store = await started()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    fakeSockets[0].receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The surface is detached and comes back while its write is in flight.
+    store.detachRenderer(view.renderer)
+    await vi.advanceTimersByTimeAsync(0)
+    store.attachRenderer(view.renderer)
+    await vi.advanceTimersByTimeAsync(0)
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    await store.reconnect()
+
+    // The write did complete, and that surface is the one showing the bytes,
+    // so the resume point is the offset it acknowledged — not zero, and not
+    // an offset from a stream that was never rendered.
+    expect(fakeSockets[fakeSockets.length - 1].ofType('attach')[0]).toEqual({
+      type: 'attach', offset: 5, takeover: false,
+    })
+    // The bytes reached the screen once.
+    expect(view.writes).toHaveLength(1)
+  })
+
+  it('does not let a delayed End rejection write an error over the successor', async () => {
+    const store = await started()
+    store.attachRenderer(makeRenderer('s1').renderer)
+    const ending = deferred<unknown>()
+    apiDel.mockReturnValueOnce(ending.promise)
+    const request = store.endSession()
+
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s2') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s2').renderer)
+
+    ending.reject(new Error('network down'))
+    expect(await request).toBe(false)
+
+    // The failure belongs to the session that was ended. The successor is
+    // not in error, and the pane does not say the end failed.
+    expect(store.activeSession?.session_id).toBe('s2')
+    expect(store.phase).not.toBe('error')
+    expect(store.error).toBe('')
+  })
+
+  it('does not let a delayed malformed End reply write an error over the successor', async () => {
+    const store = await started()
+    store.attachRenderer(makeRenderer('s1').renderer)
+    const ending = deferred<unknown>()
+    apiDel.mockReturnValueOnce(ending.promise)
+    const request = store.endSession()
+
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s2') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s2').renderer)
+
+    ending.resolve({ not_ok: true })
+    expect(await request).toBe(false)
+
+    expect(store.activeSession?.session_id).toBe('s2')
+    expect(store.phase).not.toBe('error')
+    expect(store.error).toBe('')
+  })
+
+  it('keeps a confirmed renderer offset when another session is selected', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1')
+    store.attachRenderer(view.renderer)
+    fakeSockets.at(-1)!.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Another session is selected, and then this one again. The surface
+    // still shows what it showed.
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s2') })
+    await store.createSession()
+    store.selectSession('s1')
+
+    expect(fakeSockets.at(-1)?.ofType('attach')[0]?.offset).toBe(5)
+  })
+
+  it('refuses a renderer rebound to another session without opening a socket', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1')
+    store.attachRenderer(view.renderer)
+    fakeSockets.at(-1)!.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(view.writes).toHaveLength(1)
+
+    // A physical screen cannot remember two sessions. Rebinding it at runtime
+    // is refused rather than resuming an offset that belongs to s1.
+    apiPost.mockResolvedValue({ session: sessionPayload('s2') })
+    await store.createSession()
+    ;(view.renderer as { sessionId: string }).sessionId = 's2'
+    store.detachRenderer(view.renderer)
+    store.attachRenderer(view.renderer)
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(fakeSockets).toHaveLength(1)
+    expect(store.error).toContain('cannot be reused')
+    expect(view.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['hello'])
+  })
+
+  it('does not write the queued bytes of one surface to another surface', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const first = makeRenderer('s1', true)
+    store.attachRenderer(first.renderer)
+    fakeSockets[0].receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+    // The second write is queued behind the first, which never confirms.
+    fakeSockets[0].receive({ type: 'output', start: 5, end: 10, data: b64('world') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Another surface takes over. The queued bytes belong to the first one.
+    const second = makeRenderer('s1')
+    store.attachRenderer(second.renderer)
+    await vi.advanceTimersByTimeAsync(0)
+    first.settle()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(second.writes).toHaveLength(0)
+    expect(first.writes.map((bytes) => new TextDecoder().decode(bytes)))
+      .toEqual(['hello', 'world'])
+  })
+
+  it('does not let a rebound renderer start successor output while an old write is pending', async () => {
+    const store = await started()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    fakeSockets[0].receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s2') })
+    await store.createSession()
+    ;(view.renderer as { sessionId: string }).sessionId = 's2'
+    store.detachRenderer(view.renderer)
+    store.attachRenderer(view.renderer)
+
+    // No s2 connection is opened, so no s2 output can race the old write.
+    expect(view.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['hello'])
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(view.writes.map((bytes) => new TextDecoder().decode(bytes))).toEqual(['hello'])
+    expect(store.error).toContain('cannot be reused')
+  })
+
+  it('does not let a stale open of the same scope land on a newer one', async () => {
+    const store = useTerminalStore()
+    const older = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return older.promise
+      if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions: [] })
+      return Promise.resolve({})
+    })
+    const first = store.open({ chatId: 'chat-1' })
+
+    // The pane is opened again for the same scope.
+    const newer = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return newer.promise
+      if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions: [] })
+      return Promise.resolve({})
+    })
+    const second = store.open({ chatId: 'chat-1' })
+
+    newer.resolve(statusPayload({ host: 'new-host' }))
+    await second
+    older.resolve(statusPayload({ host: 'stale-host' }))
+    await first
+
+    // The newer open answers: the stale one is about a pane that is gone.
+    expect(store.status?.host).toBe('new-host')
+  })
+
+  it('does not let a stale open failure write an error over a newer one', async () => {
+    const store = useTerminalStore()
+    const older = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return older.promise
+      if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions: [] })
+      return Promise.resolve({})
+    })
+    const first = store.open({ chatId: 'chat-1' })
+
+    const newer = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return newer.promise
+      if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions: [] })
+      return Promise.resolve({})
+    })
+    const second = store.open({ chatId: 'chat-1' })
+
+    newer.resolve(statusPayload())
+    await second
+    older.reject(new Error('network down'))
+    await first
+
+    // The stale failure is not the pane's error to show.
+    expect(store.error).toBe('')
+    expect(store.phase).not.toBe('error')
+  })
+
+  it('does not let a stale list failure write an error over a newer one', async () => {
+    const store = await started()
+    const older = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      if (path.startsWith('/api/terminal/sessions')) return older.promise
+      return Promise.resolve({})
+    })
+    const first = store.refreshSessions()
+
+    const newer = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      if (path.startsWith('/api/terminal/sessions')) return newer.promise
+      return Promise.resolve({})
+    })
+    const second = store.refreshSessions()
+
+    newer.resolve({ sessions: [sessionPayload('s1')] })
+    await second
+    older.reject(new Error('network down'))
+    await first
+
+    expect(store.error).toBe('')
+    expect(store.sessions).toHaveLength(1)
+  })
+
+  it('does not let a delayed End rejection touch the successor', async () => {
+    const store = await started()
+    store.attachRenderer(makeRenderer('s1').renderer)
+    const ending = deferred<unknown>()
+    apiDel.mockReturnValueOnce(ending.promise)
+    const request = store.endSession()
+
+    apiPost.mockResolvedValueOnce({ session: sessionPayload('s2') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s2').renderer)
+    const successor = fakeSockets.at(-1)
+
+    ending.reject(new Error('network down'))
+    expect(await request).toBe(false)
+
+    expect(store.activeSession?.session_id).toBe('s2')
+    expect(successor?.closed).toBe(false)
+    expect(store.phase).not.toBe('error')
+  })
+
+  it('does not let an overlapping list reply change the selection', async () => {
+    const store = await started()
+    apiPost.mockResolvedValue({ session: sessionPayload('s2') })
+    await store.createSession()
+    expect(store.activeSession?.session_id).toBe('s2')
+
+    // Two lists in flight; the older one answers last.
+    const older = deferred<unknown>()
+    const newer = deferred<unknown>()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      if (path.startsWith('/api/terminal/sessions')) return older.promise
+      return Promise.resolve({})
+    })
+    const first = store.refreshSessions()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      if (path.startsWith('/api/terminal/sessions')) return newer.promise
+      return Promise.resolve({})
+    })
+    const second = store.refreshSessions()
+
+    newer.resolve({ sessions: [sessionPayload('s2'), sessionPayload('s3')] })
+    await second
+    older.resolve({ sessions: [sessionPayload('s2')] })
+    await first
+
+    // The older list updates the rows; it does not take the selection.
+    expect(store.activeSession?.session_id).toBe('s2')
+  })
+
+  it('does not let a hide during a pending create change the successor', async () => {
+    const store = await started()
+    const pending = deferred<unknown>()
+    apiPost.mockReturnValue(pending.promise)
+    const create = store.createSession()
+
+    store.hide()
+    pending.resolve({ session: sessionPayload('s2') })
+
+    expect(await create).toBe(true)
+    // The pane is hidden, so nothing is connected, but the session that was
+    // created is still listed for when the pane comes back.
+    expect(store.visible).toBe(false)
+    expect(store.sessions.map((session) => session.session_id)).toContain('s2')
+    expect(fakeSockets).toHaveLength(0)
+  })
+
+  it('does not let a dispose during a pending create change anything', async () => {
+    const store = await started()
+    const pending = deferred<unknown>()
+    apiPost.mockReturnValue(pending.promise)
+    const create = store.createSession()
+
+    store.dispose()
+    pending.resolve({ session: sessionPayload('s2') })
+
+    // A disposed store answers nothing: the late reply changes no state.
+    expect(await create).toBe(false)
+    expect(store.phase).toBe('closed')
+    expect(store.visible).toBe(false)
+    expect(store.sessions.map((session) => session.session_id)).not.toContain('s2')
+  })
+})
+
+// ── Who may open a connection ────────────────────────────────────────────
+//
+// A connection belongs to a visible, unlocked pane with a matching surface.
+// Anything else is a state the user has to leave before a socket may open,
+// and a session another connection took over does not come back on its own.
+
+describe('terminal store connection eligibility', () => {
+  async function started() {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s1').renderer)
+    return store
+  }
+
+  it('refuses to reconnect while the pane is hidden', async () => {
+    const store = await started()
+    store.hide()
+    const before = fakeSockets.length
+
+    expect(await store.reconnect()).toBe(false)
+    expect(fakeSockets).toHaveLength(before)
+  })
+
+  it('refuses to reconnect while the pane is locked', async () => {
+    const store = await started()
+    fakeSockets[0].close(4401)
+    await vi.advanceTimersByTimeAsync(0)
+    const before = fakeSockets.length
+
+    expect(await store.reconnect()).toBe(false)
+    expect(fakeSockets).toHaveLength(before)
+  })
+
+  it('refuses to reconnect after the store is disposed', async () => {
+    const store = await started()
+    store.dispose()
+    const before = fakeSockets.length
+
+    expect(await store.reconnect()).toBe(false)
+    expect(fakeSockets).toHaveLength(before)
+  })
+
+  it('does not take a session back after another connection took it over', async () => {
+    const store = await started()
+    fakeSockets[0].close(4409)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.phase).toBe('takeover')
+    const before = fakeSockets.length
+
+    // The page coming back into view does not silently reclaim the session.
+    window.dispatchEvent(new Event('pageshow'))
+    await vi.advanceTimersByTimeAsync(0)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(fakeSockets).toHaveLength(before)
+    expect(store.phase).toBe('takeover')
+  })
+
+  it('closes a connection that never completes the terminal handshake', async () => {
+    const store = await started()
+    const socket = fakeSockets[0]
+
+    // The transport opens, but the engine never says the session is ready.
+    await vi.advanceTimersByTimeAsync(5000)
+
+    expect(socket.closed).toBe(true)
+    expect(store.phase).not.toBe('live')
+  })
+
+  it('starts the retry budget again only after a completed handshake', async () => {
+    const store = await started()
+    fakeSockets[0].ready()
+    expect(store.phase).toBe('live')
+
+    // A dropped connection after a completed handshake gets the full budget.
+    fakeSockets[0].close(1006)
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(fakeSockets.length).toBeGreaterThan(1)
+  })
+
+  it('keeps the page listeners after a session ends', async () => {
+    const store = await started()
+    apiDel.mockResolvedValue({ ok: true })
+    const removeDocument = vi.spyOn(document, 'removeEventListener')
+
+    await store.endSession()
+
+    // Ending a session is not hiding the pane: the page stays wired up.
+    expect(removeDocument).not.toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+    expect(store.visible).toBe(true)
+  })
+
+  it('wires the page listeners back up when the pane opens again', async () => {
+    const store = await started()
+    store.hide()
+    const addDocument = vi.spyOn(document, 'addEventListener')
+
+    await store.open({ chatId: 'chat-1' })
+
+    expect(addDocument).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+  })
+})
+
+// ── Bounded responses ────────────────────────────────────────────────────
+
+describe('terminal store bounded responses', () => {
+  it('refuses a session without a folder', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      if (path.startsWith('/api/terminal/sessions')) {
+        return Promise.resolve({ sessions: [sessionPayload('s1', { folder: '' })] })
+      }
+      return Promise.resolve({})
+    })
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+
+    expect(store.sessions).toEqual([])
+    expect(store.error).toContain('session list')
+  })
+
+  it('refuses a list with more sessions than the engine keeps', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      if (path.startsWith('/api/terminal/sessions')) {
+        return Promise.resolve({
+          sessions: [
+            sessionPayload('s1'), sessionPayload('s2'), sessionPayload('s3'),
+            sessionPayload('s4'), sessionPayload('s5'),
+          ],
+        })
+      }
+      return Promise.resolve({})
+    })
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+
+    expect(store.sessions).toEqual([])
+    expect(store.error).toContain('session list')
+  })
+
+  it('accepts a list of exactly the sessions the engine keeps', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') return Promise.resolve(statusPayload())
+      if (path.startsWith('/api/terminal/sessions')) {
+        return Promise.resolve({
+          sessions: [
+            sessionPayload('s1'), sessionPayload('s2'),
+            sessionPayload('s3'), sessionPayload('s4'),
+          ],
+        })
+      }
+      return Promise.resolve({})
+    })
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+
+    expect(store.sessions).toHaveLength(4)
+    expect(store.error).toBe('')
+  })
 })
 
 // ── Scope, URLs and strict parsing ───────────────────────────────────────
@@ -444,21 +1213,50 @@ describe('terminal store session lifecycle', () => {
     expect(store.error).not.toContain('could not be confirmed')
   })
 
-  it('does not let a stale create land on a replaced renderer', async () => {
+  it('closes the old session socket when a create selects a new session', async () => {
     const store = useTerminalStore()
     await store.open({ chatId: 'chat-1' })
     apiPost.mockResolvedValue({ session: sessionPayload('s1') })
     await store.createSession()
     store.attachRenderer(makeRenderer('s1').renderer)
+    const first = fakeSockets[0]
+    first.ready()
 
     const pending = deferred<unknown>()
     apiPost.mockReturnValue(pending.promise)
     const create = store.createSession()
-    // The surface is replaced while the request is open.
-    store.attachRenderer(makeRenderer('s1').renderer)
     pending.resolve({ session: sessionPayload('s2') })
 
-    expect(await create).toBe(false)
+    expect(await create).toBe(true)
+    // The new session takes the selection, and the old session's socket
+    // goes with it: the socket belongs to a session, and the engine allows
+    // one controller per session.
+    expect(store.activeSession?.session_id).toBe('s2')
+    expect(first.closed).toBe(true)
+  })
+
+  it('does not let a stale create take the selection from a successor', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s1').renderer)
+    apiPost.mockResolvedValue({ session: sessionPayload('s3') })
+    await store.createSession()
+    expect(store.activeSession?.session_id).toBe('s3')
+
+    const pending = deferred<unknown>()
+    apiPost.mockReturnValue(pending.promise)
+    const create = store.createSession()
+    // The user picks another session while the request is open.
+    store.selectSession('s1')
+    pending.resolve({ session: sessionPayload('s2') })
+
+    // The shell was created on the engine, so the call succeeded; but the
+    // selection belongs to the user, and a late reply does not take it.
+    expect(await create).toBe(true)
+    expect(store.activeSession?.session_id).toBe('s1')
+    expect(store.sessions.map((session) => session.session_id)).toContain('s2')
   })
 
   it('does not let a late write move the cursor of a replaced renderer', async () => {
@@ -540,21 +1338,22 @@ describe('terminal store session lifecycle', () => {
     // The queue is dropped while the write is still in flight, so its bytes
     // are already out of the budget. The failed write must not subtract them
     // a second time: the budget would go negative and every later burst
-    // would be measured against a wrong total.
+    // would be measured against a wrong total. Nor may it fail the store:
+    // the surface it belonged to is gone.
     store.hide()
     await vi.advanceTimersByTimeAsync(0)
     pending.fail()
     await vi.advanceTimersByTimeAsync(0)
-    expect(store.error).toContain('could not be written')
+    expect(store.error).not.toContain('could not be written')
 
-    // The budget is still whole: exactly a megabyte of output must trip the
-    // bound, and not one byte more. A budget that went short by the failed
-    // chunk would let the last chunk through.
+    // The budget is still whole: more than a megabyte of output must trip
+    // the bound. A budget that went short by the failed chunk would let the
+    // last chunk through.
     store.visible = true
     expect(await store.reconnect()).toBe(true)
     const fresh = fakeSockets[fakeSockets.length - 1]
     const chunk = new Uint8Array(64 * 1024)
-    for (let i = 0; i < 15; i += 1) {
+    for (let i = 0; i < 16; i += 1) {
       fresh.receive({
         type: 'output', start: i * chunk.length, end: (i + 1) * chunk.length,
         data: encodeTerminalBytes(chunk),
@@ -564,20 +1363,10 @@ describe('terminal store session lifecycle', () => {
     expect(store.error).not.toContain('faster than the terminal')
     expect(fakeSockets[fakeSockets.length - 1].sent.length).toBeGreaterThan(0)
 
-    // The last chunk that still fits: a megabyte minus what is queued.
-    const last = new Uint8Array(1024 * 1024 - 15 * chunk.length)
+    // The next chunk does not fit any more.
     fresh.receive({
-      type: 'output', start: 15 * chunk.length, end: 15 * chunk.length + last.length,
-      data: encodeTerminalBytes(last),
-    })
-    await vi.advanceTimersByTimeAsync(0)
-    expect(store.error).not.toContain('faster than the terminal')
-
-    // One byte more tips it over.
-    fresh.receive({
-      type: 'output', start: 15 * chunk.length + last.length,
-      end: 15 * chunk.length + last.length + 1,
-      data: encodeTerminalBytes(new Uint8Array(1)),
+      type: 'output', start: 16 * chunk.length, end: 17 * chunk.length,
+      data: encodeTerminalBytes(chunk),
     })
     await vi.advanceTimersByTimeAsync(0)
 
@@ -604,6 +1393,8 @@ describe('terminal store session lifecycle', () => {
     // A fresh connection is opened in the meantime.
     await store.reconnect()
     expect(fakeSockets).toHaveLength(2)
+    // The engine answers the new connection, so it stays open.
+    fakeSockets[1].ready()
 
     // The pending retry belongs to the connection it was scheduled for, so
     // it must not even schedule a second one over the live connection.
@@ -980,13 +1771,14 @@ describe('terminal store output handling', () => {
     expect(store.error).toContain('never received')
   })
 
-  it('catches the acknowledgement up when the screen already holds the bytes', async () => {
+  it('acknowledges nothing for a duplicate the renderer already confirmed', async () => {
     const { store, socket } = await attached()
     socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
     await vi.advanceTimersByTimeAsync(0)
 
-    // The same bytes again: nothing new for the screen, so the
-    // acknowledgement catches up and a reconnect resumes from there.
+    // The same bytes again: nothing new for the screen, so nothing is
+    // written — and nothing is acknowledged either. The acknowledgement
+    // belongs to the renderer, and the renderer already gave it.
     socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
     await vi.advanceTimersByTimeAsync(0)
     await store.reconnect()
@@ -996,13 +1788,13 @@ describe('terminal store output handling', () => {
     })
   })
 
-  it('catches the acknowledgement up for a replay the screen already holds', async () => {
+  it('does not acknowledge a duplicate the renderer has not confirmed', async () => {
     const store = useTerminalStore()
     await store.open({ chatId: 'chat-1' })
     apiPost.mockResolvedValue({ session: sessionPayload('s1') })
     await store.createSession()
     // The renderer never acknowledges, so the screen is at five and the
-    // acknowledged offset is at zero.
+    // acknowledged offset is still at zero.
     const view = makeRenderer('s1', true)
     store.attachRenderer(view.renderer)
     const socket = fakeSockets[0]
@@ -1010,15 +1802,16 @@ describe('terminal store output handling', () => {
     await vi.advanceTimersByTimeAsync(0)
 
     // The engine replays the same five bytes. The screen holds them, so
-    // nothing is written a second time — but the acknowledgement catches up,
-    // because the screen really does show them.
+    // nothing is written a second time — but a duplicate is not a
+    // confirmation: the renderer never said it took them, so the resume
+    // point stays where the renderer left it.
     socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
     await vi.advanceTimersByTimeAsync(0)
     await store.reconnect()
 
     expect(view.writes).toHaveLength(1)
     expect(fakeSockets[1].ofType('attach')[0]).toEqual({
-      type: 'attach', offset: 5, takeover: false,
+      type: 'attach', offset: 0, takeover: false,
     })
   })
 
@@ -1030,9 +1823,251 @@ describe('terminal store output handling', () => {
     })
     await vi.advanceTimersByTimeAsync(0)
 
+    // The screen is cleared before the replay is written over it, and the
+    // clear happens with the first write of the replay.
+    socket.receive({ type: 'output', start: 50, end: 55, data: b64('world') })
+    await vi.advanceTimersByTimeAsync(0)
+
     expect(view.resets).toBe(1)
     expect(store.truncated).toBe(true)
     expect(store.warning).toContain('truncated')
+    expect(new TextDecoder().decode(view.writes[0])).toBe('world')
+  })
+
+  it('clears the screen before the replay when a write is still in flight', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    // The renderer never confirms, so a write is still in flight when the
+    // truncated replay arrives.
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const socket = fakeSockets[0]
+    socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    socket.receive({
+      type: 'ready', session_id: 's1', folder: '/tmp', cols: 80, rows: 24,
+      seq: 4096, replay_start: 50, truncated: true,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The clear waits for the write in flight: a reset now would put the
+    // bytes that are still coming back onto the cleared screen.
+    expect(view.resets).toBe(0)
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(view.resets).toBe(1)
+  })
+
+  it('acknowledges the replayed bytes once the truncated screen is cleared', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1')
+    store.attachRenderer(view.renderer)
+    const socket = fakeSockets[0]
+
+    // The engine dropped the bytes before the retained buffer and says so.
+    socket.receive({
+      type: 'ready', session_id: 's1', folder: '/tmp', cols: 80, rows: 24,
+      seq: 4096, replay_start: 50, truncated: true,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    socket.receive({ type: 'output', start: 50, end: 55, data: b64('world') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(view.resets).toBe(1)
+    expect(new TextDecoder().decode(view.writes[0])).toBe('world')
+
+    // The replay was rendered and confirmed, so the resume point is its end.
+    await store.reconnect()
+    expect(fakeSockets[fakeSockets.length - 1].ofType('attach')[0]).toEqual({
+      type: 'attach', offset: 55, takeover: false,
+    })
+  })
+
+  it('does not acknowledge bytes the screen does not hold', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const socket = fakeSockets[0]
+    socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The surface is replaced while the write is in flight: the bytes are
+    // going to a screen that is no longer the one on show.
+    const successor = makeRenderer('s1')
+    store.attachRenderer(successor.renderer)
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The old surface's write confirms bytes the new surface does not hold,
+    // so the resume point is the new surface's own acknowledgement: zero.
+    await store.reconnect()
+    expect(fakeSockets[fakeSockets.length - 1].ofType('attach')[0]).toEqual({
+      type: 'attach', offset: 0, takeover: false,
+    })
+  })
+
+  it('does not acknowledge a write for a surface that was replaced', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const socket = fakeSockets[0]
+    socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The surface is replaced while the write is in flight, and the write
+    // resolves after the replacement.
+    const successor = makeRenderer('s1')
+    store.attachRenderer(successor.renderer)
+    await vi.advanceTimersByTimeAsync(0)
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The successor never took those bytes, so its own acknowledgement is
+    // still zero and the resume point is zero.
+    expect(successor.writes).toHaveLength(0)
+    await store.reconnect()
+    expect(fakeSockets[fakeSockets.length - 1].ofType('attach')[0]).toEqual({
+      type: 'attach', offset: 0, takeover: false,
+    })
+  })
+
+  it('drops the bytes queued for the stream a truncated replay replaced', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    // The first write is never confirmed, so the second one stays in the
+    // queue when the truncation arrives.
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const socket = fakeSockets[0]
+    socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+    socket.receive({ type: 'output', start: 5, end: 10, data: b64('world') })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(view.writes).toHaveLength(1)
+
+    // The engine says it dropped the bytes before the retained buffer.
+    socket.receive({
+      type: 'ready', session_id: 's1', folder: '/tmp', cols: 80, rows: 24,
+      seq: 4096, replay_start: 50, truncated: true,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The bytes of the dropped stream that were still waiting never reach
+    // the screen: the engine is about to send the replay, and the screen
+    // was cleared for it.
+    expect(view.resets).toBe(1)
+    expect(view.writes).toHaveLength(1)
+  })
+
+  it('does not confirm a write for a stream the surface no longer shows', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const socket = fakeSockets[0]
+    socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The engine replaces the stream: the retained buffer starts after the
+    // bytes this surface was given, and says it dropped the rest.
+    socket.receive({
+      type: 'ready', session_id: 's1', folder: '/tmp', cols: 80, rows: 24,
+      seq: 4096, replay_start: 50, truncated: true,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The write of the dropped stream resolves now. It confirms bytes the
+    // surface is not showing, so the resume point is the replay's base.
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    await store.reconnect()
+
+    expect(fakeSockets[fakeSockets.length - 1].ofType('attach')[0]).toEqual({
+      type: 'attach', offset: 50, takeover: false,
+    })
+  })
+
+  it('clears a detached surface only after its own write has finished', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const socket = fakeSockets[0]
+    socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The engine replaces the stream, so the surface owes a clear.
+    socket.receive({
+      type: 'ready', session_id: 's1', folder: '/tmp', cols: 80, rows: 24,
+      seq: 4096, replay_start: 50, truncated: true,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(view.resets).toBe(0)
+
+    // The surface is detached before the clear could be applied. The clear
+    // belongs to that surface and waits for its own write: clearing now
+    // would let the write that is in flight land on the cleared screen.
+    store.detachRenderer(view.renderer)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(view.resets).toBe(0)
+
+    // The write finishes, and the clear follows it.
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(view.resets).toBe(1)
+  })
+
+  it('clears the dropped stream off the screen when a truncated replay replaces it', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    // The renderer never confirms, so the first write stays in flight and
+    // the bytes of the old stream are still queued behind it.
+    const view = makeRenderer('s1', true)
+    store.attachRenderer(view.renderer)
+    const socket = fakeSockets[0]
+    socket.receive({ type: 'output', start: 0, end: 5, data: b64('hello') })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The engine says it dropped the bytes before the retained buffer.
+    socket.receive({
+      type: 'ready', session_id: 's1', folder: '/tmp', cols: 80, rows: 24,
+      seq: 4096, replay_start: 50, truncated: true,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    // The replay follows.
+    socket.receive({ type: 'output', start: 50, end: 55, data: b64('world') })
+    await vi.advanceTimersByTimeAsync(0)
+    view.settle()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The screen was cleared after the stale write landed, so the bytes of
+    // the dropped stream are not on it any more: the clear happened after
+    // that write and before the replay.
+    expect(view.resets).toBe(1)
+    const order = view.writes.map((bytes) => new TextDecoder().decode(bytes))
+    expect(order[order.length - 1]).toBe('world')
   })
 
   it('does not write the same bytes twice when the terminal comes back', async () => {
@@ -1276,7 +2311,11 @@ describe('terminal store bounds', () => {
     await store.createSession()
     const view = makeRenderer('s1')
     store.attachRenderer(view.renderer)
-    return { store, view, socket: fakeSockets[0] }
+    const socket = fakeSockets[0]
+    // The terminal is live only once the engine has said the session is
+    // ready: input before that would go to a session that is not there yet.
+    socket.ready()
+    return { store, view, socket }
   }
 
   it('refuses input larger than the frame the engine accepts', async () => {
@@ -1305,6 +2344,21 @@ describe('terminal store bounds', () => {
 
     expect(store.sendInput(new Uint8Array([0x41]))).toBe(true)
     expect(socket.ofType('input')[0]).toEqual({ type: 'input', data: 'QQ==' })
+  })
+
+  it('refuses input before the terminal handshake completed', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s1').renderer)
+    const socket = fakeSockets[0]
+
+    // The transport is open, but the engine has not said the session is
+    // ready, so there is nothing to type into yet.
+    expect(store.sendInput(new Uint8Array([0x41]))).toBe(false)
+    expect(store.error).toContain('not connected')
+    expect(socket.ofType('input')).toHaveLength(0)
   })
 
   it('refuses a malformed frame without acting on it', async () => {
@@ -1378,6 +2432,12 @@ describe('terminal store bounds', () => {
     expect(store.phase).toBe('error')
     expect(store.error).toContain('faster than the terminal')
     expect(view.writes.length).toBeLessThan(17)
+
+    // The stream is broken, so it is not retried: a new connection would
+    // replay the same output into the same slow screen.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fakeSockets).toHaveLength(1)
+    expect(store.phase).toBe('error')
   })
 })
 
@@ -1537,7 +2597,11 @@ describe('terminal store page lifecycle', () => {
     apiPost.mockResolvedValue({ session: sessionPayload('s1') })
     await store.createSession()
     store.attachRenderer(makeRenderer('s1').renderer)
-    return { store, socket: fakeSockets[0] }
+    const socket = fakeSockets[0]
+    // The engine says the session is ready: only then is the terminal live
+    // and only then does the client keep it alive with a ping.
+    socket.ready()
+    return { store, socket }
   }
 
   it('replaces the connection when the page becomes visible again', async () => {

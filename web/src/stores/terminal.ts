@@ -35,10 +35,12 @@ import {
 // token in a ref, and every request rides the same-origin session the api
 // helper already uses. The password is passed to one POST and is not kept.
 //
-// The offset belongs to the renderer, not to the socket. `ready.seq` says how
-// many bytes exist; it is never the number of bytes the client consumed. The
-// cursor advances only after the renderer's write promise resolves, so a
-// reconnect resumes from the screen the user actually has.
+// Two offsets, and they are not the same number. `acked` is what the renderer
+// has confirmed — the only offset a resume may use, because the contract says
+// the client applies an offset only after the write callback completes.
+// `rendered` is what the screen holds, and a replay is trimmed against it so
+// the same bytes are never shown twice. `ready.seq` is neither: it says how
+// many bytes exist.
 
 export type { TerminalSessionInfo }
 
@@ -73,11 +75,12 @@ export interface TerminalStatus {
  * The surface that renders terminal bytes.
  *
  * `write` resolves when the renderer has taken the bytes; that resolution is
- * what advances the consumed offset. `reset` clears the screen before a
+ * what advances the acknowledged offset. `reset` clears the screen before a
  * truncated replay is written over it.
  */
 export interface TerminalRenderer {
-  sessionId: string
+  /** A physical screen belongs to one session for its entire lifetime. */
+  readonly sessionId: string
   write(bytes: Uint8Array): Promise<void>
   reset(): void
 }
@@ -91,8 +94,12 @@ const SEND_BUFFER_MAX_BYTES = 256 * 1024
 const PING_INTERVAL_MS = 15_000
 /** Silence after which the connection is treated as stalled, in milliseconds. */
 const WATCHDOG_MS = 30_000
+/** How long the engine may take to answer the attach with a ready frame. */
+const READY_TIMEOUT_MS = 5000
 /** Automatic reconnect attempts before the client gives up and asks the user. */
 const MAX_AUTO_RECONNECT_ATTEMPTS = 8
+/** Sessions the engine keeps for one scope. */
+const MAX_SESSIONS = 4
 
 // ── Response validation ──────────────────────────────────────────────────
 //
@@ -132,7 +139,10 @@ function parseSessionInfo(value: unknown): TerminalSessionInfo | null {
   const { session_id, folder, cols, rows, seq, attached, exited, exit_code } = value
   if (typeof session_id !== 'string' || !session_id.trim()) return null
   if (session_id.length > TERMINAL_MAX_SESSION_ID_CHARS) return null
-  if (typeof folder !== 'string' || folder.length > TERMINAL_MAX_FOLDER_CHARS) return null
+  // A session without a folder is not a session the client can show: the
+  // pane names the folder, and an empty one would read as "no folder".
+  if (typeof folder !== 'string' || !folder.trim()) return null
+  if (folder.length > TERMINAL_MAX_FOLDER_CHARS) return null
   if (!isCellCount(cols, TERMINAL_MIN_COLS, TERMINAL_MAX_COLS)) return null
   if (!isCellCount(rows, TERMINAL_MIN_ROWS, TERMINAL_MAX_ROWS)) return null
   if (!isCount(seq)) return null
@@ -147,6 +157,10 @@ function parseSessionList(value: unknown): TerminalSessionInfo[] | null {
   if (!isRecord(value)) return null
   const { sessions } = value
   if (!Array.isArray(sessions)) return null
+  // The engine keeps four sessions per scope. A longer list is not a list
+  // this client can act on, and rendering it would mean the client believes
+  // more sessions than the engine can hold.
+  if (sessions.length > MAX_SESSIONS) return null
   const parsed: TerminalSessionInfo[] = []
   for (const entry of sessions) {
     const session = parseSessionInfo(entry)
@@ -219,78 +233,104 @@ export const useTerminalStore = defineStore('terminal', () => {
   // ── Internals ──────────────────────────────────────────────────────────
 
   let disposed = false
-  /**
-   * Bumped when the scope changes, so a reply for the previous scope cannot
-   * land on the new one.
-   */
+  /** Bumped when the scope changes, so a reply for the previous scope cannot land. */
   let scopeEpoch = 0
   /**
-   * Bumped when the selected session changes, so a reply that would move the
-   * selection cannot yank the user back to an older choice.
+   * Bumped when the pane is opened again, so a reply for an earlier open of
+   * the *same* scope cannot land either: the scope did not change, but the
+   * pane was reopened, and the older answer is about a pane that is gone.
    */
-  let selectionEpoch = 0
+  let openEpoch = 0
   /**
-   * Bumped when the renderer changes, so a reply that would move the
-   * selection cannot land on a different surface.
+   * Bumped when the session list is read again, so a reply for an earlier
+   * read cannot land on a newer one.
    */
-  let rendererEpoch = 0
-  /**
-   * Bumped when the connection is replaced.
-   *
-   * A pending retry belongs to the connection it was scheduled for: when a
-   * fresh unlock or a new socket replaces it, the old retry must not open a
-   * second connection over the new one.
-   */
+  let refreshEpoch = 0
+  /** Bumped when the connection is replaced, so a pending retry cannot reopen over it. */
   let connectionEpoch = 0
   /** The renderer currently drawing the terminal, if any. */
   let renderer: TerminalRenderer | null = null
   /** The socket currently owned by the store, if any. */
   let socket: WebSocket | null = null
-  /**
-   * Bytes the renderer has acknowledged — the only offset a resume may use.
-   *
-   * The contract is explicit: the client applies an offset only after the
-   * renderer's write callback completes, so this is the number that goes
-   * into an `attach`.
-   */
-  let consumed = 0
-  /**
-   * Bytes handed to the renderer's write — what the screen holds.
-   *
-   * The screen is the authority on what has been shown, so a replay is
-   * trimmed against it: the same bytes must not reach the screen twice.
-   */
-  let screen = 0
-  /** Bumped when the stream itself changes, so a late write cannot be counted. */
-  let streamEpoch = 0
-  /** Automatic reconnect attempts since the last successful handshake. */
+  /** True once the current connection completed the terminal handshake. */
+  let terminalReady = false
+  /** Automatic reconnect attempts since the last completed handshake. */
   let reconnectAttempts = 0
   /** When the last valid frame arrived, in milliseconds. */
   let lastFrameAt = 0
 
   /**
-   * The acknowledged offset of every renderer this store has seen.
+   * What one surface holds, and everything the store owes it.
    *
-   * A renderer that is detached and attached again keeps its screen, so it
-   * resumes where it left off; a renderer the store has never seen starts at
-   * zero and takes the retained replay.
+   * A surface is a physical screen bound to one session for its lifetime. It
+   * has its own bytes and place in that stream; a detached surface keeps its
+   * own numbers, so selecting another session never costs it what it showed.
    */
-  const rendererOffsets = new WeakMap<TerminalRenderer, number>()
-
-  interface PendingChunk {
-    bytes: Uint8Array
-    /** The offset the stream has reached once these bytes are on the screen. */
-    nextOffset: number
-    seq: number
+  interface Surface {
+    /** The renderer this record belongs to. */
+    view: TerminalRenderer
+    /** The session this physical screen shows for its lifetime. */
+    readonly sessionId: string
+    /** Bytes the renderer has confirmed — the only offset a resume may use. */
+    acked: number
+    /**
+     * The end of the bytes the surface's screen holds.
+     *
+     * This is what the screen really shows, not what the store has accepted:
+     * a byte that was queued and then dropped was never on the screen, so it
+     * must not be trimmed away when the engine replays it.
+     */
+    shown: number
+    /** The bytes waiting to be written to this surface. */
+    queue: QueuedChunk[]
+    /** Bytes the queue holds. */
+    queued: number
+    /** True while a write to this surface is in flight. */
+    writing: boolean
+    /** The end of the bytes the in-flight write carries, if there is one. */
+    inflightEnd: number | null
+    /** A clear this surface owes, and the offset it clears back to. */
+    pendingReset: number | null
+    /** True while this surface is the one on show. */
+    attached: boolean
   }
-  const pending: PendingChunk[] = []
-  let pendingBytes = 0
-  /** Bumped when the queue is dropped, so a late write cannot advance the cursor. */
-  let queueSeq = 0
-  let draining = false
+
+  interface QueuedChunk {
+    bytes: Uint8Array
+    /** The offset the stream reaches once these bytes are on the screen. */
+    nextOffset: number
+  }
+
+  /** One physical renderer has one immutable session record. */
+  const surfaces = new WeakMap<TerminalRenderer, Surface>()
+
+  function surfaceOf(view: TerminalRenderer): Surface {
+    const known = surfaces.get(view)
+    if (known) return known
+    const fresh: Surface = {
+      view,
+      sessionId: view.sessionId,
+      acked: 0,
+      shown: 0,
+      queue: [],
+      queued: 0,
+      writing: false,
+      inflightEnd: null,
+      pendingReset: null,
+      attached: false,
+    }
+    surfaces.set(view, fresh)
+    return fresh
+  }
+
+  /** The surface on show, if there is one. */
+  function currentSurface(): Surface | null {
+    return renderer ? surfaces.get(renderer) ?? null : null
+  }
 
   const timers = new Set<ReturnType<typeof setTimeout>>()
   let pingTimer: ReturnType<typeof setInterval> | null = null
+  let readyTimer: ReturnType<typeof setTimeout> | null = null
   let listenersInstalled = false
 
   function scheduleTimer(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
@@ -302,27 +342,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     return id
   }
 
-  function clearQueue(): void {
-    pending.length = 0
-    pendingBytes = 0
-    queueSeq += 1
-  }
-
-  /**
-   * Drop the bytes the renderer never acknowledged.
-   *
-   * The engine replays from the acknowledged offset, so the replayed bytes
-   * are trimmed against the ones the *screen* holds: the screen is the
-   * authority on what has been shown. The acknowledgement is what the engine
-   * replays from, and it only moves when the renderer says so.
-   *
-   * The stream epoch moves with it: a write still in flight belongs to the
-   * stream that is being dropped, so it must not move the cursor of the one
-   * that replaces it.
-   */
-  function dropUnacknowledged(): void {
-    clearQueue()
-    streamEpoch += 1
+  function cancelTimer(id: ReturnType<typeof setTimeout> | null): void {
+    if (id === null || id === undefined) return
+    clearTimeout(id)
+    timers.delete(id)
   }
 
   /** Close the socket without letting its close event decide anything. */
@@ -330,6 +353,9 @@ export const useTerminalStore = defineStore('terminal', () => {
     const ws = socket
     socket = null
     connectionEpoch += 1
+    terminalReady = false
+    cancelTimer(readyTimer)
+    readyTimer = null
     if (!ws) return
     ws.onopen = null
     ws.onmessage = null
@@ -347,95 +373,144 @@ export const useTerminalStore = defineStore('terminal', () => {
       clearInterval(pingTimer)
       pingTimer = null
     }
+    cancelTimer(readyTimer)
+    readyTimer = null
   }
 
-  /** Drop the socket and its timers. In-flight replies see the epoch bump. */
+  /** Drop the connection and its timers. */
   function invalidateWorld(): void {
     closeSocket()
     stopSocketTimers()
   }
 
-  function resetStream(): void {
-    clearQueue()
-    streamEpoch += 1
-    consumed = 0
-    screen = 0
-  }
-
   function fail(message: string): void {
     error.value = message
     phase.value = 'error'
-    closeSocket()
-    stopSocketTimers()
+    invalidateWorld()
   }
 
   // ── Renderer backpressure ──────────────────────────────────────────────
 
   /**
-   * One drain loop, not one task per frame.
+   * Drop the bytes a surface is waiting for.
    *
-   * The renderer writes asynchronously, so the bytes it has not taken yet
-   * wait here. The queue is bounded: past a megabyte the client is slower
-   * than the shell, and the socket is closed rather than allowed to grow.
-   *
-   * The queue is also the ordering guarantee: the replay the engine sends
-   * after a reconnect and the bytes still waiting here reach the renderer
-   * in stream order, because both go through this one queue.
+   * They never reached the screen, so the surface's shown offset goes back to
+   * what it really shows — the acknowledged bytes, plus the write that is
+   * already in flight and cannot be recalled. The engine replays from the
+   * acknowledged offset, so the discarded bytes come back rather than being
+   * trimmed away as if they had been shown.
    */
-  async function drain(): Promise<void> {
-    if (draining) return
-    draining = true
-    try {
-      while (pending.length > 0) {
-        const chunk = pending.shift() as PendingChunk
-        const target = renderer
-        if (!target) {
-          pendingBytes -= chunk.bytes.length
-          return
-        }
-        const myStream = streamEpoch
-        try {
-          await target.write(chunk.bytes)
-        } catch {
-          if (chunk.seq === queueSeq) pendingBytes -= chunk.bytes.length
-          fail('The terminal view could not be written to.')
-          return
-        }
-        // The renderer took the bytes, so *that* renderer holds them: the
-        // record follows the renderer, not the socket.
-        rendererOffsets.set(target, chunk.nextOffset)
-        // A replaced renderer or a reset stream owns the outcome now: the
-        // bytes went to a screen that is no longer the one on show, so the
-        // live cursor does not move for them.
-        if (renderer !== target || myStream !== streamEpoch) return
-        pendingBytes -= chunk.bytes.length
-        // The renderer has acknowledged the bytes, so the offset may move.
-        consumed = chunk.nextOffset
-      }
-    } finally {
-      draining = false
-      if (pending.length > 0 && !disposed) void drain()
+  function dropQueued(surface: Surface): void {
+    const droppedBytes = surface.queue.reduce((total, chunk) => total + chunk.bytes.length, 0)
+    surface.queue = []
+    // `queued` includes the write already in flight. Only the queued tail is
+    // discarded here; the write cannot be recalled and stays counted until
+    // its promise settles.
+    surface.queued -= droppedBytes
+    surface.shown = Math.max(surface.acked, surface.inflightEnd ?? surface.acked)
+  }
+
+  /**
+   * Clear a surface before the first write that follows a truncated replay.
+   *
+   * The clear waits for the write in flight: a write that is still on its way
+   * would otherwise land on the cleared screen and put the bytes back. The
+   * wait belongs to the surface, so a surface that is detached while it waits
+   * is still cleared — once, and after its own write has finished.
+   */
+  function applyReset(surface: Surface, at: number): void {
+    surface.pendingReset = null
+    surface.view.reset()
+    surface.acked = at
+    surface.shown = at
+    if (surface.attached) {
+      truncated.value = true
+      warning.value =
+        'The retained output was truncated, so the terminal may not show the full screen state.'
     }
   }
 
   /**
-   * Queue the bytes for the renderer.
+   * One drain loop per surface, not one task per frame.
    *
-   * The screen is committed to these bytes from here on — they are in the
-   * queue and will be written — so the screen cursor moves now, not when the
-   * write promise resolves. The *acknowledged* offset moves later, and only
-   * that one goes into an `attach`.
+   * The renderer writes asynchronously, so the bytes it has not taken yet
+   * wait in the surface's own queue. The queue is bounded: past a megabyte
+   * the client is slower than the shell, and the socket is closed rather
+   * than allowed to grow.
    */
-  function enqueueOutput(bytes: Uint8Array, nextOffset: number): void {
+  async function drain(surface: Surface): Promise<void> {
+    if (surface.writing) return
+    surface.writing = true
+    try {
+      while (surface.queue.length > 0) {
+        if (disposed) {
+          dropQueued(surface)
+          return
+        }
+        const chunk = surface.queue.shift() as QueuedChunk
+        // The bytes stay counted while they are on their way to the screen:
+        // the write in flight is part of what the client is holding.
+        surface.inflightEnd = chunk.nextOffset
+        if (surface.pendingReset !== null) applyReset(surface, surface.pendingReset)
+        try {
+          await surface.view.write(chunk.bytes)
+        } catch {
+          // A failed write belongs to the surface that asked for it. A
+          // surface that is not on show, or a pane that is hidden, is not
+          // the store's to answer for: the successor keeps its own state
+          // and the user is not looking at a screen that is not there.
+          surface.inflightEnd = null
+          surface.queued -= chunk.bytes.length
+          if (surface.attached && visible.value) {
+            fail('The terminal view could not be written to.')
+          }
+          return
+        }
+        surface.inflightEnd = null
+        surface.queued -= chunk.bytes.length
+        // The renderer took the bytes, so the surface's screen holds them.
+        // The acknowledgement belongs to the surface, not to the socket.
+        if (chunk.nextOffset > surface.acked) {
+          surface.acked = chunk.nextOffset
+        }
+        if (chunk.nextOffset > surface.shown) {
+          surface.shown = chunk.nextOffset
+        }
+      }
+    } finally {
+      surface.inflightEnd = null
+      // A reset is an operation on the physical screen, not merely this
+      // session's cursor. It must finish before this drain releases the
+      // renderer to another session; otherwise the old reset can erase a
+      // successor write that has already begun.
+      if (surface.pendingReset !== null) {
+        applyReset(surface, surface.pendingReset)
+      }
+      surface.writing = false
+      if (surface.queue.length > 0 && !disposed) void drain(surface)
+    }
+  }
+
+  /**
+   * Queue the bytes for a surface.
+   *
+   * The bytes are on their way to the screen, so the surface's shown offset
+   * moves now. The *acknowledged* offset moves later, and only that one goes
+   * into an `attach`.
+   */
+  function enqueueOutput(surface: Surface, bytes: Uint8Array, nextOffset: number): void {
     if (bytes.length === 0) return
-    if (pendingBytes + bytes.length > PENDING_OUTPUT_MAX_BYTES) {
+    if (surface.queued + bytes.length > PENDING_OUTPUT_MAX_BYTES) {
+      // The shell is outrunning the screen. The stream is broken, so it is
+      // not retried: a new connection would replay the same output into the
+      // same slow screen.
       fail('The shell is producing output faster than the terminal can show it.')
       return
     }
-    pendingBytes += bytes.length
-    screen = nextOffset
-    pending.push({ bytes, nextOffset, seq: queueSeq })
-    void drain()
+    surface.queued += bytes.length
+    if (nextOffset > surface.shown) surface.shown = nextOffset
+    surface.queue.push({ bytes, nextOffset })
+    void drain(surface)
   }
 
   // ── Socket ─────────────────────────────────────────────────────────────
@@ -453,31 +528,47 @@ export const useTerminalStore = defineStore('terminal', () => {
     ws.send(JSON.stringify(frame))
   }
 
-  /** A socket is owned only while the surface, the scope and the grant agree. */
-  function socketEligible(): boolean {
-    const current = renderer
-    const session = activeSession.value
+  /**
+   * A connection may be opened only while the surface, the scope, the grant
+   * and the visibility all agree.
+   */
+  function canConnect(): boolean {
+    if (disposed) return false
     if (!visible.value || !unlocked.value) return false
-    if (!current || !session) return false
-    return current.sessionId === session.session_id
+    const surface = currentSurface()
+    const session = activeSession.value
+    if (!surface || !session) return false
+    return surface.sessionId === session.session_id
+  }
+
+  /**
+   * An automatic recovery may open a connection only where the user has not
+   * something to decide.
+   *
+   * A session another connection took over comes back through an explicit
+   * takeover, a session that is gone does not come back at all, a locked pane
+   * needs the password, and a failed stream needs the user to look at it.
+   */
+  function canRecover(): boolean {
+    if (!canConnect()) return false
+    return phase.value !== 'takeover'
+      && phase.value !== 'ended'
+      && phase.value !== 'locked'
+      && phase.value !== 'error'
   }
 
   function maybeConnect(): void {
-    if (!socketEligible()) return
+    if (!canConnect()) return
     if (socket && socket.readyState <= WebSocket.OPEN) return
     openSocket(false)
   }
 
   function openSocket(takeover: boolean): void {
     const session = activeSession.value
-    const current = renderer
-    if (!session || !current) return
+    const surface = currentSurface()
+    if (!session || !surface) return
     closeSocket()
-    // The engine replays from the acknowledged offset, so the bytes the
-    // screen holds above it are re-sent. They are trimmed against the
-    // screen, and the screen is re-based to the acknowledged offset so the
-    // two agree about where the stream starts.
-    screen = consumed
+    // The resume point belongs to the surface that will receive the replay.
     const ws = new WebSocket(terminalSocketUrl(session.session_id))
     socket = ws
     lastFrameAt = Date.now()
@@ -486,12 +577,18 @@ export const useTerminalStore = defineStore('terminal', () => {
     ws.onopen = () => {
       if (socket !== ws) return
       lastFrameAt = Date.now()
-      reconnectAttempts = 0
-      phase.value = 'live'
       // The resume point is the offset the renderer acknowledged — never
       // `ready.seq`, which is only a snapshot of what exists.
-      sendFrame(ws, { type: 'attach', offset: consumed, takeover })
-      startPingTimer()
+      sendFrame(ws, { type: 'attach', offset: surface.acked, takeover })
+      // The transport is open, but the terminal is not: the engine still has
+      // to say the session is ready. A connection that never gets there is
+      // closed and retried, and it costs the retry budget.
+      readyTimer = scheduleTimer(() => {
+        if (socket !== ws) return
+        error.value = 'The terminal did not complete its handshake.'
+        closeSocket()
+        handleClose(1006)
+      }, READY_TIMEOUT_MS)
     }
 
     ws.onmessage = (event: MessageEvent) => {
@@ -527,18 +624,28 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   function handleFrame(frame: TerminalServerFrame): void {
-    const current = renderer
-    if (!current) return
+    const surface = currentSurface()
+    if (!surface) return
     switch (frame.type) {
       case 'ready': {
         if (frame.session_id !== activeSession.value?.session_id) {
           fail('The terminal connected to a different session.')
           return
         }
+        // The handshake is complete: the terminal is live, and the retry
+        // budget starts again.
+        terminalReady = true
+        cancelTimer(readyTimer)
+        readyTimer = null
+        reconnectAttempts = 0
+        phase.value = 'live'
+        // Only a live terminal is worth keeping alive with a ping: a socket
+        // that never got here is closed by the handshake timeout instead.
+        startPingTimer()
         // The engine replays from the offset the client acknowledged, so the
         // gap is measured against that offset. A retained buffer that starts
         // after it means the bytes in between are gone.
-        if (frame.replay_start > consumed) {
+        if (frame.replay_start > surface.acked) {
           if (!frame.truncated) {
             // The engine no longer holds the bytes between the client's cursor
             // and its buffer, and does not admit to having lost them: the
@@ -547,18 +654,19 @@ export const useTerminalStore = defineStore('terminal', () => {
             return
           }
           // The retained stream starts after the cursor and the engine says
-          // it lost the rest: the screen is reset and the replay is written
-          // over it. It is a partial stream, not a full-screen recovery.
-          dropUnacknowledged()
-          current.reset()
-          consumed = frame.replay_start
-          screen = frame.replay_start
+          // it lost the rest. The screen is cleared before the replay is
+          // written over it, and the clear waits for the write in flight so
+          // stale bytes cannot land on it. The bytes queued for the dropped
+          // stream go with it: the engine is about to send them again.
+          dropQueued(surface)
+          surface.acked = frame.replay_start
+          surface.shown = frame.replay_start
+          surface.pendingReset = frame.replay_start
           truncated.value = true
           warning.value =
             'The retained output was truncated, so the terminal may not show the full screen state.'
         }
         if (frame.truncated) truncated.value = true
-        phase.value = 'live'
         break
       }
       case 'output': {
@@ -570,18 +678,16 @@ export const useTerminalStore = defineStore('terminal', () => {
         // A frame that starts past what this client received is a gap: the
         // slice refuses it, because the bytes in between never arrived and
         // the renderer must not be handed a hole.
-        const slice = terminalOutputSlice(frame, screen)
+        const slice = terminalOutputSlice(frame, surface.shown)
         if (!slice) {
           fail('The terminal sent output this browser never received.')
           return
         }
-        if (slice.bytes.length === 0) {
-          // The screen already holds these bytes, so the acknowledgement can
-          // catch up with the stream: nothing new has to be written.
-          consumed = Math.max(consumed, frame.end)
-          break
-        }
-        enqueueOutput(slice.bytes, slice.nextOffset)
+        // A duplicate carries no new bytes. It is discarded, and it
+        // acknowledges nothing: only the renderer may do that, by resolving
+        // the write.
+        if (slice.bytes.length === 0) break
+        enqueueOutput(surface, slice.bytes, slice.nextOffset)
         break
       }
       case 'replay_end': {
@@ -594,8 +700,7 @@ export const useTerminalStore = defineStore('terminal', () => {
         markSessionExited(activeSession.value?.session_id, frame.code)
         phase.value = 'ended'
         error.value = ''
-        closeSocket()
-        stopSocketTimers()
+        invalidateWorld()
         break
       }
       case 'pong':
@@ -603,8 +708,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       case 'error': {
         error.value = frame.reason
         phase.value = 'error'
-        closeSocket()
-        stopSocketTimers()
+        invalidateWorld()
         break
       }
       default:
@@ -697,7 +801,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     const delay = terminalReconnectDelayMs(reconnectAttempts)
     scheduleTimer(() => {
       if (myScope !== scopeEpoch || myConnection !== connectionEpoch) return
-      if (!socketEligible()) return
+      if (!canRecover()) return
       openSocket(false)
     }, delay)
   }
@@ -710,7 +814,9 @@ export const useTerminalStore = defineStore('terminal', () => {
       if (Date.now() - lastFrameAt >= WATCHDOG_MS) {
         // The socket says it is open but nothing has arrived for the whole
         // watchdog window: it is stalled, and a stalled socket is replaced.
-        void forceReconnect()
+        if (!canRecover()) return
+        phase.value = 'reconnecting'
+        openSocket(false)
         return
       }
       sendFrame(ws, { type: 'ping' })
@@ -718,13 +824,17 @@ export const useTerminalStore = defineStore('terminal', () => {
     if (disposed) stopSocketTimers()
   }
 
-  async function forceReconnect(): Promise<void> {
-    if (!socketEligible()) return
-    phase.value = 'reconnecting'
+  // ── Page lifecycle ─────────────────────────────────────────────────────
+
+  /**
+   * iOS suspends the page and its sockets in the background, and on resume
+   * the socket can still report itself as open while nothing flows. The
+   * connection is therefore replaced rather than trusted.
+   */
+  function resumeVisible(): void {
+    if (!canRecover()) return
     openSocket(false)
   }
-
-  // ── Page lifecycle ─────────────────────────────────────────────────────
 
   function onVisibilityChange(): void {
     if (document.visibilityState !== 'visible') return
@@ -733,17 +843,6 @@ export const useTerminalStore = defineStore('terminal', () => {
 
   function onPageShow(): void {
     resumeVisible()
-  }
-
-  /**
-   * iOS suspends the page and its sockets in the background, and on resume
-   * the socket can still report itself as open while nothing flows. The
-   * connection is therefore replaced rather than trusted.
-   */
-  function resumeVisible(): void {
-    if (!visible.value) return
-    if (!socketEligible()) return
-    openSocket(false)
   }
 
   function installListeners(): void {
@@ -782,21 +881,22 @@ export const useTerminalStore = defineStore('terminal', () => {
     const scopeChanged = target.value === null || scopeKey(target.value) !== scopeKey(next)
     invalidateWorld()
     visible.value = true
+    installListeners()
     target.value = next
     if (scopeChanged) {
       scopeEpoch += 1
       sessions.value = []
       activeSession.value = null
-      resetStream()
       truncated.value = false
     }
     error.value = ''
     warning.value = ''
     phase.value = 'loading'
     const myScope = scopeEpoch
+    const myOpen = ++openEpoch
     try {
       const raw = await api.get<unknown>(`${TERMINAL_API}/status`)
-      if (myScope !== scopeEpoch) return
+      if (myScope !== scopeEpoch || myOpen !== openEpoch) return
       const parsed = parseStatus(raw)
       if (!parsed) {
         error.value = 'The engine did not report a terminal status this app understands.'
@@ -817,10 +917,10 @@ export const useTerminalStore = defineStore('terminal', () => {
       }
       phase.value = 'ready'
       await refreshSessions()
-      if (myScope !== scopeEpoch) return
+      if (myScope !== scopeEpoch || myOpen !== openEpoch) return
       maybeConnect()
     } catch {
-      if (myScope !== scopeEpoch) return
+      if (myScope !== scopeEpoch || myOpen !== openEpoch) return
       error.value = 'The engine could not be asked whether the terminal is available.'
       phase.value = 'error'
     }
@@ -839,15 +939,17 @@ export const useTerminalStore = defineStore('terminal', () => {
    * The socket is closed and the timers stop, but the session keeps running
    * on the engine: hiding is not ending, and ending is not hiding.
    *
-   * The bytes the renderer never took are dropped, and the cursor goes back
-   * to the acknowledged offset, because the engine replays from there: a
-   * cursor left past the replay would trim the replay away and lose the
-   * bytes between the two.
+   * The bytes the surface is waiting for are dropped, and the surface's
+   * shown offset goes back to what it really shows. The engine replays from
+   * the acknowledged offset, so the dropped bytes come back rather than
+   * being trimmed away as if the screen had already shown them.
    */
   function hide(): void {
     visible.value = false
     invalidateWorld()
-    dropUnacknowledged()
+    removeListeners()
+    const surface = currentSurface()
+    if (surface) dropQueued(surface)
   }
 
   /**
@@ -909,15 +1011,19 @@ export const useTerminalStore = defineStore('terminal', () => {
    * pull the selection back. The selection that existed when the request
    * went out is what guards that: a list that arrives afterwards updates
    * the rows, never the choice.
+   *
+   * A refresh that started before a *later* refresh is stale whatever the
+   * scope, so the newest request is the one that answers.
    */
   async function refreshSessions(): Promise<void> {
     const scope = target.value
     if (!scope) return
     const myScope = scopeEpoch
+    const myRefresh = ++refreshEpoch
     const selectedAtStart = activeSession.value?.session_id
     try {
       const raw = await api.get<unknown>(`${TERMINAL_API}/sessions?${scopeQuery(scope)}`)
-      if (myScope !== scopeEpoch) return
+      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch) return
       const parsed = parseSessionList(raw)
       if (!parsed) {
         error.value = 'The engine did not report a session list this app understands.'
@@ -937,11 +1043,11 @@ export const useTerminalStore = defineStore('terminal', () => {
       const candidate = parsed.find((session) => !session.exited)
       if (candidate) {
         activeSession.value = candidate
-        selectionEpoch += 1
-        resetStream()
       }
     } catch {
-      if (myScope !== scopeEpoch) return
+      // A failure that belongs to a read that has been superseded is not
+      // the newer one's error to show.
+      if (myScope !== scopeEpoch || myRefresh !== refreshEpoch) return
       error.value = 'The terminal sessions could not be listed.'
     }
   }
@@ -960,11 +1066,10 @@ export const useTerminalStore = defineStore('terminal', () => {
     creating.value = true
     error.value = ''
     const myScope = scopeEpoch
-    const myRenderer = rendererEpoch
-    const mySelection = selectionEpoch
+    const selectedAtStart = activeSession.value?.session_id
     try {
       const raw = await api.post<unknown>(`${TERMINAL_API}/sessions`, scopeBody(scope))
-      if (myScope !== scopeEpoch || myRenderer !== rendererEpoch) return false
+      if (myScope !== scopeEpoch) return false
       const session = parseSessionEnvelope(raw)
       if (!session) {
         error.value = 'The engine did not report the new session.'
@@ -976,16 +1081,22 @@ export const useTerminalStore = defineStore('terminal', () => {
       ]
       // The user may have picked another session while the request was open;
       // a new session does not yank the selection back.
-      if (mySelection === selectionEpoch) {
-        activeSession.value = session
-        selectionEpoch += 1
-        resetStream()
-        phase.value = 'ready'
-        maybeConnect()
-      }
+      if (activeSession.value?.session_id !== selectedAtStart) return true
+      // The new session takes over from the old one, and the old one keeps
+      // its connection to itself: the socket belongs to a session, so it
+      // goes with the session it was opened for.
+      invalidateWorld()
+      activeSession.value = session
+      // The surface keeps its bytes: it is the same screen, and the session
+      // it was showing may well be selected again.
+      phase.value = 'ready'
+      maybeConnect()
       return true
     } catch (caught) {
+      // A failure that belongs to a session that is no longer selected is
+      // not the successor's error to show.
       if (myScope !== scopeEpoch) return false
+      if (activeSession.value?.session_id !== selectedAtStart) return false
       if (isRefusal(caught)) {
         error.value = 'The engine refused to start a terminal session.'
       } else {
@@ -1008,22 +1119,33 @@ export const useTerminalStore = defineStore('terminal', () => {
     return typeof status === 'number' && status >= 400 && status < 500
   }
 
-  /** Choose one of the listed sessions. */
+  /**
+   * Choose one of the listed sessions.
+   *
+   * The socket belongs to a session, so the old one goes with the old
+   * selection. The *surface* does not: a surface showing another session
+   * keeps what it showed, and comes back to it when its session is selected
+   * again. Selecting another session is not permission to erase what the
+   * first one showed.
+   */
   function selectSession(sessionId: string): boolean {
     const session = sessions.value.find((entry) => entry.session_id === sessionId)
     if (!session) return false
     if (activeSession.value?.session_id === sessionId) return true
     invalidateWorld()
     activeSession.value = session
-    selectionEpoch += 1
-    // The offset belongs to the session: another one starts from zero.
-    resetStream()
     phase.value = session.exited ? 'ended' : 'ready'
     maybeConnect()
     return true
   }
 
-  /** End a session. This is the one action that stops the process. */
+  /**
+   * End a session. This is the one action that stops the process.
+   *
+   * The reply only touches the session it was asked about. A session that was
+   * selected while the request was in flight keeps its own connection: the
+   * list loses the ended row, and nothing else moves.
+   */
   async function endSession(): Promise<boolean> {
     const session = activeSession.value
     if (!session) return false
@@ -1031,25 +1153,30 @@ export const useTerminalStore = defineStore('terminal', () => {
     ending.value = true
     error.value = ''
     const myScope = scopeEpoch
+    const endedId = session.session_id
     try {
       const raw = await api.del<unknown>(
-        `${TERMINAL_API}/sessions/${encodeURIComponent(session.session_id)}`,
+        `${TERMINAL_API}/sessions/${encodeURIComponent(endedId)}`,
       )
       if (myScope !== scopeEpoch) return false
       if (!parseOk(raw)) {
+        if (activeSession.value?.session_id !== endedId) return false
         error.value = 'The engine did not confirm the end of the session.'
         return false
       }
-      sessions.value = sessions.value.filter((entry) => entry.session_id !== session.session_id)
-      if (activeSession.value?.session_id === session.session_id) {
-        activeSession.value = null
-        resetStream()
-        phase.value = 'ended'
-      }
+      sessions.value = sessions.value.filter((entry) => entry.session_id !== endedId)
+      // Only the session that was asked about is torn down. A successor that
+      // was selected while the request was open keeps its own socket.
+      if (activeSession.value?.session_id !== endedId) return true
       invalidateWorld()
+      activeSession.value = null
+      phase.value = 'ended'
       return true
     } catch {
+      // A failure that belongs to a session that is no longer selected is
+      // not the successor's error to show.
       if (myScope !== scopeEpoch) return false
+      if (activeSession.value?.session_id !== endedId) return false
       error.value = 'The terminal session could not be ended.'
       return false
     } finally {
@@ -1060,25 +1187,30 @@ export const useTerminalStore = defineStore('terminal', () => {
   /**
    * Attach the surface that draws the terminal.
    *
-   * A renderer the store has not seen before starts at offset zero and takes
-   * the retained replay; the same renderer attaching again resumes from the
-   * offset it acknowledged. A renderer bound to another session is refused:
-   * an offset means nothing in a different stream.
+   * A surface the store has not seen before starts at offset zero and takes
+   * the retained replay; the same surface attaching again resumes from the
+   * offset it acknowledged. A surface is permanently bound to its first
+   * session: an integration switching sessions must create a new renderer,
+   * because a physical screen cannot retain two session histories.
    */
   function attachRenderer(next: TerminalRenderer): void {
-    if (renderer === next) return
-    invalidateWorld()
-    rendererEpoch += 1
-    renderer = next
     const session = activeSession.value
     if (session && next.sessionId !== session.session_id) {
       error.value = 'The terminal view and the selected session do not match.'
       return
     }
-    const known = rendererOffsets.get(next)
-    consumed = known === undefined ? 0 : known
-    screen = consumed
-    clearQueue()
+    const known = surfaces.get(next)
+    if (known && known.sessionId !== next.sessionId) {
+      error.value = 'A terminal view cannot be reused for another session.'
+      return
+    }
+    if (renderer === next) return
+    invalidateWorld()
+    const previous = currentSurface()
+    if (previous) previous.attached = false
+    renderer = next
+    const surface = surfaceOf(next)
+    surface.attached = true
     error.value = ''
     maybeConnect()
   }
@@ -1086,27 +1218,32 @@ export const useTerminalStore = defineStore('terminal', () => {
   /**
    * Detach a surface.
    *
-   * The check is by identity: a detach for a renderer this store has already
+   * The check is by identity: a detach for a surface this store has already
    * replaced must not tear down the successor.
+   *
+   * The surface keeps its own bytes and its own pending clear: a clear it
+   * owes is owed to that screen, and it waits for that screen's write in
+   * flight however long that takes. The store does not clear it on the
+   * spot, because the write in flight would land on the cleared screen.
    */
   function detachRenderer(next: TerminalRenderer): void {
     if (renderer !== next) return
     invalidateWorld()
-    rendererEpoch += 1
+    const surface = currentSurface()
+    if (surface) surface.attached = false
     renderer = null
-    dropUnacknowledged()
   }
 
   /**
    * Reconnect.
    *
    * A session that another connection took over only comes back through an
-   * explicit takeover, so the plain reconnect refuses while the pane is in
-   * that state.
+   * explicit takeover, and a hidden or locked pane has no connection to
+   * restore.
    */
   function reconnect(takeover = false): Promise<boolean> {
     if (phase.value === 'takeover' && !takeover) return Promise.resolve(false)
-    if (!renderer || !activeSession.value) return Promise.resolve(false)
+    if (!canConnect()) return Promise.resolve(false)
     reconnectAttempts = 0
     phase.value = 'reconnecting'
     openSocket(takeover)
@@ -1116,7 +1253,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   /** Send raw bytes to the shell. */
   function sendInput(bytes: Uint8Array): boolean {
     const ws = socket
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !terminalReady) {
       error.value = 'The terminal is not connected.'
       return false
     }
@@ -1137,7 +1274,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   /** Tell the shell about a new window size. */
   function resize(cols: number, rows: number): boolean {
     const ws = socket
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    if (!ws || ws.readyState !== WebSocket.OPEN || !terminalReady) return false
     if (!Number.isInteger(cols) || !Number.isInteger(rows)) return false
     // The engine's bounds are the client's bounds too: a frame outside them
     // is refused by the engine, and a zero-sized frame is not a window.
@@ -1153,7 +1290,14 @@ export const useTerminalStore = defineStore('terminal', () => {
     disposed = true
     scopeEpoch += 1
     invalidateWorld()
-    clearQueue()
+    // The current surface loses its queued tail. Other surfaces with a drain
+    // stop themselves after their uncancelable write settles, without keeping
+    // every historical renderer alive in a global registry.
+    const surface = currentSurface()
+    if (surface) {
+      dropQueued(surface)
+      surface.attached = false
+    }
     for (const id of timers) clearTimeout(id)
     timers.clear()
     removeListeners()
@@ -1161,8 +1305,6 @@ export const useTerminalStore = defineStore('terminal', () => {
     visible.value = false
     phase.value = 'closed'
   }
-
-  installListeners()
 
   onScopeDispose(() => {
     dispose()
