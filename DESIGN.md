@@ -149,6 +149,8 @@ The task board keeps the same status groups on every device: **To do, In progres
 
 The workspace editor keeps one consistent label/control row per field, with each explanation directly below its own field. Its compact saved summary remains above the editor. Dirty forms offer primary **Save changes** and neutral bordered **Discard**; clean forms offer neutral bordered **Close**, not a stranded Done link. Closing or discarding never saves or changes file-access permissions, and File access deep links only locate and focus the control.
 
+The chat header keeps close, title and any `code` badge on one vertical centre while the project sits on the line below, so a wrapped title never moves the close control. A long title wraps to at most two lines with the full title on hover; the one-line limit applies when the project shares the row on a phone. While the engine is naming a brand new chat, the header shows the sidebar's shared shimmer, labelled *Naming conversation*, in place of the temporary title, and it gives way to the real title when the name lands. Reduced motion freezes the shimmer without shifting the layout.
+
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
