@@ -891,14 +891,28 @@ describe('ProjectSidebar accessible context menus', () => {
     store.chats[0].repo_location = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
   }
 
-  it('lets the branch chip stand in for code when both apply', async () => {
+  it('shows only the code badge when code mode and a worktree both apply', async () => {
     worktreeChat(true)
     const wrapper = await mountSidebar()
     await flushPromises()
-    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
+    const code = wrapper.get('.chat-code-tag')
+    expect(code.text()).toBe('code')
+    expect(code.attributes('title')).toContain('feat-x')
+    expect(code.attributes('title')).toContain('/r/app-wt')
+    expect(code.attributes('aria-label')).toContain('feat-x')
+    expect(code.attributes('aria-label')).toContain('/r/app-wt')
+    expect(wrapper.find('.chat-repo-tag').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the dimmed branch tag when code mode is off', async () => {
+    worktreeChat(false)
+    const wrapper = await mountSidebar()
+    await flushPromises()
     const chip = wrapper.get('.chat-repo-tag')
-    expect(chip.attributes('title')).toBe('Code mode · Worktree: /r/app-wt')
-    expect(chip.classes()).not.toContain('chat-repo-tag--code-off')
+    expect(chip.text()).toBe('⑂ feat-x')
+    expect(chip.classes()).toContain('chat-repo-tag--code-off')
+    expect(wrapper.find('.chat-code-tag').exists()).toBe(false)
     wrapper.unmount()
   })
 

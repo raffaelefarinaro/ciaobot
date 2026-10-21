@@ -742,9 +742,14 @@
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
                     <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
-                    <span v-if="isChatCodeModeOn(chat, project.repo) && !branchChip(chat, project.repo)" class="chat-code-tag" title="Code mode is on">code</span>
                     <span
-                      v-if="branchChip(chat, project.repo)"
+                      v-if="isChatCodeModeOn(chat, project.repo)"
+                      class="chat-code-tag"
+                      :title="codeBadgeTitle(chat, project.repo)"
+                      :aria-label="codeBadgeTitle(chat, project.repo)"
+                    >code</span>
+                    <span
+                      v-if="branchChip(chat, project.repo) && !isChatCodeModeOn(chat, project.repo)"
                       class="chat-repo-tag"
                       :class="{
                         'chat-repo-tag--removed': branchChip(chat, project.repo)!.removed,
@@ -919,7 +924,7 @@ import { useVaultReviewStore } from '../stores/vaultReview'
 import { useTaskSignalsStore } from '../stores/taskSignals'
 import ChatSignals from './ChatSignals.vue'
 import ActivityGlyph from './ActivityGlyph.vue'
-import { sidebarBranchChip } from '../lib/repoLocation'
+import { sidebarBranchChip, sidebarCodeBadgeTitle } from '../lib/repoLocation'
 import { isChatCodeModeOn } from '../lib/codeMode'
 import BrandMark from './BrandMark.vue'
 import CiaoMark from './CiaoMark.vue'
@@ -1112,6 +1117,13 @@ function projectAttentionLabel(projectId: string): string {
 // The branch chip for a chat row, with code mode folded in.
 function branchChip(chat: ChatInfo, repo: ProjectInfo['repo']) {
   return sidebarBranchChip(repo, chat.repo_location, isChatCodeModeOn(chat, repo))
+}
+
+// The `code` badge's tooltip: the repository, the branch the chat works on
+// and the folder it works in. The badge is one short word, so the detail
+// lives here; the full branch and path also reach a screen reader.
+function codeBadgeTitle(chat: ChatInfo, repo: ProjectInfo['repo']) {
+  return sidebarCodeBadgeTitle(repo, chat.repo_location)
 }
 
 // Background command runs across this project's visible chats. A run can sit
