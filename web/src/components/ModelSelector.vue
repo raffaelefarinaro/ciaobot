@@ -403,6 +403,7 @@ onMounted(() => {
                 }"
                 :data-model="model"
                 :data-section="section.key"
+                :title="model"
                 :disabled="section.disabled"
                 role="option"
                 :aria-selected="isActive(model)"

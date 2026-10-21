@@ -323,7 +323,7 @@ describe('HomeIntake', () => {
     await trigger.trigger('click')
     await flushPromises()
     const sonnet = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
-      .find(option => option.textContent?.includes('sonnet'))
+      .find(option => option.dataset.model === 'sonnet')
     expect(sonnet).toBeTruthy()
     sonnet!.click()
     await flushPromises()

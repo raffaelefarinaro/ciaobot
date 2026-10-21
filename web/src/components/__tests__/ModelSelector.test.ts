@@ -258,3 +258,91 @@ describe('ModelSelector', () => {
     expect(wrapper.emitted('close')).toEqual([[]])
   })
 })
+
+describe('ModelSelector model names', () => {
+  const NAMED_SECTIONS: ModelSection[] = [
+    {
+      key: 'opencode',
+      label: 'opencode',
+      models: ['openai/gpt-5.6-luna'],
+      modelLabels: { 'openai/gpt-5.6-luna': 'GPT-5.6 Luna' },
+      modelBadges: { 'openai/gpt-5.6-luna': ['Default', 'openai'] },
+    },
+  ]
+
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('shows the readable name and keeps the raw id in the title', async () => {
+    const wrapper = mountSelector({ sections: NAMED_SECTIONS })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    const item = wrapper.get('.model-selector__item')
+    expect(item.find('.model-selector__item-label').text()).toBe('GPT-5.6 Luna')
+    expect(item.attributes('title')).toBe('openai/gpt-5.6-luna')
+    // The raw id still carries the selection, not the readable name.
+    expect(item.attributes('data-model')).toBe('openai/gpt-5.6-luna')
+    expect(item.attributes('role')).toBe('option')
+    // The namespace the id states rides beside the readable name.
+    expect(item.findAll('.model-selector__item-badge').map((el) => el.text())).toEqual([
+      'Default',
+      'openai',
+    ])
+  })
+
+  it('names the selected model on the trigger', async () => {
+    const wrapper = mountSelector({
+      sections: NAMED_SECTIONS,
+      modelValue: 'openai/gpt-5.6-luna',
+    })
+
+    expect(wrapper.get('.model-selector__trigger').text()).toContain('GPT-5.6 Luna')
+  })
+
+  it('finds a model by its technical id', async () => {
+    const wrapper = mountSelector({ sections: NAMED_SECTIONS })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    // The readable name reads "GPT-5.6 Luna", so only the raw id carries
+    // "gpt-5.6-luna".
+    await wrapper.find('.model-selector__search').setValue('gpt-5.6-luna')
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.findAll('.model-selector__item').length).toBe(1)
+  })
+
+  it('finds a model by the provider its id states', async () => {
+    const wrapper = mountSelector({ sections: NAMED_SECTIONS })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('.model-selector__search').setValue('openai')
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.findAll('.model-selector__item').length).toBe(1)
+  })
+
+  it('selects the raw id and sends nothing', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const wrapper = mountSelector({ sections: NAMED_SECTIONS })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('.model-selector__item').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([['openai/gpt-5.6-luna']])
+    expect(wrapper.emitted('select')).toEqual([['openai/gpt-5.6-luna', 'opencode']])
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
+  })
+})
