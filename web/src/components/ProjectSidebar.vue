@@ -741,7 +741,15 @@
                       class="chat-title"
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
-                    <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
+                    <span
+                      v-if="taskSignals.isTaskChat(chat)"
+                      class="chat-task-tag"
+                      :title="taskBadgeTitle(chat)"
+                    >task</span>
+                    <!-- The tag hides with the row's other marks on hover, so the
+                         qualifier also travels as text: the row title for a
+                         pointer, a hidden line for a screen reader. -->
+                    <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
                     <span
                       v-if="isChatCodeModeOn(chat, project.repo)"
                       class="chat-code-tag"
@@ -1126,14 +1134,25 @@ function codeBadgeTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string | und
   return sidebarCodeBadgeTitle(repo, chat.repo_location)
 }
 
+// Which relation the task badge stands for: the board task is delegated to
+// this chat, or the chat is only linked to it. The word on the badge stays
+// `task`; the qualifier is in the tooltip and the accessible name, so a
+// linked chat never claims to be the task's attempt.
+function taskBadgeTitle(chat: ChatInfo): string {
+  return taskSignals.isDelegatedChat(chat) ? 'Delegated board task' : 'Linked to a board task'
+}
+
 // The chat row's own title: the chat's name, the row's guidance, and, in code
 // mode, the repository facts. A mouse hides the row's marks while its actions
 // show, so the facts live here too, where they stay reachable.
 function chatRowTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string {
   if (chat.local === false) return `${chat.title}\nThis chat lives on another instance`
-  const guidance = `${chat.title}\nDrag to move to another project`
+  const lines = [chat.title, 'Drag to move to another project']
+  const task = taskSignals.isTaskChat(chat) ? taskBadgeTitle(chat) : ''
+  if (task) lines.push(task)
   const facts = codeBadgeTitle(chat, repo)
-  return facts ? `${guidance}\n${facts}` : guidance
+  if (facts) lines.push(facts)
+  return lines.join('\n')
 }
 
 // Background command runs across this project's visible chats. A run can sit
