@@ -230,8 +230,8 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   `chat_pin_changed` event and the `/ws/events` snapshot's `chat_pins`, and is
   mutated only through `PATCH /api/chats/{id}` `{pin:{path,expected_revision}}`.
   The browser never reads or writes a chat id from the two pin keys — those hold
-  *project* pins only, which remain browser-local and are pruned of any chat id
-  a pre-#1119 build left behind. Manual chat pin/unpin awaits the acknowledged
+  only legacy *project* pins, which the app no longer shows, and are pruned of
+  any chat id a pre-#1119 build left behind. Manual chat pin/unpin awaits the acknowledged
   server state (a 409 adopts the server's truth and surfaces an error, no retry),
   and a per-chat pending flag disables the control while the write is in flight.
   It also composes an outgoing message from that
