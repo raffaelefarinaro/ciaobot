@@ -24,6 +24,10 @@ import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const STATIC_ROOT = path.resolve(here, '../../../ciao/web/static')
+// The terminal renderer's browser harness, in its own build tree. It is a
+// test-only page: the production build writes to a different directory, so
+// the PWA that ships can never carry it.
+const HARNESS_ROOT = path.resolve(here, './harness-dist')
 const PORT = Number(process.env.CIAO_E2E_PORT || 4599)
 
 if (!fs.existsSync(path.join(STATIC_ROOT, 'index.html'))) {
@@ -393,10 +397,37 @@ function serveStatic(res, pathname) {
   res.end(body)
 }
 
+/**
+ * The terminal renderer's harness page, served from its own build tree.
+ *
+ * The tree is written by `npm run build:harness` (and by the e2e build the
+ * test script runs), so a checkout that never built it answers with a
+ * message that says so rather than with the PWA's shell.
+ */
+function serveHarness(res, pathname) {
+  const relative = pathname.slice('/__fixture__/harness/'.length)
+  const resolved = path.resolve(HARNESS_ROOT, relative)
+  const inRoot = resolved === HARNESS_ROOT || resolved.startsWith(HARNESS_ROOT + path.sep)
+  if (!inRoot || !fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    return sendJson(res, { error: 'the terminal harness is not built (npm run build:harness)' }, 404)
+  }
+  const body = fs.readFileSync(resolved)
+  res.writeHead(200, {
+    'content-type': MIME[path.extname(resolved)] || 'application/octet-stream',
+    'cache-control': 'no-store',
+    'content-length': body.length,
+  })
+  res.end(body)
+}
+
 // ── Request routing ─────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
   const { pathname } = new URL(req.url, `http://127.0.0.1:${PORT}`)
+
+  if (pathname.startsWith('/__fixture__/harness/')) {
+    return serveHarness(res, pathname)
+  }
 
   if (pathname.startsWith('/__fixture__/')) {
     const state = sessionOf(req)

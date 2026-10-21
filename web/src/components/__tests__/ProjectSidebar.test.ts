@@ -465,10 +465,19 @@ describe('ProjectSidebar chat actions', () => {
     await flushPromises()
 
     const shimmer = wrapper.get('.chat-item .title-shimmer')
-    expect(shimmer.attributes('aria-label')).toBe('Naming conversation')
+    // A bare span is role=generic, which cannot be named: the bar is hidden
+    // from assistive tech and the name travels as text beside it.
+    expect(shimmer.attributes('aria-hidden')).toBe('true')
+    expect(shimmer.attributes('aria-label')).toBeUndefined()
     expect(shimmer.attributes('title')).toBe('Naming conversation')
+    const names = wrapper.findAll('.chat-item .sr-only')
+      .filter(node => node.text() === 'Naming conversation')
+    expect(names).toHaveLength(1)
+    // Once, and only once, so a screen reader does not hear it twice.
+    const row = wrapper.get('.chat-item')
+    expect(row.text().split('Naming conversation').length - 1).toBe(1)
     // The placeholder stands in for the title, so the temporary one never shows.
-    expect(wrapper.get('.chat-item').text()).not.toContain('New Chat')
+    expect(row.text()).not.toContain('New Chat')
 
     store.chats[0].title = 'Deploy the API'
     store.chats[0].title_status = 'ready'
