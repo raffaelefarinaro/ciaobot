@@ -1904,6 +1904,27 @@ def test_proposals_handover_returns_setting_and_agreement(tmp_path: Path) -> Non
     assert body["agreement"]["suggest_handover"] is False
 
 
+def test_proposals_handover_reports_whether_acting_is_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    client = _client(config)
+    monkeypatch.setattr("ciao.web.routes_api.trusted_registry", lambda name, vault: None)
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+    assert body["acting_available"] is False
+
+    seen: list[tuple[str | None, Path]] = []
+
+    def trusted(name: str | None, vault: Path) -> CiaoConfig:
+        seen.append((name, vault))
+        return config
+
+    monkeypatch.setattr("ciao.web.routes_api.trusted_registry", trusted)
+    body = client.get("/api/proposals/handover", params={"workspace": "personal"}).json()
+    assert body["acting_available"] is True
+    assert seen == [("personal", config.workspace_vault_root("personal"))]
+
+
 def test_proposals_handover_validates_workspace(tmp_path: Path) -> None:
     client = _client(_config(tmp_path))
 
