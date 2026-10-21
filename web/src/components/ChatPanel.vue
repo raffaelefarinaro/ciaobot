@@ -1381,6 +1381,7 @@ import { isApplePlatform } from '../lib/platform'
 import { useKeyboardSettings } from '../composables/useKeyboardSettings'
 import { memoryPassChatId, memoryPassSource } from '../lib/memoryPass'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { useTerminalStore } from '../stores/terminal'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
 // them, parsed server-side from the session JSONL), so each panel anchors
 // under the turn that spawned its agents.
@@ -2175,6 +2176,17 @@ function openProjectKnowledge() {
 useModalFocus(railEl, drawerShown, {
   initialFocus: detailsFocusEl,
   onEscape: () => { inspectorOpen.value = false },
+})
+
+// The browser terminal takes the screen on a narrow pane, and the chat
+// details drawer is a modal surface there: while it is up, everything outside
+// it is inert, and it claims Escape in the capture phase. The terminal is
+// opened from this drawer — its Repository section carries the button — so
+// the drawer steps aside when the terminal opens, rather than leaving a
+// dead, inert pane on top of the screen.
+const terminal = useTerminalStore()
+watch(() => terminal.visible, (open) => {
+  if (open && drawerShown.value) inspectorOpen.value = false
 })
 
 async function openInspectorFile(path: string) {

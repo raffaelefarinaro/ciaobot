@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { onScopeDispose, ref } from 'vue'
 import { api } from '../lib/api'
+import { requestTerminalPanel } from '../lib/terminalPanel'
 import {
   TERMINAL_INPUT_MAX_BYTES,
   TERMINAL_MAX_COLS,
@@ -878,6 +879,11 @@ export const useTerminalStore = defineStore('terminal', () => {
       phase.value = 'error'
       return
     }
+    // The pane is a chunk of its own, mounted by the shell the first time a
+    // terminal is asked for. Asking for it here keeps every way into the
+    // terminal — the chat's button, the project's button, a future deep link
+    // — on the same path.
+    requestTerminalPanel()
     const scopeChanged = target.value === null || scopeKey(target.value) !== scopeKey(next)
     invalidateWorld()
     visible.value = true

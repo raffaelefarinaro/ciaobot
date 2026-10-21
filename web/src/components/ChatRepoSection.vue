@@ -6,7 +6,7 @@ import { branchLabel } from '../lib/repo'
 import { chatLocationDiffers, repoChip } from '../lib/repoLocation'
 import type { ProjectRepo, RepoLocation } from '../lib/types'
 import { useProjectStore } from '../stores/projects'
-import HostTerminalButton from './HostTerminalButton.vue'
+import BrowserTerminalButton from './BrowserTerminalButton.vue'
 
 const props = defineProps<{
   repo: ProjectRepo
@@ -106,7 +106,7 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
         </span>
       </div>
     </div>
-    <HostTerminalButton v-if="!chip.missing" :chat-id="chatId" class="chat-repo-terminal" />
+    <BrowserTerminalButton v-if="!chip.missing" :chat-id="chatId" class="chat-repo-terminal" />
     <template v-if="!archived">
       <div class="repo-code-row">
         <span :id="switchId" class="repo-code-label">Code mode</span>

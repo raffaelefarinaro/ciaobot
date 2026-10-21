@@ -179,10 +179,121 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map() }
     sessions.set(id, state)
   }
   return state
+}
+
+// ── The browser terminal ────────────────────────────────────────────────
+//
+// A synthetic shell. It answers the terminal's own HTTP routes and speaks
+// its byte protocol on a socket, so the pane can be driven end to end in a
+// real browser: open it from a chat, type at it, watch the output, resize
+// it, hide it and open it again.
+//
+// The shell is invented rather than real: `echo` answers with its argument
+// and nothing else, so the suite never needs a shell on the contributor's
+// machine, and a stray command cannot touch anything.
+
+const TERMINAL_FOLDER = '/synthetic/workspace'
+const TERMINAL_PLATFORM = 'macos'
+const TERMINAL_HOST = 'fixture.local'
+
+/** The sessions this browser context owns, keyed by id. */
+function terminalSessions(state) {
+  if (!state.terminals) state.terminals = new Map()
+  return state.terminals
+}
+
+/** The scope a session belongs to: one chat, or one project. */
+function terminalScope(url) {
+  const chat = url.searchParams.get('chat_id')
+  if (chat) return `chat:${chat}`
+  const project = url.searchParams.get('project_id')
+  if (project) return `project:${project}`
+  return ''
+}
+
+/** What the pane's session list shows. */
+function terminalInfo(session) {
+  return {
+    session_id: session.session_id,
+    folder: session.folder,
+    cols: session.cols,
+    rows: session.rows,
+    seq: session.seq,
+    attached: session.sockets.size > 0,
+    exited: session.exited,
+    exit_code: session.exit_code,
+  }
+}
+
+/** What a shell answers to a line the user typed. */
+function shellOutput(line) {
+  const command = line.replace(/[\r\n]+$/, '')
+  const echoed = `${command}\r\n`
+  if (command.startsWith('echo ')) return echoed + `${command.slice(5)}\r\n`
+  return echoed
+}
+
+/** Push bytes down the stream, keeping the offsets honest. */
+function terminalEmit(session, ws, text) {
+  const bytes = Buffer.from(text, 'utf8')
+  const start = session.seq
+  session.output = Buffer.concat([session.output, bytes])
+  session.seq = session.output.length
+  ws.send({ type: 'output', start, end: session.seq, data: bytes.toString('base64') })
+}
+
+/** The terminal's HTTP half. */
+async function terminalApi(req, res, pathname, url, state) {
+  const terminals = terminalSessions(state)
+  if (pathname === '/api/terminal/status' && req.method === 'GET') {
+    return sendJson(res, {
+      available: true,
+      reason: '',
+      platform: TERMINAL_PLATFORM,
+      host: TERMINAL_HOST,
+      unlock_expires_in: 900,
+      detached_ttl_seconds: 600,
+    })
+  }
+  if (pathname === '/api/terminal/unlock' && req.method === 'POST') {
+    await readBody(req)
+    return sendJson(res, { ok: true, expires_in: 900 })
+  }
+  if (pathname === '/api/terminal/sessions' && req.method === 'GET') {
+    const scope = terminalScope(url)
+    const sessions = [...terminals.values()].filter((s) => s.scope === scope)
+    return sendJson(res, { sessions: sessions.map(terminalInfo) })
+  }
+  if (pathname === '/api/terminal/sessions' && req.method === 'POST') {
+    const body = await readBody(req)
+    const scope = body?.chat_id ? `chat:${body.chat_id}` : body?.project_id ? `project:${body.project_id}` : ''
+    const id = `term-${terminals.size + 1}`
+    const session = {
+      session_id: id,
+      scope,
+      folder: TERMINAL_FOLDER,
+      cols: 80,
+      rows: 24,
+      seq: 0,
+      output: Buffer.alloc(0),
+      pending: '',
+      sockets: new Set(),
+      exited: false,
+      exit_code: null,
+    }
+    terminals.set(id, session)
+    return sendJson(res, { session: terminalInfo(session) })
+  }
+  if (pathname.startsWith('/api/terminal/sessions/') && req.method === 'DELETE') {
+    const id = decodeURIComponent(pathname.slice('/api/terminal/sessions/'.length))
+    terminals.delete(id)
+    return sendJson(res, { ok: true })
+  }
+  return sendJson(res, { error: 'unknown terminal route' }, 404)
 }
 
 // ── API ─────────────────────────────────────────────────────────────────
@@ -423,7 +534,8 @@ function serveHarness(res, pathname) {
 // ── Request routing ─────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
-  const { pathname } = new URL(req.url, `http://127.0.0.1:${PORT}`)
+  const url = new URL(req.url, `http://127.0.0.1:${PORT}`)
+  const { pathname } = url
 
   if (pathname.startsWith('/__fixture__/harness/')) {
     return serveHarness(res, pathname)
@@ -500,7 +612,20 @@ const server = http.createServer(async (req, res) => {
       }
       return sendJson(res, { ok: true, delivered: open?.size || 0 })
     }
+    if (pathname === '/__fixture__/terminal') {
+      // What the synthetic shell currently believes: the sessions this
+      // browser context owns, and the size it was last told about. A spec
+      // reads it to prove a resize actually reached the engine.
+      const terminals = terminalSessions(state)
+      return sendJson(res, {
+        sessions: [...terminals.values()].map(terminalInfo),
+      })
+    }
     return sendJson(res, { error: 'unknown fixture route' }, 404)
+  }
+
+  if (pathname.startsWith('/api/terminal/')) {
+    return terminalApi(req, res, pathname, url, sessionOf(req))
   }
 
   if (pathname.startsWith('/api/')) {
@@ -531,6 +656,70 @@ server.on('upgrade', (req, socket) => {
   const { pathname } = new URL(req.url, `http://127.0.0.1:${PORT}`)
   const ws = acceptUpgrade(req, socket, pathname)
   if (!ws) return
+  if (pathname.startsWith('/ws/terminal/')) {
+    // The terminal's byte stream. The client attaches first; the fixture
+    // answers with the session's state and replays whatever the shell printed
+    // before this connection, so a reconnect resumes instead of starting
+    // over.
+    const sessionId = decodeURIComponent(pathname.slice('/ws/terminal/'.length))
+    const state = sessionOf(req)
+    const terminals = terminalSessions(state)
+    let session = terminals.get(sessionId)
+    if (!session) {
+      session = {
+        session_id: sessionId,
+        scope: '',
+        folder: TERMINAL_FOLDER,
+        cols: 80,
+        rows: 24,
+        seq: 0,
+        output: Buffer.alloc(0),
+        pending: '',
+        sockets: new Set(),
+        exited: false,
+        exit_code: null,
+      }
+      terminals.set(sessionId, session)
+    }
+    session.sockets.add(ws)
+    socket.on('close', () => session.sockets.delete(ws))
+    ws.onMessage = (text) => {
+      let frame
+      try { frame = JSON.parse(text) } catch { return }
+      if (frame.type === 'attach') {
+        ws.send({
+          type: 'ready',
+          session_id: sessionId,
+          folder: session.folder,
+          cols: session.cols,
+          rows: session.rows,
+          seq: session.seq,
+          replay_start: 0,
+          truncated: false,
+        })
+        if (session.seq > 0) {
+          ws.send({ type: 'output', start: 0, end: session.seq, data: session.output.toString('base64') })
+        }
+        ws.send({ type: 'replay_end', seq: session.seq, truncated: false })
+        return
+      }
+      if (frame.type === 'input') {
+        session.pending += Buffer.from(String(frame.data || ''), 'base64').toString('utf8')
+        if (!/[\r\n]/.test(session.pending)) return
+        const line = session.pending
+        session.pending = ''
+        terminalEmit(session, ws, shellOutput(line))
+        return
+      }
+      if (frame.type === 'resize') {
+        session.cols = Number(frame.cols) || session.cols
+        session.rows = Number(frame.rows) || session.rows
+        return
+      }
+      if (frame.type === 'ping') ws.send({ type: 'pong' })
+    }
+    return
+  }
   if (pathname !== '/ws/events') {
     // Per-chat sockets: quiet, except for the frames a spec asked for. Holding
     // them in the session state lets a spec deliver a call to the socket that
