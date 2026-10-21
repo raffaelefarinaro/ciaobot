@@ -127,7 +127,7 @@ describe('InjectedPromptCard', () => {
     // card has to read correctly while the attempt runs, after it settles and
     // after it failed, because a reloaded turn keeps the same copy.
     expect(wrapper.get('.injected-card-note').text()).toBe(
-      'The request above was sent again unchanged.',
+      'This turn repeats the request above unchanged.',
     )
     const details = wrapper.get('details.injected-card-original')
     expect(wrapper.get('details.injected-card-original summary').text()).toBe('Show original request')

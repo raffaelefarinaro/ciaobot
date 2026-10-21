@@ -6,7 +6,7 @@
  *
  * ChatPanel draws this once {@link parseInjectedPrompt} has recognised the turn
  * from its recorded origin. The raw prompt stays reachable behind its own
- * toggle. Log paths are plain `a.file-link` markup: ChatPanel's delegated click
+ * toggle, or its own disclosure for a retry. Log paths are plain `a.file-link` markup: ChatPanel's delegated click
  * handler opens them.
  */
 import { computed, ref, useId } from 'vue'
@@ -163,7 +163,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
            away. The generic full-prompt toggle stays out: it would show the
            same words a second time. -->
       <template v-else-if="prompt.kind === 'retry'">
-        <p class="injected-card-note">The request above was sent again unchanged.</p>
+        <p class="injected-card-note">This turn repeats the request above unchanged.</p>
         <details class="injected-card-original">
           <summary>Show original request</summary>
           <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
