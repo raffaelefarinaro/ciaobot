@@ -39,6 +39,7 @@ import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import AgentPrincipal, ControlPlaneError, CiaoControlPlane
+from ciao.task_decisions import read_decisions
 
 
 class _RecordingStream:
@@ -2853,3 +2854,166 @@ async def test_an_unlinked_chat_still_cannot_add_a_note(tmp_path: Path) -> None:
         )
     assert refused.value.code == "task_report_not_holder"
     assert "task link-chat" in refused.value.args[0]
+
+
+# ── Decision log (#1726) ─────────────────────────────────────────────
+
+
+def _decisions(plane: CiaoControlPlane) -> list[dict[str, Any]]:
+    return read_decisions(plane.config.workspace_vault_root("personal"))
+
+
+async def _review_ready(
+    tmp_path: Path, title: str = "Reviewed"
+) -> tuple[CiaoControlPlane, _RecordingPcm, dict[str, Any], str]:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title=title)
+    attempt_id = _delegate(plane, task)["attempt"]["attempt_id"]
+    _agent_says_done(plane)
+    await _end_turns(pcm)
+    return plane, pcm, _get_task(plane, task["id"]), attempt_id
+
+
+async def test_approving_a_review_records_an_approve_decision_with_its_reason(
+    tmp_path: Path,
+) -> None:
+    plane, _pcm, reviewed, attempt_id = await _review_ready(tmp_path)
+    plane.workspace_task_action(
+        "personal",
+        "complete",
+        reviewed["id"],
+        expected_revision=reviewed["revision"],
+        actor="user",
+        reason="good as is",
+    )
+    rows = _decisions(plane)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "approve"
+    assert rows[0]["reason"] == "good as is"
+    assert rows[0]["attempt_id"] == attempt_id
+    assert rows[0]["attempt_state"] == "ready_for_review"
+    assert rows[0]["task_id"] == reviewed["id"]
+
+
+async def test_approving_without_a_reason_records_an_approve_row_with_an_empty_reason(
+    tmp_path: Path,
+) -> None:
+    plane, _pcm, reviewed, _attempt_id = await _review_ready(tmp_path)
+    plane.workspace_task_action(
+        "personal",
+        "complete",
+        reviewed["id"],
+        expected_revision=reviewed["revision"],
+        actor="user",
+    )
+    assert [(row["kind"], row["reason"]) for row in _decisions(plane)] == [("approve", "")]
+
+
+def test_a_reason_on_a_completion_with_no_review_ready_attempt_is_refused_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    plane, _pcm = _world(tmp_path)
+    task = _create(plane, title="Plain task")
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_action(
+            "personal",
+            "complete",
+            task["id"],
+            expected_revision=task["revision"],
+            actor="user",
+            reason="x",
+        )
+    assert excinfo.value.code == "invalid_action"
+    assert _get_task(plane, task["id"])["status"] == "backlog"
+    assert _decisions(plane) == []
+
+
+def test_a_reason_on_a_non_complete_action_is_refused(tmp_path: Path) -> None:
+    plane, _pcm = _world(tmp_path)
+    task = _create(plane, title="Plain task")
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_action(
+            "personal",
+            "move",
+            task["id"],
+            expected_revision=task["revision"],
+            status="in_progress",
+            actor="user",
+            reason="x",
+        )
+    assert excinfo.value.code == "invalid_action"
+    assert _get_task(plane, task["id"])["status"] == "backlog"
+
+
+async def test_a_failed_approval_records_no_decision(tmp_path: Path) -> None:
+    plane, _pcm, reviewed, _attempt_id = await _review_ready(tmp_path)
+    with pytest.raises(ControlPlaneError):
+        plane.workspace_task_action(
+            "personal",
+            "complete",
+            reviewed["id"],
+            expected_revision=reviewed["revision"],
+            status="done",
+            project_id="nope-bogus",
+            actor="user",
+            reason="good as is",
+        )
+    assert _decisions(plane) == []
+
+
+async def test_detaching_a_review_ready_attempt_records_a_reject_decision(
+    tmp_path: Path,
+) -> None:
+    plane, _pcm, reviewed, attempt_id = await _review_ready(tmp_path)
+    await _act(plane, attempt_id, "detach", reason="not a task")
+    rows = _decisions(plane)
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "reject"
+    assert rows[0]["reason"] == "not a task"
+    assert rows[0]["attempt_id"] == attempt_id
+    assert rows[0]["attempt_state"] == "ready_for_review"
+    assert rows[0]["task_id"] == reviewed["id"]
+    assert (rows[0]["actor"], rows[0]["via"]) == ("user", "pwa")
+
+
+async def test_detaching_a_review_ready_attempt_without_a_reason_still_records_a_reject_row(
+    tmp_path: Path,
+) -> None:
+    plane, _pcm, _reviewed, attempt_id = await _review_ready(tmp_path)
+    await _act(plane, attempt_id, "detach")
+    assert [(row["kind"], row["reason"]) for row in _decisions(plane)] == [("reject", "")]
+
+
+async def test_a_reason_on_detach_of_a_running_attempt_is_refused_before_it_stops(
+    tmp_path: Path,
+) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Still running")
+    attempt_id = _delegate(plane, task)["attempt"]["attempt_id"]
+    with pytest.raises(ControlPlaneError) as excinfo:
+        await _act(plane, attempt_id, "detach", reason="x")
+    assert excinfo.value.code == "invalid_action"
+    assert _attempt_store(plane).get(attempt_id).state == "running"
+    assert pcm.stop_awaited == 0
+    assert _decisions(plane) == []
+
+
+async def test_a_reason_on_stop_is_refused(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    task = _create(plane, title="Still running")
+    attempt_id = _delegate(plane, task)["attempt"]["attempt_id"]
+    with pytest.raises(ControlPlaneError) as excinfo:
+        await _act(plane, attempt_id, "stop", reason="x")
+    assert excinfo.value.code == "invalid_action"
+    assert _attempt_store(plane).get(attempt_id).state == "running"
+    assert pcm.stop_awaited == 0
+
+
+async def test_detaching_a_running_attempt_without_a_reason_records_no_decision(
+    tmp_path: Path,
+) -> None:
+    plane, _pcm = _world(tmp_path)
+    task = _create(plane, title="Still running")
+    attempt_id = _delegate(plane, task)["attempt"]["attempt_id"]
+    await _act(plane, attempt_id, "detach")
+    assert _decisions(plane) == []

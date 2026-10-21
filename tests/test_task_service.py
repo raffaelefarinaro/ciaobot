@@ -27,6 +27,7 @@ import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.control_plane import AgentPrincipal, ControlPlaneError, CiaoControlPlane
+from ciao.task_decisions import read_decisions
 
 TASK_ID_CHARS = "0123456789abcdef"
 
@@ -772,3 +773,105 @@ def test_a_completion_window_is_inclusive_and_refuses_a_bad_bound(
     with pytest.raises(ControlPlaneError) as excinfo:
         plane.workspace_task_list("personal", completed_since="yesterday")
     assert excinfo.value.code == "invalid_task"
+
+
+# ── Decision log (#1726) ─────────────────────────────────────────────
+
+
+def test_agent_created_task_is_marked_and_payload_says_so(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    agent_made = plane.task_create(_principal(), title="Filed by the agent")["data"]
+    user_made = plane.workspace_task_create("personal", title="Filed by the user")
+    assert agent_made["created_by"] == "agent"
+    assert user_made["created_by"] is None
+
+
+def test_delete_records_a_decision_row_that_outlives_the_file(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    created = plane.task_create(_principal(), title="Dismiss me")["data"]
+    plane.workspace_task_delete(
+        "personal",
+        created["id"],
+        expected_revision=created["revision"],
+        reason="not mine",
+        actor="user",
+    )
+    assert not (_tasks_dir(plane, "personal") / f"{created['id']}.md").exists()
+    rows = read_decisions(plane.config.workspace_vault_root("personal"))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["kind"] == "delete"
+    assert row["reason"] == "not mine"
+    assert row["task_created_by"] == "agent"
+    assert row["actor"] == "user"
+    assert row["via"] == "pwa"
+    assert row["task_id"] == created["id"]
+    assert row["task_title"] == "Dismiss me"
+
+
+def test_delete_without_a_reason_still_records_a_row_with_an_empty_reason(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    created = _create(plane, "personal", title="Plain")
+    plane.workspace_task_delete(
+        "personal", created["id"], expected_revision=created["revision"], actor="user"
+    )
+    rows = read_decisions(plane.config.workspace_vault_root("personal"))
+    assert [(row["kind"], row["reason"], row["task_created_by"]) for row in rows] == [
+        ("delete", "", "")
+    ]
+
+
+def test_agent_delete_with_a_reason_records_actor_agent_via_cli(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    principal = _principal()
+    created = plane.task_create(principal, title="Agent removes")["data"]
+    plane.task_delete(
+        principal, created["id"], expected_revision=created["revision"], reason="user asked"
+    )
+    rows = read_decisions(plane.config.workspace_vault_root("personal"))
+    assert len(rows) == 1
+    assert (rows[0]["actor"], rows[0]["via"], rows[0]["reason"]) == ("agent", "cli", "user asked")
+
+
+def test_delete_with_a_stale_revision_records_nothing(tmp_path: Path) -> None:
+    plane = _world(tmp_path)
+    created = _create(plane, "personal", title="Stale")
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_delete(
+            "personal", created["id"], expected_revision="0" * 64, reason="x", actor="user"
+        )
+    assert excinfo.value.code == "task_revision_conflict"
+    assert read_decisions(plane.config.workspace_vault_root("personal")) == []
+    assert (_tasks_dir(plane, "personal") / f"{created['id']}.md").is_file()
+
+
+@pytest.mark.parametrize("reason", [5, "x" * 1001])
+def test_delete_refuses_a_non_string_or_overlong_reason_before_deleting(
+    tmp_path: Path, reason: Any
+) -> None:
+    plane = _world(tmp_path)
+    created = _create(plane, "personal", title="Keep")
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_delete(
+            "personal", created["id"], expected_revision=created["revision"], reason=reason
+        )
+    assert excinfo.value.code == "invalid_task"
+    assert (_tasks_dir(plane, "personal") / f"{created['id']}.md").is_file()
+    assert read_decisions(plane.config.workspace_vault_root("personal")) == []
+
+
+def test_a_failing_decision_append_does_not_fail_the_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plane = _world(tmp_path)
+    created = _create(plane, "personal", title="Gone anyway")
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("ciao.control_plane.append_decision", boom)
+    result = plane.workspace_task_delete(
+        "personal", created["id"], expected_revision=created["revision"], actor="user"
+    )
+    assert result["deleted"] is True
+    assert not (_tasks_dir(plane, "personal") / f"{created['id']}.md").exists()

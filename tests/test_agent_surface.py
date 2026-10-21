@@ -1368,3 +1368,81 @@ def test_handover_messages_refuse_credential_paths(tmp_path: Path) -> None:
     plain = tmp_path / "notes.json"
     plain.write_text('[{"role": "user"}]', encoding="utf-8")
     assert agent_cli._handover_messages(f"@{plain}") == [{"role": "user"}]
+
+
+# ── Decision reasons (#1726) ─────────────────────────────────────────
+
+
+def test_task_delete_reason_file_is_read_and_sent_as_reason(tmp_path: Path) -> None:
+    reason = tmp_path / "why.txt"
+    reason.write_text("dismissed: not mine\n", encoding="utf-8")
+    parser = agent_cli.build_parser()
+    name, arguments = agent_cli.resolve(
+        parser.parse_args(
+            ["task", "delete", "a" * 32, "--revision", "rev1", "--reason-file", str(reason)]
+        )
+    )
+    assert name == "task_delete"
+    assert arguments == {
+        "task_id": "a" * 32,
+        "expected_revision": "rev1",
+        "reason": "dismissed: not mine\n",
+    }
+
+
+def test_task_attempt_reason_file_is_passed_for_detach(tmp_path: Path) -> None:
+    reason = tmp_path / "why.txt"
+    reason.write_text("not a task", encoding="utf-8")
+    parser = agent_cli.build_parser()
+    name, arguments = agent_cli.resolve(
+        parser.parse_args(["task", "attempt", "b" * 32, "detach", "--reason-file", f"@{reason}"])
+    )
+    assert name == "task_attempt_action"
+    assert arguments == {"attempt_id": "b" * 32, "action": "detach", "reason": "not a task"}
+
+
+def test_reason_file_refuses_a_credential_adjacent_path(tmp_path: Path) -> None:
+    secret = tmp_path / ".env"
+    secret.write_text("TOKEN=1", encoding="utf-8")
+    parser = agent_cli.build_parser()
+    with pytest.raises(agent_cli.UsageError) as excinfo:
+        agent_cli.resolve(
+            parser.parse_args(
+                ["task", "delete", "a" * 32, "--revision", "rev1", "--reason-file", str(secret)]
+            )
+        )
+    assert "--reason-file" in str(excinfo.value)
+
+
+def test_no_reason_file_sends_no_reason_key() -> None:
+    parser = agent_cli.build_parser()
+    _name, deleted = agent_cli.resolve(
+        parser.parse_args(["task", "delete", "a" * 32, "--revision", "rev1"])
+    )
+    _name, attempt = agent_cli.resolve(parser.parse_args(["task", "attempt", "b" * 32, "detach"]))
+    assert "reason" not in deleted
+    assert "reason" not in attempt
+
+
+def test_task_complete_has_no_reason_flag() -> None:
+    parser = agent_cli.build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(
+            ["task", "complete", "a" * 32, "--revision", "rev1", "--reason-file", "x"]
+        )
+    assert excinfo.value.code == 2
+
+
+def test_mcp_task_attempt_action_refuses_a_reason_on_non_detach(tmp_path: Path) -> None:
+    service = _task_service(tmp_path)
+    token = _token(service)
+    with _client(service) as client:
+        response = _post(
+            client,
+            token,
+            "task_attempt_action",
+            {"attempt_id": "b" * 32, "action": "stop", "reason": "x"},
+        )
+    # A refusal raised inside the op itself reaches the agent as a tool error.
+    assert response.status_code == 400
+    assert "reason is only recorded by detach" in response.json()["error"]["message"]
