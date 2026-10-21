@@ -741,7 +741,12 @@
                       class="chat-title"
                       :class="{ 'chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
-                    <span v-if="taskSignals.isDelegatedChat(chat)" class="chat-task-tag" title="Delegated board task">task</span>
+                    <span
+                      v-if="taskSignals.isTaskChat(chat)"
+                      class="chat-task-tag"
+                      :title="taskBadgeTitle(chat)"
+                      :aria-label="taskBadgeTitle(chat)"
+                    >task</span>
                     <span
                       v-if="isChatCodeModeOn(chat, project.repo)"
                       class="chat-code-tag"
@@ -1124,6 +1129,14 @@ function branchChip(chat: ChatInfo, repo: ProjectInfo['repo']) {
 function codeBadgeTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string | undefined {
   if (!repo || !isChatCodeModeOn(chat, repo)) return undefined
   return sidebarCodeBadgeTitle(repo, chat.repo_location)
+}
+
+// Which relation the task badge stands for: the board task is delegated to
+// this chat, or the chat is only linked to it. The word on the badge stays
+// `task`; the qualifier is in the tooltip and the accessible name, so a
+// linked chat never claims to be the task's attempt.
+function taskBadgeTitle(chat: ChatInfo): string {
+  return taskSignals.isDelegatedChat(chat) ? 'Delegated board task' : 'Linked to a board task'
 }
 
 // The chat row's own title: the chat's name, the row's guidance, and, in code

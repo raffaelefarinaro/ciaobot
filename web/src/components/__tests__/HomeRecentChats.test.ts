@@ -669,7 +669,8 @@ describe('delegated task chats on Home', () => {
   function task(overrides: Partial<Task>): Task {
     return {
       id: 'task-1', title: 'Ship it', status: 'in_progress', project_id: '', due: '',
-      assignee: 'agent', chat_id: 'quiet', attempt_id: 'attempt-1', created_at: '', updated_at: '',
+      assignee: 'agent', chat_id: 'quiet', attempt_id: 'attempt-1', linked_chats: [],
+      created_at: '', updated_at: '',
       revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: 'running',
       attempt_outcome: '', attempt_summary: '', attempt_detail: '', live_attempt_id: 'attempt-1',
       ...overrides,
@@ -697,6 +698,10 @@ describe('delegated task chats on Home', () => {
       .find(r => r.text().includes('A quiet chat'))!
     expect(row.get('.home-chat-project').text()).toBe('Personal project')
     expect(row.get('.home-chat-task').text()).toBe('task')
+    // Delegation is the relation this chat has with the task, and the badge
+    // says so rather than leaving the word `task` to speak for it.
+    expect(row.get('.home-chat-task').attributes('title')).toBe('Delegated board task')
+    expect(row.get('.home-chat-task').attributes('aria-label')).toBe('Delegated board task')
     expect(row.get('.home-chat-status').text()).toBe('needs input')
     wrapper.unmount()
   })
@@ -766,6 +771,78 @@ describe('delegated task chats on Home', () => {
     const tag = rowFor(wrapper, 'A quiet chat').find('.home-chat-code')
     expect(tag.exists()).toBe(codeMode && linked)
     if (tag.exists()) expect(tag.text()).toBe('code')
+    wrapper.unmount()
+  })
+})
+
+describe('linked task chats on Home', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.restoreAllMocks()
+  })
+
+  /**
+   * A task the chat only works on: no delegation, so no attempt of its own and
+   * nothing about the task's state is this chat's to act on.
+   */
+  function linkedTask(overrides: Partial<Task> = {}): Task {
+    return {
+      id: 'task-linked', title: 'Ship it', status: 'in_progress', project_id: '', due: '',
+      assignee: 'agent', chat_id: '', attempt_id: '', linked_chats: ['quiet'],
+      created_at: '', updated_at: '',
+      revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: '',
+      attempt_outcome: '', attempt_summary: '', attempt_detail: '', live_attempt_id: '',
+      ...overrides,
+    } as Task
+  }
+
+  async function mountWithLinkedTask(overrides: Partial<Task> = {}) {
+    seedChats()
+    const signals = useTaskSignalsStore()
+    signals.tasks = [linkedTask(overrides)]
+    signals.loadedWorkspace = 'personal'
+    const { default: HomeRecentChats } = await import('../HomeRecentChats.vue')
+    const wrapper = mount(HomeRecentChats, { attachTo: document.body })
+    await nextTick()
+    return wrapper
+  }
+
+  function rowFor(wrapper: Awaited<ReturnType<typeof mountWithLinkedTask>>, title: string) {
+    return wrapper.findAll('.home-chat-item').find(row => row.text().includes(title))!
+  }
+
+  it('tags a linked task chat and says it is only linked', async () => {
+    const wrapper = await mountWithLinkedTask()
+    const tag = rowFor(wrapper, 'A quiet chat').get('.home-chat-task')
+    // The same squared word as a delegated chat.
+    expect(tag.text()).toBe('task')
+    // A link is a relation, not an attempt, and the badge says which it is.
+    expect(tag.attributes('title')).toBe('Linked to a board task')
+    expect(tag.attributes('aria-label')).toBe('Linked to a board task')
+    wrapper.unmount()
+  })
+
+  it('does not promote a linked task chat to needs you when the task waits on the user', async () => {
+    const wrapper = await mountWithLinkedTask({
+      attempt_state: 'needs_you', attempt_outcome: 'needs_input',
+      attempt_id: 'attempt-1', live_attempt_id: 'attempt-1',
+    })
+    expect(wrapper.find('.home-tier--needsYou').text()).not.toContain('A quiet chat')
+    const row = rowFor(wrapper, 'A quiet chat')
+    // The task's state is not this chat's to report: the link says nothing
+    // about the attempt, so the row keeps the plain tier phrase.
+    expect(row.get('.home-chat-status').text()).toBe('no new activity')
+    expect(row.text()).not.toContain('needs input')
+    wrapper.unmount()
+  })
+
+  it('drops the badge when the refreshed task no longer links the chat', async () => {
+    const wrapper = await mountWithLinkedTask()
+    expect(wrapper.find('.home-chat-task').exists()).toBe(true)
+    // What the `tasks_changed` re-read delivers after the unlink.
+    useTaskSignalsStore().tasks = [linkedTask({ linked_chats: [] })]
+    await nextTick()
+    expect(wrapper.find('.home-chat-task').exists()).toBe(false)
     wrapper.unmount()
   })
 })

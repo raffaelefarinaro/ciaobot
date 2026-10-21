@@ -87,7 +87,12 @@
                       class="home-chat-title"
                       :class="{ 'home-chat-title--unread': store.chatUnread(chat.chat_id) > 0 }"
                     >{{ chat.title }}</span>
-                    <span v-if="taskSignals.isDelegatedChat(chat)" class="home-chat-task">task</span>
+                    <span
+                      v-if="taskSignals.isTaskChat(chat)"
+                      class="home-chat-task"
+                      :title="taskBadgeTitle(chat)"
+                      :aria-label="taskBadgeTitle(chat)"
+                    >task</span>
                     <span v-if="isChatCodeModeOn(chat, store.projectFor(chat.chat_id)?.repo)" class="home-chat-task home-chat-code" title="Code mode is on">code</span>
                   </span>
                   <!-- Project plus a status phrase read from the same signals
@@ -497,6 +502,16 @@ function statusPhrase(tier: HomeTierKey, chat: ChatInfo): string {
 
 function relativeActivity(chat: ChatInfo): string {
   return formatRelative(chatActivityTimestamp(chat))
+}
+
+/**
+ * Which relation the task badge stands for: the board task is delegated to
+ * this chat, or the chat is only linked to it. The word on the badge stays
+ * `task`; the qualifier is in the tooltip and the accessible name, so a linked
+ * chat never claims to be the task's attempt.
+ */
+function taskBadgeTitle(chat: ChatInfo): string {
+  return taskSignals.isDelegatedChat(chat) ? 'Delegated board task' : 'Linked to a board task'
 }
 
 function chatItemClasses(tier: HomeTierKey, chat: ChatInfo): string[] {
