@@ -309,6 +309,42 @@ const GET_ROUTES = {
   }),
 }
 
+/**
+ * The chats of one project, in the shape the real route answers
+ * (`ciao/web/routes_api.py::project_chats`).
+ *
+ * Without `?archived=1` it answers the project's chats as a bare array; with
+ * it, a page envelope over the archived conversations, which is what
+ * ProjectView's "Show archived chats" section reads. The `{}` catch-all used
+ * to answer this path, and ProjectView read `items` off a payload that had
+ * none: the section listed nothing and the whole project pane went blank
+ * (#1710).
+ */
+function projectChats(req, url) {
+  const projectId = decodeURIComponent(url.pathname.split('/')[3] || '')
+  const chats = CHATS.filter(chat => chat.project_id === projectId)
+  if (url.searchParams.get('archived') !== '1') return chats
+  const archived = chats
+    .filter(chat => chat.archived)
+    // The engine sorts by (created_at, chat_id), newest first.
+    .sort((a, b) => (a.created_at === b.created_at
+      ? b.chat_id.localeCompare(a.chat_id)
+      : b.created_at.localeCompare(a.created_at)))
+  const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0)
+  const limit = Math.max(1, Number(url.searchParams.get('limit')) || 10)
+  return {
+    items: archived.slice(offset, offset + limit).map(chat => ({
+      chat_id: chat.chat_id,
+      title: chat.title,
+      created_at: chat.created_at,
+      archive_path: chat.archive_path || '',
+    })),
+    total: archived.length,
+    offset,
+    limit,
+  }
+}
+
 /** Path patterns, for the routes that carry an id. */
 const GET_PATTERNS = [
   // An empty array is the "nothing to merge" short-circuit in the store; the
@@ -323,6 +359,7 @@ const GET_PATTERNS = [
   // assertion about one.
   [/^\/api\/memory\/receipts\/mrcpt_fixture_2$/, () => VERIFICATION_RECEIPT],
   [/^\/api\/memory\/receipts\/mrcpt_fixture_entry$/, () => VERIFICATION_ENTRY_RECEIPT],
+  [/^\/api\/projects\/[^/]+\/chats$/, projectChats],
 ]
 
 /**
@@ -423,7 +460,8 @@ function serveHarness(res, pathname) {
 // ── Request routing ─────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
-  const { pathname } = new URL(req.url, `http://127.0.0.1:${PORT}`)
+  const url = new URL(req.url, `http://127.0.0.1:${PORT}`)
+  const { pathname } = url
 
   if (pathname.startsWith('/__fixture__/harness/')) {
     return serveHarness(res, pathname)
@@ -507,7 +545,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET') {
       const handler = GET_ROUTES[pathname]
         || GET_PATTERNS.find(([pattern]) => pattern.test(pathname))?.[1]
-      return sendJson(res, handler ? handler(req) : {})
+      return sendJson(res, handler ? handler(req, url) : {})
     }
     const body = await readBody(req)
     const write = WRITE_ROUTES[pathname]

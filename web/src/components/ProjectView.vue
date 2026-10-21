@@ -604,7 +604,14 @@ async function loadArchives(): Promise<void> {
       `/api/projects/${encodeURIComponent(projectId)}/chats?archived=1&limit=${ARCHIVED_PER_PAGE}&offset=${archivedPage.value * ARCHIVED_PER_PAGE}`,
     )
     if (request !== archiveRequest || projectId !== props.projectId) return
-    archiveData.value = data
+    // The engine answers a page envelope. A payload without `items` — a stub,
+    // or an engine that does not know the `archived=1` branch and answers the
+    // bare array instead — would leave the template reading
+    // `archiveData.items.length`, and the throw that follows takes the whole
+    // project pane down with it. The section's own error row is the readable
+    // outcome (#1710).
+    if (!data || !Array.isArray(data.items)) throw new Error('malformed archive page')
+    archiveData.value = { ...data, total: Number(data.total) || 0 }
     const lastPage = Math.max(0, Math.ceil(data.total / ARCHIVED_PER_PAGE) - 1)
     if (archivedPage.value > lastPage) archivedPage.value = lastPage
   } catch {
