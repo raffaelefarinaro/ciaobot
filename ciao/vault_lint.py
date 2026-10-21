@@ -59,6 +59,19 @@ _COMMON_STEMS = {
     "changelog", "todo", "template",
 }
 
+# The auto-managed General project's main doc. Every workspace gets one
+# (`ciao setup`, `ProjectChatManager._ensure_general_vault_folder`), and what
+# points at it is the app's pinned General project, not a note. Nothing in
+# the vault links to it by design, so the orphan check says nothing about it.
+_GENERAL_PROJECT_NOTE = ("projects", "active", "general", "general.md")
+
+
+def _is_general_project_note(relative: Path) -> bool:
+    """True for `projects/active/general/general.md` at the vault root or
+    under a workspace directory (shared-vault layout), any casing."""
+    parts = tuple(part.casefold() for part in relative.parts)
+    return parts[-len(_GENERAL_PROJECT_NOTE):] == _GENERAL_PROJECT_NOTE
+
 # Separators that are a naming *style*, not a different name. A vault filled by
 # more than one writer collects both spellings of the same note — a person
 # captured by hand as `Ben Hempel.md` and by an agent as `Ben-Hempel.md` are one
@@ -738,6 +751,9 @@ def run_validation(
         rel_path = file.relative
         rel_no_sfx = rel_path.with_suffix("").as_posix()
         rel_str = file.relative.as_posix()
+
+        if _is_general_project_note(rel_path):
+            continue
 
         if not any(part in orphan_candidate_dirs for part in rel_path.parts):
             continue

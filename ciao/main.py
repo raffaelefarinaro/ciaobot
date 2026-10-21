@@ -34,10 +34,21 @@ from ciao.upgrade import update_skills
 from ciao.web.app import create_app
 from ciao.error_log import install_asyncio_noise_filter, setup_error_logging
 from ciao.os_support.limits import raise_file_descriptor_limit
+from ciao.port_in_use import (
+    BIND_PHASE,
+    PORT_IN_USE_EXIT_CODE,
+    check_server_port,
+    clear_port_in_use,
+    is_address_in_use,
+    port_in_use_message,
+    record_port_in_use,
+)
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
 
 if TYPE_CHECKING:
+    import uvicorn
+
     from ciao.provider_service import ProviderService
 
 logger = logging.getLogger(__name__)
@@ -218,6 +229,91 @@ def _uvicorn_config_kwargs(config: Any) -> dict[str, Any]:
         "port": config.pwa_port,
         "log_level": "info",
     }
+
+
+def _handle_bind_failure(
+    exc: OSError,
+    *,
+    port: int,
+    workspace: Path | None = None,
+) -> int | None:
+    """The exit code for a bind failure, or ``None`` when it is not one.
+
+    The engine binds its own socket (see
+    :func:`ciao.port_in_use.check_server_port`), so the ``OSError`` of a taken
+    port arrives here instead of inside uvicorn, which would catch it, log it
+    and leave the process through ``sys.exit(3)`` — a code the engine never
+    chose, recorded nowhere, and read by a service manager as "this run
+    failed", so the job was respawned forever.
+
+    The reason is recorded outside the workspace, because an engine that
+    cannot bind cannot serve the endpoint that would report it: the reader
+    has to find the reason somewhere else.
+
+    ``None`` means the error is something else (a permission problem, a
+    missing interface): those keep uvicorn's own behaviour instead of
+    being reported as a port somebody else is holding.
+    """
+    if not is_address_in_use(exc):
+        return None
+    message = port_in_use_message(port, workspace)
+    logger.error("%s", message)
+    record_port_in_use(message)
+    return PORT_IN_USE_EXIT_CODE
+
+
+def _bind_or_fail(
+    tracker: StartupTracker,
+    *,
+    host: str,
+    port: int,
+    workspace: Path | None = None,
+) -> int | None:
+    """Check the engine's own port, and record why it could not be bound.
+
+    uvicorn binds the port itself, inside ``Server.startup``, and swallows
+    the ``OSError``: the engine only ever saw a ``SystemExit`` with uvicorn's
+    own startup-failure code, so the reason never reached the startup
+    status, the log, or the operator — and a service manager respawned the
+    job forever. The engine therefore attempts the same bind itself, at a
+    point it owns.
+
+    ``None`` means the port was free (or the failure was not a taken
+    address, which keeps uvicorn's own behaviour). An exit code means the
+    port is taken: the ``server_starting`` phase is failed with the reason,
+    the reason is recorded where a reader outside the engine can find it,
+    and the engine leaves with that code.
+    """
+    try:
+        check_server_port(host, port)
+    except OSError as exc:
+        exit_code = _handle_bind_failure(exc, port=port, workspace=workspace)
+        if exit_code is None:
+            raise
+        tracker.fail(BIND_PHASE, port_in_use_message(port, workspace))
+        return exit_code
+    # The port is free, so a record of an earlier bind failure is stale.
+    clear_port_in_use()
+    return None
+
+
+async def _mark_bound_when_serving(
+    server: "uvicorn.Server",
+    tracker: StartupTracker,
+    *,
+    poll_interval: float = 0.05,
+) -> None:
+    """Finish the bind phase once uvicorn is serving, not when it stops.
+
+    ``Server.started`` is set at the end of ``Server.startup``, after the
+    listening socket is bound and lifespan startup has run. The phase is
+    done at that point, so ``overall_ready`` reflects a running engine. If
+    ``serve()`` ends before that (a bind failure), the caller cancels this
+    watcher and the phase stays in progress.
+    """
+    while not server.started:
+        await asyncio.sleep(max(0.0, poll_interval))
+    tracker.done(BIND_PHASE)
 
 
 def _open_browser_when_ready(url: str) -> None:
@@ -1245,7 +1341,7 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
 
     uvi_config = uvicorn.Config(app, **_uvicorn_config_kwargs(config))
     server = uvicorn.Server(uvi_config)
-    tracker.start("server_starting")
+    tracker.start(BIND_PHASE)
     logger.info("Starting Ciaobot server on %s:%d", config.pwa_host, config.pwa_port)
     if getattr(config, "bootstrap_mode", False):
         # The setup wizard's finish step only accepts loopback hosts, so give
@@ -1261,7 +1357,19 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
             flush=True,
         )
         _open_browser_when_ready(setup_url)
-    tracker.done("server_starting")
+
+    # The port is checked before the server starts, so a port that is already
+    # taken fails here — with the errno the reason can be read out of — and
+    # not inside uvicorn, which would swallow it and leave the process with a
+    # code that names nothing (#1654).
+    exit_code = _bind_or_fail(
+        tracker,
+        host=config.pwa_host,
+        port=config.pwa_port,
+        workspace=config.workspace_root,
+    )
+    if exit_code is not None:
+        return exit_code
 
     restart_flag: list[int | None] = [None]
     restart_task: list[asyncio.Task | None] = [None]
@@ -1421,10 +1529,13 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         _shutdown_backup,
     ]
 
+    bind_watch = asyncio.create_task(_mark_bound_when_serving(server, tracker))
     try:
         await server.serve()
     except RestartRequested as exc:
         return int(exc.args[0]) if exc.args else RESTART_EXIT_CODE
+    finally:
+        bind_watch.cancel()
     if restart_flag[0] is not None:
         return restart_flag[0]
     return 0

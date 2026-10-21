@@ -51,7 +51,8 @@ from ciao.git_mutation import RepositoryBusyError, ensure_mutable, repository_mu
 from ciao.jsonio import write_private_text
 from ciao.memory_receipts import QueueLockError, QueueReceiptUnavailable
 from ciao.os_support.private import make_private_dir
-from ciao.web.auth import LOOPBACK_HOST_NAMES, is_loopback_client
+from ciao.port_in_use import BIND_PHASE
+from ciao.web.auth import LOOPBACK_HOST_NAMES, _same_origin, is_loopback_client
 from ciao.web.document_conversion import ANYDOC_EXTENSIONS, is_anydoc_document
 from ciao.app_settings import DEFAULT_LOG_LEVEL, DEFAULT_PWA_HOST, LOG_LEVELS
 from ciao.config import (
@@ -1696,11 +1697,19 @@ async def project_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
     if request.method == "DELETE":
+        # `?delete_vault=1` removes the vault entry too (the folder under
+        # projects/active/ and the inbound links into it). Omitting it keeps
+        # the guarded default: a vault-backed project is refused.
+        raw_delete_vault = request.query_params.get("delete_vault", "")
+        delete_vault = raw_delete_vault.strip().lower() in {"1", "true"}
         try:
-            ok = pcm.delete_project(project_id)
+            result = pcm.delete_project(project_id, delete_vault=delete_vault)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
-        return JSONResponse({"ok": ok})
+        return JSONResponse({
+            "ok": result["deleted"],
+            **{k: v for k, v in result.items() if k != "deleted"},
+        })
     # PATCH
     body = await request.json()
     repo_path = body.get("repo_path")
@@ -3045,7 +3054,15 @@ async def chat_subagents(request: Request) -> JSONResponse:
             and live_provider.has_live_server
             and live_provider.current_session_id == chat.session_id
         ):
-            collab_tree = await live_provider.read_live_collab_tree()
+            # Metadata only, unless the caller asked for one child's
+            # transcript: the list is polled every few seconds, and reading
+            # every child's history on every poll is what made a chat with
+            # many background agents re-read every transcript every few
+            # seconds.
+            collab_tree = await live_provider.read_live_collab_tree(
+                include_messages=bool(wanted_agent_id),
+                only_child_id=wanted_agent_id or None,
+            )
         else:
             resolver = getattr(pcm, "_agent_root_for_chat", None)
             root = resolver(chat_id) if resolver is not None else config.workspace_root
@@ -3080,6 +3097,9 @@ async def chat_subagents(request: Request) -> JSONResponse:
                     item.get("active") if isinstance(item.get("active"), bool) else None,
                 ),
                 "turn_index": transcript_service._opencode_child_turn_index(info, chat),
+                # The list carries no transcript, so the run length comes from
+                # the child session's own timestamps.
+                "duration_ms": transcript_service._opencode_child_duration_ms(info),
             })
         return JSONResponse(opencode_entries)
 
@@ -3269,6 +3289,8 @@ async def _running_subagent_rows(pcm, config, chat) -> list[dict]:
             agent_id = str(info.get("id") or "")
             if not agent_id:
                 continue
+            # The live tree carries no transcript; the ephemeral fallback still
+            # does, and the status falls back to message timing there.
             messages = item.get("messages")
             messages = messages if isinstance(messages, list) else []
             if transcript_service._opencode_child_status(
@@ -5776,6 +5798,10 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
 
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
+    # The port the engine binds is taken (#1654): the engine could not start,
+    # and a client has to be able to tell that from "still starting" without
+    # reading the phase's prose.
+    payload["port_in_use"] = _port_in_use(payload.get("phases"))
     latest_version, update_available = await _cached_update_hint(request)
     payload.update({
         "version": __version__,
@@ -5784,6 +5810,18 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
         "update_available": update_available,
     })
     return JSONResponse(payload)
+
+
+def _port_in_use(phases: object) -> bool:
+    """Whether a failed bind phase is among the reported phases."""
+    if not isinstance(phases, list):
+        return False
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        if phase.get("name") == BIND_PHASE and phase.get("status") == "failed":
+            return True
+    return False
 
 
 async def _refresh_update_hint(app: Any, fetcher: Callable[[], dict[str, object]]) -> None:
@@ -5909,7 +5947,7 @@ def _host_name(value: str) -> str:
 
 
 def _localhost_request(request: Request) -> bool:
-    """True when the TCP peer is this machine AND the Host names loopback.
+    """True when the TCP peer is this machine AND the Host names a local address.
 
     The peer check is what makes it local: during first run the server binds
     0.0.0.0, and a LAN client can send ``Host: localhost`` freely. The Host
@@ -5921,8 +5959,10 @@ def _localhost_request(request: Request) -> bool:
     name = _host_name(request.headers.get("host", ""))
     if not name:
         name = (request.url.hostname or "").rstrip(".").lower()
-    # 0.0.0.0 counts as loopback: a browser pointed at it can only reach the
-    # viewer's own machine (users copy it from the uvicorn bind-address log).
+    # 0.0.0.0 is an accepted local Host spelling, not a loopback network
+    # address: a browser pointed at it can only reach the viewer's own machine
+    # (users copy it from the uvicorn bind-address log). It is accepted only
+    # because the peer above is a real loopback TCP peer.
     return name in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
@@ -6010,22 +6050,6 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     workspace = str(body.get("workspace", "")).strip()
     if not workspace:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
-    from ciao.setup_status import tcc_protected_location
-
-    protected = tcc_protected_location(workspace)
-    if protected:
-        return JSONResponse(
-            {
-                "error": (
-                    f"'{workspace}' is inside ~/{protected}, which macOS privacy "
-                    "protection blocks background services from reading — the "
-                    "Ciaobot server and menu bar would fail to start. Pick a "
-                    "folder outside ~/Desktop, ~/Documents, and ~/Downloads "
-                    "(for example ~/ciaobot)."
-                )
-            },
-            status_code=400,
-        )
     try:
         port = int(body.get("port") or config.pwa_port)
     except (TypeError, ValueError):
@@ -6228,8 +6252,13 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
     chips when they are present; otherwise it asks for the logical workspace
     name that will be assigned to the selected folder.
     """
+    from ciao import cli
     from ciao.cli import detect_vault_mode
-    from ciao.setup_status import detect_nested_workspaces
+    from ciao.setup_status import (
+        cloud_sync_warning,
+        detect_nested_workspaces,
+        macos_access_note,
+    )
 
     guard = _setup_fs_guard(request)
     if guard is not None:
@@ -6255,6 +6284,10 @@ async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
         "mode": mode,
         "vault_root": str(vault_root),
         "existing_workspaces": nested,
+        "cloud_sync_warning": cloud_sync_warning(target),
+        "macos_access_note": (
+            macos_access_note(target) if cli._verified_host_if_installed() is not None else ""
+        ),
     })
 
 
@@ -6295,16 +6328,39 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
 # computer running Ciaobot only: browsing folders and moving the install are
 # filesystem operations a phone or a remote browser has no business making.
 # "Local" is the setup routes' rule (`_localhost_request`: a loopback TCP peer
-# whose Host names loopback) plus a same-host Origin, so a DNS-rebound page on
-# this machine cannot ride the session cookie.
+# whose Host names a local address, including the accepted 0.0.0.0 spelling)
+# plus an exact same-origin Origin, so a DNS-rebound page on this machine
+# cannot ride the session cookie.
 
 
 def host_browser_request(request: Request) -> bool:
-    """A browser on the computer running Ciaobot: loopback TCP peer, loopback Host, same-host Origin/Referer.
+    """A browser on the computer running Ciaobot: loopback TCP peer, local Host, exact same-origin Origin/Referer.
+
+    The browser's own origin must match this request's origin in scheme, host
+    and effective port — a page on `http://localhost:3000` is a different
+    origin from `http://localhost:8443`, and it is not this engine's own page.
+    `Origin` is the browser's declaration and wins; `Referer` is only read
+    when there is no `Origin`. An empty header carries no origin information,
+    so it reads as absent. A request with neither is not a browser request
+    and keeps the peer/Host gating alone.
 
     Narrows a session route; grants nothing by itself (AuthMiddleware still requires the session).
     """
-    return _localhost_request(request) and _setup_finish_origin_allowed(request)
+    if not _localhost_request(request):
+        return False
+    source = request.headers.get("origin") or request.headers.get("referer")
+    if not source:
+        return True
+    try:
+        scheme = urlsplit(source).scheme.lower()
+    except ValueError:
+        return False
+    if scheme not in {"http", "https"} or scheme != request.url.scheme.lower():
+        return False
+    # `_same_origin` compares the host and the effective port; a proxy-declared
+    # host cannot stand in for the browser's own origin here, because a request
+    # carrying proxy headers never reaches this point (`is_loopback_client`).
+    return _same_origin(request, source)
 
 
 def _workspace_move_local(request: Request) -> bool:
@@ -6323,11 +6379,14 @@ def _workspace_move_guard(request: Request) -> JSONResponse | None:
 async def workspace_move_status_endpoint(request: Request) -> JSONResponse:
     """Where the workspace is, whether this browser may move it, and the last move."""
     from ciao import workspace_move
+    from ciao.setup_status import cloud_sync_warning
 
     op = await asyncio.to_thread(workspace_move.read_operation)
+    root = Path(request.app.state.config.workspace_root).resolve()
     return JSONResponse(
         {
-            "workspace_root": str(Path(request.app.state.config.workspace_root).resolve()),
+            "workspace_root": str(root),
+            "cloud_sync_warning": cloud_sync_warning(root),
             "local": _workspace_move_local(request),
             # On Linux the service account cannot stop its own root-owned
             # unit; the administrator moves it with `sudo ciao workspace-move`.
@@ -9434,16 +9493,20 @@ def _housekeeping_context(request: Request) -> "operator_actions.DetectionContex
     The package-status fetcher is the cached one the app already owns (see
     ``make_cached_package_status`` in ``app.py``), so detection never blocks
     on GitHub. The schedule manager, when present, exposes the missed one-time
-    reminders.
+    reminders. ``provider_checks_fetcher`` is the cached, offline provider-CLI
+    check (``provider_versions.make_cached_checks``); absent, the provider
+    update tile stays silent.
     """
     from ciao import operator_actions
 
     config = request.app.state.config
     fetcher = getattr(request.app.state, "package_status_fetcher", None)
+    provider = getattr(request.app.state, "provider_checks_fetcher", None)
     return operator_actions.DetectionContext(
         config=config,
         schedule_store=getattr(request.app.state, "schedule_manager", None),
         package_status=fetcher if callable(fetcher) else None,
+        provider_checks=provider if callable(provider) else None,
     )
 
 
@@ -9535,7 +9598,8 @@ async def run_housekeeping_action(request: Request) -> JSONResponse:
 async def dismiss_housekeeping_action(request: Request) -> JSONResponse:
     """Record a "not now" for one action, then re-detect and return the list.
 
-    Only ask-style actions (e.g. the GitHub star nudge) accept a dismissal; it
+    Only ask-style and advisory actions (the GitHub star nudge, a provider
+    update) accept a dismissal; it
     writes a suppression receipt so the tile stops surfacing for a while. The
     response shape mirrors ``run_housekeeping_action`` so the client re-renders
     the strip the same way. Unknown id is 404, never 500.

@@ -1037,6 +1037,80 @@ is_set_up_workspace() {
     [ -f "$1/.env" ] && grep -Eq "^[[:space:]]*CIAO_WORKSPACES[[:space:]]*=[[:space:]]*[\"']?[^[:space:]\"']" "$1/.env"
 }
 
+port_owner() {
+    # The programs listening on <port>, one name per line; nothing when the
+    # port is free or lsof is not installed. `lsof` is the only lister macOS
+    # and Linux both ship, so its absence costs the owner, never the port.
+    #
+    # The name is what the holding process chose for itself, so it is
+    # sanitised before it is ever printed: a carriage return or an ANSI
+    # escape in it would otherwise reach the operator's terminal verbatim and
+    # could rewrite the line it appears on. Only printable bytes survive.
+    command -v lsof >/dev/null 2>&1 || return 0
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null \
+        | awk 'NR > 1 { print $1 }' \
+        | tr -c '[:print:]' ' ' \
+        | tr '\n' ' ' \
+        | sed 's/  */ /g; s/^ //; s/ $//'
+}
+
+python_probe_port() {
+    # The verified wheel's own probe: `ciao.port_in_use.port_is_available`
+    # binds the port the way the engine does. It answers 0 (the port is
+    # free), 1 (the port is taken) and 2 (the probe could not run at all).
+    #
+    # The three are told apart on purpose: a probe that could not run - a
+    # wheel that would not install, an interpreter that would not start -
+    # says nothing about the port, and reading it as "taken" would refuse
+    # an install on a guess.
+    "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
+        python -I -c 'import sys
+from ciao.port_in_use import port_is_available
+try:
+    free = port_is_available(int(sys.argv[1]))
+except Exception:
+    sys.exit(2)
+sys.exit(0 if free else 1)' \
+        "$1" 2>/dev/null
+}
+
+check_port_available() {
+    # Refuse an install whose port is already held by something that is not
+    # Ciaobot (#1654). The engine would die on the bind and the service
+    # manager would respawn it forever, and the operator was told the engine
+    # was "still starting" with a dead sign-in link.
+    #
+    # Ciaobot's own engine already serving the port is legitimate: that is a
+    # re-install of a running engine, and the port is bound by the very
+    # thing being replaced.
+    port=$1
+    workspace=$2
+    # `set -e` is on, so the probe's own status is captured rather than
+    # allowed to end the script.
+    probe_rc=0
+    python_probe_port "$port" || probe_rc=$?
+    case "$probe_rc" in
+        0) return 0 ;;
+        2) return 0 ;;
+    esac
+    if [ -n "$CURL" ]; then
+        # Something is answering on that port. It has to *look* like
+        # Ciaobot's own engine, not merely answer: a hostile process on the
+        # port could answer anything, and the exemption is what lets the
+        # install continue. The engine's startup status carries a "version"
+        # field, so a response that does not is not the engine.
+        status=$("$CURL" -fsS -m 2 "http://localhost:$port/api/startup-status" 2>/dev/null || true)
+        case "$status" in
+            *'"version"'*) return 0 ;;
+        esac
+    fi
+    owner=$(port_owner "$port")
+    if [ -n "$owner" ]; then
+        fail "port $port is already in use by $owner. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port"
+    fi
+    fail "port $port is already in use by another program. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port"
+}
+
 check_host_workspace() {
     # A host hand-over moves an engine that is *already running*, and the
     # workspace it runs in is the one that engine's own plist names: the `.env`
@@ -1349,6 +1423,40 @@ if [ -n "$host_entry" ]; then
     # deletes it by hand. Exit 1 is reserved for a release that did not verify
     # (a manifest/selection error or an archive that does not match its signed
     # digest), and stops the run.
+    #
+    # A superseded host is replaced by this one (#1659). Its presence before the
+    # install is what makes a successful install a replacement, and a
+    # replacement changes the bytes macOS granted Accessibility/Automation to,
+    # so the user is told once.
+    #
+    # The revision that is superseded is read from the wheel itself
+    # (`ciao.server_host.LEGACY_HOST_REVISION`), never written here: a copy of
+    # the number in this script would silently stop matching on the next
+    # revision bump, and the warning is exactly what a user needs then. The
+    # installed revision is read from the sealed plist with `plutil`, the one
+    # tool macOS has for exactly this. A plist it cannot read is not proof of
+    # anything, so it only ever means "not a superseded host": the warning is a
+    # courtesy, and the replacement itself is the installer's decision, made
+    # from the ownership record, not from this.
+    host_superseded_plist="$HOME/Applications/Ciaobot Server.app/Contents/Info.plist"
+    host_replacing=0
+    superseded_revision=$(
+        "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
+            python -I -c 'from ciao.server_host import LEGACY_HOST_REVISION; print(LEGACY_HOST_REVISION)' \
+            2>/dev/null || true
+    )
+    if [ -n "$superseded_revision" ] && [ -f "$host_superseded_plist" ]; then
+        # `plutil` is looked up on PATH, not by its absolute path: the
+        # installer is exercised on Linux CI too, where macOS's own plutil is
+        # not there. A missing plutil only means "not a superseded host".
+        host_revision=$(
+            plutil -extract CFBundleVersion raw -o - \
+                "$host_superseded_plist" 2>/dev/null || true
+        )
+        if [ "$host_revision" = "$superseded_revision" ]; then
+            host_replacing=1
+        fi
+    fi
     host_rc=0
     "$uv" run --quiet --no-project --python "$PYTHON_VERSION" --with "$wheel" \
         python -I -m ciao.server_host_install install \
@@ -1357,7 +1465,12 @@ if [ -n "$host_entry" ]; then
         --archive "$host" \
         --public-key "$RELEASE_PUBLIC_KEY" >/dev/null || host_rc=$?
     case "$host_rc" in
-        0) echo "Ciaobot Server host installed and recorded." ;;
+        0)
+            echo "Ciaobot Server host installed and recorded."
+            if [ "$host_replacing" -eq 1 ]; then
+                echo "warning: Ciaobot Server was replaced by a new build, so macOS will ask again for its Accessibility and Automation permissions; approve them in System Settings > Privacy & Security" >&2
+            fi
+            ;;
         3) echo "warning: the Ciaobot Server host was not installed (see above); the engine install continues" >&2 ;;
         *) fail "the signed server host could not be installed" ;;
     esac
@@ -1431,11 +1544,10 @@ install_step "could not write the install receipt" \
 # service, no agent: the one thing it must not become is a second writer for a
 # runtime root a host owns.
 if [ "$migrate_path" != client ]; then
-    # --yes turns off every guard in `ciao setup` (a LaunchAgent macOS TCC will
-    # block, a health check that never comes up, a service silently re-pointed
-    # at a different workspace), so it is passed only for the workspace this
-    # script detected the engine already running in - the same rule install.sh
-    # applies.
+    # --yes turns off every guard in `ciao setup` (a health check that never
+    # comes up, a service silently re-pointed at a different workspace), so it
+    # is passed only for the workspace this script detected the engine already
+    # running in - the same rule install.sh applies.
     setup_yes=
     if [ -z "$workspace" ]; then
         workspace=
@@ -1470,6 +1582,21 @@ if [ "$migrate_path" != client ]; then
     # the path it found, so it is cleared for this one command.
     workspace=$(CDPATH= cd -- "$workspace" && pwd -P)
 
+    # The port is checked before the service is registered: an engine that
+    # cannot bind dies and is respawned forever, and the operator was told
+    # the engine was "still starting" with a dead sign-in link (#1654).
+    # Ciaobot's own engine already serving the port is legitimate - that is
+    # a re-install of a running engine - so the check skips it.
+    #
+    # The port is the one the workspace names, and a workspace that has none
+    # yet gets the default: setup writes the same value, so the check and
+    # the engine agree on which port is at stake.
+    if [ "$no_start" -eq 0 ]; then
+        port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
+        [ -n "$port" ] || port=8443
+        check_port_available "$port" "$workspace"
+    fi
+
     # Idempotent, and it preserves an existing .env and its password. stderr is
     # left visible so setup's own guard message reaches the user.
     set -- --workspace "$workspace" --python "$ciao"
@@ -1491,10 +1618,12 @@ if [ "$migrate_path" != client ]; then
 fi
 
 if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
-    install_step "could not start the engine; try: $ciao service status" \
-        "$ciao" service start --workspace "$workspace" --json >/dev/null
+    # The workspace's own `.env` is the authority on the port, and setup has
+    # just written it.
     port=$(awk -F= '/^PWA_PORT=/{print $2}' "$workspace/.env" 2>/dev/null | tr -d '"' | tail -1)
     [ -n "$port" ] || port=8443
+    install_step "could not start the engine; try: $ciao service status" \
+        "$ciao" service start --workspace "$workspace" --json >/dev/null
     # A slow first boot is not a failed install: the plist is written, so say
     # so instead of failing an install that did everything it promised. A
     # migration is the exception - the app's own agent is about to be retired,
@@ -1504,11 +1633,30 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
     if [ "$migrate_path" = host ]; then
         health_attempts=90
     fi
+    # Only a record written after this point describes this run.
+    : > "$tmp/health-wait-started"
     attempt=0
     healthy=0
+    port_in_use=0
     while [ "$attempt" -lt "$health_attempts" ]; do
+        # An engine that could not bind its port cannot answer this, so the
+        # record it left outside the workspace is read too (#1654). Its path
+        # is ciao.port_in_use.port_in_use_path() (PORT_IN_USE_FILENAME):
+        # keep both in sync.
+        port_record="$HOME/.local/state/ciaobot/port-in-use.txt"
+        if [ -f "$port_record" ] && [ "$port_record" -nt "$tmp/health-wait-started" ]; then
+            port_in_use=1
+            break
+        fi
         status=$("$CURL" -fsS "http://localhost:$port/api/startup-status" 2>/dev/null || true)
         if [ -n "$status" ]; then
+            # The engine reports a bind failure as an explicit flag, so the
+            # installer can tell "the port is taken" from "still starting"
+            # without reading the phase's prose (#1654).
+            if printf '%s' "$status" | grep -q '"port_in_use":[[:space:]]*true'; then
+                port_in_use=1
+                break
+            fi
             if [ "$migrate_path" != host ]; then
                 healthy=1
                 break
@@ -1531,12 +1679,43 @@ if [ "$no_start" -eq 0 ] && [ "$migrate_path" != client ]; then
         attempt=$((attempt + 1))
         "$SLEEP" 1
     done
-    if [ "$healthy" -eq 0 ]; then
+    # Written by the supervisor when macOS denies the workspace; the path is
+    # ciao.workspace_access.denial_path() (DENIAL_FILE_NAME): keep both in sync.
+    access_denied=
+    denial_record="$HOME/.local/state/ciaobot/workspace-access-denied.txt"
+    if [ "$denial_record" -nt "$tmp/health-wait-started" ]; then
+        access_denied=$(cat "$denial_record" 2>/dev/null || true)
+    fi
+    if [ "$port_in_use" -ne 0 ]; then
+        # The engine could not bind its port (#1654). The install itself
+        # succeeded - the wheel is installed and the workspace is set up - but
+        # the engine is not serving, so no sign-in link is printed: a link
+        # that cannot work is worse than no link.
+        owner=$(port_owner "$port")
+        if [ -n "$owner" ]; then
+            echo "Ciaobot engine installer: port $port is already in use by $owner. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port" >&2
+        else
+            echo "Ciaobot engine installer: port $port is already in use by another program. Free port $port, or set PWA_PORT in $workspace/.env to serve on a different port" >&2
+        fi
+        engine_ready=0
+    elif [ "$healthy" -eq 0 ]; then
+        engine_ready=0
         if [ "$migrate_path" = host ]; then
+            if [ -n "$access_denied" ]; then
+                abort_install "$access_denied"
+            fi
             abort_install "the new engine did not answer on http://localhost:$port with version $version within ${health_attempts}s; check: $ciao service status"
         fi
-        echo "Ciaobot engine installer: the engine is still starting; check: ciao service status" >&2
+        if [ -n "$access_denied" ]; then
+            echo "Ciaobot engine installer: $access_denied" >&2
+        else
+            echo "Ciaobot engine installer: the engine is still starting; check: ciao service status" >&2
+        fi
+    else
+        engine_ready=1
     fi
+else
+    engine_ready=1
 fi
 
 if [ "$migrate_path" = client ]; then
@@ -1619,7 +1798,7 @@ echo "Ciaobot engine $version installed."
 echo "  ciao:      $ciao"
 echo "  workspace: $workspace"
 url=
-if [ "$no_start" -eq 0 ]; then
+if [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ]; then
     # Printed to the terminal and nowhere else: the URL is a one-time
     # credential that signs the person at this keyboard in. A failure must not
     # reach the user as "Open Ciaobot: " with nothing after it.
@@ -1633,10 +1812,15 @@ if [ "$no_start" -eq 0 ]; then
     echo "Open Ciaobot: $url"
     echo "This link signs you in once. Do not share it."
 fi
+# `ciao setup` leaves this marker only when it generated the password itself
+# (ciao.setup_marker.WELCOME_PENDING_FILENAME); the app shows it once on Home.
+if [ "$migrate_path" != client ] && [ -f "$workspace/.runtime/welcome-pending" ]; then
+    echo "Your Ciaobot password was created for you. Ciaobot shows it once on Home on this computer: save it in your password manager."
+fi
 case ":${PATH:-}:" in
     *":$bin_dir:"*) ;;
     *) echo "Add ciao to your PATH: $uv tool update-shell" ;;
 esac
-if [ -t 1 ] && [ "$no_start" -eq 0 ] && command -v open >/dev/null 2>&1; then
+if [ -t 1 ] && [ "$no_start" -eq 0 ] && [ "$engine_ready" -eq 1 ] && command -v open >/dev/null 2>&1; then
     open "$url" >/dev/null 2>&1 || true
 fi

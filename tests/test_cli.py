@@ -1499,6 +1499,59 @@ def test_setup_url_reads_port_from_env(tmp_path: Path, capsys) -> None:
     assert "http://localhost:9999/?setup=" in capsys.readouterr().out
 
 
+def test_service_start_reports_the_port_when_the_engine_cannot_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """`ciao service start` has to name the port, not just "it failed".
+
+    The engine leaves with the port-in-use exit code when it could not bind
+    its port. The CLI reads that code off the launchd job and turns it back
+    into the sentence the operator needs: which port is taken, and the two
+    ways out.
+    """
+    import subprocess
+
+    from ciao import macos_service
+    from ciao.port_in_use import PORT_IN_USE_EXIT_CODE
+
+    runtime = macos_service.DesktopRuntime(
+        workspace=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "workspace" / ".runtime"),
+        port=8443,
+        server_plist=str(tmp_path / "LaunchAgents" / "com.ciao.server.plist"),
+        python_path="/opt/ciao/bin/python3",
+    )
+    Path(runtime.server_plist).parent.mkdir(parents=True, exist_ok=True)
+    Path(runtime.server_plist).write_bytes(b"")
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(macos_service, "discover_runtime", lambda **_: runtime)
+    # The test fakes the platform, and the macOS path then asks launchd for
+    # the job in this user's domain - a uid `os.getuid` cannot give on
+    # Windows, where the test still runs. The domain is not what is under
+    # test here, so it is fixed (the same isolation #1666 applied).
+    monkeypatch.setattr(macos_service, "_getuid", lambda: 501)
+
+    def _run(command, **_kwargs):
+        printed = (
+            "gui/501/com.ciao.server = {\n"
+            "\tstate = not running\n"
+            f"\tlast exit code = {PORT_IN_USE_EXIT_CODE}\n"
+            "}\n"
+            if command[1] == "print"
+            else ""
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=printed, stderr="")
+
+    monkeypatch.setattr(macos_service, "_launchctl", lambda args, runner=None: _run(["launchctl", *args]))
+
+    assert cli.main(["service", "start"]) == 1
+
+    err = capsys.readouterr().err
+    assert "8443" in err
+    assert "already in use" in err
+    assert "PWA_PORT" in err
+
+
 def test_auth_print_only_outputs_terminal_command(capsys) -> None:
     assert cli.main(["auth", "opencode", "--print-only"]) == 0
 
@@ -4578,3 +4631,86 @@ def test_a_run_with_no_registered_name_plans_no_entries_and_says_so(
         workspace="client-a",
     ).entries[0]
     assert entry.verified == date(2024, 1, 5)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_rotate_setup_token_writes_an_owner_only_file(tmp_path):
+    from ciao.os_support.private import is_private
+
+    token_path = tmp_path / ".runtime" / "setup-token"
+    token_path.parent.mkdir()
+    token_path.write_text("old\n", encoding="utf-8")
+    os.chmod(token_path, 0o644)
+
+    token = cli._rotate_setup_token(tmp_path)
+
+    assert token_path.read_text(encoding="utf-8") == token + "\n"
+    assert is_private(token_path)
+
+
+def test_setup_url_reports_a_token_create_race_without_a_traceback(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    def raced(*args, **kwargs):
+        raise FileExistsError("setup-token")
+
+    monkeypatch.setattr(cli, "open_private", raced)
+
+    assert cli.main(["setup-url", "--workspace", str(tmp_path)]) == 1
+
+    err = capsys.readouterr().err.strip()
+    assert len(err.splitlines()) == 1
+    assert "setup token" in err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_ensure_setup_token_tightens_an_older_world_readable_file(tmp_path: Path) -> None:
+    from ciao.os_support.private import is_private
+
+    token_path = tmp_path / ".runtime" / "setup-token"
+    token_path.parent.mkdir()
+    token_path.write_text("old-token\n", encoding="utf-8")
+    os.chmod(token_path, 0o644)
+
+    assert cli._ensure_setup_token(tmp_path) == "old-token"
+    assert is_private(token_path)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="renders a macOS hosted plist")
+def test_setup_command_prints_the_macos_access_note(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    from tests.test_server_host_activation import _verified_host
+
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    args = [
+        "setup",
+        "--workspace",
+        str(home / "Documents" / "ws"),
+        "--auth-token",
+        "test-token",
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(tmp_path / "Applications"),
+        "--python",
+        _fake_python(tmp_path),
+    ]
+
+    host = _verified_host()
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: host)
+    assert cli.main(args) == 0
+    err = capsys.readouterr().err
+    assert "Note:" in err and "Ciaobot Server" in err
+
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: None)
+    other = [*args[:2], str(home / "Documents" / "ws2"), *args[3:], "--yes"]
+    assert cli.main(other) == 1
+    err = capsys.readouterr().err
+    assert "Ciaobot Server" in err and "Error:" in err
+    assert not (home / "Documents" / "ws2").exists()

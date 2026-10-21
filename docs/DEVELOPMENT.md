@@ -302,8 +302,10 @@ while the server is running, because the live schedule store may be writing it.
 - **`develop`** is the integration branch. Feature and fix PRs target `develop`.
 - **`main`** is release-only. Direct pushes and merges to `main` are blocked; only release PRs land there.
 - **CI** (`.github/workflows/ci.yml`) runs on pushes to `develop` and on pull requests into `develop` or `main`.
-  Every PR runs the `linux-server` job: `mypy ciao`, `pytest -n auto tests/`,
-  `npm test`, `npm run build` and a package smoke test, in about 5 minutes. The
+  Every PR runs two Linux jobs in parallel: `linux-server` (`mypy ciao`,
+  `pytest -n auto tests/`, about 4 minutes) and `linux-web` (`npm test`,
+  `npm run build` and a package smoke test of the built wheel, about 3
+  minutes). The
   full macOS `test` job (coverage, browser tests, and the engine wheel this
   branch would publish, installed into a throwaway venv and cold-started — the
   launchd, installer, engine-update and migration coverage — about 18 minutes)
@@ -313,11 +315,16 @@ while the server is running, because the live schedule store may be writing it.
   no diff for it to react to; a macOS-only regression in a `develop` PR shows up
   on the post-merge push run instead.
   The `windows` job (`windows-latest`, every PR and push) is blocking since
-  #696's C9: it imports every `ciao` module, runs `mypy ciao` (natively win32),
-  `pytest -n auto tests/` and `npm test`, and fails on any of the four. Every
-  gate runs even after an earlier one failed, the job summary lists the four
-  counts and the failing tests by name, and the full logs are in its
-  `windows-results` artifact. Its install.ps1 steps (dry runs under both
+  #696's C9. On every run it imports every `ciao` module and runs `mypy ciao`
+  (natively win32). Its job-level `WINDOWS_FULL` flag follows the macOS gate:
+  on pushes and PRs into `main` it also runs `pytest -n auto --durations=30
+  tests/` and `npm test`, which take about 15 minutes on a hosted runner, so a
+  PR into `develop` skips them and waits about 2 minutes. A Windows test
+  failure therefore surfaces on the post-merge push run, and `/ciao-release`
+  will not cut while that run is red. The job fails on any gate that ran. Every
+  gate runs even after an earlier one failed, the job summary lists the counts
+  and the failing tests by name, and the full logs are in its
+  `windows-results` artifact. Its install.ps1 steps (full runs only) (dry runs under both
   PowerShell hosts, the analyzer, and a real end-to-end install and
   `-Uninstall`) stay advisory: a hosted runner has no interactive logon, so a
   task that does not start there is a datum, not a verdict. Known flaky
@@ -331,6 +338,33 @@ while the server is running, because the live schedule store may be writing it.
   need one on Windows. The suite also points `LOCALAPPDATA` at each test's
   home, so a machine with Ciaobot installed does not hand its real logon-task
   workspace to config-discovery tests.
+  One step runs on **every** PR rather than only on the `WINDOWS_FULL` ones:
+  `Windows ConPTY terminal tests`, which is `pytest -q -rfE
+  tests/test_os_terminal_windows.py` with a 15-minute bound, so a test that
+  hangs on a pipe fails the job instead of holding the runner. The native
+  Windows terminal (`ciao/os_support/terminal_windows.py`, a ConPTY driven
+  through `ctypes`) can only be proved on Windows — a POSIX run exercises
+  the ordering of the native calls with a fake, never the pseudoconsole
+  itself — so the real tests run there before the change is merged rather
+  than after it. The step runs on the `windows-latest` image; as of
+  2026-10-21 that is Windows Server 2025, whose `ClosePseudoConsole` returns
+  immediately (11 24H2 and later). The fake covers the orderings that also
+  work on the older versions, where that call waits for the clients to
+  disconnect: the output pipe is closed before the pseudoconsole, on the
+  normal close and on the failed-spawn rollback alike, and the reader is
+  stopped and joined before the pipe goes. The fake's `ClosePseudoConsole`
+  blocks until the output pipe is closed, exactly as those versions do, so
+  an order that would deadlock there fails the fake too; a read on a pipe
+  whose write end is open blocks as well, so the rollback is pinned to
+  close the pipe and never read from it. What only Windows can answer is
+  whether a pseudoconsole really carries the shell's output, the interrupt
+  and the resize: the real tests wait for text the shell has to compute from
+  code points, so a terminal that only echoed the command back cannot pass
+  them. Their input lines end with a bare `\r`: PowerShell reads CR as Enter
+  while LF means "insert a newline" in its line editor, so a `\r\n` leaves a
+  `>>` continuation line open and the next command joins that block instead
+  of running — which is exactly what made the Ctrl-C case look like a dead
+  terminal on the first native run.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
@@ -362,7 +396,7 @@ One-time GitHub setup for a fresh clone or repo admin:
 ./scripts/configure-github-branches.sh
 ```
 
-That sets `develop` as the default branch and enables pull-request + CI requirements on `develop` and `main`.
+That sets `develop` as the default branch and protects both branches. `develop` requires `linux-server`, `linux-web` and `windows`, with admins exempt so the post-release sync PR can merge. `main` takes changes only through a pull request and requires those three plus the macOS `test` job, for admins too.
 
 ### GitHub code scanning
 
@@ -447,6 +481,7 @@ ciao dev
 - Frontend: `http://localhost:5173`
 - Dev backend: `http://127.0.0.1:8543`
 - `ciao dev` intentionally avoids `localhost:8443` because editor/webview proxy processes can hijack that port and serve stale UI.
+- The login page's *Sign in on this computer* (`POST /api/auth/host-sign-in`) cannot be exercised through `:5173`: the Vite proxy forwards `Host: localhost:5173` to `:8543`, and the route refuses a Host port that differs from its listening socket (the guard against redirecting the one-time token to another local port), so it answers 403 `not_on_host`. Check it against a built engine (`npm run build`, then `http://localhost:8543`). Do not relax that check for dev.
 - A development backend refuses to start when another Ciaobot backend already owns the same runtime directory. Stop the launchd service first, or use a separate `CIAO_RUNTIME_ROOT`; changing only the port is not sufficient because both servers would otherwise mutate the same project/chat registry.
 
 ## Testing
@@ -1755,7 +1790,10 @@ credential resources covered in both absolute and workspace-relative spellings
 when a custom runtime root is configured. Keep form constraints and explicit
 empty-versus-cancel semantics in the provider/PWA contract. Native form and
 permission cards stay mounted until a matching `(chat_id, session_id,
-request_id)` response is acknowledged. The PWA keeps complete response frames
+request_id)` response is acknowledged. Permission and form requests from
+task/subagent child sessions (known from `session.created.parentID`, or the
+server's active-session map) surface with the child's own session id; every
+other child event stays filtered. The PWA keeps complete response frames
 in memory only (never localStorage), queues them across closed or failed
 sockets, and retries them on reconnect; a timeout makes the card retryable but
 does not discard the queued frame. Backend state is cleared only after a typed

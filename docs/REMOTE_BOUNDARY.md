@@ -35,27 +35,81 @@ carried by the session.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update
-  coordinator's drain handshake, and `/api/admin/restart-blockers` (the
-  reason-tagged list `ciao service` gates restart/stop on). It requires a loopback TCP source address, a loopback `Host` (`localhost`, `127.0.0.1`, `::1`) and, when the request carries `Origin` or `Referer`, one naming this exact origin, for every method. The peer address is what makes a caller local; the `Host` check refuses a DNS-rebound page on this machine, which is a loopback peer whose `Origin` matches its own (attacker-chosen) `Host`. A request that fails takes the normal session path, so Settings still reads restart blockers with its session. A loopback peer carrying
+  coordinator's drain handshake, `/api/admin/restart-blockers` (the
+  reason-tagged list `ciao service` gates restart/stop on), and `POST /api/auth/host-sign-in` (it mints a one-time setup token and opens it, through an owner-only file, in the host's own default browser; it returns nothing a caller could reuse, so another local user or process can at most open a tab on the owner's screen, 10 s cooldown; the redirect port is the socket's own listening port, never the Host header's, and the token file is recreated owner-only on every mint). It requires a loopback TCP source address, a loopback `Host` (`localhost`, `127.0.0.1`, `::1`) and, when the request carries `Origin` or `Referer`, one naming this exact origin, for every method. The peer address is what makes a caller local; the `Host` check refuses a DNS-rebound page on this machine, which is a loopback peer whose `Origin` matches its own (attacker-chosen) `Host`. A request that fails takes the normal session path, so Settings still reads restart blockers with its session. A loopback peer carrying
   reverse-proxy headers (`Forwarded`, `Via`, any `X-Forwarded-*`,
   `X-Real-IP`, `X-Client-IP`, `True-Client-IP`, `CF-Connecting-IP`, any
   `Tailscale-*`) is not local: `tailscale serve` and
   other proxies on this machine connect from 127.0.0.1 on behalf of remote
   callers. `is_loopback_client` is the only "is it local" check in the
   codebase and nothing else grants access on it.
+- `host_browser_request` (`ciao/web/routes_api.py`) is the "browser on the
+  computer running Ciaobot" predicate, and it is an **exact origin** check, not
+  a host-name check. It requires all of:
+  - a loopback TCP peer (`is_loopback_client`): a real local connection, with
+    no reverse-proxy headers, so a proxied caller is not the host;
+  - a local `Host`: `localhost`, `127.0.0.1`, `::1`, or the accepted local
+    spelling `0.0.0.0` (users copy that from the bind-address log; it is a
+    local `Host` spelling gated by the loopback peer, not a loopback network
+    address);
+  - a browser origin that matches the request's own origin in **scheme, host
+    and effective port**. `Origin` is the browser's declaration and takes
+    precedence; `Referer` is only read when there is no `Origin`. A
+    cross-port (`http://localhost:3000` against an engine on `:8443`),
+    cross-scheme, cross-host, `null`, malformed or credential-bearing value is
+    a refusal. A request carrying neither header is not a browser request and
+    keeps the peer/Host gating alone.
+  The port matters: two pages on `localhost` at different ports are different
+  origins, and only the engine's own page is the host browser.
 - Moving the install workspace (`/api/workspace-move/dirs`, `/plan` and the
-  `POST`) needs the session *and* `is_loopback_client`, a localhost `Host` and a
-  same-host `Origin`: browsing folders and moving the install are for the
+  `POST`) needs the session *and* `is_loopback_client`, a local `Host` and a
+  same-origin `Origin`: browsing folders and moving the install are for the
   computer running Ciaobot. The peer check narrows a session route here; it
   grants nothing. A remote browser gets the CLI command instead.
 - Opening a terminal on the engine's machine (`GET`/`POST /api/host/terminal`)
   needs the session *and* the same host-browser rule (`host_browser_request`:
-  loopback peer, localhost `Host`, same-host `Origin`/`Referer`). It is
+  loopback peer, local `Host`, same-origin `Origin`/`Referer`). It is
   deliberately not in `_LOOPBACK_ONLY_API`, because that set lets a loopback peer
   skip the session, and any local process or DNS-rebound page could then open
   terminals. The body carries an action id or a chat/project id, never a command
   or a path. `GET` reports `not_on_host` (200) to a signed-in remote browser so it
   can hide the buttons; `POST` answers 403.
+- `POST /api/auth/settings` (change the PWA password) needs the session and,
+  from anywhere but the host, the current password. A browser on the host
+  (`host_browser_request`: loopback peer with no proxy headers, local `Host`,
+  and an exact same-origin `Origin`/`Referer` that includes the port) may skip
+  the current password; the session is never
+  skipped, so this route stays out of `_LOOPBACK_ONLY_API`. `GET
+  /api/auth/settings` reports `on_host` from the same predicate so the card can
+  hide the field. A `tailscale serve` or other proxied caller is not the host.
+  An SSH local forward counts as the host; that caller can already read `.env`.
+  Any password change re-keys the session signer, so every other device is
+  signed out and must sign in with the new password.
+- The browser terminal's grant (`ciao_terminal`) is revoked by the auth
+  actions, and it is revoked by the *bearer*, never by the session. A
+  `POST /api/auth/logout` revokes the grant that request presents and
+  nothing else: two browsers signed in inside the same second can hold
+  byte-identical `ciao_session` cookies, so the login cookie cannot name
+  a browser, and revoking "the grant for this session" would end another
+  browser's terminal. A logout that presents no terminal cookie revokes
+  nothing. A *successful* `POST /api/auth/settings` password change ends
+  **every** grant, on every browser, and clears the `ciao_terminal` cookie
+  — the password is the terminal's own credential, so every browser has to
+  unlock again, including the one that made the change. A refused password
+  change ends nothing. The grant is revoked here; the terminal socket's own
+  re-check against this store is the terminal-stream child's work and does
+  not exist yet, so no socket is closed by this today. The signed session
+  cookie remains required for every route either way, and neither action
+  names a user or a device: there are no per-device identities to revoke
+  against.
+- The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
+  need the session *and* `host_browser_request`, and are not in
+  `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails
+  `is_loopback_client` (the `Tailscale-*`/`X-Forwarded-For` headers) and the
+  loopback `Host` check. The password is returned only while
+  `.runtime/welcome-pending` exists; dismissing or changing the password deletes
+  it. An SSH port-forward looks local, and anyone with SSH to the host can
+  already read `.env`.
 - Model-authored HTML is served from `/api/workspace-html` under a sandboxing
   CSP (`sandbox allow-scripts`, no `allow-same-origin`, `connect-src 'none'`,
   `form-action 'none'`), so an artifact cannot reach the API or the local-only
@@ -66,9 +120,15 @@ carried by the session.
 - There is no native capability of any kind left: the macOS app and its shell
   are retired (`#579`), so a remote browser gets nothing a local one does not,
   and `trigger_app_update` does not exist. A browser is a local control path only
-  through session routes that also require the host: `/api/workspace-move*`,
-  `/api/host/terminal` and `POST /api/settings/providers/{provider}/connect`
-  check the loopback peer, a loopback `Host` and a same-host `Origin`;
+  through session routes that also require the host: `/api/workspace-move/dirs`,
+  `/api/workspace-move/plan`, `POST /api/workspace-move`,
+  `/api/host/terminal`, `GET /api/welcome/password`, `POST /api/welcome/open-folder`,
+  `POST /api/settings/providers/{provider}/connect` and `POST /api/auth/settings`
+  (current-password exemption only)
+  check the loopback peer, a local `Host` and an exact same-origin `Origin`
+  (scheme, host and effective port);
+  `GET /api/workspace-move` is session-only and reports `local: false` for a
+  non-host browser;
   `/api/workspace-open` checks the loopback peer only. Each refuses a non-host
   peer; Connect answers a remote browser 403 `not_on_host` with the sign-in
   `command` to run on the host.

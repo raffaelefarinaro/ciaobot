@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import plistlib
 import re
 import shlex
 import shutil
@@ -20,6 +21,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 from typing import Iterable, Mapping, Any
 
 from ciao import provider_registry
@@ -88,6 +90,7 @@ def clear_claude_discovery_cache() -> None:
     _claude_mcps_cache = None
     _claude_skills_cache = None
     _claude_mcps_generation += 1
+    _CLI_VERSION_CACHE.cache_clear()
 
 
 def _acquire_mcps_probe() -> threading.Event | None:
@@ -134,10 +137,10 @@ def detect_nested_workspaces(vault_path: Path) -> list[str]:
     )
 
 
-# macOS TCC (privacy) protects these home subfolders. A launchd-spawned
-# background agent has no access grant for them, so a workspace placed inside
-# one fails at runtime with EPERM ("Operation not permitted") reading its own
-# .runtime files — the server and menu bar die (exit 78). Steer setup away.
+# macOS privacy protection (TCC) guards these home subfolders. A bare-Python
+# launchd job gets no prompt and no grant (EPERM, "Operation not permitted"),
+# while the `Ciaobot Server.app` host gets the "access files in your <folder>
+# folder" prompt and its grant covers its child processes (docs/SERVER_HOST.md).
 _TCC_PROTECTED_DIRS = ("Desktop", "Documents", "Downloads")
 
 
@@ -153,6 +156,128 @@ def tcc_protected_location(path: Path | str) -> str | None:
         if resolved == base or base in resolved.parents:
             return name
     return None
+
+
+def macos_access_note(path: Path | str) -> str:
+    """One sentence for surfaces that show a workspace inside a TCC folder, or ""."""
+    protected = tcc_protected_location(path)
+    if not protected:
+        return ""
+    return (
+        f"This folder is inside ~/{protected}. The first time Ciaobot starts there, "
+        f"macOS asks to let \"Ciaobot Server\" access your {protected} folder: choose "
+        "Allow, or Ciaobot cannot start. You can change it later in System Settings → "
+        "Privacy & Security → Files and Folders."
+    )
+
+
+# Sync clients mirror these folders to the cloud. A workspace inside one gets
+# conflicted copies of files the engine is writing and a .git directory
+# synced mid-write. Setup warns and never refuses: some people sync on purpose.
+_MAC_CLOUD_STORAGE_PREFIXES = (
+    ("Dropbox", "Dropbox"),
+    ("GoogleDrive", "Google Drive"),
+    ("OneDrive", "OneDrive"),
+    ("iCloudDrive", "iCloud Drive"),
+    ("Box", "Box"),
+)
+_WINDOWS_ONEDRIVE_ENV = ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")
+
+
+def _parts_under(path: Path, base: Path) -> tuple[str, ...] | None:
+    """``path``'s parts below ``base``, trying both as written and resolved."""
+
+    def forms(p: Path) -> list[Path]:
+        out = [p.absolute()]
+        try:
+            out.append(p.resolve())
+        except (OSError, RuntimeError):
+            pass
+        return out
+
+    for candidate in forms(path):
+        for root in forms(base):
+            try:
+                return candidate.relative_to(root).parts
+            except ValueError:
+                continue
+    return None
+
+
+def _finder_prefs(home: Path) -> Mapping[str, Any]:
+    """Finder's preferences, or {} when unreadable."""
+    try:
+        with (home / "Library/Preferences/com.apple.finder.plist").open("rb") as handle:
+            loaded = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError, ExpatError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+_ICLOUD_FINDER_KEYS = {
+    "desktop": "FXICloudDriveDesktop",
+    "documents": "FXICloudDriveDocuments",
+}
+
+
+def cloud_synced_location(
+    path: Path | str,
+    *,
+    platform: str | None = None,
+    home: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    finder_prefs: Mapping[str, Any] | None = None,
+) -> str | None:
+    """The sync service whose folder holds ``path`` ("iCloud Drive",
+    "Dropbox", ...), or None when the path is not in a known synced folder."""
+    platform = platform or sys.platform
+    home = home if home is not None else Path.home()
+    source = env if env is not None else os.environ
+    target = Path(path).expanduser()
+    if platform == "win32":
+        for name in _WINDOWS_ONEDRIVE_ENV:
+            root = str(source.get(name, "") or "").strip()
+            if root and _parts_under(target, Path(root)) is not None:
+                return "OneDrive"
+    parts = _parts_under(target, home)
+    if not parts:
+        return None
+    folded = [part.casefold() for part in parts]
+    first = folded[0]
+    if platform == "darwin" and first in _ICLOUD_FINDER_KEYS:
+        prefs = finder_prefs if finder_prefs is not None else _finder_prefs(home)
+        if bool(prefs.get(_ICLOUD_FINDER_KEYS[first])):
+            return "iCloud Drive (Desktop & Documents)"
+    if platform == "darwin" and first == "library":
+        if len(parts) >= 2 and folded[1] == "mobile documents":
+            return "iCloud Drive"
+        if len(parts) >= 3 and folded[1] == "cloudstorage":
+            for prefix, label in _MAC_CLOUD_STORAGE_PREFIXES:
+                if parts[2].casefold().startswith(prefix.casefold()):
+                    return label
+            return "a cloud-synced folder"
+        return None
+    if first == "dropbox" or first.startswith("dropbox ("):
+        return "Dropbox"
+    if first == "google drive":
+        return "Google Drive"
+    if first.startswith("onedrive"):
+        return "OneDrive"
+    if platform == "win32" and first == "iclouddrive":
+        return "iCloud Drive"
+    return None
+
+
+def cloud_sync_warning(path: Path | str, **kwargs: Any) -> str:
+    """One sentence for every surface that shows a workspace path, or ""."""
+    service = cloud_synced_location(path, **kwargs)
+    if not service:
+        return ""
+    return (
+        f"{Path(path).expanduser()} is inside {service}. Sync apps can make "
+        "conflicted copies of files Ciaobot is writing and can break its Git "
+        "history. A folder that is not synced, such as ~/Ciaobot, is safer."
+    )
 
 
 def _check(
@@ -195,6 +320,7 @@ def _provider(
     cli_path: str = "",
     path_command: str = "",
     terminal_action: str = "",
+    release_check: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -226,6 +352,8 @@ def _provider(
         row["path_command"] = path_command
     if terminal_action:
         row["terminal_action"] = terminal_action
+    if release_check is not None:
+        row["release_check"] = release_check
     return row
 
 
@@ -240,6 +368,11 @@ def _cli_version(binary: str) -> str:
         return "installed"
     lines = (run.stdout or run.stderr).strip().splitlines()
     return lines[-1] if lines else "installed"
+
+
+# The real lru_cache'd probe. Tests replace the module attribute `_cli_version`;
+# clearing goes through this reference so it still reaches the cache.
+_CLI_VERSION_CACHE = _cli_version
 
 
 # Skills Claude Code ships itself (code-review, dataviz, ...). Nothing lists
@@ -813,8 +946,22 @@ def _claude_status(
     *,
     workspace_root: Path | None = None,
 ) -> dict[str, Any]:
+    from ciao.provider_versions import release_check
+    from ciao.providers.claude import get_bundled_claude_path
+
     binary = claude_cli_path()
     version = _cli_version(binary) if binary else "not installed"
+    bundled_path = get_bundled_claude_path()
+    check = (
+        release_check(
+            "claude",
+            version,
+            bundled=bool(bundled_path) and binary == str(bundled_path),
+            binary=binary,
+        )
+        if binary
+        else None
+    )
     claude_skills = discover_claude_system_skills()
     claude_mcps = discover_claude_mcps(workspace_root, config_path=config_path)
     if not binary:
@@ -861,6 +1008,7 @@ def _claude_status(
             skills=claude_skills,
             mcps=claude_mcps,
             cli_path=binary,
+            release_check=check,
             terminal_action="claude-login",
         )
     # No fallback on unparseable probe output: a timeout or process error is
@@ -889,6 +1037,7 @@ def _claude_status(
             mcps=claude_mcps,
             install_url=CLAUDE_INSTALL_DOCS_URL,
             cli_path=binary,
+            release_check=check,
             path_command=claude_path_hint(binary),
             terminal_action="claude-install",
         )
@@ -910,6 +1059,7 @@ def _claude_status(
         skills=claude_skills,
         mcps=claude_mcps,
         cli_path=binary,
+        release_check=check,
         # An installed CLI the terminal cannot find still needs the PATH line:
         # the user is about to be handed a command to type into that terminal.
         path_command=claude_path_hint(binary),

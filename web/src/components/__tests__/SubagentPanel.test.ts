@@ -67,6 +67,16 @@ describe('SubagentPanel', () => {
     expect(rows[1].text()).toBe('finished')
   })
 
+  // The list endpoint carries no transcript, so a run's length comes from the
+  // provider's own duration instead of the messages' timestamps.
+  it('renders the duration from duration_ms when the row has no messages', () => {
+    const w = mountPanel([
+      sub({ messages: [], duration_ms: 130_000 }),
+    ])
+    const rows = w.findAll('.subagent-row-status')
+    expect(rows[0].text()).toContain('2m 10s')
+  })
+
   it('links to the read-only transcript, and omits the link without a chatId', () => {
     const w = mountPanel([sub()], 'c1')
     const link = w.getComponent(RouterLinkStub)

@@ -40,10 +40,13 @@ for (const width of [1440, 390]) {
       await page.screenshot({ path: testInfo.outputPath('editor-dark.png'), fullPage: true })
       await page.getByRole('radio', { name: 'Done', exact: true }).click()
       await expect(page.locator('#task-resolution-text')).toBeFocused()
+      const actions = page.locator('.task-resolution-sheet .form-actions button')
+      await expect(actions).toHaveCount(2)
+      await expect(actions).toHaveText(['Mark done', 'Cancel'])
       if (width === 390) {
-        expect((await page.getByRole('button', { name: 'Complete without note' }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
+        expect((await page.getByRole('button', { name: 'Mark done' }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
       }
-      await page.getByRole('button', { name: 'Complete without note' }).click()
+      await page.getByRole('button', { name: 'Mark done' }).click()
       await expect(page.locator('#task-detail-name')).toHaveCount(0)
       await expect(page.locator('.task-card--done .task-open')).toBeFocused()
       await expect(page).toHaveURL(/\/tasks$/)

@@ -16,9 +16,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from ciao.models import AgentRequest, PermissionRequestEvent, ResultEvent
+from ciao.models import AgentRequest, PermissionRequestEvent, ResultEvent, ToolUseEvent
 from ciao.providers import opencode as opencode_module
-from ciao.providers.opencode import OpencodeProvider, _read_running_shells
+from ciao.providers.opencode import OpencodeProvider, _PendingRequest, _read_running_shells
 from tests.test_opencode_provider import _FakeEventStream, _FakeServerClient
 
 FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
@@ -224,6 +224,7 @@ async def test_background_subagent_turn_tracks_the_child(tmp_path, monkeypatch):
 
     assert events[-1].result == "LAUNCHED"
     assert provider._background_children == {"ses_bgsub_child"}
+    assert provider._child_sessions == {"ses_bgsub_child": SUB_SESSION}
 
 
 @pytest.mark.asyncio
@@ -667,3 +668,197 @@ def test_shell_and_subagent_fixtures_carry_no_private_paths():
         raw = (FIXTURES / name).read_text(encoding="utf-8")
         for needle in ("raffaelefarinaro", "claude-501", "OPENCODE_SERVER_PASSWORD", "Bearer "):
             assert needle not in raw
+
+
+# ── child-session requests (#1617) ───────────────────────────────────────
+
+P = "ses_task_parent"
+C = "ses_task_child"
+GC = "ses_task_grandchild"
+
+
+def _child_asked(rid: str, sid: str) -> str:
+    return _event(
+        "permission.asked", id=rid, sessionID=sid, action="shell",
+        resources=["gh issue list"], metadata={"command": "gh issue list"},
+        source={"type": "tool", "messageID": "msg_c", "id": "call_c"},
+    )
+
+
+def _child_form(sid: str) -> str:
+    return _event(
+        "form.created",
+        form={
+            "id": "frm_child", "sessionID": sid, "title": "Pick",
+            "fields": [{"key": "value", "title": "Value", "type": "string"}],
+        },
+    )
+
+
+def _permissions(events: list) -> list:
+    return [e for e in events if isinstance(e, PermissionRequestEvent)]
+
+
+@pytest.mark.asyncio
+async def test_child_permission_surfaces_during_the_turn(tmp_path, monkeypatch):
+    lines = [
+        _event("session.inbox.delivered", sessionID=P, inboxID="msg_ours"),
+        _event("session.created", sessionID=C, parentID=P),
+        _event("session.execution.started", sessionID=C),
+        _child_asked("per_child", C),
+        _text(C, "msg_c2", "CHILDTEXT"),
+        _event("session.execution.succeeded", sessionID=C),
+        _text(P, "msg_answer", "ANSWER"),
+        _event("session.execution.succeeded", sessionID=P),
+    ]
+    provider = OpencodeProvider(tmp_path)
+
+    events = await _run_turn(provider, monkeypatch, _TurnClient(lines), P, "ours")
+
+    asked = _permissions(events)
+    assert [(e.request_id, e.session_id) for e in asked] == [("per_child", C)]
+    assert provider._permission_requests["per_child"].session_id == C
+    assert "CHILDTEXT" not in _texts(events)
+    assert events[-1].result == "ANSWER"
+
+
+@pytest.mark.asyncio
+async def test_child_form_surfaces_and_settles_during_the_turn(tmp_path, monkeypatch):
+    lines = [
+        _event("session.inbox.delivered", sessionID=P, inboxID="msg_ours"),
+        _event("session.created", sessionID=C, parentID=P),
+        _event("session.execution.started", sessionID=C),
+        _child_form(C),
+        _event("form.replied", sessionID=C, formID="frm_child"),
+        _text(C, "msg_c2", "CHILDTEXT"),
+        _event("session.execution.succeeded", sessionID=C),
+        _text(P, "msg_answer", "ANSWER"),
+        _event("session.execution.succeeded", sessionID=P),
+    ]
+    provider = OpencodeProvider(tmp_path)
+
+    events = await _run_turn(provider, monkeypatch, _TurnClient(lines), P, "ours")
+
+    forms = [
+        e for e in events
+        if isinstance(e, ToolUseEvent) and e.tool_name == "AskUserQuestion"
+    ]
+    assert [(e.request_id, e.session_id) for e in forms] == [("frm_child", C)]
+    assert "frm_child" not in provider._question_requests
+    assert "CHILDTEXT" not in _texts(events)
+    assert events[-1].result == "ANSWER"
+
+
+@pytest.mark.asyncio
+async def test_grandchild_permission_surfaces(tmp_path, monkeypatch):
+    lines = [
+        _event("session.inbox.delivered", sessionID=P, inboxID="msg_ours"),
+        _event("session.created", sessionID=C, parentID=P),
+        _event("session.created", sessionID=GC, parentID=C),
+        _child_asked("per_gc", GC),
+        _text(P, "msg_answer", "ANSWER"),
+        _event("session.execution.succeeded", sessionID=P),
+    ]
+    provider = OpencodeProvider(tmp_path)
+
+    events = await _run_turn(provider, monkeypatch, _TurnClient(lines), P, "ours")
+
+    assert [(e.request_id, e.session_id) for e in _permissions(events)] == [
+        ("per_gc", GC)
+    ]
+    assert provider._child_sessions == {C: P, GC: P}
+
+
+@pytest.mark.asyncio
+async def test_request_from_an_unrelated_session_stays_filtered(tmp_path, monkeypatch):
+    lines = [
+        _event("session.inbox.delivered", sessionID=P, inboxID="msg_ours"),
+        _child_asked("per_stranger", "ses_stranger"),
+        _text(P, "msg_answer", "ANSWER"),
+        _event("session.execution.succeeded", sessionID=P),
+    ]
+    provider = OpencodeProvider(tmp_path)
+
+    events = await _run_turn(provider, monkeypatch, _TurnClient(lines), P, "ours")
+
+    assert _permissions(events) == []
+    assert "per_stranger" not in provider._permission_requests
+
+
+@pytest.mark.asyncio
+async def test_drain_surfaces_a_background_child_permission(tmp_path, monkeypatch):
+    provider = _drain_provider(
+        tmp_path, monkeypatch, SUB_SESSION, [_child_asked("per_bg", "ses_bgsub_child")]
+    )
+    provider._child_sessions = {"ses_bgsub_child": SUB_SESSION}
+    _script(
+        monkeypatch, provider,
+        shells=[set()],
+        active=[{"ses_bgsub_child"}, ()],
+    )
+
+    events = await _drain(provider)
+
+    assert [e.session_id for e in _permissions(events)] == ["ses_bgsub_child"]
+
+
+class _ReloadClient:
+    def __init__(self, listings: dict[str, list]) -> None:
+        self.listings = listings
+        self.paths: list[str] = []
+
+    async def get(self, path: str, *, params=None):
+        self.paths.append(path)
+        return _Response({"data": self.listings.get(path, [])})
+
+
+@pytest.mark.asyncio
+async def test_reload_polls_live_child_sessions(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    provider._child_sessions = {C: P}
+    provider._background_children = {C}
+    client = _ReloadClient({
+        f"/api/session/{C}/permission": [{
+            "id": "per_reload", "sessionID": C, "action": "shell",
+            "resources": ["ls"], "metadata": {"command": "ls"},
+        }],
+    })
+
+    events = await provider._reload_pending_requests(client, P)  # type: ignore[arg-type]
+
+    assert [e.session_id for e in _permissions(events)] == [C]
+    assert f"/api/session/{C}/permission" in client.paths
+    assert f"/api/session/{C}/form" in client.paths
+
+
+@pytest.mark.asyncio
+async def test_reload_prunes_a_vanished_child_request(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    provider._child_sessions = {C: P}
+    provider._permission_requests["per_gone"] = _PendingRequest("per_gone", session_id=C)
+    client = _ReloadClient({})
+
+    await provider._reload_pending_requests(client, P)  # type: ignore[arg-type]
+
+    assert "per_gone" not in provider._permission_requests
+
+
+@pytest.mark.asyncio
+async def test_reload_does_not_poll_finished_children(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    provider._child_sessions = {C: P}
+    client = _ReloadClient({})
+
+    await provider._reload_pending_requests(client, P)  # type: ignore[arg-type]
+
+    assert not any(C in path for path in client.paths)
+
+
+@pytest.mark.asyncio
+async def test_disconnect_forgets_child_sessions(tmp_path):
+    provider = OpencodeProvider(tmp_path)
+    provider._child_sessions = {C: P}
+
+    await provider.disconnect()
+
+    assert provider._child_sessions == {}

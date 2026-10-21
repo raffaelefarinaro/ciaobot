@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator, Sequence
@@ -279,10 +280,10 @@ _BACKGROUND_WAKE_TAIL_LINES = 50
 # Claude keeps one CLI process per chat alive between turns (#1402), so this
 # timeout also bounds how long an idle Claude CLI lives. opencode runs
 # **one `opencode serve` process per chat** — see the module
-# docstring in ciao/providers/opencode.py for why the control plane's per-chat
-# MCP token forces that. Without a reaper, a day of touching chats leaves a
-# server process, a port, an SSE stream and a stderr reader alive for every
-# one of them until the app restarts.
+# docstring in ciao/providers/opencode.py for why the chat's per-chat
+# capability token, sandbox and server password force that. Without a reaper, a
+# day of touching chats leaves a server process, a port, an SSE stream and a
+# stderr reader alive for every one of them until the app restarts.
 #
 # A provider is only reclaimed when the chat has been quiet for the timeout
 # AND has no work in flight (`active_chat_ids`, a between-turns drain with
@@ -292,6 +293,15 @@ _BACKGROUND_WAKE_TAIL_LINES = 50
 # takes (ciao/providers/opencode.py::_ensure_server,
 # ciao/providers/claude.py::_ensure_connected).
 _PROVIDER_IDLE_TIMEOUT_SECONDS = 900.0
+# Claude is the exception to the timeout above. Its provider is one CLI
+# process whose next turn resumes the same session, but rebuilding it pays a
+# cold start that measured 13-53 s on a loaded 10-core Mac — which is what the
+# SDK's initialize deadline times out on. The most recently used few are
+# therefore kept warm past the idle timeout. Both bounds matter: the count
+# stops a day of touching chats from pinning one CLI per chat, and the idle
+# age stops a chat left open for days from doing the same.
+_CLAUDE_WARM_PROVIDER_LIMIT = 4
+_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS = 3600.0
 RESTART_BLOCKER_REASONS = (
     "streaming",
     "background_agents",
@@ -544,6 +554,11 @@ class ChatInfo:
     # provider transcripts store them as ordinary user messages; history reads
     # this back so the PWA draws a notice card. Absent key = typed by the person.
     user_turn_origin: dict = field(default_factory=dict)
+    # Map of user-turn index (as str) → the client send id the PWA minted for
+    # that turn. The engine answers a repeated send id with a duplicate echo
+    # instead of starting a second turn, so a recovery resend cannot double a
+    # message that already landed.
+    user_turn_send_ids: dict = field(default_factory=dict)
     # Relative workspace path to the archived markdown transcript.
     # Set when archive_chat() succeeds; cleared on new_session().
     archive_path: str = ""
@@ -845,6 +860,10 @@ class ProjectChatManager:
         # started lazily on first use so a manager built in a test (or any
         # process with no running loop) never creates one it does not need.
         self._provider_last_used: dict[str, float] = {}
+        # Provider id per chat, recorded when the provider is built. The reaper
+        # needs it to tell a cheap-to-rebuild opencode server from a Claude CLI
+        # worth keeping warm (see `_CLAUDE_WARM_PROVIDER_LIMIT`).
+        self._provider_kind: dict[str, str] = {}
         # Consecutive failed disconnect attempts per chat, kept only while a
         # provider is being retried (see `_PROVIDER_DISCONNECT_MAX_ATTEMPTS`)
         # and cleared by `_pop_provider`, so it cannot outlive the provider it
@@ -1059,6 +1078,7 @@ class ProjectChatManager:
                 user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 user_turn_steered=dict(cd.get("user_turn_steered", {})),
                 user_turn_origin=dict(cd.get("user_turn_origin", {})),
+                user_turn_send_ids=dict(cd.get("user_turn_send_ids", {})),
                 archive_path=cd.get("archive_path", ""),
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
                 retry_prompt=cd.get("retry_prompt", ""),
@@ -1180,6 +1200,7 @@ class ProjectChatManager:
                     "user_turn_unattended": c.user_turn_unattended,
                     "user_turn_steered": c.user_turn_steered,
                     "user_turn_origin": c.user_turn_origin,
+                    "user_turn_send_ids": c.user_turn_send_ids,
                     "archive_path": c.archive_path,
                     "retry_status": c.retry_status,
                     "retry_prompt": c.retry_prompt,
@@ -3039,28 +3060,176 @@ class ProjectChatManager:
             "project": project.to_dict() if project else None,
         }
 
-    def delete_project(self, project_id: str) -> bool:
+    def _remove_project_vault_entry(self, project: ProjectInfo) -> dict[str, Any]:
+        """Remove a vault-backed project's folder, cleaning the links into it.
+
+        The folder under ``projects/active/<stem>/`` goes from disk, and the
+        inbound links to its notes are dissolved first, so nothing is left
+        pointing at a note that no longer exists. A failure leaves the project
+        row in place and rolls the staged link cleanup back, so the delete can
+        be retried instead of the project being half-gone.
+
+        Returns the cleanup report: ``{vault_entry_removed, removed_notes,
+        removed_files, edited_backlinks}``.
+        """
+        report: dict[str, Any] = {
+            "vault_entry_removed": False,
+            "removed_notes": 0,
+            "removed_files": 0,
+            "edited_backlinks": [],
+        }
+        vault_folder = project.vault_folder or ""
+        if not chat_service._VAULT_FOLDER_RE.fullmatch(vault_folder):
+            raise ValueError(f"Invalid vault_folder {vault_folder!r} stored on project.")
+        if not self._is_known_workspace(project.workspace):
+            raise ValueError(f"Unknown workspace {project.workspace!r}.")
+
+        active_root = self._vault_active_root(project.workspace).resolve()
+        raw_entry = active_root / vault_folder
+        entry = raw_entry.resolve()
+        # Refuse to act if the resolved path escapes the active root (a
+        # symlink pointing out of the projects tree), the same shape
+        # `complete_project` uses.
+        if not entry.is_relative_to(active_root):
+            raise ValueError(
+                f"vault_folder {vault_folder!r} resolves outside the projects tree."
+            )
+        if raw_entry.is_symlink():
+            # A symlink is never followed: the delete is about one folder, and
+            # a link is a name that points somewhere else.
+            raise ValueError(f"Project folder {str(raw_entry)!r} is a symlink.")
+        if not entry.exists():
+            # Already gone: the row can still go, and the report says no entry
+            # was removed.
+            return report
+        if not entry.is_dir():
+            raise ValueError(f"Project folder {str(entry)!r} is not a directory.")
+
+        # The note ids the vault scan renders are the prefix plus the
+        # vault-relative path, so the scan target that owns this folder also
+        # owns the ids. Guessing a prefix would strip the links of the wrong
+        # vault (or none), so an unmatched folder is refused.
+        target_root: Path | None = None
+        prefix: Path | None = None
+        for candidate_root, _name, candidate_prefix in self._config.vault_scan_targets():
+            root = Path(candidate_root).expanduser().resolve()
+            if entry.is_relative_to(root):
+                target_root = root
+                prefix = Path(candidate_prefix)
+                break
+        if target_root is None or prefix is None:
+            raise ValueError(
+                f"Project folder {str(entry)!r} is not inside a scanned vault."
+            )
+
+        notes = sorted(entry.rglob("*.md"))
+        deleted_paths = [
+            f"{prefix.as_posix()}/{note.relative_to(target_root).as_posix()}"
+            for note in notes
+        ]
+        # Counted before the cleanup, so the report describes the folder the
+        # user had, not what the staging left behind.
+        files = [p for p in entry.rglob("*") if p.is_file()]
+
+        # Probe the parent directory before any note is rewritten: an
+        # unwritable folder used to fail only at the final removal, by which
+        # point every live link to the notes had been dissolved.
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=entry.parent, prefix=".ciao-delete-", suffix=".probe"
+            ):
+                pass
+        except OSError as exc:
+            raise ValueError(f"delete failed: {exc}") from exc
+
+        from ciao.vault_index import strip_references_many
+
+        # The cleanup is staged and committed before the folder goes, so a
+        # removal that fails has to put the rewritten notes back: otherwise
+        # the links stay dissolved while the notes they named are still on
+        # disk, and the user sees a delete that half-happened.
+        undo: dict[str, str] = {}
+        try:
+            edited = strip_references_many(
+                target_root, deleted_paths, path_prefix=prefix, undo=undo
+            )
+        except OSError as exc:
+            raise ValueError(f"backlink cleanup failed: {exc}") from exc
+
+        try:
+            shutil.rmtree(entry)
+        except OSError as exc:
+            # Roll the staged link cleanup back, so the vault is exactly as it
+            # was: the folder is still there, and so are the links into it.
+            for path, text in undo.items():
+                Path(path).write_text(text, encoding="utf-8", newline="")
+            raise ValueError(f"delete failed: {exc}") from exc
+
+        report["vault_entry_removed"] = True
+        report["removed_notes"] = len(notes)
+        report["removed_files"] = len(files)
+        report["edited_backlinks"] = edited
+        return report
+
+    def delete_project(
+        self, project_id: str, *, delete_vault: bool = False
+    ) -> dict[str, Any]:
+        """Delete a project, optionally with the vault entry that backs it.
+
+        Without ``delete_vault`` a vault-backed project is refused: deleting
+        the row alone would be undone by auto-discovery on the next
+        ``list_projects()`` call. The default stays guarded so an agent
+        (through the control plane or MCP) cannot silently ``rmtree`` a
+        folder of memory; the PWA passes the flag because the user confirmed
+        it in a dialog.
+
+        With ``delete_vault`` the folder under ``projects/active/<stem>/`` is
+        removed and the inbound links to its notes are cleaned, BEFORE the
+        row goes. That order matters: a failed filesystem step leaves the
+        project row intact and retryable (and rolls the link cleanup back),
+        and a removed folder can never be re-discovered as a fresh project.
+
+        Returns ``{deleted, vault_entry_removed, removed_notes, removed_files,
+        edited_backlinks}``.
+        """
         project = self._projects.get(project_id)
         if project is None:
-            return False
+            return {
+                "deleted": False,
+                "vault_entry_removed": False,
+                "removed_notes": 0,
+                "removed_files": 0,
+                "edited_backlinks": [],
+            }
         if project.is_auto or project.kind == "memory":
             raise ValueError(
                 f"The {project.name} project is auto-managed and cannot be deleted."
             )
+        report: dict[str, Any] = {
+            "vault_entry_removed": False,
+            "removed_notes": 0,
+            "removed_files": 0,
+            "edited_backlinks": [],
+        }
         if project.vault_folder:
-            # Block deletion of vault-backed projects: auto-discovery would be
-            # immediately re-create them on the next list_projects() call,
-            # leaving the user with a project that won't stay deleted.
-            # Use complete_project to move the vault entry to completed/, or
-            # remove the vault entry directly and refresh.
-            ws_root = self._display_path(self._vault_active_root(project.workspace))
-            raise ValueError(
-                f"Project '{project.name}' is backed by vault entry "
-                f"'{project.vault_folder}'. Use Complete to move it to "
-                f"completed/, or remove {ws_root}/"
-                f"{project.vault_folder} (folder or .md) and refresh."
-            )
-        return self._remove_project(project_id)
+            if not delete_vault:
+                # Block deletion of vault-backed projects: auto-discovery would
+                # immediately re-create them on the next list_projects() call,
+                # leaving the user with a project that won't stay deleted.
+                # The in-app Delete removes the entry; Complete moves it to
+                # completed/ instead.
+                ws_root = self._display_path(self._vault_active_root(project.workspace))
+                raise ValueError(
+                    f"Project '{project.name}' is backed by vault entry "
+                    f"'{project.vault_folder}'. Use Delete to remove the entry "
+                    f"and the project, or Complete to move it to completed/ "
+                    f"({ws_root}/{project.vault_folder})."
+                )
+            # The entry goes first: a failure here raises and leaves the row
+            # in place, so the delete can be retried.
+            report.update(self._remove_project_vault_entry(project))
+        deleted = self._remove_project(project_id)
+        return {"deleted": deleted, **report}
 
     def _remove_project(self, project_id: str) -> bool:
         """Internal removal: pops the project, archives its chats, persists,
@@ -4360,6 +4529,9 @@ class ProjectChatManager:
                 agent_root=agent_root,
                 workspace=self._workspace_for_chat(chat_id),
             )
+            # Only on creation: the kind must describe the provider object that
+            # is actually in the map, not whatever the chat row says later.
+            self._provider_kind[chat_id] = provider_name
         # Stamped on every hand-out, not just on creation: a long conversation
         # reuses one ProviderService for its whole life, so creation time says
         # nothing about whether the chat is still in use.
@@ -4378,6 +4550,7 @@ class ProjectChatManager:
         """
         self._provider_last_used.pop(chat_id, None)
         self._provider_disconnect_failures.pop(chat_id, None)
+        self._provider_kind.pop(chat_id, None)
         self._steer_locks.pop(chat_id, None)
         return self._providers.pop(chat_id, None)
 
@@ -4517,6 +4690,33 @@ class ProjectChatManager:
             or getattr(chat, "pending_permission", "")
         )
 
+    def _warm_claude_ids(self, now: float) -> set[str]:
+        """Chats whose Claude CLI should outlive the idle timeout.
+
+        A Claude provider is one CLI process, and its next turn resumes the
+        same session instead of starting a new conversation — but rebuilding
+        the process costs a cold start that measured 13-53 s under load, which
+        is exactly what the SDK's initialize deadline times out on. Keeping the
+        most recently used few warm turns the common case (return to a chat you
+        were in) into a ~2 s warm turn instead of a cold start.
+
+        Bounded by count and by idle age so neither a long day of chat-hopping
+        nor a chat left open for days pins a process per chat. opencode is
+        never kept: its provider is a whole `opencode serve` with a port and an
+        SSE stream, which is what the idle timeout exists for.
+        """
+        candidates = [
+            (self._provider_last_used[chat_id], chat_id)
+            for chat_id, kind in self._provider_kind.items()
+            if kind == "claude"
+            and chat_id in self._providers
+            and chat_id in self._provider_last_used
+            and now - self._provider_last_used[chat_id]
+            < _CLAUDE_WARM_IDLE_TIMEOUT_SECONDS
+        ]
+        candidates.sort(reverse=True)
+        return {chat_id for _, chat_id in candidates[:_CLAUDE_WARM_PROVIDER_LIMIT]}
+
     async def reap_idle_providers(self, *, force: bool = False) -> list[str]:
         """Disconnect providers for chats idle past the timeout.
 
@@ -4530,11 +4730,17 @@ class ProjectChatManager:
         Only the provider is released. The chat row, its ``session_id`` and its
         transcript are untouched, so the next turn reconnects and resumes — see
         ``_PROVIDER_IDLE_TIMEOUT_SECONDS``.
+
+        The most recently used Claude providers are exempt while they are
+        within ``_CLAUDE_WARM_PROVIDER_LIMIT`` and
+        ``_CLAUDE_WARM_IDLE_TIMEOUT_SECONDS``; rebuilding one costs a cold
+        start (``_warm_claude_ids``). ``force`` ignores that exemption too.
         """
         if not self._providers:
             return []
         now = time.monotonic()
         active = set(self.active_chat_ids())
+        warm = set() if force else self._warm_claude_ids(now)
         reclaimed: list[str] = []
         for chat_id in list(self._providers):
             if self._provider_is_busy(chat_id, active):
@@ -4555,6 +4761,8 @@ class ProjectChatManager:
                 self._provider_last_used[chat_id] = now
                 continue
             if not force and now - last_used < self._provider_idle_timeout:
+                continue
+            if chat_id in warm:
                 continue
             failures = self._provider_disconnect_failures.get(chat_id, 0)
             provider = self._pop_provider(chat_id)
@@ -4865,6 +5073,7 @@ class ProjectChatManager:
             file_roots=fs_roots if fs_scope == "workspace" else (),
             linked_repo_block=repo_block,
             linked_repo_line=repo_line,
+            permission_mode=self._effective_mode_for_chat(chat, unattended=unattended),
         )
         if capsule:
             capsule = f"[Chat ID: \"{chat.chat_id}\"]\n{capsule}"
@@ -5429,6 +5638,10 @@ class ProjectChatManager:
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         # Artifacts publish to claude.ai; ciaobot has no use for that surface
         env["CLAUDE_CODE_DISABLE_ARTIFACT"] = "1"
+        # Nobody sits at a tool's terminal: a credential prompt from git or gh
+        # would block the call until it is killed, stalling the whole turn.
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GH_PROMPT_DISABLED"] = "1"
         # The claude.ai connectors (the Claude account's remote MCP servers)
         # load into every Claude chat unless Claude Code is told not to. A
         # workspace can switch them off; a memory pass always runs without them,
@@ -5901,6 +6114,15 @@ class ProjectChatManager:
         """Return the in-flight ChatStream for this chat, if any."""
         return self._broker.get(chat_id)
 
+    def has_pending_send(self, chat_id: str, send_id: str) -> bool:
+        """True when the chat's live queue already holds this client send id."""
+        if not send_id:
+            return False
+        stream = self._broker.get(chat_id)
+        if stream is None:
+            return False
+        return stream.has_pending_send(send_id)
+
     def queue_message(
         self,
         chat_id: str,
@@ -5909,12 +6131,15 @@ class ProjectChatManager:
         entry_id: str | None = None,
         delivery: str = "queue",
         origin: str = "",
+        send_id: str = "",
     ) -> bool:
         """Append a user message to the active stream's pending queue.
 
         ``delivery="steer"`` marks it for injection into the running turn; the
         caller then awaits ``steer_queue`` to dispatch it. ``origin`` tags an
         engine-written message (see ``start_stream``); it rides on the entry.
+        ``send_id`` is the client send id, recorded on the queue entry so the
+        flushed turn can carry it.
 
         Returns True if queued, False if there's no active stream (caller
         should fall through to `start_stream`).
@@ -5937,7 +6162,8 @@ class ProjectChatManager:
         if delivery not in QUEUE_DELIVERIES:
             delivery = "queue"
         resolved_id = stream.enqueue(
-            text, image_refs, entry_id=entry_id, delivery=delivery, origin=origin
+            text, image_refs, entry_id=entry_id, delivery=delivery, origin=origin,
+            send_id=send_id,
         )
         stream.publish({
             "type": "queued",
@@ -5946,6 +6172,7 @@ class ProjectChatManager:
             "images": image_refs,
             "delivery": delivery,
             "waiting": False,
+            **({"send_id": send_id} if send_id else {}),
         })
         return True
 
@@ -6196,6 +6423,7 @@ class ProjectChatManager:
                 chat.user_turn_images.pop(key, None)
                 chat.user_turn_unattended.pop(key, None)
                 chat.user_turn_steered.pop(key, None)
+                chat.user_turn_send_ids.pop(key, None)
                 cancelled_origin = str(chat.user_turn_origin.pop(key, "") or "")
                 self._streaming.discard_turn_perf(chat_id, turn_index)
             else:
@@ -7079,6 +7307,7 @@ class ProjectChatManager:
         unattended: bool = False,
         compact: bool = False,
         origin: str = "",
+        send_id: str = "",
     ) -> ChatStream:
         """Start (or return the in-flight) ChatStream for this chat.
 
@@ -7096,6 +7325,10 @@ class ProjectChatManager:
 
         ``origin`` (a ``TURN_ORIGINS`` value) tags a turn the engine wrote, so
         history and the echo let the PWA draw a notice card, not a user bubble.
+
+        ``send_id`` is the client send id for this turn. The engine records it
+        per user turn, so a later frame carrying the same id is answered with
+        a duplicate echo instead of starting a second turn.
         """
         if origin and origin not in TURN_ORIGINS:
             raise ValueError(f"unknown turn origin {origin!r}")
@@ -7218,6 +7451,8 @@ class ProjectChatManager:
                 chat_meta.user_turn_unattended[str(turn_index)] = True
             if origin:
                 chat_meta.user_turn_origin[str(turn_index)] = origin
+            if send_id:
+                chat_meta.user_turn_send_ids[str(turn_index)] = send_id
             self._streaming.start_turn_perf(chat_id, turn_index)
 
         # First buffered event: echo the user prompt so any client subscribing
@@ -7235,6 +7470,8 @@ class ProjectChatManager:
             echo_payload["origin"] = origin
         if turn_index is not None:
             echo_payload["turn_index"] = turn_index
+        if send_id:
+            echo_payload["send_id"] = send_id
         if sent_at_iso:
             echo_payload["sent_at"] = sent_at_iso
         if not compact:
@@ -7292,6 +7529,35 @@ class ProjectChatManager:
             compact=compact,
         )
         return stream
+
+    def find_turn_by_send_id(self, chat_id: str, send_id: str) -> dict | None:
+        """The user turn a client send id already owns, if any.
+
+        The newest turn wins: a send id is minted per logical send, and the
+        engine records it per turn, so the last turn carrying it is the one a
+        repeated frame would duplicate. Returns the turn index and the
+        recorded send time, or None when the id owns no turn yet.
+        """
+        if not send_id:
+            return None
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return None
+        send_ids = chat.user_turn_send_ids
+        for key in sorted(
+            send_ids.keys(),
+            key=lambda k: int(k) if str(k).isdigit() else -1,
+            reverse=True,
+        ):
+            if send_ids.get(key) != send_id:
+                continue
+            turn_index = int(key)
+            timing = chat.user_turn_timings.get(key) or chat.user_turn_timings.get(turn_index)
+            sent_at = ""
+            if isinstance(timing, dict):
+                sent_at = str(timing.get("sent_at") or "")
+            return {"turn_index": turn_index, "sent_at": sent_at}
+        return None
 
     async def _auto_title_and_publish(
         self, chat_id: str, user_text: str, assistant_text: str
@@ -7902,7 +8168,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is not None:
             provider_service = self._providers.get(chat_id)
-            session_id = str(
+            session_id = event.session_id or str(
                 getattr(
                     getattr(provider_service, "provider", None),
                     "current_session_id",
@@ -8072,6 +8338,18 @@ class ProjectChatManager:
             stream.resolve_permission(request_id, session_id)
         return cleared
 
+    @staticmethod
+    def _provider_holds_permission(
+        provider: object, request_id: str, session_id: str
+    ) -> bool:
+        """Whether the live provider is still waiting on this permission request."""
+        if isinstance(provider, OpencodeProvider):
+            return provider.has_permission_request(request_id, session_id)
+        gate = getattr(provider, "permission_gate", None)
+        has_pending = getattr(gate, "has_pending", None)
+        # The Claude gate's has_pending takes no session: its ids are global.
+        return bool(callable(has_pending) and has_pending(request_id))
+
     async def respond_permission(
         self,
         chat_id: str,
@@ -8093,15 +8371,35 @@ class ProjectChatManager:
         stored = self._pending_response_record(chat.pending_permission)
         stored_request = str(stored.get("request_id") or "")
         stored_session = str(stored.get("session_id") or "")
-        if stored_request and stored_request != request_id:
-            # The submitting tab is stale, but a newer permission owns the
-            # persisted slot and must remain untouched.
-            return QuestionResponseResult(True)
-        if session_id and stored_session and session_id != stored_session:
-            return QuestionResponseResult(True)
-        expected_session = session_id or stored_session or str(
-            getattr(chat, "session_id", "") or ""
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        # Several permissions can be pending at once but the chat persists only
+        # one slot. A request the live provider still holds is answered on its
+        # own terms; only requests it does not know are treated as stale.
+        provider_holds = self._provider_holds_permission(provider, request_id, session_id)
+        if not provider_holds:
+            if stored_request and stored_request != request_id:
+                # The submitting tab is stale, but a newer permission owns the
+                # persisted slot and must remain untouched.
+                logger.info(
+                    "permission reply %s session=%s approved=%s: stale-ignored",
+                    request_id, session_id, approved,
+                )
+                return QuestionResponseResult(True)
+            if session_id and stored_session and session_id != stored_session:
+                logger.info(
+                    "permission reply %s session=%s approved=%s: stale-ignored",
+                    request_id, session_id, approved,
+                )
+                return QuestionResponseResult(True)
+        held_session = (
+            provider.permission_request_session(request_id)
+            if provider_holds and isinstance(provider, OpencodeProvider)
+            else ""
         )
+        expected_session = session_id or held_session or (
+            stored_session if stored_request == request_id else ""
+        ) or str(getattr(chat, "session_id", "") or "")
 
         if self._native_form_is_dead(chat_id):
             if not stored_request:
@@ -8116,15 +8414,14 @@ class ProjectChatManager:
             )
             return QuestionResponseResult(True, expired=True)
 
-        provider_service = self._providers.get(chat_id)
-        provider = provider_service.provider if provider_service is not None else None
         if provider_service is None or provider is None:
             return QuestionResponseResult(
                 False, "Permission provider is unavailable; retry when it reconnects", True
             )
         provider_session = str(getattr(provider, "current_session_id", "") or "")
         if (
-            expected_session
+            not provider_holds
+            and expected_session
             and provider_session
             and isinstance(provider, OpencodeProvider)
             and provider_session != expected_session
@@ -8187,20 +8484,32 @@ class ProjectChatManager:
         )
         legacy_stale = not native_result and not response.ok
         stale = native_stale or legacy_stale
+        # A reply that lost the race (another tab answered, V2 409, Claude gate
+        # already resolved) changed nothing: never retract the winning call's card.
+        already_resolved = stale or response.already_resolved
         if not response.ok and not stale:
+            logger.info(
+                "permission reply %s session=%s approved=%s: failed",
+                request_id, session_id, approved,
+            )
             return response
+        logger.info(
+            "permission reply %s session=%s approved=%s: %s",
+            request_id, session_id, approved,
+            "already-resolved" if already_resolved else "delivered",
+        )
 
         self._clear_permission_state(chat_id, request_id, expected_session)
 
         stream = self._broker.get(chat_id)
-        if stream is not None and not approved:
+        if stream is not None and not approved and not already_resolved:
             # The refused call never ran, so retract any file card it already
             # painted. Custom adapters may use a request id that differs from
             # the tool id, so use the id captured before the provider consumed
             # its pending-request entry.
             stream.deny_tool_use(tool_use_id or request_id)
-        if stale:
-            return QuestionResponseResult(True)
+        if already_resolved:
+            return QuestionResponseResult(True, already_resolved=True)
         return response
 
     def _clear_question_state(
@@ -8227,6 +8536,19 @@ class ProjectChatManager:
             stream.resolve_question(request_id, session_id)
         return cleared
 
+    @staticmethod
+    def _provider_holds_question(
+        provider: object, request_id: str, session_id: str
+    ) -> bool:
+        """Whether the live provider is still waiting on this form.
+
+        Only OpenCode holds native forms: Claude's AskUserQuestion carries no
+        request id and is answered as a new message.
+        """
+        return isinstance(provider, OpencodeProvider) and provider.has_question_request(
+            request_id, session_id
+        )
+
     async def respond_question(
         self,
         chat_id: str,
@@ -8243,15 +8565,35 @@ class ProjectChatManager:
         )
         stored_request = str(stored.get("request_id") or "")
         stored_session = str(stored.get("session_id") or "")
-        if stored_request and stored_request != request_id:
-            # Settle only the stale submitter. A newer form keeps both the
-            # persisted backend state and the other tab's card.
-            return QuestionResponseResult(True)
-        if session_id and stored_session and session_id != stored_session:
-            return QuestionResponseResult(True)
-        expected_session = session_id or stored_session or str(
-            getattr(chat, "session_id", "") or ""
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+        # Several forms can be pending at once (parallel calls, child sessions)
+        # but the chat persists only one slot. A form the live provider still
+        # holds is answered on its own terms; only unknown forms are stale.
+        provider_holds = self._provider_holds_question(provider, request_id, session_id)
+        if not provider_holds:
+            if stored_request and stored_request != request_id:
+                # Settle only the stale submitter. A newer form keeps both the
+                # persisted backend state and the other tab's card.
+                logger.info(
+                    "question reply %s session=%s action=%s: stale-ignored",
+                    request_id, session_id, action,
+                )
+                return QuestionResponseResult(True)
+            if session_id and stored_session and session_id != stored_session:
+                logger.info(
+                    "question reply %s session=%s action=%s: stale-ignored",
+                    request_id, session_id, action,
+                )
+                return QuestionResponseResult(True)
+        held_session = (
+            provider.question_request_session(request_id)
+            if provider_holds and isinstance(provider, OpencodeProvider)
+            else ""
         )
+        expected_session = session_id or held_session or (
+            stored_session if stored_request == request_id else ""
+        ) or str(getattr(chat, "session_id", "") or "")
 
         if self._native_form_is_dead(chat_id):
             if not stored_request:
@@ -8271,8 +8613,6 @@ class ProjectChatManager:
                 return QuestionResponseResult(False, str(exc), False)
             return QuestionResponseResult(True, delivered_as_message=True)
 
-        provider_service = self._providers.get(chat_id)
-        provider = provider_service.provider if provider_service is not None else None
         if provider is None:
             return QuestionResponseResult(
                 False,
@@ -8281,7 +8621,8 @@ class ProjectChatManager:
             )
         provider_session = str(getattr(provider, "current_session_id", "") or "")
         if (
-            expected_session
+            not provider_holds
+            and expected_session
             and provider_session
             and isinstance(provider, OpencodeProvider)
             and provider_session != expected_session
@@ -8310,15 +8651,28 @@ class ProjectChatManager:
                 "OpenCode returned an invalid form acknowledgement",
                 True,
             )
-        if result.ok:
-            self._clear_question_state(chat_id, request_id, expected_session)
-            return result
-        if (
-            not result.retryable
+        # A reply that lost the race (another tab answered or cancelled, V2
+        # 409/404) changed nothing; clearing the matching form is idempotent.
+        stale = (
+            not result.ok
+            and not result.retryable
             and result.error == "Question request is no longer active"
-        ):
+        )
+        if result.ok or stale:
+            already_resolved = stale or result.already_resolved
+            logger.info(
+                "question reply %s session=%s action=%s: %s",
+                request_id, session_id, action,
+                "already-resolved" if already_resolved else "delivered",
+            )
             self._clear_question_state(chat_id, request_id, expected_session)
-            return QuestionResponseResult(True)
+            if already_resolved:
+                return QuestionResponseResult(True, already_resolved=True)
+            return result
+        logger.info(
+            "question reply %s session=%s action=%s: failed",
+            request_id, session_id, action,
+        )
         return result
 
     def respond_capability(
@@ -9267,6 +9621,7 @@ class ProjectChatManager:
                     except OSError:
                         logger.exception("Failed to unlink image %s", ref)
         chat.user_turn_images = {}
+        chat.user_turn_send_ids = {}
         chat.user_turn_count = 0
 
     def resolve_image_ref(self, ref: str) -> ImageAttachment | None:

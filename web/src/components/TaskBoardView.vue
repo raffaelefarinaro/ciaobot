@@ -37,6 +37,7 @@
  * that resolve it** rather than silently rewritten.
  */
 import SkeletonLoader from './SkeletonLoader.vue'
+import TaskNoteFeed from './TaskNoteFeed.vue'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { routeLocationKey, routerKey } from 'vue-router'
 import { DropdownMenuContent, DropdownMenuItem, DropdownMenuPortal, DropdownMenuRoot, DropdownMenuTrigger } from 'reka-ui'
@@ -1027,9 +1028,10 @@ async function submitCreate() {
 // ── Resolution ────────────────────────────────────────────────────────────
 //
 // A completion's note. Every Done gesture opens this sheet first. The note is
-// optional only through "Complete without note". Submit sends the status and the
-// note in one POST, so a note never lands without the completion it belongs to.
-// Cancel posts nothing. A failed write keeps the draft.
+// optional: an empty or whitespace-only draft completes without a resolution, and
+// nonblank text is sent as typed. Submit sends the status and the note in one
+// POST, so a note never lands without the completion it belongs to. Cancel posts
+// nothing. A failed write keeps the draft.
 
 type ResolutionMode = 'complete' | 'edit'
 
@@ -1111,7 +1113,11 @@ function resetResolution() {
 async function submitResolution() {
   const task = resolutionTask.value
   if (!task || resolutionBusy.value) return
-  const text = resolutionDraft.value
+  // Completion's note is optional; edit-resolution keeps the draft exactly as
+  // typed, including an empty or whitespace-only note.
+  const text = resolutionMode.value === 'complete' && !resolutionDraft.value.trim()
+    ? ''
+    : resolutionDraft.value
   // With Done collapsed the completed card leaves the view, and its focus with it:
   // read its lane neighbour now, before the write re-renders the lane.
   const handoff = resolutionMode.value === 'complete' && !doneShown.value && columnsShown.value
@@ -1181,12 +1187,6 @@ function focusHandoffFor(taskId: string): string {
   const item = paneEl.value?.querySelector(`li[data-task-id="${taskId}"]`)
   const neighbour = item?.nextElementSibling ?? item?.previousElementSibling
   return neighbour?.getAttribute('data-task-id') ?? ''
-}
-
-/** Complete with an empty resolution. The blank is the user's explicit choice. */
-async function completeWithoutNote() {
-  resolutionDraft.value = ''
-  await submitResolution()
 }
 
 /**
@@ -2520,36 +2520,25 @@ const today = localDateKey()
             </template>
             <!-- A feed, newest first, under the box that adds to it: each note is a
                  bubble that names who wrote it and when, with its links live. -->
-            <ol v-if="detailHeld?.updates.length" class="task-notes" aria-label="Progress notes, newest first">
-              <li
-                v-for="item in detailHeld.updates"
-                :key="item.id"
-                class="task-note"
-                :data-actor="item.actor === 'agent' ? 'agent' : 'user'"
-              >
-                <div class="task-note-meta">
-                  <span class="task-note-author">{{ item.actor === 'agent' ? 'Agent' : 'You' }}</span>
-                  <span class="task-note-when">{{ formatCompletedAt(item.recorded_at) || 'No time recorded' }}<template v-if="item.edited_at"> · edited</template></span>
-                  <button
-                    v-if="editingUpdateId !== item.id"
-                    type="button"
-                    class="btn-chip task-chip task-note-edit"
-                    :disabled="progressBusy || detailSaving"
-                    :aria-label="`Edit progress note from ${formatCompletedAt(item.recorded_at) || item.actor}`"
-                    @click="beginEditProgress(item)"
-                  >Edit</button>
+            <TaskNoteFeed v-if="detailHeld?.updates.length" :updates="detailHeld.updates" :editing-id="editingUpdateId">
+              <template #actions="{ note }">
+                <button
+                  v-if="editingUpdateId !== note.id"
+                  type="button"
+                  class="btn-chip task-chip task-note-edit"
+                  :disabled="progressBusy || detailSaving"
+                  :aria-label="`Edit progress note from ${formatCompletedAt(note.recorded_at) || note.actor}`"
+                  @click="beginEditProgress(note)"
+                >Edit</button>
+              </template>
+              <template #editor="{ note }">
+                <textarea v-model="editingUpdateDraft" rows="4" :disabled="progressBusy" :aria-label="`Edit progress note from ${note.actor}`"></textarea>
+                <div class="task-resolution-actions task-note-actions">
+                  <button type="button" class="btn-chip task-chip" :disabled="progressBusy" @click="editingUpdateId = ''">Cancel</button>
+                  <button type="button" class="btn-chip task-chip" :disabled="progressBusy || !editingUpdateDraft.trim()" @click="saveEditedProgress">Save</button>
                 </div>
-                <template v-if="editingUpdateId === item.id">
-                  <textarea v-model="editingUpdateDraft" rows="4" :disabled="progressBusy" :aria-label="`Edit progress note from ${item.actor}`"></textarea>
-                  <div class="task-resolution-actions task-note-actions">
-                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy" @click="editingUpdateId = ''">Cancel</button>
-                    <button type="button" class="btn-chip task-chip" :disabled="progressBusy || !editingUpdateDraft.trim()" @click="saveEditedProgress">Save</button>
-                  </div>
-                </template>
-                <!-- eslint-disable-next-line vue/no-v-html — rendered via DOMPurify -->
-                <div v-else class="task-note-text markdown" v-html="renderUserMarkdown(item.text)"></div>
-              </li>
-            </ol>
+              </template>
+            </TaskNoteFeed>
             <p v-else-if="detailHeld" class="hint">No progress notes yet.</p>
             <p v-if="progressError" class="task-action-error" role="alert">{{ progressError }}</p>
           </section>
@@ -2742,7 +2731,7 @@ const today = localDateKey()
       </div>
     </div>
 
-    <!-- Resolution sheet: one note for one completion. Cancel posts nothing. -->
+    <!-- Resolution sheet: one completion action, with an optional note. Cancel posts nothing. -->
     <div v-if="resolutionOpen && resolutionTask" class="modal-backdrop" @click.self="closeResolution">
       <div
         ref="resolutionEl"
@@ -2776,15 +2765,8 @@ const today = localDateKey()
             <button
               type="submit"
               class="btn-primary"
-              :disabled="resolutionBusy || (resolutionMode === 'complete' && !resolutionDraft.trim())"
-            >{{ resolutionBusy ? 'Saving…' : resolutionSubmitLabel }}</button>
-            <button
-              v-if="resolutionMode === 'complete'"
-              type="button"
-              class="btn-small"
               :disabled="resolutionBusy"
-              @click="completeWithoutNote"
-            >Complete without note</button>
+            >{{ resolutionBusy ? 'Saving…' : resolutionSubmitLabel }}</button>
             <button type="button" class="btn-small" :disabled="resolutionBusy" @click="closeResolution">Cancel</button>
           </div>
         </form>
@@ -3831,66 +3813,6 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   border-top: 1px solid var(--border);
 }
 .task-progress .form-group { margin: 0; }
-.task-notes {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-/* One note, drawn as a comment: a tonal bubble, the author leading its line. The
-   agent's notes take the agent's violet so who said what reads at a glance;
-   the text says it too, so colour is never the only cue. */
-.task-note {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--bg) 45%, var(--bg2));
-}
-.task-note[data-actor='agent'] {
-  border-color: color-mix(in srgb, var(--accent2) 35%, var(--border));
-  background: color-mix(in srgb, var(--accent2) 8%, var(--bg2));
-}
-.task-note-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 28px;
-}
-.task-note-author { color: var(--fg); font-size: var(--text-sm); font-weight: 600; }
-.task-note-when { color: var(--fg3); font-size: var(--text-xs); }
-.task-note-edit {
-  margin-left: auto;
-  min-height: 26px;
-  padding-block: 0;
-  border-color: transparent;
-  background: none;
-  color: var(--fg3);
-  opacity: 0;
-  transition: opacity 120ms var(--ease);
-}
-.task-note:hover .task-note-edit,
-.task-note:focus-within .task-note-edit,
-.task-note-edit:focus-visible { opacity: 1; }
-.task-note-edit:hover:not(:disabled) { color: var(--fg); border-color: var(--border); }
-@media (hover: none) { .task-note-edit { opacity: 1; } }
-.task-note-text {
-  color: var(--fg);
-  font-size: var(--text-sm);
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-.task-note-text :deep(p),
-.task-note-text :deep(ul),
-.task-note-text :deep(ol) { margin: 0 0 0.5em; }
-.task-note-text :deep(ul),
-.task-note-text :deep(ol) { padding-left: 1.4em; }
-.task-note-text :deep(:last-child) { margin-bottom: 0; }
-.task-note-text :deep(a) { color: var(--accent); text-underline-offset: 2px; }
 .task-note-composer { margin: 0; }
 .task-note-actions { justify-content: flex-end; }
 .task-delegate-go { align-self: flex-start; }
@@ -3918,7 +3840,6 @@ button.task-check:disabled { cursor: progress; opacity: 0.5; }
   .task-detail-form textarea.task-title-field { font-size: calc(19px * var(--font-scale, 1)); }
 }
 @media (pointer: coarse) {
-  .task-detail-sheet .task-delete,
-  .task-note-edit { min-height: var(--touch); }
+  .task-detail-sheet .task-delete { min-height: var(--touch); }
 }
 </style>

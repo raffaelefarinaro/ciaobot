@@ -378,6 +378,9 @@
             </p>
           </div>
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
+          <p v-if="workspaceMove?.cloud_sync_warning" class="hint hint--warn workspace-cloud-warning" role="note">
+            {{ workspaceMove.cloud_sync_warning }}
+          </p>
           <p v-if="workspaceMoveOutcome" class="hint workspace-move-outcome" :class="{ 'workspace-move-outcome--error': workspaceMoveOutcome.error }">
             {{ workspaceMoveOutcome.text }}
           </p>
@@ -464,16 +467,21 @@
           <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
           <template v-else>
             <div class="settings-form-panel">
-              <label class="settings-field">
+              <label v-if="!authSettings.on_host" class="settings-field">
                 <span class="ws-label">Current password</span>
                 <input
+                  id="auth-current-password"
                   v-model="authCurrentPassword"
                   type="password"
                   class="routine-input"
                   autocomplete="current-password"
+                  :aria-invalid="authCurrentPasswordError ? 'true' : undefined"
+                  :aria-describedby="authCurrentPasswordError ? 'auth-current-password-error' : undefined"
                   :disabled="authSettingsSaving"
                 />
+                <span v-if="authCurrentPasswordError" id="auth-current-password-error" class="hint hint--warn" role="alert">{{ authCurrentPasswordError }}</span>
               </label>
+              <p v-if="authSettings.on_host" class="hint">You're on the computer running Ciaobot, so you don't need the current password here.</p>
               <label class="settings-field">
                 <span class="ws-label">New password</span>
                 <input
@@ -687,6 +695,29 @@
                     </DropdownMenuRoot>
                   </div>
                 </div>
+                <!-- Full width, after the head: inside .set-row-main it shares a line with Connected / Verify and clips at phone width. -->
+                <div v-if="conn.release_check?.state === 'below_tested'" class="set-row-sub provider-release-check">
+                  <p class="provider-release-note">Older than {{ conn.release_check.tested }}, the version this Ciaobot release was tested with. Update with:</p>
+                  <code class="provider-release-command">{{ conn.release_check.command }}</code>
+                  <div class="provider-release-actions">
+                    <button
+                      type="button"
+                      class="btn-small btn-chip"
+                      @click="providerCommandCopy.copy(String(connKey), conn.release_check.command || '')"
+                    >{{ providerCommandCopy.stateOf(String(connKey)) === 'copied' ? 'Copied' : 'Copy' }}</button>
+                    <HostTerminalButton
+                      v-if="conn.release_check.terminal_action"
+                      :action="conn.release_check.terminal_action"
+                      variant="small"
+                      label="Update in Terminal"
+                      :aria-label="`Update ${conn.label || connKey} in Terminal`"
+                      @not-applicable="fetchProviderKeys()"
+                    />
+                    <span v-if="providerCommandCopy.stateOf(String(connKey)) === 'failed'" class="provider-release-failed" role="status">Copy failed; select the command above.</span>
+                  </div>
+                </div>
+                <p v-else-if="conn.release_check?.state === 'current'" class="set-row-sub">Tested with {{ conn.release_check.tested }}</p>
+                <p v-else-if="conn.release_check?.state === 'bundled'" class="set-row-sub">Bundled with Ciaobot; updates with Ciaobot</p>
                 <div v-if="getProviderSection(String(connKey))" class="provider-inline-defaults">
                   <div class="set-subrow">
                     <span class="ws-label set-subrow-label">Default model</span>
@@ -961,12 +992,21 @@
               </div>
             </div>
 
+            <p v-if="workspaceLinkStatus" class="hint hint--warn workspace-link-status" role="status">
+              {{ workspaceLinkStatus }}
+            </p>
+
             <div class="workspace-list set-list">
               <div
                 v-for="form in workspaceForms"
                 :key="form.name"
+                :id="`workspace-row-${form.name}`"
                 class="workspace-card set-row"
-                :class="{ 'workspace-card--open': openWorkspace === form.name }"
+                :class="{
+                  'workspace-card--open': openWorkspace === form.name,
+                  'workspace-card--target': workspaceLinkTarget === form.name,
+                }"
+                @animationend.self="clearWorkspaceLinkHighlight(form.name)"
               >
                 <div class="workspace-card-header set-row-head">
                   <span class="set-dot" aria-hidden="true" :style="{ '--swatch': workspaceSwatch(form.color) }"></span>
@@ -1055,9 +1095,14 @@
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field set-subrow">
+                  <label class="settings-field set-subrow" :id="`workspace-file-access-row-${form.name}`">
                     <span class="ws-label set-subrow-label">File access</span>
-                    <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.agent_fs_scope" :disabled="workspacesSaving === form.name">
+                    <select
+                      :id="`workspace-file-access-${form.name}`"
+                      class="routine-input routine-select workspace-select set-subrow-control"
+                      v-model="form.agent_fs_scope"
+                      :disabled="workspacesSaving === form.name"
+                    >
                       <option value="">{{ fsScopeDefaultOptionLabel }}</option>
                       <option value="workspace">Workspace only</option>
                       <option value="machine">Whole machine</option>
@@ -2032,6 +2077,7 @@ import {
 } from 'reka-ui'
 import PaneHeader from './PaneHeader.vue'
 import HostTerminalButton from './HostTerminalButton.vue'
+import { useCommandCopy } from '../composables/useCommandCopy'
 import UpdateProgressView from './UpdateProgressView.vue'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -2049,6 +2095,7 @@ import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
 import type { ModelSection } from '../lib/modelSections'
 import { isLoopbackHostname } from '../lib/loopback'
 import { settingsTabLabel } from '../lib/settingsNav'
+import { parseWorkspaceFileAccessHref } from '../lib/appLinks'
 import { useMcpServers } from '../composables/useMcpServers'
 import { assetOriginClass, assetOriginLabel, commandOrigin, subagentOrigin } from '../lib/assetOrigin'
 
@@ -2331,12 +2378,14 @@ interface WorkspaceMoveOperation {
   target: string
   error: string
   updated_at: string
+  denied?: boolean
 }
 
 interface WorkspaceMoveStatus {
   workspace_root: string
   local: boolean
   admin_only?: boolean
+  cloud_sync_warning?: string
   operation: WorkspaceMoveOperation | null
 }
 
@@ -3012,14 +3061,16 @@ function scrollToChatProvidersIfLinked(): void {
 }
 watch(() => route.fullPath, scrollToChatProvidersIfLinked)
 
-// The Home setup card's "How to install" lands on /settings#install-app; the
-// card is mounted with the home tab, so only the scroll needs waiting for.
+// Home links land on these home-tab cards (#install-app from the setup
+// card's "How to install", #other-devices from "Phone setup"); the cards
+// are mounted with the home tab, so only the scroll needs waiting for.
+const HOME_TAB_ANCHORS = new Set(['#install-app', '#other-devices'])
 watch(
   () => route.hash,
   hash => {
-    if (hash !== '#install-app') return
+    if (!HOME_TAB_ANCHORS.has(hash)) return
     void nextTick(() => {
-      document.getElementById('install-app')?.scrollIntoView?.({ block: 'start' })
+      document.getElementById(hash.slice(1))?.scrollIntoView?.({ block: 'start' })
     })
   },
   { immediate: true },
@@ -3038,6 +3089,8 @@ function providerBringsCounts(providerId: string, conn: ProviderConnection): str
 }
 
 
+
+const providerCommandCopy = useCommandCopy()
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
   if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'opencode' ? 'opencode' : 'Claude Code'} on this computer?`, {
@@ -3724,6 +3777,81 @@ const workspaceBaseline = ref<Record<string, string>>({})
 // bound to it: `form.name` is the row's identity (baseline, key, PATCH path),
 // and changing it mid-edit would re-key the card and lose focus.
 const workspaceNameDraft = ref('')
+// A File access link (`/settings/workspaces?workspace=NAME#file-access`) only
+// locates the control. This is the status shown when it cannot: an unknown
+// workspace, or another row's unsaved draft in the way. It names the target,
+// never a value, and never claims a setting changed.
+const workspaceLinkStatus = ref('')
+// The row being pointed at, so the CSS animation has one source of truth.
+const workspaceLinkTarget = ref<string | null>(null)
+// Bumped on every route resolution so a delayed list load from a superseded
+// link cannot open, scroll to or focus the wrong row.
+let workspaceLinkRequest = 0
+const WORKSPACE_LINK_OFFSET = 16
+
+function clearWorkspaceLinkHighlight(name: string): void {
+  if (workspaceLinkTarget.value === name) workspaceLinkTarget.value = null
+}
+
+function scrollToWorkspaceFileAccess(name: string): void {
+  const body = bodyEl.value
+  if (!body) return
+  // Scope both lookups to the owning pane, and measure the field row itself:
+  // the card header can be in view while the File access control is still
+  // below the fold.
+  const row = body.querySelector<HTMLElement>(`#workspace-file-access-row-${name}`)
+  const control = body.querySelector<HTMLElement>(`#workspace-file-access-${name}`)
+  if (!row || !control) return
+  // Only the settings pane scrolls. Its scrollTop is the truth; a measured
+  // offset keeps this correct whatever else has rendered above the row.
+  // scrollIntoView is deliberately not used: on a nested pane iOS Safari can
+  // scroll the wrong ancestor.
+  const offset = row.getBoundingClientRect().top - body.getBoundingClientRect().top
+  const top = Math.max(0, body.scrollTop + offset - WORKSPACE_LINK_OFFSET)
+  const reduce = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  body.scrollTo({ top, behavior: reduce ? 'auto' : 'smooth' })
+  control.focus({ preventScroll: true })
+  workspaceLinkTarget.value = name
+}
+
+async function applyWorkspaceFileAccessLink(fullPath: string): Promise<void> {
+  const request = ++workspaceLinkRequest
+  // A navigation clears what an earlier link said; a missing target and the
+  // row it pointed at must not outlive the address that produced them.
+  workspaceLinkStatus.value = ''
+  workspaceLinkTarget.value = null
+  const name = parseWorkspaceFileAccessHref(fullPath)
+  if (!name || currentTab.value !== 'workspaces') return
+  await loadSettingsTab('workspaces')
+  if (request !== workspaceLinkRequest) return
+  await nextTick()
+  if (request !== workspaceLinkRequest) return
+  // A failed load is an error, not a claim that the workspace is missing.
+  if (workspacesError.value) return
+  const form = workspaceForms.value.find(f => f.name === name)
+  if (!form) {
+    workspaceLinkStatus.value = `No workspace named "${name}" exists. No settings changed.`
+    return
+  }
+  const openName = openWorkspace.value
+  if (openName && openName !== name) {
+    const openForm = workspaceForms.value.find(f => f.name === openName)
+    // One editor and one name draft are open at a time. Switching would
+    // discard what the user typed, so ask them to save or discard first.
+    if (openForm && workspaceDirty(openForm)) {
+      workspaceLinkStatus.value =
+        `Save or discard your changes to "${openName}" before opening File access for "${name}".`
+      return
+    }
+  }
+  // Already open: keep its draft exactly as it is. Re-initialising here would
+  // silently undo an edit to the name the link happens to name.
+  if (openWorkspace.value !== name) openWorkspaceEditor(name)
+  await nextTick()
+  if (request !== workspaceLinkRequest) return
+  scrollToWorkspaceFileAccess(name)
+}
 
 function openWorkspaceEditor(name: string): void {
   openWorkspace.value = name
@@ -4051,6 +4179,16 @@ function loadSettingsTab(tab: string): Promise<void> {
   return request
 }
 
+// File access links are checked on every navigation, including the direct load
+// of one. `loadSettingsTab` is cached, so a link that arrives with the tab
+// costs no second fetch, and a link that arrives before the first list does
+// waits for that same load instead of opening a row that is not there yet.
+watch(
+  () => route.fullPath,
+  path => { void applyWorkspaceFileAccessLink(path) },
+  { immediate: true },
+)
+
 onMounted(() => {
   loadAppearanceSettings()
   housekeeping.init()
@@ -4291,21 +4429,25 @@ async function fetchLocalStatus() {
 // ── PWA password (Settings → home) ─────────────────────────────────────
 interface AuthSettings {
   password_configured: boolean
+  on_host?: boolean
 }
 
 const authSettings = ref<AuthSettings | null>(null)
 const authCurrentPassword = ref('')
+const authCurrentPasswordError = ref('')
+watch(authCurrentPassword, () => { authCurrentPasswordError.value = '' })
 const authNewPassword = ref('')
 const authSettingsSaving = ref(false)
 const authSettingsResult = ref('')
 const authSettingsError = ref(false)
 
-// Protection is always on, so this card only changes the password, and the
-// server always asks for the current one.
+// Protection is always on, so this card only changes the password. The server
+// asks for the current one except from a browser on the computer running
+// Ciaobot, which reports `on_host`.
 const canSaveAuthSettings = computed(() => {
   if (!authSettings.value) return false
   if (!authNewPassword.value.trim()) return false
-  if (!authCurrentPassword.value) return false
+  if (!authSettings.value.on_host && !authCurrentPassword.value) return false
   return true
 })
 
@@ -4322,18 +4464,31 @@ async function saveAuthSettings() {
   authSettingsSaving.value = true
   authSettingsResult.value = ''
   authSettingsError.value = false
+  authCurrentPasswordError.value = ''
   try {
-    const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', {
-      password: authNewPassword.value,
-      current_password: authCurrentPassword.value,
-    })
+    const body: Record<string, string> = { password: authNewPassword.value }
+    if (!authSettings.value.on_host) body.current_password = authCurrentPassword.value
+    const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', body)
     authSettings.value = {
+      ...authSettings.value,
       password_configured: res.password_configured,
     }
     authCurrentPassword.value = ''
     authNewPassword.value = ''
     authSettingsResult.value = 'Password saved. Other devices have to log in again.'
   } catch (e) {
+    const code = (e as { payload?: { code?: unknown } } | null)?.payload?.code
+    if (code === 'wrong_current_password' || code === 'current_password_required' || code === 'rate_limited') {
+      authCurrentPasswordError.value = code === 'wrong_current_password'
+        ? 'Current password is incorrect.'
+        : code === 'rate_limited'
+          ? apiErrorMessage(e, 'Too many wrong attempts. Wait a few minutes and try again.')
+          : 'Enter your current password.'
+      authSettingsSaving.value = false
+      await nextTick()
+      document.getElementById('auth-current-password')?.focus()
+      return
+    }
     authSettingsError.value = true
     authSettingsResult.value = apiErrorMessage(e, 'Could not save password settings')
   }
@@ -5359,6 +5514,21 @@ a.btn-secondary {
   justify-content: flex-start;
   gap: var(--space-2);
 }
+.provider-release-check { display: flex; flex-direction: column; gap: var(--space-2); }
+.provider-release-note { margin: 0; }
+.provider-release-command {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
+.provider-release-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.provider-release-failed { color: var(--fg3); }
 .provider-connection-detail {
   display: flex;
   flex-wrap: wrap;
@@ -5786,6 +5956,22 @@ a.btn-secondary {
   flex-direction: column;
   border-radius: 0;
   background: transparent;
+}
+/* A File access link briefly tints the row it found. The animation carries no
+   meaning: the focus ring on the select is the durable cue, and reduced motion
+   keeps that while dropping the tint. */
+.workspace-card--target {
+  animation: workspace-link-target 1.6s var(--ease);
+}
+@keyframes workspace-link-target {
+  0% { background-color: color-mix(in srgb, var(--accent) 14%, transparent); }
+  100% { background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-card--target { animation: none; }
+}
+.workspace-link-status {
+  margin: var(--space-2) 0;
 }
 /* The unsaved new workspace keeps a light frame: it is a draft form, and it
    has to read as not-yet-real next to the saved rows. */
@@ -6241,7 +6427,7 @@ a.btn-secondary {
   .provider-brings > summary::before { transition: none; }
 }
 /* /settings/providers scrolls here; keep the card clear of the pane header. */
-#chat-providers, #install-app { scroll-margin-top: var(--space-4); }
+#chat-providers, #install-app, #other-devices { scroll-margin-top: var(--space-4); }
 .provider-brings > summary:hover { color: var(--fg); }
 .provider-brings > summary:focus-visible {
   outline: 2px solid var(--accent);

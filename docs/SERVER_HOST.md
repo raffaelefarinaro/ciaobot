@@ -12,11 +12,12 @@ the direct shape is kept. Host upgrade and rollback are later children.
 
 ## What it does
 
-The host exposes exactly two fixed operations, revision 2:
+The host exposes exactly three fixed operations, revision 3:
 
 ```sh
 Ciaobot Server.app/Contents/MacOS/Ciaobot Server serve --python /absolute/interpreter
 Ciaobot Server.app/Contents/MacOS/Ciaobot Server request-accessibility
+Ciaobot Server.app/Contents/MacOS/Ciaobot Server run-move --python /absolute/interpreter --operation <id> --state-dir /absolute/dir
 ```
 
 - **`serve`** launches exactly `[python, -I, -m, ciao.cli, supervise]` as a child
@@ -32,13 +33,23 @@ Ciaobot Server.app/Contents/MacOS/Ciaobot Server request-accessibility
   for five seconds so macOS can present the asynchronous settings prompt. It
   never grants anything itself, never reads, clicks, types or scripts, and never
   runs AppleScript.
+- **`run-move`** launches exactly
+  `[python, -I, -m, ciao.workspace_move, run, --operation, <id>, --state-dir, <dir>]`
+  as a child and mirrors its status, exactly like `serve`. The workspace move
+  must run as a descendant of the host, so a macOS folder grant the user gave
+  the host covers the move too (#1658). The command is fixed: only the
+  interpreter, the operation id and the state directory are caller-supplied, and
+  all three are validated before anything is spawned. There is no arbitrary
+  command, no shell and no extra argument.
 
 The parser is strict. It accepts exactly `serve --python <absolute existing
-executable>` or `request-accessibility` and rejects repeated, unknown and extra
-arguments, relative and empty paths, and non-executable targets. Invalid argv
-exits `2` before AppKit is set up or any permission call is reachable. A
-symlinked or dot-alias path is resolved by the filesystem as an ordinary
-executable path.
+executable>`, `request-accessibility`, or
+`run-move --python <absolute existing executable> --operation <id> --state-dir
+<absolute normalized dir>` and rejects repeated, unknown and extra arguments,
+relative and empty paths, a `..` in either value, an operation id that is not a
+plain identifier, and non-executable targets. Invalid argv exits `2` before
+AppKit is set up or any permission call is reachable. A symlinked or dot-alias
+path is resolved by the filesystem as an ordinary executable path.
 
 ## Process group and job ownership
 
@@ -123,8 +134,8 @@ built by the later service child (#1008 child B), not here.
 | Bundle ID | `local.ciaobot.server` |
 | Display name | `Ciaobot Server` |
 | Executable | `Ciaobot Server` |
-| Host protocol | `CiaobotServerHostProtocol` = `1` |
-| Bundle version | host revision (`2`), never the engine release |
+| Host protocol | `CiaobotServerHostProtocol` = `2` |
+| Bundle version | host revision (`3`), never the engine release |
 | Minimum system | `13.0` |
 | `LSUIElement` | `true` (accessory app: no window, no Dock) |
 
@@ -179,16 +190,49 @@ in System Settings. That is why ordinary engine updates must keep these bytes
 unchanged, and why a host upgrade is a separate, explicit, warned action. The
 builder and tests never edit TCC and never remove a grant.
 
+## Workspaces in Desktop, Documents and Downloads
+
+Step 1 of #1577 (2026-10-20, macOS 27.0.1, v1.6.0) on a real Mac: the
+launchd-started host gets the "Ciaobot Server would like to access files in your
+Documents folder" prompt without any `NS*FolderUsageDescription` key. Allow
+covers the supervisor, the engine and the agent children, and survives logout
+and login. A direct (bare-Python) definition gets no prompt and no grant, so
+`setup_workspace` and `_register_launchd_service` still refuse a protected
+folder when no verified host is installed.
+
+The workspace move is the other half of that rule (#1658). Its launchd job
+runs the host's `run-move` operation, so it is a descendant of the branded
+`Ciaobot Server` app and the grant the user gave the host covers the move too.
+With a verified host the plan warns (naming the folder and the one-time macOS
+prompt) instead of refusing; without one the job stays a bare interpreter and
+a protected source or destination is still refused. A folder the user answered
+*Don't Allow* to is recorded through `ciao/workspace_access.py::record_denial`
+and reported with the move's folder, not as a traceback in
+`workspace-move.log`.
+
+Revision 3 adds the three usage strings the prompt was missing
+(#1659): `NSDesktopFolderUsageDescription`,
+`NSDocumentsFolderUsageDescription` and
+`NSDownloadsFolderUsageDescription`. Each names its folder, names Ciaobot
+Server, and says the access is scoped to a workspace the user chose. Adding them
+changed the signed bytes, which is why the host revision moved to 3 and why the
+installer can now replace a revision-2 host instead of refusing it (see
+`docs/SERVER_HOST_CONTRACT.md`). Not yet verified: whether the folder grant
+survives a host revision (a re-signed bundle). Check it in the release walk of
+the next host revision.
+
 ## Tests
 
 `tests/test_server_host.py` runs the pure checks everywhere (identity distinct
 from the PWA/retired/experiment IDs, revision independent of engine version, the
-icon digest, no Python bundled, the exact both-arch compile commands and
-deployment floor, output refusal, non-macOS refusal before writes, injected
-build ordering, archive safety and metadata, the `killpg`-free and
-`posix_spawn`-only source contract). On macOS with Command Line Tools it
+folder usage descriptions the macOS folder prompts need, the icon digest, no
+Python bundled, the exact both-arch compile commands and deployment floor,
+output refusal, non-macOS refusal before writes, injected build ordering,
+archive safety and metadata, the `killpg`-free and `posix_spawn`-only source
+contract). On macOS with Command Line Tools it
 compiles the real host and a small offline C child fixture once, then exercises
-the shipped host: fixed supervisor argv, inherited cwd/environment/stdio, the
+the shipped host: fixed supervisor argv, the fixed `run-move` argv and the
+process group it shares with the host, inherited cwd/environment/stdio, the
 child's reset signal mask and dispositions, the dropped extra fd, exit and
 signal mirroring, exit `130`/`143` treated as a clean stop (and unchanged
 without a stop), stop forwarding and reaping, the graceful Quit Apple Event
@@ -201,6 +245,16 @@ by the tests, and no live launchd, `.app`, engine or TCC is involved.
 ```sh
 PYTHONPATH=$PWD python -m pytest tests/test_server_host.py -q
 ```
+
+## When macOS denies workspace access
+
+If the user answers *Don't Allow* to "Ciaobot Server would like to access files in your Documents folder" (or Desktop, Downloads, a removable or network volume), the supervisor's first probe (`ciao/workspace_access.py`) sees `EPERM` before it touches the workspace. It writes one plain line to `~/.local/state/ciaobot/workspace-access-denied.txt` (outside every workspace), prints it to stderr and exits 78, without launching the engine.
+
+The user sees the line in `ciao service status` (text and `--json`, field `workspace_access_denied`), in the installer when its health wait fails, and in the file itself. The message names System Settings, Privacy & Security, Files and Folders, Ciaobot Server.
+
+Exit 78 passes through the host unchanged: it is neither a stop code nor a launch failure. launchd relaunches the job after its ~10 s throttle, so once the switch is turned on the engine comes up on its own and the next passing probe deletes the file. On a host migration the installer rolls back and the previous engine keeps running until access is granted and the installer is rerun.
+
+To bring the prompt back for testing: `tccutil reset SystemPolicyDocumentsFolder local.ciaobot.server` (Desktop: `SystemPolicyDesktopFolder`, Downloads: `SystemPolicyDownloadsFolder`).
 
 ## Not in this child
 

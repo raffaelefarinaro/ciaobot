@@ -14,6 +14,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
+from ciao.providers.opencode import OpencodeProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -501,6 +502,108 @@ def test_without_agent_id_every_subagent_is_returned(
 
     assert resp.status_code == 200
     assert sorted(entry["agent_id"] for entry in resp.json()) == ["researcher", "writer"]
+
+
+# --- opencode: the poll path must not read transcripts (#1652) ---------------
+#
+# The live collab tree re-read every child's history on every poll. The list
+# endpoint is polled every few seconds by the in-chat panel, so a chat with
+# many background agents made the engine re-read every transcript every few
+# seconds. Only the detail view (``?agent_id=``) needs a transcript.
+
+
+class _OpencodeResponse:
+    def __init__(self, payload: object, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.text = ""
+
+    def json(self) -> object:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"status {self.status_code}")
+
+
+class _OpencodeClient:
+    """A fake OpenCode server that records every path it is asked for."""
+
+    def __init__(self) -> None:
+        self.get_calls: list[str] = []
+
+    async def get(self, path: str, *, params=None):
+        self.get_calls.append(path)
+        if path == "/api/session":
+            return _OpencodeResponse({"data": [
+                {"id": "ses_child_a", "parentID": "ses_parent", "title": "First"},
+                {"id": "ses_child_b", "parentID": "ses_parent", "title": "Second"},
+            ]})
+        if path == "/api/session/active":
+            return _OpencodeResponse({"data": {}})
+        if path.endswith("/message"):
+            return _OpencodeResponse({
+                "data": [],
+                "cursor": {"previous": None, "next": None},
+            })
+        return _OpencodeResponse({"data": {}})
+
+    async def post(self, path: str, json=None):  # pragma: no cover - unused
+        raise AssertionError(f"unexpected POST {path}")
+
+
+def _opencode_client(tmp_path: Path) -> tuple[TestClient, _OpencodeClient]:
+    """A client whose chat is an opencode chat with a live server attached."""
+    recorder = _OpencodeClient()
+    provider = OpencodeProvider(tmp_path)
+    provider._client = recorder  # type: ignore[assignment]
+    provider._process = SimpleNamespace(returncode=None)
+    provider._session_id = "ses_parent"
+
+    chat = SimpleNamespace(
+        session_id="ses_parent",
+        provider="opencode",
+        chat_id="chat-1",
+        user_turn_timings={},
+    )
+    pcm = SimpleNamespace(
+        get_chat=lambda chat_id: chat if chat_id == "chat-1" else None,
+        _providers={"chat-1": SimpleNamespace(provider=provider)},
+        _agent_root_for_chat=lambda chat_id: None,
+    )
+    app = Starlette(routes=[Route("/api/chats/{chat_id}/subagents", chat_subagents, methods=["GET"])])
+    app.state.project_chat_manager = pcm
+    app.state.config = SimpleNamespace(workspace_root=tmp_path / "workspace")
+    return TestClient(app), recorder
+
+
+def test_opencode_subagent_list_reads_no_transcripts(tmp_path: Path) -> None:
+    """The unfiltered list is metadata only: no child's history is read."""
+    client, recorder = _opencode_client(tmp_path)
+
+    resp = client.get("/api/chats/chat-1/subagents")
+
+    assert resp.status_code == 200
+    assert not [path for path in recorder.get_calls if path.endswith("/message")]
+    assert sorted(entry["agent_id"] for entry in resp.json()) == [
+        "ses_child_a",
+        "ses_child_b",
+    ]
+
+
+def test_opencode_subagent_detail_reads_only_that_child(tmp_path: Path) -> None:
+    """The detail view reads one transcript, not every sibling's."""
+    client, recorder = _opencode_client(tmp_path)
+
+    resp = client.get(
+        "/api/chats/chat-1/subagents", params={"agent_id": "ses_child_b"}
+    )
+
+    assert resp.status_code == 200
+    message_reads = [path for path in recorder.get_calls if path.endswith("/message")]
+    assert message_reads == ["/api/session/ses_child_b/message"]
+    rows = resp.json()
+    assert [entry["agent_id"] for entry in rows] == ["ses_child_b"]
 
 
 # --- Empty / banner-only ResultEvent guards ----------------------------------

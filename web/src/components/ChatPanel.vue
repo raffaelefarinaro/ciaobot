@@ -475,9 +475,8 @@
            All in-progress content (tool calls, intermediate text, and current
            streaming text) stays inside this block. The final answer bubble
            only appears after the result event. -->
-      <!-- The live turn: the same line as a finished turn, open, with a spinner
-           and the step that is running now; steps land on the timeline as
-           they happen. The answer bubble appears only after the result. -->
+      <!-- The live turn starts as one expandable activity line. Full steps stay
+           in its timeline; the answer bubble appears only after the result. -->
       <div v-if="store.isStreaming" class="trace-block live" :class="{ open: liveTraceOpen }">
         <button
           type="button"
@@ -485,8 +484,14 @@
           :aria-expanded="liveTraceOpen"
           @click="toggleLiveTrace"
         >
+          <svg class="trace-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
           <span class="activity-spinner"></span>
-          <span class="trace-label">{{ liveTraceLabel }}</span>
+          <span class="trace-label">Working</span>
+          <span class="live-preview" aria-live="polite" aria-atomic="true">
+            <Transition name="live-step" mode="out-in">
+              <span :key="liveStepIdentity" class="live-preview-text">{{ liveStepPreview }}</span>
+            </Transition>
+          </span>
           <span v-if="liveTraceMetaParts.length" class="trace-meta">
             <span
               v-for="part in liveTraceMetaParts"
@@ -1381,16 +1386,18 @@ import {
   buildTurnParts,
   collectToolUsage,
   collectTraceOutputs,
-  describeToolStep,
   fileCardBasename,
   fileCardDirname,
   fileCardIcon,
   findFinalAnswerIndex,
   isInterruptedTail,
+  isPermissionActivityLine,
   formatTokenUsage,
   isImageFilePath,
   isScratchPath,
   isSubagentLine,
+  liveToolStep,
+  permissionActivityLine,
   mentionedFilePaths,
   mergeTraceOutputs,
   collapseOutputsByName,
@@ -2159,10 +2166,10 @@ const openTraces = ref<Record<number, boolean>>({})
 // a reference, not part of the reply, and a turn that touched many files used
 // to push the answer off screen behind a wall of pills.
 const openOutputs = ref<Record<number, boolean>>({})
-// The live trace opens at every turn start; a user who closes it keeps it
-// closed for that turn. `Reading` means they scrolled away from the tail
-// (transcript or trace body), so the finished trace must not move under them.
-const liveTraceOpen = ref(true)
+// The live trace starts compact; explicit expansion is kept through completion.
+// `Reading` means they scrolled away from the tail (transcript or trace body),
+// so the finished trace must not move under them.
+const liveTraceOpen = ref(false)
 const liveTraceTouched = ref(false)
 const liveTraceReading = ref(false)
 const liveBodyAtBottom = ref(true)
@@ -2329,7 +2336,7 @@ function toggleLiveTrace() {
 }
 
 function resetLiveTraceState() {
-  liveTraceOpen.value = true
+  liveTraceOpen.value = false
   liveTraceTouched.value = false
   liveTraceReading.value = false
   liveBodyAtBottom.value = true
@@ -3830,20 +3837,49 @@ const liveTraceMetaParts = computed(() => {
 // progress, otherwise "Thinking..." while the model reasons.
 // What the agent is doing right now, for the live Activity line. Read from
 // the last timeline entry; empty when the timeline gives nothing concrete.
+// Permission lines still waiting for an answer. An answered one stays in the
+// trace as history but is no longer the current step (#1618).
+const openPermissionLines = computed(() => new Set(
+  pendingApprovals.value.flatMap(p => activityLines(permissionActivityLine(p.tool_name, p.message))),
+))
 const liveStepLabel = computed(() => {
   if (store.currentStreamingThinking) return ''
   const last = store.currentTimeline[store.currentTimeline.length - 1]
   if (!last) return ''
   if (last.kind === 'filecard' && last.file_path) return `Editing ${fileCardBasename(last.file_path)}`
   if (last.kind !== 'tool') return ''
-  const lines = activityLines(last.content)
-  // The row ellipses in CSS; this only turns the raw tool line into words.
-  return describeToolStep(lines[lines.length - 1] || '')
+  return liveToolStep(activityLines(last.content), last.tool_use_ids, openPermissionLines.value, new Set(store.currentDeniedToolUseIds))
 })
-const liveTraceLabel = computed(() => {
-  if (liveStepLabel.value) return `Working · ${liveStepLabel.value}`
-  if (store.currentTimeline.length || store.currentStreamingText) return 'Working...'
-  return 'Thinking...'
+const liveStepPreview = computed(() => {
+  if (store.currentStreamingThinking) return 'Thinking…'
+  if (store.currentStreamingText) return 'Writing response…'
+  const last = store.currentTimeline[store.currentTimeline.length - 1]
+  if (last?.kind === 'tool' || last?.kind === 'filecard') return liveStepLabel.value || 'Working…'
+  if (last?.kind === 'status') return last.content
+  if (last?.kind === 'text') return 'Sharing an update…'
+  return 'Thinking…'
+})
+// Key the selected activity, not its rendered description: IDs distinguish
+// repeated same-label tools, and the line index covers providers with no IDs.
+// Live phases get a stable key, so token additions and clock ticks never slide.
+const liveStepIdentity = computed(() => {
+  if (store.currentStreamingThinking) return 'phase:thinking'
+  if (store.currentStreamingText) return 'phase:response'
+  const last = store.currentTimeline[store.currentTimeline.length - 1]
+  if (!last) return 'phase:thinking'
+  const entryIndex = store.currentTimeline.length - 1
+  if (last.kind === 'tool') {
+    const lines = activityLines(last.content)
+    let lineIndex = lines.length - 1
+    while (lineIndex >= 0 && isPermissionActivityLine(lines[lineIndex]) && !openPermissionLines.value.has(lines[lineIndex].trim())) lineIndex--
+    if (lineIndex < 0) return `activity:${entryIndex}:tool:idle`
+    const toolId = last.tool_use_ids?.[lineIndex]
+    const denied = lineIndex < lines.length - 1 && !!toolId && new Set(store.currentDeniedToolUseIds).has(toolId)
+    const permissionState = isPermissionActivityLine(lines[lineIndex]) ? 'pending' : denied ? 'denied' : 'active'
+    return `activity:${entryIndex}:tool:${lineIndex}:${toolId || 'line'}:${permissionState}`
+  }
+  if (last.kind === 'filecard') return `activity:${entryIndex}:file:${last.tool_use_id || last.file_path}`
+  return `activity:${entryIndex}:${last.kind}`
 })
 
 // Image extensions get routed through openImage so the binary streams

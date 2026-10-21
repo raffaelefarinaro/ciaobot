@@ -188,6 +188,17 @@ export interface ProjectInfo {
 
 export type ArchivedChatSummary = Pick<ChatInfo, 'chat_id' | 'title' | 'created_at' | 'archive_path'>
 
+// The report a project delete returns. `vault_entry_removed` says whether the
+// project had a folder under projects/active/ that was removed; the counts
+// and the edited backlink list describe that cleanup.
+export interface ProjectDeleteReport {
+  ok: boolean
+  vault_entry_removed: boolean
+  removed_notes: number
+  removed_files: number
+  edited_backlinks: string[]
+}
+
 export interface ChatArchivePage {
   items: ArchivedChatSummary[]
   total: number
@@ -374,6 +385,12 @@ export interface ChatMessage {
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
   turn_index?: number
+  // The client send id of the client's OWN optimistic bubble for this turn.
+  // The engine records the same id per user turn and echoes it on the
+  // user_echo, so the client can tell its bubble from the server's copy of
+  // the same turn and prove that a send was delivered. Only present on the
+  // client-rendered copy of a user message.
+  send_id?: string
   // Server-reported agent latency for the final assistant bubble of a turn,
   // in milliseconds. Drives the footer "· 7.3s" label.
   duration_ms?: number
@@ -412,6 +429,9 @@ export interface SubagentTranscript {
   is_async?: boolean
   status?: 'running' | 'completed' | 'failed' | 'stopped' | ''
   turn_index?: number
+  // Run length in milliseconds, when the provider can report it without the
+  // transcript (opencode child sessions carry their own timestamps).
+  duration_ms?: number | null
 }
 
 // One live subagent from `/api/subagents/running`. Same dispatch metadata as
@@ -520,6 +540,7 @@ export type WsEvent =
       error?: string;
       retryable?: boolean;
       expired?: boolean;
+      already_resolved?: boolean;
     }
   | { type: 'permission_resolved'; request_id: string; session_id?: string }
   // The selected model cannot see the attached images; the engine asks the
@@ -539,7 +560,22 @@ export type WsEvent =
       timeout_s: number;
     }
   | { type: 'chat_title'; chat_id: string; title: string }
-  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string; origin?: TurnOrigin }
+  | {
+      type: 'user_echo';
+      text: string;
+      images?: string[];
+      turn_index?: number;
+      sent_at?: string;
+      unattended?: boolean;
+      entry_id?: string;
+      origin?: TurnOrigin;
+      // The client send id this turn owns. It identifies the send exactly, so
+      // the client can tell its own optimistic bubble from the server's copy.
+      send_id?: string;
+      // True when the engine already owns this send id: the frame was a
+      // repeat of a turn that ran, and no second turn was started.
+      duplicate?: boolean;
+    }
   // A tool call was refused (user Deny, or the auto-deny on an unattended
   // run). The call never executed, so any file card already painted for this
   // tool_use_id has to be retracted.
@@ -553,9 +589,10 @@ export type WsEvent =
       error?: string;
       retryable?: boolean;
       delivered_as_message?: boolean;
+      already_resolved?: boolean;
     }
   | { type: 'question_resolved'; request_id: string; session_id?: string }
-  | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean }
+  | { type: 'queued'; id?: string; text: string; images?: string[]; delivery?: QueueDelivery; waiting?: boolean; send_id?: string }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[]; delivery?: QueueDelivery; steering?: boolean; waiting?: boolean }> }
   // A steer reached the running turn: the entries leave the queue and the
   // message becomes its own user turn.
@@ -908,6 +945,8 @@ export type HostTerminalAction =
   | 'opencode-login'
   | 'gws-install'
   | 'skills-update'
+  | 'opencode-update'
+  | 'claude-update'
 
 /** `GET /api/host/terminal`. */
 export interface HostTerminalCapabilities {
@@ -923,6 +962,15 @@ export interface HostTerminalLaunchResult {
   ok: boolean
   platform: string
   launched: string
+}
+
+/** What `ciao/provider_versions.py::release_check` says about an installed CLI. */
+export interface ProviderReleaseCheck {
+  state: 'untested' | 'bundled' | 'unsupported' | 'unknown' | 'below_tested' | 'current'
+  tested?: string
+  installed?: string
+  command?: string
+  terminal_action?: HostTerminalAction
 }
 
 export interface ProviderConnection {
@@ -948,6 +996,8 @@ export interface ProviderConnection {
   path_command?: string
   /** Terminal action that runs the command shown for this row, when the engine offers one. */
   terminal_action?: HostTerminalAction
+  /** How the installed CLI compares with the version this release was tested with. */
+  release_check?: ProviderReleaseCheck
   /** Desktop app found while the CLI is missing. */
   app_path?: string
   /** Absolute path of the CLI binary Ciaobot would run. */
@@ -1306,6 +1356,10 @@ export interface OperatorAction {
   /** A precondition the install cannot get past on its own: unmissable and not
    *  dismissible. Deliberately not an app-wide lock. */
   blocking: boolean
+  /** Host-terminal action the strip may offer on the engine's computer. */
+  terminal_action?: HostTerminalAction
+  /** The same command as copyable text. */
+  command?: string
 }
 
 export interface HousekeepingResponse {

@@ -72,6 +72,23 @@ rtk proxy git status --short                          # must be empty
 A non-zero count means `develop` is ahead of the remote: push it, or stop. A
 dirty tree stops the cut (`--apply` refuses — see traps).
 
+**The post-merge CI run must be green on every platform.** A develop PR runs
+only Linux plus the fast Windows gates (imports, win32 mypy); the Windows
+pytest and vitest suites and the macOS job (browser tests, engine cold-start)
+run on the push to `develop` after merge. That push run is the only place
+those suites ran on what you are about to ship:
+
+```bash
+gh run list --repo raffaelefarinaro/ciaobot --workflow ci.yml --branch develop \
+  --event push --limit 1 --json headSha,status,conclusion,url
+```
+
+`headSha` must equal `git rev-parse origin/develop`, `status` must be
+`completed` and `conclusion` `success`. A run still in progress means wait; a
+red one stops the cut. File the failure as an issue, fix it on `develop`, and
+start again from the top of this step. The release PR into `main` re-runs the
+full matrix, but finding a Windows break there means fixing it mid-cut.
+
 **Decide scope with the user.** Run `gh pr list --state open` and
 `gh issue list --state open` on `raffaelefarinaro/ciaobot`, show the result, and
 ask which open PRs should land in this release. Merge the chosen ones into
@@ -167,6 +184,12 @@ env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" --bump <patch|minor|
 
 Read the plan. It is the last chance to catch a wrong bump.
 
+Also read the **Provider versions** block. It shows the OpenCode binary on this
+machine and the Claude CLI bundled in the installed `claude-agent-sdk`, each next
+to the latest published version. If it warns that OpenCode is behind latest, the
+maintainer decides: update OpenCode first and re-run the plan, or cut with the
+installed version recorded as tested.
+
 **Write the release notes.** The plan's changelog is the raw commit list; users
 read the notes. Run **`/ciao-release-notes`** for the range
 `<last-tag>..origin/develop`, write the body to
@@ -190,7 +213,10 @@ What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`,
 in both `web/public/sw.js` and `ciao/web/static/sw.js`; writes the notes into
 `CHANGELOG.md` (or, without `--notes-file`, the commit list);
 auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the
-installed `gws` CLI differs from the pin; runs the full check suite; commits
+installed `gws` CLI differs from the pin; records the tested OpenCode and bundled
+Claude CLI versions in `ciao/stock/provider-versions.json` (fails on a missing,
+dev, unpublished or unsupported OpenCode unless `--untested-provider opencode`);
+runs the full check suite; commits
 `release: prepare vX.Y.Z`; pushes; opens the PR into `main`.
 
 ## Step 5 — Install the candidate and walk it
@@ -212,7 +238,7 @@ task files in `skills/ciao-release/tasks/`:
 skills/ciao-release/tasks/01-boot-and-home.md        first paint, workspace, what-needs-you
 skills/ciao-release/tasks/02-chat-and-turns.md       start a chat, real turns, streaming, stop
 skills/ciao-release/tasks/03-archive-and-memory.md   archive, reopen, the archived footer
-skills/ciao-release/tasks/04-projects-and-schedule.md  a plain app project, an isolated vault note completion, a schedule row
+skills/ciao-release/tasks/04-projects-and-schedule.md  an app project with a scaffolded vault note, an isolated vault note completion, a schedule row
 skills/ciao-release/tasks/05-settings-and-assets.md  every Settings route loads, the scoped asset lists
 ```
 
@@ -221,6 +247,15 @@ start of `tasks/01`. After that the session is unlocked and the rest run
 unattended. **Never read `PWA_AUTH_TOKEN` out of the workspace `.env` and type
 it yourself** — it puts the password in the transcript and in this task's
 context for no benefit.
+
+**Mandatory check:** Settings -> Models must show the same OpenCode and Claude
+versions as `ciao/stock/provider-versions.json` on the release branch. If they
+differ, re-record, commit, push to the release branch, and repeat the real chat
+turn with that provider:
+
+```bash
+env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" --refresh-provider-versions
+```
 
 ### Driving the app, and the walkthrough report
 

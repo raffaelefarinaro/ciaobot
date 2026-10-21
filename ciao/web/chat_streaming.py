@@ -508,7 +508,9 @@ class ChatStreaming:
                                 )
                                 or ""
                             )
-                            if provider_session:
+                            # A request from a task/subagent child session keeps its
+                            # own session: the reply must be addressed there (#1617).
+                            if provider_session and not payload.get("session_id"):
                                 payload["session_id"] = provider_session
                         if payload:
                             apply_file_touches_to_payload(
@@ -1078,6 +1080,7 @@ class ChatStreaming:
                 turn_unattended = False
                 turn_index2: int | None = None
                 sent_at_iso2 = ""
+                queued_send_id = str(next_pending.get("send_id") or "")
                 chat_meta2 = self._host._chats.get(chat_id)
                 if (
                     chat_meta2 is not None
@@ -1110,6 +1113,8 @@ class ChatStreaming:
                     }
                     if turn_origin:
                         chat_meta2.user_turn_origin[str(turn_index2)] = turn_origin
+                    if queued_send_id:
+                        chat_meta2.user_turn_send_ids[str(turn_index2)] = queued_send_id
                     self.start_turn_perf(chat_id, turn_index2)
                     self._host._save()
 
@@ -1125,6 +1130,8 @@ class ChatStreaming:
                     followup_echo["sent_at"] = sent_at_iso2
                 if turn_origin:
                     followup_echo["origin"] = turn_origin
+                if queued_send_id:
+                    followup_echo["send_id"] = queued_send_id
                 stream.publish(followup_echo)
 
                 current_prompt = combined_text

@@ -2,12 +2,14 @@ import { describe, expect, test } from 'vitest'
 import {
   dropSupersededLiveTail,
   groupIntoTurns,
+  hasRenderedFinalAnswer,
   historySignature,
   isLiveTraceRow,
   isSettledHistoryRow,
   mergeMessageFields,
   mergeMetadata,
   normalizeMessages,
+  pruneOrphanOptimisticUsers,
   queuedTextAlreadyRendered,
   sanitizeInjectedContext,
   stripImageManifest,
@@ -347,6 +349,157 @@ describe('dropSupersededLiveTail', () => {
     expect(out[1].effective_model).toBe('m1')
     expect(out[3].usage).toEqual({ input: '99' })
     expect(out[3].effective_model).toBe('m2')
+  })
+})
+
+describe('hasRenderedFinalAnswer', () => {
+  // A replayed `result` frame carries the same answer the transcript already
+  // holds. Rendering it again is the "one reply, two bubbles" report.
+  test('true when the transcript already ends in that exact answer', () => {
+    const rows = [
+      msg({ role: 'user', content: 'q' }),
+      msg({ role: 'assistant', content: 'Here is the answer.', phase: 'final_answer' }),
+    ]
+    expect(hasRenderedFinalAnswer(rows, 'Here is the answer.')).toBe(true)
+  })
+
+  test('whitespace differences do not make it a different answer', () => {
+    const rows = [
+      msg({ role: 'user', content: 'q' }),
+      msg({ role: 'assistant', content: 'Here  is\nthe answer.', phase: 'final_answer' }),
+    ]
+    expect(hasRenderedFinalAnswer(rows, 'Here is the answer.')).toBe(true)
+  })
+
+  test('activity rows after the answer do not hide it', () => {
+    const rows = [
+      msg({ role: 'user', content: 'q' }),
+      msg({ role: 'assistant', content: 'Here is the answer.', phase: 'final_answer' }),
+      msg({ role: 'system', content: 'Read x', tool_name: '_activity' }),
+    ]
+    expect(hasRenderedFinalAnswer(rows, 'Here is the answer.')).toBe(true)
+  })
+
+  test('false for a different answer', () => {
+    const rows = [
+      msg({ role: 'user', content: 'q' }),
+      msg({ role: 'assistant', content: 'Here is the answer.', phase: 'final_answer' }),
+    ]
+    expect(hasRenderedFinalAnswer(rows, 'A different answer.')).toBe(false)
+  })
+
+  test('false when a newer user turn follows the answer', () => {
+    const rows = [
+      msg({ role: 'user', content: 'q' }),
+      msg({ role: 'assistant', content: 'Here is the answer.', phase: 'final_answer' }),
+      msg({ role: 'user', content: 'another question' }),
+    ]
+    expect(hasRenderedFinalAnswer(rows, 'Here is the answer.')).toBe(false)
+  })
+
+  test('false for empty text', () => {
+    const rows = [msg({ role: 'assistant', content: 'Here is the answer.', phase: 'final_answer' })]
+    expect(hasRenderedFinalAnswer(rows, '')).toBe(false)
+  })
+
+  test('false when the transcript is empty', () => {
+    expect(hasRenderedFinalAnswer([], 'anything')).toBe(false)
+  })
+
+  test('true for a hydrated answer, which carries no phase', () => {
+    // A row loaded from /messages has no `phase`: the server does not stamp
+    // one. The answer is the transcript's last assistant text.
+    const rows = [
+      msg({ role: 'user', content: 'q' }),
+      msg({ role: 'assistant', content: 'Here is the answer.' }),
+    ]
+    expect(hasRenderedFinalAnswer(rows, 'Here is the answer.')).toBe(true)
+  })
+
+  test('a hydrated answer followed by trace rows still counts', () => {
+    const rows = [
+      msg({ role: 'user', content: 'q' }),
+      msg({ role: 'assistant', content: 'Here is the answer.' }),
+      msg({ role: 'system', content: 'Read x', tool_name: '_activity' }),
+    ]
+    expect(hasRenderedFinalAnswer(rows, 'Here is the answer.')).toBe(true)
+  })
+
+  test('a hydrated answer followed by a newer answer does not count', () => {
+    const rows = [
+      msg({ role: 'user', content: 'q' }),
+      msg({ role: 'assistant', content: 'Here is the answer.' }),
+      msg({ role: 'user', content: 'another question' }),
+      msg({ role: 'assistant', content: 'A second answer.' }),
+    ]
+    expect(hasRenderedFinalAnswer(rows, 'Here is the answer.')).toBe(false)
+  })
+
+  test('commentary is never the final answer', () => {
+    const rows = [
+      msg({ role: 'user', content: 'q' }),
+      msg({ role: 'assistant', content: 'Now let me check.', phase: 'commentary' }),
+    ]
+    expect(hasRenderedFinalAnswer(rows, 'Now let me check.')).toBe(false)
+  })
+})
+
+describe('pruneOrphanOptimisticUsers', () => {
+  test('drops one un-indexed bubble for one server row', () => {
+    const local = [msg({ role: 'user', content: 'hello' })]
+    const server = [msg({ role: 'user', content: 'hello', turn_index: 0 })]
+    const out = pruneOrphanOptimisticUsers(local, server)
+    expect(out).toHaveLength(0)
+  })
+
+  test('consumes server rows one-to-one: two server copies cover two optimistic bubbles', () => {
+    // The server holds the message twice, so it owns both copies: the two
+    // optimistic bubbles are consumed one for one, and the transcript still
+    // shows the message twice — a genuine repeat keeps both copies.
+    const local = [
+      msg({ role: 'user', content: 'hello' }),
+      msg({ role: 'user', content: 'hello' }),
+    ]
+    const server = [
+      msg({ role: 'user', content: 'hello', turn_index: 0 }),
+      msg({ role: 'user', content: 'hello', turn_index: 1 }),
+    ]
+    const kept = pruneOrphanOptimisticUsers(local, server)
+    const merged = [...server, ...kept]
+    expect(merged.filter(m => m.content === 'hello')).toHaveLength(2)
+  })
+
+  test('keeps a second optimistic bubble the server does not cover', () => {
+    // One server copy, two optimistic bubbles: only one of them is the
+    // server's copy, the other stays.
+    const local = [
+      msg({ role: 'user', content: 'hello' }),
+      msg({ role: 'user', content: 'hello' }),
+    ]
+    const server = [msg({ role: 'user', content: 'hello', turn_index: 0 })]
+    const out = pruneOrphanOptimisticUsers(local, server)
+    expect(out).toHaveLength(1)
+  })
+
+  test('keeps a bubble that already carries a turn_index', () => {
+    const local = [msg({ role: 'user', content: 'hello', turn_index: 3 })]
+    const server = [msg({ role: 'user', content: 'hello', turn_index: 0 })]
+    const out = pruneOrphanOptimisticUsers(local, server)
+    expect(out).toHaveLength(1)
+  })
+
+  test('leaves an unmatched bubble alone', () => {
+    const local = [msg({ role: 'user', content: 'never sent' })]
+    const server = [msg({ role: 'user', content: 'hello', turn_index: 0 })]
+    const out = pruneOrphanOptimisticUsers(local, server)
+    expect(out).toHaveLength(1)
+    expect(out[0].content).toBe('never sent')
+  })
+
+  test('never drops an assistant row', () => {
+    const local = [msg({ role: 'assistant', content: 'hello' })]
+    const server = [msg({ role: 'user', content: 'hello', turn_index: 0 })]
+    expect(pruneOrphanOptimisticUsers(local, server)).toHaveLength(1)
   })
 })
 

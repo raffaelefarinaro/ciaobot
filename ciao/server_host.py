@@ -10,7 +10,9 @@ Three questions, deliberately kept apart, in the order they must be asked:
 * **Syntax** — :func:`parse_service_command` reads an invocation and answers
   only what the argv *says*: a typed :class:`ServiceCommand`, either the direct
   engine shape (``python -m ciao.cli run|supervise`` or ``ciao run|supervise``)
-  or the native-host shape (``Ciaobot Server serve --python <abs>``). It is
+  or one of the two native-host shapes (``Ciaobot Server serve --python <abs>``
+  and ``Ciaobot Server run-move --python <abs> --operation <id> --state-dir
+  <abs>``). It is
   pure, runs on every platform, and proves nothing about the files it names. A
   hosted command whose executable basename is ``Ciaobot Server`` is accepted
   even when no such host exists, because "the argv names the host" is not "the
@@ -27,6 +29,9 @@ Three questions, deliberately kept apart, in the order they must be asked:
   to match it exactly: identity, revision, protocol, executable digest, both
   CDHashes and the whole file set. Only that match proves this machine installed
   this host. A missing record is a refusal, never a reason to trust a bundle.
+  :func:`verify_superseded_host` is the one narrower proof, against the
+  revision this engine supersedes, so the installer can replace a host it can
+  prove is ours and refuse every other bundle.
 
 The record never lives inside the sealed app: a record covered by the signature
 it vouches for would be circular, and one written into the bundle would change
@@ -65,6 +70,9 @@ __all__ = [
     "HOST_PROTOCOL_KEY",
     "HOST_REVISION",
     "ICON_NAME",
+    "LEGACY_HOST_PROTOCOL",
+    "LEGACY_HOST_REVISION",
+    "MOVE_HOST_PROTOCOL",
     "MINIMUM_SYSTEM_VERSION",
     "NATIVE_TIMEOUT_SECONDS",
     "SCHEMA_VERSION",
@@ -75,10 +83,14 @@ __all__ = [
     "default_bundle_path",
     "default_ownership_path",
     "host_service_argv",
+    "host_move_argv",
+    "host_interpreter",
     "inspect_host_bundle",
     "parse_service_command",
     "read_host_ownership",
+    "read_superseded_ownership",
     "verify_owned_host",
+    "verify_superseded_host",
 ]
 
 #: The fixed bundle identity. These must agree with ``scripts/build-server-host.py``
@@ -88,10 +100,24 @@ APP_NAME = "Ciaobot Server.app"
 BUNDLE_ID = "local.ciaobot.server"
 EXECUTABLE_NAME = "Ciaobot Server"
 ICON_NAME = "CiaobotServer.icns"
-HOST_REVISION = 2
+HOST_REVISION = 3
 HOST_PROTOCOL_KEY = "CiaobotServerHostProtocol"
-HOST_PROTOCOL = 1
+HOST_PROTOCOL = 2
 MINIMUM_SYSTEM_VERSION = "13.0"
+
+#: The one superseded host revision this engine can still prove it owns, so
+#: the installer can replace it instead of refusing the upgrade and leaving
+#: the Mac without a host (#1659). A record of any other revision is refused
+#: by both readers.
+LEGACY_HOST_REVISION = 2
+#: The protocol the superseded revision spoke.
+LEGACY_HOST_PROTOCOL = 1
+
+#: The first host protocol that carries the ``run-move`` operation, so the
+#: workspace move can run as a descendant of the host (#1658). A host below it
+#: has no such operation: the move job stays a bare interpreter and the move
+#: keeps refusing a protected folder.
+MOVE_HOST_PROTOCOL = 2
 
 #: The host's own stop grace and the launchd ``ExitTimeOut`` a service plist must
 #: exceed so launchd does not sweep the job group out from under the host's stop.
@@ -213,6 +239,19 @@ class ServiceCommand:
     argv: tuple[str, ...]
 
 
+def _getuid() -> int:
+    """This user's uid.
+
+    ``os.getuid`` does not exist on Windows, where this module is imported (the
+    contract is shared) but no macOS path runs. Read through ``getattr`` so
+    mypy's win32 pass type-checks it too, and typed locally because the
+    ``getattr`` is ``Any`` (``no-any-return``). The same seam
+    :func:`ciao.macos_service._getuid` uses, and the seam a test patches.
+    """
+    getuid: Callable[[], int] = getattr(os, "getuid")
+    return getuid()
+
+
 def _absolute_posix(value: object, *, what: str, code: str) -> str:
     """Require an absolute POSIX path string, portable across platforms.
 
@@ -258,6 +297,18 @@ def _python_interpreter(value: object) -> str:
     return interpreter
 
 
+def host_interpreter(python: PurePath) -> str:
+    """The interpreter a host would run, or a refusal.
+
+    The host's own parser demands an absolute, normalized path whose basename
+    is ``python``, ``python3`` or ``python3.N``. This exposes that rule to a
+    caller that must answer "can this host run a child with this interpreter?"
+    *before* it renders a command, so the answer and the rendering can never
+    disagree.
+    """
+    return _python_interpreter(os.fspath(python))
+
+
 def _parse_direct(program: str, argv: tuple[str, ...]) -> ServiceCommand:
     base = PurePosixPath(program).name
     if _PYTHON_RE.fullmatch(base):
@@ -295,15 +346,17 @@ def _parse_direct(program: str, argv: tuple[str, ...]) -> ServiceCommand:
 def parse_service_command(arguments: object) -> ServiceCommand:
     """Parse a service invocation strictly into a :class:`ServiceCommand`.
 
-    Accepts exactly the two shapes the service actually uses:
+    Accepts exactly the shapes the host actually runs:
 
     * hosted — ``[<abs>/Ciaobot Server, serve, --python, <abs python>]``;
+    * hosted move — ``[<abs>/Ciaobot Server, run-move, --python, <abs python>,
+      --operation, <id>, --state-dir, <abs dir>]``;
     * direct — ``[<abs python>, [-I], -m, ciao.cli, run|supervise]`` or
       ``[<abs ciao>, run|supervise]``.
 
     Repeated, unknown, extra or relative arguments, a non-string element, a
-    non-sequence and a wrong host basename are all refusals. The hosted shape is
-    syntax only and never proves ownership.
+    non-sequence and a wrong host basename are all refusals. The hosted shapes
+    are syntax only and never prove ownership.
     """
     if not isinstance(arguments, (list, tuple)) or isinstance(arguments, (str, bytes)):
         raise ServerHostError(
@@ -334,6 +387,29 @@ def parse_service_command(arguments: object) -> ServiceCommand:
         python = _python_interpreter(argv[3])
         return ServiceCommand("hosted", host, python, argv)
 
+    if (
+        len(argv) == 8
+        and argv[1] == "run-move"
+        and argv[2] == "--python"
+        and argv[4] == "--operation"
+        and argv[6] == "--state-dir"
+    ):
+        # The workspace move runs under the host (#1658), so its command is a
+        # shape the parser knows. The same rules as the serve shape apply to
+        # the interpreter; the state directory is an absolute, normalized path.
+        host = _absolute_posix(
+            argv[0], what="the host executable", code=INVALID_COMMAND
+        )
+        if PurePosixPath(host).name != EXECUTABLE_NAME:
+            raise ServerHostError(
+                f"the hosted executable must be {EXECUTABLE_NAME!r}, not "
+                f"{PurePosixPath(host).name!r}",
+                code=INVALID_COMMAND,
+            )
+        python = _python_interpreter(argv[3])
+        _absolute_posix(argv[7], what="the state directory", code=INVALID_COMMAND)
+        return ServiceCommand("hosted", host, python, argv)
+
     program = _absolute_posix(argv[0], what="the program", code=INVALID_COMMAND)
     return _parse_direct(program, argv)
 
@@ -357,6 +433,62 @@ def host_service_argv(bundle_path: PurePath, python: PurePath) -> tuple[str, ...
     interpreter = _python_interpreter(os.fspath(python))
     host = PurePosixPath(bundle) / "Contents" / "MacOS" / EXECUTABLE_NAME
     return (os.fspath(host), "serve", "--python", interpreter)
+
+
+#: The operation id the engine mints for a move: a timestamp plus six hex
+#: characters. The host accepts any plain identifier, so this is the shape
+#: :func:`host_move_argv` is given.
+_MOVE_OPERATION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def host_move_argv(
+    bundle_path: PurePath,
+    python: PurePath,
+    operation: str,
+    state_dir: PurePath,
+) -> tuple[str, ...]:
+    """Render the exact hosted command for the workspace move.
+
+    The ``run-move`` shape :func:`parse_service_command` accepts:
+    ``[<host>, "run-move", "--python", <abs python>, "--operation", <id>,
+    "--state-dir", <abs dir>]``. The host spawns a fixed child
+    (``[python, -I, -m, ciao.workspace_move, run, --operation, <id>,
+    --state-dir, <dir>]``), so a macOS folder grant the user gave the host
+    covers the move too (#1658).
+
+    Strictly syntax and rendering, like :func:`host_service_argv`: this runs no
+    subprocess and proves nothing about the bytes behind the names. A caller
+    must confirm the bundle with :func:`verify_owned_host` *before* it renders
+    or runs this command, and the operation id must be a plain identifier so
+    the host's own parser cannot read it as an option.
+    """
+    bundle = _absolute_posix(
+        os.fspath(bundle_path), what="the bundle path", code=INVALID_COMMAND
+    )
+    if PurePosixPath(bundle).name != APP_NAME:
+        raise ServerHostError(
+            f"the bundle must be named {APP_NAME!r}: {bundle!r}", code=INVALID_COMMAND
+        )
+    interpreter = _python_interpreter(os.fspath(python))
+    if not isinstance(operation, str) or not _MOVE_OPERATION_RE.fullmatch(operation):
+        raise ServerHostError(
+            f"the move operation must be a plain identifier: {operation!r}",
+            code=INVALID_COMMAND,
+        )
+    state = _absolute_posix(
+        os.fspath(state_dir), what="the state directory", code=INVALID_COMMAND
+    )
+    host = PurePosixPath(bundle) / "Contents" / "MacOS" / EXECUTABLE_NAME
+    return (
+        os.fspath(host),
+        "run-move",
+        "--python",
+        interpreter,
+        "--operation",
+        operation,
+        "--state-dir",
+        state,
+    )
 
 
 # ── The ownership snapshot ──────────────────────────────────────────────────
@@ -437,7 +569,13 @@ def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _decode_record(raw: str, *, path: Path) -> HostOwnership:
+def _decode_record(
+    raw: str,
+    *,
+    path: Path,
+    revision: int = HOST_REVISION,
+    protocol: int = HOST_PROTOCOL,
+) -> HostOwnership:
     try:
         document: Any = json.loads(raw, object_pairs_hook=_reject_duplicate_pairs)
     except ServerHostError:
@@ -481,18 +619,15 @@ def _decode_record(raw: str, *, path: Path) -> HostOwnership:
         )
     if (
         not _strict_int(document["host_revision"])
-        or document["host_revision"] != HOST_REVISION
+        or document["host_revision"] != revision
     ):
         raise ServerHostError(
-            f"the ownership record at {path.name} is not host revision {HOST_REVISION}",
+            f"the ownership record at {path.name} is not host revision {revision}",
             code=INVALID_OWNERSHIP,
         )
-    if (
-        not _strict_int(document["host_protocol"])
-        or document["host_protocol"] != HOST_PROTOCOL
-    ):
+    if not _strict_int(document["host_protocol"]) or document["host_protocol"] != protocol:
         raise ServerHostError(
-            f"the ownership record at {path.name} is not host protocol {HOST_PROTOCOL}",
+            f"the ownership record at {path.name} is not host protocol {protocol}",
             code=INVALID_OWNERSHIP,
         )
 
@@ -544,8 +679,8 @@ def _decode_record(raw: str, *, path: Path) -> HostOwnership:
         schema=SCHEMA_VERSION,
         bundle_path=bundle_path,
         bundle_id=BUNDLE_ID,
-        host_revision=HOST_REVISION,
-        host_protocol=HOST_PROTOCOL,
+        host_revision=revision,
+        host_protocol=protocol,
         executable_sha256=executable_sha256,
         per_arch_cdhashes=per_arch,
         bundle_files=bundle_files,
@@ -585,7 +720,31 @@ def read_host_ownership(path: Path) -> HostOwnership:
     the bundle it describes (both paths resolved) are all refusals. Values are
     never coerced and no file is written. On macOS the record's owner must be this uid
     and its mode must grant nothing to group or other.
+
+    Only the current revision is accepted. A record of the superseded revision
+    is a different question, answered by
+    :func:`read_superseded_ownership`.
     """
+    return _read_ownership_record(path, revision=HOST_REVISION, protocol=HOST_PROTOCOL)
+
+
+def read_superseded_ownership(path: Path) -> HostOwnership:
+    """Read the ownership record of the one superseded host revision.
+
+    The same strict reader, but it accepts a record whose revision is
+    :data:`LEGACY_HOST_REVISION` and whose protocol is the one that revision
+    spoke. It answers "was this host ours?", not "is this the host this engine
+    speaks to?": the installer uses it to prove a host it may replace.
+    """
+    return _read_ownership_record(
+        path, revision=LEGACY_HOST_REVISION, protocol=LEGACY_HOST_PROTOCOL
+    )
+
+
+def _read_ownership_record(
+    path: Path, *, revision: int, protocol: int
+) -> HostOwnership:
+    """Read and strictly decode an ownership record for one revision."""
     record = Path(path)
     try:
         info = os.lstat(record)
@@ -610,7 +769,7 @@ def read_host_ownership(path: Path) -> HostOwnership:
             code=INVALID_OWNERSHIP,
         )
     if sys.platform == "darwin":
-        if info.st_uid != os.getuid():
+        if info.st_uid != _getuid():
             raise ServerHostError(
                 f"the host ownership record is not owned by this user: {record}",
                 code=INVALID_OWNERSHIP,
@@ -627,7 +786,7 @@ def read_host_ownership(path: Path) -> HostOwnership:
             f"the host ownership record at {record} is unreadable",
             code=INVALID_OWNERSHIP,
         ) from exc
-    ownership = _decode_record(raw, path=record)
+    ownership = _decode_record(raw, path=record, revision=revision, protocol=protocol)
     # The record must not live inside the bundle it vouches for. Both sides are
     # resolved, so a symlinked ancestor on either path cannot hide the overlap.
     if Path(os.path.realpath(record)).is_relative_to(
@@ -741,7 +900,12 @@ def _collect_sealed_files(bundle: Path) -> tuple[dict[str, str], bytes]:
     return files, plist
 
 
-def _check_bundle_plist(raw: bytes) -> None:
+def _check_bundle_plist(
+    raw: bytes,
+    *,
+    revision: int = HOST_REVISION,
+    protocol: int = HOST_PROTOCOL,
+) -> None:
     try:
         info: Any = plistlib.loads(raw)
     except Exception as exc:
@@ -768,18 +932,18 @@ def _check_bundle_plist(raw: bytes) -> None:
             f"the host bundle's executable is not {EXECUTABLE_NAME!r}",
             code=INSPECTION_FAILED,
         )
-    protocol = info.get(HOST_PROTOCOL_KEY)
-    if not _strict_int(protocol) or protocol != HOST_PROTOCOL:
+    protocol_value = info.get(HOST_PROTOCOL_KEY)
+    if not _strict_int(protocol_value) or protocol_value != protocol:
         raise ServerHostError(
-            f"the host bundle is not protocol {HOST_PROTOCOL}", code=INSPECTION_FAILED
+            f"the host bundle is not protocol {protocol}", code=INSPECTION_FAILED
         )
-    revision = str(HOST_REVISION)
+    bundle_revision = str(revision)
     if (
-        info.get("CFBundleVersion") != revision
-        or info.get("CFBundleShortVersionString") != revision
+        info.get("CFBundleVersion") != bundle_revision
+        or info.get("CFBundleShortVersionString") != bundle_revision
     ):
         raise ServerHostError(
-            f"the host bundle is not revision {HOST_REVISION}", code=INSPECTION_FAILED
+            f"the host bundle is not revision {revision}", code=INSPECTION_FAILED
         )
     if info.get("LSMinimumSystemVersion") != MINIMUM_SYSTEM_VERSION:
         raise ServerHostError(
@@ -850,7 +1014,11 @@ def _per_arch_cdhashes(executable: Path, runner: Runner) -> dict[str, str]:
 
 
 def inspect_host_bundle(
-    bundle_path: Path, *, runner: Runner = subprocess.run
+    bundle_path: Path,
+    *,
+    runner: Runner = subprocess.run,
+    revision: int = HOST_REVISION,
+    protocol: int = HOST_PROTOCOL,
 ) -> HostOwnership:
     """Snapshot an installed macOS host bundle's identity and bytes.
 
@@ -867,6 +1035,11 @@ def inspect_host_bundle(
     it returns is a well-formed host — **not** proof that this machine installed
     it. Only :func:`verify_owned_host` answers that, against an existing private
     record.
+
+    ``revision`` and ``protocol`` name the identity the bundle is expected to
+    carry. They default to the current one; :func:`verify_superseded_host`
+    passes the superseded pair, so a bundle of an older revision can be
+    inspected without loosening any other check.
     """
     if sys.platform != "darwin":
         raise ServerHostError(
@@ -895,7 +1068,7 @@ def inspect_host_bundle(
 
     # The walk refuses a symlinked `Contents` and a missing sealed file.
     files, plist = _collect_sealed_files(bundle)
-    _check_bundle_plist(plist)
+    _check_bundle_plist(plist, revision=revision, protocol=protocol)
 
     # Verification covers every architecture of a universal binary by default.
     verify = _run_native(runner, [CODESIGN, "--verify", "--strict", os.fspath(bundle)])
@@ -911,8 +1084,8 @@ def inspect_host_bundle(
         schema=SCHEMA_VERSION,
         bundle_path=os.fspath(bundle),
         bundle_id=BUNDLE_ID,
-        host_revision=HOST_REVISION,
-        host_protocol=HOST_PROTOCOL,
+        host_revision=revision,
+        host_protocol=protocol,
         executable_sha256=files[_EXECUTABLE_REL],
         per_arch_cdhashes=cdhashes,
         bundle_files=files,
@@ -952,6 +1125,53 @@ def verify_owned_host(
         )
     # Both snapshots carry the fixed identity constants, so equality is the
     # executable digest, both CDHashes and the whole file set.
+    if record != inspected:
+        raise ServerHostError(
+            "the installed host bundle does not match its ownership record",
+            code=NOT_OWNED,
+        )
+    return inspected
+
+
+def verify_superseded_host(
+    bundle_path: Path,
+    *,
+    ownership_path: Path | None = None,
+    runner: Runner = subprocess.run,
+) -> HostOwnership:
+    """Prove a bundle is the superseded host this machine installed.
+
+    The upgrade path for a host revision bump (#1659). A revision-2 host is not
+    the host this engine speaks to, so :func:`verify_owned_host` refuses it;
+    but it is still *ours*, and the installer must be able to replace it rather
+    than leave the Mac without a host. This answers that narrower question: it
+    reads the owner-only record (default :func:`default_ownership_path`) with
+    the superseded revision and protocol, inspects the bundle against the same
+    pair, and requires the canonical bundle path, identity, executable digest,
+    both CDHashes and the whole file set to be equal.
+
+    Only :data:`LEGACY_HOST_REVISION` is accepted. A record of any other
+    revision - the current one, an older one this engine never shipped, or a
+    future one - is refused, so this can never prove a host the installer may
+    not replace. It never writes, signs, launches or deletes anything.
+    """
+    record_path = (
+        default_ownership_path() if ownership_path is None else Path(ownership_path)
+    )
+    record = read_superseded_ownership(record_path)
+    inspected = inspect_host_bundle(
+        bundle_path,
+        runner=runner,
+        revision=LEGACY_HOST_REVISION,
+        protocol=LEGACY_HOST_PROTOCOL,
+    )
+
+    if record.bundle_path != inspected.bundle_path:
+        raise ServerHostError(
+            f"the ownership record names {record.bundle_path}, but the bundle is "
+            f"{inspected.bundle_path}",
+            code=NOT_OWNED,
+        )
     if record != inspected:
         raise ServerHostError(
             "the installed host bundle does not match its ownership record",

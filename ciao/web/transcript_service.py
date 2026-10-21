@@ -864,6 +864,32 @@ def _opencode_child_status(
     return "completed"
 
 
+def _opencode_child_duration_ms(info: dict) -> int | None:
+    """Child run length from its session timestamps, or None.
+
+    The child session's own ``time.created`` / ``time.updated`` are the only
+    length available once the transcript is no longer read, so the in-chat
+    panel can still show how long a run took.
+    """
+    time_info = info.get("time") if isinstance(info, dict) else None
+    if not isinstance(time_info, dict):
+        return None
+    created = time_info.get("created")
+    updated = time_info.get("updated")
+    if (
+        not isinstance(created, (int, float))
+        or isinstance(created, bool)
+        or not isinstance(updated, (int, float))
+        or isinstance(updated, bool)
+    ):
+        return None
+    created_ms = int(created)
+    updated_ms = int(updated)
+    if updated_ms < created_ms:
+        return None
+    return updated_ms - created_ms
+
+
 def _opencode_child_turn_index(info: dict, chat) -> int:
     """The parent turn a child belongs to: the last one sent before it began."""
     time_info = info.get("time")

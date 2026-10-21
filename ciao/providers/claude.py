@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import uuid
 import warnings
@@ -127,6 +128,27 @@ _STEER_CANCEL_TIMEOUT_S = 5.0
 # ever costs the first turn its exact figure; the local estimate covers it.
 _CONTEXT_USAGE_TIMEOUT_S = 3.0
 
+# The SDK sizes its ``initialize`` control-request deadline from this
+# process-wide environment variable and exposes no option for it. A cold CLI
+# start under load measured 13-53 s on a 10-core Mac, so the SDK's 60 s floor
+# is right at the edge: a turn that crosses it dies before the model is asked
+# anything ("Control request timeout: initialize"). A CLI that is alive but
+# silent still fails, just one turn later than before.
+_STREAM_CLOSE_TIMEOUT_ENV = "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"
+_INITIALIZE_TIMEOUT_MS = 180_000
+# Ask the CLI to name a refused startup in the message stream. Without it a
+# startup failure ends with stderr alone, which the SDK turns into a bare
+# control-request timeout instead of an error that says what went wrong.
+# Claude Code >= 2.1.274 reads it.
+_STARTUP_FAILURE_RESULTS_ENV = "CLAUDE_CODE_STARTUP_FAILURE_RESULTS"
+# Every control-request failure is a bare ``Exception``, so the message is the
+# only thing that identifies an initialize handshake that missed its deadline.
+_INITIALIZE_TIMEOUT_MESSAGE = "Control request timeout: initialize"
+
+
+class ClaudeInitializeTimeout(RuntimeError):
+    """The CLI never answered the SDK's ``initialize`` handshake in time."""
+
 
 class _SteerEchoTimeout(Exception):
     """The grace wait for a follow-up round expired (private to the turn loop)."""
@@ -210,6 +232,17 @@ def _is_oversized_message_error(exc: BaseException) -> bool:
     size' / 'Failed to decode JSON' error, which otherwise kills the stream."""
     msg = str(exc)
     return "buffer size" in msg or "Failed to decode JSON" in msg
+
+
+def _is_initialize_timeout(exc: BaseException) -> bool:
+    """True for the SDK's control-request deadline on the initialize handshake.
+
+    The SDK raises a bare ``Exception`` for every control-request failure, so
+    the message is the only signal. Other subtypes (``get_context_usage``,
+    ``set_model``, ``interrupt``) also time out by design and must not be
+    mistaken for a CLI that never started.
+    """
+    return isinstance(exc, Exception) and str(exc).startswith(_INITIALIZE_TIMEOUT_MESSAGE)
 
 
 def _cli_process_exited(client: object) -> bool:
@@ -789,6 +822,16 @@ class ClaudeProvider(BaseSDKProvider):
             add_dirs.append(linked_repo)
         self._fs_scope_key = (request.agent_fs_scope, request.agent_roots)
 
+        # The SDK reads the initialize deadline from os.environ when it builds
+        # the client, so it has to be set before ClaudeSDKClient() below.
+        # setdefault: an operator value for the same SDK knob wins.
+        os.environ.setdefault(_STREAM_CLOSE_TIMEOUT_ENV, str(_INITIALIZE_TIMEOUT_MS))
+        cli_env = dict(request.extra_env or {})
+        # A startup the CLI refuses should arrive as a result message naming
+        # the reason, not as stderr-only silence that the SDK reports as a
+        # control-request timeout with no cause.
+        cli_env.setdefault(_STARTUP_FAILURE_RESULTS_ENV, "1")
+
         options = ClaudeAgentOptions(
             model=requested_model,
             fallback_model=_fallback_model_for(requested_model),
@@ -801,7 +844,7 @@ class ClaudeProvider(BaseSDKProvider):
             # so a single large tool result / content block doesn't kill the
             # stream. See _SDK_MAX_BUFFER_BYTES and issue #137.
             max_buffer_size=_SDK_MAX_BUFFER_BYTES,
-            env=request.extra_env or {},
+            env=cli_env,
             # Per-workspace tool denylist (e.g. the default harness set, or
             # ``Bash``). Empty list = no denylist applied.
             disallowed_tools=list(request.disallowed_tools or []),
@@ -952,12 +995,29 @@ class ClaudeProvider(BaseSDKProvider):
         return delivery_id
 
     async def disconnect(self) -> None:
-        if self._client is not None:
+        # Take the client out of the slot *before* awaiting its close, so
+        # exactly one caller owns the close.
+        #
+        # The SDK's `disconnect()` is not idempotent: it clears its query only
+        # after the await, and `Query._close_impl()` has no `_closed` guard, so
+        # two callers both run the teardown and both call
+        # `transport.close()`. That transport's `close()` guards
+        # `if not self._process: return` only on entry, so two concurrent
+        # closes both pass the guard; the first then clears `_process` and the
+        # second reads `returncode` off None and raises
+        # `AttributeError: 'NoneType' object has no attribute 'returncode'`.
+        #
+        # Two callers met because the engine's teardown disconnects the
+        # provider while a fire-and-forget close (the chat-cleanup disconnects
+        # in ciao/web/project_chats.py) is still in flight, and because the
+        # slot used to be cleared only after the await, so the second caller
+        # read the same client out of it.
+        client, self._client = self._client, None
+        if client is not None:
             try:
-                await self._client.disconnect()
+                await client.disconnect()
             except _CLAUDE_OP_ERRORS:
                 logger.debug("Claude disconnect failed; dropping client anyway")
-            self._client = None
         self._connected = False
         self._turn_open = False
         self._steers_pending.clear()
@@ -979,10 +1039,13 @@ class ClaudeProvider(BaseSDKProvider):
         """
         if self._client is not client:
             return
+        # Clear the slot before the close starts, so this and disconnect() are
+        # both single-owner: whichever takes the client out of the slot owns
+        # closing it, and the other finds nothing to close.
+        self._client = None
         task = asyncio.ensure_future(self._close_dead_client(client))
         self._closing_tasks.add(task)
         task.add_done_callback(self._closing_tasks.discard)
-        self._client = None
         self._connected = False
         self._session_id = None
         self._pending_quota = {}
@@ -1110,11 +1173,13 @@ class ClaudeProvider(BaseSDKProvider):
     ) -> AsyncGenerator[StreamEvent, None]:
         # Pre-stream connect/query failures (e.g. "ProcessTransport is not
         # ready for writing" when the CLI exits in the instant after
-        # _ensure_connected checked it) are rare, because _ensure_connected
-        # detects an exited CLI first. They are safe to retry once: no events were yielded, the
-        # session_id on the chat is preserved, and _ensure_connected will
-        # build a fresh client on the retry because _connected was just
-        # reset in _run_streaming_once's except block.
+        # _ensure_connected checked it, or an initialize handshake that missed
+        # its deadline on a cold, loaded CLI) are rare... They are safe to
+        # retry once: no events were yielded, the session_id on the chat is
+        # preserved, and _ensure_connected will build a fresh client on the
+        # retry because _connected was just reset in _run_streaming_once's
+        # except block. Both retries share the single ``attempt`` budget, so a
+        # machine that is failing every spawn does not loop.
         #
         # If ANY event was yielded before the failure, we must not retry —
         # the partial output is already on the wire and a second pass would
@@ -1127,6 +1192,25 @@ class ClaudeProvider(BaseSDKProvider):
                     events_yielded = True
                     yield event
                 return
+            except ClaudeInitializeTimeout as exc:
+                if not events_yielded and attempt == 0:
+                    # A cold CLI start under load can outrun the initialize
+                    # deadline. A second spawn usually lands warm, and no
+                    # event has been yielded, so nothing is duplicated.
+                    logger.warning(
+                        "Claude CLI did not answer initialize (%s); retrying once",
+                        exc,
+                    )
+                    attempt += 1
+                    continue
+                if request.resume_session:
+                    logger.error(
+                        "Claude CLI did not answer initialize for session %s after "
+                        "the retry; raising instead of silently starting a fresh "
+                        "session",
+                        request.resume_session,
+                    )
+                raise
             except CLIConnectionError as exc:
                 if not events_yielded and attempt == 0:
                     # The CLI died between the liveness check and the write.
@@ -1219,7 +1303,15 @@ class ClaudeProvider(BaseSDKProvider):
                     # No prompt: the SDK then never starts stream_input, which
                     # closes stdin once the run goes idle and makes the CLI
                     # exit (#1402).
-                    await asyncio.wait_for(client.connect(), timeout=120)
+                    try:
+                        await asyncio.wait_for(client.connect(), timeout=120)
+                    except Exception as exc:
+                        # Only an initialize handshake that missed its deadline
+                        # is worth a fresh spawn; every other control-request
+                        # failure is a real error for this turn.
+                        if _is_initialize_timeout(exc):
+                            raise ClaudeInitializeTimeout(str(exc)) from exc
+                        raise
                     self._connected = True
                 await asyncio.wait_for(client.query(payload), timeout=120)
 
@@ -1490,6 +1582,14 @@ class ClaudeProvider(BaseSDKProvider):
             try:
                 await self.disconnect()
             except Exception:
+                pass
+            raise
+        except ClaudeInitializeTimeout:
+            # Drop the client so the retry in ``run_streaming`` builds a fresh
+            # CLI instead of reusing the one that never answered.
+            try:
+                await self.disconnect()
+            except Exception:  # noqa: BLE001 — best-effort teardown
                 pass
             raise
         finally:

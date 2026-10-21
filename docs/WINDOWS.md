@@ -24,7 +24,7 @@ irm https://github.com/raffaelefarinaro/ciaobot/releases/latest/download/install
 
 When it finishes it prints a one-time sign-in link and opens it in your browser.
 The link signs you in once. Do not share it. If you lose it, run
-`ciao setup-url --workspace <your workspace folder>` for a new one.
+`ciao setup-url --workspace <your workspace folder>` for a new one. If the installer created your password, it also tells you that Ciaobot shows it once on Home on this computer.
 
 `iex` cannot take arguments, so to pass an option run the script as a script
 block:
@@ -37,7 +37,7 @@ Options:
 
 | Option | What it does |
 |---|---|
-| `-Workspace <folder>` | Put the workspace (your notes, memory and settings) in this folder instead of `%USERPROFILE%\Ciaobot`. |
+| `-Workspace <folder>` | Put the workspace (your notes, memory and settings) in this folder instead of `%USERPROFILE%\Ciaobot`. Avoid a folder inside OneDrive: sync conflicts can damage Ciaobot's files and history, and setup prints a warning if you choose one. |
 | `-NoStart` | Install the engine but do not register the logon task, do not start it and do not print a sign-in link. The installer prints the two commands that finish the job later. |
 | `-Uninstall` | Remove what the installer added (see Uninstall). Your workspace is kept. |
 | `-Version <x.y.z>` | Install a specific release instead of the latest. |

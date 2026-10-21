@@ -32,20 +32,18 @@
             transition: isDraggingSplit ? 'none' : undefined
           }"
         >
-          <ProjectView
-            v-if="projectIdParam"
-            :project-id="projectIdParam"
-            @close="closeProject"
-            @open-sidebar="sidebarCollapsed = false"
-          />
           <SubagentChatView
-            v-else-if="subagentRoute"
+            v-if="subagentRoute"
             :key="subagentRoute.agentId"
             :chat-id="subagentRoute.chatId"
             :agent-id="subagentRoute.agentId"
             @open-sidebar="sidebarCollapsed = false"
           />
           <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" file-pinned @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <!-- The route names a chat the catalog has not delivered yet: the
+               pane is on its way, so it shows the skeleton rather than
+               nothing (#1651). -->
+          <ChatPaneSkeleton v-else-if="chatRoutePending" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
             <div class="home-boot-body">
@@ -114,6 +112,7 @@
                     <HomeNoticeReopen />
                     <HousekeepingStrip />
                   </template>
+                  <HomeWelcomeCard />
                   <HomeSetupCard />
                   <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                   <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -209,6 +208,10 @@
           </div>
           <ChatPanel ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         </template>
+        <!-- The route names a chat the catalog has not delivered yet: the pane
+             is on its way, so it shows the skeleton rather than nothing
+             (#1651). -->
+        <ChatPaneSkeleton v-else-if="chatRoutePending" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader page-tag="Home" @open-sidebar="sidebarCollapsed = false" />
           <div class="home-boot-body">
@@ -275,6 +278,7 @@
                   <HomeNoticeReopen />
                   <HousekeepingStrip />
                 </template>
+                <HomeWelcomeCard />
                 <HomeSetupCard />
                 <HomeRecentChats ref="homeRecentRef" @choose-new-chat="chooseNewChat" />
                 <div v-if="showGlobalNewChatActions" class="empty-actions">
@@ -303,6 +307,7 @@
       </template>
     </div>
     <FileViewerModal v-if="fileViewerMounted" :opener="fileViewerOpener" />
+    <ItemPeekHost v-if="itemPeekMounted" />
   </div>
 </template>
 
@@ -313,12 +318,14 @@ import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { useItemPeekStore } from '../stores/itemPeek'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
 import type ChatPanelComponent from './ChatPanel.vue'
 import type PinnedFilePanelComponent from './PinnedFilePanel.vue'
 import { loadChatPanel, loadFileViewerModal, loadPinnedFilePanel, prefetchChatPanelForRoute } from '../lib/chatComponents'
+import ChatPaneSkeleton from './ChatPaneSkeleton.vue'
 // The destinations behind the rail are loaded on first visit, not on boot.
 // Statically imported they landed in the same chunk as the chat itself — a
 // third of a megabyte of Settings, Automations, the memory canvas and the
@@ -334,15 +341,31 @@ const ProjectView = defineAsyncComponent(() => import('./ProjectView.vue'))
 const SchedulePanel = defineAsyncComponent(() => import('./SchedulePanel.vue'))
 const TaskBoardView = defineAsyncComponent(() => import('./TaskBoardView.vue'))
 const SettingsView = defineAsyncComponent(() => import('./SettingsView.vue'))
-const ChatPanel = defineAsyncComponent(loadChatPanel)
+// The chat chunk is the biggest one, and the first chat opened after an
+// update is exactly when it has to be fetched: the hashed assets change with
+// every build, so nothing is warm. `defineAsyncComponent` renders nothing
+// while the loader is in flight, which is how the pane could come up blank
+// (#1651). The skeleton is the loading component, and `delay: 0` because
+// Vue's default 200 ms wait is what makes the pane look dead on a cold
+// chunk — the placeholder has to be on screen from the first frame.
+const ChatPanel = defineAsyncComponent({
+  loader: loadChatPanel,
+  loadingComponent: ChatPaneSkeleton,
+  delay: 0,
+  timeout: 30000,
+})
 const PinnedFilePanel = defineAsyncComponent(loadPinnedFilePanel)
 const FileViewerModal = defineAsyncComponent(loadFileViewerModal)
+// Lazy like the file viewer, and not in lib/chatComponents: that module's loaders
+// are the chat chunk's named entry points.
+const ItemPeekHost = defineAsyncComponent(() => import('./ItemPeekHost.vue'))
 import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
 import HomeReviewSummary from './HomeReviewSummary.vue'
 import HousekeepingStrip from './HousekeepingStrip.vue'
 import HomeSetupCard from './HomeSetupCard.vue'
+import HomeWelcomeCard from './HomeWelcomeCard.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 import { pendingConfirm } from '../lib/confirm'
@@ -361,6 +384,13 @@ watch(() => fileViewer.isOpen, (open, wasOpen) => {
     fileViewerOpener.value = document.activeElement
   }
 }, { flush: 'sync' })
+// The item peek (a task opened from a link) is mounted once first opened, like
+// the file viewer, and its open state gates the chat's own keys the same way.
+const itemPeek = useItemPeekStore()
+const itemPeekMounted = ref(itemPeek.isOpen)
+watch(() => itemPeek.isOpen, (open) => {
+  if (open) itemPeekMounted.value = true
+})
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
 // reach composer-owned actions (archive).
@@ -589,6 +619,85 @@ const subagentRoute = computed(() => {
   const agentId = (route.params.agentId as string) || ''
   return chatId && agentId ? { chatId, agentId } : null
 })
+// The route names a chat, but the catalog has not caught up with it yet:
+// `activeChat` is still null while the selection and the URL already point at
+// the conversation (a reload, a desktop deep link, a chat the poll has not
+// delivered yet). Every render branch used to fall through in that window and
+// the pane came up completely empty (#1651) — no header, no skeleton, no
+// composer, and no `aria-busy` to say it was on its way. The pane skeleton is
+// what covers the gap; the real transcript takes over as soon as the entry
+// arrives.
+//
+// "The catalog has not caught up yet" is a statement about a lookup that is
+// still running, so the pending state is bound to that lookup and not to the
+// absence of a chat. A route that names a chat which does not exist — a dead
+// deep link, a chat deleted in another tab, a chat the poll dropped from the
+// catalog — has nothing to wait for: the lookup settles, finds nothing, and
+// the skeleton must not be the terminal state. Otherwise the pane would say
+// "Loading conversation" forever for a conversation that will never arrive,
+// and the user is left with a placeholder they cannot dismiss. Once the
+// lookup is done, the pane falls back to the home empty state, which is what
+// it showed before the skeleton existed.
+//
+// The ref holds the id of the chat the pane is waiting for, not a flag: two
+// lookups can overlap (the boot's deep-link open and a route change while
+// that one is still running), and a flag cleared by the older one would drop
+// the skeleton while the newer lookup is still in flight.
+const chatLookupPendingId = ref<string | null>(null)
+
+// The route names a chat, so the pane waits for it — until the chat is on
+// screen (the arrival watcher below ends the wait) or until a lookup for it
+// comes back empty (it does not exist, and no amount of waiting changes that).
+watch(
+  () => (route.params.chatId as string) || '',
+  (id) => {
+    if (!id) {
+      chatLookupPendingId.value = null
+      return
+    }
+    // A chat that is already on screen is not on its way: the wait ends the
+    // moment it is there, and a later disappearance is a fact, not a lag.
+    if (store.activeChat?.chat_id === id) {
+      chatLookupPendingId.value = null
+      return
+    }
+    chatLookupPendingId.value = id
+  },
+  { immediate: true },
+)
+
+// The chat arrived: the wait is over. If it leaves again later (deleted in
+// another tab, dropped from the catalog by the poll), the pane falls back to
+// the home empty state instead of keeping a placeholder for a conversation
+// that is gone.
+watch(
+  () => store.activeChat?.chat_id ?? null,
+  (id) => {
+    if (id && id === chatLookupPendingId.value) chatLookupPendingId.value = null
+  },
+)
+
+// The lookup the pane is waiting for. It either produces the chat — the
+// arrival watcher ends the wait and the transcript takes over — or it does
+// not, and then the chat does not exist: the wait ends and the pane falls
+// back to the home empty state, as it did before the skeleton existed.
+async function openChatFromRoute(chatId: string) {
+  try {
+    await store.openChatFromDeepLink(chatId)
+  } finally {
+    // The chat arrived: the arrival watcher has already ended the wait, and
+    // the lookup is not the one the pane is waiting on any more.
+    if (chatLookupPendingId.value === chatId && store.activeChat?.chat_id !== chatId) {
+      chatLookupPendingId.value = null
+    }
+  }
+}
+
+const chatRoutePending = computed(() => {
+  const id = (route.params.chatId as string) || ''
+  if (!id || store.activeChat) return false
+  return chatLookupPendingId.value === id
+})
 const viewMode = computed<'chat' | 'project' | 'schedules' | 'tasks' | 'settings' | 'memory' | 'proposals'>(() => {
   const path = route.path
   if (path.startsWith('/settings')) return 'settings'
@@ -615,7 +724,8 @@ const viewShortcutsActive = computed(() =>
   viewMode.value !== 'settings'
   && !pendingConfirm.value
   && !pendingPrompt.value
-  && !fileViewer.isOpen,
+  && !fileViewer.isOpen
+  && !itemPeek.isOpen,
 )
 // The chat-only chords are inert on the full-screen views that own the keyboard
 // themselves. `1`–`9` keep switching workspaces from all of them: they are gated
@@ -732,20 +842,19 @@ const activePinKey = computed(() => {
   // still selected underneath it. Home (`/` or a bare `/chat`) has no key at
   // all, so a retained chat can never surface its pinned page for even one
   // frame while the route watcher clears the view; Settings, Automations,
-  // Tasks, Memory and the project routes read as before (they carry neither
-  // param). Coming back to the chat restores that chat's pin, because the pin
-  // is looked up under the chat the route names.
+  // Tasks, Memory and the project routes have no key either. Coming back to
+  // the chat restores that chat's pin, because the pin is looked up under the
+  // chat the route names.
   //
   // A chat route shows that chat only while it is the one selected: archiving
   // or deleting it, or a refresh that no longer lists it, clears the selection
   // without a navigation, and the screen falls back to Home. The pin follows
   // what is on screen, so Home never carries a chat's page beside it.
-  if (projectIdParam.value) return projectIdParam.value
   const chatId = (route.params.chatId as string) || ''
   return chatId && store.activeChat?.chat_id === chatId ? chatId : ''
 })
-// A file opened while the split view is available docks beside the chat or
-// project on screen instead of opening the viewer (stores/fileViewer.ts).
+// A file opened from a chat while the split view is available docks beside
+// that chat instead of opening the viewer (stores/fileViewer.ts).
 watch(
   [activePinKey, isMobile],
   ([key, mobile]) => fileViewer.setDockTarget(mobile ? '' : key),
@@ -780,12 +889,11 @@ watch(
   },
 )
 // On a narrow device there is no split pane: the chat's shared (server-owned)
-// pin is a compact opener within the chat. Only a chat route carries one — a
-// project route and Home have no narrow pin (their pins stay desktop-local).
+// pin is a compact opener within the chat. Only a chat route carries a pin key.
 const narrowSharedPin = computed(() => {
   if (!isMobile.value) return ''
   const key = activePinKey.value
-  if (!key || projectIdParam.value) return ''
+  if (!key) return ''
   return store.pinnedFileFor(key) || ''
 })
 const pinWritePending = computed(() => {
@@ -859,7 +967,18 @@ function clearRetainedChatView() {
 }
 
 onMounted(async () => {
-  await store.fetchAll()
+  try {
+    await store.fetchAll()
+  } catch {
+    // The engine is unreachable. Without this, the rejection skipped the
+    // whole tail of this hook — including the deep-link lookup — and
+    // nothing could ever clear the pending state, so a chat route sat on
+    // "Loading conversation" instead of the home-boot skeleton that says
+    // the workspaces are still on their way. The store is not bootstrapped
+    // in this state, so the home-boot branch is the honest answer.
+    chatLookupPendingId.value = null
+    return
+  }
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
   // The route is re-read here, after the awaits, never captured before them.
@@ -873,7 +992,10 @@ onMounted(async () => {
     // layout mounts, so a reload of `/` arrives here with that chat selected.
     clearRetainedChatView()
   } else if (chatId && store.activeChatId !== chatId) {
-    await store.openChatFromDeepLink(chatId)
+    // The lookup is marked as running for as long as it takes: the pane shows
+    // the skeleton while the catalog is still being asked, and falls back to
+    // the home empty state once the answer is in and it is not this chat.
+    await openChatFromRoute(chatId)
   }
   // Auto-collapse sidebar on mobile when a chat is active
   if (isMobile.value && store.activeChat) {
@@ -901,8 +1023,18 @@ watch(
       return
     }
     if (!store.bootstrapped) return
-    if (store.activeChatId !== id) void store.openChatFromDeepLink(id)
-    else void store.markRead(id)
+    if (store.activeChatId !== id) {
+      // Same as the boot's deep-link open: the skeleton covers the lookup,
+      // and a route that names a chat which does not exist ends on the home
+      // empty state rather than on a permanent "Loading conversation".
+      void openChatFromRoute(id)
+    } else if (!store.activeChat) {
+      // The selection names a chat the catalog does not have: the poll
+      // dropped it, another device pruned it, the boot could not resolve it.
+      // Nothing is on screen and no lookup is running, so the pane must not
+      // sit on the placeholder for a conversation that does not exist.
+      chatLookupPendingId.value = null
+    } else void store.markRead(id)
     if (isMobile.value) sidebarCollapsed.value = true
   }
 )
@@ -960,7 +1092,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   const alt = e.altKey
   const isSectionArrow = alt && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
   if (isSectionArrow) {
-    if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen || itemPeek.isOpen) return
     // Order matches the sidebar's own destination order (Chats, Automations,
     // Tasks, Memory, Settings), so Option+Arrow walks the sections the way the
     // nav lists them. `/tasks` needs its own index: it has no `viewMode` fall
@@ -1051,7 +1183,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // bell), so this never steals the key from them.
   if (matchesShortcut(e, 'closeChat')) {
     // The confirm dialog and the file viewer own Esc while they are up.
-    if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen || itemPeek.isOpen) return
     // Any open Reka layer (dialog, menu, popover) owns Esc: Reka marks each one
     // `data-dismissable-layer` and closes it from its own window listener,
     // which is registered after this one and so runs after it. Without this,
@@ -1197,7 +1329,12 @@ function onShortcutKeydown(e: KeyboardEvent) {
     if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return
     if (!store.activeChat) return
     e.preventDefault()
-    chatPanelRef.value?.archiveActiveChat()
+    // The ref is on `<ChatPanel>`, but while the chunk is in flight the
+    // loading component is what the ref resolves to, and it has none of
+    // ChatPanel's methods. Guarding the ref alone left `archiveActiveChat`
+    // an "is not a function" throw in exactly the window the skeleton
+    // covers (#1651).
+    chatPanelRef.value?.archiveActiveChat?.()
     return
   }
 
@@ -1218,7 +1355,9 @@ function onShortcutKeydown(e: KeyboardEvent) {
   if (matchesShortcut(e, 'modelPicker')) {
     if (!store.activeChat) return
     e.preventDefault()
-    chatPanelRef.value?.toggleModelPicker()
+    // Same as the archive chord above: the ref can be the loading
+    // component, which has no model picker to open.
+    chatPanelRef.value?.toggleModelPicker?.()
     return
   }
 
@@ -1695,6 +1834,7 @@ onBeforeUnmount(() => {
    heading and row spacing inside each section is untouched. */
 .home-main > :deep(.housekeeping),
 .home-main > :deep(.update-tasks),
+.home-main > :deep(.home-welcome),
 .home-main > :deep(.home-setup),
 .home-main > :deep(.home-notice-reopen),
 .home-main > :deep(.home-recent),

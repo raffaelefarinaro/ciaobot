@@ -11,9 +11,9 @@ on:
 permissions:
   contents: read
 
-# Two tiers. `linux-server` is the gate every PR waits on: the same blocking
-# steps a contributor runs locally (mypy, pytest, frontend tests, build), with
-# pytest parallelized. `test` is the full macOS job — coverage, browser tests,
+# Linux is the gate every PR waits on, split into two parallel jobs:
+# `linux-server` (mypy, pytest -n auto, package smoke) and `linux-web` (vitest
+# and the PWA build). `test` is the full macOS job — coverage, browser tests,
 # the launchd service, and an engine wheel built from this branch, installed
 # into a throwaway venv and cold-started. It is the only place the launchd,
 # installer, engine-update and migration machinery runs on the real platform,
@@ -22,12 +22,31 @@ permissions:
 # develop PR therefore surfaces on the post-merge push run instead, before any
 # release can ship it.
 #
-# `windows` is the native Windows port's (#696) advisory job: it measures and
-# never fails. It runs on every PR and push so each port PR shows its before
-# and after counts in the job summary, and it becomes a blocking gate at #696's
-# C9 checkpoint once the suite is green there.
+# `windows` follows the same split. On a develop PR it runs only the fast
+# gates — every module imports and `mypy ciao` passes natively on win32, which
+# is where POSIX-only calls get caught — in about two minutes. The Windows
+# pytest and vitest suites and the install.ps1 checks take over a quarter of an
+# hour on a hosted runner, so they run on the post-merge push to develop and on
+# release PRs into main. /ciao-release refuses to cut while that push run is red.
 jobs:
   linux-server:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+    - name: Install Python dependencies
+      run: python -m pip install -e '.[test]'
+    - name: Python static type check
+      run: mypy ciao
+    - name: Linux backend tests
+      run: pytest -n auto tests/
+
+  # The package smoke installs the wheel and serves the packaged PWA, so it
+  # runs here, after the build has written ciao/web/static.
+  linux-web:
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v7
@@ -40,12 +59,6 @@ jobs:
         node-version: '22'
         cache: 'npm'
         cache-dependency-path: web/package-lock.json
-    - name: Install Python dependencies
-      run: python -m pip install -e '.[test]'
-    - name: Python static type check
-      run: mypy ciao
-    - name: Linux backend tests
-      run: pytest -n auto tests/
     - name: Install frontend dependencies
       working-directory: web
       run: npm ci
@@ -55,11 +68,16 @@ jobs:
     - name: Build PWA
       working-directory: web
       run: npm run build
+    - name: Install Python package
+      run: python -m pip install -e .
     - name: Smoke-test installed package
       run: ciao package-smoke --skip-frontend
 
   windows:
     runs-on: windows-latest
+    env:
+      # 'true' on pushes and release PRs into main, 'false' on develop PRs.
+      WINDOWS_FULL: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' }}
     defaults:
       run:
         shell: bash
@@ -70,6 +88,7 @@ jobs:
         python-version: '3.12'
         cache: 'pip'
     - uses: actions/setup-node@v7
+      if: env.WINDOWS_FULL == 'true'
       with:
         node-version: '22'
         cache: 'npm'
@@ -79,7 +98,8 @@ jobs:
     - name: Install Python dependencies
       run: python -m pip install -e '.[test]' uv
     # Blocking since C9 (#696): every module imports, mypy's win32 pass is
-    # clean, and the backend and frontend suites pass. Each gate writes its log
+    # clean, and (WINDOWS_FULL only) the backend and frontend suites pass.
+    # `--durations=30` lists where the suite's time goes. Each gate writes its log
     # and the job fails on it; the steps after a gate run on `!cancelled()`, so
     # one red gate does not hide the others' results.
     - name: Import every ciao module
@@ -105,13 +125,25 @@ jobs:
       run: |
         set -o pipefail
         python -m mypy ciao 2>&1 | tee windows-mypy.txt
-    - name: Windows backend tests
+    # The ConPTY adapter only exists on Windows, and only a Windows runner can
+    # prove that a real pseudoconsole works. This step runs on every PR, not
+    # only on the ones that run the whole Windows suite, so the native binding
+    # is exercised before the change is merged instead of after it.
+    # The timeout is a bound, not a hope: a terminal test that hangs on a
+    # pipe must fail the job rather than hold the runner for six hours.
+    - name: Windows ConPTY terminal tests
       if: ${{ !cancelled() }}
+      timeout-minutes: 15
       run: |
         set -o pipefail
-        python -m pytest -n auto -q -rfE tests/ 2>&1 | tee windows-pytest.txt
+        python -m pytest -q -rfE tests/test_os_terminal_windows.py 2>&1 | tee windows-terminal.txt
+    - name: Windows backend tests
+      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
+      run: |
+        set -o pipefail
+        python -m pytest -n auto -q -rfE --durations=30 tests/ 2>&1 | tee windows-pytest.txt
     - name: Windows frontend tests
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
       working-directory: web
       env:
         NO_COLOR: '1'
@@ -122,7 +154,7 @@ jobs:
     # did, and a hosted runner with no interactive logon is not a verdict on
     # the installer (see the end-to-end step).
     - name: Build install.ps1 offline fixture
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
       run: |
         python - <<'EOF' || true
         import pathlib, re, shutil, sys
@@ -142,7 +174,7 @@ jobs:
         print("fixture version", VERSION)
         EOF
     - name: Build install.ps1 end-to-end fixture
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
       run: |
         python - <<'EOF' || true
         # The offline fixture above is the bytes `the signed wheel`, which
@@ -180,7 +212,7 @@ jobs:
         print("e2e fixture", version, wheel.name)
         EOF
     - name: install.ps1 offline verification and analyzer (advisory)
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
       run: |
         {
           echo "--- pwsh, file form ---"
@@ -207,7 +239,7 @@ jobs:
     # datum this step exists to produce, not a failure. Nothing below can fail
     # the job, and the workspace is a throwaway under RUNNER_TEMP.
     - name: install.ps1 end-to-end install and uninstall (advisory)
-      if: ${{ !cancelled() }}
+      if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
       # The step's shell is Git Bash, whose MSYS path conversion turns a
       # `/Query`, `/TN`, `/v` or `/End` argument into a Windows path before the
       # program ever sees it: `schtasks` and `reg` were being asked to read
@@ -266,12 +298,17 @@ jobs:
       if: always()
       run: |
         # `tests/` keeps captured log lines that also start with ERROR out.
-        grep -E '^(FAILED|ERROR) tests/' windows-pytest.txt | sed -E 's/ - .*//' | sort -u > windows-failures.txt || true
+        # The terminal file names its tests as `tests/test_...`, so the same
+        # grep covers the focused native step: a red ConPTY step has to name
+        # the tests that failed, not only the count.
+        grep -E '^(FAILED|ERROR) tests/' windows-pytest.txt windows-terminal.txt 2>/dev/null | sed -E 's/ - .*//' | sed -E 's#^[^(]*tests/#tests/#' | sort -u > windows-failures.txt || true
         {
           echo "### Windows (#696)"
           echo
+          [ "$WINDOWS_FULL" = true ] || echo "Develop PR: imports, mypy and the ConPTY terminal tests only; the suites run after merge."
           echo "- imports: $(tail -1 windows-imports.txt 2>/dev/null)"
           echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
+          echo "- ConPTY terminal: $(tail -1 windows-terminal.txt 2>/dev/null)"
           echo "- pytest: $(tail -1 windows-pytest.txt 2>/dev/null)"
           echo "- npm test: $(grep -E '^ *(Test Files|Tests) ' windows-vitest.txt 2>/dev/null | tr -s ' ' | paste -sd ';' -)"
           echo "- install.ps1: $(grep -E 'exit ' windows-install-ps1.txt 2>/dev/null | paste -sd ';' -)"

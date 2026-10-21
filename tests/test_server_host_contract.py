@@ -41,11 +41,13 @@ from ciao.server_host import (
     SCHEMA_VERSION,
     HostOwnership,
     ServerHostError,
+    host_move_argv,
     host_service_argv,
     inspect_host_bundle,
     parse_service_command,
     read_host_ownership,
     verify_owned_host,
+    verify_superseded_host,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,6 +118,16 @@ def test_constants_agree_with_the_swift_host() -> None:
     match = re.search(r"^let STOP_GRACE_SECONDS = ([0-9.]+)$", source, re.MULTILINE)
     assert match is not None
     assert float(match.group(1)) == server_host.STOP_GRACE_SECONDS
+
+
+def test_the_protocol_carrying_the_move_operation_is_the_host_protocol() -> None:
+    # The Swift host has one protocol revision, and the ``run-move`` operation
+    # belongs to it. The engine refuses a host below MOVE_HOST_PROTOCOL, so the
+    # two must not drift apart: a host that speaks the current protocol
+    # carries the move.
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+    assert "case runMove(" in source
+    assert server_host.MOVE_HOST_PROTOCOL == server_host.HOST_PROTOCOL
 
 
 def test_the_hosted_child_is_an_accepted_direct_supervise_command() -> None:
@@ -217,6 +229,98 @@ def test_parse_hosted_is_syntax_only_not_ownership() -> None:
     parsed = parse_service_command([host, "serve", "--python", "/usr/bin/python3"])
     assert parsed.mode == "hosted"
     assert parsed.program == host
+
+
+def test_parse_the_hosted_move_shape() -> None:
+    # The workspace move runs under the host (#1658), so the host's second
+    # hosted shape is a command the parser knows: it names the interpreter the
+    # move runs, like the serve shape does.
+    host = f"{POSIX_BUNDLE}/Contents/MacOS/{EXECUTABLE_NAME}"
+    argv = [
+        host,
+        "run-move",
+        "--python",
+        "/usr/bin/python3",
+        "--operation",
+        "op-1234",
+        "--state-dir",
+        "/Users/x/.local/state/ciaobot/workspace-move",
+    ]
+    parsed = parse_service_command(argv)
+    assert parsed.mode == "hosted"
+    assert parsed.program == host
+    assert parsed.python == "/usr/bin/python3"
+    assert parsed.argv == tuple(argv)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        # A relative state directory, a traversing one and a non-absolute
+        # interpreter are all refusals.
+        [
+            "run-move",
+            "--python",
+            "/usr/bin/python3",
+            "--operation",
+            "op-1234",
+            "--state-dir",
+            "relative/state",
+        ],
+        [
+            "run-move",
+            "--python",
+            "/usr/bin/python3",
+            "--operation",
+            "op-1234",
+            "--state-dir",
+            "/Users/x/../state",
+        ],
+        [
+            "run-move",
+            "--python",
+            "relative/python3",
+            "--operation",
+            "op-1234",
+            "--state-dir",
+            "/Users/x/state",
+        ],
+        # The shape is exactly seven arguments: a missing or an extra one is a
+        # refusal.
+        [
+            "run-move",
+            "--python",
+            "/usr/bin/python3",
+            "--operation",
+            "op-1234",
+        ],
+        [
+            "run-move",
+            "--python",
+            "/usr/bin/python3",
+            "--operation",
+            "op-1234",
+            "--state-dir",
+            "/Users/x/state",
+            "extra",
+        ],
+        # A non-python interpreter is refused, like the serve shape.
+        [
+            "run-move",
+            "--python",
+            "/bin/sh",
+            "--operation",
+            "op-1234",
+            "--state-dir",
+            "/Users/x/state",
+        ],
+    ],
+)
+def test_parse_rejects_invalid_hosted_move_shapes(bad: list[str]) -> None:
+    host = f"{POSIX_BUNDLE}/Contents/MacOS/{EXECUTABLE_NAME}"
+    with pytest.raises(ServerHostError) as caught:
+        parse_service_command([host, *bad])
+    assert caught.value.code == server_host.INVALID_COMMAND
 
 
 @pytest.mark.parametrize(
@@ -350,6 +454,61 @@ def test_host_service_argv_rejects_strict_absent_inputs(
 ) -> None:
     with pytest.raises(ServerHostError) as caught:
         host_service_argv(PurePosixPath(bundle), PurePosixPath(python))
+    assert caught.value.code == server_host.INVALID_COMMAND
+
+
+# ── syntax: host_move_argv ──────────────────────────────────────────────────
+
+
+def test_host_move_argv_round_trips_through_the_parser() -> None:
+    argv = host_move_argv(
+        PurePosixPath(POSIX_BUNDLE),
+        PurePosixPath("/usr/bin/python3"),
+        "op-1234",
+        PurePosixPath("/Users/x/.local/state/ciaobot/workspace-move"),
+    )
+    assert argv == (
+        f"{POSIX_BUNDLE}/Contents/MacOS/{EXECUTABLE_NAME}",
+        "run-move",
+        "--python",
+        "/usr/bin/python3",
+        "--operation",
+        "op-1234",
+        "--state-dir",
+        "/Users/x/.local/state/ciaobot/workspace-move",
+    )
+    parsed = parse_service_command(list(argv))
+    assert parsed.mode == "hosted"
+    assert parsed.python == "/usr/bin/python3"
+
+
+@pytest.mark.parametrize(
+    "bundle, python, operation, state_dir",
+    [
+        # A bundle the host does not own, an interpreter it would refuse.
+        ("Applications/" + APP_NAME, "/usr/bin/python3", "op-1", "/state"),
+        (POSIX_BUNDLE, "python3", "op-1", "/state"),
+        (POSIX_BUNDLE, "/bin/sh", "op-1", "/state"),
+        # An operation id that is not a plain identifier: the host's own
+        # parser reads a leading dash as an option.
+        (POSIX_BUNDLE, "/usr/bin/python3", "--state-dir", "/state"),
+        (POSIX_BUNDLE, "/usr/bin/python3", "", "/state"),
+        (POSIX_BUNDLE, "/usr/bin/python3", "op/1", "/state"),
+        # A state directory that is not absolute and normalized.
+        (POSIX_BUNDLE, "/usr/bin/python3", "op-1", "relative/state"),
+        (POSIX_BUNDLE, "/usr/bin/python3", "op-1", "/Users/x/../state"),
+    ],
+)
+def test_host_move_argv_rejects_strict_absent_inputs(
+    bundle: str, python: str, operation: str, state_dir: str
+) -> None:
+    with pytest.raises(ServerHostError) as caught:
+        host_move_argv(
+            PurePosixPath(bundle),
+            PurePosixPath(python),
+            operation,
+            PurePosixPath(state_dir),
+        )
     assert caught.value.code == server_host.INVALID_COMMAND
 
 
@@ -880,10 +1039,11 @@ def test_inspect_rejects_a_special_file(
             lambda b: _rewrite_plist(b, revision=HOST_REVISION + 1),
             server_host.INSPECTION_FAILED,
         ),
-        (lambda b: _rewrite_plist(b, protocol=2), server_host.INSPECTION_FAILED),
-        # A plist <true/> is not protocol 1, although True == 1 in Python.
+        (lambda b: _rewrite_plist(b, protocol=3), server_host.INSPECTION_FAILED),
+        # A plist <true/> is not a protocol number, and a string is not one
+        # either, although "2" is the protocol's own text.
         (lambda b: _rewrite_plist(b, protocol=True), server_host.INSPECTION_FAILED),
-        (lambda b: _rewrite_plist(b, protocol="1"), server_host.INSPECTION_FAILED),
+        (lambda b: _rewrite_plist(b, protocol="2"), server_host.INSPECTION_FAILED),
         (lambda b: _rewrite_plist(b, minimum="12.0"), server_host.INSPECTION_FAILED),
         (lambda b: (b / _ICON_REL).unlink(), server_host.INSPECTION_FAILED),
         (
@@ -1147,6 +1307,143 @@ def test_verify_owned_host_never_writes_or_signs(
         assert command[0] == _CODESIGN
         assert command[1] in ("--verify", "-dv")
         assert "--sign" not in command
+
+
+# ── ownership: the superseded host this engine can still replace ────────────
+
+
+def _make_superseded_bundle(root: Path) -> Path:
+    """A host bundle of the superseded revision, with the old identity fields."""
+    bundle = root / APP_NAME
+    (bundle / "Contents" / "MacOS").mkdir(parents=True)
+    (bundle / "Contents" / "Resources").mkdir(parents=True)
+    (bundle / "Contents" / "_CodeSignature").mkdir(parents=True)
+    (bundle / _EXE_REL).write_bytes(b"universal-host-binary")
+    (bundle / _ICON_REL).write_bytes(b"indigo-icns-bytes")
+    (bundle / _CODESIGN_REL).write_bytes(b"sealed-resources")
+    document = BUILD.bundle_info()
+    document["CFBundleVersion"] = "2"
+    document["CFBundleShortVersionString"] = "2"
+    document[HOST_PROTOCOL_KEY] = 1
+    with (bundle / _PLIST_REL).open("wb") as handle:
+        plistlib.dump(document, handle)
+    return bundle
+
+
+def _superseded_record(bundle: Path) -> dict[str, Any]:
+    """The ownership record a revision-2 installation would have written.
+
+    The digests are the ones the bundle's own bytes hash to, so the only thing
+    that separates this record from a current one is its revision and protocol.
+    """
+    document = _record(os.fspath(bundle))
+    document["host_revision"] = 2
+    document["host_protocol"] = 1
+    document["executable_sha256"] = hashlib.sha256(b"universal-host-binary").hexdigest()
+    document["bundle_files"] = {
+        _PLIST_REL: hashlib.sha256((bundle / _PLIST_REL).read_bytes()).hexdigest(),
+        _EXE_REL: hashlib.sha256((bundle / _EXE_REL).read_bytes()).hexdigest(),
+        _ICON_REL: hashlib.sha256((bundle / _ICON_REL).read_bytes()).hexdigest(),
+        _CODESIGN_REL: hashlib.sha256((bundle / _CODESIGN_REL).read_bytes()).hexdigest(),
+    }
+    return document
+
+
+@requires_posix_uid
+def test_a_revision_two_record_is_read_as_a_superseded_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The current reader refuses anything that is not the current revision:
+    # a revision-2 record is not proof that the installed bundle is the host
+    # this engine speaks to. The superseded reader is the one that answers
+    # "is this bundle ours?", so the installer can replace it (#1659).
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_superseded_bundle(tmp_path)
+    runner = _FakeRunner()
+    record = _write_record(
+        tmp_path / "server-host.json",
+        _superseded_record(bundle),
+    )
+
+    # The current reader refuses it.
+    with pytest.raises(ServerHostError) as caught:
+        read_host_ownership(record)
+    assert caught.value.code == server_host.INVALID_OWNERSHIP
+    with pytest.raises(ServerHostError) as caught:
+        verify_owned_host(bundle, ownership_path=record, runner=runner)
+    assert caught.value.code == server_host.INVALID_OWNERSHIP
+
+    # The superseded reader accepts it, and answers with the same identity.
+    superseded = verify_superseded_host(bundle, ownership_path=record, runner=runner)
+    assert superseded.host_revision == 2
+    assert superseded.host_protocol == 1
+    assert superseded.bundle_path == os.fspath(bundle)
+    assert superseded.bundle_id == BUNDLE_ID
+
+
+@requires_posix_uid
+@pytest.mark.parametrize("revision", [1, 3, 4])
+def test_only_the_one_superseded_revision_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, revision: int
+) -> None:
+    # Exactly one older revision is superseded. Anything else - a revision this
+    # engine never shipped, or the current one - is refused by both readers.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_superseded_bundle(tmp_path)
+    document = _superseded_record(bundle)
+    document["host_revision"] = revision
+    record = _write_record(tmp_path / "server-host.json", document)
+    with pytest.raises(ServerHostError):
+        verify_superseded_host(bundle, ownership_path=record, runner=_FakeRunner())
+
+
+@requires_posix_uid
+def test_a_superseded_host_must_still_match_its_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The proof is not "the record says revision 2": the bundle's bytes must
+    # still match that record exactly, exactly as verify_owned_host requires.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_superseded_bundle(tmp_path)
+    runner = _FakeRunner()
+    record = _write_record(
+        tmp_path / "server-host.json",
+        _superseded_record(bundle),
+    )
+    (bundle / _ICON_REL).write_bytes(b"tampered-icon")
+    with pytest.raises(ServerHostError) as caught:
+        verify_superseded_host(bundle, ownership_path=record, runner=runner)
+    assert caught.value.code == server_host.NOT_OWNED
+
+
+@requires_posix_uid
+def test_a_superseded_host_with_no_record_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A bundle with no record is never ours: there is nothing to prove it.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_superseded_bundle(tmp_path)
+    with pytest.raises(ServerHostError) as caught:
+        verify_superseded_host(
+            bundle, ownership_path=tmp_path / "absent.json", runner=_FakeRunner()
+        )
+    assert caught.value.code == server_host.MISSING_RECORD
+
+
+@requires_posix_uid
+def test_a_superseded_host_whose_record_names_another_path_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The record must name this bundle. A record that names another path is
+    # not proof about this one, exactly as for the current host.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    bundle = _make_superseded_bundle(tmp_path)
+    document = _superseded_record(bundle)
+    document["bundle_path"] = POSIX_BUNDLE
+    record = _write_record(tmp_path / "server-host.json", document)
+    with pytest.raises(ServerHostError) as caught:
+        verify_superseded_host(bundle, ownership_path=record, runner=_FakeRunner())
+    assert caught.value.code == server_host.NOT_OWNED
 
 
 # ── macOS-only integration: the real universal host ─────────────────────────

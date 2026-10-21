@@ -164,3 +164,18 @@ async def test_cancel_all_pending_denies_and_clears() -> None:
     assert isinstance(r2, PermissionResultDeny)
     assert r1.message == "turn aborted"
     assert gate.pending_count == 0
+
+
+@pytest.mark.asyncio
+async def test_parallel_requests_are_tracked_and_answered_independently() -> None:
+    gate = PermissionGate()
+    first = asyncio.create_task(gate.handle("Grep", {}, _ctx("tu-a")))
+    second = asyncio.create_task(gate.handle("Bash", {}, _ctx("tu-b")))
+    await asyncio.sleep(0)
+
+    assert gate.has_pending("tu-a") and gate.has_pending("tu-b")
+    assert gate.answer("tu-a", approved=True)
+    assert isinstance(await first, PermissionResultAllow)
+    assert not gate.has_pending("tu-a") and gate.has_pending("tu-b")
+    assert gate.answer("tu-b", approved=True)
+    assert isinstance(await second, PermissionResultAllow)

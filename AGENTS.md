@@ -75,13 +75,16 @@ scripts/dev-commands.sh all              # typecheck, coverage, lint, audit
      must agree: `web/package.json` `engines`, `SUPPORTED_RANGE` in
      `web/scripts/check-node.mjs`, and `docs/DEVELOPMENT.md`.
   4. `cd web && npm run build` after frontend changes.
-  PRs into `develop` run these on Linux, and the first three on Windows too:
-  the `windows` job (`windows-latest`) blocks on every module importing,
-  `python -m mypy ciao` (natively win32, so a POSIX-only call such as
-  `os.getuid` or `signal.SIGHUP` outside a platform branch fails it), the
-  full `pytest` suite and `npm test`. The macOS job (browser tests and an
-  engine cold-start) runs after merge, so a PR going green is not proof the
-  macOS job will.
+  PRs into `develop` run these on Linux (`linux-server` for the backend,
+  `linux-web` for vitest and the build, in parallel). On Windows a develop PR
+  runs only the fast gates: every module importing and `python -m mypy ciao`
+  (natively win32, so a POSIX-only call such as `os.getuid` or `signal.SIGHUP`
+  outside a platform branch fails it). The Windows `pytest` and `npm test`
+  suites and the macOS job (browser tests and an engine cold-start) run on
+  the push to `develop` after merge and on release PRs into `main`, so a PR
+  going green is not proof those will. Path handling is the usual Windows
+  break (`ciao\x` vs `ciao/x`): compare paths with `Path`/`as_posix()`, not
+  string literals.
   `pip-audit`, `npm audit` and `npm run lint` are advisory in CI (`|| true`).
   Lint is still worth running; it just will not fail the build for you.
 - Some docs are checked by tests, so new code often needs a doc edit:
@@ -155,12 +158,31 @@ this file; the gates are the ones under Verification.
 - New issues: `[Bug]` → label `bug`, `[Feature]` → `enhancement` (see the
   `ciao-support` skill). `report`-labelled issues are auto-opened and may be
   noise: flag, don't drop. `not_ready` issues are skipped by the backlog loop.
+- After merging a batch into `develop`, watch the post-merge push run
+  (`gh run list --workflow ci.yml --branch develop --event push --limit 1`).
+  The Windows suites and the macOS job run only there. If it goes red, open a
+  `bug` issue naming the failing tests and the merge that broke them, and fix
+  it before merging more on top. `/ciao-release` will not cut over a red run.
+- Hands-on device testing (a real Windows or macOS install) is for diffs that
+  touch the installers (`scripts/install*.sh`, `scripts/install.ps1`), the
+  service or scheduled-task code, engine update/migration, or `desktop/`.
+  Other issues rely on CI.
 - Security-sensitive diffs (ship fan-out plus a PR-scoped security review):
   auth, secrets, `/api` or `/ws` routes, `docs/REMOTE_BOUNDARY.md`, `desktop/`
   (also run the `desktop/src-tauri` commands in `docs/DEVELOPMENT.md`),
   release plumbing.
 - There is no `/code-review` command for reviewer workers; review from
   `git diff origin/develop...HEAD`.
+- Other sessions merge into `develop` all day, so use the skill's serial merge
+  queue. The `gates.sh` for this repo runs, from the worktree root: `PYTHONPATH=$PWD
+  ~/repos/ciaobot/.venv/bin/python -m mypy ciao`, the same with `--platform
+  win32`, `PYTHONPATH=$PWD ~/repos/ciaobot/.venv/bin/python -m pytest -n auto
+  tests/` (re-run only `--lf` before calling it red; latency tests flake under
+  load), and, after symlinking `web/node_modules`, `npm test` and `npm run build`
+  in `web/` (remove the symlink afterwards).
+- `PWA_API.md`, `DESIGN.md` (the Home paragraph), `web/README.md` and
+  `docs/ARCHITECTURE.md` are appended to by most PRs and conflict when two land
+  together. Resolve by keeping both sides.
 - An engine booted inside a worktree can push memory-backup commits
   (`backup <ts>Z`, `<branch> session commit <ts>`) to the branch. Compare
   `git ls-remote origin <branch>` with the reported sha and drop strays with

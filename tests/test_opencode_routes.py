@@ -284,6 +284,9 @@ def test_opencode_subagents_read_child_sessions(
         # remain conservative rather than settling a possibly-running child.
         "status": "running",
         "turn_index": 0,
+        # The child session carries no timestamps here, so there is no length
+        # to report.
+        "duration_ms": None,
     }]
 
 

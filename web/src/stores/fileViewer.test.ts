@@ -513,6 +513,31 @@ describe('docking beside the chat', () => {
     expect(store.isOpen).toBe(false)
   })
 
+  test('an open without a chat never docks, even when nothing is pinned', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Archived')))
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinnedFileFor').mockReturnValue(undefined)
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    await store.open('memory-vault/Logs/Chats/chat-abc/claude/2026-10-01-s.md')
+    expect(projects.pinFile).not.toHaveBeenCalled()
+    expect(store.isOpen).toBe(true)
+    expect(store.content).toBe('Archived')
+  })
+
+  test('an image opened without a chat uses the viewer', async () => {
+    const projects = useProjectStore()
+    vi.spyOn(projects, 'pinnedFileFor').mockReturnValue(undefined)
+    vi.spyOn(projects, 'pinFile').mockResolvedValue(true)
+    const store = useFileViewerStore()
+    store.setDockTarget('chat-1')
+    await store.openImage('a.png')
+    expect(projects.pinFile).not.toHaveBeenCalled()
+    expect(store.isOpen).toBe(true)
+    expect(store.kind).toBe('image')
+  })
+
   test('without a dock the viewer opens and nothing is pinned', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('Hello')))
     const projects = useProjectStore()

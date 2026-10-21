@@ -364,9 +364,17 @@ def test_flags_and_defaults_match_install_engine_sh() -> None:
 
     # The two lines that reach the user as "you are signed in now". Byte-equal,
     # because this is the one moment in the install the user has to trust it.
-    for line in ("Open Ciaobot: ", "This link signs you in once. Do not share it."):
+    for line in (
+        "Open Ciaobot: ",
+        "This link signs you in once. Do not share it.",
+        "Your Ciaobot password was created for you. Ciaobot shows it once on Home "
+        "on this computer: save it in your password manager.",
+    ):
         assert line in SCRIPT_TEXT, f"install.ps1 lost the sign-in line {line!r}"
         assert line in SH_TEXT, f"install-engine.sh lost the sign-in line {line!r}"
+
+    assert ".runtime\\welcome-pending" in SCRIPT_TEXT
+    assert ".runtime/welcome-pending" in SH_TEXT
 
     # `ciao setup` exiting 3 means the memory regions could not be set up, which
     # is a warning and not a failed install: the same one code, and only that
@@ -375,6 +383,13 @@ def test_flags_and_defaults_match_install_engine_sh() -> None:
     assert "default { Fail 'ciao setup failed' }" in SCRIPT_TEXT
     assert '3) echo "warning: ciao setup could not set up memory regions' in SH_TEXT
     assert '*) abort_install "ciao setup failed" ;;' in SH_TEXT
+
+
+def test_installers_name_the_setup_marker_filename() -> None:
+    from ciao import setup_marker
+
+    assert ".runtime\\" + setup_marker.WELCOME_PENDING_FILENAME in SCRIPT_TEXT
+    assert ".runtime/" + setup_marker.WELCOME_PENDING_FILENAME in SH_TEXT
 
 
 def test_ps1_setup_and_service_flags_exist_in_cli() -> None:
@@ -790,6 +805,34 @@ def test_uninstall_keeps_the_bin_dir_on_path_while_anything_is_still_in_it() -> 
     assert "Get-ChildItem -LiteralPath $PathEntry -Force -ErrorAction Stop" in undo
     assert "if ($left.Count -gt 0) {" in undo
     assert "Kept $PathEntry on your PATH: it still holds $names." in undo
+
+
+def test_install_ps1_reads_the_port_reason_and_drops_the_dead_link() -> None:
+    # #1669: a taken port left the engine unable to serve, and the installer
+    # still printed "Open Ciaobot: <url>" - a link nothing was listening on.
+    # The engine records the reason outside the workspace (it cannot serve the
+    # endpoint that would report it), so the installer reads that record and
+    # names the port, and a port failure means no link at all.
+    assert "function Read-PortInUseReason" in SCRIPT_TEXT
+    # Asked of the wheel, so the record's path has one owner rather than a
+    # copy here that could drift from ciao/port_in_use.py.
+    assert "from ciao.port_in_use import read_port_in_use" in SCRIPT_TEXT
+    assert "$portReason = Read-PortInUseReason $uv $wheel" in SCRIPT_TEXT
+    # The port failure sets the flag, and the link is gated on it.
+    port_block = SCRIPT_TEXT[SCRIPT_TEXT.index("if ($portReason) {"):]
+    assert "$engineReady = $false" in port_block[: port_block.index("} else {")]
+    assert "if ($engineReady) {" in SCRIPT_TEXT
+    link_at = SCRIPT_TEXT.index('Write-Host "Open Ciaobot: $url"')
+    assert SCRIPT_TEXT.index("if ($engineReady) {") < link_at
+    # Only a port failure suppresses the link. A slow first boot and a
+    # signed-out account keep it: the task is registered, so the engine comes
+    # up, and the link signs the person in when it does.
+    ready_default = SCRIPT_TEXT.index("$engineReady = $true")
+    port_check = SCRIPT_TEXT.index("if ($portReason) {")
+    assert ready_default < port_check, "the flag must default to ready, so only the port failure clears it"
+    assert "$engineReady = $false" not in SCRIPT_TEXT[:port_check], (
+        "nothing before the port check may clear the flag"
+    )
 
 
 def test_install_ps1_does_not_wait_for_an_engine_that_cannot_start_yet() -> None:

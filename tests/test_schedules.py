@@ -2113,3 +2113,21 @@ def test_a_completed_slot_marker_only_moves_forward():
     assert stamp_run_outcome(entry, "2026-06-14#a", "ok") is False
     assert entry.last_completed_on == "2026-06-15"
     assert entry.last_status == "running"
+
+
+async def test_tick_stamps_first_seen_for_system_routines(tmp_path: Path) -> None:
+    store = ScheduleStore(
+        tmp_path, include_system=True, workspace_names=lambda: ["personal"]
+    )
+
+    async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
+        return None
+
+    mgr = ScheduleManager(store=store, dispatch_to_web=dispatch)
+    await mgr.tick(now=datetime(2026, 1, 19, 14, 0, tzinfo=UTC))
+
+    state = json.loads(
+        (tmp_path / "system_schedules_state.json").read_text(encoding="utf-8")
+    )
+    row = state["schedules"]["system-memory-curation@personal"]
+    assert row["first_seen_at"] == "2026-01-19T14:00:00Z"

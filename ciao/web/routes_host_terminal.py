@@ -4,7 +4,7 @@ Both routes take the normal session path (signed session cookie plus the
 same-origin check on the POST) and appear in neither the public nor the
 loopback-only allowlist: that last set lets a loopback peer skip the session,
 which would let any local process open terminals. The handlers then add
-``host_browser_request``: loopback TCP peer, loopback Host, same-host
+``host_browser_request``: loopback TCP peer, local Host, exact same-origin
 Origin/Referer.
 
 The body carries an action id or a chat/project id, never a command or a path;
@@ -99,6 +99,8 @@ async def host_terminal_launch(request: Request) -> JSONResponse:
             {"ok": False, "platform": host_terminal.host_platform(), "reason": exc.reason, "error": str(exc)},
             status_code=409,
         )
+    except host_terminal.NothingToUpdate as exc:
+        return _fail("not_applicable", str(exc), 409)
     except OSError as exc:
         return _fail("launch_failed", str(exc), 500)
     return JSONResponse({"ok": True, "platform": host_terminal.host_platform(), "launched": launched})

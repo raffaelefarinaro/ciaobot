@@ -1119,7 +1119,7 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
 
 
 def test_setup_finish_accepts_0000_host(tmp_path) -> None:
-    """0.0.0.0 counts as loopback: users copy it from the bind-address log."""
+    """0.0.0.0 is an accepted local Host spelling: users copy it from the bind-address log."""
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
@@ -1143,6 +1143,42 @@ def test_setup_finish_accepts_0000_host(tmp_path) -> None:
 
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
+
+
+def test_setup_finish_refuses_a_protected_folder_without_a_host(
+    tmp_path, monkeypatch
+) -> None:
+    from ciao import cli
+
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_verified_host_if_installed", lambda: None)
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    workspace = home / "Documents" / "ws"
+
+    resp = TestClient(app, base_url="http://localhost:8443", client=_LOOPBACK_PEER).post(
+        "/api/setup/finish",
+        json={
+            "password": "wizard-pass",
+            "workspace": str(workspace),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 409
+    assert "Ciaobot Server" in resp.json()["error"]
+    assert not workspace.exists()
 
 
 def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
@@ -2278,3 +2314,257 @@ def test_provider_rows_carry_their_terminal_action(tmp_path, monkeypatch) -> Non
 
     assert claude["auth"] == "not_installed"
     assert claude["terminal_action"] == "claude-install"
+
+
+def test_cloud_synced_location_recognises_sync_folders(tmp_path) -> None:
+    from ciao.setup_status import cloud_synced_location
+
+    home = tmp_path / "h"
+    mac = home / "Library" / "CloudStorage"
+    cases = [
+        ("darwin", home / "Library/Mobile Documents/com~apple~CloudDocs/ws", "iCloud Drive"),
+        ("darwin", mac / "GoogleDrive-me@x.com/My Drive/ws", "Google Drive"),
+        ("darwin", mac / "Dropbox/ws", "Dropbox"),
+        ("darwin", mac / "OneDrive-Personal/ws", "OneDrive"),
+        ("darwin", mac / "Nextcloud/ws", "a cloud-synced folder"),
+        ("darwin", home / "Dropbox (Acme)/ws", "Dropbox"),
+        ("darwin", home / "OneDrive - Contoso/ws", "OneDrive"),
+        ("darwin", home / "dropbox" / "ws", "Dropbox"),
+        ("darwin", home / "Ciaobot", None),
+        ("darwin", home, None),
+        ("darwin", mac, None),
+        ("darwin", home / "Library/Application Support/x", None),
+        ("linux", home / "Dropbox/ws", "Dropbox"),
+        ("linux", home / "Library/Mobile Documents/x", None),
+        ("win32", home / "iCloudDrive/ws", "iCloud Drive"),
+    ]
+    for platform, path, expected in cases:
+        assert cloud_synced_location(path, platform=platform, home=home, env={}) == expected, path
+
+    corp = tmp_path / "corp"
+    assert (
+        cloud_synced_location(corp / "ws", platform="win32", home=home, env={"OneDrive": str(corp)})
+        == "OneDrive"
+    )
+    assert cloud_synced_location(corp / "ws", platform="win32", home=home, env={}) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_cloud_synced_location_follows_symlinks(tmp_path) -> None:
+    from ciao.setup_status import cloud_synced_location
+
+    home = tmp_path / "h"
+    real = home / "Library" / "CloudStorage" / "Dropbox"
+    (real / "ws").mkdir(parents=True)
+    (home / "Dropbox").symlink_to(real)
+    assert cloud_synced_location(home / "Dropbox" / "ws", platform="darwin", home=home) == "Dropbox"
+
+
+def test_cloud_sync_warning_names_the_service_and_is_empty_otherwise(tmp_path) -> None:
+    from ciao.setup_status import cloud_sync_warning
+
+    home = tmp_path / "h"
+    path = home / "Dropbox" / "ws"
+    warning = cloud_sync_warning(path, platform="darwin", home=home)
+    assert "Dropbox" in warning
+    assert str(path) in warning
+    assert cloud_sync_warning(home / "Ciaobot", platform="darwin", home=home) == ""
+
+
+def test_setup_inspect_folder_reports_cloud_sync_warning(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "notes"
+    target.mkdir()
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["cloud_sync_warning"] == ""
+
+    monkeypatch.setattr("ciao.setup_status.cloud_sync_warning", lambda path, **kw: "SYNCED")
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["cloud_sync_warning"] == "SYNCED"
+
+
+def test_macos_access_note_names_the_folder(monkeypatch, tmp_path) -> None:
+    from ciao import setup_status
+
+    home = tmp_path / "home"
+    (home / "Documents" / "ws").mkdir(parents=True)
+    (home / "projects" / "ws").mkdir(parents=True)
+    monkeypatch.setattr(setup_status.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(setup_status.sys, "platform", "darwin")
+
+    note = setup_status.macos_access_note(home / "Documents" / "ws")
+    assert "Documents" in note and "Ciaobot Server" in note
+    assert setup_status.macos_access_note(home / "projects" / "ws") == ""
+
+    monkeypatch.setattr(setup_status.sys, "platform", "linux")
+    assert setup_status.macos_access_note(home / "Documents" / "ws") == ""
+
+
+def test_cloud_synced_location_detects_icloud_desktop_and_documents(tmp_path) -> None:
+    from ciao.setup_status import cloud_synced_location
+
+    home = tmp_path / "h"
+    docs = home / "Documents" / "ws"
+    desk = home / "Desktop" / "ws"
+    label = "iCloud Drive (Desktop & Documents)"
+
+    def where(path, prefs, platform="darwin"):
+        return cloud_synced_location(path, platform=platform, home=home, finder_prefs=prefs)
+
+    assert where(docs, {"FXICloudDriveDocuments": 1}) == label
+    assert where(desk, {"FXICloudDriveDocuments": 1}) is None
+    assert where(desk, {"FXICloudDriveDesktop": True}) == label
+    assert where(docs, {"FXICloudDriveDesktop": True}) is None
+    assert where(docs, {}) is None and where(desk, {}) is None
+    assert where(docs, {"FXICloudDriveDocuments": 0}) is None
+    assert where(docs, {"FXICloudDriveDocuments": 1}, platform="linux") is None
+
+
+def test_finder_prefs_reads_the_plist_and_tolerates_garbage(tmp_path) -> None:
+    import plistlib
+
+    from ciao.setup_status import cloud_synced_location
+
+    home = tmp_path / "h"
+    prefs = home / "Library" / "Preferences" / "com.apple.finder.plist"
+    prefs.parent.mkdir(parents=True)
+    with prefs.open("wb") as handle:
+        plistlib.dump({"FXICloudDriveDocuments": True}, handle, fmt=plistlib.FMT_BINARY)
+    docs = home / "Documents" / "ws"
+    assert (
+        cloud_synced_location(docs, platform="darwin", home=home)
+        == "iCloud Drive (Desktop & Documents)"
+    )
+
+    prefs.write_bytes(b"not a plist at all")
+    assert cloud_synced_location(docs, platform="darwin", home=home) is None
+    prefs.write_bytes(
+        b'<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>FXICl'
+    )
+    assert cloud_synced_location(docs, platform="darwin", home=home) is None
+    prefs.unlink()
+    assert cloud_synced_location(docs, platform="darwin", home=home) is None
+
+
+def test_setup_inspect_folder_reports_macos_access_note(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "notes"
+    target.mkdir()
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["macos_access_note"] == ""
+
+    monkeypatch.setattr("ciao.setup_status.macos_access_note", lambda path: "ALLOW IT")
+    # No verified Ciaobot Server on this Mac: the folder is refused later, so
+    # promising a prompt would mislead.
+    monkeypatch.setattr("ciao.cli._verified_host_if_installed", lambda: None)
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["macos_access_note"] == ""
+
+    monkeypatch.setattr("ciao.cli._verified_host_if_installed", lambda: object())
+    resp = client.get("/api/setup/inspect-folder", params={"path": str(target)})
+    assert resp.json()["macos_access_note"] == "ALLOW IT"
+
+
+def test_setup_warns_when_the_workspace_is_in_a_synced_folder(monkeypatch, capsys) -> None:
+    from ciao import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.delenv("CIAO_ENGINE_PATH", raising=False)
+    synced = Path.home() / "Dropbox" / "ws"
+    assert cli.main(["setup", "--workspace", str(synced)]) == 0
+    err = capsys.readouterr().err
+    assert "Warning:" in err and "Dropbox" in err
+
+    assert cli.main(["setup", "--workspace", str(Path.home() / "plain")]) == 0
+    assert "Dropbox" not in capsys.readouterr().err
+
+
+def _tested_record(running: str) -> dict:
+    return {
+        "schema": 1,
+        "ciaobot": running,
+        "recorded": "2026-10-20",
+        "providers": {
+            "opencode": {"status": "tested", "version": "2.1.0", "package": "@opencode/cli"},
+            "claude": {"status": "tested", "version": "2.1.301", "source": "claude-agent-sdk 0.2.168"},
+        },
+    }
+
+
+def test_claude_row_marks_bundled_release_check(tmp_path, monkeypatch) -> None:
+    import ciao
+    from ciao import provider_versions
+
+    bundled = "/opt/sdk/claude_agent_sdk/_bundled/claude"
+    monkeypatch.setattr("ciao.setup_status.claude_cli_path", lambda: bundled)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: bundled)
+    monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
+    config = _config(tmp_path)
+
+    claude = setup_status(config, env={})["providers"]["claude"]
+
+    assert claude["release_check"] == {"state": "bundled", "tested": "2.1.301"}
+
+
+def test_opencode_unsupported_row_keeps_v2_migration_text(monkeypatch) -> None:
+    import ciao
+    from ciao import provider_versions
+    from ciao.providers import opencode
+
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda *a, **k: "/bin/opencode")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="1.14.0\n", returncode=0)
+    )
+    monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
+    monkeypatch.setattr("ciao.tool_path.resolve_on_terminal_path", lambda cmd: None)
+
+    row = opencode.opencode_login_status(inventory=False)
+
+    assert row["auth"] == "unsupported_version"
+    assert row["detail"] == opencode.OPENCODE_V2_REQUIRED
+    assert row["terminal_action"] == "opencode-install"
+    assert row["release_check"] == {"state": "unsupported", "tested": "2.1.0"}
+
+
+def test_opencode_ok_row_carries_a_below_tested_release_check(monkeypatch) -> None:
+    import ciao
+    from ciao import provider_versions
+    from ciao.providers import opencode
+
+    monkeypatch.setattr(opencode, "resolve_opencode_binary", lambda *a, **k: "/bin/opencode")
+    monkeypatch.setattr(
+        "subprocess.run", lambda *a, **k: SimpleNamespace(stdout="opencode v2.0.32\n", returncode=0)
+    )
+    monkeypatch.setattr(opencode, "_credential_count", lambda *a, **k: 1)
+    monkeypatch.setattr(provider_versions, "load_record", lambda: _tested_record(ciao.__version__))
+
+    row = opencode.opencode_login_status(inventory=False)
+
+    assert row["release_check"]["state"] == "below_tested"
+    assert row["release_check"]["terminal_action"] == "opencode-update"
+    assert row["release_check"]["command"].endswith("upgrade 2.1.0")
+
+
+def test_clearing_the_discovery_cache_rereads_a_system_cli_version(monkeypatch) -> None:
+    from ciao import setup_status as module
+
+    calls: list[str] = []
+
+    def fake_run(argv, **_k):
+        calls.append(argv[0])
+        return SimpleNamespace(stdout="2.0.0\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    probe = module._CLI_VERSION_CACHE
+    probe.cache_clear()
+    try:
+        probe("/x/claude")
+        probe("/x/claude")
+        assert len(calls) == 1
+        module.clear_claude_discovery_cache()
+        probe("/x/claude")
+        assert len(calls) == 2
+    finally:
+        probe.cache_clear()
