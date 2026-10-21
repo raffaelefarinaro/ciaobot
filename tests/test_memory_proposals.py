@@ -1644,7 +1644,7 @@ def test_as_bullet_renders_the_decide_tail_last() -> None:
 
     proposal = mp.MemoryProposal(
         target="learnings", text="x", source_section="s", request="r",
-        decider="you", decide_reason="why really)",
+        decider="you", decide_reason="why (really)",
     )
     line = proposal.as_bullet()
     assert line.endswith("  _(from: s)_  _(request: r)_  _(decide: you; why really)_")

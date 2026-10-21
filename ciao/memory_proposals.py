@@ -315,8 +315,8 @@ DECIDE_REASON_MAX_CHARS = 200
 
 
 def render_decide_tail(decider: str, reason: str) -> str:
-    """``  _(decide: you; reason)_``: reason flattened, ``)`` stripped, capped."""
-    flat = _one_line(reason).replace(")", "")[:DECIDE_REASON_MAX_CHARS].strip()
+    """``  _(decide: you; reason)_``: reason flattened, parentheses stripped, capped."""
+    flat = _one_line(reason).replace(")", "").replace("(", "")[:DECIDE_REASON_MAX_CHARS].strip()
     return f"  _(decide: {decider}; {flat})_" if flat else f"  _(decide: {decider})_"
 
 

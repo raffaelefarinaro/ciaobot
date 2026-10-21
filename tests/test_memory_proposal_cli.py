@@ -820,7 +820,7 @@ def test_cli_add_rejects_an_unknown_decider(tmp_path: Path) -> None:
     assert exc.value.code == 2
 
 
-def test_cli_escalate_retags_in_place_under_the_lock(tmp_path: Path) -> None:
+def test_cli_escalate_retags_in_place_under_the_lock(tmp_path: Path, monkeypatch) -> None:
     """Escalation rewrites one line under queue_lock and records no decision."""
     import contextlib
 
@@ -836,12 +836,8 @@ def test_cli_escalate_retags_in_place_under_the_lock(tmp_path: Path) -> None:
         with real_lock(path):
             yield
 
-    original = memory_receipts.queue_lock
-    memory_receipts.queue_lock = recording_lock
-    try:
-        rc = _escalate(tmp_path, vault, "Mo leads", "Checked People/Mo.md; only you know.")
-    finally:
-        memory_receipts.queue_lock = original
+    monkeypatch.setattr(memory_receipts, "queue_lock", recording_lock)
+    rc = _escalate(tmp_path, vault, "Mo leads", "Checked People/Mo.md; only you know.")
 
     assert rc == 0
     assert entered

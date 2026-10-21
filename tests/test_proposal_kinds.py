@@ -388,6 +388,7 @@ def test_bullets_without_a_decide_tail_parse_with_decider_none(line: str) -> Non
 
 def test_unknown_decider_word_is_not_a_decide_tail() -> None:
     """Only the closed decider set forms a tail; anything else stays in text."""
+    # No `from` tail on purpose: the lazy `from` group would otherwise absorb it into source.
     bullet = pk.parse_bullet("- [memory] x  _(decide: maybe)_")
     assert bullet is not None
     assert bullet.decider is None

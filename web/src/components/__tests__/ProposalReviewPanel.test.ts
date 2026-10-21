@@ -123,7 +123,7 @@ describe('ProposalReviewPanel', () => {
     await flushPromises()
 
     expect(wrapper.get('.pr-row-meta').text()).toContain('decide: you')
-    expect(wrapper.get('.pr-row-reason').text()).toBe('Judgement about identity.')
+    expect(wrapper.get('.pr-row-reason').text()).toBe('Why: Judgement about identity.')
     wrapper.unmount()
   })
 
@@ -164,12 +164,58 @@ describe('ProposalReviewPanel', () => {
     quiet.unmount()
   })
 
+  it('Needs you toggles independently of All: All un-presses and keeps the unfiltered count', async () => {
+    apiGet.mockResolvedValue({
+      rows: [
+        row({ id: 'y', text: 'For you', decider: 'you' }),
+        row({ id: 'n', text: 'For night', decider: 'nightly' }),
+        row({ id: 'u', text: 'Undecided' }),
+      ],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const chips = () => wrapper.findAll('.mr-chip')
+    const all = () => chips().find(c => c.text().startsWith('All'))!
+    const needs = () => chips().find(c => c.text().startsWith('Needs you'))!
+
+    await needs().trigger('click')
+    expect(all().attributes('aria-pressed')).toBe('false')
+    expect(needs().attributes('aria-pressed')).toBe('true')
+    expect(all().text()).toContain('3')
+
+    await all().trigger('click')
+    expect(all().attributes('aria-pressed')).toBe('true')
+    expect(needs().attributes('aria-pressed')).toBe('false')
+    expect(useProposalsStore().decideFilter).toBe('all')
+    wrapper.unmount()
+  })
+
+  it('drops the Needs you filter when its chip disappears', async () => {
+    apiGet.mockResolvedValue({
+      rows: [
+        row({ id: 'y', text: 'For you', decider: 'you' }),
+        row({ id: 'n', text: 'For night', decider: 'nightly' }),
+      ],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    const store = useProposalsStore()
+    await wrapper.findAll('.mr-chip').find(c => c.text().startsWith('Needs you'))!.trigger('click')
+    expect(store.decideFilter).toBe('needs-you')
+
+    store.rows = store.rows.filter(r => r.id !== 'n')
+    await nextTick()
+
+    expect(store.decideFilter).toBe('all')
+    wrapper.unmount()
+  })
+
   it('renders the reason as text, never markup', async () => {
     apiGet.mockResolvedValue({ rows: [row({ id: 'a', decider: 'you', decide_reason: '<b>x</b>' })] })
     const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
     await flushPromises()
 
-    expect(wrapper.get('.pr-row-reason').text()).toBe('<b>x</b>')
+    expect(wrapper.get('.pr-row-reason').text()).toBe('Why: <b>x</b>')
     expect(wrapper.find('.pr-row-reason b').exists()).toBe(false)
     wrapper.unmount()
   })

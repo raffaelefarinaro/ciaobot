@@ -472,6 +472,8 @@ watch(
  * and this list cannot disagree about what is in scope.
  */
 const scopeFiltered = computed(() => store.visibleRows(projectStore.activeWorkspace))
+/** The All chip's count ignores the Needs you toggle, so pressing it does not renumber All. */
+const allCount = computed(() => store.visibleRows(projectStore.activeWorkspace, false).length)
 
 // -- Change type ------------------------------------------------------------
 //
@@ -541,6 +543,10 @@ const needsYouChipShown = computed(() => {
   const ws = projectStore.activeWorkspace
   return store.needsYouCount(ws) > 0
     && store.scopedRows(ws).some(r => r.decider === 'nightly')
+})
+
+watch(needsYouChipShown, (shown) => {
+  if (!shown) store.decideFilter = 'all'
 })
 
 function toggleNeedsYou() {
@@ -1513,9 +1519,9 @@ watch(
           <button
             type="button"
             class="mr-chip"
-            :aria-pressed="changeFilter === 'all'"
-            @click="changeFilter = 'all'"
-          >All <span class="mr-chip-count">{{ scopeFiltered.length }}</span></button>
+            :aria-pressed="changeFilter === 'all' && store.decideFilter === 'all'"
+            @click="changeFilter = 'all'; store.decideFilter = 'all'"
+          >All <span class="mr-chip-count">{{ allCount }}</span></button>
           <button
             v-if="needsYouChipShown"
             type="button"
@@ -1594,9 +1600,9 @@ watch(
             <p class="pr-row-meta">
               <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
               <template v-if="row.source && !isRehome(row) && !isSkill(row)"> · from {{ row.source }}</template>
-              <template v-if="row.decider"> · decide: {{ row.decider === 'you' ? 'you' : 'nightly' }}</template>
+              <template v-if="row.decider"> · decide: {{ row.decider }}</template>
             </p>
-            <p v-if="row.decide_reason" class="pr-row-reason">{{ row.decide_reason }}</p>
+            <p v-if="row.decide_reason" class="pr-row-reason">Why: {{ row.decide_reason }}</p>
             <div class="pr-row-top">
               <!-- Backtick spans render as inline code rather than raw backticks;
                    built from segments, never v-html, since the text is model-written. -->
@@ -1701,7 +1707,7 @@ watch(
               <p class="pr-card-meta">
                 <span v-if="row.source">from <span class="pr-card-source">{{ row.source }}</span></span>
                 <span v-else>no recorded source</span>
-                <span v-if="row.decider">decide: {{ row.decider === 'you' ? 'you' : 'nightly' }}<template v-if="row.decide_reason"> ({{ row.decide_reason }})</template></span>
+                <span v-if="row.decider">decide: {{ row.decider }}<template v-if="row.decide_reason"> ({{ row.decide_reason }})</template></span>
                 <span v-if="store.previews[row.id].leak_warning" class="pr-badge --warn">visible in every workspace</span>
               </p>
 

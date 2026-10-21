@@ -371,11 +371,11 @@ export const useProposalsStore = defineStore('proposals', () => {
   }
 
   /** Rows the list should render: workspace scope, then kind, then search. */
-  function visibleRows(workspace: string): ProposalRow[] {
+  function visibleRows(workspace: string, withDecide = true): ProposalRow[] {
     const needle = search.value.trim().toLowerCase()
     return scopedRows(workspace).filter(r =>
       (kindFilter.value === 'all' || r.kind === kindFilter.value)
-      && (decideFilter.value === 'all' || needsYou(r))
+      && (!withDecide || decideFilter.value === 'all' || needsYou(r))
       && (!needle
         || (r.text ?? '').toLowerCase().includes(needle)
         || (r.path ?? '').toLowerCase().includes(needle)),
