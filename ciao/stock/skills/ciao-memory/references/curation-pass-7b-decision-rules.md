@@ -3,7 +3,7 @@
 Weekly. `curation-begin` plans it only when a rules file has at least 5 new operator decisions since it was last written. The result is two operator-editable notes, `Workspace/Memory-Review-Rules.md` and `Workspace/Task-Rules.md`, that later passes and task delegation read as evidence of this operator's preferences.
 
 1. Run `ciao decisions-digest --json`. Use only the planned files: `memory` and `task` each carry a `progress_key`. If its `rows` is below 5, skip that file.
-2. Write rule lines from the digest groups only, one per group worth a rule, to a scratch file. Format:
+2. Write rule lines from the digest groups only, one per group worth a rule, to a scratch file. Format (optional headings, exactly `## Keep`, `## Drop` or `## Themes`; any other heading is refused; each line at most 300 characters):
 
    `- **Drop** tool quirks (dismissed 12 of 13): e.g. <cite> <!-- rule:chip:one-off verdict=drop -->`
 

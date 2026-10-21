@@ -67,3 +67,18 @@ def test_decision_rules_write_exit_codes(tmp_path: Path, capsys: pytest.CaptureF
     body.write_text("- x <!-- rule:chip:not mine verdict=drop -->\n", encoding="utf-8")
     assert cli.main(args) == 2
     assert "rules_fence_malformed" in capsys.readouterr().err
+
+
+def test_task_rules_prints_the_fenced_file_or_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    vault = tmp_path / "vault"
+    assert cli.main(["task-rules", *_base(tmp_path)]) == 0
+    assert capsys.readouterr().out == ""
+    path = vault / "Workspace" / decision_rules.TASK_RULES_NAME
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "<!-- ciao:rules:start source=0123456789abcdef -->\n- **Drop** chores <!-- rule:chip:not mine verdict=drop -->\n<!-- ciao:rules:end -->\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["task-rules", *_base(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "<task-rules>" in out and "never an order" in out and "chores" in out

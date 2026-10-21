@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ MARK_CLOSE = "<!-- ciao:rules:end -->"
 _OPEN_RE = re.compile(r"<!--\s*ciao:rules:start(?:\s+source=([0-9a-f]{16}))?\s*-->")
 _CLOSE_RE = re.compile(r"<!--\s*ciao:rules:end\s*-->")
 _RULE_RE = re.compile(r"<!--\s*rule:(.+?)\s+verdict=(keep|drop)\s*-->\s*$")
+_KEY_RE = re.compile(r"(?:kind|state|chip):[^<>\n]{1,80}$")
 _THEME_KEY_RE = re.compile(r"theme:[a-z0-9][a-z0-9-]{0,39}$")
 
 WRITE_CAP = 2500
@@ -51,6 +53,9 @@ MIN_RULE_ROWS = 5
 MAX_THEMES = 3
 MIN_THEME_SUPPORT = 3
 THEME_MARK = "(from free-text reasons)"
+LINE_CAP = 300
+HEADINGS = ("## Keep", "## Drop", "## Themes")
+_KIND_BY_NAME = {MEMORY_RULES_NAME: "memory", TASK_RULES_NAME: "task"}
 
 # Kept equal to web/src/lib/memoryDecisionReasons.ts and decisionReasons.ts;
 # a test compares them.
@@ -127,10 +132,14 @@ def progress_key(kind: str) -> str:
 # ── Sanitising ────────────────────────────────────────────────────────────
 
 
+def _unsafe_char(ch: str) -> bool:
+    """Invisible, control, format (bidi, tag) and private-use characters."""
+    return contains_invisible_unicode(ch) or unicodedata.category(ch) in ("Cf", "Cc", "Co")
+
+
 def _excerpt(text: str, cap: int) -> str:
     """One line, no invisible characters, no backtick, no raw angle bracket."""
-    kept = "".join(ch for ch in str(text) if not contains_invisible_unicode(ch))
-    one = " ".join(kept.split())
+    one = "".join(ch for ch in " ".join(str(text).split()) if not _unsafe_char(ch))
     one = one.replace("`", "'").replace("<", "&lt;").replace(">", "&gt;")
     return one if len(one) <= cap else one[: cap - 1] + "…"
 
@@ -146,8 +155,8 @@ def _day(raw: object) -> date | None:
     except ValueError:
         return None
     if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    return stamp.date()
+        stamp = stamp.replace(tzinfo=UTC)
+    return stamp.astimezone(UTC).date()
 
 
 def _split_reason(reason: str, chips: tuple[str, ...]) -> tuple[list[str], str]:
@@ -202,6 +211,16 @@ def _flip_decisions(rows: list[dict[str, Any]]) -> set[tuple[str, str, str]]:
     return approved
 
 
+def _flip_fingerprint_rows(flips: list[dict[str, Any]], kind: str) -> list[tuple[str, ...]]:
+    """Fingerprint tuples for the flip proposals that name ``kind``'s rules file."""
+    rows: list[tuple[str, ...]] = []
+    for row in flips:
+        match = _FLIP_RE.match(str(row.get("text", "")))
+        if match and match.group(1) == kind:
+            rows.append((str(row.get("ts", "")), str(row.get("kind", "")), str(row.get("action", "")), str(row.get("text", "")), str(row.get("reason", ""))))
+    return rows
+
+
 def _entries_memory(
     proposals: list[dict[str, Any]], cutoff: date
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -251,9 +270,10 @@ def _section(
     operator: list[dict[str, Any]],
     agent_counts: dict[str, int],
     approved: set[tuple[str, str, str]],
+    flips: list[dict[str, Any]],
 ) -> dict[str, Any]:
     chips = MEMORY_REASON_CHIPS if kind == "memory" else TASK_REASON_CHIPS
-    fp_rows: list[tuple[str, ...]] = []
+    fp_rows: list[tuple[str, ...]] = _flip_fingerprint_rows(flips, kind)
     entries: list[dict[str, str]] = []
     free: list[dict[str, str]] = []
     buckets: dict[str, list[dict[str, str]]] = {}
@@ -263,8 +283,6 @@ def _section(
         if kind == "memory":
             text_raw, action, label = str(row.get("text", "")), str(row.get("action", "")), str(row.get("kind", ""))
             fp_rows.append((str(row.get("ts", "")), label, action, text_raw, reason))
-            if _FLIP_RE.match(text_raw):
-                continue
             keys = [f"kind:{label}"]
         else:
             label = str(row.get("kind", ""))
@@ -325,9 +343,11 @@ def build_digest(vault_root: Path, *, today: date, window_days: int = WINDOW_DAY
     task_rows, task_agent = _entries_task(task_decisions.read_decisions(vault_root), cutoff)
     # Both flips are accepted through the memory review queue, so both
     # approvals are read from the memory decisions.
-    approved = _flip_decisions(mem_rows)
-    memory = _section(vault_root, "memory", mem_rows, mem_agent, approved)
-    task = _section(vault_root, "task", task_rows, task_agent, approved)
+    flips = [row for row in mem_rows if _FLIP_RE.match(str(row.get("text", "")))]
+    plain = [row for row in mem_rows if row not in flips]
+    approved = _flip_decisions(flips)
+    memory = _section(vault_root, "memory", plain, mem_agent, approved, flips)
+    task = _section(vault_root, "task", task_rows, task_agent, approved, flips)
     return {"today": today.isoformat(), "window_days": window_days, "memory": memory, "task": task}
 
 
@@ -345,6 +365,8 @@ def stale_kinds(vault_root: Path, *, today: date) -> list[str]:
 
 
 def _read_text(path: Path) -> str | None:
+    if path.is_symlink():
+        raise RulesError("rules_invalid", f"{path.name} is a symlink; refusing to follow it")
     try:
         with path.open(encoding="utf-8", newline="") as handle:
             return handle.read()
@@ -364,7 +386,12 @@ def _parse(text: str) -> tuple[re.Match[str], re.Match[str]] | None:
 
 def read_state(vault_root: Path, kind: str, *, strict: bool = True) -> RulesState:
     """The rules file split into managed and outside text. Raises on a bad fence when ``strict``."""
-    text = _read_text(rules_path(vault_root, kind))
+    try:
+        text = _read_text(rules_path(vault_root, kind))
+    except RulesError:
+        if strict:
+            raise
+        return RulesState(True, "", "", "", "", {}, False, True)
     if text is None:
         return RulesState(False, "", "", "", "", {}, False)
     try:
@@ -386,29 +413,53 @@ def read_state(vault_root: Path, kind: str, *, strict: bool = True) -> RulesStat
     return RulesState(True, text, managed, outside, opening.group(1) or "", rules, True)
 
 
-def _lint(body: str, section: dict[str, Any], state: RulesState) -> None:
+def _lint_structure(body: str) -> list[tuple[str, str, str, str]]:
+    """The checks that need no digest: shape, charset, markup, caps.
+
+    Returns ``(line, key, verdict, prose)`` for every rule line. Shared by the
+    writer and by the reader, which re-lints so a file edited around the CLI
+    cannot put unlinted text in front of a model.
+    """
     if len(body) > WRITE_CAP:
         raise RulesError("rules_over_cap", f"{len(body)} characters, over the {WRITE_CAP} limit; consolidate")
-    if contains_invisible_unicode(body):
-        raise RulesError("rules_invalid", "the body has invisible characters")
-    groups = {g["key"]: g for g in section["groups"]}
-    free_cites = {f["cite"] for f in section["free_text_reasons"]}
-    kept_lines = set(state.managed.splitlines())
+    if any(_unsafe_char(ch) for ch in body if ch != "\n"):
+        raise RulesError("rules_invalid", "the body has invisible, control or format characters")
+    if "ciao:rules" in body:
+        raise RulesError("rules_invalid", "the body names a ciao:rules marker")
+    rules: list[tuple[str, str, str, str]] = []
     seen: set[str] = set()
-    themes = 0
     for line in body.splitlines():
-        if not line.strip() or line.startswith("## "):
+        if not line.strip():
+            continue
+        if line.startswith("##"):
+            if line not in HEADINGS:
+                raise RulesError("rules_invalid", f"heading must be one of {', '.join(HEADINGS)}")
             continue
         found = _RULE_RE.search(line)
         if not line.startswith("- ") or found is None:
             raise RulesError("rules_invalid", f"not a rule line: {line[:60]!r}")
         key, verdict = found.group(1), found.group(2)
         prose = line[: found.start()]
-        if "<" in prose or ">" in prose or "ciao:" in prose:
+        if "<" in prose or ">" in prose or "<!--" in prose or "-->" in prose:
             raise RulesError("rules_invalid", f"markup in the rule for {key}")
+        if not (_KEY_RE.match(key) or _THEME_KEY_RE.match(key)):
+            raise RulesError("rules_unknown_key", f"{key!r} is not a rule key")
+        if len(line) > LINE_CAP:
+            raise RulesError("rules_invalid", f"the rule for {key} is {len(line)} characters, over {LINE_CAP}")
         if key in seen:
             raise RulesError("rules_invalid", f"two rules for {key}")
         seen.add(key)
+        rules.append((line, key, verdict, prose))
+    return rules
+
+
+def _lint(body: str, section: dict[str, Any], state: RulesState) -> None:
+    rules = _lint_structure(body)
+    groups = {g["key"]: g for g in section["groups"]}
+    free_cites = {f["cite"] for f in section["free_text_reasons"]}
+    kept_lines = set(state.managed.splitlines())
+    themes = 0
+    for line, key, verdict, prose in rules:
         previous = state.rules.get(key)
         if previous and previous != verdict and not groups.get(key, {}).get("flip_approved"):
             raise RulesError("rules_flip_unapproved", f"{key}: {previous} -> {verdict} needs an accepted flip proposal")
@@ -428,6 +479,8 @@ def _lint(body: str, section: dict[str, Any], state: RulesState) -> None:
             raise RulesError("rules_unknown_key", f"{key} is not a digest group")
         if not any(example["cite"] in line for example in group["examples"]):
             raise RulesError("rules_uncited", f"{key} needs a verbatim cite from the digest")
+        if verdict != group["lean"]:
+            raise RulesError("rules_invalid", f"{key}: the verdict must match the group's lean ({group['lean']})")
 
 
 def write_managed(vault_root: Path, kind: str, body: str, *, today: date) -> dict[str, Any]:
@@ -474,12 +527,18 @@ def _capped(text: str, cap: int, name: str) -> str:
 
 def load_for_prompt(vault_root: Path, name: str) -> str:
     """The rules file as a fenced prompt block, or ``""`` when absent, empty or malformed."""
-    kind = "memory" if name == MEMORY_RULES_NAME else "task"
+    kind = _KIND_BY_NAME.get(name)
+    if kind is None:
+        raise ValueError(f"unknown rules file {name!r}")
     try:
         state = read_state(vault_root, kind)
     except (RulesError, OSError, UnicodeError):
         return ""
-    managed = _capped(state.managed, WRITE_CAP, name)
+    try:
+        _lint_structure(state.managed)
+        managed = _capped(state.managed, WRITE_CAP, name)
+    except RulesError:
+        managed = ""
     outside = _capped(state.outside, READ_OUTSIDE_CAP, name)
     text = "\n\n".join(part for part in (managed, outside) if part)
     if not text:

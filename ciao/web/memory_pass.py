@@ -886,10 +886,7 @@ class MemoryPassCoordinator:
         workspace = self._workspace_of(chat)
         if not workspace:
             return ""
-        try:
-            vault = Path(self._host._config.workspace_vault_root(workspace))
-        except (AttributeError, ValueError):  # pragma: no cover - config guard
-            return ""
+        vault = Path(self._host._config.workspace_vault_root(workspace))
         text = decision_rules.load_for_prompt(vault, decision_rules.MEMORY_RULES_NAME)
         return "\n\n" + text if text else ""
 

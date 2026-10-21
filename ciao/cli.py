@@ -4172,6 +4172,17 @@ def _decisions_digest_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _task_rules_command(args: argparse.Namespace) -> int:
+    """Print the operator's distilled task rules, fenced, or nothing when absent."""
+    from ciao import decision_rules
+
+    _workspace, vault = _resolve_workspace_and_vault(args)
+    text = decision_rules.load_for_prompt(vault, decision_rules.TASK_RULES_NAME)
+    if text:
+        print(text)
+    return 0
+
+
 def _decision_rules_write_command(args: argparse.Namespace) -> int:
     """Write one rules note's managed section from a body file."""
     refused = _refuse_ambiguous_vault_write(args)
@@ -8276,6 +8287,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Emit the full digest as JSON."
     )
     decisions_digest_parser.set_defaults(func=_decisions_digest_command)
+
+    task_rules_parser = subparsers.add_parser(
+        "task-rules",
+        help="Print the operator's distilled task preferences (Workspace/Task-Rules.md).",
+        description=(
+            "Read-only. Prints Workspace/Task-Rules.md fenced as evidence of the "
+            "operator's preferences, never orders; prints nothing when the file is "
+            "absent or fails its checks. Run it before filing a task."
+        ),
+    )
+    task_rules_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    task_rules_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    task_rules_parser.set_defaults(func=_task_rules_command)
 
     decision_rules_write_parser = subparsers.add_parser(
         "decision-rules-write",

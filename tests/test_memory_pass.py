@@ -1991,7 +1991,7 @@ def test_every_prompt_variant_carries_the_fenced_rules_when_present_and_is_uncha
     vault = Path(manager._config.workspace_vault_root(workspace))
     (vault / "Workspace").mkdir(parents=True, exist_ok=True)
     (vault / "Workspace" / "Memory-Review-Rules.md").write_text(
-        "<!-- ciao:rules:start source=0123456789abcdef -->\n- **Drop** one-offs\n<!-- ciao:rules:end -->\n",
+        "<!-- ciao:rules:start source=0123456789abcdef -->\n- **Drop** one-offs <!-- rule:chip:one-off verdict=drop -->\n<!-- ciao:rules:end -->\n",
         encoding="utf-8",
     )
     for source_kind in variants:

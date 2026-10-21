@@ -223,9 +223,9 @@ def test_rules_carry_a_reason_in_the_same_bullet() -> None:
     assert "land in notes and transcripts" in bullet("webhook create|rotate")
 
 
-def test_system_prompt_task_bullet_reads_task_rules_if_present() -> None:
+def test_system_prompt_task_bullet_runs_task_rules_before_filing() -> None:
     payload = mi.system_prompt_payload("")
     assert payload is not None
     append = payload["append"]
-    assert append.count("Workspace/Task-Rules.md") == 1
-    assert "if it exists" in append[append.index("Workspace/Task-Rules.md") :][:120]
+    assert append.count("ciao task-rules") == 1
+    assert "Workspace/Task-Rules.md" not in append

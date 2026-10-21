@@ -3068,7 +3068,7 @@ async def test_task_rules_are_quoted_when_present_and_skipped_when_absent(tmp_pa
 
     rules = plane.config.workspace_vault_root("personal") / "Workspace" / "Task-Rules.md"
     rules.write_text(
-        "<!-- ciao:rules:start source=0123456789abcdef -->\n- **Drop** chores\n<!-- ciao:rules:end -->\n",
+        "<!-- ciao:rules:start source=0123456789abcdef -->\n- **Drop** chores <!-- rule:chip:not mine verdict=drop -->\n<!-- ciao:rules:end -->\n",
         encoding="utf-8",
     )
     _delegate(plane, _create(plane, title="Draft the second runbook", body="Steps, links and criteria two."))
