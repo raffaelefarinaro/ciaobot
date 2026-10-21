@@ -2104,47 +2104,46 @@ def test_a_real_terminal_reports_the_window_size_after_a_resize(
 
 
 @_windows_only
-def test_a_real_ctrl_c_interrupts_the_foreground_command_and_not_the_shell(
+def test_a_real_ctrl_c_cancels_the_pending_line_and_the_shell_lives(
     tmp_path: Path,
 ) -> None:
-    """Ctrl+C is an input byte: it reaches the program, and the shell lives.
+    """Ctrl+C reaches the program's console read, and the shell survives.
 
-    The interrupt is sent to a **native** foreground program (``ping``)
-    rather than a PowerShell cmdlet. ConPTY turns the ``0x03`` byte into a
-    console control event only through the console's processed-input path,
-    which is the path a native program gets; PowerShell's own cmdlets run
-    inside the shell, where the line editor owns the console input mode and
-    the byte is not an interrupt. Interrupting a native program is also what
-    a user does at a real prompt.
+    The byte is typed at a line that is **not** submitted: the shell is
+    waiting for the rest of it. ``0x03`` aborts that console read, so the
+    pending line is dropped and the shell returns to its prompt. A shell
+    that never saw the byte would keep the line, and the next command would
+    be appended to it instead of running on its own.
 
-    The program runs for about half a minute, so a reply that arrives well
-    inside that window can only be there because the interrupt reached it.
-    The marker is computed by the shell, so it cannot be an echo of what was
-    typed, and it is typed only once the shell is back at its prompt:
-    sending it straight after the interrupt is a race the shell can win by
-    discarding the pending input along with the interrupted line.
+    The dropped line is a command whose **computed** output differs from
+    what was typed, so the assertion cannot be satisfied by the echo: if
+    the line ran, its marker appears; the test requires that it does not.
     """
     ready_code, ready = _marker("GO")
+    dropped_code, dropped = _marker("DROPPED")
     coded, expected = _marker("AFTER")
     terminal = tw.spawn_terminal(cwd=tmp_path)
     try:
         terminal.write(_emit(ready_code))
         _read_until(terminal, ready.encode("utf-8"))
-        # ~30 seconds of pinging, one per second.
-        terminal.write(b"ping -n 31 127.0.0.1\r")
-        # The line has been accepted once the shell echoes it back.
-        _read_until(terminal, b"ping", timeout=10)
-        time.sleep(1.0)
+
+        # A complete command with no Enter after it: the line editor holds
+        # it, waiting for more input.
+        partial = _emit(dropped_code)
+        assert partial.endswith(b"\r")
+        terminal.write(partial[:-1])
+        _read_until(terminal, b"[char]", timeout=10)
+
         terminal.write(b"\x03")
-        # The prompt comes back when the interrupted program unwinds. Until
-        # then the shell may discard whatever else arrives, so the marker
-        # waits for it rather than racing it.
+        # The prompt comes back when the read has been aborted.
         _read_until(terminal, b"> ", timeout=10)
+
         terminal.write(_emit(coded))
-        # Ten seconds is far below the half minute the foreground program
-        # would take, so a reply can only mean the interrupt worked.
         produced = _read_until(terminal, expected.encode("utf-8"), timeout=10)
         assert expected.encode("utf-8") in produced
+        assert (
+            dropped.encode("utf-8") not in produced
+        ), "the cancelled line must not run: the shell kept it in its buffer"
         assert terminal.poll() is None, "the shell must survive the interrupt"
     finally:
         terminal.close()
@@ -2299,13 +2298,17 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
         # between cycles instead of stacking three teardowns together.
         counts.append(settled_handle_count())
     after = settled_handle_count()
+    assert after == counts[-1], "a settled count must be stable"
 
-    # Three cycles leak six handles if every terminal keeps one; a bound of
-    # two leaves room for the one-off handles the console host takes and
-    # still fails on a real leak.
-    assert (
-        after <= before + 2
-    ), f"the handle count grew from {before} to {after} (per cycle {counts}); a terminal leaked"
+    # Three measured cycles must not grow the count relative to each other.
+    # A one-time cache increase before the steady state is not a leak; a
+    # terminal that keeps a handle adds its handles on every cycle, so the
+    # slope is what fails here.
+    growth = counts[-1] - counts[0]
+    assert growth <= 2, (
+        "the handle count grew across steady-state cycles: "
+        f"before {before}, per cycle {counts}; a terminal leaked"
+    )
 
 
 def test_a_computed_marker_is_not_what_was_typed() -> None:
