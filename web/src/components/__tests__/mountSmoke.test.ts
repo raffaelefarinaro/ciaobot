@@ -1140,7 +1140,9 @@ describe('component mount smoke', () => {
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       provider_default_models: { claude: 'sonnet' },
     })
-    expect(claudeSelector.find('.model-selector__trigger').text()).toContain('sonnet')
+    // The trigger names the model the way every picker does; the raw id is
+    // what gets saved, and what the option's data still carries.
+    expect(claudeSelector.find('.model-selector__trigger').text()).toContain('Sonnet')
     expect(wrapper.findAll('.provider-inline-defaults')[0]!.text()).toContain('Automatic — same as chat model')
     expect(wrapper.text()).not.toContain('Same as default')
 
