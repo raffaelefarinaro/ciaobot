@@ -27,6 +27,20 @@ function frame(value: unknown): string {
   return JSON.stringify(value)
 }
 
+function readyFrame(overrides: Record<string, unknown> = {}): string {
+  return frame({
+    type: 'ready',
+    session_id: 'sess-1',
+    folder: '/Users/someone/project',
+    cols: 120,
+    rows: 40,
+    seq: 4096,
+    replay_start: 1024,
+    truncated: true,
+    ...overrides,
+  })
+}
+
 describe('terminal protocol limits', () => {
   it('pins the byte and size caps the wire contract fixes', () => {
     expect(TERMINAL_REPLAY_MAX_BYTES).toBe(256 * 1024)
@@ -205,6 +219,40 @@ describe('parseTerminalServerFrame', () => {
     expect(parsed).toEqual({ type: 'output', start: 10, end: 12, data: 'aGk=' })
   })
 
+  it('rejects a ready frame with an empty session id', () => {
+    expect(parseTerminalServerFrame(readyFrame({ session_id: '' }))).toBeNull()
+  })
+
+  it('rejects a ready frame with a whitespace-only session id', () => {
+    expect(parseTerminalServerFrame(readyFrame({ session_id: '   ' }))).toBeNull()
+    expect(parseTerminalServerFrame(readyFrame({ session_id: '\t\n' }))).toBeNull()
+  })
+
+  it('rejects a ready frame with an empty folder', () => {
+    expect(parseTerminalServerFrame(readyFrame({ folder: '' }))).toBeNull()
+  })
+
+  it('rejects a ready frame with a whitespace-only folder', () => {
+    expect(parseTerminalServerFrame(readyFrame({ folder: '   ' }))).toBeNull()
+    expect(parseTerminalServerFrame(readyFrame({ folder: '\t' }))).toBeNull()
+  })
+
+  it('accepts a folder that legitimately contains spaces', () => {
+    const parsed = parseTerminalServerFrame(
+      readyFrame({ folder: '/Users/someone/My Project' }),
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.type === 'ready' && parsed!.folder).toBe('/Users/someone/My Project')
+  })
+
+  it('accepts a session id that legitimately contains spaces', () => {
+    const parsed = parseTerminalServerFrame(readyFrame({ session_id: 'sess 1' }))
+
+    expect(parsed).not.toBeNull()
+    expect(parsed!.type === 'ready' && parsed!.session_id).toBe('sess 1')
+  })
+
   it('accepts a replay_end frame', () => {
     const parsed = parseTerminalServerFrame(frame({ type: 'replay_end', seq: 90, truncated: false }))
 
@@ -238,6 +286,36 @@ describe('parseTerminalServerFrame', () => {
     expect(parseTerminalServerFrame(frame({ type: '' }))).toBeNull()
     expect(parseTerminalServerFrame(frame({ type: 7 }))).toBeNull()
     expect(parseTerminalServerFrame(frame({}))).toBeNull()
+  })
+
+  it('rejects a frame type that is an inherited Object.prototype key without throwing', () => {
+    // The frame-type table is a plain object, so a type like "constructor"
+    // resolves to an inherited Object.prototype function. An unknown type
+    // must be refused, never dispatched on.
+    const inherited = [
+      'constructor',
+      'hasOwnProperty',
+      '__proto__',
+      'toString',
+      'valueOf',
+      'isPrototypeOf',
+      'propertyIsEnumerable',
+      'toLocaleString',
+    ]
+
+    for (const type of inherited) {
+      expect(parseTerminalServerFrame(frame({ type }))).toBeNull()
+    }
+  })
+
+  it('rejects a frame carrying an inherited Object.prototype key', () => {
+    // The same names as *frame keys* are extra keys, so the frame is not the
+    // frame it claims to be. `__proto__` is written as raw JSON because a
+    // JSON literal sets the prototype instead of adding a key.
+    expect(parseTerminalServerFrame('{"type":"pong","constructor":1}')).toBeNull()
+    expect(parseTerminalServerFrame('{"type":"pong","hasOwnProperty":1}')).toBeNull()
+    expect(parseTerminalServerFrame('{"type":"pong","__proto__":1}')).toBeNull()
+    expect(parseTerminalServerFrame('{"type":"error","reason":"x","toString":1}')).toBeNull()
   })
 
   it('rejects malformed JSON and non-object payloads', () => {
@@ -407,6 +485,39 @@ describe('parseTerminalServerFrame', () => {
     const padded = frame({ type: 'error', reason: 'x'.repeat(TERMINAL_MAX_REASON_CHARS) })
     expect(parseTerminalServerFrame(padded)).not.toBeNull()
     expect(parseTerminalServerFrame(padded + ' '.repeat(TERMINAL_ENVELOPE_MAX_BYTES))).toBeNull()
+  })
+
+  it('rejects an envelope whose UTF-8 bytes exceed the cap even though its UTF-16 length does not', () => {
+    // A 3-byte character costs three UTF-8 bytes but one UTF-16 code unit, so
+    // a string can be well under the cap in characters and well over it in
+    // bytes. Counting characters alone would let it through.
+    //
+    // The frame is *valid JSON* on purpose. A duplicate "type" key is legal
+    // JSON and the last one wins, so the frame really is a pong frame -- but
+    // the bytes that carry it are over the cap. The envelope cap is then the
+    // only thing that can refuse it. A multi-byte blob that is not JSON at
+    // all would be rejected by the parser for a different reason, and this
+    // test would pass even with a character-only cap.
+    const characters = Math.floor(TERMINAL_ENVELOPE_MAX_BYTES / 3) + 10
+    const multibyte = `{"type":"pong","type":"${'€'.repeat(characters)}","type":"pong"}`
+
+    expect(multibyte.length).toBeLessThan(TERMINAL_ENVELOPE_MAX_BYTES)
+    expect(new TextEncoder().encode(multibyte).length).toBeGreaterThan(
+      TERMINAL_ENVELOPE_MAX_BYTES,
+    )
+    // The bytes are valid JSON that really is a pong frame: only the cap can
+    // refuse this.
+    expect(JSON.parse(multibyte)).toEqual({ type: 'pong' })
+    expect(parseTerminalServerFrame(multibyte)).toBeNull()
+  })
+
+  it('accepts a multi-byte envelope that is under the cap in bytes', () => {
+    const multibyte = `{"type":"error","reason":"${'€'.repeat(32)}"}`
+
+    expect(new TextEncoder().encode(multibyte).length).toBeLessThan(
+      TERMINAL_ENVELOPE_MAX_BYTES,
+    )
+    expect(parseTerminalServerFrame(multibyte)).not.toBeNull()
   })
 
   it('rejects a frame that is not a plain object', () => {
