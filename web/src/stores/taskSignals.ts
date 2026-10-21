@@ -4,14 +4,22 @@ import { api } from '../lib/api'
 import { readableTasks, taskRowsFrom } from '../lib/taskBoard'
 import type { ChatInfo, Task } from '../lib/types'
 
+/** Title then id, so the same set of tasks always reads the same way. */
+function byTitleThenId(a: Task, b: Task): number {
+  if (a.title !== b.title) return a.title < b.title ? -1 : 1
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1
+  return 0
+}
+
 /**
- * What the rest of the app needs to know about delegated board tasks.
+ * What the rest of the app needs to know about board tasks: the ones a chat
+ * was delegated, and the ones a chat is only linked to.
  *
  * The board (`stores/taskBoard.ts`) is the editor and loads only on `/tasks`.
  * This store is the app-wide read: the active workspace's readable tasks, so the
  * sidebar can count the ones waiting for review, Home can put a chat whose agent
- * asked for input among the chats that need you, and a delegated chat can link
- * back to its task. It never writes; the board does.
+ * asked for input among the chats that need you, and a chat can link back to its
+ * task. It never writes; the board does.
  *
  * Best-effort like `proposals`: a failed read keeps the last rows rather than
  * blanking every signal. `reload` is called on workspace switch and whenever a
@@ -113,6 +121,35 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
     return chat.helper?.kind === 'task_delegation' || !!taskForChat(chat)
   }
 
+  /**
+   * The tasks a chat is linked to outside delegation (`task link-chat`).
+   *
+   * A link is a relation, not a lifecycle: the task was not delegated to this
+   * chat, the chat does not hold its attempt, and nothing about the task's
+   * state is this chat's to act on. It is the read path for a chat that
+   * worked on a task without running it — the delegation path
+   * (`taskForChat`) stays the one that answers "which task does this chat
+   * work on", because that answer feeds the completion and closure actions.
+   *
+   * The rows are the loaded workspace's, so a link in another workspace
+   * resolves nothing.
+   */
+  function linkedTasksForChat(chat: Pick<ChatInfo, 'chat_id'> | null | undefined): Task[] {
+    if (!chat?.chat_id) return []
+    const chatId = chat.chat_id
+    // `filter` copies, so the sort below never reorders the store's rows.
+    return tasks.value.filter(t => t.linked_chats.includes(chatId)).sort(byTitleThenId)
+  }
+
+  /**
+   * Whether a chat has a task in its origin: delegated to one, or linked to
+   * one. The two are different relations; this is the question that covers
+   * both, for a signal that reads the task rather than acts on it.
+   */
+  function isTaskChat(chat: Pick<ChatInfo, 'chat_id' | 'helper'>): boolean {
+    return isDelegatedChat(chat) || linkedTasksForChat(chat).length > 0
+  }
+
   /** Tasks the agent reported done that wait for review, in `workspace`. */
   function inReview(workspace: string): Task[] {
     if (workspace !== loadedWorkspace.value) return []
@@ -137,6 +174,8 @@ export const useTaskSignalsStore = defineStore('taskSignals', () => {
     isWaitingOnUser,
     chatHoldsTask,
     isDelegatedChat,
+    linkedTasksForChat,
+    isTaskChat,
     inReview,
     inReviewCount,
     chatTaskWaitingOnUser,

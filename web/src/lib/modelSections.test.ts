@@ -34,8 +34,50 @@ describe('modelSections', () => {
     expect(sections.find((section) => section.key === 'opencode')?.models).toEqual([
       'anthropic/claude-sonnet-4-6',
     ])
-    // No tier badges are produced now that tier routing is gone.
-    expect(sections.find((section) => section.key === 'opencode')?.modelBadges).toBeUndefined()
+    // No tier badges are produced now that tier routing is gone: the only
+    // badge a model carries is the provider namespace its own id states.
+    expect(sections.find((section) => section.key === 'opencode')?.modelBadges).toEqual({
+      'anthropic/claude-sonnet-4-6': ['anthropic'],
+    })
+  })
+
+  it('names every model for the picker and leaves the raw ids alone', () => {
+    const response: ModelsResponse = {
+      models: ['opus', 'sonnet', 'haiku'],
+      default: 'opus',
+      provider_models: { claude: ['opus', 'sonnet', 'haiku'] },
+      provider_defaults: {},
+      opencode_models: ['openai/gpt-5.6-luna'],
+      backends: { anthropic: true, opencode: true },
+      thinking_levels: {},
+    }
+
+    const sections = sectionsFromModelsResponse(response)
+    const anthropic = sections.find((section) => section.key === 'anthropic')
+    const opencode = sections.find((section) => section.key === 'opencode')
+
+    expect(anthropic?.modelLabels).toEqual({
+      opus: 'Opus',
+      sonnet: 'Sonnet',
+      haiku: 'Haiku',
+    })
+    expect(opencode?.modelLabels).toEqual({ 'openai/gpt-5.6-luna': 'GPT-5.6 Luna' })
+    // The raw ids the engine owns are untouched by the readable name.
+    expect(anthropic?.models).toEqual(['opus', 'sonnet', 'haiku'])
+    expect(opencode?.models).toEqual(['openai/gpt-5.6-luna'])
+  })
+
+  it('gives a tier alias no provider badge', () => {
+    const sections = sectionsFromModelsResponse({
+      models: ['opus'],
+      default: 'opus',
+      provider_models: { claude: ['opus'] },
+      provider_defaults: { claude: 'opus' },
+    })
+
+    const anthropic = sections.find((section) => section.key === 'anthropic')
+    expect(anthropic?.modelBadges).toEqual({ opus: ['Default'] })
+    expect(anthropic?.modelLabels).toEqual({ opus: 'Opus' })
   })
 })
 
@@ -89,6 +131,9 @@ describe('opencode section', () => {
       provider_defaults: { claude: 'b-model', opencode: 'google/gemini-3-pro' },
     })
     expect(sections.find((s) => s.key === 'anthropic')?.modelBadges).toEqual({ 'b-model': ['Default'] })
-    expect(sections.find((s) => s.key === 'opencode')?.modelBadges).toEqual({ 'google/gemini-3-pro': ['Default'] })
+    // The default badge stays, and the namespace the id states rides beside it.
+    expect(sections.find((s) => s.key === 'opencode')?.modelBadges).toEqual({
+      'google/gemini-3-pro': ['Default', 'google'],
+    })
   })
 })

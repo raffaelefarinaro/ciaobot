@@ -292,3 +292,105 @@ describe('Settings > Workspaces rename from Edit', () => {
     }
   })
 })
+
+// The editor used to close on a bare "Done" word that turned into "Discard"
+// when the form was dirty. One control now says what it does: a clean editor
+// is closed, a dirty one is discarded, and both are bordered buttons next to
+// the primary Save.
+describe('Settings > Workspaces editor completion controls', () => {
+  beforeEach(async () => {
+    setActivePinia(createPinia())
+    state.workspaces = workspaces(['personal', 'work'])
+    const { api } = await import('../../lib/api')
+    vi.mocked(api.patch).mockReset()
+    vi.mocked(api.patch).mockImplementation(() => Promise.resolve({}))
+  })
+
+  it('offers a bordered Close instead of Done on a clean editor', async () => {
+    const wrapper = await mountWorkspacesTab()
+    try {
+      await openEditor(wrapper, 'work')
+      const actions = cardFor(wrapper, 'work').find('.workspace-edit-actions')
+      const close = actions.find('.workspace-close')
+      expect(close.exists()).toBe(true)
+      expect(close.text()).toBe('Close')
+      expect(close.classes()).toContain('btn-small')
+      // Nothing to save and nothing to throw away on a clean editor.
+      expect(actions.find('.workspace-save').exists()).toBe(false)
+      expect(actions.find('.workspace-discard').exists()).toBe(false)
+      expect(actions.text()).not.toContain('Done')
+      expect(actions.text()).not.toContain('Discard')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('offers Discard instead of Close when the editor is dirty', async () => {
+    const wrapper = await mountWorkspacesTab()
+    try {
+      await openEditor(wrapper, 'work')
+      const other = cardFor(wrapper, 'work').findAll('.workspace-color-swatch')
+        .find(b => b.attributes('aria-checked') === 'false')
+      await other!.trigger('click')
+      await nextTick()
+
+      const actions = cardFor(wrapper, 'work').find('.workspace-edit-actions')
+      expect(actions.find('.workspace-save').text()).toBe('Save changes')
+      const discard = actions.find('.workspace-discard')
+      expect(discard.exists()).toBe(true)
+      expect(discard.text()).toBe('Discard')
+      expect(discard.classes()).toContain('btn-small')
+      expect(actions.find('.workspace-close').exists()).toBe(false)
+      expect(actions.text()).not.toContain('Done')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('closes a clean editor without saving', async () => {
+    const { api } = await import('../../lib/api')
+    const wrapper = await mountWorkspacesTab()
+    try {
+      await openEditor(wrapper, 'work')
+      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(true)
+
+      await cardFor(wrapper, 'work').find('.workspace-close').trigger('click')
+      await flushPromises()
+
+      expect(api.patch).not.toHaveBeenCalled()
+      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('discards unsaved workspace edits without changing permissions', async () => {
+    const { api } = await import('../../lib/api')
+    const wrapper = await mountWorkspacesTab()
+    try {
+      await openEditor(wrapper, 'work')
+      const other = cardFor(wrapper, 'work').findAll('.workspace-color-swatch')
+        .find(b => b.attributes('aria-checked') === 'false')
+      await other!.trigger('click')
+      await cardFor(wrapper, 'work').find('#workspace-file-access-work').setValue('machine')
+      await nextTick()
+
+      await cardFor(wrapper, 'work').find('.workspace-discard').trigger('click')
+      await flushPromises()
+
+      expect(api.patch).not.toHaveBeenCalled()
+      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(false)
+
+      // Reopening shows the saved accent and the saved File access.
+      await openEditor(wrapper, 'work')
+      const card = cardFor(wrapper, 'work')
+      const active = card.findAll('.workspace-color-swatch')
+        .filter(b => b.attributes('aria-checked') === 'true')
+      expect(active).toHaveLength(1)
+      expect(active[0]!.attributes('aria-label')).toBe('Rose Pink')
+      expect((card.find('#workspace-file-access-work').element as HTMLSelectElement).value).toBe('')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+})

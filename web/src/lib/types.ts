@@ -2055,7 +2055,7 @@ export interface HandoverAgreement {
 export interface HandoverResponse {
   workspace: string
   handover: MemoryHandover
-  /** Whether the unattended run can act on this install at all (false on Linux/systemd). */
+  /** Whether the unattended run can act on this install at all (false when no trusted service definition registers the workspace). */
   acting_available: boolean
   agreement: HandoverAgreement
 }

@@ -4,6 +4,7 @@ import {
   chatRepoTag,
   repoChip,
   sidebarBranchChip,
+  sidebarCodeBadgeTitle,
 } from './repoLocation'
 import type { ProjectRepo, RepoLocation } from './types'
 
@@ -60,15 +61,37 @@ describe('repoLocation', () => {
     expect(repoChip(null, here)).toBeNull()
   })
 
-  it('folds code mode into the sidebar branch chip', () => {
+  it('marks a code-off sidebar branch chip as inactive', () => {
     const wt = { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true }
-    const on = sidebarBranchChip(repo, wt, true)
-    expect(on?.title).toBe('Code mode · Worktree: /r/app-wt')
-    expect(on?.codeOff).toBe(false)
-    const off = sidebarBranchChip(repo, wt, false)
+    const off = sidebarBranchChip(repo, wt)
     expect(off?.title).toBe('Worktree: /r/app-wt (code mode off)')
-    expect(off?.codeOff).toBe(true)
-    expect(sidebarBranchChip(repo, here, true)).toBeNull()
-    expect(sidebarBranchChip(repo, { ...wt, exists: false }, true)?.removed).toBe(true)
+    expect(off?.label).toBe('⑂ feat-x')
+    expect(off?.removed).toBe(false)
+    expect(sidebarBranchChip(repo, here)).toBeNull()
+    expect(sidebarBranchChip(repo, { ...wt, exists: false })?.removed).toBe(true)
+  })
+
+  it('names the full repository branch and worktree in the code badge tooltip', () => {
+    const title = sidebarCodeBadgeTitle(repo, {
+      path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true,
+    })
+    expect(title).toBe('Code mode · app · branch feat-x · worktree: /r/app-wt')
+    expect(title).toContain('feat-x')
+    expect(title).toContain('/r/app-wt')
+  })
+
+  it('names the main checkout in the code badge tooltip', () => {
+    expect(sidebarCodeBadgeTitle(repo, here)).toBe('Code mode · app · branch main · path: /r/app')
+    expect(sidebarCodeBadgeTitle(repo, null)).toBe('Code mode · app · branch main · path: /r/app')
+    // A location without a path is no location: the linked checkout, no
+    // invented worktree.
+    expect(sidebarCodeBadgeTitle(repo, { is_worktree: true })).toBe('Code mode · app · branch main · path: /r/app')
+  })
+
+  it('marks a removed worktree in the code badge tooltip', () => {
+    const title = sidebarCodeBadgeTitle(repo, {
+      path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: false,
+    })
+    expect(title).toBe('Code mode · app · branch feat-x · worktree removed: /r/app-wt')
   })
 })
