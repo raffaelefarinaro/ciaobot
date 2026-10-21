@@ -399,7 +399,8 @@ async def task_delegate(request: Request) -> JSONResponse:
 async def task_attempt_action(request: Request) -> JSONResponse:
     """One gesture on one attempt: ``stop``, ``resume``, ``retry`` or ``detach``.
 
-    ``{"workspace"}`` and an optional ``reason`` for ``detach`` are the body keys. The action is in the path, so a typo
+    ``{"workspace"}`` and an optional ``reason`` for ``detach`` are the body
+    keys. The action is in the path, so a typo
     is a 404 from the router rather than a refusal the surface invented, and the
     service maps the four real verbs.
 

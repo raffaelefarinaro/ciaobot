@@ -2946,7 +2946,7 @@ def test_a_reason_on_a_non_complete_action_is_refused(tmp_path: Path) -> None:
 
 
 async def test_a_failed_approval_records_no_decision(tmp_path: Path) -> None:
-    plane, _pcm, reviewed, _attempt_id = await _review_ready(tmp_path)
+    plane, _pcm, reviewed, attempt_id = await _review_ready(tmp_path)
     with pytest.raises(ControlPlaneError):
         plane.workspace_task_action(
             "personal",
@@ -2959,6 +2959,7 @@ async def test_a_failed_approval_records_no_decision(tmp_path: Path) -> None:
             reason="good as is",
         )
     assert _decisions(plane) == []
+    assert _get_task(plane, reviewed["id"])["attempt_id"] == attempt_id
 
 
 async def test_detaching_a_review_ready_attempt_records_a_reject_decision(
@@ -3007,6 +3008,7 @@ async def test_a_reason_on_stop_is_refused(tmp_path: Path) -> None:
     assert excinfo.value.code == "invalid_action"
     assert _attempt_store(plane).get(attempt_id).state == "running"
     assert pcm.stop_awaited == 0
+    assert _decisions(plane) == []
 
 
 async def test_detaching_a_running_attempt_without_a_reason_records_no_decision(
@@ -3016,4 +3018,43 @@ async def test_detaching_a_running_attempt_without_a_reason_records_no_decision(
     task = _create(plane, title="Still running")
     attempt_id = _delegate(plane, task)["attempt"]["attempt_id"]
     await _act(plane, attempt_id, "detach")
+    assert _decisions(plane) == []
+
+
+async def test_approving_with_a_stale_revision_records_nothing(tmp_path: Path) -> None:
+    plane, _pcm, reviewed, attempt_id = await _review_ready(tmp_path)
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.workspace_task_action(
+            "personal",
+            "complete",
+            reviewed["id"],
+            expected_revision="0" * 64,
+            actor="user",
+            reason="good as is",
+        )
+    assert excinfo.value.code == "task_revision_conflict"
+    assert _decisions(plane) == []
+    assert _get_task(plane, reviewed["id"])["attempt_id"] == attempt_id
+
+
+async def test_agent_detach_of_a_review_ready_attempt_records_actor_agent(
+    tmp_path: Path,
+) -> None:
+    plane, _pcm, _reviewed, attempt_id = await _review_ready(tmp_path)
+    await plane.task_attempt_action(_principal(), attempt_id, "detach", reason="user asked")
+    rows = _decisions(plane)
+    assert len(rows) == 1
+    assert (rows[0]["kind"], rows[0]["actor"], rows[0]["via"]) == ("reject", "agent", "cli")
+    assert rows[0]["reason"] == "user asked"
+
+
+async def test_agent_completion_of_a_review_ready_task_records_no_approve_row(
+    tmp_path: Path,
+) -> None:
+    plane, _pcm, reviewed, _attempt_id = await _review_ready(tmp_path)
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.task_action(
+            _principal(), "complete", reviewed["id"], expected_revision=reviewed["revision"]
+        )
+    assert excinfo.value.code == "task_completion_requires_user"
     assert _decisions(plane) == []

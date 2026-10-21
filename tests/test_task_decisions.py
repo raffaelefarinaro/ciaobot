@@ -104,3 +104,21 @@ def test_append_refuses_an_unknown_kind(tmp_path: Path) -> None:
 def test_new_file_is_private(tmp_path: Path) -> None:
     _append(tmp_path)
     assert stat.S_IMODE(decisions_path(tmp_path).stat().st_mode) & 0o077 == 0
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u0085", "\x0b", "\x0c"])
+def test_a_reason_with_unicode_line_separators_round_trips(tmp_path: Path, separator: str) -> None:
+    row = _append(tmp_path, reason=f"before{separator}after")
+    assert read_decisions(tmp_path) == [row]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_append_refuses_a_symlinked_decisions_file(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere.jsonl"
+    target.write_text("keep\n", encoding="utf-8")
+    path = decisions_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.symlink_to(target)
+    with pytest.raises(OSError):
+        _append(tmp_path)
+    assert target.read_text(encoding="utf-8") == "keep\n"

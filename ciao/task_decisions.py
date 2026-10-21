@@ -85,7 +85,7 @@ def append_decision(
     line = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
     path = decisions_path(vault_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = open_private(path, os.O_WRONLY | os.O_APPEND)
+    fd = open_private(path, os.O_WRONLY | os.O_APPEND, follow_symlinks=False)
     try:
         os.write(fd, line)
         os.fsync(fd)
@@ -102,7 +102,7 @@ def read_decisions(vault_root: Path) -> list[dict[str, Any]]:
     except FileNotFoundError:
         return []
     rows: list[dict[str, Any]] = []
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if not line.strip():
             continue
         try:

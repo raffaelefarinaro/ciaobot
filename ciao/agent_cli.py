@@ -311,7 +311,10 @@ def build_parser() -> argparse.ArgumentParser:
     tdelete = task.add_parser("delete", help="Permanently remove one task; its chats and runs stay.")
     tdelete.add_argument("task_id")
     tdelete.add_argument("--revision", required=True, help="The revision you read; a stale one removes nothing.")
-    tdelete.add_argument("--reason-file", default=None, metavar="FILE", help="Optional text file holding why you are deleting it, in the user's words if they gave one: @file.txt or a plain path.")
+    tdelete.add_argument("--reason-file", default=None, metavar="FILE", help=(
+        "Optional text file holding why you are deleting it, in the user's words "
+        "if they gave one: @file.txt or a plain path."
+    ))
     tmove = task.add_parser("move", help="Set a task's column.")
     tmove.add_argument("task_id")
     tmove.add_argument("--to", required=True, choices=["backlog", "in_progress", "in_review", "done"])
@@ -341,7 +344,10 @@ def build_parser() -> argparse.ArgumentParser:
     tattempt.add_argument(
         "action", choices=["stop", "resume", "retry", "detach"]
     )
-    tattempt.add_argument("--reason-file", default=None, metavar="FILE", help="Optional, for `detach` of a result that is ready for review: why it is being released.")
+    tattempt.add_argument("--reason-file", default=None, metavar="FILE", help=(
+        "Optional, for `detach` of a result that is ready for review: "
+        "why it is being released."
+    ))
 
     schedule = _verbs(nouns.add_parser("schedule", help="Schedules in the active workspace."))
     schedule.add_parser("list", help="List schedules with their next run.")
