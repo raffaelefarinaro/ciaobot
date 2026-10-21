@@ -188,6 +188,17 @@ export interface ProjectInfo {
 
 export type ArchivedChatSummary = Pick<ChatInfo, 'chat_id' | 'title' | 'created_at' | 'archive_path'>
 
+// The report a project delete returns. `vault_entry_removed` says whether the
+// project had a folder under projects/active/ that was removed; the counts
+// and the edited backlink list describe that cleanup.
+export interface ProjectDeleteReport {
+  ok: boolean
+  vault_entry_removed: boolean
+  removed_notes: number
+  removed_files: number
+  edited_backlinks: string[]
+}
+
 export interface ChatArchivePage {
   items: ArchivedChatSummary[]
   total: number

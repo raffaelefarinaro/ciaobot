@@ -782,9 +782,15 @@ class _LifecyclePcm:
         self.completed.append(project_id)
         return {"project_id": project_id}
 
-    def delete_project(self, project_id: str) -> bool:
+    def delete_project(self, project_id: str) -> dict:
         self.deleted.append(project_id)
-        return True
+        return {
+            "deleted": True,
+            "vault_entry_removed": False,
+            "removed_notes": 0,
+            "removed_files": 0,
+            "edited_backlinks": [],
+        }
 
 
 async def _assert_current_project_action_is_deferred(action: str) -> None:

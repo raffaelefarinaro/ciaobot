@@ -7,6 +7,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick, ref } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useFileViewerStore } from '../../stores/fileViewer'
+import { useItemPeekStore } from '../../stores/itemPeek'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useFontScale } from '../../composables/useFontScale'
@@ -372,6 +373,107 @@ describe('ChatLayout', () => {
     await flushPromises()
 
     expect(wrapper.find('.home-lane-status-text').text()).toBe('nothing needs your attention. no agents working. 1 updating memory.')
+    wrapper.unmount()
+  })
+
+  it('a project route sets no dock target and shows no split', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', component: EmptyStub },
+        { path: '/project/:projectId', component: EmptyStub },
+      ],
+    })
+    await router.push('/project/project-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'Upwordo',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+    vi.spyOn(store, 'pinnedFileFor').mockImplementation(
+      (key: string) => (key === 'project-1' ? 'notes/a.md' : undefined),
+    )
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(useFileViewerStore().dockTarget).toBe('')
+    expect(wrapper.find('.chat-split-side').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('a chat route sets the chat as dock target', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }, { path: '/chat/:chatId?', component: EmptyStub }],
+    })
+    await router.push('/chat/chat-1')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(useFileViewerStore().dockTarget).toBe('chat-1')
     wrapper.unmount()
   })
 
@@ -2269,6 +2371,24 @@ describe('ChatLayout home arrow navigation', () => {
 
     expect(store.activeChatId).toBeNull()
     textarea.remove()
+    wrapper.unmount()
+  })
+
+  it('Esc with the task peek open leaves the chat open', async () => {
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    await nextTick()
+    const peek = useItemPeekStore()
+    peek.target = { kind: 'task', id: 'ship', workspace: 'personal' }
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(store.activeChatId).toBe('chat-1')
+    expect(peek.isOpen).toBe(true)
+    peek.close()
     wrapper.unmount()
   })
 

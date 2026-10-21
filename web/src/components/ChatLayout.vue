@@ -32,14 +32,8 @@
             transition: isDraggingSplit ? 'none' : undefined
           }"
         >
-          <ProjectView
-            v-if="projectIdParam"
-            :project-id="projectIdParam"
-            @close="closeProject"
-            @open-sidebar="sidebarCollapsed = false"
-          />
           <SubagentChatView
-            v-else-if="subagentRoute"
+            v-if="subagentRoute"
             :key="subagentRoute.agentId"
             :chat-id="subagentRoute.chatId"
             :agent-id="subagentRoute.agentId"
@@ -313,6 +307,7 @@
       </template>
     </div>
     <FileViewerModal v-if="fileViewerMounted" :opener="fileViewerOpener" />
+    <ItemPeekHost v-if="itemPeekMounted" />
   </div>
 </template>
 
@@ -323,6 +318,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { useItemPeekStore } from '../stores/itemPeek'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
@@ -360,6 +356,9 @@ const ChatPanel = defineAsyncComponent({
 })
 const PinnedFilePanel = defineAsyncComponent(loadPinnedFilePanel)
 const FileViewerModal = defineAsyncComponent(loadFileViewerModal)
+// Lazy like the file viewer, and not in lib/chatComponents: that module's loaders
+// are the chat chunk's named entry points.
+const ItemPeekHost = defineAsyncComponent(() => import('./ItemPeekHost.vue'))
 import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
@@ -385,6 +384,13 @@ watch(() => fileViewer.isOpen, (open, wasOpen) => {
     fileViewerOpener.value = document.activeElement
   }
 }, { flush: 'sync' })
+// The item peek (a task opened from a link) is mounted once first opened, like
+// the file viewer, and its open state gates the chat's own keys the same way.
+const itemPeek = useItemPeekStore()
+const itemPeekMounted = ref(itemPeek.isOpen)
+watch(() => itemPeek.isOpen, (open) => {
+  if (open) itemPeekMounted.value = true
+})
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
 // reach composer-owned actions (archive).
@@ -718,7 +724,8 @@ const viewShortcutsActive = computed(() =>
   viewMode.value !== 'settings'
   && !pendingConfirm.value
   && !pendingPrompt.value
-  && !fileViewer.isOpen,
+  && !fileViewer.isOpen
+  && !itemPeek.isOpen,
 )
 // The chat-only chords are inert on the full-screen views that own the keyboard
 // themselves. `1`–`9` keep switching workspaces from all of them: they are gated
@@ -835,20 +842,19 @@ const activePinKey = computed(() => {
   // still selected underneath it. Home (`/` or a bare `/chat`) has no key at
   // all, so a retained chat can never surface its pinned page for even one
   // frame while the route watcher clears the view; Settings, Automations,
-  // Tasks, Memory and the project routes read as before (they carry neither
-  // param). Coming back to the chat restores that chat's pin, because the pin
-  // is looked up under the chat the route names.
+  // Tasks, Memory and the project routes have no key either. Coming back to
+  // the chat restores that chat's pin, because the pin is looked up under the
+  // chat the route names.
   //
   // A chat route shows that chat only while it is the one selected: archiving
   // or deleting it, or a refresh that no longer lists it, clears the selection
   // without a navigation, and the screen falls back to Home. The pin follows
   // what is on screen, so Home never carries a chat's page beside it.
-  if (projectIdParam.value) return projectIdParam.value
   const chatId = (route.params.chatId as string) || ''
   return chatId && store.activeChat?.chat_id === chatId ? chatId : ''
 })
-// A file opened while the split view is available docks beside the chat or
-// project on screen instead of opening the viewer (stores/fileViewer.ts).
+// A file opened from a chat while the split view is available docks beside
+// that chat instead of opening the viewer (stores/fileViewer.ts).
 watch(
   [activePinKey, isMobile],
   ([key, mobile]) => fileViewer.setDockTarget(mobile ? '' : key),
@@ -883,12 +889,11 @@ watch(
   },
 )
 // On a narrow device there is no split pane: the chat's shared (server-owned)
-// pin is a compact opener within the chat. Only a chat route carries one — a
-// project route and Home have no narrow pin (their pins stay desktop-local).
+// pin is a compact opener within the chat. Only a chat route carries a pin key.
 const narrowSharedPin = computed(() => {
   if (!isMobile.value) return ''
   const key = activePinKey.value
-  if (!key || projectIdParam.value) return ''
+  if (!key) return ''
   return store.pinnedFileFor(key) || ''
 })
 const pinWritePending = computed(() => {
@@ -1087,7 +1092,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   const alt = e.altKey
   const isSectionArrow = alt && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
   if (isSectionArrow) {
-    if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen || itemPeek.isOpen) return
     // Order matches the sidebar's own destination order (Chats, Automations,
     // Tasks, Memory, Settings), so Option+Arrow walks the sections the way the
     // nav lists them. `/tasks` needs its own index: it has no `viewMode` fall
@@ -1178,7 +1183,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // bell), so this never steals the key from them.
   if (matchesShortcut(e, 'closeChat')) {
     // The confirm dialog and the file viewer own Esc while they are up.
-    if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen || itemPeek.isOpen) return
     // Any open Reka layer (dialog, menu, popover) owns Esc: Reka marks each one
     // `data-dismissable-layer` and closes it from its own window listener,
     // which is registered after this one and so runs after it. Without this,

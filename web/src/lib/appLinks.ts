@@ -46,7 +46,7 @@ const SETTINGS_HREFS = [
 ]
 
 const APP_ROUTE_HREFS = new Set([...PAGE_HREFS, ...SETTINGS_HREFS])
-const TASK_HREF = /^\/tasks\/[0-9a-f]{32}$/
+const TASK_HREF = /^\/tasks\/([0-9a-f]{32})$/
 // One workspace row's File access control. The name is the engine's own rule
 // (ciao/workspaces.py), and the address is exact: no extra parameter, no other
 // fragment, no other tab. The link only locates the control; it never chooses
@@ -60,11 +60,25 @@ export function parseWorkspaceFileAccessHref(href: string): string | null {
   return match ? match[1]! : null
 }
 
+/** The task id an exact `/tasks/<id>` address names, or null for anything else. */
+export function parseTaskHref(href: string): string | null {
+  const match = TASK_HREF.exec((href || '').trim())
+  return match ? match[1]! : null
+}
+
 export function isAppRouteHref(href: string): boolean {
   const raw = (href || '').trim()
   return APP_ROUTE_HREFS.has(raw)
-    || TASK_HREF.test(raw)
+    || parseTaskHref(raw) !== null
     || parseWorkspaceFileAccessHref(raw) !== null
+}
+
+/**
+ * Whether a click is a plain primary-button click, with no modifier that asks
+ * the browser for a new tab or window. Keyboard activation is a plain click too.
+ */
+export function isPlainLeftClick(event: MouseEvent): boolean {
+  return !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0)
 }
 
 /**
@@ -75,6 +89,10 @@ export function isAppRouteHref(href: string): boolean {
  * is left to the browser, which opens the same address. `before` runs first
  * and can veto the navigation — a dialog that has to close out of the way
  * and may be refused by its own unsaved-changes confirm.
+ *
+ * A task link opens as a peek over the current view, with the URL unchanged,
+ * so the chat stays put. On the board's own routes it navigates as before,
+ * since the board already shows that task in its editor.
  */
 export function handleAppLinkClick(event: MouseEvent, before?: () => Promise<boolean>): boolean {
   const target = event.target as HTMLElement | null
@@ -82,12 +100,19 @@ export function handleAppLinkClick(event: MouseEvent, before?: () => Promise<boo
   if (!anchor) return false
   const href = anchor.getAttribute('href') || ''
   if (!isAppRouteHref(href)) return false
-  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return false
+  if (!isPlainLeftClick(event)) return false
   event.preventDefault()
   event.stopPropagation()
   void (async () => {
     if (before && !(await before())) return
     const { router } = await import('../router')
+    const taskId = parseTaskHref(href)
+    const name = router.currentRoute.value.name
+    if (taskId && name !== 'tasks' && name !== 'task-detail') {
+      const { useItemPeekStore } = await import('../stores/itemPeek')
+      useItemPeekStore().openTask(taskId)
+      return
+    }
     await router.push(href)
   })()
   return true
