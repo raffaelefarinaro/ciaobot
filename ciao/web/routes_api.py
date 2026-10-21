@@ -1697,11 +1697,19 @@ async def project_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
     if request.method == "DELETE":
+        # `?delete_vault=1` removes the vault entry too (the folder under
+        # projects/active/ and the inbound links into it). Omitting it keeps
+        # the guarded default: a vault-backed project is refused.
+        raw_delete_vault = request.query_params.get("delete_vault", "")
+        delete_vault = raw_delete_vault.strip().lower() in {"1", "true"}
         try:
-            ok = pcm.delete_project(project_id)
+            result = pcm.delete_project(project_id, delete_vault=delete_vault)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
-        return JSONResponse({"ok": ok})
+        return JSONResponse({
+            "ok": result["deleted"],
+            **{k: v for k, v in result.items() if k != "deleted"},
+        })
     # PATCH
     body = await request.json()
     repo_path = body.get("repo_path")

@@ -693,7 +693,7 @@
                   <DropdownMenuItem as-child>
                     <button @click="startEditProject(project.project_id)">Rename</button>
                   </DropdownMenuItem>
-                  <DropdownMenuItem v-if="!project.vault_folder" as-child>
+                  <DropdownMenuItem as-child>
                     <button @click="confirmDeleteProject(project.project_id)">Delete</button>
                   </DropdownMenuItem>
                 </DropdownMenuContent>
@@ -930,6 +930,7 @@ import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
 import { SETTINGS_NAV } from '../lib/settingsNav'
 import { ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
+import { projectDeleteMessage, projectDeleteToastBody } from '../lib/projectDelete'
 import { useArchiveChat } from '../composables/useArchiveChat'
 import { workspaceLabel } from '../lib/workspaceLabel'
 import { askPrompt } from '../lib/prompt'
@@ -1676,12 +1677,24 @@ async function finishEditProject(event: Event, id: string) {
 
 async function confirmDeleteProject(id: string) {
   closeProjectMenu()
-  if (!await askConfirm('Delete this project and archive all its chats?', {
+  const project = store.projects.find(p => p.project_id === id)
+  if (!project) return
+  const chatCount = store.chats.filter(c => c.project_id === id).length
+  if (!await askConfirm(projectDeleteMessage(project, chatCount), {
     title: 'Delete project',
     confirmLabel: 'Delete project',
     destructive: true,
   })) return
-  await store.deleteProject(id)
+  try {
+    const report = await store.deleteProject(id)
+    store.pushToast({
+      chat_id: '',
+      title: 'Project deleted',
+      body: projectDeleteToastBody(report),
+    })
+  } catch (e) {
+    store.pushErrorToast('Could not delete project', `${errorMessage(e)}`)
+  }
 }
 
 // The project-local "+" already names its project, and Home's chip names one
