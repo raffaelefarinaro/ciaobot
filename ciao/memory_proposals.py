@@ -2085,7 +2085,8 @@ def read_decisions(proposals_path: Path) -> list[dict[str, Any]]:
     text-only rows into one shape: ``{ts, action, via, kind, text, source,
     destination, outcome, proposal_id, receipt_id, learning_id, finding,
     reason, log, seq}``. ``reason`` is the optional single-line "why" recorded
-    with the decision, empty for every decision recorded without one. ``receipt_id`` is empty for every row written before it was
+    with the decision, empty for every decision recorded without one.
+    ``receipt_id`` is empty for every row written before it was
     recorded, and for every decision made outside the receipt protocol, and
     ``learning_id``/``finding`` are empty for every decision about a whole row
     rather than one derived finding. This is the read side of the decision

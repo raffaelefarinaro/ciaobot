@@ -998,3 +998,80 @@ def test_cli_without_reason_file_is_unchanged(tmp_path: Path) -> None:
 
     assert cli.main(_dismiss_args(tmp_path, vault)) == 0
     assert read_decisions(queue)[0]["reason"] == ""
+
+
+# ── credential-adjacent reason files are refused (#1734) ───────────────────
+
+
+def _refused_reason_paths(tmp_path: Path) -> list[Path]:
+    """A `.env`-shaped file and one under `.runtime/`, both holding a secret."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("TOKEN=s3cret", encoding="utf-8")
+    runtime_file = tmp_path / ".runtime" / "reason.txt"
+    runtime_file.parent.mkdir(parents=True)
+    runtime_file.write_text("s3cret-token", encoding="utf-8")
+    return [env_file, runtime_file]
+
+
+def _no_sidecar(queue: Path) -> bool:
+    from ciao.memory_proposals import dismissed_log_path
+
+    return not dismissed_log_path(queue).exists()
+
+
+def test_cli_dismiss_refuses_a_credential_adjacent_reason_file(tmp_path: Path, capsys) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+    before = queue.read_bytes()
+
+    for path in _refused_reason_paths(tmp_path):
+        rc = cli.main(_dismiss_args(tmp_path, vault, "--reason-file", str(path)))
+        assert rc == 2
+        assert "credential" in capsys.readouterr().err
+        assert queue.read_bytes() == before
+        assert _no_sidecar(queue)
+
+
+def test_cli_add_refuses_a_credential_adjacent_decide_reason_file(tmp_path: Path, capsys) -> None:
+    from ciao import cli
+
+    vault, queue = _decider_queue(tmp_path, _OTHER_BULLET)
+    before = queue.read_bytes()
+    text_file = tmp_path / "text.txt"
+    text_file.write_text("A new durable fact.", encoding="utf-8")
+
+    for path in _refused_reason_paths(tmp_path):
+        rc = cli.main([
+            "memory-proposal-add",
+            "--workspace", str(tmp_path),
+            "--vault-root", str(vault),
+            "--kind", "memory",
+            "--text-file", str(text_file),
+            "--decide", "you",
+            "--decide-reason-file", str(path),
+        ])
+        assert rc == 2
+        assert "credential" in capsys.readouterr().err
+        assert queue.read_bytes() == before
+
+
+def test_cli_escalate_refuses_a_credential_adjacent_reason_file(tmp_path: Path, capsys) -> None:
+    from ciao import cli
+
+    vault, queue = _decider_queue(tmp_path, _OTHER_BULLET)
+    before = queue.read_bytes()
+    text_file = tmp_path / "needle.txt"
+    text_file.write_text("Prefer uv", encoding="utf-8")
+
+    for path in _refused_reason_paths(tmp_path):
+        rc = cli.main([
+            "memory-proposal-escalate",
+            "--workspace", str(tmp_path),
+            "--vault-root", str(vault),
+            "--text-file", str(text_file),
+            "--reason-file", str(path),
+        ])
+        assert rc == 2
+        assert "credential" in capsys.readouterr().err
+        assert queue.read_bytes() == before

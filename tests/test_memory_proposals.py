@@ -1750,7 +1750,7 @@ def test_a_reason_with_unicode_line_separators_cannot_split_the_row(tmp_path: Pa
     queue.write_text("## 2026-09-01\n", encoding="utf-8")
 
     assert mp.record_dismissal(
-        queue, text="Sep fact.", kind="memory", via="pwa", reason="a b c\x85d\nnext"
+        queue, text="Sep fact.", kind="memory", via="pwa", reason="a\u2028b\u2029c\u0085d\nnext"
     )
 
     rows = mp.read_decisions(queue)

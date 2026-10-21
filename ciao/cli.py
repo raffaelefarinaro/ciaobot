@@ -4339,11 +4339,10 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
         print("--decide-reason-file needs --decide", file=sys.stderr)
         return 2
     if reason_file:
-        try:
-            decide_reason = " ".join(Path(reason_file).read_text(encoding="utf-8").split())
-        except (OSError, UnicodeError) as exc:
-            print(f"could not read {reason_file}: {exc}", file=sys.stderr)
+        decide_text = _read_persisted_text_file(reason_file, "--decide-reason-file")
+        if decide_text is None:
             return 2
+        decide_reason = " ".join(decide_text.split())
         if not decide_reason:
             print("the decide reason is empty", file=sys.stderr)
             return 2
@@ -4417,6 +4416,40 @@ def _observation_context(args: argparse.Namespace) -> tuple[Path, str] | int:
         print(f"Vault root is missing or not a directory: `{vault_root}`", file=sys.stderr)
         return 1
     return vault_root, workspace
+
+
+def _read_persisted_text_file(path: str, flag: str) -> str | None:
+    """The text of a file whose contents are persisted into the vault.
+
+    ``None`` after printing why not. A reason file is written to the
+    vault-tracked proposal queue or decision sidecar, so a path that names a
+    credential store (``.env``, the runtime directory) is refused, the same
+    check ``agent_cli._task_body`` applies. At most ``MAX_REASON * 4 + 1``
+    characters are read so a huge file is never loaded whole; the caller's own
+    length check then refuses an over-long reason.
+    """
+    from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
+    from ciao.task_decisions import MAX_REASON
+
+    target = Path(path).expanduser()
+    try:
+        resolved = target.resolve()
+    except OSError as exc:
+        print(f"{flag} cannot be read: {exc}", file=sys.stderr)
+        return None
+    if any(resolved.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS):
+        print(
+            f"{flag} refuses credential-adjacent paths ({path}): "
+            "pass the content in a workspace file instead.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        with resolved.open(encoding="utf-8") as handle:
+            return handle.read(MAX_REASON * 4 + 1)
+    except (OSError, UnicodeError) as exc:
+        print(f"could not read {path}: {exc}", file=sys.stderr)
+        return None
 
 
 def _read_argv_safe(value: str, path: str, what: str) -> str | None:
@@ -4660,9 +4693,12 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     reason = ""
     reason_file = (args.reason_file or "").strip()
     if reason_file:
+        reason_text = _read_persisted_text_file(reason_file, "--reason-file")
+        if reason_text is None:
+            return 2
         try:
-            reason = clean_reason(Path(reason_file).read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as exc:
+            reason = clean_reason(reason_text)
+        except ValueError as exc:
             print(f"could not use the reason in {reason_file}: {exc}", file=sys.stderr)
             return 2
     # Two needle forms, because rows reach the queue two ways:
@@ -4839,10 +4875,10 @@ def _memory_proposal_escalate_command(args: argparse.Namespace) -> int:
     if not reason_file:
         print("--reason-file is required (one line saying why only you can decide)", file=sys.stderr)
         return 2
-    reason = _read_argv_safe("", reason_file, "the reason")
-    if reason is None:
+    reason_text = _read_persisted_text_file(reason_file, "--reason-file")
+    if reason_text is None:
         return 2
-    reason = " ".join(reason.split())
+    reason = " ".join(reason_text.split())
     if not reason:
         print("the escalation reason is empty", file=sys.stderr)
         return 2
@@ -7998,7 +8034,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help=(
             "Read an optional one-line reason for this decision from this file "
-            "(at most 1000 characters). Recorded in History beside the "
+            "(at most 1000 characters; a multi-line file is flattened to one "
+            "line). Recorded in History beside the "
             "decision, for the accept (--promoted) and the dismissal alike."
         ),
     )

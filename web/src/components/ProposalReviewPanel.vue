@@ -239,6 +239,9 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
   // The pending edit rides along into the deferral: without it the retry
   // below would resend the original bullet, silently replacing the wording
   // the operator just approved.
+  // The deferral below keeps its own copy (`decisionReason`); leaving this one
+  // behind would post a refused accept's reason on a later Dismiss.
+  clearReason(row.id)
   if (previewId.value === row.id) closePreview()
   await handleAcceptRefusal(row, result.error || '', result.payload, {
     text: edited || undefined,
@@ -995,6 +998,7 @@ async function retryReconcile(row: ProposalRow) {
   })
   if (result.ok) {
     clearDeferred(row.id)
+    clearReason(row.id)
     return
   }
   if (result.conflict) {
@@ -1903,7 +1907,8 @@ watch(
             <button type="button" class="mr-link" @click="clearLink(row.id)">Show actions</button>
           </div>
 
-          <div v-else class="mr-actions pr-actions">
+          <template v-else>
+          <div class="mr-actions pr-actions">
             <!-- The preview is on the row, so the row can accept it: the verb
                  names the change, and the accept is pinned to the revision the
                  row is showing (a destination that moved comes back as a
@@ -1934,7 +1939,29 @@ watch(
             >Edit first</button>
             <button v-if="discussionChat(row)" type="button" class="mr-link pr-talk" @click="openDiscussion(row)">Open chat</button>
             <button v-else type="button" class="mr-link pr-talk" :disabled="chatBusy" @click="discuss(row)">Discuss</button>
+            <!-- The optional reason, offered here as well as on the card so the
+                 one-click Accept and Dismiss above stay one click. -->
+            <button
+              v-if="canAccept(row) && !isRehome(row) && !isPreviewOpen(row)"
+              type="button"
+              class="mr-link pr-row-why"
+              :aria-expanded="Boolean(whyOpenById[row.id])"
+              :aria-controls="`pr-why-${row.id}`"
+              @click="whyOpenById[row.id] = !whyOpenById[row.id]"
+            >Why?</button>
           </div>
+          <DecisionReason
+            v-if="whyOpenById[row.id] && canAccept(row) && !isRehome(row) && !isPreviewOpen(row)"
+            :id="`pr-why-${row.id}`"
+            class="pr-row-reason"
+            label="Reason (optional)"
+            :chips="MEMORY_REASON_CHIPS"
+            :id-prefix="`pr-why-${row.id}`"
+            :model-value="reasonById[row.id] ?? ''"
+            :disabled="store.isBusy(row.id)"
+            @update:model-value="reasonById[row.id] = $event"
+          />
+          </template>
         </li>
         </ul>
       </template>
@@ -2300,6 +2327,17 @@ watch(
   border-radius: var(--radius-sm);
   color: var(--fg);
   font-size: 0.82rem;
+}
+
+.pr-row-reason {
+  margin-top: var(--space-2);
+  min-width: 0;
+}
+
+@media (pointer: coarse) {
+  .pr-row-why {
+    min-height: 2.75rem;
+  }
 }
 
 .pr-card-why {

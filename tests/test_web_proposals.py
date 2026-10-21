@@ -4293,17 +4293,32 @@ def test_an_over_cap_or_non_string_reason_is_refused_before_any_write(
 
     config = _default_vault(tmp_path)
     queue = _queue_text(config, "personal")
-    before = queue.read_bytes()
     client = _client(config)
     row = _memory_row(client)
 
-    for action in ("dismiss", "accept"):
-        resp = client.post(f"/api/proposals/{row['id']}/{action}", json={"reason": bad})
-        assert resp.status_code == 400
-        assert "1000" in resp.json()["error"] or "string" in resp.json()["error"]
+    def snapshot() -> dict[str, bytes]:
+        # Every file under the test root: the queue, the accept destination (the
+        # workspace guide), the sidecar and any receipt journal.
+        return {
+            p.relative_to(tmp_path).as_posix(): p.read_bytes()
+            for p in sorted(tmp_path.rglob("*"))
+            if p.is_file()
+        }
 
-    assert queue.read_bytes() == before
+    before = snapshot()
+    bodies = [
+        {"reason": bad},
+        {"text": "edited", "reason": bad},
+    ]
+    for action in ("dismiss", "accept"):
+        for body in bodies:
+            resp = client.post(f"/api/proposals/{row['id']}/{action}", json=body)
+            assert resp.status_code == 400
+            assert "1000" in resp.json()["error"] or "string" in resp.json()["error"]
+
+    assert snapshot() == before, "a refused reason must write nothing at all"
     assert not dismissed_log_path(queue).exists()
+    assert any(r["id"] == row["id"] for r in client.get("/api/proposals").json()["rows"])
 
 
 def test_a_reason_of_exactly_the_cap_after_trim_passes(tmp_path: Path) -> None:

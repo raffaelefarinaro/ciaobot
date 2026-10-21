@@ -40,7 +40,6 @@ from ciao.git_proc import EXACT_BYTES
 from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao import host_terminal
 from ciao import proposal_actions
-from ciao.task_decisions import clean_reason
 from ciao import proposal_kinds
 from ciao import service_backend
 from ciao import backup_service
@@ -75,6 +74,7 @@ from ciao.workspaces import (
 )
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
+from ciao.task_decisions import clean_reason
 from ciao.tool_path import resolve_command
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
