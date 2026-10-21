@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 # ── Bundled harness skills Ciaobot replaces ──────────────────────────────
@@ -131,6 +132,21 @@ CREDENTIAL_DENY_PATTERNS: tuple[str, ...] = (
     "./secrets/**",
     "**/secrets/**",
 )
+
+_CREDENTIAL_DIR_NAMES = frozenset({".runtime", "secrets"})
+# `.env`, `.env.local`, `.env-local`, `.env_prod`, `.envrc`; not `.envelope`.
+_ENV_FILE_NAME = re.compile(r"\.env(rc)?([._-].*)?")
+
+
+def is_credential_adjacent(path: Path) -> bool:
+    """True when *path* (already resolved) names a credential store: a `.env`
+    file or variant, or anything at any depth under a `.runtime` or `secrets`
+    directory. Comparison is case-insensitive, matching `Path.match` on Windows
+    and on case-insensitive macOS volumes. `Path.match` cannot express this: it
+    is right-anchored and treats `**` as one segment (#1746)."""
+    if _ENV_FILE_NAME.fullmatch(path.name.casefold()):
+        return True
+    return any(part.casefold() in _CREDENTIAL_DIR_NAMES for part in path.parts)
 
 
 def _runtime_root_patterns(
