@@ -17,6 +17,8 @@ const apiPost = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/api', () => ({ api: { get: apiGet, post: apiPost } }))
 const askConfirm = vi.hoisted(() => vi.fn())
 vi.mock('../../lib/confirm', () => ({ askConfirm }))
+const openTask = vi.hoisted(() => vi.fn())
+vi.mock('../../stores/itemPeek', () => ({ useItemPeekStore: () => ({ openTask }) }))
 
 const RouterLinkStub = defineComponent({
   name: 'RouterLink',
@@ -80,11 +82,13 @@ describe('TaskOriginNote', () => {
   })
   afterEach(() => { vi.restoreAllMocks() })
 
-  it('names the task, links to its editor, and says the agent is running', () => {
+  it('names the task, links to its editor, and says the agent is running', async () => {
     const wrapper = mountNote([task()])
     expect(wrapper.text()).toContain('This chat works on the task Ship the board.')
     const link = wrapper.get('a')
-    expect(JSON.parse(link.attributes('data-to')!)).toEqual({ name: 'task-detail', params: { taskId: 'ship' } })
+    expect(link.attributes('href')).toBe('/tasks/ship')
+    await link.trigger('click')
+    expect(openTask).toHaveBeenCalledWith('ship')
     expect(wrapper.get('.task-origin-status').text()).toBe('Running')
     // The user can always override: detaching stops the turn.
     expect(wrapper.get('button').text()).toBe('Mark done')
@@ -182,10 +186,17 @@ describe('TaskOriginNote', () => {
     expect(wrapper.find('button').exists()).toBe(false)
   })
 
+  it('a modified click on the task link leaves it to the browser', async () => {
+    openTask.mockClear()
+    const wrapper = mountNote([task()])
+    await wrapper.get('a').trigger('click', { ctrlKey: true })
+    expect(openTask).not.toHaveBeenCalled()
+  })
+
   it('falls back to the stamp alone when the store does not hold the task', () => {
     const wrapper = mountNote([])
     expect(wrapper.text()).toContain('This chat works on a task on the board.')
-    expect(JSON.parse(wrapper.get('a').attributes('data-to')!)).toEqual({ name: 'task-detail', params: { taskId: 'ship' } })
+    expect(wrapper.get('a').attributes('href')).toBe('/tasks/ship')
     expect(wrapper.find('.task-origin-status').exists()).toBe(false)
   })
 

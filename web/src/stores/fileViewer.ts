@@ -51,9 +51,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   const sharedPinChatId = ref('')
 
   // Where a file opens docked instead of in this viewer: the pin key of the
-  // chat or project on screen, set by ChatLayout while its split view is
-  // available (a wide pane on a chat or project route), '' everywhere else.
-  // Owned by the layout so the viewer never pins to a chat that is not shown.
+  // chat on screen, set by ChatLayout while its split view is available (a
+  // wide pane on a chat route), '' everywhere else. Owned by the layout so the
+  // viewer never pins to a chat that is not shown.
   const dockTarget = ref('')
   // Generation of the latest open: a dock whose path resolution lands after a
   // newer open must not pin over the file the user opened since.
@@ -64,30 +64,26 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
 
   /**
    * Pin the file beside the chat instead of opening the viewer, so it lands in
-   * the tile without the modal flashing up first. A file a chat opens always
-   * docks, replacing the current pin; any other open docks only while nothing
-   * is pinned, so a link followed from the pinned file itself opens over it
-   * rather than navigating it away. Returns false (and the caller opens the
-   * viewer as usual) when there is no dock or the pin write fails. An open
-   * that targets a line (a `path:N` link, a comment chip) keeps the viewer,
-   * which scrolls to it; the tile has no line to land on.
+   * the tile without the modal flashing up first. Only an open that carries a
+   * chat id (a link or file card inside the chat on screen) docks, replacing
+   * that chat's pin. Every other open (a project page, the sidebar, an
+   * archived transcript) uses the viewer. Returns false (and the caller opens
+   * the viewer as usual) when there is no dock, no chat, or the pin write
+   * fails. An open that targets a line (a `path:N` link, a comment chip) keeps
+   * the viewer, which scrolls to it; the tile has no line to land on.
    */
   async function dockInstead(filePath: string, chat: string): Promise<boolean> {
     const seq = ++dockSeq
     const key = dockTarget.value
-    if (!key || isOpen.value) return false
-    const current = projectStore.pinnedFileFor(key)
-    if (current && !chat) return false
+    if (!key || !chat || isOpen.value) return false
     let target = filePath
-    if (chat) {
-      try {
-        const resolved = await api.get<{ path: string }>(
-          `/api/chats/${encodeURIComponent(chat)}/file-path?path=${encodeURIComponent(filePath)}`,
-        )
-        target = resolved.path
-      } catch {
-        return false
-      }
+    try {
+      const resolved = await api.get<{ path: string }>(
+        `/api/chats/${encodeURIComponent(chat)}/file-path?path=${encodeURIComponent(filePath)}`,
+      )
+      target = resolved.path
+    } catch {
+      return false
     }
     target = target.replace(/:\d+$/, '')
     // Superseded by a newer open: that open owns the outcome, so this one

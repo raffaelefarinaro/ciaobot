@@ -5831,6 +5831,31 @@ describe('workspace and chat transitions', () => {
     expect(localStorageData['ciao-chat-drafts']).toBeUndefined()
   })
 
+  test('deleteProject asks for the vault entry to go too and returns the report', async () => {
+    // A vault-backed project is deleted with its folder, so the request asks
+    // for it explicitly; the report tells the UI what was cleaned up.
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: 'proj-1' },
+    ]
+    store.chats = []
+    store.activeChatId = null
+    const report = {
+      ok: true,
+      vault_entry_removed: true,
+      removed_notes: 2,
+      removed_files: 3,
+      edited_backlinks: ['memory-vault/personal/Notes/Ref.md'],
+    }
+    apiDel.mockResolvedValue(report)
+
+    const result = await store.deleteProject('p1')
+
+    expect(apiDel).toHaveBeenCalledWith('/api/projects/p1?delete_vault=1')
+    expect(result).toEqual(report)
+    expect(store.projects.find(p => p.project_id === 'p1')).toBeUndefined()
+  })
+
   test('fixError opens a chat in the active workspace General project seeded with the error log', async () => {
     const store = useProjectStore()
     store.projects = [
