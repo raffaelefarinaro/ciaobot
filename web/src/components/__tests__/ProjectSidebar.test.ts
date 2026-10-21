@@ -5,6 +5,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import ProjectSidebar from '../ProjectSidebar.vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
@@ -406,6 +408,44 @@ describe('ProjectSidebar chat actions', () => {
     expect(router.currentRoute.value.path).toBe('/')
 
     wrapper.unmount()
+  })
+
+  it('shows the naming placeholder while a chat title is pending, then the title', async () => {
+    const store = useProjectStore()
+    store.chats[0].title = 'New Chat'
+    store.chats[0].title_status = 'pending'
+    const wrapper = await mountSidebar()
+    await flushPromises()
+
+    const shimmer = wrapper.get('.chat-item .title-shimmer')
+    expect(shimmer.attributes('aria-label')).toBe('Naming conversation')
+    expect(shimmer.attributes('title')).toBe('Naming conversation')
+    // The placeholder stands in for the title, so the temporary one never shows.
+    expect(wrapper.get('.chat-item').text()).not.toContain('New Chat')
+
+    store.chats[0].title = 'Deploy the API'
+    store.chats[0].title_status = 'ready'
+    await nextTick()
+
+    expect(wrapper.find('.chat-item .title-shimmer').exists()).toBe(false)
+    expect(wrapper.get('.chat-item .chat-title').text()).toBe('Deploy the API')
+
+    wrapper.unmount()
+  })
+
+  it('pulls in the shared naming placeholder stylesheet', () => {
+    // The sidebar's placeholder and the chat header's are the same bar: the
+    // sidebar loads the shared file, so the two cannot drift apart.
+    const here = join(__dirname, '..')
+    const source = readFileSync(join(here, 'ProjectSidebar.vue'), 'utf8')
+    expect(source).toContain('<style scoped src="./titleShimmer.css">')
+    const css = readFileSync(join(here, 'titleShimmer.css'), 'utf8')
+    expect(css).toMatch(/\.title-shimmer\s*\{[^}]*flex:\s*1/)
+    expect(css).toMatch(/animation:\s*title-shimmer-sweep/)
+    // The extracted stylesheet cannot declare keyframes for another block, so
+    // the mobile skeleton keeps its own sweep in the sidebar's block.
+    expect(source).toMatch(/animation:\s*mm-shimmer-sweep/)
+    expect(source).toMatch(/@keyframes\s+mm-shimmer-sweep/)
   })
 })
 

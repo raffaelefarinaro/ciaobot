@@ -19,22 +19,26 @@
     >
       <template #title>
         <div class="header-left">
-          <!-- Same 18px stroke icon in the same 30px box as the trailing header
-               actions, so the close control reads as one of them. It used to be
-               a `&times;` character at 20px, which is a different size from
-               every icon around it and sits on the text baseline rather than in
-               a box - visibly out of line beside the breadcrumb. -->
-          <button class="btn-icon close-btn" @click="$emit('close')" title="Close chat" aria-label="Close chat">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <line x1="18" y1="6" x2="6" y2="18"/>
-              <line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
           <div class="header-breadcrumb" :class="{ 'header-breadcrumb--stacked': !isWidePane }">
             <!-- The project is the context envelope for this chat. The workspace
                  is already the sidebar's scope, so repeating it here would add
                  a second, competing location cue. It links to the project page. -->
             <div class="chat-title-row">
+              <!-- Same 18px stroke icon in the same 30px box as the trailing header
+                   actions, so the close control reads as one of them. It used to be
+                   a `&times;` character at 20px, which is a different size from
+                   every icon around it and sits on the text baseline rather than in
+                   a box - visibly out of line beside the breadcrumb. It sits in the
+                   title row so it shares the title's vertical centre: with the
+                   project on a second line under the title, a close button outside
+                   the row centred itself against both lines and drifted below the
+                   title it belongs to. -->
+              <button class="btn-icon close-btn" @click="$emit('close')" title="Close chat" aria-label="Close chat">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <line x1="18" y1="6" x2="6" y2="18"/>
+                  <line x1="6" y1="6" x2="18" y2="18"/>
+                </svg>
+              </button>
               <input
                 v-if="editingTitle"
                 class="title-input"
@@ -45,7 +49,25 @@
                 @click.stop
                 autofocus
               />
-              <span v-else class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
+              <!-- While the engine names a brand new chat there is no title to
+                   show yet, and the placeholder the engine hands over ("New
+                   Chat") is not one either. The shared shimmer stands in for it
+                   until the real name arrives, and the close control and the
+                   code badge stay put meanwhile. -->
+              <span
+                v-else-if="chat.title_status === 'pending'"
+                class="chat-title-shimmer"
+                role="status"
+                aria-label="Naming conversation"
+                title="Naming conversation"
+              />
+              <span
+                v-else
+                class="pane-title chat-title"
+                :title="chat.title"
+                @dblclick.stop="startEditTitle"
+                @click.stop
+              >{{ chat.title }}</span>
               <button
                 v-if="codeModeOn && !chat.archived && !editingTitle"
                 type="button"
@@ -5112,11 +5134,10 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 
 .header-left {
   display: flex;
-  /* The close button is a 30px box, the breadcrumb is a one- or two-line block
-     of text: centring the two keeps the icon on the optical middle of whichever
-     the breadcrumb turns out to be. */
+  /* One child now: the breadcrumb, which is a one- or two-line block of text.
+     Centring it keeps the title row on the optical middle of whichever the
+     block turns out to be. */
   align-items: center;
-  gap: 4px;
   min-width: 0;
   text-align: left;
 }
@@ -5124,8 +5145,8 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* Sizing, hover fill and touch padding all come from PaneHeader's shared
    .btn-icon rules, so this only sets the resting colour: the same quiet --fg3
    as the trailing actions, since closing the chat is not the errand you came
-   here for. */
-.close-btn { color: var(--fg3); }
+   here for. `flex: none` keeps the box its own size inside the title row. */
+.close-btn { color: var(--fg3); flex: none; }
 .close-btn:hover { color: var(--fg); }
 
 /* One line: the chat title, then its project as a muted context control
@@ -5151,7 +5172,25 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
   min-width: 0;
   max-width: 100%;
 }
-.chat-title-row .chat-title { flex: 0 1 auto; min-width: 0; }
+/* A long title wraps to at most two lines instead of pushing the code badge
+   out of the header. PaneHeader's shared .pane-title rules are `nowrap` with
+   an ellipsis, so they are overridden here rather than globally: the chat
+   title is the one title that may take a second line, and the full title
+   stays in the title attribute. `overflow-wrap: anywhere` breaks a title
+   that has no spaces in it (a URL, a path). */
+.chat-title-row .chat-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
 .chat-code-badge { display: inline-grid; place-items: center; flex: none; padding: 0 2px; border: 0; background: none; cursor: pointer; border-radius: var(--radius-xs); }
 .chat-code-badge-tag { display: inline-grid; place-items: center; height: 16px; padding: 0 4px; box-sizing: border-box; border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); border-radius: var(--radius-xs); background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font: 600 calc(10px * var(--font-scale))/1 var(--font-mono); }
 .chat-code-badge:hover .chat-code-badge-tag { border-color: var(--accent); }
@@ -7725,3 +7764,7 @@ details[open] > .activity-summary::before {
 </style>
 
 <style scoped src="./chatTrace.css"></style>
+
+<!-- The shared naming placeholder: the same bar the sidebar shows while the
+     engine names a chat. -->
+<style scoped src="./titleShimmer.css"></style>

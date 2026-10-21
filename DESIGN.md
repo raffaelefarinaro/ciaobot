@@ -158,6 +158,8 @@ Shared model-picker sections show readable names while retaining the exact techn
 
 The Google Workspace card shows one next step, not the whole manual: completed steps are quiet status lines, the current step is the only one shown in full, and later instructions sit behind a closed native disclosure. Setup derivation is unchanged. The account form is a labelled row — visible Account name and Display name fields, one primary Add account action — and never triggers installation, a browser sign-in or a permission itself. Progress is derived per focus profile; the card hides once `gws` is installed and every account is signed in, unexpired and linked to a workspace.
 
+The chat header keeps close, title and any `code` badge on one vertical centre while the project keeps its own breadcrumb line (below the title on a narrow pane, beside it when the rail is hidden on a wide one), so a wrapped title never moves the close control. A long title wraps to at most two lines with the full title on hover; on a phone, where the project takes the line below, it keeps to one. While the engine is naming a brand new chat, the header shows the sidebar's shared shimmer, labelled *Naming conversation*, in place of the temporary title, and it gives way to the real title when the name lands. Reduced motion freezes the shimmer without shifting the layout.
+
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.

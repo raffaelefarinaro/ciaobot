@@ -80,7 +80,8 @@
                     <span
                       v-if="chat.title_status === 'pending'"
                       class="title-shimmer"
-                      aria-label="Generating title"
+                      aria-label="Naming conversation"
+                      title="Naming conversation"
                     />
                     <span
                       v-else
