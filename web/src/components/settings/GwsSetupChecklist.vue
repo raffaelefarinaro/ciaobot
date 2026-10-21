@@ -48,14 +48,14 @@ const showFocusName = computed(() => props.integration.profiles.length > 1 && !!
     </p>
 
     <!-- What is finished: quiet status lines, no instructions. -->
-    <ul v-if="groups.done.length" class="gws-setup-done">
+    <ul v-if="groups.done.length" class="gws-setup-done" role="list">
       <li v-for="step in groups.done" :key="step.id" class="gws-setup-done-item">
         {{ doneLabel(step.id) }}
       </li>
     </ul>
 
     <!-- The one step to do now, in full. -->
-    <ol v-if="groups.current" class="gws-setup-steps">
+    <ol v-if="groups.current" class="gws-setup-steps" role="list">
       <li
         class="gws-setup-step"
         data-state="current"
@@ -69,7 +69,7 @@ const showFocusName = computed(() => props.integration.profiles.length > 1 && !!
     <!-- The steps after that, folded away until they are next. -->
     <details v-if="groups.pending.length" class="gws-setup-more">
       <summary class="gws-setup-more-summary">What happens next?</summary>
-      <ol class="gws-setup-steps">
+      <ol class="gws-setup-steps" role="list">
         <li
           v-for="step in groups.pending"
           :key="step.id"
@@ -125,7 +125,6 @@ const showFocusName = computed(() => props.integration.profiles.length > 1 && !!
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: var(--touch);
   color: var(--fg2);
   font-size: var(--text-sm);
   cursor: pointer;
@@ -144,6 +143,11 @@ const showFocusName = computed(() => props.integration.profiles.length > 1 && !!
   transition: transform 120ms var(--ease);
 }
 .gws-setup-more[open] > .gws-setup-more-summary::before { transform: rotate(45deg); }
+@media (pointer: coarse) {
+  /* A disclosure is a tap target on touch; a fine pointer keeps the row's
+     normal text height. */
+  .gws-setup-more-summary { min-height: var(--touch); }
+}
 @media (prefers-reduced-motion: reduce) {
   .gws-setup-more-summary::before { transition: none; }
 }
