@@ -30,7 +30,24 @@ test('the Repository section is compact and the rail does not scroll sideways', 
   await expect(info).toHaveAttribute('aria-expanded', 'true')
   await expect(section.locator('.repo-code-hint').first()).toBeVisible()
 
-  await expect(page.locator('.agent-context-sub')).toHaveText('Always loaded')
+  await expect(page.locator('.chat-rail-agent-context').getByText('Always loaded', { exact: true })).toBeVisible()
+
+  // The branch is a disclosure: the summary stays one line, the full name and
+  // folder appear in its body when it is opened, and the checkout facts stay
+  // on the summary's line rather than dropping below the opened body.
+  const branch = section.locator('.chat-repo-branch-details')
+  const summary = branch.locator('summary')
+  await expect(branch.locator('.chat-repo-branch-body')).not.toBeInViewport()
+  await summary.click()
+  await expect(branch.locator('.chat-repo-branch-body')).toBeVisible()
+  await expect(branch.locator('.chat-repo-branch-value')).toHaveText(/\S/)
+  const facts = section.locator('.chat-repo-kind')
+  const summaryBox = (await summary.boundingBox())!
+  const factsBox = (await facts.boundingBox())!
+  expect(Math.abs(factsBox.y - summaryBox.y)).toBeLessThanOrEqual(2)
+  const openOverflow = await section.evaluate(el => el.scrollWidth - el.clientWidth)
+  expect(openOverflow).toBeLessThanOrEqual(0)
+  await summary.click()
 
   const rail = page.locator('.chat-rail').first()
   const overflow = await rail.evaluate(el => el.scrollWidth - el.clientWidth)

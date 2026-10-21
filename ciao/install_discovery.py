@@ -5,7 +5,8 @@ A bare-shell invocation (`ciao health get` from any directory) has no
 install the operator actually has rather than manufacture a bootstrap workspace
 beside it. Before this module that question was answered by the macOS
 LaunchAgent alone, which on Windows meant the engine's own logon task was
-ignored and the bare shell fell back to the cwd.
+ignored and the bare shell fell back to the cwd. Linux reads the root-owned
+systemd unit the installer wrote.
 
 This is the one answer to that question, and both branches are read-only: they
 read the service definition the engine wrote and mint nothing. A definition
@@ -41,8 +42,10 @@ def discover_workspace(base: Mapping[str, str]) -> Path | None:
     ``schtasks`` query would be a second source of truth this read-only seam does
     not need.
 
-    The dispatch is Windows-aware: on Windows the engine's own logon task is
-    the install record, so it is read first. Everywhere else — and on Windows
+    The dispatch is platform-aware: on Windows the engine's own logon task is
+    the install record, so it is read first; on Linux it is the systemd unit,
+    trusted only when root-owned and not group- or world-writable, and never the
+    shell environment. Everywhere else — and on Windows
     when no task was found — the macOS LaunchAgent read runs, which is the
     behaviour-before-this-seam call every platform made and the call the
     existing tests patch. On a real Windows machine there is no plist, so that
@@ -57,6 +60,12 @@ def discover_workspace(base: Mapping[str, str]) -> Path | None:
         # seam must preserve on every platform, and on Windows it simply finds
         # no plist. Returning early here would bypass the patch target the
         # existing discovery tests install and break them on the Windows job.
+    elif _platform().startswith("linux"):
+        discovered = _discover_linux()
+        if discovered is not None:
+            return discovered
+        # Same fall-through as Windows: a bare shell as another user, or an
+        # install with no unit, keeps the behaviour it had before this branch.
     return _discover_macos(base)
 
 
@@ -85,6 +94,17 @@ def _discover_windows() -> Path | None:
     if workspace is None:
         return None
     return workspace if workspace.is_dir() else None
+
+
+def _discover_linux() -> Path | None:
+    from ciao import linux_service
+
+    workspace = linux_service.unit_workspace(linux_service.UNIT_PATH)
+    if workspace is None or not workspace.is_dir():
+        return None
+    # A workspace this user cannot read (0700 under the service account) is not
+    # this shell's install: fall through rather than point at it.
+    return workspace if os.access(workspace, os.R_OK | os.X_OK) else None
 
 
 def trusted_registry(name: str | None, vault: Path) -> CiaoConfig | None:

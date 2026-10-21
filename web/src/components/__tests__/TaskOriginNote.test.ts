@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import TaskOriginNote from '../TaskOriginNote.vue'
 import { useTaskSignalsStore } from '../../stores/taskSignals'
 import type { ChatInfo, Task } from '../../lib/types'
@@ -203,5 +203,88 @@ describe('TaskOriginNote', () => {
   it('renders nothing for an ordinary chat', () => {
     const wrapper = mountNote([task({ chat_id: 'other' })], { chat_id: 'chat-1' })
     expect(wrapper.find('.task-origin').exists()).toBe(false)
+  })
+
+  it('names a task the chat is linked to, and opens its peek', async () => {
+    const wrapper = mountNote(
+      [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] })],
+      { chat_id: 'chat-1' },
+    )
+    expect(wrapper.text()).toContain('This chat is linked to the task Write the spec.')
+    const link = wrapper.get('a')
+    expect(link.attributes('href')).toBe('/tasks/linked')
+    await link.trigger('click')
+    expect(openTask).toHaveBeenCalledWith('linked')
+  })
+
+  it('offers no state and no completion for a linked task', () => {
+    for (const attempt of [
+      { status: 'in_progress' as const, attempt_state: 'running' as const },
+      { status: 'in_review' as const, attempt_state: 'ready_for_review' as const },
+      { status: 'in_progress' as const, attempt_state: 'needs_you' as const },
+    ]) {
+      const wrapper = mountNote(
+        [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'], ...attempt })],
+        { chat_id: 'chat-1' },
+      )
+      // The link is a relation, not a delegation: the task's own state and its
+      // completion are none of this chat's business.
+      expect(wrapper.text()).toContain('This chat is linked to the task Write the spec.')
+      expect(wrapper.find('.task-origin-status').exists()).toBe(false)
+      expect(wrapper.find('button').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('Approve')
+    }
+  })
+
+  it('shows every linked task, in a stable order', () => {
+    const wrapper = mountNote(
+      [
+        task({ id: 'zulu', title: 'Zulu', chat_id: '', linked_chats: ['chat-1'] }),
+        task({ id: 'alpha', title: 'Alpha', chat_id: '', linked_chats: ['chat-1'] }),
+      ],
+      { chat_id: 'chat-1' },
+    )
+    expect(wrapper.findAll('.task-origin-line').map(line => line.text())).toEqual([
+      'This chat is linked to the task Alpha.',
+      'This chat is linked to the task Zulu.',
+    ])
+  })
+
+  it('leaves a modified click on a linked task to the browser', async () => {
+    openTask.mockClear()
+    const wrapper = mountNote(
+      [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] })],
+      { chat_id: 'chat-1' },
+    )
+    await wrapper.get('a').trigger('click', { ctrlKey: true })
+    expect(openTask).not.toHaveBeenCalled()
+  })
+
+  it('drops the row when the link is removed', async () => {
+    const wrapper = mountNote(
+      [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] })],
+      { chat_id: 'chat-1' },
+    )
+    expect(wrapper.findAll('.task-origin-line')).toHaveLength(1)
+
+    useTaskSignalsStore().tasks = [task({ id: 'linked', title: 'Write the spec', chat_id: '', linked_chats: [] })]
+    await nextTick()
+    expect(wrapper.find('.task-origin').exists()).toBe(false)
+  })
+
+  it('does not repeat a task the chat is both delegated to and linked to', () => {
+    const wrapper = mountNote([task({ id: 'ship', chat_id: 'chat-1', linked_chats: ['chat-1'] })])
+    expect(wrapper.text()).toContain('This chat works on the task Ship the board.')
+    expect(wrapper.text()).not.toContain('This chat is linked to the task')
+    expect(wrapper.findAll('.task-origin-line')).toHaveLength(1)
+  })
+
+  it('still names a linked task when the chat works on another one', () => {
+    const wrapper = mountNote([
+      task({ id: 'ship', chat_id: 'chat-1', linked_chats: [] }),
+      task({ id: 'other', title: 'Write the spec', chat_id: '', linked_chats: ['chat-1'] }),
+    ])
+    expect(wrapper.text()).toContain('This chat works on the task Ship the board.')
+    expect(wrapper.text()).toContain('This chat is linked to the task Write the spec.')
   })
 })
