@@ -66,11 +66,11 @@ function makeProject(): ProjectInfo {
   }
 }
 
-function makeChat(chatId: string): ChatInfo {
+function makeChat(chatId: string, title = chatId): ChatInfo {
   return {
     chat_id: chatId,
     project_id: 'project-1',
-    title: chatId,
+    title,
     model: 'sonnet',
     provider: 'opencode',
     mode: 'normal',
@@ -93,7 +93,9 @@ async function mountPanel(): Promise<{ wrapper: VueWrapper }> {
   setActivePinia(pinia)
   const store = useProjectStore()
   store.projects = [makeProject()]
-  store.chats = [makeChat('chat-1')]
+  // The second chat is one the transcript may name: a reference to it links
+  // to the conversation under its human title (#1768).
+  store.chats = [makeChat('chat-1'), makeChat('chat-0123abcd', 'Budget review')]
   store.activeChatId = 'chat-1'
   store.messages = { 'chat-1': [] }
   store.bootstrapped = true
@@ -169,5 +171,81 @@ describe('ChatPanel user message rendering', () => {
     const img = assistant.find('img')
     expect(img.exists()).toBe(true)
     expect(img.attributes('onerror')).toBeUndefined()
+  })
+})
+
+// Issue #1768: a message that names another conversation links to it, under
+// its human title. The link is the app's own: it opens in this tab, and the
+// raw id stays in the tooltip and in `data-chat-id`.
+describe('ChatPanel chat references', () => {
+  const scrollProto = Element.prototype as unknown as { scrollTo?: unknown }
+  const originalScrollTo = scrollProto.scrollTo
+
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      value: new MemoryStorage(),
+    })
+    localStorage.clear()
+    scrollProto.scrollTo = function scrollTo() {}
+  })
+
+  afterEach(() => {
+    scrollProto.scrollTo = originalScrollTo
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  it('links a known conversation in a user bubble and in an assistant one', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'look at chat-0123abcd please', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
+      { role: 'assistant', content: 'done, see chat-0123abcd', timestamp: '2026-08-30T13:23:10Z' },
+    ]
+    await flushPromises()
+
+    for (const selector of [
+      '.message-wrap.user .message-content',
+      '.message-wrap.assistant .message-content',
+    ]) {
+      const link = wrapper.get(`${selector} a.chat-link`)
+      expect(link.text(), selector).toBe('Budget review')
+      expect(link.attributes('href'), selector).toBe('/chat/chat-0123abcd')
+      expect(link.attributes('title'), selector).toBe('chat-0123abcd')
+      expect(link.attributes('data-chat-id'), selector).toBe('chat-0123abcd')
+      // A link into the app opens in this tab, not in a second copy of it.
+      expect(link.attributes('target'), selector).toBeUndefined()
+    }
+  })
+
+  it('leaves an unknown conversation plain', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    store.messages['chat-1'] = [
+      { role: 'user', content: 'look at chat-ffffffff please', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
+    ]
+    await flushPromises()
+
+    const user = wrapper.get('.message-wrap.user .message-content')
+    expect(user.find('a.chat-link').exists()).toBe(false)
+    expect(user.text()).toContain('chat-ffffffff')
+  })
+
+  it('shows the new title when the conversation is renamed', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    store.messages['chat-1'] = [
+      { role: 'assistant', content: 'done, see chat-0123abcd', timestamp: '2026-08-30T13:23:10Z' },
+    ]
+    await flushPromises()
+    expect(wrapper.get('.message-wrap.assistant .message-content a.chat-link').text()).toBe('Budget review')
+
+    // The rendered message is cached by its text, so a renamed conversation
+    // has to drop that cache: the label follows the title.
+    const chat = store.chats.find(item => item.chat_id === 'chat-0123abcd')!
+    chat.title = 'Budget review, final'
+    await flushPromises()
+    expect(wrapper.get('.message-wrap.assistant .message-content a.chat-link').text()).toBe('Budget review, final')
   })
 })

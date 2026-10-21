@@ -3,6 +3,7 @@ import { Marked, Renderer, type Tokens } from 'marked'
 
 import { isAppRouteHref } from './appLinks'
 import { CODE_BLOCK_CLASS, codeCopyButtonHtml } from './codeCopy'
+import { linkifyChatIds } from './chatLinks'
 import { COMMENT_TAGS } from './commentContext'
 import { hasKnownFileExtension, isPlausibleFilePath, linkifyHtml } from './filePaths'
 import { buildMarkdownIndex, resolveVaultLinkTarget, vaultNoteRefFromHref } from './vaultLinks'
@@ -126,7 +127,10 @@ function sanitizeHtml(html: string): string {
     // (see lib/commentContext.ts) so they survive into the chat bubble and can
     // be styled as quote cards, instead of being stripped to bare text.
     ADD_TAGS: [...COMMENT_TAGS],
-    ADD_ATTR: ['target', 'rel', 'loading', 'data-file-path', 'data-line'],
+    // `data-chat-id` is the raw id of a conversation a message references
+    // (see lib/chatLinks.ts). It is named explicitly: the allowlist is not
+    // widened to every data attribute.
+    ADD_ATTR: ['target', 'rel', 'loading', 'data-file-path', 'data-line', 'data-chat-id'],
     FORBID_ATTR: ['style'],
   })
 }
@@ -154,10 +158,27 @@ function escapeAttr(value: string): string {
     .replace(/'/g, '&#39;')
 }
 
-export function renderMarkdown(text: string, knownPaths: string[] = []): string {
+// No chat is known unless the caller says so: the renderers are used by
+// panes that have no chat list of their own.
+const NO_KNOWN_CHATS: ReadonlyMap<string, string> = new Map()
+
+/**
+ * Render a message for the transcript.
+ *
+ * `knownChats` maps the ids of the reader's own conversations to their human
+ * titles. A reference to one of them becomes a link to the conversation,
+ * under its title, before the external attributes are added — so it keeps
+ * the app's own link shape: this tab, no `target="_blank"`.
+ */
+export function renderMarkdown(
+  text: string,
+  knownPaths: string[] = [],
+  knownChats: ReadonlyMap<string, string> = NO_KNOWN_CHATS,
+): string {
   try {
     const html = chatMarkdownParser.parse(text) as string
-    return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(html)), knownPaths)
+    const linked = linkifyChatIds(html, knownChats)
+    return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths)
   } catch {
     return sanitizeHtml(text)
   }
@@ -189,10 +210,15 @@ const userMarkdownParser = new Marked({
   renderer: userMarkdownRenderer,
 })
 
-export function renderUserMarkdown(text: string, knownPaths: string[] = []): string {
+export function renderUserMarkdown(
+  text: string,
+  knownPaths: string[] = [],
+  knownChats: ReadonlyMap<string, string> = NO_KNOWN_CHATS,
+): string {
   try {
     const html = userMarkdownParser.parse(text) as string
-    return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(html)), knownPaths)
+    const linked = linkifyChatIds(html, knownChats)
+    return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(linked)), knownPaths)
   } catch {
     return escapeAttr(text)
   }

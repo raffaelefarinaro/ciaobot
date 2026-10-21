@@ -160,6 +160,8 @@ The Google Workspace card shows one next step, not the whole manual: completed s
 
 The chat header keeps close, title and any `code` badge on one vertical centre while the project keeps its own breadcrumb line (below the title on a narrow pane, beside it when the rail is hidden on a wide one), so a wrapped title never moves the close control. A long title wraps to at most two lines with the full title on hover; on a phone, where the project takes the line below, it keeps to one. While the engine is naming a brand new chat, the header shows the sidebar's shared shimmer, labelled *Naming conversation*, in place of the temporary title, and it gives way to the real title when the name lands. Reduced motion freezes the shimmer without shifting the layout.
 
+A real chat reference links to that conversation: the visible label is the chat's own title, the raw id stays in its tooltip and data, and the link opens in this tab. This covers a bare id in prose or inline code and the app's own `@chat/<id>` mention (only the prefix stays plain). Only an id the reader's openable chat list knows becomes a link; an unknown, malformed or non-chat-looking id stays plain, and another path or URL that happens to contain one is never rewritten. Existing links, code blocks and file links are left alone, and the title is escaped like any other text.
+
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
