@@ -49,6 +49,9 @@ describe('InjectedPromptCard', () => {
     const tail = wrapper.get('pre.injected-card-tail')
     expect(tail.text()).toBe('one\ntwo')
     expect(tail.attributes('tabindex')).toBe('0')
+    // A named region, not a bare focusable element: the name has to be
+    // supported by a role for a screen reader to announce it.
+    expect(tail.attributes('role')).toBe('region')
   })
 
   it('keeps the full prompt behind its own toggle', async () => {
@@ -62,6 +65,7 @@ describe('InjectedPromptCard', () => {
     expect(wrapper.get('.injected-card-raw-toggle').attributes('aria-controls')).toBe(rawId)
     // The raw prompt is a scroll region too, so it is focusable and named.
     expect(wrapper.get('pre.injected-card-raw').attributes('tabindex')).toBe('0')
+    expect(wrapper.get('pre.injected-card-raw').attributes('role')).toBe('region')
     expect(wrapper.get('pre.injected-card-raw').attributes('aria-label')).toBe('Full prompt')
   })
 
@@ -177,6 +181,7 @@ describe('InjectedPromptCard', () => {
     expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
     const prose = wrapper.get('details.injected-card-original .injected-card-prose')
     expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('role')).toBe('region')
     expect(prose.attributes('aria-label')).toBe('Original request')
   })
 
@@ -192,6 +197,7 @@ describe('InjectedPromptCard', () => {
     await wrapper.get('.injected-card-toggle').trigger('click')
     const prose = wrapper.get('.injected-card-prose')
     expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('role')).toBe('region')
     expect(prose.attributes('aria-label')).toBe('Injected request')
     // The command output keeps its own toggle, and its own region is named.
     const detail = wrapper.get('.injected-card-detail-toggle')
@@ -201,6 +207,7 @@ describe('InjectedPromptCard', () => {
     expect(detail.attributes('aria-expanded')).toBe('true')
     const output = wrapper.get('.injected-card-output')
     expect(output.attributes('tabindex')).toBe('0')
+    expect(output.attributes('role')).toBe('region')
     expect(output.attributes('aria-label')).toBe('Command output')
   })
 
@@ -212,6 +219,7 @@ describe('InjectedPromptCard', () => {
     await wrapper.get('.injected-card-toggle').trigger('click')
     const prose = wrapper.get('.injected-card-prose')
     expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('role')).toBe('region')
     expect(prose.attributes('aria-label')).toBe('Injected instructions')
     // The event keeps its own toggle, and its own region is named.
     const detail = wrapper.get('.injected-card-detail-toggle')
@@ -221,6 +229,7 @@ describe('InjectedPromptCard', () => {
     await detail.trigger('click')
     const output = wrapper.get('.injected-card-output')
     expect(output.attributes('tabindex')).toBe('0')
+    expect(output.attributes('role')).toBe('region')
     expect(output.attributes('aria-label')).toBe('Webhook event')
   })
 
@@ -234,6 +243,7 @@ describe('InjectedPromptCard', () => {
       .toBe('The previous attempt ended as failed.')
     const prose = wrapper.get('.injected-card-prose')
     expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('role')).toBe('region')
     expect(prose.attributes('aria-label')).toBe('Injected request')
   })
 
@@ -242,6 +252,7 @@ describe('InjectedPromptCard', () => {
     await wrapper.get('.injected-card-toggle').trigger('click')
     const prose = wrapper.get('.injected-card-prose')
     expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('role')).toBe('region')
     expect(prose.attributes('aria-label')).toBe('Injected request')
   })
 })

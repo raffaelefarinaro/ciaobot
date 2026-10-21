@@ -93,6 +93,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
               v-if="run.tail.length"
               class="injected-card-tail"
               tabindex="0"
+              role="region"
               :aria-label="`Last ${run.tail.length} lines of ${run.label}`"
             >{{ run.tail.join('\n') }}</pre>
             <p v-else class="injected-card-muted">No output.</p>
@@ -112,7 +113,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
 
       <template v-else-if="prompt.kind === 'schedule'">
         <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
-        <div class="injected-card-prose" tabindex="0" aria-label="Injected request" v-html="md(prompt.prompt)"></div>
+        <div class="injected-card-prose" tabindex="0" role="region" aria-label="Injected request" v-html="md(prompt.prompt)"></div>
         <template v-if="prompt.command">
           <button
             type="button"
@@ -128,13 +129,13 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
             >{{ prompt.command.timedOut ? 'timed out' : `exit ${prompt.command.exitCode}` }}</span>
             <code class="injected-card-command">{{ prompt.command.command }}</code>
           </button>
-          <pre v-if="detailOpen" :id="detailId" class="injected-card-output" tabindex="0" aria-label="Command output">{{ prompt.command.output }}</pre>
+          <pre v-if="detailOpen" :id="detailId" class="injected-card-output" tabindex="0" role="region" aria-label="Command output">{{ prompt.command.output }}</pre>
         </template>
       </template>
 
       <template v-else-if="prompt.kind === 'webhook'">
         <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
-        <div class="injected-card-prose" tabindex="0" aria-label="Injected instructions" v-html="md(prompt.instructions)"></div>
+        <div class="injected-card-prose" tabindex="0" role="region" aria-label="Injected instructions" v-html="md(prompt.instructions)"></div>
         <template v-if="prompt.event">
           <button
             type="button"
@@ -143,19 +144,19 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
             :aria-controls="detailId"
             @click="detailOpen = !detailOpen"
           >Event</button>
-          <pre v-if="detailOpen" :id="detailId" class="injected-card-output" tabindex="0" aria-label="Webhook event">{{ prompt.event }}</pre>
+          <pre v-if="detailOpen" :id="detailId" class="injected-card-output" tabindex="0" role="region" aria-label="Webhook event">{{ prompt.event }}</pre>
         </template>
       </template>
 
       <template v-else-if="prompt.kind === 'task_resume'">
         <p v-if="prompt.previousState">The previous attempt ended as {{ prompt.previousState }}.</p>
         <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
-        <div class="injected-card-prose" tabindex="0" aria-label="Injected request" v-html="md(raw)"></div>
+        <div class="injected-card-prose" tabindex="0" role="region" aria-label="Injected request" v-html="md(raw)"></div>
       </template>
 
       <template v-else-if="prompt.kind === 'update_task'">
         <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
-        <div class="injected-card-prose" tabindex="0" aria-label="Injected request" v-html="md(raw)"></div>
+        <div class="injected-card-prose" tabindex="0" role="region" aria-label="Injected request" v-html="md(raw)"></div>
       </template>
 
       <!-- A retry repeats the request that is already in the transcript, so
@@ -167,7 +168,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
         <details class="injected-card-original">
           <summary>Show original request</summary>
           <!-- eslint-disable-next-line vue/no-v-html -- renderUserMarkdown is the transcript's sanitising renderer -->
-          <div class="injected-card-prose" tabindex="0" aria-label="Original request" v-html="md(raw)"></div>
+          <div class="injected-card-prose" tabindex="0" role="region" aria-label="Original request" v-html="md(raw)"></div>
         </details>
       </template>
 
@@ -179,7 +180,7 @@ const md = (text: string) => renderUserMarkdown(text, props.knownPaths ?? [])
           :aria-controls="rawId"
           @click="rawOpen = !rawOpen"
         >{{ rawOpen ? 'Hide full prompt' : 'Show full prompt' }}</button>
-        <pre v-if="rawOpen" :id="rawId" class="injected-card-raw" tabindex="0" aria-label="Full prompt">{{ raw }}</pre>
+        <pre v-if="rawOpen" :id="rawId" class="injected-card-raw" tabindex="0" role="region" aria-label="Full prompt">{{ raw }}</pre>
       </template>
     </div>
   </section>
