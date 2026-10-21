@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
-import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { api } from '../../lib/api'
 import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
@@ -88,7 +88,24 @@ class MemoryStorage {
   clear(): void { this.values.clear() }
 }
 
-async function mountPanel(): Promise<{ wrapper: VueWrapper }> {
+// Every panel this file mounts is torn down when its test ends. A panel that
+// outlives its test keeps its scroll-settle loop alive, and that loop calls
+// `store.canLoadOlder()` on a requestAnimationFrame: Pinia treats a setup
+// store's plain function as an action, and an action resets the one global
+// "active pinia" the next `useProjectStore()` reads. A leftover panel could
+// therefore hand the next test the previous test's store.
+enableAutoUnmount(afterEach)
+
+/**
+ * Mounts the panel on a pinia of its own and hands back that pinia's store.
+ *
+ * The store comes back with the wrapper on purpose: resolving it again inside
+ * a test would read the global active pinia, which a panel from an earlier
+ * test can replace (see the note above). Mutating a store the panel does not
+ * use is silent — the assertions then read a panel that never saw the
+ * change — and it is exactly what made this file fail on a loaded machine.
+ */
+async function mountPanel(): Promise<{ wrapper: VueWrapper; store: ReturnType<typeof useProjectStore> }> {
   const pinia = createPinia()
   setActivePinia(pinia)
   const store = useProjectStore()
@@ -123,7 +140,7 @@ async function mountPanel(): Promise<{ wrapper: VueWrapper }> {
     },
   })
   await flushPromises()
-  return { wrapper }
+  return { wrapper, store }
 }
 
 // Issue #867: the transcript renders message content with v-html through the
@@ -151,8 +168,7 @@ describe('ChatPanel user message rendering', () => {
 
   it('shows typed raw HTML in a user bubble and not in the assistant one', async () => {
     const typed = '<p id=out> <img src=x onerror=alert(1)>'
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: typed, timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
       { role: 'assistant', content: typed, timestamp: '2026-08-30T13:23:10Z' },
@@ -197,8 +213,7 @@ describe('ChatPanel chat references', () => {
   })
 
   it('links a known conversation in a user bubble and in an assistant one', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: 'look at chat-0123abcd please', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
       { role: 'assistant', content: 'done, see chat-0123abcd', timestamp: '2026-08-30T13:23:10Z' },
@@ -220,8 +235,7 @@ describe('ChatPanel chat references', () => {
   })
 
   it('leaves an unknown conversation plain', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'user', content: 'look at chat-ffffffff please', timestamp: '2026-08-30T13:23:00Z', turn_index: 0 },
     ]
@@ -233,8 +247,7 @@ describe('ChatPanel chat references', () => {
   })
 
   it('shows the new title when the conversation is renamed', async () => {
-    const { wrapper } = await mountPanel()
-    const store = useProjectStore()
+    const { wrapper, store } = await mountPanel()
     store.messages['chat-1'] = [
       { role: 'assistant', content: 'done, see chat-0123abcd', timestamp: '2026-08-30T13:23:10Z' },
     ]
