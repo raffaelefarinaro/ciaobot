@@ -33,21 +33,35 @@ export function chatRepoTag(repo: Repo, loc: Loc): RepoTag | null {
   }
 }
 
-export interface SidebarBranchChip extends RepoTag { codeOff: boolean }
-
 /**
- * The sidebar branch chip with code mode folded in. On, it stands in for the
- * row's `code` tag; off, it says so, because a worktree the agent no longer
- * works in is a different fact from one it does.
+ * The sidebar branch chip. The sidebar draws it only on code-off rows: in code
+ * mode the row carries the compact `code` badge, and the full branch lives in
+ * that badge's tooltip and in the row's own title. A worktree the agent no
+ * longer codes in is a different fact from one it does, so the chip says so.
  */
-export function sidebarBranchChip(repo: Repo, loc: Loc, codeModeOn: boolean): SidebarBranchChip | null {
+export function sidebarBranchChip(repo: Repo, loc: Loc): RepoTag | null {
   const tag = chatRepoTag(repo, loc)
   if (!tag) return null
-  return {
-    ...tag,
-    title: codeModeOn ? `Code mode · ${tag.title}` : `${tag.title} (code mode off)`,
-    codeOff: !codeModeOn,
+  return { ...tag, title: `${tag.title} (code mode off)` }
+}
+
+/**
+ * The tooltip and accessible name of the sidebar's `code` badge. The badge
+ * itself is one short word, so the facts live here: the repository, the branch
+ * the chat really works on and the folder it works in. Full values, never the
+ * shortened branch the visible tag would show. Without a location the chat
+ * works in the linked repository's own checkout.
+ */
+export function sidebarCodeBadgeTitle(repo: ProjectRepo, loc: Loc): string {
+  if (!hasLocation(loc)) {
+    return `Code mode · ${repoName(repo.path)} · branch ${branchLabel(repo.branch)} · path: ${repo.path}`
   }
+  const worktree = !!loc.is_worktree
+  const name = repoName(worktree ? repo.path : loc.path)
+  const where = worktree
+    ? `worktree${loc.exists === false ? ' removed' : ''}: ${loc.path}`
+    : `path: ${loc.path}`
+  return `Code mode · ${name} · branch ${branchLabel(loc.branch ?? repo.branch)} · ${where}`
 }
 
 export interface RepoChip {
