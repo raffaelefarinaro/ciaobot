@@ -1147,12 +1147,17 @@
               >
                 <!-- Recovery only. Here a pick is not a model change but a
                      retry of the turn that failed, so the picker says so
-                     before the user chooses. -->
+                     before the user chooses. The thinking chips below it are
+                     the current model's set: a pick applies and retries in
+                     one go, so there is no moment where the chips could
+                     follow a model the user has not chosen yet. The note
+                     says so, and a staged level the chosen model does not
+                     offer is dropped when the pick is applied. -->
                 <template v-if="isRecoveryPicker" #header>
                   <div class="model-picker-recovery">
                     <p id="model-picker-recovery-title" class="model-picker-recovery__title">Choose a model to retry immediately</p>
                     <p id="model-picker-recovery-note" class="model-picker-recovery__note">
-                      Choosing a model retries the failed request and may incur usage charges. Thinking applies to that retry.
+                      Choosing a model retries the failed request and may incur usage charges. A Thinking level you pick here applies to that retry, within the levels the current model offers.
                     </p>
                   </div>
                 </template>
@@ -3106,7 +3111,11 @@ const bucketLocked = computed(() => {
 })
 
 // Thinking levels are provider-native and may be narrowed per model when the
-// catalog reports levels.
+// catalog reports levels. The chips are the current model's set, in a
+// recovery too: the pick applies the model and retries in one go, so the
+// chips cannot follow a model the user has not chosen yet. A recovery's
+// staged level is validated against the picked model in selectModel, which
+// drops it when that model does not offer it.
 const filteredThinkingLevels = computed(() => {
   const model = chat.value?.model || ''
   const modelLevels = modelsResponse.value?.model_reasoning_levels?.[model]
