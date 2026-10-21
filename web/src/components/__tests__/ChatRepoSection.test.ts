@@ -5,8 +5,8 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import ChatRepoSection from '../ChatRepoSection.vue'
 import { useProjectStore } from '../../stores/projects'
+import { useTerminalStore } from '../../stores/terminal'
 import { api } from '../../lib/api'
-import { resetHostTerminalForTests } from '../../composables/useHostTerminal'
 import type { ProjectRepo, RepoLocation } from '../../lib/types'
 
 const repo: ProjectRepo = { path: '/r/app', branch: 'main', dirty: false, missing: false }
@@ -199,46 +199,44 @@ describe('ChatRepoSection', () => {
   })
 
   it('puts Open in Terminal before the code-mode row', async () => {
-    resetHostTerminalForTests()
-    vi.spyOn(api, 'get').mockResolvedValue({
-      available: true, platform: 'macos', reason: '', terminal: 'Terminal', actions: [],
-    })
     const wrapper = mountSection(repo, {})
     await flushPromises()
     const terminal = wrapper.get('.chat-repo-terminal').element
     const row = wrapper.get('.repo-code-row').element
     expect(terminal.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     wrapper.unmount()
-    resetHostTerminalForTests()
   })
 
-  it('offers Open in Terminal at the chat folder when the engine can open one', async () => {
-    resetHostTerminalForTests()
-    vi.spyOn(api, 'get').mockResolvedValue({
-      available: true, platform: 'macos', reason: '', terminal: 'Terminal', actions: [],
-    })
-    const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true, platform: 'macos', launched: 'Terminal' })
+  it('opens the browser terminal for the chat', async () => {
+    // The chat's terminal lives in this app now: the button opens the pane
+    // under the chat, and it asks the engine about that one chat.
+    vi.spyOn(api, 'get').mockImplementation((path: string) => Promise.resolve(
+      path === '/api/terminal/status'
+        ? { available: true, reason: '', platform: 'macos', host: 'engine.local', unlock_expires_in: 900, detached_ttl_seconds: 600 }
+        : { sessions: [] },
+    ))
+    const store = useTerminalStore()
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ ok: true })
     const wrapper = mountSection(repo, {})
     await flushPromises()
     const button = wrapper.findAll('button').find((b) => b.text() === 'Open in Terminal')
     expect(button).toBeDefined()
     await button!.trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/host/terminal', { open: 'folder', chat_id: 'c1' })
+    expect(store.visible).toBe(true)
+    expect(store.target).toEqual({ chatId: 'c1' })
+    // The native host terminal is a different route, and this button does not
+    // open one.
+    expect(post).not.toHaveBeenCalledWith('/api/host/terminal', expect.anything())
     wrapper.unmount()
-    resetHostTerminalForTests()
+    useTerminalStore().dispose()
   })
 
-  it('marks the terminal link with chat-repo-terminal when the engine can open one', async () => {
-    resetHostTerminalForTests()
-    vi.spyOn(api, 'get').mockResolvedValue({
-      available: true, platform: 'macos', reason: '', terminal: 'Terminal', actions: [],
-    })
+  it('marks the terminal link with chat-repo-terminal', async () => {
     const wrapper = mountSection(repo, {})
     await flushPromises()
     expect(wrapper.find('.chat-repo-terminal').exists()).toBe(true)
     wrapper.unmount()
-    resetHostTerminalForTests()
   })
 
   it('names a locked code mode without changing switch semantics', () => {

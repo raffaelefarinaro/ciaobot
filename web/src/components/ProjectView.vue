@@ -130,7 +130,7 @@
                 :disabled="repoBusy"
                 @click="openRepoInstructions"
               >Open AGENTS.md</button>
-              <HostTerminalButton :project-id="project.project_id" />
+              <BrowserTerminalButton :project-id="project.project_id" />
             </p>
           </template>
           <p v-else class="empty-row">No repository linked. Link one to give this project's chats the repository's agent instructions and skills.</p>
@@ -437,7 +437,7 @@ import { formatRelative } from '../lib/relativeTime'
 import { chatActivityTimestamp } from '../lib/homeLanes'
 import { colorForWorkspace } from '../lib/workspaceColors'
 import PaneHeader from './PaneHeader.vue'
-import HostTerminalButton from './HostTerminalButton.vue'
+import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import RepoPickerDialog from './RepoPickerDialog.vue'
 import { branchLabel, findRepoInstructions } from '../lib/repo'
 import ChatSignals from './ChatSignals.vue'

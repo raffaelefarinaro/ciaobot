@@ -305,6 +305,12 @@
           </div>
         </div>
       </template>
+      <!-- The browser terminal's panel: a strip under the chat on a wide
+           pane, a full-height drawer on a phone. It is loaded the first time
+           a terminal is asked for and kept afterwards, so the screen it holds
+           survives a hide — and so a chat page that never opens a terminal
+           does not download it. -->
+      <TerminalPane v-if="terminalMounted" />
     </div>
     <FileViewerModal v-if="fileViewerMounted" :opener="fileViewerOpener" />
     <ItemPeekHost v-if="itemPeekMounted" />
@@ -316,6 +322,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch 
 import HomeNoticeReopen from './HomeNoticeReopen.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { terminalPanelWanted } from '../lib/terminalPanel'
 import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useItemPeekStore } from '../stores/itemPeek'
@@ -355,6 +362,15 @@ const ChatPanel = defineAsyncComponent({
   timeout: 30000,
 })
 const PinnedFilePanel = defineAsyncComponent(loadPinnedFilePanel)
+// The browser terminal's panel, loaded the first time a terminal is asked
+// for. It stays mounted after that: the screen it holds is the session's,
+// and a hide must not throw it away. The signal that asks for it is its own
+// tiny module, so the app shell does not carry the terminal store.
+const TerminalPane = defineAsyncComponent(() => import('./TerminalPane.vue'))
+const terminalMounted = ref(false)
+watch(terminalPanelWanted, (wanted) => {
+  if (wanted) terminalMounted.value = true
+})
 const FileViewerModal = defineAsyncComponent(loadFileViewerModal)
 // Lazy like the file viewer, and not in lib/chatComponents: that module's loaders
 // are the chat chunk's named entry points.

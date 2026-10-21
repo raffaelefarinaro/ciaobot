@@ -376,6 +376,17 @@ web/                           Vue 3 PWA frontend.
                                refused), and one owned ResizeObserver measures the screen. xterm and
                                its fit addon are imported dynamically, so no page that shows no
                                terminal carries them.
+                               The pane around that screen is `TerminalPane.vue`: a strip under the
+                               chat on a wide pane, a full-height drawer on a phone, mounted the
+                               first time a terminal is asked for (`terminalPanel.ts` carries the
+                               one-bit signal) and kept after that, so the screen survives a hide.
+                               It owns one screen per session and never rebinds one, enables input
+                               only for a live, unlocked session it owns, and isolates the app's
+                               shortcuts in the bubble phase on its own root — the shell keeps
+                               Escape, Tab, the arrows, Ctrl+C and Ctrl+D, and Shift+Tab is the one
+                               key intercepted in the capture phase, to hand the keyboard back to
+                               the panel's controls. Hide detaches; End asks the engine to stop
+                               the shell.
   package.json                 npm deps and scripts (build, typecheck, test).
   Vite + TypeScript. Build outputs to ciao/web/static/.
 

@@ -156,6 +156,38 @@ either rule.
 
 iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `readyState` may still report `OPEN` while no events flow. Listen for `visibilitychange` (visible) and `pageshow` (bfcache restore) on any view that depends on a WebSocket, and force-disconnect + reconnect.
 
+### The browser terminal
+
+The chat's and the project's *Open in Terminal* opens a terminal **inside the
+app**: a strip under the chat on a wide pane, a full-height drawer on a phone.
+It is a shell on the engine's own machine, and the pane says so before
+anything is typed. The native host terminal keeps its own button
+(`HostTerminalButton.vue`) for the actions that need a real window on the
+engine's computer: provider sign-in, skill updates, the engine's own update.
+
+- `stores/terminal.ts` owns the wire — the HTTP actions, the socket, the
+  bounded renderer backpressure and the replay offsets. The pane
+  (`components/TerminalPane.vue`) owns the screen and the controls around it;
+  the screen itself is `lib/terminalRenderer.ts` (one xterm, bound to one
+  session for life).
+- The pane is a chunk of its own, mounted the first time a terminal is asked
+  for and kept after that, so the screen survives a hide and a chat page that
+  never opens a terminal does not download it. `lib/terminalPanel.ts` carries
+  the one-bit signal; Home's payload is guarded by
+  `e2e/specs/chat-file-open.spec.ts`.
+- **The keyboard belongs to the shell while the terminal has focus.** Escape,
+  Tab, the arrows, Ctrl+C and Ctrl+D reach the terminal, so the pane does not
+  use `useModalFocus` — its capture-phase Escape would swallow the shell's
+  own Escape — and it does not remap Ctrl+C or Ctrl+D. Instead the pane
+  *isolates* the app's shortcuts: a keydown that bubbles out of the terminal
+  is stopped at the pane root, in the **bubble** phase, so the terminal's own
+  listener has already run. `Shift`+`Tab` is the one key intercepted in the
+  capture phase: it moves the keyboard to the panel's controls, because the
+  shell keeps Tab and a pane that cannot be left is a keyboard trap.
+- **Hide is not End.** Hide detaches: the socket closes and the shell keeps
+  running on the engine. End asks the engine to stop it. They are two
+  buttons, and only one of them stops the process.
+
 ### Layout traps
 
 - **Do not use `scrollIntoView` on nested scrollable containers.** iOS Safari can scroll the wrong ancestor. Compute `offsetTop` relative to the scroll container and call `scrollTo({ top, behavior: 'smooth' })` directly. See `scrollToHighlight` / `scrollSidebarToCard` in `ChatPanel.vue`.
