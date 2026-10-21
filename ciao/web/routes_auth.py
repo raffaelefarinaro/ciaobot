@@ -18,7 +18,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.setup_marker import RUNTIME_DIR_NAME, clear_welcome_pending
+from ciao.terminal_auth import TERMINAL_COOKIE, TerminalGrantStore
 from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
+from ciao.web.routes_terminal import _scheme_of
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,53 @@ def _recent_password_change_failures(client_ip: str) -> list[float]:
     return recent
 
 
+def _terminal_grants(request: Request) -> TerminalGrantStore:
+    """The app's grant store.
+
+    There is no fallback: the factory always wires one, and a route that
+    cannot find it is a wiring bug rather than a request to answer.
+    """
+    store: TerminalGrantStore = request.app.state.terminal_grants
+    return store
+
+
+def _clear_terminal_cookie(response: JSONResponse, request: Request) -> None:
+    """Clear the terminal cookie with the shape the unlock gave it.
+
+    The grant cookie is host-only (no ``Domain``), ``Path=/`` (both
+    ``/api/terminal`` and ``/ws/terminal`` need it), ``HttpOnly`` and
+    ``SameSite=Strict``, and ``Secure`` when the request arrived over
+    HTTPS — so the browser drops the bearer it is holding. A ``Secure``
+    cookie would be dropped by a browser on plain HTTP, so the flag
+    follows the request's own scheme, read the way the terminal's own
+    policy reads it: the effective ASGI scheme, never a raw forwarded
+    header.
+    """
+    response.delete_cookie(
+        TERMINAL_COOKIE,
+        path="/",
+        domain=None,
+        secure=_scheme_of(request) == "https",
+        httponly=True,
+        samesite="strict",
+    )
+
+
+def _revoke_presented_terminal_grant(request: Request) -> None:
+    """Revoke the terminal grant this request presents, and only that one.
+
+    The bearer in the terminal cookie names exactly one grant, and the
+    cookie belongs to one browser. A logout that presents no cookie, or a
+    cookie naming a grant that is unknown, expired or already revoked,
+    ends nothing — so a browser that never unlocked a terminal cannot end
+    another browser's.
+    """
+    token = str(request.cookies.get(TERMINAL_COOKIE, "") or "")
+    if not token:
+        return
+    _terminal_grants(request).revoke(token)
+
+
 async def auth_login(request: Request) -> JSONResponse:
     app = request.app
     client_ip = request.client.host if request.client else "unknown"
@@ -86,8 +135,18 @@ async def auth_login(request: Request) -> JSONResponse:
 
 
 async def auth_logout(request: Request) -> JSONResponse:
+    """End this browser's session, and this browser's terminal grant.
+
+    The logout presents the grant it is ending. It revokes *that* grant and
+    nothing else: the login cookie cannot say which browser is asking —
+    two browsers signed in within the same second can hold byte-identical
+    cookies — so revoking "the grant for this session" would end another
+    browser's terminal too. The grant is named by the bearer in the
+    terminal cookie, and the bearer is a secret of one browser.
+    """
     response = JSONResponse({"ok": True})
     cookie_kwargs = session_cookie_kwargs(request)
+    _revoke_presented_terminal_grant(request)
     response.delete_cookie(
         SESSION_COOKIE,
         path="/",
@@ -96,6 +155,9 @@ async def auth_logout(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
     )
+    # The terminal cookie is cleared with the shape the unlock gave it, so
+    # the browser drops the bearer it is holding.
+    _clear_terminal_cookie(response, request)
     return response
 
 
@@ -160,6 +222,11 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     ``.env``, or with a one-time ``ciao setup-url`` login. A missing
     or wrong ``current_password`` is 400/403, never 401: 401 means the session
     is gone, and the PWA sends the browser to /login on it.
+
+    A successful change ends every terminal grant, on every browser: the
+    password is the terminal's own credential, so a change ends the
+    unlocks it made and every browser has to unlock again. A refused change
+    ends nothing.
     """
     from ciao.web.auth import MIN_PWA_PASSWORD_LENGTH, make_serializer
     from ciao.web.routes_api import _env_path, _write_env_values
@@ -222,6 +289,11 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     config.pwa_auth_token = token_to_store
     request.app.state.serializer = make_serializer(token_to_store)
     _password_change_failures.pop(client_ip, None)
+    # The password is the terminal's own credential, so a change ends every
+    # unlock it made — on every browser, including this one. A rewrite of
+    # the same secret is still a change and still ends them. Nothing is
+    # revoked on the failure paths above: a refused change changes nothing.
+    _terminal_grants(request).revoke_all()
     logger.info("PWA password changed (on_host=%s)", on_host)
 
     response = JSONResponse(
@@ -233,6 +305,9 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     # Keep this browser logged in after rotating the signing secret.
     signed = request.app.state.serializer.dumps({"user": "owner"})
     response.set_cookie(SESSION_COOKIE, signed, **session_cookie_kwargs(request))
+    # The terminal cookie goes with the grants it named: this browser has
+    # to unlock the terminal again, with the new password.
+    _clear_terminal_cookie(response, request)
     return response
 
 

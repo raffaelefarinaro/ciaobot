@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from http.cookies import Morsel, SimpleCookie
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -12,6 +14,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao import macos_service
+from ciao.terminal_auth import TERMINAL_COOKIE, TerminalGrantStore
 from ciao.web import auth
 from ciao.web.auth import AuthMiddleware, SESSION_COOKIE
 from ciao.web.routes_auth import auth_login, auth_logout
@@ -115,6 +118,11 @@ def _auth_client() -> TestClient:
     )
     app.state.serializer = serializer
     app.state.config = SimpleNamespace(pwa_auth_token="test-token")
+    # The real grant store, wired the way the app wires it: the logout
+    # route reads it off `app.state`, so a fixture without one is a wiring
+    # bug, not a request to answer. No production fallback is added for it.
+    app.state.terminal_clock = time.monotonic
+    app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
     return TestClient(app, base_url="https://ciao.example")
 
 
@@ -169,6 +177,316 @@ def test_logout_clears_host_only_cookie() -> None:
     set_cookie = resp.headers["set-cookie"]
     assert "Domain=" not in set_cookie
     assert "Max-Age=0" in set_cookie
+
+
+def test_logout_clears_the_session_cookie_on_its_own_header() -> None:
+    """The session deletion keeps its own shape now that two cookies go out.
+
+    A logout clears the login cookie *and* the terminal cookie, so the
+    response carries two `Set-Cookie` headers. Each deletion is checked on
+    the header that names it: the login cookie is host-only, `Path=/`,
+    `HttpOnly`, `SameSite=lax` and `Secure` over HTTPS.
+    """
+    client = _auth_client()
+    login = client.post("/api/auth", json={"token": "test-token"})
+    assert login.status_code == 200
+
+    resp = client.post(
+        "/api/auth/logout",
+        headers={"Origin": "https://ciao.example"},
+    )
+
+    assert resp.status_code == 200
+    set_cookies = resp.headers.get_list("set-cookie")
+    # The joined header would hide which deletion carries which attribute.
+    assert len(set_cookies) == 2
+    session = _cookie_morsel(set_cookies, SESSION_COOKIE)
+    _assert_deletion_attributes(session, samesite="lax", secure=True)
+
+
+def _grant(app: Starlette, session_cookie: str) -> str:
+    """A live grant bearer, minted on ``session_cookie``."""
+    store: TerminalGrantStore = app.state.terminal_grants
+    token, _grant = store.issue(session_cookie)
+    return token
+
+
+def _terminal_cookie_header(set_cookies: list[str], name: str) -> str:
+    """The one Set-Cookie line that names ``name``."""
+    matches = [line for line in set_cookies if line.startswith(f"{name}=")]
+    assert len(matches) == 1, f"expected one {name} cookie, got {set_cookies}"
+    return matches[0]
+
+
+def _cookie_morsel(set_cookies: list[str], name: str) -> Morsel:
+    """The parsed attributes of the one Set-Cookie line that names ``name``.
+
+    A substring check is not enough: ``"Path=/" in header`` also accepts
+    ``Path=/api``, and a browser would then keep the bearer for a path the
+    terminal never asks for. So the line is parsed and every attribute is
+    compared as a value.
+    """
+    header = _terminal_cookie_header(set_cookies, name)
+    jar = SimpleCookie()
+    jar.load(header)
+    assert name in jar, f"{name} did not parse as a cookie: {header!r}"
+    return jar[name]
+
+
+def _assert_deletion_attributes(
+    morsel: Morsel,
+    *,
+    samesite: str,
+    secure: bool,
+) -> None:
+    """Every attribute a cookie deletion has to carry, checked as a value.
+
+    Host-only (no ``Domain``), ``Path=/`` exactly, ``Max-Age=0``, ``HttpOnly``,
+    the given ``SameSite`` (case-insensitively) and ``Secure`` exactly when
+    the request arrived over HTTPS.
+    """
+    assert morsel["path"] == "/", f"Path must be exactly '/', got {morsel['path']!r}"
+    assert morsel["max-age"] == "0", f"Max-Age must be 0, got {morsel['max-age']!r}"
+    assert morsel["httponly"] is True
+    assert str(morsel["samesite"]).lower() == samesite.lower()
+    assert morsel["domain"] == "", f"must be host-only, got {morsel['domain']!r}"
+    assert bool(morsel["secure"]) is secure
+
+
+def test_logout_revokes_only_the_presented_terminal_grant() -> None:
+    """A logout ends the grant it presents and nothing else.
+
+    Two browsers can hold byte-identical login cookies, so the login
+    cookie cannot say which browser is asking. Revoking "the grant for
+    this session" would end the other browser's terminal too.
+    """
+    client = _auth_client()
+    app = client.app
+    store: TerminalGrantStore = app.state.terminal_grants
+
+    login = client.post("/api/auth", json={"token": "test-token"})
+    assert login.status_code == 200
+    session_cookie = client.cookies.get(SESSION_COOKIE) or ""
+    assert session_cookie
+
+    # Two browsers, one identical login cookie, two independent grants.
+    other_session_cookie = session_cookie
+    mine = _grant(app, session_cookie)
+    theirs = _grant(app, other_session_cookie)
+    assert mine != theirs
+    assert store.retained_grant_count() == 2
+
+    client.cookies.set(TERMINAL_COOKIE, mine)
+    resp = client.post(
+        "/api/auth/logout",
+        headers={"Origin": "https://ciao.example"},
+    )
+
+    assert resp.status_code == 200
+    # The presented grant is gone.
+    assert store.verify(mine, session_cookie) is None
+    # The other browser's grant is untouched, even though the login cookie
+    # it is bound to is byte-identical.
+    assert store.verify(theirs, other_session_cookie) is not None
+    assert store.retained_grant_count() == 1
+
+
+def test_logout_without_a_terminal_cookie_keeps_every_grant() -> None:
+    """A logout that presents no grant ends no grant."""
+    client = _auth_client()
+    app = client.app
+    store: TerminalGrantStore = app.state.terminal_grants
+
+    login = client.post("/api/auth", json={"token": "test-token"})
+    assert login.status_code == 200
+    session_cookie = client.cookies.get(SESSION_COOKIE) or ""
+    assert session_cookie
+
+    live = _grant(app, session_cookie)
+    assert store.retained_grant_count() == 1
+
+    resp = client.post(
+        "/api/auth/logout",
+        headers={"Origin": "https://ciao.example"},
+    )
+
+    assert resp.status_code == 200
+    assert store.verify(live, session_cookie) is not None
+    assert store.retained_grant_count() == 1
+
+
+def _logout_client(base_url: str) -> TestClient:
+    """A client for a logout-only app, wired with a grant store."""
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/auth/logout", auth_logout, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = SimpleNamespace(pwa_auth_token="test-token")
+    app.state.terminal_clock = time.monotonic
+    app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
+    client = TestClient(app, base_url=base_url)
+    client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
+    return client
+
+
+def test_logout_clears_the_terminal_cookie_with_the_grant_shape() -> None:
+    """The terminal cookie is cleared the way it was set.
+
+    Host-only (no `Domain`), `Path=/` exactly, `HttpOnly`, `SameSite=Strict`,
+    and `Secure` when the request arrived over HTTPS — the same shape the
+    unlock set, so the browser drops the bearer it is holding.
+    """
+    client = _auth_client()
+    login = client.post("/api/auth", json={"token": "test-token"})
+    assert login.status_code == 200
+
+    resp = client.post(
+        "/api/auth/logout",
+        headers={"Origin": "https://ciao.example"},
+    )
+
+    assert resp.status_code == 200
+    set_cookies = resp.headers.get_list("set-cookie")
+    terminal = _cookie_morsel(set_cookies, TERMINAL_COOKIE)
+    _assert_deletion_attributes(terminal, samesite="strict", secure=True)
+    # The login cookie is still cleared, exactly as before.
+    session = _terminal_cookie_header(set_cookies, SESSION_COOKIE)
+    assert "Max-Age=0" in session
+
+
+def test_logout_over_plain_http_does_not_mark_the_terminal_cookie_secure() -> None:
+    """A `Secure` cookie would be dropped by a browser on plain HTTP."""
+    client = _logout_client("http://localhost:8443")
+
+    resp = client.post("/api/auth/logout", headers={"Origin": "http://localhost:8443"})
+
+    assert resp.status_code == 200
+    terminal = _cookie_morsel(resp.headers.get_list("set-cookie"), TERMINAL_COOKIE)
+    _assert_deletion_attributes(terminal, samesite="strict", secure=False)
+
+
+def test_logout_over_plain_http_ignores_a_forwarded_https_scheme() -> None:
+    """`Secure` follows the effective scheme, not a forwarded header.
+
+    A raw `X-Forwarded-Proto` is a header anyone can send. If it could mark
+    the deletion `Secure` on a plain-HTTP request, the browser would refuse
+    to apply the deletion — so the bearer would survive the logout.
+    """
+    client = _logout_client("http://localhost:8443")
+
+    resp = client.post(
+        "/api/auth/logout",
+        headers={
+            "Origin": "http://localhost:8443",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+
+    assert resp.status_code == 200
+    terminal = _cookie_morsel(resp.headers.get_list("set-cookie"), TERMINAL_COOKIE)
+    _assert_deletion_attributes(terminal, samesite="strict", secure=False)
+
+
+def test_logout_over_plain_http_clears_the_session_cookie_without_secure() -> None:
+    """The session deletion follows the effective scheme too.
+
+    A `Secure` deletion over plain HTTP is one the browser refuses to
+    apply, so the login cookie would survive the logout.
+    """
+    client = _logout_client("http://localhost:8443")
+
+    resp = client.post("/api/auth/logout", headers={"Origin": "http://localhost:8443"})
+
+    assert resp.status_code == 200
+    session = _cookie_morsel(resp.headers.get_list("set-cookie"), SESSION_COOKIE)
+    _assert_deletion_attributes(session, samesite="lax", secure=False)
+
+
+def test_logout_over_https_marks_the_terminal_cookie_secure_despite_a_forwarded_http(
+) -> None:
+    """The other direction: a forwarded `http` cannot downgrade the deletion.
+
+    The effective scheme is what the server saw the request arrive on, so
+    the deletion is `Secure` even when a header claims plain HTTP.
+    """
+    client = _auth_client()
+    login = client.post("/api/auth", json={"token": "test-token"})
+    assert login.status_code == 200
+
+    resp = client.post(
+        "/api/auth/logout",
+        headers={
+            "Origin": "https://ciao.example",
+            "X-Forwarded-Proto": "http",
+        },
+    )
+
+    assert resp.status_code == 200
+    terminal = _cookie_morsel(resp.headers.get_list("set-cookie"), TERMINAL_COOKIE)
+    _assert_deletion_attributes(terminal, samesite="strict", secure=True)
+
+
+def test_logout_without_a_wired_grant_store_is_a_wiring_bug() -> None:
+    """There is no fallback store: a missing one raises rather than skipping.
+
+    A fallback that quietly revoked nothing would make an un-wired app look
+    like it had revoked the grant, and a fallback that invented one would
+    hide the wiring bug. The store is always wired by the factory, so a
+    route that cannot find it is a bug and says so.
+    """
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/auth/logout", auth_logout, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = SimpleNamespace(pwa_auth_token="test-token")
+    client = TestClient(app, base_url="https://ciao.example")
+    client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
+    client.cookies.set(TERMINAL_COOKIE, "a-grant-bearer")
+
+    with pytest.raises(AttributeError):
+        client.post("/api/auth/logout", headers={"Origin": "https://ciao.example"})
+
+
+def test_the_factory_app_revokes_the_grant_its_logout_presents(tmp_path) -> None:
+    """The real app, wired the way the engine wires it.
+
+    The factory is what puts the grant store on `app.state`; this proves
+    the logout route finds it there and revokes the presented bearer, with
+    no fallback of its own.
+    """
+    from ciao.config import CiaoConfig, WorkspaceConfig
+    from ciao.web.app import create_app
+
+    config = CiaoConfig(
+        pwa_auth_token="test-secret",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime",
+        media_root=tmp_path / "media",
+        vault_root=tmp_path / "memory-vault",
+        workspaces={
+            "personal": WorkspaceConfig(
+                name="personal", vault_root="memory-vault/personal"
+            )
+        },
+    )
+    app = create_app(config)
+    store: TerminalGrantStore = app.state.terminal_grants
+    client = TestClient(app, base_url="https://ciao.example")
+    client.cookies.set(SESSION_COOKIE, app.state.serializer.dumps({"user": "owner"}))
+
+    session_cookie = client.cookies.get(SESSION_COOKIE) or ""
+    token, _grant = store.issue(session_cookie)
+    client.cookies.set(TERMINAL_COOKIE, token)
+
+    resp = client.post("/api/auth/logout", headers={"Origin": "https://ciao.example"})
+
+    assert resp.status_code == 200
+    assert store.verify(token, session_cookie) is None
+    assert store.retained_grant_count() == 0
 
 
 def test_non_ascii_setup_token_is_401_not_500(tmp_path) -> None:
