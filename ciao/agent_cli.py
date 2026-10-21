@@ -467,7 +467,7 @@ def _handover_messages(raw: str | None) -> list[dict[str, Any]] | None:
                     f"--messages refuses credential-adjacent paths ({raw[1:]}): "
                     "pass the content inline instead."
                 )
-            text = candidate.read_text(encoding="utf-8")
+            text = resolved.read_text(encoding="utf-8")
         else:
             text = raw
         messages = json.loads(text)
@@ -504,7 +504,7 @@ def _task_body(raw: str | None, *, flag: str = "--body-file") -> str | None:
             "pass the content in a workspace file instead."
         )
     try:
-        return path.read_text(encoding="utf-8")
+        return resolved.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise UsageError(f"{flag} must be a readable UTF-8 file: {exc}") from exc
 
