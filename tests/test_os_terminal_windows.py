@@ -2113,6 +2113,12 @@ def test_a_real_ctrl_c_interrupts_the_foreground_command_and_not_the_shell(
     arrives well inside that window can only be there because the
     interrupt reached the program. The marker is computed by the shell, so
     it cannot be an echo of what was typed.
+
+    The marker is typed only once the shell is back at its prompt. Sending
+    it straight after the interrupt is a race the shell can win by
+    discarding the pending input along with the interrupted line, and a
+    test that loses that race would fail for a reason that says nothing
+    about the interrupt.
     """
     ready_code, ready = _marker("GO")
     coded, expected = _marker("AFTER")
@@ -2121,8 +2127,15 @@ def test_a_real_ctrl_c_interrupts_the_foreground_command_and_not_the_shell(
         terminal.write(_emit(ready_code))
         _read_until(terminal, ready.encode("utf-8"))
         terminal.write(b"Start-Sleep -Seconds 30\r")
+        # The line has been accepted once the shell echoes it back; the
+        # sleep is then running, because a native command starts at once.
+        _read_until(terminal, b"Start-Sleep", timeout=10)
         time.sleep(1.0)
         terminal.write(b"\x03")
+        # The prompt comes back when the interrupted command unwinds. Until
+        # then the shell may discard whatever else arrives, so the marker
+        # waits for it rather than racing it.
+        _read_until(terminal, b"> ", timeout=10)
         terminal.write(_emit(coded))
         # Ten seconds is far below the thirty the foreground command would
         # take, so a reply can only mean the interrupt worked.
@@ -2249,6 +2262,7 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
 
     before = settled_handle_count()
     cycle_coded, cycle_expected = _marker("CYCLE")
+    counts = []
     for _ in range(3):
         terminal = tw.spawn_terminal(cwd=tmp_path)
         try:
@@ -2256,6 +2270,21 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
             _read_until(terminal, cycle_expected.encode("utf-8"))
         finally:
             terminal.close()
+        # Every handle the adapter opened for this terminal is released
+        # before the next one starts: this is the invariant the adapter
+        # owns, and it is exact.
+        assert terminal._output_read == 0, "the output pipe was not released"
+        assert terminal._input_write == 0, "the input pipe was not released"
+        assert terminal._reader_handle is None, "the reader handle was not released"
+        assert terminal._process == 0, "the process handle was not released"
+        assert not terminal._hpcon, "the pseudoconsole was not released"
+        assert terminal._fully_closed, "the terminal did not finish closing"
+        assert (
+            getattr(terminal._tree, "_job", None) is None
+        ), "the job object was not released"
+        # The pseudoconsole unwinds in the console host, so let it settle
+        # between cycles instead of stacking three teardowns together.
+        counts.append(settled_handle_count())
     after = settled_handle_count()
 
     # Three cycles leak six handles if every terminal keeps one; a bound of
@@ -2263,7 +2292,7 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
     # still fails on a real leak.
     assert (
         after <= before + 2
-    ), f"the handle count grew from {before} to {after}; a terminal leaked"
+    ), f"the handle count grew from {before} to {after} (per cycle {counts}); a terminal leaked"
 
 
 def test_a_computed_marker_is_not_what_was_typed() -> None:
