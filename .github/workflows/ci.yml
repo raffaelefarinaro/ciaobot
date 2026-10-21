@@ -129,8 +129,11 @@ jobs:
     # prove that a real pseudoconsole works. This step runs on every PR, not
     # only on the ones that run the whole Windows suite, so the native binding
     # is exercised before the change is merged instead of after it.
+    # The timeout is a bound, not a hope: a terminal test that hangs on a
+    # pipe must fail the job rather than hold the runner for six hours.
     - name: Windows ConPTY terminal tests
       if: ${{ !cancelled() }}
+      timeout-minutes: 15
       run: |
         set -o pipefail
         python -m pytest -q -rfE tests/test_os_terminal_windows.py 2>&1 | tee windows-terminal.txt
@@ -295,7 +298,10 @@ jobs:
       if: always()
       run: |
         # `tests/` keeps captured log lines that also start with ERROR out.
-        grep -E '^(FAILED|ERROR) tests/' windows-pytest.txt | sed -E 's/ - .*//' | sort -u > windows-failures.txt || true
+        # The terminal file names its tests as `tests/test_...`, so the same
+        # grep covers the focused native step: a red ConPTY step has to name
+        # the tests that failed, not only the count.
+        grep -E '^(FAILED|ERROR) tests/' windows-pytest.txt windows-terminal.txt 2>/dev/null | sed -E 's/ - .*//' | sed -E 's#^[^(]*tests/#tests/#' | sort -u > windows-failures.txt || true
         {
           echo "### Windows (#696)"
           echo

@@ -22,6 +22,7 @@ would not be tested at all.
 from __future__ import annotations
 
 import ctypes
+import queue
 import re
 import sys
 import threading
@@ -93,10 +94,17 @@ class _FakeWin32:
         self.block_read = threading.Event()
         self.block_write = threading.Event()
         self.io_release = threading.Event()
+        # Set to make a read block until the output pipe is closed, the way
+        # a real pipe with its write end open does.
+        self.read_until_closed = threading.Event()
         # Set while the output pipe is still open: the reader waits for
         # :attr:`output_release` before it reports the end of the output.
         self.end_of_output = threading.Event()
         self.output_release = threading.Event()
+        # Set to hold the reader just before it reports the end of the
+        # output, so a test can put the final chunk in the queue first.
+        self.pause_before_end = threading.Event()
+        self.pause_release = threading.Event()
         # Set while the closer thread waits for the child to exit.
         self.block_wait = threading.Event()
         self.wait_release = threading.Event()
@@ -147,11 +155,22 @@ class _FakeWin32:
             self.io_release.wait(10)
             ctypes.set_last_error(995)  # ERROR_OPERATION_ABORTED
             return 0
+        if self.read_until_closed.is_set():
+            # A real pipe with its write end still open: the read blocks
+            # until every writer is gone. This is what a rollback that reads
+            # before it closes the pipe would hit.
+            self.output_closed.wait(10)
+            ctypes.set_last_error(109)  # ERROR_BROKEN_PIPE
+            return 0
         if self.end_of_output.is_set():
             # The pipe is still open: the read waits for the test to bring
             # the end of the output.
             self.output_release.wait(10)
         if not self.read_chunks:
+            if self.pause_before_end.is_set():
+                # The reader has read everything it was given and is held
+                # just before it reports that the output ended.
+                self.pause_release.wait(10)
             ctypes.set_last_error(109)  # ERROR_BROKEN_PIPE: the end of the output
             return 0
         chunk = self.read_chunks.pop(0)
@@ -204,6 +223,9 @@ class _FakeWin32:
         if attribute_list is None:
             size_ref._obj.value = 64
             return 0
+        if self._fail("InitializeProcThreadAttributeList"):
+            ctypes.set_last_error(8)  # ERROR_NOT_ENOUGH_MEMORY
+            return 0
         return 1
 
     def UpdateProcThreadAttribute(
@@ -248,6 +270,9 @@ class _FakeWin32:
         if self._fail("CreateProcessW"):
             ctypes.set_last_error(2)
             return 0
+        # The STARTUPINFOEX the adapter passed, read back through the pointer
+        # it gave: that is what the child really sees.
+        info = ctypes.cast(startup, ctypes.POINTER(tw._StartupInfoEx)).contents
         self.spawned.append(
             {
                 "application": application,
@@ -255,6 +280,11 @@ class _FakeWin32:
                 "flags": flags,
                 "cwd": cwd,
                 "inherit": inherit,
+                "dw_flags": int(info.StartupInfo.dwFlags),
+                "h_std_input": int(info.StartupInfo.hStdInput or 0),
+                "h_std_output": int(info.StartupInfo.hStdOutput or 0),
+                "h_std_error": int(info.StartupInfo.hStdError or 0),
+                "startup_cb": int(info.StartupInfo.cb),
             }
         )
         info_ref._obj.hProcess = self._handle("process")
@@ -303,6 +333,37 @@ class _FakeWin32:
         if int(handle) == self.output_read:
             self.output_closed.set()
         return 1
+
+
+class _QueueThatEndsDuringAnEmptyCheck:
+    """A queue that queues the last chunk and publishes the end on one look.
+
+    It models the one interleaving the reader can produce and a caller
+    cannot see coming: the reader queues its final chunk and publishes the
+    end of the output *after* the caller has looked and found nothing, but
+    before the caller has finished deciding what an empty queue means.
+
+    The producer order is the real one — the chunk first, the end after it
+    — so a caller that answers "ended" without looking at the queue again
+    is answering it while the last chunk is queued.
+    """
+
+    def __init__(self, owner: Any, *, on_call: int, final: bytes) -> None:
+        self._owner = owner
+        self._on_call = on_call
+        self._final = final
+        self._calls = 0
+        self._pending: list[bytes] = []
+
+    def get_nowait(self) -> bytes:
+        self._calls += 1
+        if self._calls == self._on_call:
+            self._pending.append(self._final)
+            self._owner._ended = tw._End(None)
+            raise queue.Empty
+        if not self._pending:
+            raise queue.Empty
+        return self._pending.pop(0)
 
 
 def _install_fake(monkeypatch: pytest.MonkeyPatch, fake: _FakeWin32) -> None:
@@ -381,6 +442,46 @@ def test_spawn_assigns_the_job_before_resuming_and_never_uses_a_process_group(
 
 
 @_windows_only
+def test_the_child_standard_handles_point_at_the_pseudoconsole(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The child's standard handles must be the pseudoconsole's, not ours.
+
+    This is the regression for the native failure in #1694: without
+    ``STARTF_USESTDHANDLES`` the child keeps the *parent's* standard handles,
+    so the shell's prompt went to the parent's stdout and its input never
+    came from the pseudoconsole. The child then saw the end of that input
+    and exited at once, and the pipe carried only the console's start-up and
+    tear-down sequences.
+
+    Microsoft Terminal does the same thing
+    (``siEx.StartupInfo.dwFlags = STARTF_USESTDHANDLES;``) with the three
+    standard-handle slots left null, because the pseudoconsole replaces the
+    child's console rather than its file descriptors.
+    """
+    fake = _FakeWin32()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        spawned = fake.spawned[0]
+        assert spawned["dw_flags"] & tw._STARTF_USESTDHANDLES, (
+            "the child must be told to use the pseudoconsole's standard "
+            "handles, or it inherits the parent's"
+        )
+        # The pseudoconsole replaces the child's console, so the three slots
+        # stay null: there is no file descriptor to hand over.
+        assert spawned["h_std_input"] == 0
+        assert spawned["h_std_output"] == 0
+        assert spawned["h_std_error"] == 0
+        # The struct size is the extended one, as the SDK asks.
+        assert spawned["startup_cb"] == ctypes.sizeof(tw._StartupInfoEx)
+    finally:
+        terminal.close()
+
+
+@_windows_only
 def test_the_job_is_created_between_the_child_and_its_resume(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -404,7 +505,6 @@ def test_the_job_is_created_between_the_child_and_its_resume(
         assert order == ["job"], "the job must be created exactly once"
         assert names.index("CreateProcessW") < names.index("ResumeThread")
         # The job was created after the child and before the resume.
-        assert names.index("CreateProcessW") < names.index("ResumeThread")
     finally:
         terminal.close()
 
@@ -450,6 +550,120 @@ def test_a_resume_failure_kills_the_child_and_closes_every_handle(
 
 
 @_windows_only
+def test_a_failed_spawn_never_reads_the_output_pipe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The rollback closes the pipe; it never reads from it.
+
+    A pipe whose write end is still open blocks the reader, so a rollback
+    that read before it closed would wait for ever: the pseudoconsole's
+    write end is exactly such a writer. Nothing has to be read on a failed
+    spawn — there is no reader to hand the bytes to — so the rollback only
+    closes the pipe, and then the pseudoconsole.
+    """
+    fake = _FakeWin32()
+    fake.pseudo_blocks = True
+    fake.resume_fails = True
+    # A read on this pipe blocks until the pipe is closed.
+    fake.read_until_closed.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    with pytest.raises(OSError):
+        tw.spawn_terminal(cwd=tmp_path)
+
+    assert "ReadFile" not in _names(fake), (
+        "the rollback must not read from the output pipe; the read would "
+        "block until the pipe is closed"
+    )
+    assert fake.pseudoconsole_closed == 1, "the pseudoconsole must be closed"
+    # The fake's ClosePseudoConsole only returns once the output pipe is
+    # closed, so a rollback that closed the pseudoconsole first would have
+    # waited out its timeout here.
+    assert (
+        fake.output_closed.is_set()
+    ), "the output pipe must be closed before the pseudoconsole is closed"
+    pipe_closed = [
+        index
+        for index, (name, args) in enumerate(fake.calls)
+        if name == "CloseHandle" and int(args[0]) == fake.output_read
+    ]
+    pseudo_closed = [
+        index
+        for index, (name, _) in enumerate(fake.calls)
+        if name == "ClosePseudoConsole"
+    ]
+    assert pipe_closed and pseudo_closed
+    assert (
+        pipe_closed[0] < pseudo_closed[0]
+    ), "the output pipe must be closed before the pseudoconsole"
+
+
+@_windows_only
+def test_a_failed_spawn_closes_every_handle_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The rollback releases each handle it opened, and no handle twice."""
+    fake = _FakeWin32()
+    fake.resume_fails = True
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    with pytest.raises(OSError):
+        tw.spawn_terminal(cwd=tmp_path)
+
+    closed = fake.closed_handles
+    assert len(closed) == len(set(closed)), "a handle was closed twice"
+    assert set(fake.handles) - set(closed) == set(), (
+        "handles were left open: " f"{sorted(set(fake.handles) - set(closed))}"
+    )
+
+
+@_windows_only
+def test_a_failed_attribute_list_is_never_deleted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A list that was never initialized is not deleted.
+
+    ``DeleteProcThreadAttributeList`` on a buffer that was only allocated
+    is a call into an uninitialized structure. The list is deleted only
+    when it was really initialized.
+    """
+    fake = _FakeWin32()
+    fake.fail_at = "InitializeProcThreadAttributeList"
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    with pytest.raises(OSError):
+        tw.spawn_terminal(cwd=tmp_path)
+
+    assert "DeleteProcThreadAttributeList" not in _names(
+        fake
+    ), "an attribute list that was never initialized must not be deleted"
+
+
+@_windows_only
+def test_an_initialized_attribute_list_is_deleted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A list that was initialized is deleted exactly once."""
+    fake = _FakeWin32()
+    fake.fail_at = "CreateProcessW"
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    with pytest.raises(OSError):
+        tw.spawn_terminal(cwd=tmp_path)
+
+    deleted = [
+        name for name, _ in fake.calls if name == "DeleteProcThreadAttributeList"
+    ]
+    assert deleted == [
+        "DeleteProcThreadAttributeList"
+    ], "an initialized attribute list must be deleted exactly once"
+
+
+@_windows_only
 def test_a_pseudoconsole_failure_closes_the_pipes_it_opened(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -483,6 +697,146 @@ def test_a_failure_after_the_pipes_closes_everything(
 
     assert "ResumeThread" not in _names(fake), "an unowned child must not run"
     assert fake.closed_handles, "every handle must be closed"
+
+
+@_windows_only
+def test_the_shell_is_resolved_on_the_canonical_terminal_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PowerShell comes from the terminal PATH, and from nowhere else.
+
+    A shell that is not on the PATH the user's own terminal resolves is
+    not on this machine's terminal PATH: reaching into ``SystemRoot`` for
+    it would be a fallback the plan forbids, and it would run a program
+    the user's terminal would not have run.
+    """
+    monkeypatch.setattr(tw, "terminal_path", lambda: r"C:\Windows\System32")
+    monkeypatch.setattr(
+        tw, "resolve_executable", lambda cmd, *, path: r"C:\Windows\System32\pwsh.exe"
+    )
+    assert tw.default_shell() == [
+        r"C:\Windows\System32\pwsh.exe",
+        "-NoLogo",
+        "-NoProfile",
+    ]
+
+    # The resolution is asked for the one command, on the one path.
+    asked: list[tuple[str, str]] = []
+
+    def resolve(cmd: str, *, path: str) -> str | None:
+        asked.append((cmd, path))
+        return None
+
+    monkeypatch.setattr(tw, "resolve_executable", resolve)
+    assert tw.default_shell.__doc__ is not None
+    with pytest.raises(FileNotFoundError):
+        tw.default_shell()
+    assert asked == [
+        ("powershell.exe", r"C:\Windows\System32")
+    ], "the shell must be looked for on the canonical terminal PATH only"
+
+
+@_windows_only
+def test_a_close_never_claims_success_while_a_thread_is_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A close that could not stop a thread does not report a closed terminal.
+
+    The close waits for the reader and the closer thread, and it says so
+    when one of them is still running. It must not claim the terminal is
+    closed while a handle it still owns is out there.
+    """
+    fake = _FakeWin32()
+    fake.block_read.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+    monkeypatch.setattr(tw, "_CLOSE_TIMEOUT", 0.2)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        monkeypatch.setattr(tw, "_CancelSynchronousIo", lambda handle: 0)
+        with pytest.raises(OSError):
+            terminal.close()
+        assert not terminal._fully_closed, (
+            "a close that left a thread running must not report a closed " "terminal"
+        )
+        # Nothing is left claimed as closed while the reader still owns
+        # its handle and its pipe.
+        assert terminal._reader.is_alive()
+        assert terminal._reader_handle, "the reader must still own its handle"
+        assert terminal._output_read, "the reader must still own its pipe"
+    finally:
+        fake.io_release.set()
+        monkeypatch.setattr(tw, "_CancelSynchronousIo", fake.CancelSynchronousIo)
+        terminal.close()
+    assert terminal._fully_closed
+
+
+@_windows_only
+def test_the_process_handle_is_released_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The closer thread owns the process handle and releases it once.
+
+    The closer thread waits for the child with that handle, so nobody else
+    may free it; when the wait is over the closer releases it. A handle
+    that were released twice, or not at all, would show up here.
+    """
+    fake = _FakeWin32()
+    # The child has not exited, so the closer thread still holds the
+    # process handle while it waits.
+    fake.block_wait.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    process_handle = terminal._process
+    assert process_handle, "the terminal must own a process handle"
+    try:
+        terminal.close()
+        closed = fake.closed_handles
+        assert (
+            closed.count(process_handle) == 1
+        ), "the process handle must be released exactly once"
+    finally:
+        fake.wait_release.set()
+        terminal.close()
+
+
+@_windows_only
+def test_a_close_with_a_full_queue_does_not_strand_the_reader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A close finishes even when nobody ever drained the output.
+
+    The queue is full, the reader is waiting for room in it, and the close
+    has to end the reader rather than wait for a consumer that will never
+    come. The reader notices that the session is over and gives up the
+    chunk it was holding, so the close can go on.
+    """
+    fake = _FakeWin32()
+    chunk = b"x" * 4096
+    fake.read_chunks = [chunk] * 40
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The queue fills up and the reader waits for room.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if terminal._queue.qsize() >= tw._OUTPUT_QUEUE_SLOTS:
+                break
+            time.sleep(0.02)
+        assert terminal._queue.qsize() >= tw._OUTPUT_QUEUE_SLOTS
+
+        # The close must finish: the reader is stopped, not left waiting
+        # for room in a queue nobody is going to drain.
+        terminal.close()
+        assert not terminal._reader.is_alive(), "the reader must have stopped"
+        assert terminal._fully_closed, "the close must have finished"
+    finally:
+        terminal.close()
 
 
 @_windows_only
@@ -623,14 +977,18 @@ def test_the_output_queue_stays_bounded_and_never_drops_a_byte(
         # from the pipe: the reader is back-pressured, not dropping.
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if terminal._queue.qsize() == tw._OUTPUT_QUEUE_SLOTS:
+            if terminal._queue.qsize() >= tw._OUTPUT_QUEUE_SLOTS:
                 break
             time.sleep(0.02)
+        # The queue holds four chunks of output and nothing else: the
+        # pending output is at most 256 KiB.
         assert (
             terminal._queue.qsize() == tw._OUTPUT_QUEUE_SLOTS
         ), "the queue must not grow past its bound"
         assert terminal._queue.maxsize == tw._OUTPUT_QUEUE_SLOTS
         time.sleep(0.5)
+        # At most four chunks came out of the pipe: the reader is
+        # back-pressured, not dropping.
         assert (
             len(fake.read_chunks) >= 35
         ), "the reader must not outrun the queue; it has to wait for room"
@@ -750,6 +1108,265 @@ def test_read_refuses_a_size_that_is_not_a_positive_number(
 
 
 @_windows_only
+def test_a_resize_after_the_pseudoconsole_is_gone_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A resize never meets a pseudoconsole that has been closed.
+
+    The closer thread closes the pseudoconsole when the child is gone. A
+    resize that started a moment earlier must not use the handle after
+    that, so the handle is only handed out while it is alive.
+    """
+    fake = _FakeWin32()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The pseudoconsole is closed, as a natural exit does.
+        terminal._close_pseudoconsole()
+        assert fake.pseudoconsole_closed == 1
+
+        with pytest.raises(OSError):
+            terminal.resize(100, 30)
+        # Nothing was resized: the closed handle was never used.
+        assert "ResizePseudoConsole" not in _names(fake)
+    finally:
+        terminal.close()
+
+
+@_windows_only
+def test_a_resize_in_flight_keeps_the_pseudoconsole_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pseudoconsole is not closed while a resize is using it.
+
+    The handle is freed only once every call that could still be using it
+    has finished, so a close that arrives in the middle of a resize does
+    not pull the handle out from under it.
+    """
+    fake = _FakeWin32()
+    # The child has not exited, so the closer thread is still waiting and the
+    # pseudoconsole is still alive.
+    fake.block_wait.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # A resize is in flight: it holds the pseudoconsole lock for the
+        # duration of the syscall, and it is still running when the close
+        # arrives.
+        resized = threading.Event()
+        finish = threading.Event()
+        closed_while_resizing: list[bool] = []
+
+        def slow_resize() -> None:
+            # The resize is inside the syscall, holding the lock.
+            time.sleep(0.3)
+            closed_while_resizing.append(fake.pseudoconsole_closed > 0)
+            resized.set()
+            finish.wait(5)
+
+        original = tw._ResizePseudoConsole
+
+        def resize(hpcon: Any, size: Any) -> int:
+            slow_resize()
+            return original(hpcon, size)
+
+        monkeypatch.setattr(tw, "_ResizePseudoConsole", resize)
+        resizer = threading.Thread(target=lambda: terminal.resize(100, 30), daemon=True)
+        resizer.start()
+        assert resized.wait(5), "the resize must be running"
+
+        # The closer cannot free the handle while the resize holds the lock.
+        closed = threading.Thread(target=terminal._close_pseudoconsole, daemon=True)
+        closed.start()
+        time.sleep(0.3)
+        assert closed_while_resizing == [
+            False
+        ], "the pseudoconsole was closed while a resize was using it"
+        assert fake.pseudoconsole_closed == 0
+
+        finish.set()
+        resizer.join(5)
+        closed.join(5)
+        assert (
+            fake.pseudoconsole_closed == 1
+        ), "the pseudoconsole must be closed once the resize ended"
+    finally:
+        fake.wait_release.set()
+        terminal.close()
+
+
+@_windows_only
+def test_a_resize_after_a_natural_exit_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A resize that comes after the shell exited is refused.
+
+    The closer thread closes the pseudoconsole when the child is gone, and
+    a resize that arrives after that has no pseudoconsole to resize.
+    """
+    fake = _FakeWin32()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The shell exits and the closer closes the pseudoconsole.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and fake.pseudoconsole_closed == 0:
+            time.sleep(0.02)
+        assert fake.pseudoconsole_closed == 1, "the pseudoconsole must be closed"
+
+        with pytest.raises(OSError):
+            terminal.resize(100, 30)
+        assert "ResizePseudoConsole" not in _names(
+            fake
+        ), "a closed pseudoconsole must not be resized"
+    finally:
+        terminal.close()
+
+
+@_windows_only
+def test_a_poll_answers_from_the_closer_and_never_from_a_freed_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A poll never touches the process handle.
+
+    The closer thread is the only one that waits for the child, and it
+    caches the exit code. A poll reads that cache, so it can never meet a
+    process handle that a close has already freed.
+    """
+    fake = _FakeWin32()
+    # The child has not exited, so the exit code is still the running one.
+    fake.block_wait.set()
+    fake.exit_code = 259  # STILL_ACTIVE
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        assert terminal.poll() is None, "the child is still running"
+        # The poll did not ask the operating system anything.
+        assert "GetExitCodeProcess" not in _names(
+            fake
+        ), "a poll must not call GetExitCodeProcess; the closer caches it"
+        # A poll after the close answers from the cached exit code.
+        terminal.close()
+        terminal.poll()
+    finally:
+        fake.wait_release.set()
+        terminal.close()
+
+
+@_windows_only
+def test_a_failed_cancellation_keeps_what_it_owns_and_is_retryable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A close that could not finish says so, and can be tried again.
+
+    A close that frees the handles a live thread still owns would use them
+    after the fact. When the cancellation does not work, the close says so
+    and keeps what it still owns, and the next call tries again rather
+    than reporting a success that never happened.
+    """
+    fake = _FakeWin32()
+    fake.block_read.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+    monkeypatch.setattr(tw, "_CLOSE_TIMEOUT", 0.2)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The cancellation is ignored, so the reader stays inside ReadFile.
+        monkeypatch.setattr(tw, "_CancelSynchronousIo", lambda handle: 0)
+        with pytest.raises(OSError) as failure:
+            terminal.close()
+        assert "reader did not stop" in str(failure.value)
+        assert (
+            not terminal._fully_closed
+        ), "a close that could not finish must not report itself as closed"
+        # The output pipe belongs to the reader that did not stop, so it was
+        # not closed under it.
+        assert terminal._output_read, "the output pipe must still be owned"
+    finally:
+        # The reader is let go, and the cancellation works again, so the
+        # retry can finish the close.
+        fake.io_release.set()
+        monkeypatch.setattr(tw, "_CancelSynchronousIo", fake.CancelSynchronousIo)
+        terminal.close()
+    assert terminal._fully_closed, "the retry must finish the close"
+
+
+@_windows_only
+def test_a_reader_that_did_not_stop_keeps_its_thread_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A live reader keeps its thread handle, so a retry can cancel it.
+
+    The thread handle is what ``CancelSynchronousIo`` needs, and the reader
+    thread owns it while it runs. A close that could not stop the reader
+    must therefore keep the handle: freeing it would leave a later close
+    with nothing to cancel with, and the reader would stay inside its read
+    for ever.
+    """
+    fake = _FakeWin32()
+    fake.block_read.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+    monkeypatch.setattr(tw, "_CLOSE_TIMEOUT", 0.2)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    reader_handle = terminal._reader_handle
+    assert reader_handle, "the reader must have a thread handle"
+    try:
+        # The cancellation is ignored, so the reader stays inside ReadFile.
+        monkeypatch.setattr(tw, "_CancelSynchronousIo", lambda handle: 0)
+        with pytest.raises(OSError):
+            terminal.close()
+
+        # The reader is alive, so its handle and its pipe are still owned.
+        assert terminal._reader.is_alive(), "the reader must still be running"
+        assert (
+            terminal._reader_handle == reader_handle
+        ), "the thread handle of a live reader must not be freed"
+        assert terminal._output_read, "the output pipe must still be owned"
+        assert (
+            reader_handle not in fake.closed_handles
+        ), "the thread handle of a live reader must not be closed"
+    finally:
+        fake.io_release.set()
+        monkeypatch.setattr(tw, "_CancelSynchronousIo", fake.CancelSynchronousIo)
+        terminal.close()
+    # The retry reclaims it: the reader ended, so the handle may go.
+    assert not terminal._reader.is_alive()
+    assert (
+        reader_handle in fake.closed_handles
+    ), "the retry must release the reader's thread handle"
+    assert terminal._fully_closed, "the retry must finish the close"
+
+
+@_windows_only
+def test_a_close_that_finished_does_not_run_twice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A close that finished is a no-op the second time."""
+    fake = _FakeWin32()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    terminal.close()
+    closed_once = list(fake.closed_handles)
+    terminal.close()
+
+    assert fake.closed_handles == closed_once, "a second close must close nothing"
+    assert fake.pseudoconsole_closed == 1, "the pseudoconsole is closed once"
+
+
+@_windows_only
 def test_write_sends_the_bytes_and_reports_the_count(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -782,6 +1399,365 @@ def test_a_broken_input_pipe_is_reported_as_a_closed_terminal(
     try:
         with pytest.raises(OSError):
             terminal.write(b"hello")
+    finally:
+        terminal.close()
+
+
+@_windows_only
+def test_the_final_bytes_come_before_the_end_of_the_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The end of the output is only reported once every byte is out.
+
+    The reader queues its last chunk and only then says that the output
+    ended. A caller that finds the queue empty can still be one step
+    behind the reader, which queues the final chunk in between. The end
+    must therefore never be reported while a chunk is still queued: the
+    final bytes come first, the end after them.
+
+    The notice goes into the same queue as the bytes, so the two are one
+    ordered stream and the window cannot exist.
+    """
+    fake = _FakeWin32()
+    fake.end_of_output.set()
+    fake.pause_before_end.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The reader is waiting for the end of the output, so the queue is
+        # empty and nothing has ended yet.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and terminal.read() is not None:
+            time.sleep(0.02)
+        assert terminal.read() is None, "the output has not ended yet"
+
+        # The reader reads the last bytes and queues them, then stops just
+        # before it reports that the output ended. This is the window in
+        # which the final bytes used to be stranded.
+        final = b"THE-LAST-BYTES"
+        fake.read_chunks.append(final)
+        fake.output_release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and terminal._queue.qsize() == 0:
+            time.sleep(0.02)
+        assert terminal._queue.qsize() >= 1, "the final bytes were not queued"
+
+        # The reader reports the end now.
+        fake.pause_release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and terminal._ended is None:
+            time.sleep(0.02)
+        assert terminal._ended is not None, "the end was not published"
+
+        # The bytes come first, the end after them.
+        assert (
+            terminal.read(65536) == final
+        ), "the final bytes must be returned before the end of the output"
+        assert terminal.read(65536) == b"", "and only then the end"
+    finally:
+        fake.pause_release.set()
+        terminal.close()
+
+
+@_windows_only
+def test_the_end_is_read_before_the_queue_is_looked_at_again() -> None:
+    """A producer that publishes between two looks cannot cause a false end.
+
+    The reader queues its last chunk and only then publishes the end of the
+    output. The dangerous interleaving is therefore: the caller looks, the
+    queue is empty; the reader queues the chunk and publishes the end; the
+    caller answers. A caller that looks at the queue twice *before* it looks
+    at the end answers "ended" while the final chunk is still queued, which
+    loses the last bytes of every terminal that ends while it is being read.
+
+    The queue here produces exactly that interleaving, on a fixed call
+    number, so the ordering is pinned without a thread and without timing:
+    the first look reports nothing, the second publishes, and a correct
+    read returns the bytes before it returns the end.
+    """
+    terminal = object.__new__(tw.WindowsTerminalProcess)
+    terminal._remainder = b""
+    terminal._end_lock = threading.Lock()
+    terminal._ended = None
+    terminal._queue = _QueueThatEndsDuringAnEmptyCheck(
+        terminal, on_call=2, final=b"THE-LAST-BYTES"
+    )
+
+    assert terminal.read(65536) is None, "nothing has been produced yet"
+    assert (
+        terminal.read(65536) == b"THE-LAST-BYTES"
+    ), "the last chunk is returned before the end of the output"
+    assert terminal.read(65536) == b"", "and only then the end"
+
+
+@_windows_only
+def test_a_reader_that_could_not_start_releases_the_process_handle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A terminal that never started must not keep the child's handle.
+
+    The closer thread is what normally releases the process handle, because
+    it is the only thing that waits on the child. When the reader cannot
+    start, the closer is never started either, so the failed spawn's close
+    is the only owner left — and it has to release the handle rather than
+    leave a child it can no longer wait for.
+    """
+    fake = _FakeWin32()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+    # The reader cannot name its own thread, so it reports the failure and
+    # the closer thread is never started.
+    monkeypatch.setattr(tw, "_OpenThread", lambda access, inherit, thread_id: 0)
+
+    with pytest.raises(OSError):
+        tw.spawn_terminal(cwd=tmp_path)
+
+    process_handles = [
+        handle for handle, name in fake.handles.items() if name == "process"
+    ]
+    assert len(process_handles) == 1, "the child was created"
+    process_handle = process_handles[0]
+    assert (
+        fake.closed_handles.count(process_handle) == 1
+    ), "the process handle must be released exactly once"
+    assert fake.pseudoconsole_closed == 1, "the pseudoconsole must be closed once"
+    # The pipes the terminal owned went with it, once each.
+    input_read, input_write = fake.pipes[0]
+    output_read, output_write = fake.pipes[1]
+    for handle in (input_write, output_read):
+        assert (
+            fake.closed_handles.count(handle) == 1
+        ), f"pipe handle {handle} must be released exactly once"
+    assert input_write not in (0, None) and output_read not in (0, None)
+
+
+@_windows_only
+def test_a_terminal_that_could_not_be_built_closes_the_transaction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A constructor that fails leaves no handle, pipe or job behind.
+
+    The terminal is the last step of the transaction and the thing that
+    takes ownership of what the transaction built. If it cannot be built,
+    nothing owns those handles, so the spawn must close them itself —
+    including the child it has already created and the job holding it.
+    """
+
+    class _ExplodingTerminal:
+        def __init__(self, **kwargs: Any) -> None:
+            raise RuntimeError("the terminal could not be built")
+
+    fake = _FakeWin32()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+    monkeypatch.setattr(tw, "WindowsTerminalProcess", _ExplodingTerminal)
+
+    with pytest.raises(RuntimeError):
+        tw.spawn_terminal(cwd=tmp_path)
+
+    assert fake.pseudoconsole_closed == 1, "the pseudoconsole must be closed once"
+    handles = [
+        handle
+        for handle, name in fake.handles.items()
+        if name in {"pipe-read", "pipe-write", "process"}
+    ]
+    for handle in handles:
+        assert (
+            fake.closed_handles.count(handle) == 1
+        ), f"handle {handle} must be closed exactly once, not leaked or doubled"
+
+
+@_windows_only
+def test_a_chunk_queued_in_the_window_is_not_stranded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A chunk that arrives after the caller's empty check is still returned.
+
+    The caller checks the queue, finds it empty, and the reader queues its
+    last chunk a moment later. That chunk must not be left behind an
+    end-of-output notice, and it must not be reported as the end either.
+    """
+    fake = _FakeWin32()
+    fake.end_of_output.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The reader is held inside its read, before it has produced
+        # anything: the queue is empty and nothing has ended.
+        fake.pause_before_end.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and terminal.read() is not None:
+            time.sleep(0.02)
+        assert terminal.read() is None, "the output has not ended yet"
+
+        # The reader produces the last bytes and reports the end while the
+        # caller is reading. The caller's read must notice the chunk.
+        final = b"THE-LAST-BYTES"
+        fake.read_chunks.append(final)
+        fake.output_release.set()
+        fake.pause_release.set()
+
+        collected = b""
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            item = terminal.read(65536)
+            if item is None:
+                time.sleep(0.02)
+                continue
+            if item == b"":
+                break
+            collected += item
+        assert (
+            collected == final
+        ), f"the final bytes were stranded behind the end of the output: {collected!r}"
+    finally:
+        fake.pause_release.set()
+        terminal.close()
+
+
+@_windows_only
+def test_the_end_of_the_output_is_never_reported_before_the_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The end is only reported when every byte that was produced is out.
+
+    The reader queues its last chunk and only then says that the output
+    ended. A caller that finds the queue empty and reads that notice can
+    still be one step behind the reader, which queues the final chunk in
+    between. The end must therefore never be reported while a chunk is
+    still queued: the final bytes come first, the end after them.
+    """
+    fake = _FakeWin32()
+    fake.end_of_output.set()
+    fake.pause_before_end.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The reader is waiting for the end of the output, so the queue is
+        # empty and nothing has ended yet.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and terminal.read() is not None:
+            time.sleep(0.02)
+        assert terminal.read() is None, "the output has not ended yet"
+
+        # The reader reads the last bytes and queues them, then stops just
+        # before it reports that the output ended. This is the window in
+        # which the final bytes used to be stranded.
+        final = b"THE-LAST-BYTES"
+        fake.read_chunks.append(final)
+        fake.output_release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and terminal._queue.qsize() == 0:
+            time.sleep(0.02)
+        assert terminal._queue.qsize() >= 1, "the final bytes were not queued"
+
+        # The reader reports the end now.
+        fake.pause_release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and terminal._ended is None:
+            time.sleep(0.02)
+        assert terminal._ended is not None, "the end must be published now"
+
+        # The bytes come first, the end after them.
+        assert (
+            terminal.read(65536) == final
+        ), "the final bytes must be returned before the end of the output"
+        assert terminal.read(65536) == b"", "and only then the end"
+    finally:
+        fake.pause_release.set()
+        terminal.close()
+
+
+@_windows_only
+def test_a_chunk_that_arrives_in_the_window_is_not_stranded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A chunk queued after the caller's empty check is still handed out.
+
+    The caller checks the queue, finds it empty, and only then looks at the
+    notice that the output ended. The reader may queue its last chunk in
+    between, and that chunk must not be left behind an end-of-output
+    notice. The reader takes the same lock for the chunk and for the
+    notice, so the two are never seen out of order.
+    """
+    fake = _FakeWin32()
+    fake.end_of_output.set()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The reader is held inside its read, before it has produced
+        # anything: the queue is empty and nothing has ended.
+        fake.pause_before_end.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and terminal.read() is not None:
+            time.sleep(0.02)
+        assert terminal.read() is None, "the output has not ended yet"
+
+        # The caller is inside its read at the moment the reader produces
+        # the last bytes and reports the end. The caller's own read is the
+        # one that has to notice the chunk.
+        final = b"THE-LAST-BYTES"
+        fake.read_chunks.append(final)
+        fake.output_release.set()
+        fake.pause_release.set()
+
+        collected = b""
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            item = terminal.read(65536)
+            if item is None:
+                time.sleep(0.02)
+                continue
+            if item == b"":
+                break
+            collected += item
+        assert (
+            collected == final
+        ), f"the final bytes were stranded behind the end of the output: {collected!r}"
+    finally:
+        fake.pause_release.set()
+        terminal.close()
+
+
+@_windows_only
+def test_a_natural_exit_still_delivers_the_final_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The last frame of a shell that exits is not lost.
+
+    The closer thread closes the pseudoconsole when the child is gone, and
+    the console host may still have a final frame to give. The reader keeps
+    draining while that happens, so the frame is delivered and the end of
+    the output follows it.
+    """
+    fake = _FakeWin32()
+    fake.read_chunks = [b"BEFORE-EXIT", b"AFTER-EXIT"]
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        collected = b""
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            item = terminal.read(65536)
+            if item is None:
+                time.sleep(0.02)
+                continue
+            if item == b"":
+                break
+            collected += item
+        assert (
+            collected == b"BEFORE-EXITAFTER-EXIT"
+        ), f"the output was cut short: {collected!r}"
     finally:
         terminal.close()
 
@@ -828,9 +1804,9 @@ def test_close_closes_the_output_pipe_before_the_closer_thread_is_joined(
         if name == "ClosePseudoConsole"
     ]
     assert pseudo_closed, "the pseudoconsole must be closed"
-    assert fake.output_closed.is_set(), (
-        "the output pipe was not closed before the closer thread returned"
-    )
+    assert (
+        fake.output_closed.is_set()
+    ), "the output pipe was not closed before the closer thread returned"
 
 
 @_windows_only
@@ -996,6 +1972,43 @@ def test_every_handle_the_transaction_opened_is_closed_once(
 # ── the real thing ──────────────────────────────────────────────────────────
 
 
+def _marker(label: str) -> tuple[str, str]:
+    """A marker the shell has to compute, and the text it produces.
+
+    A literal marker in the typed command is echoed back by the terminal
+    before the shell has run anything, so a test that waits for it passes
+    even when the shell produced nothing. The marker here is a list of
+    character codes the test computes and the shell has to turn back into
+    characters, so the bytes the test waits for only appear if the shell
+    really ran the command.
+
+    Returns the code to type and the text to wait for.
+    """
+    codes = ",".join(f"[char]{ord(char)}" for char in label)
+    coded = f"({codes})"
+    produced = "CIAO" + "".join(label) + "-END"
+    assert coded != produced, "the coded marker must differ from its output"
+    return coded, produced
+
+
+def _emit(code: str) -> bytes:
+    """The PowerShell that turns the code points back into text.
+
+    ``-join`` over an array of characters works in Windows PowerShell 5.1 as
+    well as in PowerShell 7, and it needs no pipeline and no script block:
+    a ``-replace`` with ``$1`` is not a per-match capture in any of them.
+    """
+    return (f"$m = 'CIAO' + (-join @({code})) + '-END'; Write-Output $m\r\n").encode(
+        "utf-8"
+    )
+
+
+def _emit_unicode(codes: tuple[int, ...]) -> bytes:
+    """The PowerShell that writes the given code points as one string."""
+    listed = ",".join(f"[char]{code}" for code in codes)
+    return (f"$m = (-join @({listed})); Write-Output $m\r\n").encode("utf-8")
+
+
 def _read_until(
     terminal: tw.WindowsTerminalProcess, needle: bytes, timeout: float = 60
 ) -> bytes:
@@ -1019,22 +2032,39 @@ def _read_until(
 
 @_windows_only
 def test_a_real_terminal_runs_powershell_and_answers(tmp_path: Path) -> None:
-    """A real pseudoconsole, a real shell, real bytes."""
+    """A real pseudoconsole, a real shell, real bytes.
+
+    The marker is computed by the shell, so the bytes the test waits for
+    can only be there if the shell really ran the command. A terminal that
+    echoed the command back would show the code points, not the text.
+    """
+    coded, expected = _marker("ONE")
     terminal = tw.spawn_terminal(cwd=tmp_path, cols=100, rows=30)
     try:
-        terminal.write(b"Write-Output CIAO_MARKER_1\r\n")
-        _read_until(terminal, b"CIAO_MARKER_1")
+        terminal.write(_emit(coded))
+        produced = _read_until(terminal, expected.encode("utf-8"))
+        assert expected.encode("utf-8") in produced
     finally:
         terminal.close()
 
 
 @_windows_only
 def test_a_real_terminal_carries_unicode(tmp_path: Path) -> None:
-    """The bytes on the wire are UTF-8, and the shell's own output survives."""
+    """The bytes on the wire are UTF-8, and the shell's own output survives.
+
+    The text is built from code points the test computes, so the terminal
+    cannot pass by echoing what was typed: the typed text is the code
+    points, and the output is the characters.
+    """
+    codes = (0x00E9, 0x2013, 0x00FC, 0x2603, 0x00E0)
+    text = "".join(chr(code) for code in codes)
     terminal = tw.spawn_terminal(cwd=tmp_path)
     try:
-        terminal.write("Write-Output 'caf\u00e9 \u2013 \u00fcber'\r\n".encode("utf-8"))
-        _read_until(terminal, "caf\u00e9 \u2013 \u00fcber".encode("utf-8"))
+        terminal.write(_emit_unicode(codes))
+        produced = _read_until(terminal, text.encode("utf-8"))
+        assert (
+            text.encode("utf-8") in produced
+        ), f"the unicode text did not survive: {produced[-400:]!r}"
     finally:
         terminal.close()
 
@@ -1044,18 +2074,26 @@ def test_a_real_terminal_reports_the_window_size_after_a_resize(
     tmp_path: Path,
 ) -> None:
     """A resize reaches the shell, which then reports the new size."""
+    ready_code, ready = _marker("GO")
+    size_code, size = _marker("SIZE")
     terminal = tw.spawn_terminal(cwd=tmp_path, cols=80, rows=24)
     try:
         # Let the shell come up before the resize, so the size it reports is
         # the one the pseudoconsole was told, not the one it started with.
-        terminal.write(b"Write-Output CIAO_READY\r\n")
-        _read_until(terminal, b"CIAO_READY")
+        terminal.write(_emit(ready_code))
+        _read_until(terminal, ready.encode("utf-8"))
         terminal.resize(120, 40)
         terminal.write(
-            b"$w = $Host.UI.RawUI.WindowSize; "
-            b'Write-Output ("SIZE " + $w.Width + "x" + $w.Height)\r\n'
+            (
+                "$w = $Host.UI.RawUI.WindowSize; $m = 'CIAO' + "
+                f"(-join @({size_code})) + "
+                "'-END ' + $w.Width + 'x' + $w.Height; Write-Output $m\r\n"
+            ).encode("utf-8")
         )
-        _read_until(terminal, b"SIZE 120x40")
+        produced = _read_until(terminal, size.encode("utf-8"))
+        assert (
+            b"120x40" in produced
+        ), f"the shell did not report the new size: {produced[-400:]!r}"
     finally:
         terminal.close()
 
@@ -1064,16 +2102,27 @@ def test_a_real_terminal_reports_the_window_size_after_a_resize(
 def test_a_real_ctrl_c_interrupts_the_foreground_command_and_not_the_shell(
     tmp_path: Path,
 ) -> None:
-    """Ctrl+C is an input byte: it reaches the program, and the shell lives."""
+    """Ctrl+C is an input byte: it reaches the program, and the shell lives.
+
+    The command in the foreground sleeps for half a minute, so a reply that
+    arrives well inside that window can only be there because the
+    interrupt reached the program. The marker is computed by the shell, so
+    it cannot be an echo of what was typed.
+    """
+    ready_code, ready = _marker("GO")
+    coded, expected = _marker("AFTER")
     terminal = tw.spawn_terminal(cwd=tmp_path)
     try:
-        terminal.write(b"Write-Output CIAO_READY\r\n")
-        _read_until(terminal, b"CIAO_READY")
+        terminal.write(_emit(ready_code))
+        _read_until(terminal, ready.encode("utf-8"))
         terminal.write(b"Start-Sleep -Seconds 30\r\n")
         time.sleep(1.0)
         terminal.write(b"\x03")
-        terminal.write(b"Write-Output CIAO_AFTER_INTERRUPT\r\n")
-        _read_until(terminal, b"CIAO_AFTER_INTERRUPT", timeout=30)
+        terminal.write(_emit(coded))
+        # Ten seconds is far below the thirty the foreground command would
+        # take, so a reply can only mean the interrupt worked.
+        produced = _read_until(terminal, expected.encode("utf-8"), timeout=10)
+        assert expected.encode("utf-8") in produced
         assert terminal.poll() is None, "the shell must survive the interrupt"
     finally:
         terminal.close()
@@ -1112,11 +2161,12 @@ def _process_alive(pid: int) -> bool:
 def test_a_real_close_kills_the_background_child(tmp_path: Path) -> None:
     """Closing the terminal ends the shell and what it started."""
     marker = tmp_path / "child.pid"
+    coded, expected = _marker("READY")
     terminal = tw.spawn_terminal(cwd=tmp_path)
     child_pid = 0
     try:
-        terminal.write(b"Write-Output CIAO_READY\r\n")
-        _read_until(terminal, b"CIAO_READY")
+        terminal.write(_emit(coded))
+        _read_until(terminal, expected.encode("utf-8"))
         # A plain child of the shell, so it joins the shell's job: the job
         # the adapter put the shell in.
         terminal.write(
@@ -1165,22 +2215,81 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
             raise AssertionError("GetProcessHandleCount failed")
         return int(count.value)
 
+    warm_coded, warm_expected = _marker("WARM")
     warm = tw.spawn_terminal(cwd=tmp_path)
-    warm.write(b"Write-Output CIAO_WARMUP\r\n")
-    _read_until(warm, b"CIAO_WARMUP")
-    warm.close()
+    try:
+        warm.write(_emit(warm_coded))
+        _read_until(warm, warm_expected.encode("utf-8"))
+    finally:
+        warm.close()
 
     before = handle_count()
+    cycle_coded, cycle_expected = _marker("CYCLE")
     for _ in range(3):
         terminal = tw.spawn_terminal(cwd=tmp_path)
-        terminal.write(b"Write-Output CIAO_CYCLE\r\n")
-        _read_until(terminal, b"CIAO_CYCLE")
-        terminal.close()
+        try:
+            terminal.write(_emit(cycle_coded))
+            _read_until(terminal, cycle_expected.encode("utf-8"))
+        finally:
+            terminal.close()
     after = handle_count()
 
+    # Three cycles leak six handles if every terminal keeps one; a bound of
+    # two leaves room for the one-off handles the console host takes and
+    # still fails on a real leak.
     assert (
         after <= before + 2
     ), f"the handle count grew from {before} to {after}; a terminal leaked"
+
+
+def test_a_computed_marker_is_not_what_was_typed() -> None:
+    """The marker the real tests wait for is not the text that was typed.
+
+    A terminal echoes the command back before the shell has run anything,
+    so a test that waits for a literal marker passes even when the shell
+    produced nothing. The real tests therefore wait for text the shell has
+    to compute, and this pins that the two differ.
+    """
+    coded, expected = _marker("ONE")
+    assert coded != expected, "the coded marker must differ from its output"
+    assert coded in _emit(coded).decode("utf-8"), "the typed text carries the code"
+    assert expected not in _emit(coded).decode(
+        "utf-8"
+    ), "the text the test waits for must not be in what was typed"
+
+
+def test_the_native_commands_run_in_windows_powershell_5_1() -> None:
+    """The commands the real tests type work in Windows PowerShell 5.1.
+
+    ``-replace`` with ``$1`` is not a per-match capture in PowerShell, and a
+    script-block replacement is a PowerShell 6 feature that 5.1 does not
+    have. A code-point array joined with ``-join`` works in both, so that is
+    what the tests use. The Unicode text is the same: the code points are
+    joined into one string, not quoted into the source.
+    """
+    coded, _ = _marker("ONE")
+    command = _emit(coded).decode("utf-8")
+    assert (
+        "-replace" not in command
+    ), "-replace with $1 is not a per-match capture in PowerShell"
+    assert "$1" not in command
+    assert "-join" in command, "the code points are joined into one string"
+    assert "[char]" in command
+    # No pipeline: the array is joined as it is, so the command cannot
+    # depend on how PowerShell reads a comma-separated list.
+    assert "|" not in command, "the command must not need a pipeline"
+
+    unicode_command = _emit_unicode((0x00E9, 0x2013)).decode("utf-8")
+    assert "-join" in unicode_command
+    assert "|" not in unicode_command
+    assert (
+        "[char]0x" not in unicode_command
+    ), "the code points must not be quoted into the source text"
+    assert (
+        "0x00E9" not in unicode_command
+    ), "the typed text must be the decimal code points, not the characters"
+    # The characters themselves are what the test waits for.
+    assert "é" not in unicode_command
 
 
 # ── the CI contract ─────────────────────────────────────────────────────────
@@ -1207,6 +2316,8 @@ def test_the_windows_job_runs_this_file_on_every_pull_request() -> None:
     # Blocking: the step fails the job when the native tests fail.
     assert "set -o pipefail" in step
     assert "tee windows-terminal.txt" in step
+    # A test that hangs on a pipe must fail the job, not hold the runner.
+    assert "timeout-minutes:" in step, "the focused native step needs a bound"
     # It runs on every pull request, not only on the full-suite runs.
     assert "if: ${{ !cancelled() }}" in step
     assert "WINDOWS_FULL" not in step, (
@@ -1220,3 +2331,18 @@ def test_the_windows_job_runs_this_file_on_every_pull_request() -> None:
         < windows.index("Windows ConPTY terminal tests")
         < windows.index("Windows backend tests")
     )
+    # The job summary names the focused step's result and the tests that
+    # failed in it: a red native step has to say which test was red.
+    summary = windows.split("    - name: Summarize", 1)[1]
+    assert (
+        "windows-terminal.txt" in summary
+    ), "the summary must report the focused native step's result"
+    failing = summary.split("windows-failures.txt", 1)[0]
+    assert (
+        "windows-terminal.txt" in failing
+    ), "the failing-test list must come from the focused native log too"
+    # The names the summary prints have to be the test names, not a
+    # half-stripped line: `tests/test_x.py::test_y` is what a reader needs.
+    assert (
+        "s#" in failing
+    ), "the summary must strip the file prefix from the failing test names"

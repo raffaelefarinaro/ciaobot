@@ -8,12 +8,15 @@ reads keystrokes from the other. This module drives it directly through
 * the child is created **suspended**, assigned to the
   :class:`~ciao.os_support.processes.ProcessTree` job object and only then
   resumed, so no shell instruction can ever run outside the job that owns it;
+* the child's ``STARTUPINFO`` carries ``STARTF_USESTDHANDLES`` with the
+  three standard-handle slots null, so the pseudoconsole replaces the
+  child's console instead of the child inheriting the parent's handles;
 * one reader thread drains the output pipe into a **bounded** queue (four
   slots of at most 64 KiB), so a terminal nobody reads from back-pressures
   the console host instead of growing the engine's heap;
-* one closer thread waits for the child and closes the pseudoconsole exactly
-  once, so the final frame is still delivered and the session leaks no
-  handle.
+* one closer thread waits for the child, caches the exit code and closes
+  the pseudoconsole exactly once, so the final frame is still delivered
+  and the session leaks no handle.
 
 Everything crossing the boundary is **raw bytes**. ConPTY speaks UTF-8 with
 virtual terminal sequences; this module never decodes, re-encodes or logs it.
@@ -21,13 +24,32 @@ virtual terminal sequences; this module never decodes, re-encodes or logs it.
 The Windows-only parts live behind ``if sys.platform == "win32"``, so the
 module imports on POSIX without a single fake stub.
 
-The pseudoconsole's teardown is the delicate part. Microsoft's own guidance is
-that the application must either close the output pipe *before* calling
+Three things are easy to get wrong and are pinned here.
+
+The **child's standard handles**. Without ``STARTF_USESTDHANDLES`` the child
+keeps the *parent's* standard handles, so the shell's prompt goes to the
+parent's stdout and its input never arrives from the pseudoconsole: the
+child then sees the end of that input and exits at once, and the pipe
+carries only the console's start-up and tear-down sequences. Microsoft
+Terminal sets the same flag (``siEx.StartupInfo.dwFlags =
+STARTF_USESTDHANDLES;``), with the three slots left null.
+
+The **pseudoconsole's teardown**. Microsoft's own guidance is that the
+application must either close the output pipe *before* calling
 ``ClosePseudoConsole`` or keep reading from it until that call has returned —
 on Windows 11 before 24H2, ``ClosePseudoConsole`` waits for the clients to
 disconnect and deadlocks if nobody drains the pipe. This module closes the
 output pipe first (the reader has already stopped by then) and joins the
-closer thread afterwards, which is the order the documentation asks for.
+closer thread afterwards, which is the order the documentation asks for. A
+rollback closes the pipe without reading it: a read on a pipe whose write
+end is open blocks for ever, and there is no reader to hand the bytes to.
+
+The **handles that are still in use**. The pseudoconsole handle is guarded
+by one short lock, held through the resize syscall and given up before the
+close is called, so a resize can never meet a closed handle and the close
+never waits on the lock. A close that could not stop a thread says so and
+keeps what it still owns, so it can be tried again rather than reporting a
+success that never happened.
 """
 
 from __future__ import annotations
@@ -36,7 +58,6 @@ import sys
 
 if sys.platform == "win32":
     import ctypes
-    import os
     import queue
     import subprocess
     import threading
@@ -59,6 +80,14 @@ if sys.platform == "win32":
 
     # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE (processthreadsapi.h).
     _PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
+
+    # STARTF_USESTDHANDLES (winbase.h). The child of a pseudoconsole must
+    # carry this flag: it tells Windows that the standard handles in the
+    # STARTUPINFO are the ones to use. Without it the child keeps the
+    # parent's standard handles, so the shell's output goes to the parent's
+    # stdout and its input never arrives from the pseudoconsole — the child
+    # then sees the end of that input and exits at once.
+    _STARTF_USESTDHANDLES = 0x00000100
 
     # Error codes (winerror.h).
     _ERROR_BROKEN_PIPE = 109
@@ -278,26 +307,17 @@ if sys.platform == "win32":
         return text.encode("utf-16-le")
 
     def _resolve_powershell() -> str | None:
-        """The absolute path of ``powershell.exe``, or None when it is not there."""
+        """The absolute path of ``powershell.exe`` on the terminal PATH, or None.
+
+        The canonical terminal PATH and nothing else: a shell that is not
+        on the PATH a user's own terminal would resolve is not on this
+        machine's terminal PATH, and reaching into ``SystemRoot`` for it
+        would be a fallback the plan forbids.
+        """
         path = terminal_path()
-        if path:
-            found = resolve_executable("powershell.exe", path=path)
-            if found:
-                return found
-        # The same binary at the location Windows installs it in, for a
-        # machine whose logon PATH does not name that directory.
-        system = os.environ.get("SystemRoot") or os.environ.get("SYSTEMROOT") or ""
-        if system:
-            candidate = (
-                Path(system)
-                / "System32"
-                / "WindowsPowerShell"
-                / "v1.0"
-                / "powershell.exe"
-            )
-            if candidate.is_file():
-                return str(candidate)
-        return None
+        if not path:
+            return None
+        return resolve_executable("powershell.exe", path=path)
 
     def _thread_handle(thread_id: int) -> int:
         """A handle to one thread, so a close can cancel its pending I/O.
@@ -388,11 +408,14 @@ if sys.platform == "win32":
             self._hpcon = hpcon
             self._queue: queue.Queue[bytes] = queue.Queue(maxsize=_OUTPUT_QUEUE_SLOTS)
             self._remainder = b""
-            self._end: _End | None = None
+            self._ended: _End | None = None
+            self._end_lock = threading.Lock()
             self._exit_code: int | None = None
             self._stop = threading.Event()
             self._closing = False
-            self._closed = False
+            # A close that released everything is the only one that counts
+            # as closed; a failed close keeps what it owns and is retryable.
+            self._fully_closed = False
             # Short critical sections only: never held across a blocking call.
             self._state_lock = threading.Lock()
             # Serialises writes; a close never waits on it before cancelling.
@@ -405,6 +428,34 @@ if sys.platform == "win32":
             self._closer: threading.Thread | None = None
             self._reader_ready = threading.Event()
             self._reader_error: OSError | None = None
+            # The pseudoconsole handle, and the lock that guards it. The lock
+            # is held **through** the resize syscall and released before the
+            # pseudoconsole is closed, so a resize and a close can never use
+            # the handle at the same time and the close never waits on the
+            # lock while it blocks.
+            self._hpcon_lock = threading.Lock()
+            self._hpcon = hpcon
+            self._hpcon_gone = False
+
+        # ── the pseudoconsole handle ───────────────────────────────────────
+
+        def _close_pseudoconsole(self) -> bool:
+            """Close the pseudoconsole, once, and say whether it happened.
+
+            The handle is published as gone under the lock that a resize
+            holds, so a resize that starts later refuses it, and a resize
+            that is running now finishes first: the lock is taken before
+            the handle is taken and given up before the close is called, so
+            the close never blocks on the lock.
+            """
+            with self._hpcon_lock:
+                if self._hpcon_gone or not self._hpcon:
+                    return True
+                self._hpcon_gone = True
+                hpcon = self._hpcon
+                self._hpcon = 0
+            _ClosePseudoConsole(hpcon)
+            return True
 
         # ── starting ────────────────────────────────────────────────────────
 
@@ -433,7 +484,7 @@ if sys.platform == "win32":
             except OSError as exc:
                 self._reader_error = exc
                 self._reader_ready.set()
-                self._end = _End(exc)
+                self._queue_end(_End(exc))
                 return
             with self._state_lock:
                 self._reader_handle = handle
@@ -441,19 +492,19 @@ if sys.platform == "win32":
             try:
                 complete = self._drain_output()
             except OSError as exc:
-                self._end = _End(exc)
+                self._queue_end(_End(exc))
                 return
             except Exception as exc:  # noqa: BLE001 - a reader must not die silently
-                self._end = _End(OSError(f"the terminal reader failed: {exc}"))
+                self._queue_end(_End(OSError(f"the terminal reader failed: {exc}")))
                 return
             if complete:
-                self._end = _End(None)
+                self._queue_end(_End(None))
             else:
                 # The session was closed with output still to come. That is
                 # not a clean end of the output and must not be reported as
                 # one: the caller has to know that bytes are missing.
-                self._end = _End(
-                    OSError("the terminal was closed with output still pending")
+                self._queue_end(
+                    _End(OSError("the terminal was closed with output still pending"))
                 )
 
         def _drain_output(self) -> bool:
@@ -494,7 +545,9 @@ if sys.platform == "win32":
             """Put one chunk in the queue, waiting for room rather than dropping it.
 
             The only way to give up is a close in progress: the session is
-            over then, and the caller is told the output was cut short.
+            over then, and the caller is told the output was cut short. The
+            queue holds four chunks, so the pending output is at most
+            256 KiB whatever the terminal does.
             """
             while True:
                 try:
@@ -504,6 +557,20 @@ if sys.platform == "win32":
                     if self._stop.is_set():
                         return False
 
+        def _queue_end(self, end: _End) -> None:
+            """Say that the output ended.
+
+            The notice is a state of its own, not another item in the queue:
+            a queue that is full of output would then have no room for it,
+            and the reader would wait for a consumer that may never come.
+
+            The reader queues its last chunk **before** it publishes this,
+            so a caller that sees the notice knows the chunk is already in
+            the queue and takes it before it reports the end.
+            """
+            with self._end_lock:
+                self._ended = end
+
         # ── the closer thread ───────────────────────────────────────────────
 
         def _closer_main(self) -> None:
@@ -512,13 +579,29 @@ if sys.platform == "win32":
             The reader keeps draining while this runs: Microsoft asks for
             either a closed output pipe or a concurrent drain, and the drain
             is what preserves the final frame.
+
+            The pseudoconsole handle is only freed once every call that could
+            still be using it has finished, so a resize that started a
+            moment earlier can never meet a closed handle.
+
+            This thread owns the process handle while it waits for the
+            child, and releases it when it is done: a close that freed it
+            would pull the handle out from under this wait. The exit code
+            it reads is the only answer :meth:`poll` ever gives, so no
+            other call has to touch the process handle at all.
             """
-            _WaitForSingleObject(self._process, _INFINITE)
-            code = wintypes.DWORD()
-            if _GetExitCodeProcess(self._process, ctypes.byref(code)):
-                with self._state_lock:
-                    self._exit_code = int(code.value)
-            _ClosePseudoConsole(self._hpcon)
+            process = self._process
+            if process:
+                try:
+                    _WaitForSingleObject(process, _INFINITE)
+                    code = wintypes.DWORD()
+                    if _GetExitCodeProcess(process, ctypes.byref(code)):
+                        with self._state_lock:
+                            self._exit_code = int(code.value)
+                finally:
+                    self._process = 0
+                    _CloseHandle(process)
+            self._close_pseudoconsole()
 
         # ── reading and writing ─────────────────────────────────────────────
 
@@ -528,6 +611,14 @@ if sys.platform == "win32":
             ``None`` means "nothing queued yet", ``b""`` means the output has
             ended. The bytes come back in the order the terminal produced
             them, and a short request never loses the rest of a chunk.
+
+            The end of the output is only reported once every byte that was
+            produced has been handed out. The reader queues its last chunk
+            **before** it publishes the end, so the order is: look at the
+            queue; if it is empty, look at the end; if the end is there,
+            look at the queue once more before answering it. Reading the
+            end first is what makes that safe — a published end means no
+            further chunk can be queued, so a second empty look is final.
             """
             if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
                 raise ValueError("size must be a positive whole number")
@@ -539,12 +630,22 @@ if sys.platform == "win32":
             try:
                 item = self._queue.get_nowait()
             except queue.Empty:
-                end = self._end
-                if end is None:
+                # Nothing queued at the moment the caller looked. The
+                # reader may not have produced anything yet, or it may have
+                # just queued its last chunk and published the end.
+                with self._end_lock:
+                    ended = self._ended
+                if ended is None:
                     return None
-                if end.error is not None:
-                    raise end.error
-                return b""
+                # The end is published only after the last chunk is queued,
+                # so the queue is looked at once more: the end is reported
+                # only when the bytes that came before it are out.
+                try:
+                    item = self._queue.get_nowait()
+                except queue.Empty:
+                    if ended.error is not None:
+                        raise ended.error
+                    return b""
             if len(item) <= limit:
                 return item
             self._remainder = item[limit:]
@@ -618,31 +719,26 @@ if sys.platform == "win32":
             """Tell the pseudoconsole a new size, in characters."""
             _validated_dimension(cols, "cols", 20, 500)
             _validated_dimension(rows, "rows", 5, 200)
-            with self._state_lock:
-                if self._closing:
+            # The lock is held through the syscall, so a close that arrives
+            # now waits for this call to end and the handle cannot be
+            # closed underneath it.
+            with self._hpcon_lock:
+                if self._hpcon_gone or not self._hpcon:
                     raise OSError("the terminal is closed")
-                hpcon = self._hpcon
-            hr = _ResizePseudoConsole(hpcon, _Coord(cols, rows))
+                hr = _ResizePseudoConsole(self._hpcon, _Coord(cols, rows))
             if hr < 0:
                 raise OSError(f"resizing the terminal failed: {hr:#010x}")
 
         def poll(self) -> int | None:
-            """The shell's exit code, or None while it is still running."""
+            """The shell's exit code, or None while it is still running.
+
+            The answer comes from the closer thread, which is the only one
+            that waits for the child. Nothing here touches the process
+            handle, so a poll can never meet a handle that a close has
+            already freed.
+            """
             with self._state_lock:
-                cached = self._exit_code
-            if cached is not None:
-                return cached
-            if not self._process:
-                return None
-            code = wintypes.DWORD()
-            if not _GetExitCodeProcess(self._process, ctypes.byref(code)):
-                error = ctypes.get_last_error()
-                raise OSError(
-                    f"reading the terminal exit code failed: {ctypes.WinError(error)}"
-                )
-            if code.value == _STILL_ACTIVE:
-                return None
-            return int(code.value)
+                return self._exit_code
 
         # ── closing ─────────────────────────────────────────────────────────
 
@@ -655,13 +751,16 @@ if sys.platform == "win32":
             closed **before** the closer thread's ``ClosePseudoConsole`` is
             waited for, because that call waits for the clients to disconnect
             and deadlocks on a pipe nobody drains; and only then are the
-            remaining handles released. Calling it twice does nothing the
-            second time.
+            remaining handles released.
+
+            A close that could not finish says so and stays **retryable**:
+            the resources it could not release are still owned here, so a
+            second call tries again rather than reporting a success that
+            never happened.
             """
             with self._close_lock:
-                if self._closed:
+                if self._fully_closed:
                     return
-                self._closed = True
                 with self._state_lock:
                     self._closing = True
                 self._stop.set()
@@ -670,7 +769,6 @@ if sys.platform == "win32":
                     self._tree.kill()
                 except OSError as exc:
                     problems.append(f"ending the terminal process tree failed: {exc}")
-                self._cancel_writer(problems)
                 stopped = self._stop_reader(problems)
                 if stopped:
                     # The reader has stopped, so the output pipe can go now.
@@ -685,25 +783,51 @@ if sys.platform == "win32":
                         "the terminal output pipe was kept open because its "
                         "reader did not stop"
                     )
-                # No write can be in flight any more.
-                self._release(self._input_write, "the terminal input pipe", problems)
-                self._input_write = 0
+                # The input pipe belongs to a writer that may still be inside
+                # WriteFile; closing it under that writer would be a
+                # use-after-close, so it is only freed once the writer is
+                # gone.
+                if self._cancel_writer(problems):
+                    self._release(
+                        self._input_write, "the terminal input pipe", problems
+                    )
+                    self._input_write = 0
+                else:
+                    problems.append(
+                        "the terminal input pipe was kept open because a "
+                        "write did not finish"
+                    )
                 if self._closer is None:
                     # The closer thread never ran, so nobody else owns the
-                    # pseudoconsole handle.
-                    _ClosePseudoConsole(self._hpcon)
+                    # pseudoconsole handle or the process handle: this close
+                    # is the only owner and must release both.
+                    self._close_pseudoconsole()
+                    with self._state_lock:
+                        process = self._process
+                        self._process = 0
+                    self._release(process, "the terminal process", problems)
                 else:
                     self._join_closer(problems)
-                # The reader has stopped by now, so its thread handle is
-                # safe to release.
-                with self._state_lock:
-                    reader_handle = self._reader_handle
-                    self._reader_handle = None
-                if reader_handle is not None:
-                    self._release(reader_handle, "the terminal reader thread", problems)
-                self._release(self._process, "the terminal process", problems)
-                self._process = 0
+                # The reader's thread handle belongs to the reader while it
+                # runs: it is what a later close cancels with. It is only
+                # released once the thread is gone.
+                if stopped:
+                    with self._state_lock:
+                        reader_handle = self._reader_handle
+                        self._reader_handle = None
+                    if reader_handle is not None:
+                        self._release(
+                            reader_handle, "the terminal reader thread", problems
+                        )
+                # The process handle belongs to the closer thread, which
+                # waits on it; the close that waits for that thread has
+                # therefore already seen it released.
                 self._tree.close()
+                with self._state_lock:
+                    # Only a close that released everything is a closed
+                    # terminal. A failed one keeps what it still owns, and
+                    # the next call tries again.
+                    self._fully_closed = not problems
                 if problems:
                     raise OSError("closing the terminal failed: " + "; ".join(problems))
 
@@ -715,7 +839,7 @@ if sys.platform == "win32":
                 error = ctypes.get_last_error()
                 problems.append(f"closing {what} failed: {ctypes.WinError(error)}")
 
-        def _cancel_writer(self, problems: list[str]) -> None:
+        def _cancel_writer(self, problems: list[str]) -> bool:
             """Cancel a write that is blocked on the input pipe.
 
             The write is cancelled rather than waited for: the lock that
@@ -728,6 +852,9 @@ if sys.platform == "win32":
             The cancellation happens **under** the state lock, and so does the
             writer's release of the handle, so the two can never act on a
             handle the other has already closed.
+
+            False when a write is still in flight: the input pipe then
+            belongs to that writer and must not be closed under it.
             """
             deadline = time.monotonic() + _CLOSE_TIMEOUT
             while True:
@@ -746,10 +873,10 @@ if sys.platform == "win32":
                                     f"{ctypes.WinError(error)}"
                                 )
                     if not inflight:
-                        return
+                        return True
                 if time.monotonic() >= deadline:
                     problems.append("a terminal write did not finish")
-                    return
+                    return False
                 time.sleep(0.02)
 
         def _stop_reader(self, problems: list[str]) -> bool:
@@ -820,6 +947,7 @@ if sys.platform == "win32":
         hpcon = ctypes.c_void_p()
         attribute_buffer: ctypes.Array[ctypes.c_char] | None = None
         attribute_list = 0
+        attribute_initialized = False
         process_info = _ProcessInformation()
         tree: ProcessTree | None = None
         opened: list[int] = []
@@ -859,6 +987,9 @@ if sys.platform == "win32":
                 ctypes.byref(size),
             ):
                 raise ctypes.WinError(ctypes.get_last_error())
+            # Only an initialized list may be deleted; an allocated buffer
+            # that never got initialized must simply be released.
+            attribute_initialized = True
             if not _UpdateProcThreadAttribute(
                 ctypes.cast(attribute_buffer, ctypes.c_void_p),
                 0,
@@ -873,6 +1004,10 @@ if sys.platform == "win32":
             startup = _StartupInfoEx()
             startup.StartupInfo.cb = ctypes.sizeof(_StartupInfoEx)
             startup.lpAttributeList = ctypes.cast(attribute_buffer, ctypes.c_void_p)
+            # The pseudoconsole replaces the child's console, so the three
+            # standard-handle slots stay null; the flag is what tells Windows
+            # to use them rather than the parent's handles.
+            startup.StartupInfo.dwFlags = _STARTF_USESTDHANDLES
 
             block = _environment_block(env)
             environment = ctypes.create_string_buffer(block, len(block))
@@ -919,30 +1054,44 @@ if sys.platform == "win32":
             _CloseHandle(thread_handle)
             opened.remove(thread_handle)
             thread_handle = 0
+            # The constructor is the transaction's last step: if it returns,
+            # the terminal owns the pipes, the pseudoconsole, the child and
+            # the job. If it raises, it never took them, so the rollback
+            # below is closing handles that are still the transaction's.
+            terminal = WindowsTerminalProcess(
+                pid=int(process_info.dwProcessId),
+                process=process_handle,
+                tree=tree,
+                input_write=int(input_write.value or 0),
+                output_read=int(output_read.value or 0),
+                hpcon=int(hpcon.value or 0),
+            )
         except BaseException:
             if process_handle:
                 _TerminateProcess(process_handle, 1)
                 _WaitForSingleObject(process_handle, 5000)
-            if hpcon.value:
-                _ClosePseudoConsole(hpcon)
-            if attribute_list:
+            if attribute_initialized and attribute_list:
                 _DeleteProcThreadAttributeList(attribute_list)
+            # The output pipe is closed before the pseudoconsole, and it is
+            # **not** read: the pseudoconsole's write end is still open, and
+            # a read on a pipe whose write end is open blocks for ever. On
+            # Windows older than 11 24H2, ClosePseudoConsole waits for the
+            # clients to disconnect, and they only do so once the output
+            # pipe is closed — so the pipe goes first, and the pseudoconsole
+            # after it. There is nothing to read on a failed spawn: no
+            # reader was ever started, and no frame is owed to anybody.
             for handle in reversed(opened):
                 _CloseHandle(handle)
+            opened.clear()
+            if hpcon.value:
+                _ClosePseudoConsole(hpcon)
             if tree is not None:
                 tree.close()
             raise
 
-        _DeleteProcThreadAttributeList(attribute_list)
+        if attribute_initialized and attribute_list:
+            _DeleteProcThreadAttributeList(attribute_list)
 
-        terminal = WindowsTerminalProcess(
-            pid=int(process_info.dwProcessId),
-            process=process_handle,
-            tree=tree,
-            input_write=int(input_write.value or 0),
-            output_read=int(output_read.value or 0),
-            hpcon=int(hpcon.value or 0),
-        )
         try:
             terminal._start()
         except BaseException as exc:
