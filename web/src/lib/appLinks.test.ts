@@ -3,9 +3,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const push = vi.hoisted(() => vi.fn(async (_href: string) => undefined))
-vi.mock('../router', () => ({ router: { push } }))
+const currentRoute = vi.hoisted(() => ({ value: { name: 'chat-detail' as string | undefined } }))
+vi.mock('../router', () => ({ router: { push, currentRoute } }))
+const openTask = vi.hoisted(() => vi.fn((_id: string) => undefined))
+vi.mock('../stores/itemPeek', () => ({ useItemPeekStore: () => ({ openTask }) }))
 
-import { handleAppLinkClick, isAppRouteHref, parseWorkspaceFileAccessHref } from './appLinks'
+import { handleAppLinkClick, isAppRouteHref, parseTaskHref, parseWorkspaceFileAccessHref } from './appLinks'
 
 const ID = '0123456789abcdef0123456789abcdef'
 
@@ -50,6 +53,8 @@ function click(target: Element, init: MouseEventInit = {}): MouseEvent {
 afterEach(() => {
   document.body.innerHTML = ''
   push.mockClear()
+  openTask.mockClear()
+  currentRoute.value = { name: 'chat-detail' }
 })
 
 describe('isAppRouteHref', () => {
@@ -159,13 +164,39 @@ describe('a workspace File access link', () => {
   })
 })
 
+describe('parseTaskHref', () => {
+  it('names the id of an exact task address only', () => {
+    expect(parseTaskHref(`/tasks/${ID}`)).toBe(ID)
+    for (const href of [
+      '/tasks',
+      '/tasks/9920898d',
+      '/tasks/0123456789ABCDEF0123456789ABCDEF',
+      `/tasks/${ID}/extra`,
+      `https://example.com/tasks/${ID}`,
+    ]) {
+      expect(parseTaskHref(href), href).toBeNull()
+    }
+  })
+})
+
 describe('handleAppLinkClick', () => {
-  it('routes a click on a task link in place, from inside the label', async () => {
+  it('opens a task link as a peek over the chat, from inside the label', async () => {
     const a = anchor(`/tasks/${ID}`)
     const event = click(a.querySelector('strong')!)
     expect(handleAppLinkClick(event)).toBe(true)
     expect(event.defaultPrevented).toBe(true)
-    await vi.waitFor(() => expect(push).toHaveBeenCalledWith(`/tasks/${ID}`))
+    await vi.waitFor(() => expect(openTask).toHaveBeenCalledWith(ID))
+    expect(push).not.toHaveBeenCalled()
+  })
+
+  it('sends a task link on the board to the board\'s own editor', async () => {
+    for (const name of ['tasks', 'task-detail']) {
+      currentRoute.value = { name }
+      const a = anchor(`/tasks/${ID}`)
+      expect(handleAppLinkClick(click(a.querySelector('strong')!)), name).toBe(true)
+      await vi.waitFor(() => expect(push).toHaveBeenCalledWith(`/tasks/${ID}`))
+    }
+    expect(openTask).not.toHaveBeenCalled()
   })
 
   it('routes a click on a settings link in place, anchor and all', async () => {
@@ -221,6 +252,21 @@ describe('handleAppLinkClick', () => {
     await vi.waitFor(() => expect(before).toHaveBeenCalled())
     await Promise.resolve()
     expect(push).not.toHaveBeenCalled()
+    expect(openTask).not.toHaveBeenCalled()
+  })
+
+  it('opens the peek only once the dialog in the way has closed', async () => {
+    const order: string[] = []
+    const before = vi.fn(async () => {
+      order.push('closed')
+      return true
+    })
+    openTask.mockImplementationOnce((id: string) => {
+      order.push(`peek ${id}`)
+    })
+    expect(handleAppLinkClick(click(anchor(`/tasks/${ID}`)), before)).toBe(true)
+    await vi.waitFor(() => expect(openTask).toHaveBeenCalledWith(ID))
+    expect(order).toEqual(['closed', `peek ${ID}`])
   })
 
   it('navigates from a dialog only once it has closed', async () => {
