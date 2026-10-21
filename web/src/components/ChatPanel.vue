@@ -1371,6 +1371,7 @@ import { parseTaskHandover, type TaskHandover } from '../lib/taskHandover'
 import InjectedPromptCard from './InjectedPromptCard.vue'
 import { parseInjectedPrompt, type InjectedPrompt } from '../lib/injectedPrompt'
 import { linkifyText } from '../lib/filePaths'
+import { isChatId } from '../lib/chatLinks'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
@@ -3705,6 +3706,38 @@ watch(() => chat.value?.chat_id, (id) => notifyChatFocused(id))
 
 const knownFilePaths = computed(() => touchedFiles.value.map(f => f.file_path))
 
+// The conversations this reader can open, by id and human title. A message
+// that names one of them links to it (see lib/chatLinks.ts). A remote chat's
+// session lives on another device and an archived one is a transcript, so
+// neither is a destination a reference should offer: a link to a
+// conversation that cannot be opened is worse than plain text.
+function reachableChatLinks(): [string, string][] {
+  const pairs: [string, string][] = []
+  for (const chat of store.chats) {
+    if (chat.archived || chat.local === false) continue
+    if (!isChatId(chat.chat_id)) continue
+    pairs.push([chat.chat_id, chat.title || ''])
+  }
+  return pairs
+}
+
+// A reference links to the conversation's title, so a renamed conversation
+// changes the rendering too. The key is the id/title pairs themselves, sorted
+// by id: the number of chats says nothing about whether a title moved.
+const knownChatLinksKey = computed(() => JSON.stringify(
+  reachableChatLinks().sort((a, b) => a[0].localeCompare(b[0])),
+))
+
+// The map the renderers take. It is derived from the key, so it is rebuilt
+// only when an id or a title actually changes: a chat-list poll that returns
+// the same conversations leaves the transcript alone.
+const knownChatLinks = computed(() => {
+  const known = new Map<string, string>()
+  const pairs = JSON.parse(knownChatLinksKey.value) as [string, string][]
+  for (const [id, title] of pairs) known.set(id, title)
+  return known
+})
+
 const mdCache = new Map<string, string>()
 // User bubbles render through a different pipeline (raw HTML is escaped, see
 // lib/safeMarkdown.ts), so the two renderings cannot share one text-keyed cache.
@@ -3717,13 +3750,17 @@ watch(() => knownFilePaths.value.join('|'), () => {
   mdCache.clear()
   userMdCache.clear()
 })
+watch(knownChatLinksKey, () => {
+  mdCache.clear()
+  userMdCache.clear()
+})
 
 function renderMarkdown(text: string): string {
   if (!text) return ''
   const cached = mdCache.get(text)
   if (cached !== undefined) return cached
 
-  const rendered = renderSafeMarkdown(text, knownFilePaths.value)
+  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value)
   if (mdCache.size >= MAX_MD_CACHE_SIZE) {
     // Plain FIFO eviction — fine for chat scroll-back.
     const firstKey = mdCache.keys().next().value
@@ -3738,7 +3775,7 @@ function renderUserMessage(text: string): string {
   const cached = userMdCache.get(text)
   if (cached !== undefined) return cached
 
-  const rendered = renderSafeUserMarkdown(text, knownFilePaths.value)
+  const rendered = renderSafeUserMarkdown(text, knownFilePaths.value, knownChatLinks.value)
   if (userMdCache.size >= MAX_MD_CACHE_SIZE) {
     const firstKey = userMdCache.keys().next().value
     if (firstKey !== undefined) userMdCache.delete(firstKey)
@@ -6119,6 +6156,19 @@ details[open] > .activity-summary::before {
 :deep(a.file-link:hover) {
   color: var(--accent);
   text-decoration: underline solid;
+}
+/* A reference to another conversation (#1768). An ordinary accent link, so
+   it reads as a link into the app and not as the dotted file-path chip. */
+.message-content :deep(a.chat-link),
+:deep(a.chat-link) {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.message-content :deep(a.chat-link:hover),
+:deep(a.chat-link:hover) {
+  color: var(--accent-strong);
 }
 /* A wide table may run past the reading measure into the empty space on its
    right (up to --chat-wide), so its columns stay readable instead of
