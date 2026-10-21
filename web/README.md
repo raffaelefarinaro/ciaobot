@@ -64,6 +64,12 @@ web/
                            SettingsEngineLogin.vue; SettingsMemoryHandover.vue is the Memory handover card:
                            agreement rate and the operator-only per-workspace handover choice), plus the
                            scoped CSS they share with it
+    components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
+                           MemoryMapView under the header (so every Memory section shows it). Its open
+                           state is the only storage, `ciao.memory.howOpen` ('1'/'0', read and written in
+                           try/catch). The tag table is static data (`TAG_ROWS`), labelled through
+                           `kindLabel`, and is cross-checked against the nightly and memory-pass prompts
+                           in `ciao/stock/skills/ciao-memory/references/`
     stores/               Pinia stores (auth, projects, tasks, taskBoard, webhooks, fileViewer, itemPeek), and store
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted

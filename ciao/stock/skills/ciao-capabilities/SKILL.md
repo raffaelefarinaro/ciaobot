@@ -48,7 +48,7 @@ Each area has a reference file next to this one. Open only the file the question
 
 ## Privacy and trust posture
 
-Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, and no unattended run promotes a new always-loaded fact. An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. The agent's file access is set per workspace (File access, in `references/workspaces-and-chats.md`): under Workspace only it cannot read outside that workspace's folder, but the network is not restricted.
+Local-first: the server, vault, and runtime state live on the user's machine; traffic leaves only toward the configured model providers. Memory is reviewable: confident state-shaped facts are filed by the memory pass, the unsure ones wait as proposals, and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept). An existing notes folder is never discarded or rewritten during onboarding, and the vault stays portable plain markdown. The agent's file access is set per workspace (File access, in `references/workspaces-and-chats.md`): under Workspace only it cannot read outside that workspace's folder, but the network is not restricted.
 
 ## Guided tour (new users)
 
@@ -57,7 +57,7 @@ When onboarding someone, walk through these hands-on:
 1. **Orient** — workspaces → projects → chats; create or rename a project for something they're working on.
 2. **Chat** — model picker and project context the agent always sees.
 3. **Annotate & files** — message comments, inline file cards, pin, line comments, and rich previews.
-4. **Memory** — archive → memory pass; confident facts are filed, unsure ones wait, and no unattended run promotes a new always-loaded fact.
+4. **Memory** — archive → memory pass; confident facts are filed, unsure ones wait, and no unattended run promotes a new always-loaded fact (unless the operator set Memory handover to Dismiss and accept).
 5. **Schedules** — set up one small routine they'd actually use.
 6. **Task board** — file one task with a due date, open it and press **Delegate to agent**, watch the badge go running, open the chat it works in, then **Approve Done** when the result lands. The step worth stopping on is that the agent's turn finishing never marks the task done: that gesture is theirs.
 7. **Webhooks** — point an external system at one trigger URL, if they have something that reports events.
