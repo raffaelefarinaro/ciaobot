@@ -772,3 +772,148 @@ def test_cli_request_must_be_a_plain_identifier(tmp_path: Path) -> None:
 
     rows = [row for row in list_proposals(queue) if row["kind"] == "learnings"]
     assert len(rows) == 1 and rows[0]["request"] == ""
+
+
+# ── decider: add flag and escalate ────────────────────────────────────────
+
+_PEOPLE_BULLET = "- [people Mo] Mo leads platform.  _(from: chat-1)_  _(decide: nightly; r1)_"
+_OTHER_BULLET = "- [memory] Prefer uv.  _(from: chat-2)_"
+
+
+def _decider_queue(tmp_path: Path, *bullets: str) -> tuple[Path, Path]:
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n## 2026-01-01T00:00:00Z\n\n" + "\n".join(bullets) + "\n",
+        encoding="utf-8",
+    )
+    return vault, queue
+
+
+def _escalate(tmp_path: Path, vault: Path, needle: str, reason: str | None) -> int:
+    from ciao import cli
+
+    text_file = tmp_path / "needle.txt"
+    text_file.write_text(needle, encoding="utf-8")
+    argv = [
+        "memory-proposal-escalate",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        "--text-file", str(text_file),
+    ]
+    if reason is not None:
+        reason_file = tmp_path / "reason.txt"
+        reason_file.write_text(reason, encoding="utf-8")
+        argv += ["--reason-file", str(reason_file)]
+    return cli.main(argv)
+
+
+def test_cli_add_rejects_an_unknown_decider(tmp_path: Path) -> None:
+    """argparse refuses a decider outside the closed set."""
+    import pytest
+
+    from ciao import cli
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["memory-proposal-add", "--workspace", str(tmp_path), "--decide", "maybe", "x"])
+    assert exc.value.code == 2
+
+
+def test_cli_escalate_retags_in_place_under_the_lock(tmp_path: Path) -> None:
+    """Escalation rewrites one line under queue_lock and records no decision."""
+    import contextlib
+
+    from ciao import memory_receipts
+
+    vault, queue = _decider_queue(tmp_path, _PEOPLE_BULLET, _OTHER_BULLET)
+    entered: list[Path] = []
+    real_lock = memory_receipts.queue_lock
+
+    @contextlib.contextmanager
+    def recording_lock(path: Path):
+        entered.append(path)
+        with real_lock(path):
+            yield
+
+    original = memory_receipts.queue_lock
+    memory_receipts.queue_lock = recording_lock
+    try:
+        rc = _escalate(tmp_path, vault, "Mo leads", "Checked People/Mo.md; only you know.")
+    finally:
+        memory_receipts.queue_lock = original
+
+    assert rc == 0
+    assert entered
+    lines = queue.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "# Memory Proposals"
+    assert lines[2] == "## 2026-01-01T00:00:00Z"
+    assert lines[4] == (
+        "- [people Mo] Mo leads platform.  _(from: chat-1)_"
+        "  _(decide: you; Checked People/Mo.md; only you know.)_"
+    )
+    assert lines[5] == _OTHER_BULLET
+    assert read_decisions(queue) == []
+
+
+def test_cli_escalate_adds_a_tail_to_a_bullet_with_none(tmp_path: Path) -> None:
+    """A bullet with no decide tail gains one at the end."""
+    vault, queue = _decider_queue(tmp_path, _OTHER_BULLET)
+    assert _escalate(tmp_path, vault, "Prefer uv", "r") == 0
+    assert queue.read_text(encoding="utf-8").splitlines()[-1] == _OTHER_BULLET + "  _(decide: you; r)_"
+
+
+def test_cli_escalate_replaces_an_existing_you_reason(tmp_path: Path) -> None:
+    """Re-escalating is idempotent: one tail, the latest reason."""
+    vault, queue = _decider_queue(tmp_path, _OTHER_BULLET)
+    assert _escalate(tmp_path, vault, "Prefer uv", "first") == 0
+    assert _escalate(tmp_path, vault, "Prefer uv", "second") == 0
+    last = queue.read_text(encoding="utf-8").splitlines()[-1]
+    assert last == _OTHER_BULLET + "  _(decide: you; second)_"
+    assert last.count("_(decide:") == 1
+
+
+def test_cli_escalate_preserves_the_proposal_id(tmp_path: Path) -> None:
+    """The decider is outside the hashed fields, so escalation keeps the id."""
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    vault, queue = _decider_queue(tmp_path, _PEOPLE_BULLET, _OTHER_BULLET)
+    rel = "ws/Workspace/Memory-Proposals.md"
+    before = [e.proposal_id for e in walk_proposal_queue("ws", rel, queue.read_text(encoding="utf-8"))]
+    assert _escalate(tmp_path, vault, "Mo leads", "r") == 0
+    after = [e.proposal_id for e in walk_proposal_queue("ws", rel, queue.read_text(encoding="utf-8"))]
+    assert before == after and len(before) == 2
+
+
+def test_cli_escalate_refuses_ambiguous_missing_and_empty(tmp_path: Path) -> None:
+    """Two matches or none exit 1 and change nothing; bad reason input exits 2."""
+    vault, queue = _decider_queue(tmp_path, "- [memory] lesson one  _(from: a)_", "- [memory] lesson two  _(from: a)_")
+    original = queue.read_text(encoding="utf-8")
+    assert _escalate(tmp_path, vault, "lesson", "r") == 1
+    assert queue.read_text(encoding="utf-8") == original
+    assert _escalate(tmp_path, vault, "absent", "r") == 1
+    assert _escalate(tmp_path, vault, "lesson one", "  \n") == 2
+    assert _escalate(tmp_path, vault, "lesson one", None) == 2
+    assert queue.read_text(encoding="utf-8") == original
+
+
+def test_cli_escalate_matches_the_flattened_form(tmp_path: Path) -> None:
+    """A needle with repeated whitespace still resolves, like dismiss."""
+    vault, queue = _decider_queue(tmp_path, "- [memory] spaced lesson  _(from: a)_")
+    assert _escalate(tmp_path, vault, "spaced   lesson", "r") == 0
+    assert "_(decide: you; r)_" in queue.read_text(encoding="utf-8")
+
+
+def test_dismiss_still_works_on_a_bullet_with_a_decide_tail(tmp_path: Path) -> None:
+    """Dismissal records the bare text, never the decide tail."""
+    from ciao import cli
+
+    vault, queue = _decider_queue(tmp_path, _PEOPLE_BULLET)
+    rc = cli.main([
+        "memory-proposal-dismiss", "--workspace", str(tmp_path),
+        "--vault-root", str(vault), "Mo leads",
+    ])
+    assert rc == 0
+    decisions = read_decisions(queue)
+    assert len(decisions) == 1
+    assert decisions[0]["text"] == "Mo leads platform."

@@ -4200,3 +4200,40 @@ def test_repo_accept_refuses_unlinked_repo_and_keeps_row(tmp_path: Path) -> None
     assert "linked" in resp.json()["error"]
     assert "make test" not in (repo / "AGENTS.md").read_text(encoding="utf-8")
     assert [r["id"] for r in client.get("/api/proposals").json()["rows"]] == [row["id"]]
+
+
+def test_decider_is_not_part_of_the_proposal_id() -> None:
+    """Adding, changing or dropping the decide tail never moves an id or a dup ordinal."""
+    from ciao.proposal_tracking import walk_proposal_queue
+
+    rel = "ws/Workspace/Memory-Proposals.md"
+    tails = ("", "  _(decide: nightly; r)_", "  _(decide: you; other)_")
+    walks = [
+        list(
+            walk_proposal_queue(
+                "ws", rel, f"- [people Mo] x  _(from: s)_{t}\n- [people Mo] x  _(from: s)_{t}\n"
+            )
+        )
+        for t in tails
+    ]
+    ids = [[e.proposal_id for e in w] for w in walks]
+    assert ids[0] == ids[1] == ids[2]
+    assert len(set(ids[0])) == 2
+    assert [[e.dup for e in w] for w in walks] == [[0, 1]] * 3
+
+
+def test_listing_exposes_decider_and_reason(tmp_path: Path) -> None:
+    """Rows carry decider and decide_reason only when the bullet has a tail."""
+    config = _config(tmp_path)
+    (config.workspace_vault_root("personal") / "Workspace").mkdir(parents=True, exist_ok=True)
+    _write_queue(
+        config,
+        "personal",
+        "- [memory] tagged  _(from: s)_  _(decide: you; judgement)_\n"
+        "- [memory] plain  _(from: s)_\n",
+    )
+    rows = {r["text"]: r for r in _client(config).get("/api/proposals").json()["rows"]}
+    assert rows["tagged"]["decider"] == "you"
+    assert rows["tagged"]["decide_reason"] == "judgement"
+    assert "decider" not in rows["plain"]
+    assert "decide_reason" not in rows["plain"]

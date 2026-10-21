@@ -535,6 +535,18 @@ watch(changeCounts, (chips) => {
   }
 })
 
+/** The "Needs you" chip earns its place only when it would filter something
+ * out: at least one row in scope is marked `nightly`. */
+const needsYouChipShown = computed(() => {
+  const ws = projectStore.activeWorkspace
+  return store.needsYouCount(ws) > 0
+    && store.scopedRows(ws).some(r => r.decider === 'nightly')
+})
+
+function toggleNeedsYou() {
+  store.decideFilter = store.decideFilter === 'needs-you' ? 'all' : 'needs-you'
+}
+
 function clearAllFilters() {
   changeFilter.value = 'all'
   store.resetFilters()
@@ -1386,7 +1398,7 @@ watch(
         What archived chats taught Ciaobot that it would not save on its own. Each one
         says what it will do: create a note, add to one, or change one that is already there.
         <button
-          v-if="store.kindFilter !== 'all' || store.search"
+          v-if="store.kindFilter !== 'all' || store.search || store.decideFilter !== 'all'"
           type="button"
           class="pr-clear-filter"
           @click="clearAllFilters()"
@@ -1478,7 +1490,7 @@ watch(
       <p v-if="filtersHideEverything" class="pr-empty">
         No proposals match the current filters.
         <button
-          v-if="store.kindFilter !== 'all' || store.search || changeFilter !== 'all'"
+          v-if="store.kindFilter !== 'all' || store.search || store.decideFilter !== 'all' || changeFilter !== 'all'"
           type="button"
           class="pr-clear-filter"
           @click="clearAllFilters()"
@@ -1504,6 +1516,13 @@ watch(
             :aria-pressed="changeFilter === 'all'"
             @click="changeFilter = 'all'"
           >All <span class="mr-chip-count">{{ scopeFiltered.length }}</span></button>
+          <button
+            v-if="needsYouChipShown"
+            type="button"
+            class="mr-chip"
+            :aria-pressed="store.decideFilter === 'needs-you'"
+            @click="toggleNeedsYou"
+          >Needs you <span class="mr-chip-count">{{ store.needsYouCount(projectStore.activeWorkspace) }}</span></button>
           <button
             v-for="chip in changeCounts"
             :key="chip.type"
@@ -1575,7 +1594,9 @@ watch(
             <p class="pr-row-meta">
               <span class="pr-kind" :class="`pr-kind--${row.kind}`">{{ kindLabel(row.kind) }}</span>
               <template v-if="row.source && !isRehome(row) && !isSkill(row)"> · from {{ row.source }}</template>
+              <template v-if="row.decider"> · decide: {{ row.decider === 'you' ? 'you' : 'nightly' }}</template>
             </p>
+            <p v-if="row.decide_reason" class="pr-row-reason">{{ row.decide_reason }}</p>
             <div class="pr-row-top">
               <!-- Backtick spans render as inline code rather than raw backticks;
                    built from segments, never v-html, since the text is model-written. -->
@@ -1680,6 +1701,7 @@ watch(
               <p class="pr-card-meta">
                 <span v-if="row.source">from <span class="pr-card-source">{{ row.source }}</span></span>
                 <span v-else>no recorded source</span>
+                <span v-if="row.decider">decide: {{ row.decider === 'you' ? 'you' : 'nightly' }}<template v-if="row.decide_reason"> ({{ row.decide_reason }})</template></span>
                 <span v-if="store.previews[row.id].leak_warning" class="pr-badge --warn">visible in every workspace</span>
               </p>
 

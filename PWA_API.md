@@ -1183,6 +1183,9 @@ Routes: `GET /api/proposals`, `GET /api/proposals/history`,
 `POST /api/proposals/{id}/{action}` (action is `accept` or `dismiss`),
 `POST /api/proposals/batch`, `POST /api/proposals/dismiss-older-than`.
 
+Each `GET /api/proposals` row may carry `decider` (`nightly` or `you`, absent
+when the bullet carries none) and `decide_reason` (one line).
+
 Memory mutations also expose `GET /api/memory/receipts`,
 `GET /api/memory/receipts/{id}` and `POST /api/memory/receipts/{id}/undo`
 (see below).

@@ -117,6 +117,63 @@ describe('ProposalReviewPanel', () => {
     wrapper.unmount()
   })
 
+  it('shows the decider and its reason on a row', async () => {
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a', decider: 'you', decide_reason: 'Judgement about identity.' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.get('.pr-row-meta').text()).toContain('decide: you')
+    expect(wrapper.get('.pr-row-reason').text()).toBe('Judgement about identity.')
+    wrapper.unmount()
+  })
+
+  it('a row without a decider shows no decide line', async () => {
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.get('.pr-row-meta').text()).not.toContain('decide')
+    expect(wrapper.find('.pr-row-reason').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('the Needs you chip filters out decide:nightly rows and is hidden when nothing would be filtered', async () => {
+    apiGet.mockResolvedValue({
+      rows: [
+        row({ id: 'y', text: 'For you', decider: 'you' }),
+        row({ id: 'n', text: 'For night', decider: 'nightly' }),
+      ],
+    })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    const chip = wrapper.findAll('.mr-chip').find(c => c.text().startsWith('Needs you'))
+    expect(chip).toBeTruthy()
+    await chip!.trigger('click')
+    expect(chip!.attributes('aria-pressed')).toBe('true')
+    expect(wrapper.findAll('.pr-row')).toHaveLength(1)
+    expect(wrapper.text()).toContain('For you')
+    expect(wrapper.text()).not.toContain('For night')
+    wrapper.unmount()
+
+    useProposalsStore().decideFilter = 'all'
+    apiGet.mockResolvedValue({ rows: [row({ id: 'y', decider: 'you' })] })
+    const quiet = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+    expect(quiet.findAll('.mr-chip').some(c => c.text().startsWith('Needs you'))).toBe(false)
+    quiet.unmount()
+  })
+
+  it('renders the reason as text, never markup', async () => {
+    apiGet.mockResolvedValue({ rows: [row({ id: 'a', decider: 'you', decide_reason: '<b>x</b>' })] })
+    const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+    await flushPromises()
+
+    expect(wrapper.get('.pr-row-reason').text()).toBe('<b>x</b>')
+    expect(wrapper.find('.pr-row-reason b').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('opens with a heading and one sentence, and no how-it-works disclosure', async () => {
     apiGet.mockResolvedValue({ rows: [row({ id: 'a' })] })
     useProjectStore().activeWorkspace = 'personal'

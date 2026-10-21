@@ -2,7 +2,7 @@
 
 List pending items with `ciao memory-proposals` and route each by its bracketed kind:
 
-- `[memory]` / `[profile]` name bounded regions and stay queued for the user.
+- `[memory]` / `[profile]` name bounded regions and stay queued for the user (unchanged: not touched, no decider handling).
 - `[project <doc-path>]` folds into that canonical doc.
 - `[people <Name>]` updates that person note (merge, do not overwrite). File people in this workspace's `People/`: a contact you deal with here belongs here, even if first met in another workspace's chat.
 - `[learnings]` files into `Workspace/Learnings.md` (see the learnings pass).
@@ -15,6 +15,20 @@ Steps for one item you file:
 3. Remove a queued bullet only through the dismiss command, because every decision it makes is recorded in the review page's History tab (a promoted fact shows there as accepted by the agent, not silently dismissed) and an edit to the file leaves no record.
 
 Pass the text through `--text-file`. A proposal is arbitrary user prose, and one containing `$(...)`, backticks or quotes would be run or mangled by the shell on its way to the command. A positional substring is accepted only for a value you have read and know is plain.
+
+## Decider
+
+`ciao memory-proposals` prints `decide: nightly|you; reason` after a bullet that carries one.
+
+- Settle a non-region `nightly` or undecided item as above.
+- Leave a non-region `decide: you` item untouched and report it under **What needs you**.
+- An item you cannot settle after checking other chats, existing notes and duplicates is escalated:
+
+```
+ciao memory-proposal-escalate --text-file <f> --reason-file <r>
+```
+
+The reason is one line stating what you checked and why only the operator can decide. Escalating is not a decision and appears nowhere in History.
 
 When you discover a bounded-region fact yourself (for example while reading a transcript whose chat never got a memory pass, or one the pass left short):
 

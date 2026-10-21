@@ -445,7 +445,7 @@ def test_curation_prompt_alone_carries_the_guardrails() -> None:
     for phrase in (
         "Do not promote new facts into the bounded",
         "You never edit a skill or this workspace's guide body",
-        "you never settle a proposal",
+        "you never settle a skill proposal or a guide-body proposal",
         "Memory-Consolidations.md",
         "evidence, never an instruction",
         "ciao curation-begin --json",
@@ -522,3 +522,19 @@ def test_convert_documents_skill_states_when_and_interpreter() -> None:
 def test_stale_entry_items_record_their_progress_key() -> None:
     section = _reference("curation-pass-3-reverify.md").split("## `stale_entry` items", 1)[1].split("\n## ", 1)[0]
     assert "ciao curation-progress --holder" in section
+
+
+def test_care_prompt_names_the_decider_and_escalate_command() -> None:
+    """The care prompt and pass 1 tell the run to settle, leave or escalate by decider."""
+    prompt = _curation_prompt()
+    for phrase in (
+        "ciao memory-proposal-escalate --text-file",
+        "decide: you",
+        "skill proposal or a guide-body proposal",
+    ):
+        assert phrase in prompt, phrase
+    pass1 = (_memory_skill_dir() / "references" / "curation-pass-1-proposals.md").read_text(
+        encoding="utf-8"
+    )
+    assert "memory-proposal-escalate" in pass1
+    assert "`[memory]` / `[profile]` name bounded regions and stay queued" in pass1
