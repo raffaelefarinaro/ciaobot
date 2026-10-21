@@ -701,7 +701,11 @@ describe('delegated task chats on Home', () => {
     // Delegation is the relation this chat has with the task, and the badge
     // says so rather than leaving the word `task` to speak for it.
     expect(row.get('.home-chat-task').attributes('title')).toBe('Delegated board task')
-    expect(row.get('.home-chat-task').attributes('aria-label')).toBe('Delegated board task')
+    // A plain span cannot carry a name, so the qualifier is text: the row's
+    // title for a pointer and a hidden line for a screen reader.
+    expect(row.get('.home-chat-task').attributes('aria-label')).toBeUndefined()
+    expect(row.attributes('title')).toBe('A quiet chat\nDelegated board task')
+    expect(row.get('.home-chat-heading .sr-only').text()).toBe(', Delegated board task')
     expect(row.get('.home-chat-status').text()).toBe('needs input')
     wrapper.unmount()
   })
@@ -818,7 +822,11 @@ describe('linked task chats on Home', () => {
     expect(tag.text()).toBe('task')
     // A link is a relation, not an attempt, and the badge says which it is.
     expect(tag.attributes('title')).toBe('Linked to a board task')
-    expect(tag.attributes('aria-label')).toBe('Linked to a board task')
+    expect(tag.attributes('aria-label')).toBeUndefined()
+    expect(rowFor(wrapper, 'A quiet chat').attributes('title'))
+      .toBe('A quiet chat\nLinked to a board task')
+    expect(rowFor(wrapper, 'A quiet chat').get('.home-chat-heading .sr-only').text())
+      .toBe(', Linked to a board task')
     wrapper.unmount()
   })
 

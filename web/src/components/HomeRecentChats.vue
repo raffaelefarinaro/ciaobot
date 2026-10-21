@@ -72,7 +72,7 @@
                 :class="chatItemClasses(entry.key, chat)"
                 :data-workspace-color="colorOf(chat)"
                 :disabled="chat.local === false"
-                :title="chat.local === false ? 'This chat lives on another instance' : chat.title"
+                :title="homeRowTitle(chat)"
                 @click="chat.local !== false && store.switchChat(chat.chat_id)"
               >
                 <span class="home-chat-main">
@@ -91,8 +91,10 @@
                       v-if="taskSignals.isTaskChat(chat)"
                       class="home-chat-task"
                       :title="taskBadgeTitle(chat)"
-                      :aria-label="taskBadgeTitle(chat)"
                     >task</span>
+                    <!-- A plain span cannot be named, so the relation also reads
+                         as text: in the row title for a pointer, and here for AT. -->
+                    <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
                     <span v-if="isChatCodeModeOn(chat, store.projectFor(chat.chat_id)?.repo)" class="home-chat-task home-chat-code" title="Code mode is on">code</span>
                   </span>
                   <!-- Project plus a status phrase read from the same signals
@@ -512,6 +514,11 @@ function relativeActivity(chat: ChatInfo): string {
  */
 function taskBadgeTitle(chat: ChatInfo): string {
   return taskSignals.isDelegatedChat(chat) ? 'Delegated board task' : 'Linked to a board task'
+}
+
+function homeRowTitle(chat: ChatInfo): string {
+  if (chat.local === false) return 'This chat lives on another instance'
+  return taskSignals.isTaskChat(chat) ? `${chat.title}\n${taskBadgeTitle(chat)}` : chat.title
 }
 
 function chatItemClasses(tier: HomeTierKey, chat: ChatInfo): string[] {
