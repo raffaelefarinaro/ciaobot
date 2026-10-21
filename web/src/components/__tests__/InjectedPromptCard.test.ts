@@ -14,6 +14,12 @@ const runPrompt: InjectedPrompt = {
   }],
 }
 
+// A notice's prose is capped at 320px, so a longer request, instruction or
+// resumed prompt runs past the cap. jsdom has no layout engine, so the
+// overflow is stood in for by a long text: what the tests below check is that
+// the region is reachable and named, not how tall it renders.
+const longText = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n')
+
 function mountCard(props: Record<string, unknown>) {
   return mount(InjectedPromptCard, {
     props: props as never,
@@ -54,6 +60,9 @@ describe('InjectedPromptCard', () => {
     const rawId = wrapper.get('pre.injected-card-raw').attributes('id')
     expect(rawId).toBeTruthy()
     expect(wrapper.get('.injected-card-raw-toggle').attributes('aria-controls')).toBe(rawId)
+    // The raw prompt is a scroll region too, so it is focusable and named.
+    expect(wrapper.get('pre.injected-card-raw').attributes('tabindex')).toBe('0')
+    expect(wrapper.get('pre.injected-card-raw').attributes('aria-label')).toBe('Full prompt')
   })
 
   it('links an automation turn and keeps command output collapsed', async () => {
@@ -151,5 +160,88 @@ describe('InjectedPromptCard', () => {
     const details = wrapper.get('details.injected-card-original')
     expect(details.find('img').exists()).toBe(false)
     expect(details.text()).toContain('<img src=x onerror="alert(1)">')
+  })
+
+  // A notice's prose is a scroll region capped at 320px. Without focus it
+  // cannot be scrolled from the keyboard, so a long request ran past the cap
+  // and stayed unreadable. Every region is focusable and named, the way the
+  // log tail is.
+  it('keeps a long retry request reachable and named', async () => {
+    const wrapper = mountCard({ prompt: { kind: 'retry' }, raw: longText })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    // The disclosure is unchanged: it still starts closed and the card still
+    // carries no generic full-prompt toggle.
+    const details = wrapper.get('details.injected-card-original')
+    expect(details.attributes('open')).toBeUndefined()
+    expect(wrapper.get('details.injected-card-original summary').text()).toBe('Show original request')
+    expect(wrapper.find('.injected-card-raw-toggle').exists()).toBe(false)
+    const prose = wrapper.get('details.injected-card-original .injected-card-prose')
+    expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('aria-label')).toBe('Original request')
+  })
+
+  it('keeps an automation request reachable and named', async () => {
+    const wrapper = mountCard({
+      prompt: {
+        kind: 'schedule',
+        command: { command: './digest.sh', exitCode: 0, timedOut: false, output: 'all good' },
+        prompt: longText,
+      },
+      raw: 'raw',
+    })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    const prose = wrapper.get('.injected-card-prose')
+    expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('aria-label')).toBe('Injected request')
+    // The command output keeps its own toggle, and its own region is named.
+    const detail = wrapper.get('.injected-card-detail-toggle')
+    expect(detail.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('.injected-card-output').exists()).toBe(false)
+    await detail.trigger('click')
+    expect(detail.attributes('aria-expanded')).toBe('true')
+    const output = wrapper.get('.injected-card-output')
+    expect(output.attributes('tabindex')).toBe('0')
+    expect(output.attributes('aria-label')).toBe('Command output')
+  })
+
+  it('keeps a webhook instruction reachable and named', async () => {
+    const wrapper = mountCard({
+      prompt: { kind: 'webhook', instructions: longText, event: 'build failed' },
+      raw: 'raw',
+    })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    const prose = wrapper.get('.injected-card-prose')
+    expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('aria-label')).toBe('Injected instructions')
+    // The event keeps its own toggle, and its own region is named.
+    const detail = wrapper.get('.injected-card-detail-toggle')
+    expect(detail.text()).toBe('Event')
+    expect(detail.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('.injected-card-output').exists()).toBe(false)
+    await detail.trigger('click')
+    const output = wrapper.get('.injected-card-output')
+    expect(output.attributes('tabindex')).toBe('0')
+    expect(output.attributes('aria-label')).toBe('Webhook event')
+  })
+
+  it('keeps a resumed task request reachable and named', async () => {
+    const wrapper = mountCard({
+      prompt: { kind: 'task_resume', title: 'Ship the release', previousState: 'failed' },
+      raw: longText,
+    })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    expect(wrapper.get('.injected-card-body > p').text())
+      .toBe('The previous attempt ended as failed.')
+    const prose = wrapper.get('.injected-card-prose')
+    expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('aria-label')).toBe('Injected request')
+  })
+
+  it('keeps an update task request reachable and named', async () => {
+    const wrapper = mountCard({ prompt: { kind: 'update_task' }, raw: longText })
+    await wrapper.get('.injected-card-toggle').trigger('click')
+    const prose = wrapper.get('.injected-card-prose')
+    expect(prose.attributes('tabindex')).toBe('0')
+    expect(prose.attributes('aria-label')).toBe('Injected request')
   })
 })
