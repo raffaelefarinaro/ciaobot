@@ -916,6 +916,21 @@ describe('ProjectSidebar accessible context menus', () => {
     wrapper.unmount()
   })
 
+  it('keeps the repository facts in the row title, where a hidden badge cannot hide them', async () => {
+    worktreeChat(true)
+    const wrapper = await mountSidebar()
+    await flushPromises()
+    const badge = wrapper.get('.chat-code-tag')
+    // A fine pointer hides the row's marks while its actions show, so the
+    // facts the badge carries live in the row's own title too.
+    expect(wrapper.find('.chat-code-tag').exists()).toBe(true)
+    expect(wrapper.get('.chat-item').attributes('title'))
+      .toBe(`Menu chat\nDrag to move to another project\n${badge.attributes('title')}`)
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('feat-x')
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('/r/app-wt')
+    wrapper.unmount()
+  })
+
   it('dims the branch chip of a chat whose code mode is off', async () => {
     worktreeChat(false)
     const wrapper = await mountSidebar()
