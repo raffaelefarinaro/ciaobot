@@ -142,7 +142,25 @@ def _effective_port(scheme: str, port: int | None) -> int | None:
     return {"http": 80, "https": 443}.get(scheme.lower())
 
 
+def _normalise_scheme(scheme: str) -> str:
+    """The scheme an origin is compared by.
+
+    ``ws``/``wss`` are the WebSocket spellings of ``http``/``https``: a
+    browser reaches the engine over ``wss`` while its own origin is
+    ``https``, so the two have to count as the same scheme.
+    """
+    scheme = scheme.lower()
+    return {"ws": "http", "wss": "https"}.get(scheme, scheme)
+
+
 def _same_origin(request: Request | WebSocket, origin: str) -> bool:
+    """True when ``origin`` is the request's own origin.
+
+    For a same-host origin the scheme has to match the request's scheme as
+    well as the effective port: ``https://ciao.example:8443`` is a different
+    origin from ``http://ciao.example:8443``, so the engine refuses the one
+    that does not match the scheme it serves.
+    """
     from urllib.parse import urlsplit
 
     try:
@@ -168,15 +186,16 @@ def _same_origin(request: Request | WebSocket, origin: str) -> bool:
     except ValueError:
         return False
     if origin_host == request_host:
-        request_scheme = str(getattr(request.url, "scheme", "") or parsed.scheme)
-        request_scheme = {"ws": "http", "wss": "https"}.get(
-            request_scheme, request_scheme
-        )
+        request_scheme = _normalise_scheme(request.url.scheme)
+        if request_scheme != parsed.scheme:
+            return False
         return _effective_port(parsed.scheme, origin_port) == _effective_port(
             request_scheme, request_port
         )
-    # Reached under a proxy-declared host (port may differ
-    # across the proxy hop, so it isn't compared here).
+    # Reached under a proxy-declared host. This branch stays scheme-agnostic on
+    # purpose: a TLS-terminating proxy legitimately presents http to the engine
+    # while the browser's origin is https, so only the proxy-declared host is
+    # compared (the port may differ across the proxy hop too).
     return origin_host in _allowed_origin_hosts(request)
 
 
@@ -201,7 +220,11 @@ def _loopback_host_header(request: Request) -> bool:
 
 
 def _same_origin_source(request: Request) -> bool:
-    """Origin (else Referer), when sent, must be this exact origin; checked for every method."""
+    """Origin (else Referer), when sent, must be this exact origin; checked for every method.
+
+    A same-host origin has to match the request's scheme as well as its host
+    and effective port.
+    """
     source = request.headers.get("origin") or request.headers.get("referer")
     return not source or _same_origin(request, source)
 

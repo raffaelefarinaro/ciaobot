@@ -28,14 +28,16 @@ def _auth_cookie(serializer: URLSafeTimedSerializer) -> dict[str, str]:
     return {SESSION_COOKIE: serializer.dumps({"user": "owner"})}
 
 
-def _protected_client() -> tuple[TestClient, URLSafeTimedSerializer]:
+def _protected_client(
+    base_url: str = "https://ciao.example",
+) -> tuple[TestClient, URLSafeTimedSerializer]:
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
         routes=[Route("/api/demo", _ok, methods=["GET", "POST"])],
         middleware=[Middleware(AuthMiddleware, serializer=serializer)],
     )
     app.state.serializer = serializer
-    return TestClient(app, base_url="https://ciao.example"), serializer
+    return TestClient(app, base_url=base_url), serializer
 
 
 def test_state_changing_request_rejects_cross_origin() -> None:
@@ -60,6 +62,51 @@ def test_state_changing_request_allows_matching_origin() -> None:
     assert resp.status_code == 200
 
 
+def test_state_changing_request_rejects_a_scheme_mismatch() -> None:
+    """The origin's scheme has to be the one the engine is serving.
+
+    A page on `https://ciao.example` is a different origin from the engine
+    on `http://ciao.example`, so its state-changing request is refused. The
+    same host and the same port with only the scheme changed is refused too:
+    there the port cannot carry the refusal on its own.
+    """
+    client, serializer = _protected_client(base_url="http://ciao.example")
+    cookies = _auth_cookie(serializer)
+
+    refused = client.post(
+        "/api/demo",
+        cookies=cookies,
+        headers={"Origin": "https://ciao.example"},
+    )
+    allowed = client.post(
+        "/api/demo",
+        cookies=cookies,
+        headers={"Origin": "http://ciao.example"},
+    )
+
+    assert refused.status_code == 403
+    assert allowed.status_code == 200
+
+    port_client, port_serializer = _protected_client(
+        base_url="http://ciao.example:8443"
+    )
+    port_cookies = _auth_cookie(port_serializer)
+
+    refused = port_client.post(
+        "/api/demo",
+        cookies=port_cookies,
+        headers={"Origin": "https://ciao.example:8443"},
+    )
+    allowed = port_client.post(
+        "/api/demo",
+        cookies=port_cookies,
+        headers={"Origin": "http://ciao.example:8443"},
+    )
+
+    assert refused.status_code == 403
+    assert allowed.status_code == 200
+
+
 def test_safe_request_does_not_require_origin() -> None:
     client, serializer = _protected_client()
     resp = client.get("/api/demo", cookies=_auth_cookie(serializer))
@@ -67,10 +114,10 @@ def test_safe_request_does_not_require_origin() -> None:
     assert resp.status_code == 200
 
 
-def _origin_req(headers: dict[str, str]) -> object:
+def _origin_req(headers: dict[str, str], scheme: str = "https") -> object:
     return SimpleNamespace(
         headers={k.lower(): v for k, v in headers.items()},
-        url=SimpleNamespace(hostname=None, port=None),
+        url=SimpleNamespace(hostname=None, port=None, scheme=scheme),
     )
 
 
@@ -105,6 +152,24 @@ def test_same_origin_accepts_proxy_forwarded_host() -> None:
     assert _same_origin(req, "https://app.example") is True
     # A genuine cross-origin still fails even with the forwarded host present.
     assert _same_origin(req, "https://evil.example") is False
+
+
+def test_same_origin_rejects_a_scheme_mismatch() -> None:
+    """A same host and port is not enough: the scheme has to match too.
+
+    `https://ciao.example:8443` is a different origin from
+    `http://ciao.example:8443`, so an engine serving plain http refuses the
+    https origin, and an engine serving https refuses the http one.
+    """
+    from ciao.web.auth import _same_origin
+
+    http_req = _origin_req({"host": "ciao.example:8443"}, scheme="http")
+    assert _same_origin(http_req, "http://ciao.example:8443") is True
+    assert _same_origin(http_req, "https://ciao.example:8443") is False
+
+    https_req = _origin_req({"host": "ciao.example:8443"}, scheme="https")
+    assert _same_origin(https_req, "https://ciao.example:8443") is True
+    assert _same_origin(https_req, "http://ciao.example:8443") is False
 
 
 def _auth_client() -> TestClient:

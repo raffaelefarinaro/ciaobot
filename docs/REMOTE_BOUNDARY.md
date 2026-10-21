@@ -30,8 +30,8 @@ carried by the session.
   also names loopback: first run binds 0.0.0.0, so the `Host` header alone
   would let a LAN client claim `localhost`. Every `/ws/*` handshake is checked for same-origin and
   then for the session. Every state-changing `/api/*` request must present an
-  `Origin` or `Referer` that matches the request host, allowing for a
-  proxy-declared `X-Forwarded-Host`.
+  `Origin` or `Referer` that matches the request host and scheme (normalising
+  `ws`/`wss`), allowing for a proxy-declared `X-Forwarded-Host`.
 - `_LOOPBACK_ONLY_API` is the only peer-scoped surface: the loopback-only
   local feed (`/api/menubar-chats`; legacy route
   name, no native client), the update
