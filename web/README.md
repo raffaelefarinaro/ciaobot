@@ -161,6 +161,12 @@ iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `
 - **Tap targets** must hit the `--touch: 44px` minimum (declared in `App.vue`) on every coarse-pointer layout, not only below a viewport breakpoint. Icon-only buttons use `.btn-icon` or another expanded-hit utility. Visually small actions can wrap a 44px hit area around an 18px glyph instead of resizing the glyph. The browser suite measures all visible interactive controls on Home and Chat, not only controls carrying a utility class.
 - **`position: fixed` popovers clamp through `lib/popoverAnchor.ts`**, against the *visual* viewport (`lib/viewport.ts`), not `window.innerHeight`. Anything a fixed popover pushes off screen is unreachable, because scrolling does not move it. A popover that focuses an input must also clamp *reactively*, via `useViewportHeight()`: the keyboard opens a moment after the box is placed, and a one-time measurement leaves it stranded behind the keyboard. `CommentComposePopover.vue` is the reference.
 
+The app-wide task read keeps delegation and manual links separate: `taskForChat`
+resolves only delegation, while `linkedTasksForChat` reads the task records'
+`linked_chats` and exposes all of them in Chat details without attempt state or
+completion actions. `isTaskChat` covers either relation for read-only signals;
+archive, Needs you and closure logic continue to use delegation alone.
+
 ## Design system
 
 CSS custom properties live in `App.vue` as `:root` declarations. The system is opinionated:
