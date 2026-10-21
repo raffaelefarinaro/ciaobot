@@ -2109,16 +2109,20 @@ def test_a_real_ctrl_c_interrupts_the_foreground_command_and_not_the_shell(
 ) -> None:
     """Ctrl+C is an input byte: it reaches the program, and the shell lives.
 
-    The command in the foreground sleeps for half a minute, so a reply that
-    arrives well inside that window can only be there because the
-    interrupt reached the program. The marker is computed by the shell, so
-    it cannot be an echo of what was typed.
+    The interrupt is sent to a **native** foreground program (``ping``)
+    rather than a PowerShell cmdlet. ConPTY turns the ``0x03`` byte into a
+    console control event only through the console's processed-input path,
+    which is the path a native program gets; PowerShell's own cmdlets run
+    inside the shell, where the line editor owns the console input mode and
+    the byte is not an interrupt. Interrupting a native program is also what
+    a user does at a real prompt.
 
-    The marker is typed only once the shell is back at its prompt. Sending
-    it straight after the interrupt is a race the shell can win by
-    discarding the pending input along with the interrupted line, and a
-    test that loses that race would fail for a reason that says nothing
-    about the interrupt.
+    The program runs for about half a minute, so a reply that arrives well
+    inside that window can only be there because the interrupt reached it.
+    The marker is computed by the shell, so it cannot be an echo of what was
+    typed, and it is typed only once the shell is back at its prompt:
+    sending it straight after the interrupt is a race the shell can win by
+    discarding the pending input along with the interrupted line.
     """
     ready_code, ready = _marker("GO")
     coded, expected = _marker("AFTER")
@@ -2126,19 +2130,19 @@ def test_a_real_ctrl_c_interrupts_the_foreground_command_and_not_the_shell(
     try:
         terminal.write(_emit(ready_code))
         _read_until(terminal, ready.encode("utf-8"))
-        terminal.write(b"Start-Sleep -Seconds 30\r")
-        # The line has been accepted once the shell echoes it back; the
-        # sleep is then running, because a native command starts at once.
-        _read_until(terminal, b"Start-Sleep", timeout=10)
+        # ~30 seconds of pinging, one per second.
+        terminal.write(b"ping -n 31 127.0.0.1\r")
+        # The line has been accepted once the shell echoes it back.
+        _read_until(terminal, b"ping", timeout=10)
         time.sleep(1.0)
         terminal.write(b"\x03")
-        # The prompt comes back when the interrupted command unwinds. Until
+        # The prompt comes back when the interrupted program unwinds. Until
         # then the shell may discard whatever else arrives, so the marker
         # waits for it rather than racing it.
         _read_until(terminal, b"> ", timeout=10)
         terminal.write(_emit(coded))
-        # Ten seconds is far below the thirty the foreground command would
-        # take, so a reply can only mean the interrupt worked.
+        # Ten seconds is far below the half minute the foreground program
+        # would take, so a reply can only mean the interrupt worked.
         produced = _read_until(terminal, expected.encode("utf-8"), timeout=10)
         assert expected.encode("utf-8") in produced
         assert terminal.poll() is None, "the shell must survive the interrupt"
@@ -2213,9 +2217,11 @@ def test_a_real_close_kills_the_background_child(tmp_path: Path) -> None:
 def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
     """Terminals opened and closed leave the handle count where it was.
 
-    One warm-up cycle first: the first terminal opens handles that are
-    cached for the rest of the process (the console host's, the module's
-    thread handle), and counting them as a leak would be wrong.
+    Two warm-up cycles first: the first terminal opens handles that are
+    cached for the rest of the process (the console host's channels, the
+    module's thread handle), and a single one does not reach that steady
+    state — the second terminal caches the rest. Counting those as a leak
+    would be wrong, and the measured cycles stay flat once they are in.
 
     The count is read once it has settled, not the instant the last close
     returns: from Windows 11 24H2 on ``ClosePseudoConsole`` returns before
@@ -2252,13 +2258,20 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
             previous = current
         return previous
 
+    # Two warm-up cycles first: the first terminal opens handles that are
+    # cached for the rest of the process (the console host's channels, the
+    # module's thread handle), and a single one does not reach that steady
+    # state — the second terminal caches the rest. Counting those as a leak
+    # would be wrong, and the measured cycles stay flat once they are in.
     warm_coded, warm_expected = _marker("WARM")
-    warm = tw.spawn_terminal(cwd=tmp_path)
-    try:
-        warm.write(_emit(warm_coded))
-        _read_until(warm, warm_expected.encode("utf-8"))
-    finally:
-        warm.close()
+    for _ in range(2):
+        warm = tw.spawn_terminal(cwd=tmp_path)
+        try:
+            warm.write(_emit(warm_coded))
+            _read_until(warm, warm_expected.encode("utf-8"))
+        finally:
+            warm.close()
+        settled_handle_count()
 
     before = settled_handle_count()
     cycle_coded, cycle_expected = _marker("CYCLE")
