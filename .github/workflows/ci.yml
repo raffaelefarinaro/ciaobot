@@ -125,6 +125,18 @@ jobs:
       run: |
         set -o pipefail
         python -m mypy ciao 2>&1 | tee windows-mypy.txt
+    # The ConPTY adapter only exists on Windows, and only a Windows runner can
+    # prove that a real pseudoconsole works. This step runs on every PR, not
+    # only on the ones that run the whole Windows suite, so the native binding
+    # is exercised before the change is merged instead of after it.
+    # The timeout is a bound, not a hope: a terminal test that hangs on a
+    # pipe must fail the job rather than hold the runner for six hours.
+    - name: Windows ConPTY terminal tests
+      if: ${{ !cancelled() }}
+      timeout-minutes: 15
+      run: |
+        set -o pipefail
+        python -m pytest -q -rfE tests/test_os_terminal_windows.py 2>&1 | tee windows-terminal.txt
     - name: Windows backend tests
       if: ${{ !cancelled() && env.WINDOWS_FULL == 'true' }}
       run: |
@@ -286,13 +298,17 @@ jobs:
       if: always()
       run: |
         # `tests/` keeps captured log lines that also start with ERROR out.
-        grep -E '^(FAILED|ERROR) tests/' windows-pytest.txt | sed -E 's/ - .*//' | sort -u > windows-failures.txt || true
+        # The terminal file names its tests as `tests/test_...`, so the same
+        # grep covers the focused native step: a red ConPTY step has to name
+        # the tests that failed, not only the count.
+        grep -E '^(FAILED|ERROR) tests/' windows-pytest.txt windows-terminal.txt 2>/dev/null | sed -E 's/ - .*//' | sed -E 's#^[^(]*tests/#tests/#' | sort -u > windows-failures.txt || true
         {
           echo "### Windows (#696)"
           echo
-          [ "$WINDOWS_FULL" = true ] || echo "Develop PR: imports and mypy only; the suites run after merge."
+          [ "$WINDOWS_FULL" = true ] || echo "Develop PR: imports, mypy and the ConPTY terminal tests only; the suites run after merge."
           echo "- imports: $(tail -1 windows-imports.txt 2>/dev/null)"
           echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
+          echo "- ConPTY terminal: $(tail -1 windows-terminal.txt 2>/dev/null)"
           echo "- pytest: $(tail -1 windows-pytest.txt 2>/dev/null)"
           echo "- npm test: $(grep -E '^ *(Test Files|Tests) ' windows-vitest.txt 2>/dev/null | tr -s ' ' | paste -sd ';' -)"
           echo "- install.ps1: $(grep -E 'exit ' windows-install-ps1.txt 2>/dev/null | paste -sd ';' -)"

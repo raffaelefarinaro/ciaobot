@@ -338,6 +338,33 @@ while the server is running, because the live schedule store may be writing it.
   need one on Windows. The suite also points `LOCALAPPDATA` at each test's
   home, so a machine with Ciaobot installed does not hand its real logon-task
   workspace to config-discovery tests.
+  One step runs on **every** PR rather than only on the `WINDOWS_FULL` ones:
+  `Windows ConPTY terminal tests`, which is `pytest -q -rfE
+  tests/test_os_terminal_windows.py` with a 15-minute bound, so a test that
+  hangs on a pipe fails the job instead of holding the runner. The native
+  Windows terminal (`ciao/os_support/terminal_windows.py`, a ConPTY driven
+  through `ctypes`) can only be proved on Windows — a POSIX run exercises
+  the ordering of the native calls with a fake, never the pseudoconsole
+  itself — so the real tests run there before the change is merged rather
+  than after it. The step runs on the `windows-latest` image; as of
+  2026-10-21 that is Windows Server 2025, whose `ClosePseudoConsole` returns
+  immediately (11 24H2 and later). The fake covers the orderings that also
+  work on the older versions, where that call waits for the clients to
+  disconnect: the output pipe is closed before the pseudoconsole, on the
+  normal close and on the failed-spawn rollback alike, and the reader is
+  stopped and joined before the pipe goes. The fake's `ClosePseudoConsole`
+  blocks until the output pipe is closed, exactly as those versions do, so
+  an order that would deadlock there fails the fake too; a read on a pipe
+  whose write end is open blocks as well, so the rollback is pinned to
+  close the pipe and never read from it. What only Windows can answer is
+  whether a pseudoconsole really carries the shell's output, the interrupt
+  and the resize: the real tests wait for text the shell has to compute from
+  code points, so a terminal that only echoed the command back cannot pass
+  them. Their input lines end with a bare `\r`: PowerShell reads CR as Enter
+  while LF means "insert a newline" in its line editor, so a `\r\n` leaves a
+  `>>` continuation line open and the next command joins that block instead
+  of running — which is exactly what made the Ctrl-C case look like a dead
+  terminal on the first native run.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
