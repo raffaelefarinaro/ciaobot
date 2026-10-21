@@ -84,11 +84,12 @@ def remove_pending_list(items: list[dict], entry_id: str) -> bool:
 
 
 QUEUE_DELIVERIES = frozenset({"queue", "steer"})
-#: Who the engine wrote an injected user turn for. Recorded per turn in
-#: ``ChatInfo.user_turn_origin`` and sent on ``user_echo`` / ``/messages`` so the
-#: PWA draws a notice card instead of a user bubble. Empty string = typed by the person.
+#: Who the engine wrote an injected user turn for, or that the user asked for
+#: a retry of. Recorded per turn in ``ChatInfo.user_turn_origin`` and sent on
+#: ``user_echo`` / ``/messages`` so the PWA draws a notice card instead of a
+#: user bubble. Empty string = typed by the person.
 TURN_ORIGINS = frozenset({
-    "background_run", "cli_task_wake", "schedule", "task_delegation",
+    "background_run", "cli_task_wake", "retry", "schedule", "task_delegation",
     "task_resume", "webhook", "update_task",
 })
 # ``steer_id`` of an entry handed to ``steer_turn`` whose delivery id is not
