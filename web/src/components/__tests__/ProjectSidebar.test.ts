@@ -777,6 +777,45 @@ describe('ProjectSidebar accessible context menus', () => {
     wrapper.unmount()
   })
 
+  it('offers Delete on a vault-backed project and names the folder in the confirmation', async () => {
+    // A vault-backed project used to have no Delete in its menu at all, so the
+    // only way out was Complete. The confirmation names the folder that goes
+    // from disk, so the user knows what is lost.
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-vault', name: 'Kitchen', workspace: 'personal', context: '',
+      created_at: '2026-07-29T00:00:00Z', order: 0, vault_folder: 'kitchen', is_auto: false,
+    }]
+    store.chats = [{
+      chat_id: 'chat-vault', project_id: 'project-vault', title: 'Kitchen chat', model: 'sonnet',
+      provider: 'claude', mode: 'default', session_id: 'session-vault',
+      created_at: '2026-07-29T00:00:00Z', archived: false,
+    }]
+    const { pendingConfirm } = await import('../../lib/confirm')
+    const wrapper = await mountSidebar()
+
+    await wrapper.get('[aria-label="Project actions"]').trigger('click')
+    await flushPromises()
+    const menu = document.body.querySelector<HTMLElement>('[data-reka-menu-content]')
+    expect(menu?.textContent).toContain('Rename')
+    expect(menu?.textContent).toContain('Delete')
+
+    const deleteButton = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'Delete')!
+    deleteButton.click()
+    await flushPromises()
+
+    const request = pendingConfirm.value
+    expect(request).toBeTruthy()
+    expect(request!.title).toBe('Delete project')
+    expect(request!.confirmLabel).toBe('Delete project')
+    expect(request!.destructive).toBe(true)
+    expect(request!.message).toContain('projects/active/kitchen/')
+    expect(request!.message).toContain('1')
+
+    wrapper.unmount()
+  })
+
   it('keeps the Move submenu mounted for keyboard opening and returns to its parent', async () => {
     const wrapper = await mountSidebar()
     await wrapper.get('[aria-label="Chat actions"]').trigger('click')

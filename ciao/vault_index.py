@@ -30,7 +30,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 from urllib.parse import unquote
 
 import yaml
@@ -988,24 +988,47 @@ def strip_references(
 ) -> list[str]:
     """Remove literal references to `deleted_path` from every note linking to it.
 
-    Must run BEFORE the target file is deleted from disk: resolution depends
-    on the target still existing in the filename index built here, or refs to
-    it would already come back unresolved (and thus invisible to this
+    Thin wrapper over :func:`strip_references_many` with a single target; the
+    prose lives there.
+    """
+    return strip_references_many(
+        vault_root, [deleted_path], path_prefix=path_prefix, undo=undo
+    )
+
+
+def strip_references_many(
+    vault_root: Path,
+    deleted_paths: Sequence[str],
+    *,
+    path_prefix: Path | None = None,
+    undo: dict[str, str] | None = None,
+) -> list[str]:
+    """Remove literal references to every path in `deleted_paths` from the notes linking to them.
+
+    Must run BEFORE the target files are deleted from disk: resolution depends
+    on the targets still existing in the filename index built here, or refs to
+    them would already come back unresolved (and thus invisible to this
     function) exactly as `scan_vault` treats any other broken link.
 
-    `deleted_path` is the `Entry.path` string form (e.g.
+    Each entry of `deleted_paths` is the `Entry.path` string form (e.g.
     "memory-vault/work/People/Mo.md"). Returns the repo-relative paths of the
-    files actually edited on disk.
+    files actually edited on disk; a note naming several targets is edited
+    once and listed once.
+
+    Several targets are stripped in ONE pass, so the vault is scanned once and
+    the whole cleanup is staged and committed as a unit. Deleting a folder
+    names every note in it, and a link that named two of them survived a
+    one-target-at-a-time cleanup.
 
     The cleanup is all-or-nothing: rewrites are computed without touching any
     file, staged to temp files, then swapped in; a failure at any point rolls
     every already-swapped file back, so on success the caller may safely
-    delete the target, and on failure the vault is exactly as before.
+    delete the targets, and on failure the vault is exactly as before.
 
-    ``path_prefix`` must be the prefix the CALLER's id was rendered with. After
-    the re-rooting an id reads `<root>/memory-vault/...`, while a bare scan of
-    one vault renders `memory-vault/...`: the two never compared equal, so
-    every reference was left untouched and the note was deleted anyway -
+    ``path_prefix`` must be the prefix the CALLER's ids were rendered with.
+    After the re-rooting an id reads `<root>/memory-vault/...`, while a bare
+    scan of one vault renders `memory-vault/...`: the two never compared equal,
+    so every reference was left untouched and the note was deleted anyway -
     dangling `related:` entries and markdown links on every migrated install,
     reported as `edited_backlinks: []`.
 
@@ -1013,6 +1036,9 @@ def strip_references(
     path so a caller can roll the successful cleanup back if a later delete step
     fails.
     """
+    targets = list(deleted_paths)
+    if not targets:
+        return []
     vault_root = vault_root.resolve()
     prefix = path_prefix or VAULT_RENDER_PREFIX
     entries = scan_vault(vault_root, path_prefix=path_prefix)
@@ -1022,7 +1048,10 @@ def strip_references(
     edits: list[tuple[Path, str, str]] = []
     edited: list[str] = []
     for e in entries:
-        if e.path_key == deleted_path or deleted_path not in e.related:
+        if e.path_key in targets:
+            continue
+        matches = [p for p in targets if p in e.related]
+        if not matches:
             continue
         rel_from_vault = _strip_prefix(e.path, prefix)
         abs_path = vault_root / rel_from_vault
@@ -1033,9 +1062,13 @@ def strip_references(
                 text = handle.read()
         except OSError:
             continue
-        new_text, file_changed = _strip_all_references(
-            text, filename_idx, deleted_path, rel_from_vault
-        )
+        new_text = text
+        file_changed = False
+        for deleted_path in matches:
+            new_text, changed = _strip_all_references(
+                new_text, filename_idx, deleted_path, rel_from_vault
+            )
+            file_changed = file_changed or changed
         if file_changed:
             edits.append((abs_path, text, new_text))
             edited.append(e.path_key)

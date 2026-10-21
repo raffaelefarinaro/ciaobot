@@ -635,6 +635,66 @@ def test_strip_references_commit_failure_rolls_back_every_swap(tmp_path: Path, m
     assert list(tmp_path.rglob("*.tmp")) == []
 
 
+def test_strip_references_many_strips_every_target_in_one_pass(tmp_path: Path):
+    """A folder delete names every note in it, and all of them are stripped at once.
+
+    Deleting a vault-backed project removes a whole folder, so the cleanup has
+    to dissolve the inbound links of every note in it. Doing it one target at a
+    time meant a second scan of the vault per note and a link that named two
+    of them survived the first pass.
+    """
+    _write(
+        tmp_path / "Projects" / "x" / "One.md",
+        "---\nname: One\ntype: project\n---\n# One\n",
+    )
+    _write(
+        tmp_path / "Projects" / "x" / "Two.md",
+        "---\nname: Two\ntype: project\n---\n# Two\n",
+    )
+    _write(
+        tmp_path / "Notes" / "Ref.md",
+        "---\n"
+        "name: Ref\n"
+        "type: note\n"
+        "related:\n"
+        "  - Projects/x/One\n"
+        "  - Projects/x/Two\n"
+        "---\n"
+        "# Ref\n\n"
+        "See [One](../Projects/x/One.md) and [Two](../Projects/x/Two.md).\n",
+    )
+
+    edited = vi.strip_references_many(
+        tmp_path,
+        ["memory-vault/Projects/x/One.md", "memory-vault/Projects/x/Two.md"],
+    )
+
+    # The linking note is edited once, however many targets it names.
+    assert edited == ["memory-vault/Notes/Ref.md"]
+    ref_text = (tmp_path / "Notes" / "Ref.md").read_text(encoding="utf-8")
+    assert "Projects/x/One" not in ref_text
+    assert "Projects/x/Two" not in ref_text
+    assert "related:" not in ref_text
+    assert "See One and Two." in ref_text
+    # The targets themselves are untouched: the caller deletes them next.
+    assert (tmp_path / "Projects" / "x" / "One.md").exists()
+    assert (tmp_path / "Projects" / "x" / "Two.md").exists()
+
+
+def test_strip_references_many_with_no_targets_is_a_no_op(tmp_path: Path):
+    """Nothing to strip means nothing to scan: no note is read, none is written."""
+    _write(
+        tmp_path / "Notes" / "Ref.md",
+        "---\nname: Ref\ntype: note\n---\n# Ref\n\nSee [One](../Projects/x/One.md).\n",
+    )
+    _write(tmp_path / "Projects" / "x" / "One.md", "---\nname: One\ntype: project\n---\n# One\n")
+    before = (tmp_path / "Notes" / "Ref.md").read_text(encoding="utf-8")
+
+    assert vi.strip_references_many(tmp_path, []) == []
+
+    assert (tmp_path / "Notes" / "Ref.md").read_text(encoding="utf-8") == before
+
+
 # ---- INDEX.md rendering -----------------------------------------------------
 
 

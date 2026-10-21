@@ -6,6 +6,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 ## Auth And Browser Security
 
+- Browser-terminal access (`GET /api/terminal/status`, `POST /api/terminal/unlock`) always requires a signed session, including on loopback. Terminal policy additionally requires the request's exact scheme, hostname and effective port: POST needs a bare `Origin` (no path, query or fragment); GET may use a same-origin page `Referer`, whose path and query are the page's own and are permitted, while a fragment is refused (browsers strip it before sending). Userinfo — including empty userinfo such as `http://@host` — missing/null origins and mismatches are refused. Remote access requires effective HTTPS; plain HTTP is allowed only for a direct loopback peer without proxy headers and a loopback Host. Unlock accepts exactly `{password}` in at most 4096 body bytes (password at most 1024 UTF-8 bytes), checks the password with bounded per-address failures, and returns a 15-minute grant only in a host-only HttpOnly SameSite=Strict cookie (`Secure` over HTTPS). No bearer appears in JSON. Responses are `no-store`. These routes launch no shell; session and stream integration are separate.
+- The terminal routes answer with two different envelopes, and a client must not assume one of them. A refusal from the terminal's own policy is `{"ok": false, "reason": ..., "error": ...}`; a refusal from the ordinary `AuthMiddleware` origin check — which runs first on a state-changing request and can answer before the terminal handler is reached at all — is `{"error": "forbidden origin"}`, with no `reason` key. The terminal's policy is intentionally stricter than the app's general rule (it also refuses userinfo and a non-bare `Origin`), so the two are not expected to accept the same set of requests.
+
 - Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is required, except from a browser on the host: loopback TCP peer with no reverse-proxy headers, loopback `Host`, exact same-origin `Origin`/`Referer` - the session is still required; `tailscale serve` callers are not the host). A change re-keys the session signer: every other device is signed out, and only the browser that made the change gets a new cookie. A missing current password is 400 `current_password_required`, a wrong one 403 `wrong_current_password`; neither is 401, which is reserved for a missing session. After 5 wrong current passwords from one client IP within 15 minutes, further changes from that IP are 429 `rate_limited` (even with the right password) until the window passes; a successful change clears the count, a missing current password does not count, and host browsers, which send no current password, are never limited. A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login or the login page's *Sign in on this computer*.
 - `POST /api/auth` accepts `{"token": "<PWA_AUTH_TOKEN>"}` and returns an HttpOnly `ciao_session` cookie.
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
@@ -37,7 +40,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth/host-sign-in` | Open a one-time signed-in tab in the host's default browser (loopback-only, no session; returns no credential) |
 | GET | `/api/projects` | List projects. Each carries `repo_path` and `repo`: `{path, branch, dirty, missing, instructions}` or `null` when unlinked. `instructions` is `{name, chars}` for the AGENTS.md (CLAUDE.md when there is no AGENTS.md) that code mode injects, `chars` being the injected text's length after the 20,000-character cap, or `null` when there is none or the folder is missing |
 | POST | `/api/projects` | Create project. Optional `repo_path` links a local git checkout (absolute path to its top level; 400 with the reason otherwise) |
-| PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project. PATCH accepts `repo_path` (`""` unlinks) |
+| PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project. PATCH accepts `repo_path` (`""` unlinks). DELETE accepts `?delete_vault=1` (`"true"` also): the vault-backed project's folder under `projects/active/<folder>/` is removed and the inbound links to its notes are stripped first. Without the flag a vault-backed project is refused (400). Returns `{"ok": bool, "vault_entry_removed": bool, "removed_notes": int, "removed_files": int, "edited_backlinks": [str]}` |
 | POST | `/api/projects/reorder` | Reorder a workspace's projects (drag-to-reorder) |
 | POST | `/api/projects/{project_id}/complete` | Close a vault-backed project. Body `{"outcome": "completed"\|"stopped", "note": "..."}`; both fields optional (`completed` and an empty note when omitted). The note is written into the project document before the folder moves to `completed/`. Chats are archived. Open tasks stay on the board |
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
@@ -79,6 +82,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
 | POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
 | GET | `/api/host/terminal` | Can this browser open a terminal on the engine's machine: {available, platform, reason, terminal, actions}; a non-host browser (wrong peer, wrong `Host`, or a browser origin that is not this engine's exact origin) gets available:false, reason:"not_on_host" |
+| GET | `/api/terminal/status` | Signed session + terminal origin/transport policy; returns {available, reason, platform, host, unlock_expires_in, detached_ttl_seconds}. Status grants nothing and includes no credential. |
+| POST | `/api/terminal/unlock` | Browser password re-entry: exactly {password}; 200 {ok:true, expires_in:900} plus HttpOnly grant cookie; 400 malformed body, 401 unsigned session, 403 policy/wrong password, 413 body over cap, 429 rate limit or grant capacity. Never launches a shell. |
 | POST | `/api/host/terminal` | Open a terminal on the engine's machine: {"action": <id>} runs one allowlisted command, {"open":"folder", chat_id?\|project_id?} opens the chat's code-mode worktree, the project repo or the workspace agent root; 200 {ok, platform, launched}; 403 not_on_host; 409 unavailable_headless / no_terminal_found / unsupported_platform / folder_missing / not_applicable (an update action when the provider is not older than the tested version); 400 unknown_action |
 | GET | `/api/welcome` | Is the one-time welcome card pending: {pending:false}, or {pending:true, workspace_root, provider, provider_label, on_host, platform}; never carries the password; `Cache-Control: no-store` |
 | GET | `/api/welcome/password` | {password} while the welcome marker exists and this is a host browser (loopback peer, local `Host`, exact same-origin `Origin`); 403 {reason:"not_on_host"} otherwise, 404 when nothing is pending; `Cache-Control: no-store` |
@@ -514,8 +519,14 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/projects/compl
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/completed/restore" \
   -H 'Content-Type: application/json' -d '{"workspace":"work","stem":"maf-onsite"}'
 
-# Delete — returns {"ok": true|false}.
+# Delete — returns {"ok": true|false, "vault_entry_removed": bool, "removed_notes": int,
+# "removed_files": int, "edited_backlinks": [str]}. A vault-backed project is refused
+# without the flag; with it, the folder under projects/active/<folder>/ goes and the
+# inbound links to its notes are stripped first.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/projects/$PID"
+
+# Delete a vault-backed project with its vault entry.
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/projects/$PID?delete_vault=1"
 ```
 
 **Task board**

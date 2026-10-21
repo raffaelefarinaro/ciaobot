@@ -18,8 +18,10 @@ import { taskAttemptLabel } from '../lib/taskBoard'
 import { approveTask, markTaskDone, taskClosureErrorMessage } from '../lib/taskClosure'
 import type { ChatInfo, Task } from '../lib/types'
 import { useTaskSignalsStore } from '../stores/taskSignals'
+import { useItemPeekStore } from '../stores/itemPeek'
 import AppIcon from './AppIcon.vue'
 import { askConfirm } from '../lib/confirm'
+import { isPlainLeftClick } from '../lib/appLinks'
 
 const props = defineProps<{
   chat: Pick<ChatInfo, 'chat_id' | 'helper'>
@@ -65,6 +67,17 @@ const canMarkDone = computed(() => {
   const t = task.value
   return !!t && t.status !== 'done' && !superseded.value && !taskSignals.isAwaitingReview(t)
 })
+
+/**
+ * The task link opens its peek over this chat, the same as a task link in a
+ * message. A modified click is left to the browser, which opens the task page
+ * in a new tab.
+ */
+function onTaskLink(event: MouseEvent): void {
+  if (!isPlainLeftClick(event)) return
+  event.preventDefault()
+  useItemPeekStore().openTask(taskId.value)
+}
 
 const emit = defineEmits<{ (e: 'marked-done'): void }>()
 
@@ -141,8 +154,8 @@ function submitNote(withoutNote: boolean): void {
     <AppIcon class="task-origin-icon" name="activity" :size="16" />
     <div class="task-origin-body">
       <p class="task-origin-line">
-        <template v-if="task">This chat works on the task <router-link class="task-origin-link" :to="{ name: 'task-detail', params: { taskId } }">{{ task.title || taskId }}</router-link>.</template>
-        <template v-else>This chat works on <router-link class="task-origin-link" :to="{ name: 'task-detail', params: { taskId } }">a task on the board</router-link>.</template>
+        <template v-if="task">This chat works on the task <a class="task-origin-link" :href="`/tasks/${taskId}`" @click="onTaskLink">{{ task.title || taskId }}</a>.</template>
+        <template v-else>This chat works on <a class="task-origin-link" :href="`/tasks/${taskId}`" @click="onTaskLink">a task on the board</a>.</template>
       </p>
       <p v-if="statusWords" class="task-origin-status">{{ statusWords }}</p>
       <template v-if="noteOpen">

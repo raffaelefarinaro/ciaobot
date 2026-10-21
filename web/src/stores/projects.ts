@@ -21,6 +21,7 @@ import type {
   ArchiveChatResponse,
   ArchivedWorkspace,
   ArchivedWorkspacesResponse,
+  ProjectDeleteReport,
   ProjectInfo,
   ChatInfo,
   ChatPinState,
@@ -2457,9 +2458,13 @@ export const useProjectStore = defineStore('projects', () => {
     chats.value.filter(c => c.project_id === projectId).forEach(c => clearChatDraft(c.chat_id))
   }
 
-  async function deleteProject(projectId: string) {
+  // `?delete_vault=1`: a vault-backed project is deleted with its vault
+  // entry, so the folder under projects/active/ and the inbound links into
+  // it go too. The flag is always sent: the user confirmed the removal in a
+  // dialog, and the guarded default exists for the agent surface.
+  async function deleteProject(projectId: string): Promise<ProjectDeleteReport> {
     const activeChatProject = activeChat.value?.project_id
-    await api.del(`/api/projects/${projectId}`)
+    const report = await api.del<ProjectDeleteReport>(`/api/projects/${projectId}?delete_vault=1`)
     projects.value = projects.value.filter(p => p.project_id !== projectId)
     clearDraftsForProject(projectId)
     chats.value = chats.value.filter(c => c.project_id !== projectId)
@@ -2467,6 +2472,7 @@ export const useProjectStore = defineStore('projects', () => {
       if (activeChatId.value) disconnectWs(activeChatId.value)
       await transitionToFirstChat()
     }
+    return report
   }
 
   async function completeProject(
