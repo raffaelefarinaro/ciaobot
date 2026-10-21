@@ -206,6 +206,7 @@ from ciao.web.routes_terminal_sessions import (
     terminal_sessions_end,
     terminal_sessions_list,
 )
+from ciao.web.routes_terminal_ws import terminal_stream
 from ciao.web.routes_welcome import (
     welcome_dismiss,
     welcome_open_folder,
@@ -740,6 +741,11 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # WebSocket
         WebSocketRoute("/ws/chat/{chat_id}", ws_chat),
         WebSocketRoute("/ws/events", ws_events),
+        # The browser terminal's byte stream. The same door as the HTTP
+        # half — the terminal policy, the signed session, a live grant —
+        # and the one manager in ciao/terminal_sessions.py behind it. The
+        # socket detaches when it goes; it never ends the session.
+        WebSocketRoute("/ws/terminal/{session_id}", terminal_stream),
     ]
 
     # The agent CLI loopback is mounted before the SPA catch-all. Its own
