@@ -2269,6 +2269,30 @@ def _wait_for(
     return b""
 
 
+def _collect_until(
+    terminal: tw.WindowsTerminalProcess, needles: tuple[bytes, ...], timeout: float
+) -> bytes:
+    """Collect output until one of ``needles`` shows up, or the window ends.
+
+    Unlike :func:`_drain` this does not stop when the terminal goes quiet: a
+    marker that is on its way must not be missed because the terminal had not
+    produced anything *yet*.
+    """
+    collected = b""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        item = terminal.read(65536)
+        if item is None:
+            time.sleep(0.05)
+            continue
+        if item == b"":
+            break
+        collected += item
+        if any(needle in collected for needle in needles):
+            break
+    return collected
+
+
 @_windows_only
 def test_the_console_state_behind_the_interrupt_is_measured(tmp_path: Path) -> None:
     """Measure what decides whether 0x03 interrupts a running program.
@@ -2331,6 +2355,204 @@ def test_the_console_state_behind_the_interrupt_is_measured(tmp_path: Path) -> N
         assert terminal.poll() is None, "the shell must survive the interrupt"
     finally:
         terminal.close()
+
+
+# ── the interrupt path itself, measured (#1721) ─────────────────────────────
+#
+# The console host turns the bytes on the pseudoconsole's input pipe into
+# console input records. An ETX (0x03) is matched while that stream is
+# decoded: the host synthesises a Ctrl+C key event and, when the console's
+# input mode has ENABLE_PROCESSED_INPUT set, raises a CTRL_C_EVENT. The
+# event is then delivered by the operating system to the processes of the
+# console host's *process group* (Microsoft's own summary of the mechanism:
+# "In order for Ctrl-C to work, thus, the pseudoconsole process must be in
+# the same process group as the processes you are trying to control").
+#
+# Two links of that chain are invisible from the adapter, and they are what
+# the probe below measures:
+#
+#   * does the byte reach the console as an ordinary character, or does the
+#     host turn it into the control event? A reader that reads the console
+#     tells the two apart: it reads the byte as a character when the host
+#     left it alone, and its read is aborted when the host raised the
+#     event;
+#   * is the event delivered to the process? The same reader registers a
+#     Console.CancelKeyPress handler, which tells that apart too: it runs
+#     only when the event was raised *and* reached the process.
+
+# The interrupt the console host asks for: the win32-input-mode key record
+# for Ctrl+C, exactly what Windows Terminal sends. The host advertises
+# win32-input-mode at start-up (`CSI ? 9001 h`) and decodes these records
+# into real key events, so the record is the other way into the same gate a
+# raw ETX takes. The record is `CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`: the
+# virtual key 'C' (67), its scan code (30), the character 0x03, the key
+# down, the left control key, and one repeat.
+_WIN32_CTRL_C = b"\x1b[67;30;3;1;2;1_"
+
+
+# The script the probe runs. It does three things, in this order:
+#
+# * it registers a ``Console.CancelKeyPress`` handler that cancels the
+#   interrupt and prints a marker. The handler runs only when the host
+#   raised a control event **and** delivered it to this process;
+# * it prints a "ready" marker, so the test knows the handler is
+#   registered and the read below is pending before the interrupt is
+#   written;
+# * it reads one key from the console. When the byte reached the console
+#   as an ordinary character the read returns it and the reader prints its
+#   code; when the host raised the interrupt the read is aborted, the read
+#   throws, and the reader says so.
+#
+# The markers are literals, and the script is the terminal's **shell**: the
+# terminal never echoes a command it was not given, so only the script's
+# own output can carry them.
+_PROBE_SCRIPT = (
+    "[Console]::add_CancelKeyPress({ param($sender, $event) "
+    "$event.Cancel = $true; [Console]::Out.WriteLine('CIAO-HANDLER'); "
+    "[Console]::Out.Flush() }); "
+    "[Console]::Out.WriteLine('CIAO-READY'); [Console]::Out.Flush(); "
+    "try { $key = [Console]::ReadKey($true); "
+    "[Console]::Out.WriteLine('CIAO-CHAR-' + [int][char]$key.KeyChar) } "
+    "catch { [Console]::Out.WriteLine('CIAO-READ-ABORTED'); "
+    "[Console]::Out.Flush() }"
+)
+
+
+def _probe_shell() -> list[str]:
+    """The shell that runs the probe.
+
+    The probe **is** the terminal's shell, not a child of it: a child would
+    race the shell that started it, because the interrupt reaches the whole
+    console and the shell aborts its own pipeline - and kills the child -
+    while the child is still writing its marker.
+
+    The script is handed to the shell with ``-Command`` and not with
+    ``-File``: the execution policy of the machine decides whether a
+    script file may run at all, and it has nothing to say about a command.
+    """
+    shell = tw._resolve_powershell()
+    assert shell, "powershell.exe is not on the machine's terminal PATH"
+    return [shell, "-NoProfile", "-Command", _PROBE_SCRIPT]
+
+
+def _interrupt_seen_by_a_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupt: bytes
+) -> tuple[int, int, int]:
+    """What the console host did with the interrupt, seen from a reader.
+
+    Returns ``(char_read, read_aborted, handler_ran)``, the three answers
+    a reader can give:
+
+    * ``char_read``: the reader got the byte as an ordinary character, so
+      the host raised no control event at all;
+    * ``read_aborted``: the host raised the event and the read it aborted
+      never returned, but the event did not reach the process;
+    * ``handler_ran``: the host raised the event *and* the operating
+      system delivered it, which is what the ``CancelKeyPress`` handler
+      says.
+    """
+    # The patch is scoped to this spawn: the scenarios that follow need the
+    # terminal's ordinary shell back.
+    with monkeypatch.context() as patch:
+        patch.setattr(tw, "default_shell", _probe_shell)
+        terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        # The reader is up, its handler is registered and its read is
+        # pending: the interrupt has to arrive after that, or the shell
+        # would read it instead.
+        _read_until(terminal, b"CIAO-READY", timeout=30)
+
+        terminal.write(interrupt)
+        produced = _collect_until(
+            terminal,
+            (b"CIAO-HANDLER", b"CIAO-CHAR-", b"CIAO-READ-ABORTED"),
+            timeout=20,
+        )
+        char = int(b"CIAO-CHAR-" in produced)
+        aborted = int(b"CIAO-READ-ABORTED" in produced)
+        handler = int(b"CIAO-HANDLER" in produced)
+        return char, aborted, handler
+    finally:
+        terminal.close()
+
+
+def _interrupt_ends_a_running_program(tmp_path: Path, interrupt: bytes) -> int:
+    """Whether the interrupt ended a running program.
+
+    ``ping`` is the program: it neither reads the console nor installs a
+    handler, so the only thing that can end it is the interrupt itself. The
+    shell's prompt coming back is the sign that it ended.
+    """
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        terminal.write(b"ping -n 31 127.0.0.1\r")
+        _read_until(terminal, b"Reply from", timeout=30)
+        # The queue is emptied first: a prompt left over from an earlier
+        # command would look like the one the interrupt brings back.
+        _drain(terminal, 1.0)
+
+        terminal.write(interrupt)
+        ended = bool(_wait_for(terminal, b"> ", timeout=20))
+        assert terminal.poll() is None, "the shell must survive the interrupt"
+        return int(ended)
+    finally:
+        terminal.close()
+
+
+@_windows_only
+def test_the_interrupt_is_measured_against_the_console_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measure the two links of the interrupt chain the adapter cannot see.
+
+    The bytes on the pseudoconsole's input pipe are decoded by the console
+    host, and the host raises the control event and the operating system
+    delivers it. The adapter sees neither step, so this measures them from
+    inside the pseudoconsole:
+
+    * a reader tells whether the byte arrived as an ordinary character (the
+      host left it alone) or whether the read was aborted (the host raised
+      the event);
+    * the same reader registers a ``Console.CancelKeyPress`` handler, which
+      runs only when the event was raised *and* delivered to the process.
+
+    A third scenario asks the question the user asks: does the interrupt
+    end a running program? ``ping`` is the program, because it neither
+    reads the console nor installs a handler, and a nested shell cannot
+    answer it, because a shell cancels Ctrl+C itself.
+
+    The raw ETX and the win32-input-mode key record are measured side by
+    side, because the host decodes both and dispatches both through the
+    same gate: if the two disagree, the encoding is the difference and the
+    adapter can act on it, and if they agree, the difference is further
+    down the chain and the adapter cannot.
+
+    The numbers are reported as a warning so they land in the CI log; the
+    test asserts that the measurement was possible, not what the numbers
+    say.
+    """
+    raw_char, raw_aborted, raw_handler = _interrupt_seen_by_a_reader(
+        tmp_path, monkeypatch, b"\x03"
+    )
+    raw_ended = _interrupt_ends_a_running_program(tmp_path, b"\x03")
+    record_char, record_aborted, record_handler = _interrupt_seen_by_a_reader(
+        tmp_path, monkeypatch, _WIN32_CTRL_C
+    )
+    record_ended = _interrupt_ends_a_running_program(tmp_path, _WIN32_CTRL_C)
+
+    report = (
+        f"#1721 interrupt probe: the raw 0x03 reached the reader as a "
+        f"character: {raw_char}; the raw 0x03 aborted the reader's read: "
+        f"{raw_aborted}; the raw 0x03 ran the reader's CancelKeyPress "
+        f"handler: {raw_handler}; the raw 0x03 ended a running program: "
+        f"{raw_ended}; the win32 key record reached the reader as a "
+        f"character: {record_char}; the win32 key record aborted the "
+        f"reader's read: {record_aborted}; the win32 key record ran the "
+        f"reader's CancelKeyPress handler: {record_handler}; the win32 key "
+        f"record ended a running program: {record_ended}"
+    )
+    print(report)
+    warnings.warn(report, stacklevel=1)
 
 
 def _process_alive(pid: int) -> bool:
@@ -2601,6 +2823,12 @@ def test_the_windows_job_runs_this_file_on_every_pull_request() -> None:
     assert (
         "windows-terminal.txt" in summary
     ), "the summary must report the focused native step's result"
+    # The measurements of the interrupt are reported as warnings, and the
+    # job summary has to carry them: a number in the log of a step nobody
+    # reads is not a measurement anybody can use.
+    assert "UserWarning: #1721" in summary, (
+        "the summary must carry the #1721 measurements of the interrupt"
+    )
     failing = summary.split("windows-failures.txt", 1)[0]
     assert (
         "windows-terminal.txt" in failing

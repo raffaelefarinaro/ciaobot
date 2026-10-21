@@ -309,6 +309,10 @@ jobs:
           echo "- imports: $(tail -1 windows-imports.txt 2>/dev/null)"
           echo "- mypy: $(tail -1 windows-mypy.txt 2>/dev/null)"
           echo "- ConPTY terminal: $(tail -1 windows-terminal.txt 2>/dev/null)"
+          # The interrupt measurements are reported as warnings, and the
+          # summary has to carry them: the log of a step nobody reads is
+          # not where a measurement belongs.
+          grep -hE 'UserWarning: #1721 ' windows-terminal.txt 2>/dev/null | sed -E 's/^.*UserWarning: //' | sed 's/^/- /' || true
           echo "- pytest: $(tail -1 windows-pytest.txt 2>/dev/null)"
           echo "- npm test: $(grep -E '^ *(Test Files|Tests) ' windows-vitest.txt 2>/dev/null | tr -s ' ' | paste -sd ';' -)"
           echo "- install.ps1: $(grep -E 'exit ' windows-install-ps1.txt 2>/dev/null | paste -sd ';' -)"
