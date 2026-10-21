@@ -4148,6 +4148,56 @@ def _resolve_workspace_and_vaults(
 MEMORY_PROPOSALS_DEFAULT_LIMIT = 20
 
 
+def _decisions_digest_command(args: argparse.Namespace) -> int:
+    """Print the operator's recent decisions grouped for the weekly rules pass.
+
+    Read-only. Operator decisions only; agent-made ones are counted, never listed.
+    """
+    from datetime import UTC, datetime
+
+    from ciao import decision_rules
+
+    _workspace, vault = _resolve_workspace_and_vault(args)
+    digest = decision_rules.build_digest(vault, today=datetime.now(UTC).date())
+    if args.json:
+        json.dump(digest, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    for kind in decision_rules.KINDS:
+        section = digest[kind]
+        print(
+            f"{kind}: {section['rows']} operator decisions, {len(section['groups'])} groups, "
+            f"rules file {'present' if section['file_present'] else 'absent'}"
+        )
+    return 0
+
+
+def _decision_rules_write_command(args: argparse.Namespace) -> int:
+    """Write one rules note's managed section from a body file."""
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from datetime import UTC, datetime
+
+    from ciao import decision_rules
+
+    body = _read_persisted_text_file(args.body_file, "--body-file")
+    if body is None:
+        return 2
+    _workspace, vault = _resolve_workspace_and_vault(args)
+    try:
+        result = decision_rules.write_managed(vault, args.kind, body, today=datetime.now(UTC).date())
+    except (decision_rules.RulesError, OSError) as exc:
+        print(f"ciao decision-rules-write: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        json.dump(result, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+    else:
+        print(f"{result['file']}: wrote {result['chars']} characters")
+    return 0
+
+
 def _memory_proposals_command(args: argparse.Namespace) -> int:
     """List pending memory proposals in a workspace's review queue.
 
@@ -8200,6 +8250,64 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emit one page as JSON: proposals, total, offset, limit, and truncated/next_offset when more remain.",
     )
     memory_proposals_parser.set_defaults(func=_memory_proposals_command)
+
+    decisions_digest_parser = subparsers.add_parser(
+        "decisions-digest",
+        help="Group the operator's recent memory and task decisions for the weekly rules pass.",
+        description=(
+            "Read-only. Emits the operator's decisions of the last 180 days grouped by "
+            "reason chip, kind and task state, with counts, sanitised excerpts and "
+            "ready-made citations. Agent-made decisions are only counted."
+        ),
+    )
+    decisions_digest_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    decisions_digest_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    decisions_digest_parser.add_argument(
+        "--json", action="store_true", help="Emit the full digest as JSON."
+    )
+    decisions_digest_parser.set_defaults(func=_decisions_digest_command)
+
+    decision_rules_write_parser = subparsers.add_parser(
+        "decision-rules-write",
+        help="Write the managed section of Memory-Review-Rules.md or Task-Rules.md.",
+        description=(
+            "The only way the weekly pass writes a rules note. Replaces only the span "
+            "between the ciao:rules markers; refuses a body over 2500 characters, a "
+            "malformed fence, an uncited or unknown rule, or an unapproved verdict flip."
+        ),
+    )
+    decision_rules_write_parser.add_argument("kind", choices=["memory", "task"])
+    decision_rules_write_parser.add_argument(
+        "--body-file",
+        required=True,
+        help="File holding the managed rule lines.",
+    )
+    decision_rules_write_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    decision_rules_write_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    decision_rules_write_parser.add_argument(
+        "--json", action="store_true", help="Emit the structured result as JSON."
+    )
+    decision_rules_write_parser.set_defaults(func=_decision_rules_write_command)
 
     memory_proposal_add_parser = subparsers.add_parser(
         "memory-proposal-add",

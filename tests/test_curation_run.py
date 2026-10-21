@@ -23,7 +23,7 @@ import pytest
 
 from ciao import curation_run as cr
 from ciao import memory_receipts as mr
-from ciao import skill_proposals
+from ciao import skill_proposals, task_decisions
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.learning_records import (
     LearningRecord,
@@ -2882,6 +2882,64 @@ def test_the_care_prompt_proposes_observations_between_sections_4_and_5() -> Non
     assert "references/curation-pass-4b-observations.md" in prompt
     for command in ("ciao observation-propose", "ciao observation-merge", "ciao observation-prune"):
         assert command in observations
+
+
+def test_rules_pass_planned_only_when_weekly_due_and_stale(tmp_path: Path) -> None:
+    """The decision-rules pass rides the weekly marker and needs fresh operator decisions."""
+    from ciao import decision_rules
+
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+
+    def plan(last: str) -> dict[str, cr.WorklistItem]:
+        _fresh_log(vault, last_full_pass=last)
+        return {
+            item.pass_id: item
+            for item in cr.build_worklist(
+                vault_root=vault,
+                workspace=vault.name,
+                guide_path=guide,
+                category_registry=_categories(vault),
+                workspace_dir=tmp_path,
+                today=date(2026, 9, 19),
+            ).items
+        }
+
+    assert cr.PASS_RULES not in plan("2026-09-01")
+    for index in range(5):
+        task_decisions.append_decision(
+            vault,
+            kind="delete",
+            task_id=f"t{index}",
+            task_title="x",
+            task_created_by="agent",
+            project_id="",
+            attempt_id="",
+            attempt_state="",
+            actor="user",
+            via="pwa",
+            reason="",
+            now=datetime(2026, 9, 10, tzinfo=UTC),
+        )
+    item = plan("2026-09-01")[cr.PASS_RULES]
+    assert item.weekly is True
+    assert item.keys == (decision_rules.progress_key("task"),)
+    assert set(item.keys).isdisjoint(cr.REQUIRED_HYGIENE_KEYS)
+    assert cr.PASS_RULES not in plan("2026-09-18")
+    assert cr.PASS_ORDER.index(cr.PASS_GUIDE) < cr.PASS_ORDER.index(cr.PASS_RULES) < cr.PASS_ORDER.index(cr.PASS_LOGS)
+
+
+def test_the_care_prompt_names_the_rules_pass_and_pass1_read() -> None:
+    prompt = next(
+        entry["prompt"]
+        for entry in json.loads(_stock("schedules.json"))["schedules"]
+        if entry["schedule_id"] == "system-memory-curation"
+    )
+    assert "## 7b. Distill decision rules" in prompt
+    assert prompt.index("## 7. ") < prompt.index("## 7b. ") < prompt.index("## 8. ")
+    assert "references/curation-pass-7b-decision-rules.md" in prompt
+    assert "Workspace/Memory-Review-Rules.md` if it exists" in prompt
+    assert len(prompt.encode("utf-8")) <= 8192
 
 
 # ── decider ────────────────────────────────────────────────────────────────

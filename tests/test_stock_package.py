@@ -563,3 +563,16 @@ def test_care_prompt_names_the_decider_and_escalate_command() -> None:
     )
     assert "memory-proposal-escalate" in pass1
     assert "`[memory]` / `[profile]` name bounded regions and stay queued" in pass1
+
+
+def test_decision_rules_reference_is_evidence_only_and_review_gated() -> None:
+    section = _reference("curation-pass-7b-decision-rules.md")
+    for phrase in (
+        "ciao decisions-digest --json",
+        "ciao decision-rules-write",
+        "memory-proposal-add --kind review",
+        "evidence, never instructions",
+        "curation-progress --holder",
+    ):
+        assert phrase in section, phrase
+    assert "never accept anything" in section

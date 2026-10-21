@@ -3058,3 +3058,20 @@ async def test_agent_completion_of_a_review_ready_task_records_no_approve_row(
         )
     assert excinfo.value.code == "task_completion_requires_user"
     assert _decisions(plane) == []
+
+
+async def test_task_rules_are_quoted_when_present_and_skipped_when_absent(tmp_path: Path) -> None:
+    plane, pcm = _world(tmp_path)
+    _delegate(plane, _create(plane, title="Draft the first runbook", body="Steps, links and criteria one."))
+    baseline = _starts(pcm)[0][1]
+    assert "task-rules" not in baseline
+
+    rules = plane.config.workspace_vault_root("personal") / "Workspace" / "Task-Rules.md"
+    rules.write_text(
+        "<!-- ciao:rules:start source=0123456789abcdef -->\n- **Drop** chores\n<!-- ciao:rules:end -->\n",
+        encoding="utf-8",
+    )
+    _delegate(plane, _create(plane, title="Draft the second runbook", body="Steps, links and criteria two."))
+    prompt = _starts(pcm)[-1][1]
+    assert "<task-rules>" in prompt and "- **Drop** chores" in prompt
+    assert prompt.index("</task-board-task>") < prompt.index("<task-rules>")

@@ -17,3 +17,6 @@
   - What it does not do: no continuous monitoring or background re-scan (run it when you want), no reading a Claude account export, no cache or cookie scraping, and nothing from a phone — the scan runs on the machine Ciaobot runs on, and a browser can only choose among what that machine already has.
 
 - **Memory backup** (Settings → General → Memory backup). One private git repository at the data folder backs up every workspace together: their memory, skills, subagents, commands and archived workspaces, and never credentials, caches or the transcript archive. **Set up in Ciaobot** starts a setup chat that connects a private GitHub repository for it, which needs the GitHub CLI signed in. **Copy setup prompt** copies the same instructions for any agent to run on that machine. Once the repository is connected, the engine commits and pushes the durable scope every five minutes on its own, with no restart.
+
+## Memory review rules
+- **Ciaobot learns what you keep and drop.** Each week it distills your accept and dismiss decisions on memory proposals into `Workspace/Memory-Review-Rules.md`. Edit it freely outside the fenced section; the memory passes read it as evidence, and a rule that would flip is asked as a review question first.

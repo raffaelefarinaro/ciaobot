@@ -971,3 +971,20 @@ def test_the_prompt_asks_for_a_report_strips_the_log_and_hands_over_earlier_atte
         task_revision=REVISION, relative_path="x", body="b",
     )
     assert "Earlier attempts" not in plain
+
+
+def test_task_rules_sit_after_instructions_and_before_earlier_attempts() -> None:
+    earlier = PreviousAttempt(
+        state="needs_you", outcome="blocked", summary="Got halfway.",
+        detail="", created_at="2026-10-01T09:00:00+00:00", ended_at="2026-10-01T09:30:00+00:00",
+        chat_id="chat-9", chat_title="First try", archive_path="",
+    )
+    common = {
+        "title": "T", "status": "backlog", "due": "", "project_id": "", "task_id": TASK_ID,
+        "task_revision": REVISION, "relative_path": "x", "body": "b",
+        "previous_attempts": (earlier,), "instructions": "Ask first.",
+    }
+    baseline = build_prompt(**common)
+    prompt = build_prompt(**common, task_rules="<task-rules>\nRULE\n</task-rules>")
+    assert prompt.index("Ask first.") < prompt.index("RULE") < prompt.index("Earlier attempts")
+    assert prompt.replace("\n\n<task-rules>\nRULE\n</task-rules>", "") == baseline

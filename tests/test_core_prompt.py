@@ -221,3 +221,11 @@ def test_rules_carry_a_reason_in_the_same_bullet() -> None:
     assert "output lands in transcripts and replies" in bullet("never quote or repeat credentials")
     assert "public and permanent" in bullet("Public GitHub issues")
     assert "land in notes and transcripts" in bullet("webhook create|rotate")
+
+
+def test_system_prompt_task_bullet_reads_task_rules_if_present() -> None:
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert append.count("Workspace/Task-Rules.md") == 1
+    assert "if it exists" in append[append.index("Workspace/Task-Rules.md") :][:120]

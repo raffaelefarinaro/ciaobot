@@ -47,7 +47,7 @@ from pathlib import Path
 from string import Template
 from typing import TYPE_CHECKING
 
-from ciao import skills_inventory, transcripts, upstream_drafts
+from ciao import decision_rules, skills_inventory, transcripts, upstream_drafts
 from ciao.prompt_fence import fence
 from ciao.web import chat_service
 
@@ -881,6 +881,18 @@ class MemoryPassCoordinator:
         project = self._host._projects.get(chat.project_id)
         return project.workspace if project is not None else ""
 
+    def _rules_section(self, chat: ChatInfo) -> str:
+        """The operator's distilled memory-review rules, fenced, or nothing."""
+        workspace = self._workspace_of(chat)
+        if not workspace:
+            return ""
+        try:
+            vault = Path(self._host._config.workspace_vault_root(workspace))
+        except (AttributeError, ValueError):  # pragma: no cover - config guard
+            return ""
+        text = decision_rules.load_for_prompt(vault, decision_rules.MEMORY_RULES_NAME)
+        return "\n\n" + text if text else ""
+
     def _passes_in(self, workspace: str) -> list[ChatInfo]:
         return [
             chat
@@ -907,6 +919,7 @@ class MemoryPassCoordinator:
                 )
                 + _fenced_resolution(str(helper.get("resolution") or ""))
                 + self._skill_review_section(chat, helper)
+                + self._rules_section(chat)
             )
         if helper.get("source_kind") == chat_service.PROJECT_CLOSURE_SOURCE:
             return (
@@ -918,6 +931,7 @@ class MemoryPassCoordinator:
                 )
                 + _fenced_closure(str(helper.get("note") or ""))
                 + self._skill_review_section(chat, helper)
+                + self._rules_section(chat)
             )
         return MEMORY_PASS_PROMPT.format(
             archive=helper.get("archive_path") or "",
@@ -929,6 +943,7 @@ class MemoryPassCoordinator:
             + self._repo_section(helper)
             + self._observation_section(helper)
             + self._skill_review_section(chat, helper)
+            + self._rules_section(chat)
         )
 
     def _repo_section(self, helper: dict) -> str:

@@ -1435,6 +1435,7 @@ def build_prompt(
     previous_attempts: tuple[PreviousAttempt, ...] = (),
     instructions: str = "",
     updates: tuple[TaskUpdate, ...] = (),
+    task_rules: str = "",
 ) -> str:
     """The user prompt for one delegated task.
 
@@ -1457,6 +1458,9 @@ def build_prompt(
     hand-over — how to go about it, what they expect when it is finished. It is
     the user's own direction, quoted in its own fence after the description so
     the agent can tell the work from the way it is wanted done.
+
+    *task_rules* is the pre-fenced standing guidance from ``Task-Rules.md``. It is
+    not part of the work, and the description and instructions outrank it.
     """
     header = [
         DELEGATION_INSTRUCTION.format(
@@ -1495,6 +1499,8 @@ def build_prompt(
             _neutralize(note),
             INSTRUCTIONS_FENCE_CLOSE,
         ]
+    if task_rules:
+        header += ["", task_rules]
     if previous_attempts:
         header += ["", *_handoff_lines(previous_attempts[:HANDOFF_ATTEMPTS])]
     return "\n".join(header)

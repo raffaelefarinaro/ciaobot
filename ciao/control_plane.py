@@ -24,7 +24,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from ciao import vault_index
+from ciao import decision_rules, vault_index
 from ciao.async_reads import keyed_lock, run_read
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
 from ciao.fts_search import (
@@ -4111,6 +4111,9 @@ class CiaoControlPlane:
             }
         record = document.record
         project, origin = self._delegation_project(workspace, project_id, record.project_id)
+        rules = decision_rules.load_for_prompt(
+            Path(self.config.workspace_vault_root(workspace)), decision_rules.TASK_RULES_NAME
+        )
         prompt = build_prompt(
             title=record.title,
             status=record.status,
@@ -4122,6 +4125,7 @@ class CiaoControlPlane:
             body=document.body,
             previous_attempts=self._previous_attempts(workspace, record.id),
             instructions=note,
+            task_rules=rules,
         )
         attempt_id = uuid.uuid4().hex
         # Two revisions are in play from here, and they are not the same one. The
