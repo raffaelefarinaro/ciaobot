@@ -60,6 +60,7 @@ PASSWORD = "correct horse battery staple"
 BASE = "http://localhost:8443"
 UNLOCK = "/api/terminal/unlock"
 STATUS = "/api/terminal/status"
+SESSIONS = "/api/terminal/sessions"
 
 #: A lone surrogate: what a hostile body can carry and what UTF-8 refuses.
 #: Written as an escape so this file stays valid UTF-8.
@@ -1109,7 +1110,7 @@ def _config(tmp_path: Path):
     )
 
 
-def test_factory_initializes_a_separate_grant_store_per_app_and_registers_both_routes(
+def test_factory_initializes_a_separate_grant_store_per_app_and_registers_its_routes(
     tmp_path: Path,
 ) -> None:
     first = create_app(_config(tmp_path))
@@ -1128,6 +1129,10 @@ def test_factory_initializes_a_separate_grant_store_per_app_and_registers_both_r
     assert paths == {
         (UNLOCK, ("POST",)),
         (STATUS, ("GET", "HEAD")),
+        # The session routes (#1799) live behind the same door.
+        (SESSIONS, ("GET", "HEAD")),
+        (SESSIONS, ("POST",)),
+        (f"{SESSIONS}/{{session_id}}", ("DELETE",)),
     }
 
 

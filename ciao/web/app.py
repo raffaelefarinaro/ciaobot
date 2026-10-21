@@ -22,6 +22,7 @@ from ciao.os_support.media_types import guess_type as guess_media_type
 from ciao.package_version import make_cached_package_status
 from ciao.provider_versions import make_cached_checks
 from ciao.terminal_auth import TerminalGrantStore
+from ciao.terminal_sessions import TerminalSessionManager
 from ciao.web.routes_agent import agent_dispatch_endpoint, agent_status_endpoint
 from ciao.web.routes_mcp import (
     mcp_status_endpoint,
@@ -200,6 +201,11 @@ from ciao.web.routes_push import (
 from ciao.web.routes_hooks import webhook_method_not_allowed, webhook_receive
 from ciao.web.routes_host_terminal import host_terminal_launch, host_terminal_status
 from ciao.web.routes_terminal import terminal_status, terminal_unlock
+from ciao.web.routes_terminal_sessions import (
+    terminal_sessions_create,
+    terminal_sessions_end,
+    terminal_sessions_list,
+)
 from ciao.web.routes_welcome import (
     welcome_dismiss,
     welcome_open_folder,
@@ -482,6 +488,18 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/host/terminal", host_terminal_launch, methods=["POST"]),
         Route("/api/terminal/unlock", terminal_unlock, methods=["POST"]),
         Route("/api/terminal/status", terminal_status, methods=["GET"]),
+        # The browser terminal's sessions: the wire half of the one manager
+        # in ciao/terminal_sessions.py. The same gate order as the unlock —
+        # the terminal policy, the signed session, a fresh grant — so no
+        # session is reachable before the password, and a body that names
+        # a target never names a path or a command.
+        Route("/api/terminal/sessions", terminal_sessions_list, methods=["GET"]),
+        Route("/api/terminal/sessions", terminal_sessions_create, methods=["POST"]),
+        Route(
+            "/api/terminal/sessions/{session_id}",
+            terminal_sessions_end,
+            methods=["DELETE"],
+        ),
         # host-only reads/opens: session + host_browser_request; never in _LOOPBACK_ONLY_API
         Route("/api/welcome", welcome_status, methods=["GET"]),
         Route("/api/welcome/password", welcome_password, methods=["GET"]),
@@ -783,6 +801,17 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
 
         await asyncio.to_thread(login_shell_path)
 
+        # The one terminal session manager, started with the app: its
+        # sweeper is what prunes the sessions nobody is attached to. It is
+        # read off the app state, so the manager the routes use and the
+        # manager this lifespan owns are the same one.
+        terminal_sessions: TerminalSessionManager = _app.state.terminal_sessions
+        await terminal_sessions.start()
+
+        async def _shutdown_terminal_sessions() -> None:
+            """Close every shell the browser terminal still holds."""
+            await terminal_sessions.shutdown()
+
         try:
             yield
         finally:
@@ -790,7 +819,13 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
             # cancellation (not just a normal shutdown message), so provider
             # subprocesses and background runs are not leaked across an
             # abnormal restart.
-            for callback in getattr(_app.state, "shutdown_callbacks", ()):
+            #
+            # The terminal sessions' own shutdown is appended to the
+            # callbacks the server registered, so it runs with them and
+            # never replaces them.
+            callbacks = list(getattr(_app.state, "shutdown_callbacks", ()))
+            callbacks.append(_shutdown_terminal_sessions)
+            for callback in callbacks:
                 # One failing callback must not skip the ones after it. Shutdown
                 # is the last chance to terminate provider subprocesses and
                 # background runs; leaking them because an earlier hook raised is
@@ -807,6 +842,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     app.state.config = config
     app.state.terminal_clock = time.monotonic
     app.state.terminal_grants = TerminalGrantStore(clock=app.state.terminal_clock)
+    # The one owner of every terminal shell the browser opens. It is built
+    # here, published here, started by the lifespan and closed by it; the
+    # routes read this one and there is no second registry.
+    app.state.terminal_sessions = TerminalSessionManager()
     # Runtime-mutable settings store (Settings → Models tab). None in
     # tests that build the app without one; the route 503s in that case.
     app.state.app_settings = app_settings
