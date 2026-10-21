@@ -523,8 +523,8 @@
               <span
                 v-if="chat.title_status === 'pending'"
                 class="title-shimmer"
-                aria-label="Generating title"
-                title="Generating title..."
+                aria-label="Naming conversation"
+                title="Naming conversation"
               />
               <span
                 v-else
@@ -733,8 +733,8 @@
                     <span
                       v-if="chat.title_status === 'pending'"
                       class="title-shimmer"
-                      aria-label="Generating title"
-                      title="Generating title..."
+                      aria-label="Naming conversation"
+                      title="Naming conversation"
                     />
                     <span
                       v-else
@@ -2862,39 +2862,6 @@ async function confirmDeleteChat(chatId: string) {
   .workspace-status-ring::before { animation: none; opacity: 0.3; }
 }
 
-/* Shimmer placeholder shown in the sidebar while the server auto-titles
-   a brand new chat. The linear-gradient "sweep" is what the eye reads as
-   "something is happening", similar to skeleton loaders elsewhere. */
-.title-shimmer {
-  flex: 1;
-  min-width: 0;
-  height: 12px;
-  border-radius: 4px;
-  background: linear-gradient(
-    90deg,
-    var(--bg2) 0%,
-    var(--bg3) 50%,
-    var(--bg2) 100%
-  );
-  background-size: 200% 100%;
-  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
-}
-
-@keyframes title-shimmer-sweep {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .title-shimmer {
-    animation: title-shimmer-pulse 1.8s ease-in-out infinite;
-  }
-  @keyframes title-shimmer-pulse {
-    0%, 100% { opacity: 0.6; }
-    50% { opacity: 1; }
-  }
-}
-
 /* Three-dot chat actions. Hidden by default on desktop, fade in on row
    hover or when the menu is open. Always visible on touch devices so
    the entry point is discoverable without hover. */
@@ -3377,13 +3344,21 @@ async function confirmDeleteChat(chatId: string) {
   border-radius: 999px;
   background: linear-gradient(90deg, var(--bg2) 0%, var(--bg3) 50%, var(--bg2) 100%);
   background-size: 200% 100%;
-  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+  /* The skeleton line keeps a sweep of its own. The naming placeholder's
+     keyframes live in components/titleShimmer.css, and a scoped style block
+     cannot name the @keyframes another block declares: Vue renames them per
+     block, so the name here would never resolve. */
+  animation: mm-shimmer-sweep 1.4s ease-in-out infinite;
+}
+@keyframes mm-shimmer-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 .mm-shimmer-line--n { width: 56%; height: 16px; margin-bottom: 8px; }
 .mm-shimmer-line--l { width: 78%; height: 8px; }
 .mm-skeleton-block { margin-top: var(--space-3); }
 @media (prefers-reduced-motion: reduce) {
-  .mm-shimmer-line { animation: title-shimmer-pulse 1.8s ease-in-out infinite; }
+  .mm-shimmer-line { animation: none; }
 }
 .history-loading-spinner {
   width: 9px;
@@ -3501,3 +3476,7 @@ button.mm-link-item:focus-visible { outline: 2px solid var(--accent); outline-of
   font-size: var(--text-sm) !important;
 }
 </style>
+
+<!-- The shared naming placeholder: the same bar the chat header shows while
+     the engine names a chat. -->
+<style scoped src="./titleShimmer.css"></style>

@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { defineComponent, h } from 'vue'
 import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { api } from '../../lib/api'
 import type { ChatInfo, ProjectInfo } from '../../lib/types'
 import { useProjectStore } from '../../stores/projects'
@@ -241,5 +243,110 @@ describe('ChatPanel code badge', () => {
     const rail = document.querySelector('#chat-work-rail') ?? wrapper.element.querySelector('#chat-work-rail')
     expect(rail).not.toBeNull()
     expect(rail!.querySelector('.chat-rail-repo')).not.toBeNull()
+  })
+})
+
+describe('ChatPanel naming placeholder', () => {
+  const scrollProto = Element.prototype as unknown as { scrollTo?: unknown }
+  const originalScrollTo = scrollProto.scrollTo
+  const REPO = { path: '/r/app', branch: 'main', dirty: false, missing: false, instructions: null }
+
+  beforeEach(() => {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: new MemoryStorage() })
+    localStorage.clear()
+    scrollProto.scrollTo = function scrollTo() {}
+  })
+
+  afterEach(() => {
+    scrollProto.scrollTo = originalScrollTo
+    document.body.innerHTML = ''
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  it('shows the shared naming placeholder while the title is pending', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    store.chats[0].title = 'New Chat'
+    store.chats[0].title_status = 'pending'
+    await flushPromises()
+
+    const shimmer = wrapper.get('.chat-title-row .chat-title-shimmer')
+    expect(shimmer.attributes('role')).toBe('status')
+    expect(shimmer.attributes('aria-label')).toBe('Naming conversation')
+    expect(shimmer.attributes('title')).toBe('Naming conversation')
+    // The placeholder stands in for the title, so the temporary one never shows.
+    expect(wrapper.find('.chat-title-row .chat-title').exists()).toBe(false)
+    expect(wrapper.get('.chat-title-row').text()).not.toContain('New Chat')
+    // The close control stays put while the conversation is being named.
+    expect(wrapper.find('.chat-title-row .close-btn').exists()).toBe(true)
+  })
+
+  it('replaces the placeholder when the title settles', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    store.chats[0].title = 'New Chat'
+    store.chats[0].title_status = 'pending'
+    await flushPromises()
+    expect(wrapper.find('.chat-title-shimmer').exists()).toBe(true)
+
+    store.chats[0].title = 'Deploy the API'
+    store.chats[0].title_status = 'ready'
+    await flushPromises()
+
+    expect(wrapper.find('.chat-title-shimmer').exists()).toBe(false)
+    expect(wrapper.get('.chat-title-row .chat-title').text()).toBe('Deploy the API')
+  })
+
+  it('keeps the close control, the title and the code badge in one header row', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    store.projects[0].repo = REPO
+    store.chats[0].code_mode = true
+    await flushPromises()
+
+    const row = wrapper.get('.chat-title-row')
+    expect(row.find('.close-btn').exists()).toBe(true)
+    expect(row.find('.chat-title').exists()).toBe(true)
+    expect(row.find('.chat-code-badge').exists()).toBe(true)
+    // The project sits beside the row, never inside it, so a second line
+    // under the title cannot drag the close control off the title's centre.
+    expect(row.find('.breadcrumb-scope').exists()).toBe(false)
+
+    store.chats[0].code_mode = false
+    await flushPromises()
+    const plainRow = wrapper.get('.chat-title-row')
+    expect(plainRow.find('.close-btn').exists()).toBe(true)
+    expect(plainRow.find('.chat-title').exists()).toBe(true)
+    expect(plainRow.find('.chat-code-badge').exists()).toBe(false)
+  })
+
+  it('still renames the title from the header', async () => {
+    const { wrapper } = await mountPanel()
+    const store = useProjectStore()
+    const rename = vi.spyOn(store, 'renameChat').mockResolvedValue()
+    await flushPromises()
+
+    await wrapper.get('.chat-title-row .chat-title').trigger('dblclick')
+    const input = wrapper.get('.chat-title-row .title-input')
+    await input.setValue('Renamed chat')
+    await input.trigger('keyup.enter')
+    await flushPromises()
+
+    expect(rename).toHaveBeenCalledWith('chat-1', 'Renamed chat')
+    expect(wrapper.find('.chat-title-row .title-input').exists()).toBe(false)
+  })
+
+  it('pulls in the shared naming placeholder stylesheet', () => {
+    // The header placeholder and the sidebar's are the same bar, so the header
+    // has to load the shared file: without the link the placeholder renders as
+    // an empty span, which is a hole in the header rather than a placeholder.
+    const here = join(__dirname, '..')
+    const source = readFileSync(join(here, 'ChatPanel.vue'), 'utf8')
+    expect(source).toContain('<style scoped src="./titleShimmer.css">')
+    const css = readFileSync(join(here, 'titleShimmer.css'), 'utf8')
+    expect(css).toMatch(/\.chat-title-shimmer\s*\{[^}]*flex:\s*0 1 10rem/)
+    // Reduced motion: a still bar, not a pulse.
+    expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{[\s\S]*?animation:\s*none/)
   })
 })

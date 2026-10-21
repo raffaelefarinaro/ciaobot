@@ -1,0 +1,55 @@
+/*
+ * The naming placeholder: the shimmering bar that stands in for a chat title
+ * while the engine names the conversation.
+ *
+ * Two surfaces show it and they have to look like one - the sidebar's chat
+ * rows and the chat header. `ProjectSidebar.vue` and `ChatPanel.vue` each pull
+ * this in with `<style scoped src="./titleShimmer.css">`, so each component
+ * compiles the same rules against its own scope id. A parent's scoped rules
+ * never reach a child's subtree, so the header placeholder would come out
+ * unstyled if it were left to inherit the sidebar's.
+ *
+ * The linear-gradient "sweep" is what the eye reads as "something is
+ * happening", the same skeleton-loader language the app uses elsewhere.
+ */
+
+/* The sidebar's row: it takes the space the finished title would take. */
+.title-shimmer {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The header's title: a bounded bar, so a name in flight cannot push the code
+   badge along the row while the header waits for it. */
+.chat-title-shimmer {
+  flex: 0 1 10rem;
+  width: 10rem;
+  min-width: 0;
+}
+
+.title-shimmer,
+.chat-title-shimmer {
+  height: 12px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    var(--bg2) 0%,
+    var(--bg3) 50%,
+    var(--bg2) 100%
+  );
+  background-size: 200% 100%;
+  animation: title-shimmer-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes title-shimmer-sweep {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* Reduced motion: a still bar. The pulse that used to stand in for the sweep
+   was itself a movement, and a placeholder that keeps moving is the one thing
+   a motion-sensitive reader cannot ignore. */
+@media (prefers-reduced-motion: reduce) {
+  .title-shimmer,
+  .chat-title-shimmer { animation: none; }
+}
