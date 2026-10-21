@@ -21,9 +21,11 @@ fact:
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import socket
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from starlette.applications import Starlette
@@ -37,6 +39,7 @@ from ciao.port_in_use import (
     check_server_port,
     is_address_in_use,
     port_in_use_message,
+    port_is_available,
     read_port_in_use,
 )
 from ciao.web.routes_api import startup_status_endpoint
@@ -87,21 +90,75 @@ def test_a_failed_bind_is_a_failed_startup_phase_naming_the_port(
 def test_the_bind_phase_is_only_done_once_the_port_is_bound(
     tmp_path: Path,
 ) -> None:
-    """The phase cannot be "done" before the bind happened.
+    """The phase is finished by a watcher that runs while the server serves.
 
     ``server_starting`` used to be marked done *before* uvicorn tried to
     bind, so the startup status never recorded the failure: the engine was
-    "ready" while it was dying. The phase is only finished when the server
-    is actually serving.
+    "ready" while it was dying. It was later marked done only after
+    ``serve()`` returned, so ``overall_ready`` stayed false for the whole
+    life of the engine. The one ``done`` call now sits in the watcher, which
+    is started before ``serve()`` and cancelled when it returns.
     """
     source = Path(main.__file__).read_text(encoding="utf-8")
 
-    done_at = source.index('tracker.done(BIND_PHASE)')
+    assert source.count("tracker.done(BIND_PHASE)") == 1
+    watcher_at = source.index("def _mark_bound_when_serving")
+    done_at = source.index("tracker.done(BIND_PHASE)")
+    watch_started_at = source.index("create_task(_mark_bound_when_serving")
     serve_at = source.index("await server.serve(")
-    assert done_at > serve_at, (
-        "the server_starting phase is marked done before the bind is attempted, "
-        "so a bind failure can never be recorded against it"
+    assert watch_started_at < serve_at, (
+        "the bind watcher must be running before serve() starts, or the phase "
+        "can only be finished after the server has stopped"
     )
+    assert done_at > watcher_at, "the done call belongs to the bind watcher"
+
+
+async def test_overall_ready_is_true_while_the_server_is_still_serving() -> None:
+    """The engine reports ready while it serves, not only after it stops.
+
+    A fake server stands in for uvicorn: ``started`` flips after a short
+    bind, then the server keeps "serving". The readiness is read from inside
+    that serving window, which is what ``/api/startup-status`` sees.
+    """
+    tracker = main.StartupTracker()
+    tracker.start(BIND_PHASE)
+    server = SimpleNamespace(started=False)
+    seen: dict[str, bool] = {}
+
+    async def serve() -> None:
+        seen["before_bind"] = tracker.to_dict()["overall_ready"]
+        await asyncio.sleep(0.01)
+        server.started = True
+        await asyncio.sleep(0.2)
+        seen["while_serving"] = tracker.to_dict()["overall_ready"]
+
+    watch = asyncio.create_task(
+        main._mark_bound_when_serving(server, tracker, poll_interval=0.001)
+    )
+    try:
+        await serve()
+    finally:
+        watch.cancel()
+
+    assert seen == {"before_bind": False, "while_serving": True}
+
+
+async def test_a_serve_that_ends_before_binding_leaves_the_phase_in_progress() -> None:
+    """A bind failure must not be recorded as a finished bind phase."""
+    tracker = main.StartupTracker()
+    tracker.start(BIND_PHASE)
+    server = SimpleNamespace(started=False)
+
+    watch = asyncio.create_task(
+        main._mark_bound_when_serving(server, tracker, poll_interval=0.001)
+    )
+    await asyncio.sleep(0.02)
+    watch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await watch
+
+    assert tracker.phase(BIND_PHASE).status == "in_progress"
+    assert tracker.to_dict()["overall_ready"] is False
 
 
 def test_the_engine_exits_with_the_port_in_use_code_instead_of_raising(
@@ -344,3 +401,43 @@ def test_the_engines_own_bind_claims_a_free_port() -> None:
         probe.bind(("127.0.0.1", 0))
     finally:
         probe.close()
+
+
+def _free_port() -> int:
+    """A port the kernel just handed out and that nothing holds any more."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+    finally:
+        probe.close()
+
+
+def test_a_free_port_is_available_on_the_wildcard_address() -> None:
+    """The default probe (host ``''``) must not report a free port as taken.
+
+    ``''`` binds ``::`` and ``0.0.0.0``. An AF_INET6 socket that is not
+    V6ONLY also claims the IPv4 wildcard on macOS and on Linux with
+    ``bindv6only=0``, so the second bind used to fail with EADDRINUSE on a
+    port nothing held. ``asyncio.create_server`` (and so uvicorn) sets
+    ``IPV6_V6ONLY`` on those sockets; the probe has to as well.
+    """
+    port = _free_port()
+
+    assert port_is_available(port) is True
+    check_server_port("", port)
+
+
+def test_a_listener_on_the_ipv4_wildcard_makes_the_port_taken() -> None:
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("0.0.0.0", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        assert port_is_available(port) is False
+        with pytest.raises(OSError) as raised:
+            check_server_port("", port)
+        assert is_address_in_use(raised.value) is True
+    finally:
+        holder.close()

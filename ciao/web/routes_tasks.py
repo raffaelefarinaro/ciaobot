@@ -36,6 +36,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.control_plane import ControlPlaneError
+from ciao.task_decisions import MAX_REASON
 
 #: One status per application error the task service can raise. The codes are
 #: the contract; this table is the only place one becomes a status, so a new
@@ -156,6 +157,24 @@ def _resolution(body: dict[str, Any]) -> str | None | JSONResponse:
     value = body["resolution"]
     if not isinstance(value, str):
         return _refusal("invalid_task", "resolution must be a string", 400)
+    return value
+
+
+def _reason(body: dict[str, Any]) -> str | None | JSONResponse:
+    """The optional decision reason a write carries, or the 400 to answer with.
+
+    Absent means ``None``. Present must be a string of at most ``MAX_REASON``
+    characters after trimming; refused, never truncated.
+    """
+    if "reason" not in body:
+        return None
+    value = body["reason"]
+    if not isinstance(value, str):
+        return _refusal("invalid_task", "reason must be a string", 400)
+    if len(value.strip()) > MAX_REASON:
+        return _refusal(
+            "invalid_task", f"reason is over the {MAX_REASON} character limit", 400
+        )
     return value
 
 
@@ -380,7 +399,8 @@ async def task_delegate(request: Request) -> JSONResponse:
 async def task_attempt_action(request: Request) -> JSONResponse:
     """One gesture on one attempt: ``stop``, ``resume``, ``retry`` or ``detach``.
 
-    ``{"workspace"}`` is the only body key. The action is in the path, so a typo
+    ``{"workspace"}`` and an optional ``reason`` for ``detach`` are the body
+    keys. The action is in the path, so a typo
     is a 404 from the router rather than a refusal the surface invented, and the
     service maps the four real verbs.
 
@@ -406,6 +426,9 @@ async def task_attempt_action(request: Request) -> JSONResponse:
     body = await _body(request)
     if isinstance(body, JSONResponse):
         return body
+    reason = _reason(body)
+    if isinstance(reason, JSONResponse):
+        return reason
     workspace = _workspace(request.app.state.config, body.get("workspace"))
     if workspace is None:
         return _workspace_required()
@@ -416,6 +439,7 @@ async def task_attempt_action(request: Request) -> JSONResponse:
             str(request.path_params.get("action") or ""),
             task_id=str(request.path_params.get("task_id") or ""),
             actor="user",
+            reason=reason,
         )
     except ControlPlaneError as exc:
         return _error(exc)
@@ -457,6 +481,9 @@ async def task_complete(request: Request) -> JSONResponse:
     has a result waiting for review is the exception the delegation block handles
     itself: approving Done releases the linkage and closes the task in one
     gesture, leaving the attempt as the ``ready_for_review`` record it is.
+
+    An optional ``reason`` is recorded with that approval; on any other completion
+    it is a 400 ``invalid_action``.
     """
     plane = _control_plane(request)
     if plane is None:
@@ -470,6 +497,9 @@ async def task_complete(request: Request) -> JSONResponse:
     resolution = _resolution(body)
     if isinstance(resolution, JSONResponse):
         return resolution
+    reason = _reason(body)
+    if isinstance(reason, JSONResponse):
+        return reason
     workspace = _workspace(request.app.state.config, body.get("workspace"))
     if workspace is None:
         return _workspace_required()
@@ -482,6 +512,7 @@ async def task_complete(request: Request) -> JSONResponse:
             expected_revision=revision,
             actor="user",
             resolution=resolution,
+            reason=reason,
         )
     except ControlPlaneError as exc:
         return _error(exc)
@@ -524,7 +555,8 @@ async def task_delete(request: Request) -> JSONResponse:
 
     The record is the user's own Markdown file and this unlinks it — there is
     no trash. ``expected_revision`` is required, so a delete planned against an
-    older read is a 409 with the file still there.
+    older read is a 409 with the file still there. An optional ``reason`` is
+    recorded with the decision.
     """
     plane = _control_plane(request)
     if plane is None:
@@ -535,6 +567,9 @@ async def task_delete(request: Request) -> JSONResponse:
     revision = _revision(body)
     if isinstance(revision, JSONResponse):
         return revision
+    reason = _reason(body)
+    if isinstance(reason, JSONResponse):
+        return reason
     workspace = _workspace(request.app.state.config, body.get("workspace"))
     if workspace is None:
         return _workspace_required()
@@ -544,6 +579,8 @@ async def task_delete(request: Request) -> JSONResponse:
             workspace,
             str(request.path_params.get("task_id") or ""),
             expected_revision=revision,
+            reason=reason,
+            actor="user",
         )
     except ControlPlaneError as exc:
         return _error(exc)

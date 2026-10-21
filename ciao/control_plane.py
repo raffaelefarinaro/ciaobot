@@ -69,6 +69,7 @@ from ciao.task_attempts import (
     task_delegation_helper,
 )
 from ciao.task_board import Actor, TaskBoardError, TaskBoardStore, TaskDocument
+from ciao.task_decisions import append_decision, clean_reason
 from ciao.task_log import extract_log, log_text, render_item, strip_log, upsert_item
 from ciao.task_resolution import (
     Completion,
@@ -537,6 +538,14 @@ def _completed_summary(completions: list[Completion]) -> dict[str, Any]:
     }
 
 
+def _clean_reason(value: object) -> str:
+    """An optional decision reason, or the refusal a caller answers with."""
+    try:
+        return clean_reason(value)
+    except ValueError as exc:
+        raise ControlPlaneError("invalid_task", str(exc)) from None
+
+
 def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict[str, Any]:
     """One task as a transport payload.
 
@@ -562,6 +571,7 @@ def _task_payload(document: TaskDocument, *, include_body: bool = False) -> dict
         "chat_id": record.chat_id,
         "attempt_id": record.attempt_id,
         "linked_chats": list(record.linked_chats),
+        "created_by": record.created_by,
         "created_at": record.created_at.isoformat(),
         "updated_at": record.updated_at.isoformat(),
         "revision": document.revision,
@@ -3049,8 +3059,12 @@ class CiaoControlPlane:
         body: str = "",
         project_id: str | None = None,
         due: str | None = None,
+        actor: Actor = "user",
     ) -> dict[str, Any]:
-        """Create one task in one workspace and return it as stored."""
+        """Create one task in one workspace and return it as stored.
+
+        ``actor="agent"`` marks the task ``created_by: agent`` (#1726).
+        """
         project = self._task_project(workspace, project_id) if project_id else None
         document = self._task_call(
             workspace,
@@ -3059,6 +3073,7 @@ class CiaoControlPlane:
                 body=str(body or ""),
                 project_id=project,
                 due=due or None,
+                created_by=actor,
             ),
         )
         return _task_payload(document, include_body=True)
@@ -3363,6 +3378,7 @@ class CiaoControlPlane:
         due: str | None = None,
         actor: Actor = "agent",
         resolution: str | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """One board gesture: ``move``, ``complete`` or ``reassign``.
 
@@ -3380,6 +3396,9 @@ class CiaoControlPlane:
         verb = str(action or "").strip()
         if resolution is not None and verb != "complete":
             raise ControlPlaneError("invalid_action", "resolution is only recorded by complete.")
+        if reason is not None and verb != "complete":
+            raise ControlPlaneError("invalid_action", "reason is only recorded by complete.")
+        note = _clean_reason(reason) if verb == "complete" else ""
         if verb == "move":
             target = str(status or "").strip()
             if not target:
@@ -3408,9 +3427,16 @@ class CiaoControlPlane:
                 changes=changes,
                 actor=actor,
                 resolution=resolution,
+                reason=note,
             )
             if reviewed is not None:
                 return reviewed
+            if note:
+                raise ControlPlaneError(
+                    "invalid_action",
+                    "a reason is recorded when approving a delegated result that is ready "
+                    "for review; this task has none.",
+                )
         task = self.workspace_task_update(
             workspace,
             task_id,
@@ -3432,6 +3458,7 @@ class CiaoControlPlane:
         changes: dict[str, object],
         actor: Actor,
         resolution: str | None = None,
+        reason: str = "",
     ) -> dict[str, Any] | None:
         """Close a task whose delegated turn has a result waiting, in one gesture.
 
@@ -3520,6 +3547,15 @@ class CiaoControlPlane:
         # what a board paints, and a completed card still naming a live attempt
         # would keep drawing Stop and Detach over a task with no chat to open.
         done: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
+        self._record_task_decision(
+            workspace,
+            kind="approve",
+            task=_task_payload(done),
+            actor=actor,
+            reason=reason,
+            attempt_id=attempt.attempt_id,
+            attempt_state=attempt.state,
+        )
         self._learn_from_approved(
             workspace,
             attempt,
@@ -3780,8 +3816,50 @@ class CiaoControlPlane:
                 attempt.attempt_id,
             )
 
+    def _record_task_decision(
+        self,
+        workspace: str,
+        *,
+        kind: str,
+        task: Mapping[str, Any],
+        actor: Actor,
+        reason: str,
+        attempt_id: str = "",
+        attempt_state: str = "",
+    ) -> None:
+        """Append one operator decision to the workspace's decision log (#1726).
+
+        Best effort and never raising: it runs only after the real write landed,
+        and failing a delete or approval that already happened would tell the
+        caller the opposite of what is true. A failed append is logged.
+        """
+        try:
+            append_decision(
+                self.workspace_vault_root(workspace),
+                kind=kind,
+                task_id=str(task.get("id") or ""),
+                task_title=str(task.get("title") or ""),
+                task_created_by="agent" if task.get("created_by") == "agent" else "",
+                project_id=str(task.get("project_id") or ""),
+                attempt_id=attempt_id,
+                attempt_state=attempt_state,
+                actor=actor,
+                via="pwa" if actor == "user" else "cli",
+                reason=reason,
+            )
+        except (OSError, ValueError):
+            logger.exception(
+                "tasks: could not record the %s decision for task %s", kind, task.get("id")
+            )
+
     def workspace_task_delete(
-        self, workspace: str, task_id: str, *, expected_revision: str
+        self,
+        workspace: str,
+        task_id: str,
+        *,
+        expected_revision: str,
+        reason: str | None = None,
+        actor: Actor = "agent",
     ) -> dict[str, Any]:
         """Remove one task record from one workspace, revision-checked.
 
@@ -3791,13 +3869,22 @@ class CiaoControlPlane:
         and log stored inside its file: it does not delete or archive linked
         chats, stop a running turn, discard attempt history, or mark anything
         done. Completion remains user-only; removal is not completion.
+
+        The decision is recorded in the workspace's decision log with the
+        optional ``reason``; that row outlives the deleted file. An over-long or
+        non-string reason is refused before anything is deleted.
         """
         clean = str(task_id or "").strip()
+        note = _clean_reason(reason)
+        document: TaskDocument = self._task_call(workspace, lambda store: store.get(clean))
         self._task_call(
             workspace,
             lambda store: store.delete(
                 clean, expected_revision=str(expected_revision or "")
             ),
+        )
+        self._record_task_decision(
+            workspace, kind="delete", task=_task_payload(document), actor=actor, reason=note
         )
         return {"id": clean, "deleted": True}
 
@@ -4866,6 +4953,7 @@ class CiaoControlPlane:
         *,
         task_id: str = "",
         actor: Actor = "user",
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """One lifecycle gesture on one attempt: ``stop``, ``resume``, ``retry`` or ``detach``.
 
@@ -4903,8 +4991,14 @@ class CiaoControlPlane:
         ``actor`` is the caller, and nothing here completes a task: the user's own
         completion (see :meth:`workspace_task_complete_reviewed`) is what that
         gesture makes possible, and only a user can take it.
+
+        ``reason`` is optional and only ``detach`` records it: releasing a result
+        that is ready for review is the operator's "reject" decision (#1726).
         """
         verb = str(action or "").strip()
+        if reason is not None and verb != "detach":
+            raise ControlPlaneError("invalid_action", "reason is only recorded by detach.")
+        note = _clean_reason(reason) if verb == "detach" else ""
         clean = str(attempt_id or "").strip()
         attempt = self._attempt_call(workspace, lambda store: store.get(clean))
         named_task = str(task_id or "").strip()
@@ -4923,7 +5017,7 @@ class CiaoControlPlane:
         if verb == "retry":
             return self._attempt_retry(workspace, attempt, actor=actor)
         if verb == "detach":
-            return await self._attempt_detach(workspace, attempt, actor=actor)
+            return await self._attempt_detach(workspace, attempt, actor=actor, reason=note)
         raise ControlPlaneError(
             "invalid_action", "action must be stop, resume, retry, or detach."
         )
@@ -5109,7 +5203,7 @@ class CiaoControlPlane:
             return None
 
     async def _attempt_detach(
-        self, workspace: str, attempt: TaskAttempt, *, actor: Actor
+        self, workspace: str, attempt: TaskAttempt, *, actor: Actor, reason: str = ""
     ) -> dict[str, Any]:
         """Release the task from the attempt, stopping the turn first if needed.
 
@@ -5133,7 +5227,19 @@ class CiaoControlPlane:
         The card leaves In review with it: a task in that column with no attempt
         behind it asks the user to review a result they have already released, so
         it goes back to In progress here and nowhere else.
+
+        Releasing a result that is ready for review is the operator's reject
+        decision, recorded in the decision log (#1726) once the release has
+        landed. A non-empty ``reason`` on any other detach is refused before the
+        turn is stopped or anything is written.
         """
+        was_review = attempt.state == "ready_for_review" and attempt.is_live
+        if reason and not was_review:
+            raise ControlPlaneError(
+                "invalid_action",
+                "a reason is recorded when releasing a result that is ready for review; "
+                "this attempt is not.",
+            )
         document = self._attempt_task(workspace, attempt)
         if attempt.state == "running":
             await self._stop_turn(attempt.chat_id)
@@ -5175,7 +5281,18 @@ class CiaoControlPlane:
             freed = self._release_attempt(workspace, attempt.attempt_id)
             if freed is not None:
                 settled = freed
-        return _attempt_payload(settled, self._task_with_attempt(workspace, document))
+        released_task = self._task_with_attempt(workspace, document)
+        if was_review:
+            self._record_task_decision(
+                workspace,
+                kind="reject",
+                task=released_task,
+                actor=actor,
+                reason=reason,
+                attempt_id=attempt.attempt_id,
+                attempt_state=attempt.state,
+            )
+        return _attempt_payload(settled, released_task)
 
     # ---- agent wrappers for delegation --------------------------------
 
@@ -5204,7 +5321,11 @@ class CiaoControlPlane:
         )
 
     async def task_attempt_action(
-        self, principal: AgentPrincipal, attempt_id: str, action: str
+        self,
+        principal: AgentPrincipal,
+        attempt_id: str,
+        action: str,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Stop, resume, retry or detach one delegation attempt in this workspace.
 
@@ -5215,7 +5336,7 @@ class CiaoControlPlane:
         """
         return _ok(
             await self.workspace_task_attempt_action(
-                self._workspace(principal), attempt_id, action, actor="agent"
+                self._workspace(principal), attempt_id, action, actor="agent", reason=reason
             )
         )
 
@@ -5273,6 +5394,7 @@ class CiaoControlPlane:
                 body=body,
                 project_id=project_id,
                 due=due,
+                actor="agent",
             )
         )
 
@@ -5351,6 +5473,7 @@ class CiaoControlPlane:
         task_id: str,
         *,
         expected_revision: str,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         """Permanently remove one task in the calling chat's workspace.
 
@@ -5368,6 +5491,8 @@ class CiaoControlPlane:
                 self._workspace(principal),
                 task_id,
                 expected_revision=expected_revision,
+                reason=reason,
+                actor="agent",
             )
         )
 

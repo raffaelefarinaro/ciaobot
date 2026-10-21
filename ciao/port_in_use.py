@@ -80,8 +80,10 @@ def check_server_port(host: str, port: int) -> None:
 
     The addresses and the socket options are the ones asyncio's own
     ``create_server`` would use — ``SO_REUSEADDR`` on POSIX, none on
-    Windows — so this bind fails exactly when uvicorn's would, and the
-    ``OSError`` it raises is the one the engine would have seen.
+    Windows, and ``IPV6_V6ONLY`` on every IPv6 socket — so this bind fails
+    exactly when uvicorn's would, and the ``OSError`` it raises is the one
+    the engine would have seen. Without V6ONLY the ``::`` probe also claims
+    ``0.0.0.0`` on macOS, and a free port reads as taken.
     """
     infos = socket.getaddrinfo(
         host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
@@ -91,6 +93,8 @@ def check_server_port(host: str, port: int) -> None:
     try:
         for family, socktype, proto, _canonname, address in infos:
             sock = socket.socket(family, socktype, proto)
+            if family == socket.AF_INET6:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
             if reuse_address:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:

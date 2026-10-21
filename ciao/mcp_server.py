@@ -1120,13 +1120,16 @@ async def _op_task_update(service: CiaoMcpService, task_id: str, expected_revisi
 
 
 async def _op_task_delete(service: CiaoMcpService, task_id: str,
-                          expected_revision: str) -> dict[str, Any]:
+                          expected_revision: str,
+                          reason: str | None = None) -> dict[str, Any]:
     """Permanently remove one task record the user asked you to delete.
 
     Args:
         task_id: The task's 32-hex id, from `task_list` or `task_get`.
         expected_revision: The `revision` you read. A stale one removes
             nothing — re-read rather than resending the same revision.
+        reason: Optional. Why the record is being removed, in the user's words
+            if they gave one. Stored with the decision, never acted on.
 
     This removes only that task file, including the notes, history and
     delegation log stored inside it. It does not delete or archive linked
@@ -1139,7 +1142,7 @@ async def _op_task_delete(service: CiaoMcpService, task_id: str,
     return await service._invoke(
         "task_delete",
         lambda cp, p: cp.task_delete(
-            p, task_id, expected_revision=expected_revision
+            p, task_id, expected_revision=expected_revision, reason=reason
         ),
         mutating=True,
     )
@@ -1250,8 +1253,13 @@ async def _op_task_report(service: CiaoMcpService, task_id: str, outcome: str,
 
 
 async def _op_task_attempt_action(service: CiaoMcpService, attempt_id: str,
-                                 action: str) -> dict[str, Any]:
+                                 action: str,
+                                 reason: str | None = None) -> dict[str, Any]:
     """One lifecycle gesture on a delegation attempt.
+
+    reason: Optional, `detach` only, for a result that is ready for review: why
+        it is being released, in the user's words if they gave one. Stored with
+        the decision, never acted on.
 
     action:
         "stop"   — end the running turn. Not undoable, and the task keeps its
@@ -1270,13 +1278,15 @@ async def _op_task_attempt_action(service: CiaoMcpService, attempt_id: str,
         "stop": lambda cp, p: cp.task_attempt_action(p, attempt_id, "stop"),
         "resume": lambda cp, p: cp.task_attempt_action(p, attempt_id, "resume"),
         "retry": lambda cp, p: cp.task_attempt_action(p, attempt_id, "retry"),
-        "detach": lambda cp, p: cp.task_attempt_action(p, attempt_id, "detach"),
+        "detach": lambda cp, p: cp.task_attempt_action(p, attempt_id, "detach", reason=reason),
     }
     op = dispatch.get(action)
     if op is None:
         raise ControlPlaneError(
             "invalid_action", "action must be stop, resume, retry, or detach."
         )
+    if reason is not None and action != "detach":
+        raise ControlPlaneError("invalid_action", "reason is only recorded by detach.")
     # `_DESTRUCTIVE`: `stop` ends a turn that cannot be resumed, so the whole
     # operation is ask-class rather than allow-class.
     return await service._invoke("task_attempt_action", op, mutating=True)
