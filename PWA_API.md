@@ -37,7 +37,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth/host-sign-in` | Open a one-time signed-in tab in the host's default browser (loopback-only, no session; returns no credential) |
 | GET | `/api/projects` | List projects. Each carries `repo_path` and `repo`: `{path, branch, dirty, missing, instructions}` or `null` when unlinked. `instructions` is `{name, chars}` for the AGENTS.md (CLAUDE.md when there is no AGENTS.md) that code mode injects, `chars` being the injected text's length after the 20,000-character cap, or `null` when there is none or the folder is missing |
 | POST | `/api/projects` | Create project. Optional `repo_path` links a local git checkout (absolute path to its top level; 400 with the reason otherwise) |
-| PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project. PATCH accepts `repo_path` (`""` unlinks) |
+| PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project. PATCH accepts `repo_path` (`""` unlinks). DELETE accepts `?delete_vault=1` (`"true"` also): the vault-backed project's folder under `projects/active/<folder>/` is removed and the inbound links in other notes are stripped first. Without the flag a vault-backed project is refused (400). Returns `{"ok": bool, "vault_entry_removed": bool, "removed_notes": int, "removed_files": int, "edited_backlinks": [str]}` |
 | POST | `/api/projects/reorder` | Reorder a workspace's projects (drag-to-reorder) |
 | POST | `/api/projects/{project_id}/complete` | Close a vault-backed project. Body `{"outcome": "completed"\|"stopped", "note": "..."}`; both fields optional (`completed` and an empty note when omitted). The note is written into the project document before the folder moves to `completed/`. Chats are archived. Open tasks stay on the board |
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
@@ -514,8 +514,14 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/projects/compl
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/completed/restore" \
   -H 'Content-Type: application/json' -d '{"workspace":"work","stem":"maf-onsite"}'
 
-# Delete — returns {"ok": true|false}.
+# Delete — returns {"ok": true|false, "vault_entry_removed": bool, "removed_notes": int,
+# "removed_files": int, "edited_backlinks": [str]}. A vault-backed project is refused
+# without the flag; with it, the folder under projects/active/<folder>/ goes and the
+# inbound links in other notes are stripped first.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/projects/$PID"
+
+# Delete a vault-backed project with its vault entry.
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/projects/$PID?delete_vault=1"
 ```
 
 **Task board**

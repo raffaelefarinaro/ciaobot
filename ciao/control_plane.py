@@ -2403,16 +2403,22 @@ class CiaoControlPlane:
         project = self._resolve_project(principal, project_id)
         pid = project.project_id
         current_chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
+        # No vault flag: an agent cannot silently remove a folder of memory.
+        # A vault-backed project is refused here; the user deletes it in the
+        # app, where the removal is confirmed.
         if current_chat is not None and current_chat.project_id == pid:
             return self._defer_until_chat_idle(
                 principal,
                 "project_delete",
                 lambda: {
-                    "deleted": self.pcm.delete_project(pid),
+                    "deleted": self.pcm.delete_project(pid)["deleted"],
                     "project_id": pid,
                 },
             )
-        return _ok({"deleted": self.pcm.delete_project(pid), "project_id": pid})
+        return _ok({
+            "deleted": self.pcm.delete_project(pid)["deleted"],
+            "project_id": pid,
+        })
 
     def chats_list(
         self,

@@ -198,10 +198,9 @@ def test_delete_project_publishes_event(tmp_path: Path) -> None:
 
 
 def test_delete_project_rejects_vault_backed(tmp_path: Path) -> None:
-    """Deleting a vault-backed project must fail: otherwise auto-discovery
-    re-creates the project on the next list_projects() call. The user must
-    use complete_project (which moves the vault entry) or remove the vault
-    entry directly."""
+    """Deleting a vault-backed project must fail by default: otherwise
+    auto-discovery re-creates the project on the next list_projects() call. The
+    message must name both ways out, so the user is not left guessing."""
     parent = tmp_path / "memory-vault" / "personal" / "projects" / "active"
     folder = parent / "Stuck"
     folder.mkdir(parents=True)
@@ -214,13 +213,127 @@ def test_delete_project_rejects_vault_backed(tmp_path: Path) -> None:
     pcm.list_projects()  # triggers auto-discovery
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "Stuck")
 
-    with pytest.raises(ValueError, match="vault entry"):
+    with pytest.raises(ValueError, match="vault entry") as excinfo:
         pcm.delete_project(proj.project_id)
+
+    # The message points at the two ways out: Delete (removes the entry) and
+    # Complete (moves it to completed/).
+    message = str(excinfo.value)
+    assert "Delete" in message
+    assert "Complete" in message
 
     # Project must remain in state — the guard fires before any mutation.
     assert proj.project_id in pcm._projects
     # Vault folder must remain untouched.
     assert (folder / "Stuck.md").exists()
+
+
+def test_delete_project_with_delete_vault_removes_folder_and_cleans_links(tmp_path: Path) -> None:
+    """Deleting a vault-backed project for real removes its folder, cleans the
+    inbound links in other notes, and does not come back on the next
+    auto-discovery."""
+    vault = tmp_path / "memory-vault" / "personal"
+    folder = vault / "projects" / "active" / "Stuck"
+    folder.mkdir(parents=True)
+    (folder / "Stuck.md").write_text(
+        "---\nname: Stuck\nstatus: active\n---\n# Stuck\n",
+        encoding="utf-8",
+    )
+    notes = vault / "Notes"
+    notes.mkdir(parents=True)
+    (notes / "Ref.md").write_text(
+        "---\n"
+        "name: Ref\n"
+        "type: note\n"
+        "related:\n"
+        "  - projects/active/Stuck/Stuck\n"
+        "---\n"
+        "# Ref\n\n"
+        "See [Stuck](../projects/active/Stuck/Stuck.md).\n",
+        encoding="utf-8",
+    )
+
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()  # triggers auto-discovery
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "Stuck")
+    chat = pcm.create_chat(proj.project_id, title="stuck chat")
+    cap = _EventCapture(pcm)
+
+    report = pcm.delete_project(proj.project_id, delete_vault=True)
+
+    # The folder is gone from disk.
+    assert not folder.exists()
+    # The row is gone too.
+    assert proj.project_id not in pcm._projects
+    assert report["deleted"] is True
+    assert report["vault_entry_removed"] is True
+    assert report["removed_notes"] == 1
+    assert report["removed_files"] == 1
+    # The chat is archived with the project.
+    assert chat.chat_id not in pcm._chats
+    # The deletion is published, so the sidebar drops the row without a reload.
+    deleted = [e for e in cap.drain() if e.get("type") == "project_deleted"]
+    assert [e["project_id"] for e in deleted] == [proj.project_id]
+    # The inbound link no longer dangles: the markdown link is gone and the
+    # `related:` entry with it.
+    ref_text = (notes / "Ref.md").read_text(encoding="utf-8")
+    assert "projects/active/Stuck" not in ref_text
+    assert "related:" not in ref_text
+    assert "See Stuck." in ref_text
+    # The project does not reappear: the folder it came from is gone.
+    assert not [p for p in pcm.list_projects() if p.vault_folder == "Stuck"]
+
+
+def test_delete_project_with_delete_vault_refuses_symlink_escape(tmp_path: Path) -> None:
+    """A project folder that is a symlink out of the active root is not
+    deleted: the delete must not reach outside the projects tree."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "Elsewhere.md").write_text(
+        "---\nname: Elsewhere\nstatus: active\n---\n# Elsewhere\n",
+        encoding="utf-8",
+    )
+    parent = tmp_path / "memory-vault" / "personal" / "projects" / "active"
+    parent.mkdir(parents=True)
+    (parent / "Stuck").symlink_to(outside, target_is_directory=True)
+
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()
+    proj = next(
+        (p for p in pcm.list_projects() if p.vault_folder == "Stuck"),
+        None,
+    )
+    if proj is None:
+        # Auto-discovery skips a symlinked folder; the row is created by hand
+        # so the delete path is the one under test.
+        proj = pcm.create_project("Stuck", workspace="personal")
+        pcm.update_project(proj.project_id, vault_folder="Stuck")
+
+    with pytest.raises(ValueError):
+        pcm.delete_project(proj.project_id, delete_vault=True)
+
+    # Nothing outside the projects tree was touched, and the row survives so
+    # the delete can be retried.
+    assert (outside / "Elsewhere.md").exists()
+    assert (parent / "Stuck").exists()
+    assert proj.project_id in pcm._projects
+
+
+def test_delete_project_with_delete_vault_missing_folder_removes_row(tmp_path: Path) -> None:
+    """A vault-backed project whose folder is already gone is still deleted:
+    the row goes, and the report says no entry was removed."""
+    pcm = _make_manager(tmp_path)
+    proj = pcm.create_project("Ghost", workspace="personal")
+    pcm.update_project(proj.project_id, vault_folder="Ghost")
+
+    report = pcm.delete_project(proj.project_id, delete_vault=True)
+
+    assert report["deleted"] is True
+    assert report["vault_entry_removed"] is False
+    assert report["removed_notes"] == 0
+    assert report["removed_files"] == 0
+    assert report["edited_backlinks"] == []
+    assert proj.project_id not in pcm._projects
 
 
 def test_delete_project_allows_manual_project_without_vault_folder(tmp_path: Path) -> None:
@@ -229,8 +342,8 @@ def test_delete_project_allows_manual_project_without_vault_folder(tmp_path: Pat
     p = pcm.create_project("Manual", workspace="personal")
     assert p.vault_folder == ""
 
-    ok = pcm.delete_project(p.project_id)
-    assert ok is True
+    report = pcm.delete_project(p.project_id)
+    assert report["deleted"] is True
     assert p.project_id not in pcm._projects
 
 

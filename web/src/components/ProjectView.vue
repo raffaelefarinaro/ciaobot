@@ -27,7 +27,7 @@
           @click="doComplete"
         >Complete</button>
         <div
-          v-if="!project.vault_folder && !project.is_auto"
+          v-if="!project.is_auto"
           ref="projectActionsEl"
           class="project-actions"
         >
@@ -429,6 +429,8 @@ import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { askConfirm } from '../lib/confirm'
+import { projectDeleteMessage, projectDeleteToastBody } from '../lib/projectDelete'
+import { errorMessage } from '../lib/errorMessage'
 import { api } from '../lib/api'
 import { useModalFocus } from '../composables/useModalFocus'
 import { formatRelative } from '../lib/relativeTime'
@@ -887,15 +889,27 @@ async function submitClosure(withoutNote: boolean) {
 
 async function doDelete() {
   if (!project.value) return
+  const target = project.value
   closeProjectActions(false)
   await nextTick()
   projectActionsTrigger.value?.focus()
-  if (!await askConfirm('Delete this project and archive all its chats?', {
+  const chatCount = store.chats.filter(c => c.project_id === target.project_id).length
+  if (!await askConfirm(projectDeleteMessage(target, chatCount), {
     title: 'Delete project',
     confirmLabel: 'Delete project',
     destructive: true,
   })) return
-  await store.deleteProject(project.value.project_id)
+  try {
+    const report = await store.deleteProject(target.project_id)
+    store.pushToast({
+      chat_id: '',
+      title: 'Project deleted',
+      body: projectDeleteToastBody(report),
+    })
+  } catch (e) {
+    store.pushErrorToast('Could not delete project', `${errorMessage(e)}`)
+    return
+  }
   emit('close')
 }
 
