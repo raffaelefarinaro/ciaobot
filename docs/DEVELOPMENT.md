@@ -365,6 +365,28 @@ while the server is running, because the live schedule store may be writing it.
   `>>` continuation line open and the next command joins that block instead
   of running — which is exactly what made the Ctrl-C case look like a dead
   terminal on the first native run.
+  What a `0x03` byte does inside a pseudoconsole is decided by the console
+  host, not by the adapter, and the rule is worth writing down before
+  anyone tries to fix the interrupt from this side. The host reads the
+  input pipe, turns the byte into a Ctrl+C key event, and raises a
+  `CTRL_C_EVENT` **only when the console's input mode has
+  `ENABLE_PROCESSED_INPUT` set**; with the flag off, the byte is handed to
+  the shell as an ordinary character, which is why a `0x03` at a prompt
+  cancels the pending line and nothing else. The input mode belongs to the
+  *client*: the console host never writes it, the only writer is the
+  client's own `SetConsoleMode`, and the `CreatePseudoConsole` flags
+  (`PSEUDOCONSOLE_INHERIT_CURSOR`, `PSEUDOCONSOLE_AMBIGUOUS_IS_WIDE`,
+  `PSEUDOCONSOLE_GLYPH_WIDTH_*`) do not touch it. The `?9001h` sequence
+  the host emits at start-up is a request *from* the host *to* the
+  terminal, and the key records it asks for are decoded by the same state
+  machine and dispatched through the same gate, so the handshake cannot
+  change the interrupt either. The adapter therefore cannot make a `0x03`
+  interrupt a running program on its own: what decides it is the mode the
+  shell leaves on the console, and the shell's own standard handles.
+  `tests/test_os_terminal_windows.py::test_the_console_state_behind_the_interrupt_is_measured`
+  measures both from inside the pseudoconsole and reports what the byte
+  did to a running program, so the state behind the gap in #1721 is on
+  record instead of guessed at.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both

@@ -32,6 +32,16 @@ const CHAT_ID_RE = new RegExp(`^${CHAT_ID_SOURCE}$`)
  */
 const TOKEN_CHAR = /[\w/\\-]/
 
+/**
+ * What may open a token.
+ *
+ * Whitespace, an opening bracket or a quote. A character that opens nothing
+ * — a letter, a digit, or the `=` of a query value — is part of the token
+ * that surrounds it, so the token it introduces has to start after one of
+ * these.
+ */
+const OPENS_TOKEN = /[\s([{<"']/
+
 /** Elements whose content is never a reference. */
 const SKIP_TAGS = new Set(['A', 'PRE', 'SCRIPT', 'STYLE', 'TEXTAREA', 'BUTTON'])
 
@@ -51,7 +61,10 @@ type Reference = { index: number; id: string; title: string }
  * A reference has to be a word of its own: the characters around it may not
  * be word characters, dashes or path separators, and the token it sits in
  * may not be a URL — a query value like `?to=chat-0123abcd` names a chat
- * inside a link, not a conversation.
+ * inside a link, not a conversation. The app's own `@chat/<id>` mention is
+ * the one exception, and its `@` has to open the token as well: the start
+ * of the text, whitespace or an opening bracket, so `?to=@chat/chat-0123abcd`
+ * stays part of the address.
  */
 function findReferences(text: string, known: ReadonlyMap<string, string>): Reference[] {
   const re = new RegExp(CHAT_ID_SOURCE, 'g')
@@ -79,13 +92,16 @@ function findReferences(text: string, known: ReadonlyMap<string, string>): Refer
 /**
  * True when the id is the tail of the app's own `@chat/<id>` mention.
  *
- * The `@` has to open the token, so `notes/chat-0123abcd`, a URL path and an
- * `@` inside a longer word are all still rejected.
+ * The `@` has to open the token, so `notes/chat-0123abcd`, a URL path and
+ * an `@` inside a longer word are all still rejected — and so is a
+ * scheme-less query such as `?to=@chat/chat-0123abcd`, where the `@`
+ * follows a `=` and opens nothing.
  */
 function isAppMention(text: string, index: number): boolean {
   const at = index - '@chat/'.length
   if (at < 0 || text.slice(at, index) !== '@chat/') return false
-  return at === 0 || !TOKEN_CHAR.test(text[at - 1]!)
+  if (at === 0) return true
+  return OPENS_TOKEN.test(text[at - 1]!)
 }
 
 /**

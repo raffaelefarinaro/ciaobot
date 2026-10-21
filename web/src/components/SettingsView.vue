@@ -4211,9 +4211,12 @@ function loadSettingsTab(tab: string): Promise<void> {
   let reads: Promise<unknown>[]
   switch (tab) {
     case 'home':
+      // The health card waits on the agent assets, so the home tab has to
+      // read them: without this it stays on its loader until another tab
+      // happens to fetch the same data.
       reads = [fetchLocalStatus().then(() => {
         if (localStatus.value?.dev_mode) return refreshDebugIssues()
-      }), fetchAuthSettings(), fetchRoutines(), fetchWorkspaceMove(), fetchPackageStatus(), fetchUpdateStatus()]
+      }), fetchAuthSettings(), fetchRoutines(), fetchWorkspaceMove(), fetchPackageStatus(), fetchUpdateStatus(), fetchAgentAssets()]
       break
     case 'models':
       reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), mcp.fetchStatus(), fetchWorkspaceModels()]
@@ -4271,6 +4274,11 @@ watch(() => projectStore.activeWorkspace, () => {
   }
   if (['models', 'skills', 'subagents', 'commands', 'mcp'].includes(currentTab.value)) {
     void loadSettingsTab(currentTab.value)
+  } else if (currentTab.value === 'home') {
+    // The home tab's health card reads the same workspace-scoped agent
+    // assets, so a switch has to refresh them too. The home tab itself stays
+    // unscoped: its other reads do not belong to a workspace.
+    void fetchAgentAssets()
   }
 })
 

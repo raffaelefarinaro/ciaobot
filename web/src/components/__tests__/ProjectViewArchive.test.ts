@@ -95,4 +95,33 @@ describe('ProjectView archived chats', () => {
     expect(fileViewer.path).toBe(ARCHIVE_PATH)
     wrapper.unmount()
   })
+
+  it('keeps the pane alive when the archive page is malformed', async () => {
+    seed()
+    // A payload without `items`: a stub, or an engine that does not know the
+    // `archived=1` branch and answers the bare array instead.
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.includes('archived=1')) return {} as never
+      throw new Error(`unstubbed ${url}`)
+    })
+
+    const { default: ProjectView } = await import('../ProjectView.vue')
+    const wrapper = mount(ProjectView, {
+      props: { projectId: 'project-1' },
+      global: { stubs: { PaneHeader: { template: '<div><slot name="title" /><slot name="actions" /></div>' } } },
+    })
+    await flush()
+
+    await wrapper.get('.archive-toggle').trigger('click')
+    await flush()
+
+    // The template reads `archiveData.items.length`, so an unguarded payload
+    // throws inside the render and takes the whole project pane with it: the
+    // section stays on the loading skeleton, and the error it never reached
+    // is never said. The section's own error row is the readable outcome
+    // instead (#1710).
+    expect(wrapper.find('[aria-label="Loading archived chats"]').exists()).toBe(false)
+    expect(wrapper.get('[role="alert"]').text()).toContain('Could not load archived chats.')
+    wrapper.unmount()
+  })
 })

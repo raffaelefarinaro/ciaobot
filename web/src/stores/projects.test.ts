@@ -1158,6 +1158,114 @@ describe('duplicate send suppression', () => {
     const userMsgs = (store.messages[chatId] || []).filter(m => m.role === 'user')
     expect(userMsgs).toHaveLength(1)
   })
+
+  test('a duplicate echo for the running turn does not clear its live stream', async () => {
+    // The engine answered a recovery resend of the turn that is still
+    // running: the echo is a repeat, but this turn owns the live buffer.
+    // Clearing it blanked the live text, the trace and the spinner until the
+    // next delta or a history reload came in (#1716).
+    const store = useProjectStore()
+    const chatId = 'chat-duplicate-echo-running'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'run it', sent_at: '2026-10-20T12:20:40Z', turn_index: 4 },
+          ],
+          total: 1, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    // The turn that is running: its user bubble carries the server's turn
+    // index, and the live stream is buffering the answer.
+    store.messages[chatId] = [
+      { role: 'user', content: 'run it', timestamp: '2026-10-20T12:20:40Z', turn_index: 4 },
+    ]
+    store.streaming[chatId] = true
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'tool_use', tool_name: 'Bash', tool_input: 'ls' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'text_delta', text: 'partial answer' }),
+    })
+    expect(store.currentTimeline).toHaveLength(1)
+
+    apiGet.mockClear()
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'run it',
+        send_id: 's-running',
+        duplicate: true,
+        turn_index: 4,
+      }),
+    })
+    await nextTick()
+
+    // The repeat echo leaves the live turn alone: the text, the trace and the
+    // spinner all survive it, and no history reload runs.
+    expect(store.streaming[chatId]).toBe(true)
+    expect(store.streamingText[chatId]).toBe('partial answer')
+    expect(store.currentTimeline).toHaveLength(1)
+    const reloads = apiGet.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/messages'))
+    expect(reloads).toHaveLength(0)
+  })
+
+  test('a duplicate echo naming a finished last turn still settles the client', async () => {
+    // The repeat names the transcript's last turn, but that turn is over: no
+    // live buffer is running, so the client settles — no streaming state, and
+    // one background reload of the authoritative transcript. The echo must not
+    // put the spinner back on a finished turn.
+    const store = useProjectStore()
+    const chatId = 'chat-duplicate-echo-finished'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'finished turn', sent_at: '2026-10-20T12:20:40Z', turn_index: 4 },
+          ],
+          total: 1, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.messages[chatId] = [
+      { role: 'user', content: 'finished turn', timestamp: '2026-10-20T12:20:40Z', turn_index: 4 },
+    ]
+    // Nothing is streaming: the turn this echo repeats is long over.
+    store.streaming[chatId] = false
+
+    apiGet.mockClear()
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'finished turn',
+        send_id: 's-finished',
+        duplicate: true,
+        turn_index: 4,
+      }),
+    })
+    await nextTick()
+
+    expect(store.streaming[chatId]).toBe(false)
+    const reloads = apiGet.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/messages'))
+    await vi.waitFor(() => expect(reloads).toHaveLength(1))
+    await new Promise((r) => setTimeout(r, 0))
+    // Nothing new was rendered: the turn is already on screen.
+    const userMsgs = (store.messages[chatId] || []).filter(m => m.role === 'user' && m.turn_index === 4)
+    expect(userMsgs).toHaveLength(1)
+  })
 })
 
 describe('deferred message sends', () => {
@@ -1402,6 +1510,92 @@ describe('deferred send visibility and re-send de-duplication', () => {
       const bubbles = userBubbles(store, chatId, 'echo me')
       expect(bubbles).toHaveLength(1)
       expect(bubbles[0].turn_index).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a promoted deferred send keeps one bubble when its echo arrives', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-echo-send-id'
+      store.activeChatId = chatId
+
+      // The socket is down, so the send is deferred and rendered as a pending
+      // bubble. It carries no send id yet: none was minted.
+      store.sendMessage(chatId, 'one turn only')
+      expect(userBubbles(store, chatId, 'one turn only')).toHaveLength(1)
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      // The promotion put the send on the wire under a minted send id.
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      const sendId = frames[0].send_id as string
+      expect(sendId).toBeTruthy()
+
+      // The broker echoes the turn back with its server-assigned index and the
+      // send id the frame carried. The echo reconciliation matches bubbles by
+      // send id, so a promoted bubble that never learned the id cannot be
+      // recognised and the echo pushes a second copy of the same turn.
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_echo', text: 'one turn only', turn_index: 0, send_id: sendId,
+        }),
+      })
+
+      const bubbles = userBubbles(store, chatId, 'one turn only')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].turn_index).toBe(0)
+      expect(bubbles[0].send_id).toBe(sendId)
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('a promoted deferred send without a rendered bubble still pushes one', async () => {
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-deferred-wiped-bubble'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'wiped pending')
+      expect(userBubbles(store, chatId, 'wiped pending')).toHaveLength(1)
+
+      // A history reload lands while the retry chain is still waiting and
+      // wipes the optimistic bubble.
+      store.messages[chatId] = []
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      const frames = messageFrames(socket)
+      expect(frames).toHaveLength(1)
+      const sendId = frames[0].send_id as string
+      expect(sendId).toBeTruthy()
+
+      // The promotion had no bubble to promote, so it pushed one instead —
+      // carrying the send id, so the echo settles it rather than adding a
+      // second copy.
+      const bubbles = userBubbles(store, chatId, 'wiped pending')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].send_id).toBe(sendId)
+
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'user_echo', text: 'wiped pending', turn_index: 0, send_id: sendId,
+        }),
+      })
+
+      const settled = userBubbles(store, chatId, 'wiped pending')
+      expect(settled).toHaveLength(1)
+      expect(settled[0].turn_index).toBe(0)
+      expect(settled[0].send_id).toBe(sendId)
     } finally {
       vi.useRealTimers()
       vi.stubGlobal('WebSocket', FakeWebSocket)
