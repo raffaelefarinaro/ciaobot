@@ -338,6 +338,17 @@ while the server is running, because the live schedule store may be writing it.
   need one on Windows. The suite also points `LOCALAPPDATA` at each test's
   home, so a machine with Ciaobot installed does not hand its real logon-task
   workspace to config-discovery tests.
+  One step runs on **every** PR rather than only on the `WINDOWS_FULL` ones:
+  `Windows ConPTY terminal tests`, which is `pytest -q -rfE
+  tests/test_os_terminal_windows.py`. The native Windows terminal
+  (`ciao/os_support/terminal_windows.py`, a ConPTY driven through `ctypes`)
+  can only be proved on Windows — a POSIX run only exercises the ordering of
+  the native calls with a fake, never the pseudoconsole itself — so the real
+  tests run there before the change is merged rather than after it. The step
+  runs on the `windows-latest` image (Windows Server 2025), whose
+  `ClosePseudoConsole` returns immediately (11 24H2 and later); the ordering
+  that also works on the older versions, where that call waits for the
+  clients to disconnect, is pinned by the fake.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
