@@ -74,6 +74,10 @@ export type PreparedMessage = {
   // id it already has, so the engine can tell it apart from a deliberate
   // repeat of the same text. Minted by the store when it is absent.
   sendId?: string
+  // The only tag a client may ask for: a deliberate retry of a turn the
+  // user asked to run again. Every other origin is the engine's own
+  // (wake, automation, webhook, ...) and cannot be requested from here.
+  origin?: 'retry'
 }
 
 /**

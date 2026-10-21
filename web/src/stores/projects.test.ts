@@ -8001,3 +8001,253 @@ describe('queue delivery: queue or steer', () => {
     expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('queue')
   })
 })
+
+// ── The retry origin on the wire ─────────────────────────────────────────
+// A deliberate retry is a new turn the user asked for, not a repeat of the
+// words: it carries the 'retry' tag the engine records per turn, and it is a
+// NEW logical send, so it never inherits the id of an unacked ordinary send
+// that happens to carry the same text. The transport recovery of that retry
+// is the same logical send again: same id, same tag.
+describe('retry origin on the wire', () => {
+  function sentFrames(): Array<Record<string, unknown>> {
+    return fakeSockets
+      .flatMap(s => (s.send as Mock).mock.calls.map((c: unknown[]) => String(c[0])))
+      .map(raw => JSON.parse(raw) as Record<string, unknown>)
+      .filter(p => p.type === 'message')
+  }
+
+  // The prepared message a deliberate retry builds: the original text and
+  // images, plus the tag. Nothing else is client-chosen.
+  function retryPayload(text: string) {
+    return { composed: text, fileComments: [], chatComments: [], origin: 'retry' as const }
+  }
+
+  test('an ordinary send carries no origin at all', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-plain-send'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'plain words')
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect('origin' in frames[0]).toBe(false)
+  })
+
+  test('a retry carries the origin on the frame and on the optimistic bubble', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-retry-frame'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'try again', retryPayload('try again'))
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({ type: 'message', text: 'try again', origin: 'retry' })
+    expect(frames[0].send_id).toBeTruthy()
+    // The bubble the user sees carries the tag too, so the renderer and the
+    // transcript agree on what this turn is.
+    const bubble = (store.messages[chatId] || []).find(m => m.role === 'user')
+    expect(bubble?.origin).toBe('retry')
+  })
+
+  test('a retry is a new logical send: a fresh id next to an unacked send with the same text', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-retry-fresh-id'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'same words')
+    const ordinaryId = sentFrames()[0].send_id
+    expect(ordinaryId).toBeTruthy()
+
+    store.sendMessage(chatId, 'same words', retryPayload('same words'))
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(2)
+    expect(frames[1].origin).toBe('retry')
+    // A new intent, so a new id: the engine must not read the retry as the
+    // ordinary send it never acknowledged.
+    expect(frames[1].send_id).not.toBe(ordinaryId)
+  })
+
+  test('an ordinary send of the same text keeps the tracked id and no origin', () => {
+    // The tag is the only thing that makes a send a new logical send: an
+    // ordinary duplicate still collapses onto the tracked one.
+    const store = useProjectStore()
+    const chatId = 'chat-plain-same-id'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'same words')
+    const firstId = sentFrames()[0].send_id
+    store.sendMessage(chatId, 'same words')
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(2)
+    expect(frames[1].send_id).toBe(firstId)
+    expect('origin' in frames[1]).toBe(false)
+  })
+
+  test('a queued retry carries the origin on the queue frame', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-retry-queued'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    // A turn is running: the send is queued behind it, not started.
+    store.streaming[chatId] = true
+
+    store.sendMessage(chatId, 'queued retry', retryPayload('queued retry'))
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({
+      type: 'message', mode: 'queue', text: 'queued retry', origin: 'retry',
+    })
+  })
+
+  test('a retry deferred while the socket is down keeps one tagged bubble and one tagged frame', async () => {
+    // A socket that stays CONNECTING until the test opens it, so the
+    // deferred window can be driven deterministically.
+    const lateSockets: LateSocket[] = []
+    class LateSocket {
+      static CONNECTING = 0
+      static OPEN = 1
+      static CLOSING = 2
+      static CLOSED = 3
+      readyState = LateSocket.CONNECTING
+      onopen: (() => void) | null = null
+      onmessage: ((e: { data: string }) => void) | null = null
+      onclose: (() => void) | null = null
+      onerror: (() => void) | null = null
+      send = vi.fn()
+      close() { this.readyState = LateSocket.CLOSED; this.onclose?.() }
+      constructor(public url: string) { lateSockets.push(this) }
+      open() { this.readyState = LateSocket.OPEN; this.onopen?.() }
+    }
+    vi.stubGlobal('WebSocket', LateSocket)
+    vi.useFakeTimers()
+    try {
+      const store = useProjectStore()
+      const chatId = 'chat-retry-deferred'
+      store.activeChatId = chatId
+
+      store.sendMessage(chatId, 'deferred retry', retryPayload('deferred retry'))
+
+      // The pending bubble is on screen and carries the tag.
+      const pending = (store.messages[chatId] || []).filter(m => m.role === 'user')
+      expect(pending).toHaveLength(1)
+      expect(pending[0].origin).toBe('retry')
+
+      const socket = lateSockets[0]
+      socket.open()
+      await vi.advanceTimersByTimeAsync(3000)
+
+      const frames = (socket.send as Mock).mock.calls
+        .map(([raw]) => JSON.parse(String(raw)) as Record<string, unknown>)
+        .filter(p => p.type === 'message')
+      expect(frames).toHaveLength(1)
+      expect(frames[0]).toMatchObject({ text: 'deferred retry', origin: 'retry' })
+      // The pending bubble was promoted in place, not duplicated.
+      const bubbles = (store.messages[chatId] || []).filter(m => m.role === 'user')
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].origin).toBe('retry')
+    } finally {
+      vi.useRealTimers()
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+    }
+  })
+
+  test('the unacked record keeps the tag and the recovery resends the same id with it', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-retry-recovery'
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.sendMessage(chatId, 'lost retry', retryPayload('lost retry'))
+    const first = sentFrames()[0]
+    expect(first.origin).toBe('retry')
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.origin).toBe('retry')
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(2)
+    // The same logical send: the same id, the same tag.
+    expect(frames[1].send_id).toBe(first.send_id)
+    expect(frames[1].origin).toBe('retry')
+    // The attempt count survives the recovery, so the one-retry cap holds.
+    expect(JSON.parse(localStorageData['ciao-unacked-sends'])[chatId]?.attempts).toBe(1)
+  })
+
+  test('a persisted unacked retry restores the tag', async () => {
+    localStorageData['ciao-unacked-sends'] = JSON.stringify({
+      'chat-reload-retry': {
+        id: 'send-retry-1', text: 'survived the refresh', at: Date.now(), attempts: 0, origin: 'retry',
+      },
+    })
+    const store = useProjectStore()
+    store.restoreState()
+    const chatId = 'chat-reload-retry'
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect(frames[0]).toMatchObject({ text: 'survived the refresh', origin: 'retry' })
+    expect(frames[0].send_id).toBe('send-retry-1')
+  })
+
+  test('a persisted unacked send with any other origin is dropped, not defaulted', async () => {
+    // Only the exact 'retry' tag is honoured. An engine origin forged into
+    // the cache must not ride the wire.
+    localStorageData['ciao-unacked-sends'] = JSON.stringify({
+      'chat-forged-origin': {
+        id: 'send-forged', text: 'forged origin', at: Date.now(), attempts: 0, origin: 'schedule',
+      },
+    })
+    const store = useProjectStore()
+    store.restoreState()
+    const chatId = 'chat-forged-origin'
+    store.activeChatId = chatId
+    apiGet.mockResolvedValue([])
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(100)
+      await vi.advanceTimersByTimeAsync(1600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    const frames = sentFrames()
+    expect(frames).toHaveLength(1)
+    expect(frames[0].text).toBe('forged origin')
+    expect('origin' in frames[0]).toBe(false)
+  })
+})
