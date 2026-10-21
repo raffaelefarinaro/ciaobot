@@ -549,10 +549,10 @@ class ChatInfo:
     # turn (#1392). The provider transcripts do not say so, so history reads
     # this back to mark the bubble. Absent key = an ordinary turn.
     user_turn_steered: dict = field(default_factory=dict)
-    # Map of user-turn index (as str) → TURN_ORIGINS value for turns the engine
-    # wrote (wakes, automation runs, task resumes, webhooks, update tasks). The
-    # provider transcripts store them as ordinary user messages; history reads
-    # this back so the PWA draws a notice card. Absent key = typed by the person.
+    # Map of user-turn index (as str) → TURN_ORIGINS value for engine-written
+    # turns or a user-requested retry. Provider transcripts store these as
+    # ordinary user messages; history reads this back so the PWA draws a notice
+    # card. Absent key = an ordinary typed turn (or a mixed-origin steer).
     user_turn_origin: dict = field(default_factory=dict)
     # Map of user-turn index (as str) → the client send id the PWA minted for
     # that turn. The engine answers a repeated send id with a duplicate echo
@@ -6137,7 +6137,8 @@ class ProjectChatManager:
 
         ``delivery="steer"`` marks it for injection into the running turn; the
         caller then awaits ``steer_queue`` to dispatch it. ``origin`` tags an
-        engine-written message (see ``start_stream``); it rides on the entry.
+        engine-written message or user-requested retry (see ``start_stream``);
+        it rides on the entry.
         ``send_id`` is the client send id, recorded on the queue entry so the
         flushed turn can carry it.
 
@@ -7323,8 +7324,9 @@ class ProjectChatManager:
         ``compact`` starts a context compaction instead of a user turn: it
         takes no user-turn slot, echoes no user bubble and never auto-titles.
 
-        ``origin`` (a ``TURN_ORIGINS`` value) tags a turn the engine wrote, so
-        history and the echo let the PWA draw a notice card, not a user bubble.
+        ``origin`` (a ``TURN_ORIGINS`` value) tags an engine-written turn or a
+        user-requested retry, so history and the echo let the PWA draw a notice
+        card, not a user bubble.
 
         ``send_id`` is the client send id for this turn. The engine records it
         per user turn, so a later frame carrying the same id is answered with
