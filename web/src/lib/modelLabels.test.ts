@@ -14,6 +14,16 @@ describe('modelDisplayName', () => {
     expect(modelDisplayName('anthropic/claude-sonnet-4-6')).toBe('Claude Sonnet-4-6')
   })
 
+  it('names a nested id by its own segment, without repeating the vendor', () => {
+    expect(modelDisplayName('openrouter/minimax/minimax-m3.1-flash:free')).toBe(
+      'MiniMax M3.1 Flash :free',
+    )
+    expect(modelDisplayName('openrouter/anthropic/claude-sonnet-4.5')).toBe(
+      'Claude Sonnet-4.5',
+    )
+    expect(modelDisplayName('openrouter/stealth/space-bunny-alpha')).toBe('Space Bunny Alpha')
+  })
+
   it('keeps a version marker as a word of its own', () => {
     expect(modelDisplayName('ollama-cloud/deepseek-v4.1-flash:1017')).toBe(
       'DeepSeek V4.1 Flash :1017',

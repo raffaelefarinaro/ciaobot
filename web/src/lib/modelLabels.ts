@@ -60,9 +60,11 @@ function humanizeChunk(chunk: string): string {
 /**
  * The readable name of a model id.
  *
- * The transport prefix before the first slash names the provider rather than
- * the model, so it is dropped ("openai/gpt-5.6-luna" is the GPT-5.6 Luna);
- * the tag after a colon is part of the technical id and is kept, spaced off
+ * Only the model's own path segment names it: a namespaced id such as
+ * "openai/gpt-5.6-luna" or "openrouter/minimax/minimax-m3.1-flash:free" puts
+ * transport (and sometimes the upstream vendor) before the final segment, so
+ * everything up to the last slash is dropped and never repeated as a vendor.
+ * The tag after a colon is part of the technical id and is kept, spaced off
  * the name so it reads as a tag.
  */
 export function modelDisplayName(id: string): string {
@@ -72,7 +74,7 @@ export function modelDisplayName(id: string): string {
   const colon = model.indexOf(':')
   const base = colon >= 0 ? model.slice(0, colon) : model
   const suffix = colon >= 0 ? model.slice(colon) : ''
-  const name = base.split('/').map(humanizeChunk).join(' / ')
+  const name = humanizeChunk(base.slice(base.lastIndexOf('/') + 1))
   if (!name) return suffix
   return suffix ? `${name} ${suffix}` : name
 }
