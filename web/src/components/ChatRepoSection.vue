@@ -99,9 +99,11 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
             </p>
           </div>
         </details>
-        <span v-if="chip.isWorktree" class="chat-repo-kind">worktree</span>
-        <span v-if="chip.dirty === true" class="chat-repo-dirty"><span class="chat-repo-dot" aria-hidden="true"></span>uncommitted changes</span>
-        <span v-else-if="chip.dirty === false" class="chat-repo-clean">clean</span>
+        <span class="chat-repo-facts">
+          <span v-if="chip.isWorktree" class="chat-repo-kind">worktree</span>
+          <span v-if="chip.dirty === true" class="chat-repo-dirty"><span class="chat-repo-dot" aria-hidden="true"></span>uncommitted changes</span>
+          <span v-else-if="chip.dirty === false" class="chat-repo-clean">clean</span>
+        </span>
       </div>
     </div>
     <HostTerminalButton v-if="!chip.missing" :chat-id="chatId" class="chat-repo-terminal" />
@@ -233,10 +235,13 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
 .chat-repo-copy:hover, .repo-code-info:hover { color: var(--fg); }
 .chat-repo-copy:focus-visible, .repo-code-info:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
 .chat-repo-meta { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px var(--space-3); margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--fg2); }
-/* The summary and the checkout facts share one line; the disclosure body sits
-   under it, so the facts never drift down beside the path when it opens. */
-.chat-repo-branch-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--space-3); min-width: 0; }
-.chat-repo-branch-details { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+/* The summary and the checkout facts share one line and never wrap: the
+   disclosure keeps the space they leave, so its body grows downward while the
+   facts stay beside the branch. The body's long path wraps inside that
+   column. */
+.chat-repo-branch-line { display: flex; flex-wrap: nowrap; align-items: baseline; gap: 4px var(--space-3); min-width: 0; }
+.chat-repo-branch-details { flex: 1 1 auto; min-width: 0; max-width: 100%; }
+.chat-repo-facts { display: inline-flex; flex-wrap: wrap; flex: none; align-items: baseline; gap: 4px var(--space-3); }
 .chat-repo-branch {
   /* list-item keeps the native disclosure triangle, the only cue it opens. */
   display: list-item;

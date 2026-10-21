@@ -87,7 +87,9 @@ describe('ChatRepoSection', () => {
     const line = wrapper.get('.chat-repo-branch-line')
     expect(line.get('.chat-repo-kind').text()).toBe('worktree')
     // Exactly one focusable control in the branch row: the disclosure itself.
-    expect(line.findAll('button, a, input, select, textarea, [tabindex]')).toHaveLength(0)
+    const focusables = line.findAll('summary, button, a, input, select, textarea, [tabindex]')
+    expect(focusables).toHaveLength(1)
+    expect(focusables[0].element).toBe(summary.element)
     wrapper.unmount()
   })
 
