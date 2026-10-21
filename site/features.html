@@ -32,6 +32,7 @@
         <a href="guide.html">Get started</a>
         <a href="features.html" aria-current="page">Features</a>
         <a href="memory.html">Memory</a>
+        <a href="terminal.html">Terminal</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot/releases">What's new</a>
         <a href="https://github.com/raffaelefarinaro/ciaobot">GitHub</a>
       </nav>
@@ -161,6 +162,7 @@
       <h2>File access</h2>
       <p>Each workspace decides how much of your computer its agent can read. <strong>Workspace only</strong> keeps the agent's shell and file tools inside that workspace's folder. <strong>Whole machine</strong> lets it read any file you can read. A workspace with no File access choice uses Workspace only on macOS and Linux, and Whole machine on Windows, which has no sandbox.</p>
       <p>Workspace only does not limit the network: the agent can still reach the internet and Ciaobot's own command-line tool. On Linux, the sandbox needs a one-time AppArmor setup on Ubuntu 23.10 and later (see the Linux guide in the GitHub repository).</p>
+      <p>File access covers the agent, not the <a href="terminal.html">terminal panel</a>: that one is your own shell, and it is not confined to the workspace folder.</p>
       <p class="how"><strong>How:</strong> Settings → Workspaces → Edit, then <em>File access</em>. Each workspace row shows the value in effect.</p>
     </section>
 
@@ -180,7 +182,7 @@
 
     <nav class="next-page narrow" aria-label="Next pages">
       <a class="btn" href="guide.html">← Getting started</a>
-      <a class="btn btn-primary" href="builtin.html">What's built in →</a>
+      <a class="btn btn-primary" href="terminal.html">The terminal →</a>
     </nav>
   </main>
 

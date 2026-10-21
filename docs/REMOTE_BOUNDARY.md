@@ -103,12 +103,15 @@ carried by the session.
   **every** grant, on every browser, and clears the `ciao_terminal` cookie
   — the password is the terminal's own credential, so every browser has to
   unlock again, including the one that made the change. A refused password
-  change ends nothing. The grant is revoked here; the terminal socket's own
-  re-check against this store is the terminal-stream child's work and does
-  not exist yet, so no socket is closed by this today. The signed session
-  cookie remains required for every route either way, and neither action
-  names a user or a device: there are no per-device identities to revoke
-  against.
+  change ends nothing. The grant is revoked here, and the terminal socket
+  enforces it twice: a watchdog re-checks the store at most once a second
+  and closes the socket `4401`, and the receive loop re-checks on every
+  client frame, so a revoked grant ends the stream even between ticks. A
+  detached session's shell keeps running until its own 15-minute detached
+  TTL, which is what lets the browser unlock again and recover it. The
+  signed session cookie remains required for every route either way, and
+  neither action names a user or a device: there are no per-device
+  identities to revoke against.
 - The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
   need the session *and* `host_browser_request`, and are not in
   `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails

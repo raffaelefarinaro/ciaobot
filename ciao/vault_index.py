@@ -1036,7 +1036,7 @@ def strip_references_many(
     path so a caller can roll the successful cleanup back if a later delete step
     fails.
     """
-    targets = list(deleted_paths)
+    targets = set(deleted_paths)
     if not targets:
         return []
     vault_root = vault_root.resolve()
@@ -1050,7 +1050,7 @@ def strip_references_many(
     for e in entries:
         if e.path_key in targets:
             continue
-        matches = [p for p in targets if p in e.related]
+        matches = [p for p in deleted_paths if p in e.related]
         if not matches:
             continue
         rel_from_vault = _strip_prefix(e.path, prefix)

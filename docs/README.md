@@ -10,6 +10,7 @@ Ciaobot is a persistent personal workspace for Claude Code and OpenCode: your ag
 - [Files and documents](https://www.raffaelefarinaro.com/ciaobot/features.html#documents): preview, pin, edit, and annotate outputs beside a chat.
 - [Tasks](https://www.raffaelefarinaro.com/ciaobot/features.html#tasks): track next steps, delegate to an agent, and review results before completing them.
 - [Automations](https://www.raffaelefarinaro.com/ciaobot/features.html#automations): recurring tasks and inspectable results.
+- [Browser terminal](https://www.raffaelefarinaro.com/ciaobot/terminal.html): a shell on the computer running Ciaobot, opened from a chat or a project.
 
 ## Connecting and extending
 

@@ -2,18 +2,19 @@
  * The naming placeholder: the shimmering bar that stands in for a chat title
  * while the engine names the conversation.
  *
- * Two surfaces show it and they have to look like one - the sidebar's chat
- * rows and the chat header. `ProjectSidebar.vue` and `ChatPanel.vue` each pull
- * this in with `<style scoped src="./titleShimmer.css">`, so each component
- * compiles the same rules against its own scope id. A parent's scoped rules
- * never reach a child's subtree, so the header placeholder would come out
- * unstyled if it were left to inherit the sidebar's.
+ * Three surfaces show it and they have to look like one - the sidebar's chat
+ * rows, Home's jump-back rows and the chat header. `ProjectSidebar.vue`,
+ * `HomeRecentChats.vue` and `ChatPanel.vue` each pull this in with
+ * `<style scoped src="./titleShimmer.css">`, so each component compiles the
+ * same rules against its own scope id. A parent's scoped rules never reach a
+ * child's subtree, so the header placeholder would come out unstyled if it
+ * were left to inherit the sidebar's.
  *
  * The linear-gradient "sweep" is what the eye reads as "something is
  * happening", the same skeleton-loader language the app uses elsewhere.
  */
 
-/* The sidebar's row: it takes the space the finished title would take. */
+/* A row's placeholder: it takes the space the finished title would take. */
 .title-shimmer {
   flex: 1;
   min-width: 0;
