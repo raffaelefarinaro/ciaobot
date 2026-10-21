@@ -204,6 +204,19 @@ def _isolate_launch_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.fixture(autouse=True)
+def _isolate_linux_unit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let a test read the machine's real `/etc/systemd/system/ciaobot.service`.
+
+    Bare-shell discovery trusts that unit on Linux, so a suite run on the VPS (or
+    any box with the engine installed) would otherwise discover the live
+    workspace. Autouse for the same reason as `_isolate_launch_agents`.
+    """
+    monkeypatch.setattr(
+        "ciao.linux_service.UNIT_PATH", tmp_path / "no-systemd" / "ciaobot.service"
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_install_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let a test read or write the machine's real install receipt.
 
