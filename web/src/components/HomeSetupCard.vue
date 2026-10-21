@@ -135,12 +135,9 @@ function hide() {
     <ol class="home-setup-steps">
       <li class="home-setup-step" :data-done="installDone">
         <div class="home-setup-text">
-          <strong>Install the app</strong>
+          <span class="home-setup-label">Install the app</span>
           <span v-if="installDone" class="hint">{{ installedHint }}</span>
-          <span v-else-if="!canPromptInstall" class="hint">
-            {{ installInstructions() }}
-            <RouterLink class="home-setup-link" to="/settings#install-app">How to install</RouterLink>
-          </span>
+          <span v-else-if="!canPromptInstall" class="hint">{{ installInstructions() }}</span>
         </div>
         <button
           v-if="!installDone && canPromptInstall"
@@ -149,10 +146,17 @@ function hide() {
           :disabled="busy === 'install'"
           @click="install"
         >Install</button>
+        <!-- The browser has no prompt: the row's action is the way to the
+             per-platform steps, a real link to Settings and not a dead end. -->
+        <RouterLink
+          v-else-if="!installDone && !canPromptInstall"
+          class="btn-small home-setup-action"
+          to="/settings#install-app"
+        >How to install</RouterLink>
       </li>
       <li v-if="pushAvailable || needsInstallFirst" class="home-setup-step" :data-done="pushOn">
         <div class="home-setup-text">
-          <strong>Turn on notifications</strong>
+          <span class="home-setup-label">Turn on notifications</span>
           <span v-if="pushOn" class="hint">On for this device</span>
           <span v-else-if="needsInstallFirst" class="hint">Install the app first; iPhone and iPad only notify from the Home Screen app.</span>
           <span v-else-if="denied" class="hint">Blocked. Allow notifications for this site in your system settings.</span>
@@ -166,15 +170,19 @@ function hide() {
         >Enable</button>
       </li>
       <li v-if="showPhoneStep" class="home-setup-step">
-        <div class="home-setup-text">
-          <strong>Use on your phone</strong>
+        <!-- Phone setup is a long tail read on demand: the row keeps its
+             label, the steps wait behind a native disclosure. -->
+        <details class="home-setup-phone">
+          <summary class="home-setup-summary">
+            <span class="home-setup-label">Use on your phone</span>
+          </summary>
           <ol class="home-setup-substeps hint">
             <li>Install Tailscale on this computer and your phone, signed in to the same account.</li>
             <li>Make Ciaobot reachable from the phone: Settings shows the address and the one command.</li>
             <li>On the phone, open the address or scan its QR code, sign in with your Ciaobot password, then Add to Home Screen.</li>
           </ol>
-        </div>
-        <RouterLink class="home-setup-link" to="/settings#other-devices">Phone setup</RouterLink>
+          <RouterLink class="btn-small home-setup-action" to="/settings#other-devices">Phone setup</RouterLink>
+        </details>
       </li>
     </ol>
     <p v-if="error" class="action-result" role="alert">{{ error }}</p>
@@ -206,13 +214,65 @@ function hide() {
   min-width: 0;
   flex: 1 1 14rem;
 }
-.home-setup-step[data-done="true"] strong { color: var(--fg3); }
-.home-setup-substeps { margin: 2px 0 0; padding-left: 1.25em; display: grid; gap: 2px; }
-.home-setup-link { white-space: nowrap; }
+/* A task name, not a heading: one quiet label per row. */
+.home-setup-label {
+  font-size: var(--text-base);
+  font-weight: 600;
+  line-height: 1.35;
+}
+.home-setup-step[data-done="true"] .home-setup-label { color: var(--fg3); }
+/* One action slot per row, so the rows' actions share a column. */
+.home-setup-step > .btn-small,
+.home-setup-action {
+  flex: 0 0 auto;
+  width: 9.5rem;
+  justify-content: center;
+}
+.home-setup-action { white-space: nowrap; }
+.home-setup-substeps { margin: var(--space-2) 0 0; padding-left: 1.25em; display: grid; gap: 2px; }
+/* The phone row is a disclosure: the label stays, the steps wait. */
+.home-setup-phone { flex: 1 1 14rem; min-width: 0; }
+.home-setup-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  color: var(--fg);
+  cursor: pointer;
+  list-style: none;
+}
+.home-setup-summary::-webkit-details-marker { display: none; }
+.home-setup-summary::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin: 0 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 120ms var(--ease);
+}
+.home-setup-phone[open] > .home-setup-summary::before { transform: rotate(45deg); }
+@media (prefers-reduced-motion: reduce) {
+  .home-setup-summary::before { transition: none; }
+}
+/* `summary` is not in the global focus rule's :where() list, so the ring this
+   control needs is stated here rather than assumed. */
+.home-setup-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
 @media (pointer: coarse) {
-  .home-setup-link { display: inline-flex; align-items: center; min-height: var(--touch); }
+  .home-setup-summary { min-height: var(--touch); }
 }
 @container (max-width: 560px) {
-  .home-setup-step > button { width: 100%; min-height: 44px; }
+  .home-setup-step > .btn-small,
+  .home-setup-step > .home-setup-action,
+  .home-setup-phone .home-setup-action {
+    width: 100%;
+    min-height: var(--touch);
+  }
 }
 </style>

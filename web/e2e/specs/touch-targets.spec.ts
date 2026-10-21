@@ -21,7 +21,7 @@ const TABS = [
 // before it is measured. Automations and Import have no fixture rows, so they
 // wait on their heading.
 const MAIN_SURFACES: Array<[string, string]> = [
-  ['/', '.home-setup-link'],
+  ['/', '.home-setup'],
   ['/tasks', '.task-card'],
   ['/automations', '.schedule-panel .page-tag'],
   ['/memory/review', '.pr-select-toggle'],

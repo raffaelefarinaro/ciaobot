@@ -112,8 +112,11 @@ engine decides `on_host` (from `GET /api/welcome`); the PWA never infers it.
 The X dismisses engine-wide through `/api/welcome/dismiss`, not per browser.
 
 Phone setup lives permanently in Settings → Other devices
-(`settings/SettingsDevices.vue`, anchor `#other-devices`); the Home setup card
-only links to it, and only on the computer running Ciaobot.
+(`settings/SettingsDevices.vue`, anchor `#other-devices`); on the computer running
+Ciaobot, the Home setup card keeps its three phone instructions and that link
+inside a closed native disclosure. Setup task labels stay quiet, help links use
+neutral bordered actions aligned with the row buttons, and narrow panes make
+those actions full-width. Phone setup never keeps a completed reminder open.
 
 
 The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quirks are addressed in code; do not undo them without reading why.
