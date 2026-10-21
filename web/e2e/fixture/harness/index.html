@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>terminal renderer harness</title>
+    <style>
+      /* The app's own tokens, so the renderer's theme has something real to
+         resolve: the same custom properties the PWA defines, with the same
+         values, so the browser proof is about the real resolution and not
+         about a stub. */
+      :root {
+        --bg: #1a1a2e;
+        --bg2: #1f2240;
+        --bg3: #2a2e54;
+        --fg: #e8e8f0;
+        --fg2: #b4b4c4;
+        --fg3: #8f90a8;
+        --accent: #fb923c;
+        --accent2: #6a47b8;
+        --on-accent: #1a1a2e;
+        --success: #4caf50;
+        --warning: #facc15;
+        --error: #f44336;
+        --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+        --text-base: 14px;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+      }
+
+      /* The bare div the screen is mounted on. Its width follows the
+         viewport, so a viewport change resizes the screen the way a pane
+         that is laid out would. */
+      #terminal {
+        width: 100%;
+        height: 400px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="terminal"></div>
+    <script type="module" src="./harness.ts"></script>
+  </body>
+</html>
