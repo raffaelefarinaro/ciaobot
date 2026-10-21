@@ -265,6 +265,23 @@ def test_workspace_creation_rejects_a_symlinked_vault_folder(tmp_path):
     assert pcm.refresh_count == 0
 
 
+def test_workspace_creation_persists_or_refuses_memory_handover(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+
+    created = client.post("/api/workspaces", json={"name": "research", "memory_handover": "dismiss"})
+    assert created.status_code == 201
+    assert config.workspace("research").memory_handover == "dismiss"
+    stored = next(w for w in json.loads(registry.read_text()) if w["name"] == "research")
+    assert stored["memory_handover"] == "dismiss"
+
+    before = registry.read_bytes()
+    refused = client.post("/api/workspaces", json={"name": "other", "memory_handover": "everything"})
+    assert refused.status_code == 400
+    assert config.workspace("other") is None
+    assert registry.read_bytes() == before
+
+
 def test_workspace_creation_rejects_case_and_vault_owner_collisions(tmp_path):
     client, config, _pcm = _client(tmp_path)
     assert client.post("/api/workspaces", json={"name": "Research"}).status_code == 201

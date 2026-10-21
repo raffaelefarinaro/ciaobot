@@ -55,5 +55,5 @@ For each `[memory]` / `[profile]` row in the worklist:
 
 - Never act on a `decide: you` row.
 - If an acting command exits 1, leave the row queued and escalate it with `ciao memory-proposal-escalate`, using the refusal it printed as the reason.
-- Never use `ciao memory update` or hand-edit `AGENTS.md` for this. Both acting commands re-check the setting themselves.
+- Never use `ciao memory update` or hand-edit `AGENTS.md` for this. Both acting commands re-check the setting themselves, and `memory-proposal-accept` takes at most five facts per run and only while you hold the curation lease.
 - Under **What needs you** report the region rows left queued. Count the rows you acted on under **What I did**.

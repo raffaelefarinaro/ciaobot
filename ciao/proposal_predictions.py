@@ -29,6 +29,8 @@ REASON_MAX_CHARS = 200
 AGREEMENT_WINDOW = 50
 SUGGEST_MIN_DECISIONS = 20
 SUGGEST_MIN_RATE = 0.9
+#: Most facts the agent may accept into the always-loaded regions in one curation run.
+HANDOVER_ACCEPT_CAP = 5
 
 
 def _one_line(value: str) -> str:
@@ -70,12 +72,55 @@ def _row_key(row: dict[str, str]) -> str:
     return prediction_key(row.get("kind", ""), row.get("text", ""))
 
 
+def _decision_times(proposals_path: Path) -> dict[str, list[str]]:
+    """Every dated region decision's timestamp, per ``(kind, text)`` key."""
+    from ciao import memory_proposals  # noqa: PLC0415
+
+    times: dict[str, list[str]] = {}
+    for decision in memory_proposals.read_decisions(proposals_path):
+        kind = str(decision.get("kind", "")).lower()
+        ts = str(decision.get("ts", ""))
+        if kind in REGION_KINDS and ts:
+            times.setdefault(prediction_key(kind, str(decision["text"])), []).append(ts)
+    return times
+
+
 def latest_predictions(proposals_path: Path) -> dict[str, dict[str, str]]:
-    """The newest prediction per ``(kind, text)`` key."""
+    """The newest *live* prediction per ``(kind, text)`` key.
+
+    A prediction is void once the operator (or anyone) has decided the same fact
+    after it was made: a fact dismissed and later re-queued is a new question,
+    and the verdict recorded for the old one must not authorise acting on it.
+    The sidecar keeps the row; it just stops counting.
+    """
     latest: dict[str, dict[str, str]] = {}
     for row in read_predictions(proposals_path):
         latest[_row_key(row)] = row
-    return latest
+    if not latest:
+        return latest
+    decided = _decision_times(proposals_path)
+    return {
+        key: row
+        for key, row in latest.items()
+        if not any(ts > row.get("predicted_at", "") for ts in decided.get(key, ()))
+    }
+
+
+def count_agent_accepts_since(proposals_path: Path, since: datetime) -> int:
+    """Agent-made accepts recorded in the decision sidecar at or after ``since``."""
+    from ciao import memory_proposals  # noqa: PLC0415
+
+    count = 0
+    for decision in memory_proposals.read_decisions(proposals_path):
+        if decision.get("via") != "agent" or decision.get("action") != "accepted":
+            continue
+        try:
+            decided_at = datetime.fromisoformat(str(decision.get("ts", "")))
+        except ValueError:
+            continue
+        if decided_at.tzinfo is not None and decided_at >= since:
+            count += 1
+    return count
 
 
 def record_prediction(
@@ -130,22 +175,36 @@ def attach_predictions(proposals_path: Path, rows: list[dict[str, Any]]) -> None
     """Join the prediction that preceded each decision onto History-shaped rows.
 
     A row gets ``prediction`` only for a region kind with a dated decision and a
-    prediction for the same ``(kind, text)`` made at or before that decision.
+    prediction for the same ``(kind, text)`` made at or before that decision and
+    after the previous decision on the same fact, so a re-queued fact never
+    inherits the verdict recorded for its earlier life.
     """
     by_key: dict[str, list[dict[str, str]]] = {}
     for entry in read_predictions(proposals_path):
         by_key.setdefault(_row_key(entry), []).append(entry)
     if not by_key:
         return
+    decided = _decision_times(proposals_path)
+    for row in rows:
+        row_ts = str(row.get("ts", ""))
+        if row_ts:
+            decided.setdefault(
+                prediction_key(str(row.get("kind", "")), str(row.get("text", ""))), []
+            ).append(row_ts)
     for row in rows:
         kind = str(row.get("kind", "")).lower()
         ts = str(row.get("ts", ""))
         if kind not in REGION_KINDS or not ts:
             continue
+        key = prediction_key(kind, str(row.get("text", "")))
+        # The previous decision on this fact, from the sidecar and the rows in
+        # hand (a filtered History page may not carry it).
+        earlier = [t for t in decided.get(key, ()) if t < ts]
+        floor = max(earlier, default="")
         chosen: dict[str, str] | None = None
-        for entry in by_key.get(prediction_key(kind, str(row.get("text", ""))), []):
+        for entry in by_key.get(key, []):
             predicted_at = entry.get("predicted_at", "")
-            if predicted_at and predicted_at <= ts:
+            if predicted_at and floor < predicted_at <= ts:
                 chosen = entry
         if chosen is None:
             continue

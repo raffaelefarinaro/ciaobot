@@ -2893,8 +2893,12 @@ def _worklist_for_queue(
     *,
     handover: str = "off",
     predictions: tuple[tuple[str, str, str], ...] = (),
+    dismissed_at: str | None = None,
 ) -> "cr.Worklist":
+    import json
+
     from ciao import proposal_predictions
+    from ciao.memory_proposals import dismissed_log_path
 
     vault = _vault(tmp_path)
     guide = _guide(tmp_path)
@@ -2909,6 +2913,16 @@ def _worklist_for_queue(
             text=text,
             verdict=verdict,
             reason="because",
+        )
+    if dismissed_at is not None:
+        # Every queued fact was decided (and re-queued) after its prediction.
+        decided = [text for _kind, text, _verdict in predictions]
+        dismissed_log_path(vault / cr.PROPOSALS_RELATIVE).write_text(
+            "".join(
+                json.dumps({"dismissed_at": dismissed_at, "kind": "memory", "text": text}) + "\n"
+                for text in decided
+            ),
+            encoding="utf-8",
         )
     return cr.build_worklist(
         handover=handover,
@@ -2999,6 +3013,48 @@ def test_region_row_key_changes_between_predict_and_act_stage(tmp_path: Path) ->
     )
     assert _proposal_keys(predict) != _proposal_keys(act)
     assert len(_proposal_keys(predict)) == len(_proposal_keys(act)) == 1
+
+
+def test_a_requeued_region_fact_with_a_stale_prediction_is_predict_work_again(
+    tmp_path: Path,
+) -> None:
+    """The operator dismissed it after the verdict was recorded; the old verdict is void."""
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    row = "- [memory] x\n"
+    acting = _worklist_for_queue(
+        tmp_path / "a", row, handover="all", predictions=(("memory", "x", "accept"),)
+    )
+    requeued = _worklist_for_queue(
+        tmp_path / "b",
+        row,
+        handover="all",
+        predictions=(("memory", "x", "accept"),),
+        dismissed_at="2999-01-01T00:00:00+00:00",
+    )
+
+    assert len(_proposal_keys(acting)) == 1  # act:accept
+    # Back at the predict stage, so a different key.
+    assert len(_proposal_keys(requeued)) == 1
+    assert _proposal_keys(requeued) != _proposal_keys(acting)
+
+
+def test_dismiss_and_all_share_the_act_key_for_a_predicted_dismiss(tmp_path: Path) -> None:
+    """Pins today's behaviour: the key carries the stage and verdict, not the setting."""
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    keys = [
+        _proposal_keys(
+            _worklist_for_queue(
+                tmp_path / name,
+                "- [memory] x\n",
+                handover=handover,
+                predictions=(("memory", "x", "dismiss"),),
+            )
+        )
+        for name, handover in (("a", "dismiss"), ("b", "all"))
+    ]
+    assert keys[0] == keys[1]
 
 
 def test_item_key_ignores_the_decider() -> None:

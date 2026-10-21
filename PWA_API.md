@@ -825,7 +825,10 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # verdicts. Set it with PATCH /api/workspaces/{name} and a body such as
 # {"memory_handover": "dismiss"}; any other value is a 400. A save that omits
 # the key keeps it, and it is the only way to change it (no agent verb, CLI
-# or env var sets it).
+# or env var sets it). At "all" the nightly run can accept queued, possibly
+# untrusted [memory]/[profile] text into the always-loaded AGENTS.md regions,
+# within the event-shape and duplicate guards and a cap of five accepts per
+# curation run, and each accept can be undone from History.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, default_provider,

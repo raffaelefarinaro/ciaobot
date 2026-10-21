@@ -723,7 +723,7 @@ re-read it from the registry at call time and also require a stored prediction w
 verdict, a region row and no `decide: you`. `dismiss` lets the run settle predicted dismissals as
 `via: agent`; `all` also lets it accept through `accept_region_fact`, the guarded path the PWA accept
 uses, so the write gets the event-shape guard, the duplicate check, the learned-at stamp and an undo
-receipt that History offers. A workspace restored from an archive returns to `off`.
+receipt that History offers. The acting commands read the registry only from the installed engine (the service definition, never `--workspace` or `CIAO_WORKSPACE`), require the registry to map the workspace to the vault being written, and cap accepts at `HANDOVER_ACCEPT_CAP` (5) per curation run, counted from `via: agent` accepts since the live lease began. A prediction is void once the same fact has been decided after it, so a re-queued fact needs a fresh verdict. A workspace restored from an archive returns to `off`.
 
 **A filed upstream issue is not a deployed lesson.** `filed` on a draft means the
 issue exists. The lesson is still not in any local skill, so nothing about the

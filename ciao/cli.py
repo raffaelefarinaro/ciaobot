@@ -4957,7 +4957,7 @@ def _memory_proposal_predict_command(args: argparse.Namespace) -> int:
     matched = _match_one_row(path, needle)
     if matched is None:
         print(
-            f"No unique memory proposal matched {needle!r} "
+            f"No unique memory proposal matched {_clip(needle)!r} "
             "(the text may be ambiguous or absent).",
             file=sys.stderr,
         )
@@ -5016,7 +5016,10 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
     needle = _proposal_needle(args)
     if needle is None:
         return 2
-    no_match = f"No unique memory proposal matched {needle!r} (the text may be ambiguous or absent)."
+    no_match = (
+        f"No unique memory proposal matched {_clip(needle)!r} "
+        "(the text may be ambiguous or absent)."
+    )
     with queue_lock(path):
         matched = _match_one_row(path, needle)
         if matched is None:
@@ -5027,9 +5030,22 @@ def _memory_proposal_accept_command(args: argparse.Namespace) -> int:
         if refusal:
             print(f"handover refused: {refusal}", file=sys.stderr)
             return 1
+        # At most HANDOVER_ACCEPT_CAP accepts per curation run, counted from the
+        # sidecar's agent decisions since the live lease began. The lease is
+        # server-written state, so the count cannot be reset from the argument
+        # list; a run with no live lease may not accept at all.
+        refusal = _handover_accept_budget(vault, path)
+        if refusal:
+            print(f"handover refused: {refusal}", file=sys.stderr)
+            return 1
     # Not written under the queue lock: the PWA writes the region and then takes
-    # the queue lock, and the region write takes the guide lock.
-    guide = guide_path(_curation_agent_root(workspace, name))
+    # the queue lock, and the region write takes the guide lock. The guide comes
+    # from the installed registry the gate just verified, not from --workspace.
+    trusted = _trusted_registry(name, vault)
+    if trusted is None or name is None:
+        print("handover refused: the installed registry changed underneath", file=sys.stderr)
+        return 1
+    guide = guide_path(trusted.agent_root(name))
     try:
         ensure_regions(guide)
     except (OSError, ValueError) as exc:
@@ -5369,6 +5385,44 @@ def _workspace_handover(workspace: Path, name: str | None) -> str:
     return handover
 
 
+def _trusted_registry(name: str | None, vault: Path) -> CiaoConfig | None:
+    """The installed engine's registry, if it registers *name* at exactly *vault*.
+
+    The handover gate decides what an unattended agent may write into the
+    always-loaded regions, so it must not read a registry the agent can name.
+    ``--workspace``, ``CIAO_WORKSPACE`` and ``CIAO_RUNTIME_ROOT`` are caller
+    inputs and are dropped here: the install comes only from the service
+    definition (:func:`ciao.install_discovery.discover_workspace`), and nothing
+    is guessed when there is none. ``None`` when no install is found, the name
+    is not registered there, or the registered vault is not the one in hand.
+    """
+    if name is None:
+        return None
+    from ciao.config import CiaoConfig, installed_workspace_env
+    from ciao.install_discovery import discover_workspace
+
+    base = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("CIAO_WORKSPACE", "CIAO_RUNTIME_ROOT")
+    }
+    installed = discover_workspace(base)
+    if installed is None:
+        return None
+    # A placeholder keeps a read-only resolution from minting a session secret.
+    env_source = installed_workspace_env({**base, "CIAO_WORKSPACE": str(installed)})
+    if not env_source.get("PWA_AUTH_TOKEN", "").strip():
+        env_source["PWA_AUTH_TOKEN"] = "memory-proposals"
+    config = CiaoConfig.from_env(env_source)
+    if config.workspace(name) is None:
+        return None
+    try:
+        registered_vault = Path(config.workspace_vault_root(name)).resolve()
+    except (OSError, ValueError):
+        return None
+    return config if registered_vault == vault.resolve() else None
+
+
 def _proposal_needle(args: argparse.Namespace) -> str | None:
     """The proposal text or substring from the argument or ``--text-file``.
 
@@ -5383,15 +5437,40 @@ def _proposal_needle(args: argparse.Namespace) -> str | None:
         )
         return None
     if text_file:
-        try:
-            needle = Path(text_file).read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeError) as exc:
-            print(f"could not read {text_file}: {exc}", file=sys.stderr)
+        # Refuses credential-adjacent paths, like every other persisted-text flag.
+        read = _read_persisted_text_file(text_file, "--text-file")
+        if read is None:
             return None
+        needle = read.strip()
     if not needle:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return None
     return needle
+
+
+def _handover_accept_budget(vault: Path, queue: Path) -> str:
+    """``""`` while this curation run may still accept, else why not."""
+    from ciao.curation_run import active_lease
+    from ciao.proposal_predictions import HANDOVER_ACCEPT_CAP, count_agent_accepts_since
+
+    lease = active_lease(vault)
+    if lease is None:
+        return "accepting needs a live curation run (take the lease with curation-begin)"
+    try:
+        started = datetime.datetime.fromisoformat(str(lease.get("started_at", "")))
+    except ValueError:
+        return "the curation lease has no readable start time"
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=datetime.UTC)
+    if count_agent_accepts_since(queue, started) >= HANDOVER_ACCEPT_CAP:
+        return f"this curation run already accepted its cap of {HANDOVER_ACCEPT_CAP} facts"
+    return ""
+
+
+def _clip(needle: str, limit: int = 80) -> str:
+    """At most *limit* characters of a needle, for an error message."""
+    flat = " ".join(needle.split())
+    return flat if len(flat) <= limit else flat[:limit] + "..."
 
 
 def _match_one_row(path: Path, needle: str) -> tuple[Any, str] | None:
@@ -5437,7 +5516,12 @@ def _handover_gate(
         return "only [memory] and [profile] rows can be handed over"
     if bullet.decider == "you":
         return "the row is marked decide: you"
-    handover = _workspace_handover(workspace, name)
+    # The queue lives at <vault>/Workspace/Memory-Proposals.md.
+    trusted = _trusted_registry(name, queue.parent.parent)
+    if trusted is None:
+        return "the installed engine does not register this workspace at this vault"
+    registered = trusted.workspace(name or "")
+    handover = registered.memory_handover if registered is not None else "off"
     if not handover_allows(handover, verdict):
         return f"the workspace handover is {handover}, which does not allow {verdict}"
     predicted = latest_predictions(queue).get(prediction_key(bullet.kind, bullet.text))

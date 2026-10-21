@@ -295,3 +295,127 @@ def test_agreement_for_queue_reads_the_decision_sidecar(tmp_path: Path) -> None:
     assert result["matched"] == 18
     assert result["rate"] == 0.9
     assert result["suggest_handover"] is True
+
+
+def _write_decisions(queue: Path, rows: list[tuple[str, str, str]]) -> None:
+    """Hand-written decision sidecar rows: ``(ts, action, text)``."""
+    from ciao.memory_proposals import dismissed_log_path
+
+    log = dismissed_log_path(queue)
+    key = {"accepted": "promoted_at", "dismissed": "dismissed_at"}
+    log.write_text(
+        "".join(
+            json.dumps({key[action]: ts, "kind": "memory", "text": text, "via": "pwa"}) + "\n"
+            for ts, action, text in rows
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_a_prediction_older_than_a_decision_on_the_same_fact_is_not_live(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    _write_predictions(queue, [_prediction("2026-01-01T00:00:01+00:00", "x", "accept")])
+    _write_decisions(queue, [("2026-01-01T00:00:05+00:00", "dismissed", "x")])
+
+    assert pp.latest_predictions(queue) == {}
+    # The raw log keeps it: nothing is ever deleted.
+    assert len(pp.read_predictions(queue)) == 1
+
+
+def test_a_prediction_made_after_the_decision_is_live(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    _write_predictions(queue, [_prediction("2026-01-01T00:00:09+00:00", "x", "accept")])
+    _write_decisions(queue, [("2026-01-01T00:00:05+00:00", "dismissed", "x")])
+
+    assert pp.prediction_key("memory", "x") in pp.latest_predictions(queue)
+
+
+def test_history_joins_only_a_prediction_made_after_the_previous_decision(
+    tmp_path: Path,
+) -> None:
+    queue = _queue(tmp_path)
+    _write_predictions(
+        queue,
+        [
+            _prediction("2026-01-01T00:00:01+00:00", "x", "accept"),
+            _prediction("2026-01-01T00:00:20+00:00", "x", "dismiss"),
+        ],
+    )
+    _write_decisions(
+        queue,
+        [
+            ("2026-01-01T00:00:10+00:00", "dismissed", "x"),
+            ("2026-01-01T00:00:30+00:00", "dismissed", "x"),
+        ],
+    )
+    rows = [
+        _decision("2026-01-01T00:00:10+00:00", "x", "dismissed"),
+        _decision("2026-01-01T00:00:30+00:00", "x", "dismissed"),
+    ]
+
+    pp.attach_predictions(queue, rows)
+
+    assert rows[0]["prediction"]["verdict"] == "accept"
+    assert rows[1]["prediction"]["verdict"] == "dismiss"
+    assert rows[1]["prediction"]["ts"] == "2026-01-01T00:00:20+00:00"
+
+
+def test_a_requeued_fact_with_only_a_stale_prediction_gets_no_join(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    _write_predictions(queue, [_prediction("2026-01-01T00:00:01+00:00", "x", "accept")])
+    _write_decisions(
+        queue,
+        [
+            ("2026-01-01T00:00:10+00:00", "dismissed", "x"),
+            ("2026-01-01T00:00:30+00:00", "dismissed", "x"),
+        ],
+    )
+    rows = [_decision("2026-01-01T00:00:30+00:00", "x", "dismissed")]
+
+    pp.attach_predictions(queue, rows)
+
+    assert "prediction" not in rows[0]
+
+
+def test_join_with_only_later_predictions_attaches_nothing(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    _write_predictions(queue, [_prediction("2026-01-01T00:00:09+00:00", "x", "accept")])
+    rows = [_decision("2026-01-01T00:00:05+00:00", "x", "accepted")]
+
+    pp.attach_predictions(queue, rows)
+
+    assert "prediction" not in rows[0]
+
+
+def test_a_prediction_at_exactly_the_decision_time_is_joined(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    _write_predictions(queue, [_prediction("2026-01-01T00:00:05+00:00", "x", "accept")])
+    rows = [_decision("2026-01-01T00:00:05+00:00", "x", "accepted")]
+
+    pp.attach_predictions(queue, rows)
+
+    assert rows[0]["prediction"]["match"] is True
+
+
+def test_latest_wins_through_dismiss_accept_dismiss(tmp_path: Path) -> None:
+    queue = _queue(tmp_path)
+    for verdict, reason in (("dismiss", "a"), ("accept", "a"), ("dismiss", "a")):
+        assert pp.record_prediction(queue, kind="memory", text="x", verdict=verdict, reason=reason)
+    assert pp.latest_predictions(queue)[pp.prediction_key("memory", "x")]["verdict"] == "dismiss"
+    assert len(pp.read_predictions(queue)) == 3
+
+
+def test_agreement_ignores_row_order_and_windows_fifty_one_rows() -> None:
+    rows = _joined(51, matching=51)
+    rows[0]["prediction"] = {"verdict": "accept", "reason": "r", "ts": "x", "match": False}
+    shuffled = list(reversed(rows))
+
+    result = pp.agreement(shuffled, handover="off")
+
+    # The oldest row (the only mismatch) falls outside the newest fifty.
+    assert result["decided"] == 50
+    assert result["matched"] == 50
+
+
+def test_suggest_handover_is_false_under_all() -> None:
+    assert pp.agreement(_joined(20), handover="all")["suggest_handover"] is False

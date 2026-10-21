@@ -357,10 +357,11 @@ def _proposal_items(vault_root: Path, handover: str) -> list[WorklistItem]:
     # does not look busy forever. A `decide: you` row is predicted but never
     # acted on. The walk covers every row and a skipped row is only left out of
     # the keys, so leaving one out cannot renumber a later duplicate's ordinal.
-    # The stage is part of a region row's subject, so a row that moves from
-    # predict to act (or whose setting changes) gets a new key and an earlier
-    # `curation-progress` done-key cannot hide it. The item key never hashes the
-    # decider.
+    # The stage and verdict are part of a region row's subject, so a row that
+    # moves from predict to act, or whose verdict changes, gets a new key and an
+    # earlier `curation-progress` done-key cannot hide it. The key does not carry
+    # the handover setting: a predicted dismiss is `act:dismiss` under both
+    # `dismiss` and `all`. The item key never hashes the decider.
     predictions = latest_predictions(vault_root / PROPOSALS_RELATIVE)
     collected_keys: list[str] = []
     for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text):
