@@ -364,6 +364,17 @@ web/                           Vue 3 PWA frontend.
                                `memoryInsights.ts` derives Home's one row per archived conversation from
                                the archive pipeline plus that pass — every phase, its wording and its
                                flags — so the lane rows and the lane status sentence cannot disagree.
+                               The embedded terminal's screen starts here too: `terminalRenderer.ts`
+                               owns one physical xterm bound to one session — the session id is fixed
+                               at construction, xterm's options object never leaves the module, input
+                               is off until `setInputEnabled(true)`, a write is acknowledged only from
+                               xterm's own write callback with the absolute end offset of the bytes
+                               just parsed, a write still in flight when the screen is disposed is
+                               rejected rather than resolved, the theme is resolved from the app's
+                               tokens to `rgb()`/`rgba()` values xterm can parse (`color-mix()` is
+                               refused), and one owned ResizeObserver measures the screen. xterm and
+                               its fit addon are imported dynamically, so no page that shows no
+                               terminal carries them.
   package.json                 npm deps and scripts (build, typecheck, test).
   Vite + TypeScript. Build outputs to ciao/web/static/.
 
