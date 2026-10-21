@@ -17,6 +17,7 @@ STREAM_KEEPALIVE_SECONDS cadence.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 from pathlib import Path
@@ -308,7 +309,7 @@ def _duplicate_app(started: list[dict]) -> Starlette:
             turns[send_id] = {"turn_index": 7, "sent_at": "2026-10-20T12:20:40Z"}
 
     manager = SimpleNamespace(
-        get_chat=lambda _cid: SimpleNamespace(archived=False),
+        get_chat=lambda _cid: SimpleNamespace(archived=False, user_turn_origin={}),
         get_active_stream=lambda _cid: None,
         find_turn_by_send_id=find_turn_by_send_id,
         has_pending_send=lambda _cid, _sid: False,
@@ -541,3 +542,213 @@ def test_a_duplicate_send_id_is_not_queued_twice() -> None:
     # And no turn was started for it.
     assert started == [], started
 
+
+# ── Retry origin: the client may tag its own retry ───────────────────────
+#
+# A deliberate retry of a failed turn is still the user's message, but the
+# PWA draws it as a notice instead of a bubble. The tag rides on the frame as
+# `origin: "retry"`: it is presentation metadata, and no engine origin
+# (schedule, background_run, …) can be forged from the wire.
+
+
+def _origin_app(calls: list, stream: ChatStream | None = None) -> Starlette:
+    """A manager that records what the send path was handed."""
+
+    def start_stream(chat_id: str, text: str, images=None, **kwargs) -> None:
+        calls.append(("start_stream", text, dict(kwargs)))
+
+    def queue_message(chat_id: str, text: str, images=None, **kwargs) -> bool:
+        calls.append(("queue_message", text, dict(kwargs)))
+        return True
+
+    async def steer_queue(chat_id: str) -> None:
+        calls.append(("steer_queue", chat_id, {}))
+
+    manager = SimpleNamespace(
+        get_chat=lambda _cid: SimpleNamespace(archived=False, user_turn_origin={}),
+        get_active_stream=lambda _cid: stream,
+        resolve_image_ref=lambda ref: None,
+        find_turn_by_send_id=lambda _cid, _sid: None,
+        has_pending_send=lambda _cid, _sid: False,
+        queue_message=queue_message,
+        steer_queue=steer_queue,
+        start_stream=start_stream,
+    )
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = manager
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+    return app
+
+
+def test_a_retry_tagged_send_starts_a_retry_tagged_turn() -> None:
+    calls: list = []
+    client = signed_in(TestClient(_origin_app(calls)))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"message","text":"try again","origin":"retry"}')
+    assert calls == [
+        ("start_stream", "try again", {"send_id": "", "origin": "retry"}),
+    ], calls
+
+
+def test_an_ordinary_send_passes_no_origin() -> None:
+    """An untagged send is untouched: the route adds nothing to the call."""
+    calls: list = []
+    client = signed_in(TestClient(_origin_app(calls)))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"message","text":"hello"}')
+    assert calls == [("start_stream", "hello", {"send_id": ""})], calls
+
+
+def test_no_origin_other_than_retry_is_accepted_from_the_wire() -> None:
+    """The client may not forge an engine origin.
+
+    ``schedule``/``background_run`` and friends say the ENGINE wrote the turn;
+    a client that could set them could make its own message look like an
+    automation notice. Only the exact "retry" value is honoured; every other
+    value (including a near miss) is ignored, as any other extra field is.
+    """
+    forged_values = [
+        "schedule", "background_run", "cli_task_wake", "task_delegation",
+        "task_resume", "webhook", "update_task", "cron", "RETRY", "Retry",
+        "retry ", 5, True, ["retry"], {"origin": "retry"},
+    ]
+    for forged in forged_values:
+        calls: list = []
+        client = signed_in(TestClient(_origin_app(calls)))
+        with client.websocket_connect("/ws/chat/chat-1") as ws:
+            ws.send_text(
+                json.dumps({"type": "message", "text": "hello", "origin": forged})
+            )
+        assert calls == [("start_stream", "hello", {"send_id": ""})], forged
+
+
+def test_a_retry_tagged_send_is_queued_with_its_origin() -> None:
+    """A retry sent while a turn runs keeps its tag in the queue."""
+    calls: list = []
+    client = signed_in(TestClient(_origin_app(calls, ChatStream("chat-1"))))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"message","text":"try again","origin":"retry"}')
+    assert calls == [
+        (
+            "queue_message",
+            "try again",
+            {"entry_id": None, "delivery": "queue", "send_id": "", "origin": "retry"},
+        ),
+    ], calls
+
+
+def test_a_retry_tagged_steer_is_queued_with_its_origin() -> None:
+    calls: list = []
+    client = signed_in(TestClient(_origin_app(calls, ChatStream("chat-1"))))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text(
+            '{"type":"message","text":"try again","origin":"retry","delivery":"steer"}'
+        )
+    assert calls == [
+        (
+            "queue_message",
+            "try again",
+            {"entry_id": None, "delivery": "steer", "send_id": "", "origin": "retry"},
+        ),
+        ("steer_queue", "chat-1", {}),
+    ], calls
+
+
+def test_an_archived_chat_refuses_a_retry_tagged_send() -> None:
+    """The tag buys nothing: an archived chat is still refused."""
+    calls: list = []
+    app = _origin_app(calls)
+    app.state.project_chat_manager.get_chat = lambda _cid: SimpleNamespace(
+        archived=True, user_turn_origin={}
+    )
+    client = signed_in(TestClient(app))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"message","text":"try again","origin":"retry"}')
+        frame = ws.receive_json()
+    assert frame["type"] == "error"
+    assert frame["archived"] is True
+    assert calls == [], calls
+
+
+def _duplicate_origin_app(
+    calls: list,
+    recorded_origin: str = "",
+    owned: bool = True,
+    pending: bool = False,
+) -> Starlette:
+    """A manager that owns a recorded turn, and the chat meta that records it."""
+    turns: dict[str, dict] = {
+        "s-1": {"turn_index": 7, "sent_at": "2026-10-20T12:20:40Z"}
+    }
+    origins = {"7": recorded_origin} if recorded_origin else {}
+
+    def find_turn_by_send_id(chat_id: str, send_id: str):
+        return turns.get(send_id) if owned else None
+
+    def start_stream(chat_id: str, text: str, images=None, **kwargs) -> None:
+        calls.append(("start_stream", text, dict(kwargs)))
+
+    manager = SimpleNamespace(
+        get_chat=lambda _cid: SimpleNamespace(archived=False, user_turn_origin=origins),
+        get_active_stream=lambda _cid: None,
+        find_turn_by_send_id=find_turn_by_send_id,
+        has_pending_send=lambda _cid, _sid: pending,
+        start_stream=start_stream,
+    )
+    app = Starlette(routes=[WebSocketRoute("/ws/chat/{chat_id}", ws_chat)])
+    app.state.project_chat_manager = manager
+    app.state.focused_chats = {}
+    app.state.serializer = URLSafeTimedSerializer("test-secret")
+    return app
+
+
+@pytest.mark.parametrize("recorded_origin", ["retry", "background_run"])
+def test_a_duplicate_send_echoes_the_recorded_origin(recorded_origin: str) -> None:
+    """A repeat of a retry turn repeats the tag the engine recorded.
+
+    The client that reconnects after a recovery resend must not lose the
+    notice it was told about.
+    """
+    calls: list = []
+    client = signed_in(TestClient(_duplicate_origin_app(calls, recorded_origin)))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text('{"type":"message","text":"try again","send_id":"s-1","origin":"retry"}')
+        echo = ws.receive_json()
+    assert echo["type"] == "user_echo"
+    assert echo["duplicate"] is True
+    assert echo["turn_index"] == 7
+    assert echo["origin"] == recorded_origin
+    # And the repeat started no second turn.
+    assert calls == [], calls
+
+
+def test_a_duplicate_send_does_not_take_the_origin_from_the_frame() -> None:
+    """A repeat cannot tag a turn the engine never tagged."""
+    calls: list = []
+    client = signed_in(TestClient(_duplicate_origin_app(calls, "")))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text(
+            '{"type":"message","text":"try again","send_id":"s-1","origin":"retry"}'
+        )
+        echo = ws.receive_json()
+    assert echo["duplicate"] is True
+    assert "origin" not in echo
+    assert calls == [], calls
+
+
+def test_a_pending_duplicate_is_not_tagged_as_a_retry() -> None:
+    """A queued send owns no turn yet, so it has no tag to repeat.
+
+    The eventual echo and the history carry the authoritative one.
+    """
+    calls: list = []
+    client = signed_in(TestClient(_duplicate_origin_app(calls, "", owned=False, pending=True)))
+    with client.websocket_connect("/ws/chat/chat-1") as ws:
+        ws.send_text(
+            '{"type":"message","text":"try again","send_id":"s-1","origin":"retry"}'
+        )
+        echo = ws.receive_json()
+    assert echo["duplicate"] is True
+    assert "origin" not in echo
+    assert calls == [], calls

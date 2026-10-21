@@ -100,3 +100,79 @@ def test_systemd_accepts_rendered_unit(tmp_path):
     ))
     result = subprocess.run(["systemd-analyze", "verify", str(unit)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def _write_unit(path, workspace, *, mode=0o644):
+    path.write_text(
+        render_service(workspace=workspace, user="ciaobot", home=Path("/home/ciaobot"), python=Path("/usr/bin/python3")),
+        encoding="utf-8",
+    )
+    path.chmod(mode)
+
+
+def _trust_own_uid(monkeypatch, path):
+    monkeypatch.setattr("ciao.linux_service.TRUSTED_UNIT_UID", path.stat().st_uid)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes")
+def test_unit_workspace_round_trips_render_service(tmp_path, monkeypatch):
+    from ciao.linux_service import unit_workspace
+
+    unit = tmp_path / "ciaobot.service"
+    workspace = tmp_path / 'ws%x"q'
+    _write_unit(unit, workspace)
+    _trust_own_uid(monkeypatch, unit)
+
+    assert unit_workspace(unit) == workspace
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes")
+def test_unit_workspace_refuses_a_file_not_owned_by_the_trusted_uid(tmp_path, monkeypatch):
+    from ciao.linux_service import unit_workspace
+
+    unit = tmp_path / "ciaobot.service"
+    _write_unit(unit, tmp_path / "ws")
+    monkeypatch.setattr("ciao.linux_service.TRUSTED_UNIT_UID", unit.stat().st_uid + 1)
+
+    assert unit_workspace(unit) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes")
+@pytest.mark.parametrize("mode", [0o664, 0o646])
+def test_unit_workspace_refuses_group_or_world_writable(tmp_path, monkeypatch, mode):
+    from ciao.linux_service import unit_workspace
+
+    unit = tmp_path / "ciaobot.service"
+    _write_unit(unit, tmp_path / "ws", mode=mode)
+    _trust_own_uid(monkeypatch, unit)
+
+    assert unit_workspace(unit) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes")
+def test_unit_workspace_missing_or_without_the_line_is_none(tmp_path, monkeypatch):
+    from ciao.linux_service import unit_workspace
+
+    unit = tmp_path / "ciaobot.service"
+    assert unit_workspace(unit) is None
+    unit.write_text("[Service]\nEnvironment=\"HOME=/home/x\"\n", encoding="utf-8")
+    unit.chmod(0o644)
+    _trust_own_uid(monkeypatch, unit)
+    assert unit_workspace(unit) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX ownership and modes")
+def test_unit_workspace_takes_the_last_assignment_and_ignores_relative_paths(tmp_path, monkeypatch):
+    from ciao.linux_service import unit_workspace
+
+    unit = tmp_path / "ciaobot.service"
+    unit.write_text(
+        'Environment="CIAO_WORKSPACE=/srv/first"\nEnvironment=CIAO_WORKSPACE=/srv/second\n',
+        encoding="utf-8",
+    )
+    unit.chmod(0o644)
+    _trust_own_uid(monkeypatch, unit)
+    assert unit_workspace(unit) == Path("/srv/second")
+
+    unit.write_text('Environment="CIAO_WORKSPACE=/srv/first"\nEnvironment="CIAO_WORKSPACE=rel/dir"\n', encoding="utf-8")
+    assert unit_workspace(unit) is None

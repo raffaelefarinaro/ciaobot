@@ -1,32 +1,33 @@
 <template>
   <!-- What the agent is given for this chat, each with when it is sent. Shared
        by the Chat details rail and the narrow-pane drawer. -->
-  <section class="rail-section agent-context" aria-labelledby="agent-context-label">
-    <p id="agent-context-label" class="rail-label">Agent context</p>
-    <template v-if="contextPct != null">
-      <div class="agent-context-meter-row">
-        <div
-          class="agent-context-meter"
-          role="meter"
-          :aria-valuenow="contextPct"
-          aria-valuemin="0"
-          aria-valuemax="100"
-          aria-label="Context window used"
-        >
-          <span class="agent-context-track"><span class="agent-context-fill" :style="{ width: `${Math.min(100, contextPct)}%` }"></span></span>
-          <strong>{{ contextPctLabel }}</strong>
-        </div>
-        <button
-          type="button"
-          class="btn-small agent-context-compact"
-          :disabled="compactDisabled"
-          :aria-busy="compacting ? 'true' : undefined"
-          title="Compact this chat's context into a shorter summary"
-          @click="emit('compact')"
-        >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
+  <section v-if="contextPct != null" class="rail-section agent-context" :aria-labelledby="usageLabelId">
+    <p :id="usageLabelId" class="rail-label">Context usage</p>
+    <div class="agent-context-meter-row">
+      <div
+        class="agent-context-meter"
+        role="meter"
+        :aria-valuenow="contextPct"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-label="Context window used"
+      >
+        <span class="agent-context-track"><span class="agent-context-fill" :style="{ width: `${Math.min(100, contextPct)}%` }"></span></span>
+        <strong>{{ contextPctLabel }}</strong>
       </div>
-    </template>
-    <p class="agent-context-sub">Always loaded</p>
+      <button
+        type="button"
+        class="btn-small agent-context-compact"
+        :disabled="compactDisabled"
+        :aria-busy="compacting ? 'true' : undefined"
+        title="Compact this chat's context into a shorter summary"
+        @click="emit('compact')"
+      >{{ compacting ? 'Compacting…' : 'Compact' }}</button>
+    </div>
+    <p class="agent-context-usage-note">{{ contextPctLabel }} of context window used</p>
+  </section>
+  <section class="rail-section agent-context" aria-labelledby="agent-context-label">
+    <p id="agent-context-label" class="rail-label">Always loaded</p>
     <div class="rail-list">
       <button
         v-if="guide.path"
@@ -80,7 +81,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import type { ProjectInfo } from '../lib/types'
 import { linkifyText } from '../lib/filePaths'
 import { joinRepoPath, repoName } from '../lib/repo'
@@ -98,6 +99,10 @@ const props = defineProps<{
   codeMode?: boolean
 }>()
 const emit = defineEmits<{ 'open-file': [path: string]; compact: [] }>()
+
+// Unique per instance: the rail and the drawer are one component, and the
+// usage group's heading must not collide with anything else's.
+const usageLabelId = useId()
 
 const guide = ref<WorkspaceGuide>({ path: '', content: '', error: '' })
 let guideSeq = 0
@@ -160,12 +165,12 @@ const contextPctLabel = computed(() => {
 </script>
 
 <style scoped>
-.agent-context-sub { margin: var(--space-3) 0 var(--space-1); color: var(--fg3); font-size: var(--text-xs); }
+.agent-context-usage-note { margin: 0 0 var(--space-2); color: var(--fg3); font-size: var(--text-xs); }
 .agent-context-meter-row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin: 4px 0 10px;
+  margin: 4px 0 6px;
 }
 .agent-context-meter {
   flex: 1;

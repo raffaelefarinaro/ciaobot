@@ -1,5 +1,5 @@
 // The workspace guide (AGENTS.md) the agent reads on every turn. Shared by the
-// Memory page's "Always loaded" rail and the chat's Agent context section.
+// Memory page's "Always loaded" rail and the chat's Always loaded group.
 
 export interface WorkspaceGuide {
   /** The path it was found at ('' when there is none). */
