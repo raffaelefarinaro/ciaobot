@@ -166,7 +166,8 @@ describe('ProjectSidebar chat actions', () => {
     // The row's accessible name comes from its content, so it says "task" too.
     expect(delegated.text()).toContain('task')
     expect(plain.find('.chat-task-tag').exists()).toBe(false)
-    expect(delegated.attributes('title')).toBe('Copy me\nDrag to move to another project')
+    expect(delegated.attributes('title'))
+      .toBe('Copy me\nDrag to move to another project\nDelegated board task')
     wrapper.unmount()
   })
 
@@ -180,7 +181,10 @@ describe('ProjectSidebar chat actions', () => {
     const tag = wrapper.get('.chat-item .chat-task-tag')
     expect(tag.text()).toBe('task')
     expect(tag.attributes('title')).toBe('Delegated board task')
-    expect(tag.attributes('aria-label')).toBe('Delegated board task')
+    // The tag hides while the row is hovered or focused, so the qualifier is
+    // also text: in the row's title for a pointer, in a hidden line for AT.
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('Delegated board task')
+    expect(wrapper.get('.chat-item .sr-only').text()).toBe(', Delegated board task')
     wrapper.unmount()
   })
 
@@ -195,7 +199,8 @@ describe('ProjectSidebar chat actions', () => {
     expect(tag.text()).toBe('task')
     // The relation is what says delegation apart: a link is not an attempt.
     expect(tag.attributes('title')).toBe('Linked to a board task')
-    expect(tag.attributes('aria-label')).toBe('Linked to a board task')
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('Linked to a board task')
+    expect(wrapper.get('.chat-item .sr-only').text()).toBe(', Linked to a board task')
     wrapper.unmount()
   })
 

@@ -745,8 +745,11 @@
                       v-if="taskSignals.isTaskChat(chat)"
                       class="chat-task-tag"
                       :title="taskBadgeTitle(chat)"
-                      :aria-label="taskBadgeTitle(chat)"
                     >task</span>
+                    <!-- The tag hides with the row's other marks on hover, so the
+                         qualifier also travels as text: the row title for a
+                         pointer, a hidden line for a screen reader. -->
+                    <span v-if="taskSignals.isTaskChat(chat)" class="sr-only">, {{ taskBadgeTitle(chat) }}</span>
                     <span
                       v-if="isChatCodeModeOn(chat, project.repo)"
                       class="chat-code-tag"
@@ -1144,9 +1147,12 @@ function taskBadgeTitle(chat: ChatInfo): string {
 // show, so the facts live here too, where they stay reachable.
 function chatRowTitle(chat: ChatInfo, repo: ProjectInfo['repo']): string {
   if (chat.local === false) return `${chat.title}\nThis chat lives on another instance`
-  const guidance = `${chat.title}\nDrag to move to another project`
+  const lines = [chat.title, 'Drag to move to another project']
+  const task = taskSignals.isTaskChat(chat) ? taskBadgeTitle(chat) : ''
+  if (task) lines.push(task)
   const facts = codeBadgeTitle(chat, repo)
-  return facts ? `${guidance}\n${facts}` : guidance
+  if (facts) lines.push(facts)
+  return lines.join('\n')
 }
 
 // Background command runs across this project's visible chats. A run can sit
