@@ -74,11 +74,13 @@ const MODELS_RESPONSE = {
   provider_defaults: { claude: 'sonnet' },
   thinking_levels: { claude: ['low', 'medium', 'high'] },
   // opus cannot do 'high', fable can: the recovery validates a staged
-  // thinking level against the model the user picks.
+  // thinking level against the model the user picks. haiku does 'high' and
+  // nothing else.
   model_reasoning_levels: {
     sonnet: ['low', 'medium', 'high'],
     opus: ['low', 'medium'],
     fable: ['low', 'medium', 'high'],
+    haiku: ['high'],
   },
   model_options: {},
   backends: { anthropic: true },
@@ -603,6 +605,14 @@ describe('ChatPanel recovery model picker', () => {
     await flushPromises()
   }
 
+  // A recovery stages its level with selectThinking, which the chips call.
+  // The chips are the current model's set, so a level the picker does not
+  // offer is staged the same way the picker stages the ones it does.
+  function stageThinkingLevel(wrapper: VueWrapper, level: string) {
+    const panel = wrapper.vm as unknown as { selectThinking: (level: string) => Promise<void> }
+    return panel.selectThinking(level)
+  }
+
   function armPendingRetry(store: ReturnType<typeof useProjectStore>) {
     store.chats[0].retry = {
       status: 'pending',
@@ -639,7 +649,11 @@ describe('ChatPanel recovery model picker', () => {
 
     expect(wrapper.find('.model-picker-recovery__title').text()).toBe('Choose a model to retry immediately')
     expect(wrapper.find('.model-picker-recovery__note').text()).toContain('may incur usage charges')
-    expect(wrapper.find('.model-picker-recovery__note').text()).toContain('Thinking applies to that retry')
+    // The note names the limit of a staged level: the chips are the current
+    // model's set, so a level the picked model does not offer is dropped.
+    expect(wrapper.find('.model-picker-recovery__note').text()).toContain(
+      'A Thinking level you pick here applies to that retry, within the levels the current model offers.',
+    )
     // The listbox is named by the heading and the search field describes
     // itself with the consequence, so the warning is not visual-only.
     const stub = wrapper.getComponent({ name: 'ModelSelectorStub' })
@@ -940,6 +954,40 @@ describe('ChatPanel recovery model picker', () => {
     await pickModel(wrapper, 'opus')
 
     expect(updateChat.mock.calls[0][1]).toMatchObject({ model: 'opus', thinking_level: '' })
+    wrapper.unmount()
+  })
+
+  it('staged thinking level unsupported by the target model falls back to the provider default', async () => {
+    const { wrapper, store } = await mountPanel({ chat: { model: 'sonnet' } })
+    const tryNow = vi.spyOn(store, 'tryChatRetryNow').mockResolvedValue(undefined as never)
+    const patch = vi.spyOn(api, 'patch').mockImplementation(async (path: string, body?: unknown) => {
+      if (path === '/api/chats/chat-1') {
+        const updates = (body ?? {}) as Partial<ChatInfo>
+        return makeChat('chat-1', {
+          model: String(updates.model ?? 'sonnet'),
+          thinking_level: String(updates.thinking_level ?? ''),
+        }) as never
+      }
+      return {} as never
+    })
+    armPendingRetry(store)
+    await flushPromises()
+
+    await openCardRecovery(wrapper)
+    // The chips are the current model's set: sonnet stops at 'high', so the
+    // picker does not offer 'xhigh'.
+    expect(wrapper.findAll('.thinking-chip').map(c => c.text())).toEqual(['Auto', 'Low', 'Medium', 'High'])
+    await stageThinkingLevel(wrapper, 'xhigh')
+    await flushPromises()
+
+    // haiku does 'high' and nothing else, so the staged level is out of range
+    // for it and the retry falls back to the provider default.
+    await pickModel(wrapper, 'haiku')
+
+    const call = patch.mock.calls.find(c => c[0] === '/api/chats/chat-1')
+    expect(call).toBeTruthy()
+    expect(call![1]).toMatchObject({ model: 'haiku', thinking_level: '' })
+    expect(tryNow).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
 
