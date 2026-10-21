@@ -1,7 +1,7 @@
 <template>
   <!-- What the agent is given for this chat, each with when it is sent. Shared
        by the Chat details rail and the narrow-pane drawer. -->
-  <section v-if="contextPct != null" class="rail-section agent-context agent-context-usage" :aria-labelledby="usageLabelId">
+  <section v-if="contextPct != null" class="rail-section agent-context" :aria-labelledby="usageLabelId">
     <p :id="usageLabelId" class="rail-label">Context usage</p>
     <div class="agent-context-meter-row">
       <div

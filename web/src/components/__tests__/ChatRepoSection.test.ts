@@ -74,16 +74,20 @@ describe('ChatRepoSection', () => {
     wrapper.unmount()
   })
 
-  it('keeps the branch summary keyboard-operable', () => {
-    const wrapper = mountSection(repo, {})
+  it('puts the whole branch and path inside the disclosure, and the facts outside it', () => {
+    const wrapper = mountSection(repo, { path: '/r/app-wt', branch: 'feat-x', is_worktree: true, exists: true })
     const details = wrapper.get('details.chat-repo-branch-details')
     const summary = details.get('summary.chat-repo-branch')
-    // A native summary, first in the details, is the focusable disclosure.
+    // The interactive disclosure is the summary; the body is its content, and
+    // the checkout facts stay beside it on the same line rather than inside it.
     expect(summary.element.tagName).toBe('SUMMARY')
     expect(details.element.firstElementChild).toBe(summary.element)
-    const summaryEl = summary.element as HTMLElement
-    summaryEl.focus()
-    expect(document.activeElement).toBe(summaryEl)
+    expect(details.get('.chat-repo-branch-body').text()).toContain('feat-x')
+    expect(details.find('.chat-repo-kind').exists()).toBe(false)
+    const line = wrapper.get('.chat-repo-branch-line')
+    expect(line.get('.chat-repo-kind').text()).toBe('worktree')
+    // Exactly one focusable control in the branch row: the disclosure itself.
+    expect(line.findAll('button, a, input, select, textarea, [tabindex]')).toHaveLength(0)
     wrapper.unmount()
   })
 

@@ -246,7 +246,7 @@ describe('ChatPanel aligned layout', () => {
     await nextTick()
 
     const rail = wrapper.get('#chat-work-rail')
-    // The project is named in the rail's Agent context, so the header no
+    // The project is named in the rail's Always loaded group, so the header no
     // longer repeats it.
     expect(rail.findComponent({ name: 'AgentContextSection' }).exists()).toBe(true)
     expect(wrapper.find('.breadcrumb-scope').exists()).toBe(false)

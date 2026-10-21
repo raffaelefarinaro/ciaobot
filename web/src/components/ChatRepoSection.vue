@@ -79,26 +79,30 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
     <p v-if="chip.missing" class="chat-repo-missing" role="status">The linked folder is missing. Change or unlink it on the project page.</p>
     <div v-else class="chat-repo-meta">
       <!-- The branch stays one line in the summary; the whole name and the
-           folder the chat works in are one click away. -->
-      <details class="chat-repo-branch-details">
-        <summary
-          class="chat-repo-branch"
-          :title="differs ? `Main checkout is on ${branchLabel(repo.branch)}` : undefined"
-        ><span aria-hidden="true">⑂ </span><span class="sr-only">branch </span>{{ chip.branch }}</summary>
-        <div class="chat-repo-branch-body">
-          <p class="chat-repo-branch-full">
-            <span class="chat-repo-body-key">branch</span>
-            <span class="chat-repo-branch-value">{{ chip.branch }}</span>
-          </p>
-          <p class="chat-repo-path">
-            <span class="chat-repo-body-key">path</span>
-            <span class="chat-repo-path-value">{{ chip.path }}</span>
-          </p>
-        </div>
-      </details>
-      <span v-if="chip.isWorktree" class="chat-repo-kind">worktree</span>
-      <span v-if="chip.dirty === true" class="chat-repo-dirty"><span class="chat-repo-dot" aria-hidden="true"></span>uncommitted changes</span>
-      <span v-else-if="chip.dirty === false" class="chat-repo-clean">clean</span>
+           folder the chat works in are one click away. The facts about the
+           checkout stay in their own line beside the summary, so opening the
+           disclosure never pushes them down beside the path. -->
+      <div class="chat-repo-branch-line">
+        <details class="chat-repo-branch-details">
+          <summary
+            class="chat-repo-branch"
+            :title="differs ? `Main checkout is on ${branchLabel(repo.branch)}` : undefined"
+          ><span aria-hidden="true">⑂ </span><span class="sr-only">branch </span>{{ chip.branch }}</summary>
+          <div class="chat-repo-branch-body">
+            <p class="chat-repo-branch-full">
+              <span class="chat-repo-body-key">branch</span>
+              <span class="chat-repo-branch-value">{{ chip.branch }}</span>
+            </p>
+            <p class="chat-repo-path">
+              <span class="chat-repo-body-key">path</span>
+              <span class="chat-repo-path-value">{{ chip.path }}</span>
+            </p>
+          </div>
+        </details>
+        <span v-if="chip.isWorktree" class="chat-repo-kind">worktree</span>
+        <span v-if="chip.dirty === true" class="chat-repo-dirty"><span class="chat-repo-dot" aria-hidden="true"></span>uncommitted changes</span>
+        <span v-else-if="chip.dirty === false" class="chat-repo-clean">clean</span>
+      </div>
     </div>
     <HostTerminalButton v-if="!chip.missing" :chat-id="chatId" class="chat-repo-terminal" />
     <template v-if="!archived">
@@ -228,7 +232,10 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
 }
 .chat-repo-copy:hover, .repo-code-info:hover { color: var(--fg); }
 .chat-repo-copy:focus-visible, .repo-code-info:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-sm); }
-.chat-repo-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--space-3); margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--fg2); }
+.chat-repo-meta { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px var(--space-3); margin: var(--space-1) 0 0; font-size: var(--text-sm); color: var(--fg2); }
+/* The summary and the checkout facts share one line; the disclosure body sits
+   under it, so the facts never drift down beside the path when it opens. */
+.chat-repo-branch-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--space-3); min-width: 0; }
 .chat-repo-branch-details { flex: 0 1 auto; min-width: 0; max-width: 100%; }
 .chat-repo-branch {
   /* list-item keeps the native disclosure triangle, the only cue it opens. */
@@ -255,8 +262,8 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
 @media (pointer: coarse) {
   .repo-code-switch { min-width: var(--touch); }
   .chat-repo-copy, .repo-code-info { width: var(--touch); height: var(--touch); }
-  /* The summary is a tap target like any other control, and its one line
-     still sits in the middle of that box. */
-  .chat-repo-branch { min-height: var(--touch); line-height: var(--touch); }
+  /* The summary is a tap target like any other control: 44px in both axes,
+     and its one line still sits in the middle of that box. */
+  .chat-repo-branch { min-height: var(--touch); min-width: var(--touch); line-height: var(--touch); }
 }
 </style>
