@@ -1158,6 +1158,114 @@ describe('duplicate send suppression', () => {
     const userMsgs = (store.messages[chatId] || []).filter(m => m.role === 'user')
     expect(userMsgs).toHaveLength(1)
   })
+
+  test('a duplicate echo for the running turn does not clear its live stream', async () => {
+    // The engine answered a recovery resend of the turn that is still
+    // running: the echo is a repeat, but this turn owns the live buffer.
+    // Clearing it blanked the live text, the trace and the spinner until the
+    // next delta or a history reload came in (#1716).
+    const store = useProjectStore()
+    const chatId = 'chat-duplicate-echo-running'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'run it', sent_at: '2026-10-20T12:20:40Z', turn_index: 4 },
+          ],
+          total: 1, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    // The turn that is running: its user bubble carries the server's turn
+    // index, and the live stream is buffering the answer.
+    store.messages[chatId] = [
+      { role: 'user', content: 'run it', timestamp: '2026-10-20T12:20:40Z', turn_index: 4 },
+    ]
+    store.streaming[chatId] = true
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'tool_use', tool_name: 'Bash', tool_input: 'ls' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'text_delta', text: 'partial answer' }),
+    })
+    expect(store.currentTimeline).toHaveLength(1)
+
+    apiGet.mockClear()
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'run it',
+        send_id: 's-running',
+        duplicate: true,
+        turn_index: 4,
+      }),
+    })
+    await nextTick()
+
+    // The repeat echo leaves the live turn alone: the text, the trace and the
+    // spinner all survive it, and no history reload runs.
+    expect(store.streaming[chatId]).toBe(true)
+    expect(store.streamingText[chatId]).toBe('partial answer')
+    expect(store.currentTimeline).toHaveLength(1)
+    const reloads = apiGet.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/messages'))
+    expect(reloads).toHaveLength(0)
+  })
+
+  test('a duplicate echo naming a finished last turn still settles the client', async () => {
+    // The repeat names the transcript's last turn, but that turn is over: no
+    // live buffer is running, so the client settles — no streaming state, and
+    // one background reload of the authoritative transcript. The echo must not
+    // put the spinner back on a finished turn.
+    const store = useProjectStore()
+    const chatId = 'chat-duplicate-echo-finished'
+    store.activeChatId = chatId
+    apiGet.mockImplementation((path: string) => {
+      if (path.includes('/messages')) {
+        return Promise.resolve({
+          items: [
+            { role: 'user', content: 'finished turn', sent_at: '2026-10-20T12:20:40Z', turn_index: 4 },
+          ],
+          total: 1, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+        })
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockResolvedValue({})
+    store.connectWs(chatId)
+
+    store.messages[chatId] = [
+      { role: 'user', content: 'finished turn', timestamp: '2026-10-20T12:20:40Z', turn_index: 4 },
+    ]
+    // Nothing is streaming: the turn this echo repeats is long over.
+    store.streaming[chatId] = false
+
+    apiGet.mockClear()
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'finished turn',
+        send_id: 's-finished',
+        duplicate: true,
+        turn_index: 4,
+      }),
+    })
+    await nextTick()
+
+    expect(store.streaming[chatId]).toBe(false)
+    const reloads = apiGet.mock.calls.filter((c: unknown[]) => String(c[0]).includes('/messages'))
+    await vi.waitFor(() => expect(reloads).toHaveLength(1))
+    await new Promise((r) => setTimeout(r, 0))
+    // Nothing new was rendered: the turn is already on screen.
+    const userMsgs = (store.messages[chatId] || []).filter(m => m.role === 'user' && m.turn_index === 4)
+    expect(userMsgs).toHaveLength(1)
+  })
 })
 
 describe('deferred message sends', () => {
