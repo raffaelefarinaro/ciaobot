@@ -156,6 +156,8 @@ The device-setup reminder uses quiet task labels at `--text-base`, weight 600, a
 Shared model-picker sections show readable names while retaining the exact technical identifier in each option's tooltip, data and search. Provider badges come only from the identifier's actual namespace, never an inferred upstream vendor, and remain beside any Default badge. Formatting changes presentation only: selected raw identifiers and provider routing stay unchanged.
 
 
+The Google Workspace card shows one next step, not the whole manual: completed steps are quiet status lines, the current step is the only one shown in full, and later instructions sit behind a closed native disclosure. Setup derivation is unchanged. The account form is a labelled row — visible Account name and Display name fields, one primary Add account action — and never triggers installation, a browser sign-in or a permission itself. Progress is derived per focus profile; the card hides once `gws` is installed and every account is signed in, unexpired and linked to a workspace.
+
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
