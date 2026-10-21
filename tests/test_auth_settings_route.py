@@ -209,7 +209,7 @@ def test_host_browser_ignores_a_wrong_current_password(tmp_path: Path) -> None:
 
 
 def test_host_browser_with_a_different_port_origin_still_needs_the_current_password(tmp_path: Path) -> None:
-    """host_browser_request ignores ports; the exemption must not."""
+    """The route is host-browser-gated, and a different port is not the host."""
     app = _app(tmp_path)
     client = TestClient(app, base_url=HOST_URL, client=HOST_PEER)
     res = client.post(

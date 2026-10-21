@@ -76,6 +76,7 @@ def test_plan_refuses_a_protected_destination_or_source_without_a_host(
     assert not any("background job" in r for r in _plan(plain, home / "new", host=None).refusals)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the run-move argv is a POSIX launchd command")
 def test_plan_warns_and_allows_a_protected_folder_through_the_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1038,6 +1039,7 @@ def _spawn_mac_job_plist(
     return job
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the run-move argv is a POSIX launchd command")
 def test_the_mac_move_job_runs_through_the_verified_host(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

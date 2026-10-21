@@ -8,7 +8,7 @@ Every route takes the normal session path (signed session cookie, same-origin
 check on POSTs) and appears in neither the public nor the loopback-only
 allowlist: the latter lets a loopback peer skip the session. The password read
 and the folder open then add ``host_browser_request``: loopback TCP peer with
-no proxy headers, loopback Host, same-host Origin/Referer. `tailscale serve`
+no proxy headers, local Host, exact same-origin Origin/Referer. `tailscale serve`
 dials the engine from 127.0.0.1 but always adds ``Tailscale-*`` and
 ``X-Forwarded-For`` headers and a ``*.ts.net`` Host, so a tailnet visitor fails
 that check twice. An SSH port-forward still looks local; anyone with SSH to the
@@ -44,8 +44,9 @@ NOT_ON_HOST = "The password is shown on the computer running Ciaobot."
 
 
 def _host_request(request: Request) -> bool:
-    # host_browser_request ignores ports; the exact-origin check keeps another
-    # localhost app (a dev server on :3000) from reading the password.
+    # host_browser_request refuses a cross-port or cross-scheme origin itself,
+    # so another localhost app (a dev server on :3000) cannot read the
+    # password; the _same_origin_source conjunct is defense in depth.
     return host_browser_request(request) and _same_origin_source(request)
 
 
