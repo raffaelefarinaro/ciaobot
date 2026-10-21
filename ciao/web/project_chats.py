@@ -3064,10 +3064,10 @@ class ProjectChatManager:
         """Remove a vault-backed project's folder, cleaning the links into it.
 
         The folder under ``projects/active/<stem>/`` goes from disk, and the
-        inbound links in other notes are dissolved first, so nothing is left
-        pointing at a note that no longer exists. Every failure leaves the
-        folder alone: the caller keeps the project row, so the delete can be
-        retried instead of the project being half-gone.
+        inbound links to its notes are dissolved first, so nothing is left
+        pointing at a note that no longer exists. A failure leaves the project
+        row in place and rolls the staged link cleanup back, so the delete can
+        be retried instead of the project being half-gone.
 
         Returns the cleanup report: ``{vault_entry_removed, removed_notes,
         removed_files, edited_backlinks}``.
@@ -3144,9 +3144,14 @@ class ProjectChatManager:
 
         from ciao.vault_index import strip_references_many
 
+        # The cleanup is staged and committed before the folder goes, so a
+        # removal that fails has to put the rewritten notes back: otherwise
+        # the links stay dissolved while the notes they named are still on
+        # disk, and the user sees a delete that half-happened.
+        undo: dict[str, str] = {}
         try:
             edited = strip_references_many(
-                target_root, deleted_paths, path_prefix=prefix
+                target_root, deleted_paths, path_prefix=prefix, undo=undo
             )
         except OSError as exc:
             raise ValueError(f"backlink cleanup failed: {exc}") from exc
@@ -3154,6 +3159,10 @@ class ProjectChatManager:
         try:
             shutil.rmtree(entry)
         except OSError as exc:
+            # Roll the staged link cleanup back, so the vault is exactly as it
+            # was: the folder is still there, and so are the links into it.
+            for path, text in undo.items():
+                Path(path).write_text(text, encoding="utf-8", newline="")
             raise ValueError(f"delete failed: {exc}") from exc
 
         report["vault_entry_removed"] = True
@@ -3175,10 +3184,10 @@ class ProjectChatManager:
         it in a dialog.
 
         With ``delete_vault`` the folder under ``projects/active/<stem>/`` is
-        removed and the inbound links in other notes are cleaned, BEFORE the
+        removed and the inbound links to its notes are cleaned, BEFORE the
         row goes. That order matters: a failed filesystem step leaves the
-        project row intact and retryable, and a removed folder can never be
-        re-discovered as a fresh project.
+        project row intact and retryable (and rolls the link cleanup back),
+        and a removed folder can never be re-discovered as a fresh project.
 
         Returns ``{deleted, vault_entry_removed, removed_notes, removed_files,
         edited_backlinks}``.

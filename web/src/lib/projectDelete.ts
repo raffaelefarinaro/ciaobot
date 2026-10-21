@@ -23,7 +23,7 @@ export function projectDeleteMessage(project: ProjectDeleteTarget, chatCount: nu
   const lines: string[] = [`Delete "${project.name}"?`]
   if (project.vault_folder) {
     lines.push(
-      `Its vault folder projects/active/${project.vault_folder}/ is deleted, and the links pointing into it are cleaned up.`,
+      `Its vault folder projects/active/${project.vault_folder}/ is deleted, and the links to its notes are cleaned up.`,
     )
   }
   lines.push(

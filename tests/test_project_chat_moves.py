@@ -230,7 +230,7 @@ def test_delete_project_rejects_vault_backed(tmp_path: Path) -> None:
 
 def test_delete_project_with_delete_vault_removes_folder_and_cleans_links(tmp_path: Path) -> None:
     """Deleting a vault-backed project for real removes its folder, cleans the
-    inbound links in other notes, and does not come back on the next
+    inbound links to its notes, and does not come back on the next
     auto-discovery."""
     vault = tmp_path / "memory-vault" / "personal"
     folder = vault / "projects" / "active" / "Stuck"
@@ -282,6 +282,63 @@ def test_delete_project_with_delete_vault_removes_folder_and_cleans_links(tmp_pa
     assert "See Stuck." in ref_text
     # The project does not reappear: the folder it came from is gone.
     assert not [p for p in pcm.list_projects() if p.vault_folder == "Stuck"]
+
+
+def test_delete_project_with_delete_vault_restores_links_when_rmtree_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed removal rolls the link cleanup back.
+
+    The inbound links were dissolved before the folder went, so a removal
+    that failed left the notes rewritten while the folder and the project
+    row were still there: a partial delete the user cannot see, and links
+    pointing at notes that are still on disk.
+    """
+    vault = tmp_path / "memory-vault" / "personal"
+    folder = vault / "projects" / "active" / "Stuck"
+    folder.mkdir(parents=True)
+    (folder / "Stuck.md").write_text(
+        "---\nname: Stuck\nstatus: active\n---\n# Stuck\n",
+        encoding="utf-8",
+    )
+    notes = vault / "Notes"
+    notes.mkdir(parents=True)
+    ref = notes / "Ref.md"
+    original = (
+        "---\n"
+        "name: Ref\n"
+        "type: note\n"
+        "related:\n"
+        "  - projects/active/Stuck/Stuck\n"
+        "---\n"
+        "# Ref\n\n"
+        "See [Stuck](../projects/active/Stuck/Stuck.md).\n"
+    )
+    ref.write_text(original, encoding="utf-8")
+
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()  # triggers auto-discovery
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "Stuck")
+
+    def _denied(*args: object, **kwargs: object) -> None:
+        raise OSError("denied")
+
+    monkeypatch.setattr("ciao.web.project_chats.shutil.rmtree", _denied)
+
+    with pytest.raises(ValueError, match="delete failed"):
+        pcm.delete_project(proj.project_id, delete_vault=True)
+
+    # The folder is still there, and so is the project row: the delete can be
+    # retried.
+    assert folder.exists()
+    assert (folder / "Stuck.md").exists()
+    assert proj.project_id in pcm._projects
+    # The link cleanup was rolled back: the note still points at the note
+    # that is still on disk.
+    assert ref.read_text(encoding="utf-8") == original
+    assert "projects/active/Stuck/Stuck" in ref.read_text(encoding="utf-8")
+    assert "related:" in ref.read_text(encoding="utf-8")
+    assert "[Stuck](../projects/active/Stuck/Stuck.md)" in ref.read_text(encoding="utf-8")
 
 
 def test_delete_project_with_delete_vault_refuses_symlink_escape(tmp_path: Path) -> None:
