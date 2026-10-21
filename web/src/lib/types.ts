@@ -1752,6 +1752,9 @@ export interface ProposalRow {
   leak_warning?: boolean
   rehome?: RehomeSignal
   target?: string
+  /** Who the memory pass said should settle this: `nightly` (more context would) or `you`. Absent on rows filed without one. */
+  decider?: 'nightly' | 'you'
+  decide_reason?: string
   /** A `note_edit` row: a note verification the autonomy rule would not apply,
    * queued for a person to decide. `target` is the note it is about (the queue
    * bullet's own payload is a sidecar id), and this is what the accept needs

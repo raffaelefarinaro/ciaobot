@@ -98,6 +98,55 @@ describe('proposals store filters', () => {
     expect(store.search).toBe('')
     expect(store.visibleRows('personal')).toHaveLength(3)
   })
+
+  describe('needs-you filter', () => {
+    function decided() {
+      const store = useProposalsStore()
+      store.rows = [
+        row({ id: 'you', decider: 'you' }),
+        row({ id: 'none' }),
+        row({ id: 'night', decider: 'nightly' }),
+        row({ id: 'w-you', workspace: 'work', decider: 'you' }),
+      ]
+      return store
+    }
+
+    it('needs-you shows undecided and decide:you rows, hides decide:nightly', () => {
+      const store = decided()
+      store.decideFilter = 'needs-you'
+
+      expect(store.visibleRows('personal').map(r => r.id)).toEqual(['you', 'none'])
+    })
+
+    it('needsYouCount counts over the workspace scope', () => {
+      const store = decided()
+      store.decideFilter = 'needs-you'
+
+      expect(store.needsYouCount('personal')).toBe(2)
+      expect(store.needsYouCount('work')).toBe(1)
+    })
+
+    it('resetFilters and revealRow clear the needs-you filter', () => {
+      const store = decided()
+      store.decideFilter = 'needs-you'
+      store.resetFilters()
+      expect(store.decideFilter).toBe('all')
+
+      store.decideFilter = 'needs-you'
+      store.revealRow('night')
+      expect(store.decideFilter).toBe('all')
+    })
+
+    it('needs-you does not hide history rows', () => {
+      const store = decided()
+      store.historyRows = [historyRow({ id: 'h1', workspace: 'personal' })]
+      const before = store.visibleHistory('personal').map(r => r.id)
+      store.decideFilter = 'needs-you'
+
+      expect(store.visibleHistory('personal').map(r => r.id)).toEqual(before)
+      expect(store.historyFiltersActive).toBe(false)
+    })
+  })
 })
 
 describe('post-mutation refresh', () => {

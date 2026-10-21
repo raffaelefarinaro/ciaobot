@@ -86,10 +86,18 @@ _KIND_ALT = "|".join(re.escape(k) for k in KINDS)
 # different facts — one is a transcript somebody can re-read, the other is a
 # request identifier — and a request id folded into the source would read back
 # as a chat id.
+#
+# A `_(decide: nightly|you; reason)_` tail is the third tail, after `from` and
+# `request`. It names who should settle the item and why; the reason is
+# optional. It sits outside the text group, so it never changes `text`,
+# `source` or the stable proposal id. Groups 1 to 5 keep their numbers.
+DECIDERS: tuple[str, ...] = ("nightly", "you")
+_DECIDER_ALT = "|".join(DECIDERS)
 BULLET_RE = re.compile(
     rf"^\s*-\s*\[({_KIND_ALT})(?:[ \t]+([^\]]*))?\]\s+(.+?)"
     rf"(?:\s+_\(from:\s*(.+?)\)_)?"
-    rf"(?:\s+_\(request:\s*(.+?)\)_)?\s*$",
+    rf"(?:\s+_\(request:\s*(.+?)\)_)?"
+    rf"(?:\s+_\(decide:\s*({_DECIDER_ALT})(?:;\s*(.+?))?\)_)?\s*$",
     re.IGNORECASE,
 )
 """Public shared bullet pattern. Consumers import this, never a private copy:
@@ -113,6 +121,8 @@ class ProposalBullet:
     source: str = ""
     target: str = ""
     request: str = ""
+    decider: str | None = None
+    decide_reason: str = ""
 
 
 def parse_bullet(line: str) -> ProposalBullet | None:
@@ -142,6 +152,8 @@ def parse_bullet(line: str) -> ProposalBullet | None:
         source=(match.group(4) or "").strip(),
         target=(match.group(2) or "").strip(),
         request=(match.group(5) or "").strip(),
+        decider=(match.group(6).lower() if match.group(6) else None),
+        decide_reason=(match.group(7) or "").strip(),
     )
 
 

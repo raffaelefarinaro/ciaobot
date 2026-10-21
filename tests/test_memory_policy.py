@@ -345,7 +345,7 @@ def test_the_care_schedule_no_longer_instructs_unattended_promotion_or_settlemen
     assert "Route an entry at x3 or more" in prompt
     assert "An x3 is a priority order, not permission to edit" in prompt
     assert "You never edit a skill or this workspace's guide body" in prompt
-    assert "you never settle a proposal" in prompt
+    assert "you never settle a skill proposal or a guide-body proposal" in prompt
     assert "ciao skill-proposal-add NAME --input-file FILE" in prompt
     assert "ciao skill-draft-add --input-file FILE" in prompt
     assert "ciao skill-drafts" in prompt

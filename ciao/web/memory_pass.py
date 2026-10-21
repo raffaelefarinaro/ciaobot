@@ -91,7 +91,9 @@ MEMORY_PASS_PROMPT = (
     "question for the owner instead of inventing a type. Facts from turns "
     "marked as automated (unattended) are not the user's and must not be "
     "recorded. Do not do anything outside memory and the vault: no "
-    "messages, emails, commits, pushes or external calls. Finish with a short "
+    "messages, emails, commits, pushes or external calls. "
+    "Every item you queue with `ciao memory-proposal-add` (repository facts included) must carry `--decide nightly|you` and `--decide-reason-file FILE` (one line). Use `nightly` when more context would settle it: other chats, existing notes, a duplicate check. Use `you` only for a judgement about the operator's identity or preferences. "
+    "Finish with a short "
     "list of what you changed."
 )
 

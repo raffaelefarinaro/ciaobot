@@ -152,7 +152,8 @@ evals cannot name.
 The proposals queue is reviewed and dismissed through the PWA, with one
 deliberate CLI exception the nightly curation agent drives because one shell
 command beats a synchronous request per row: `ciao memory-proposal-add`,
-`ciao memory-proposals`, and `ciao memory-proposal-dismiss --text-file <file>`.
+`ciao memory-proposals`, `ciao memory-proposal-dismiss --text-file <file>`, and
+`ciao memory-proposal-escalate --text-file <file> --reason-file <file>`.
 
 The skill-proposal queue has the same pair, for the same reason, and files
 rather than dismisses are the interesting half: `ciao skill-proposal-add NAME

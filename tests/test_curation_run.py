@@ -2880,3 +2880,45 @@ def test_the_care_prompt_proposes_observations_between_sections_4_and_5() -> Non
     assert "references/curation-pass-4b-observations.md" in prompt
     for command in ("ciao observation-propose", "ciao observation-merge", "ciao observation-prune"):
         assert command in observations
+
+
+# ── decider ────────────────────────────────────────────────────────────────
+
+
+def _worklist_for_queue(tmp_path: Path, queue_text: str) -> "cr.Worklist":
+    vault = _vault(tmp_path)
+    guide = _guide(tmp_path)
+    _fresh_log(vault, last_full_pass=date(2026, 9, 18).isoformat())
+    (vault / cr.PROPOSALS_RELATIVE).write_text(
+        "# Memory proposals\n\n" + queue_text, encoding="utf-8", newline=""
+    )
+    return cr.build_worklist(
+        vault_root=vault,
+        workspace=vault.name,
+        guide_path=guide,
+        category_registry=_categories(vault),
+        workspace_dir=tmp_path,
+        today=date(2026, 9, 19),
+    )
+
+
+def test_decide_you_rows_are_not_nightly_work(tmp_path: Path) -> None:
+    """An escalated row waits for the operator; a nightly or undecided one is work."""
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    escalated = _worklist_for_queue(tmp_path / "a", "- [people Mo] x  _(decide: you; r)_\n")
+    assert escalated.empty
+    nightly = _worklist_for_queue(tmp_path / "b", "- [people Mo] x  _(decide: nightly; r)_\n")
+    assert not nightly.empty
+    region = _worklist_for_queue(tmp_path / "c", "- [memory] x  _(decide: nightly; r)_\n")
+    assert region.empty
+
+
+def test_item_key_ignores_the_decider() -> None:
+    """The worklist key must not hash the decider, or resume of a run breaks."""
+    from ciao.proposal_kinds import parse_bullet
+
+    plain = parse_bullet("- [people Mo] x  _(from: s)_")
+    tagged = parse_bullet("- [people Mo] x  _(from: s)_  _(decide: you; r)_")
+    assert plain is not None and tagged is not None
+    assert cr._proposal_subject(plain, 0) == cr._proposal_subject(tagged, 0)
