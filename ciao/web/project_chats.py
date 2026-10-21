@@ -3161,8 +3161,31 @@ class ProjectChatManager:
         except OSError as exc:
             # Roll the staged link cleanup back, so the vault is exactly as it
             # was: the folder is still there, and so are the links into it.
+            #
+            # A note the removal already took is left alone: writing it back
+            # would put a note the user deleted on disk again, linking to a
+            # note that may be gone with it. Every restore is best-effort, so
+            # one unwritable note does not strand the notes after it: the
+            # failures are collected and named in the error instead of
+            # escaping as an OSError the delete route cannot answer.
+            unrestored: list[str] = []
             for path, text in undo.items():
-                Path(path).write_text(text, encoding="utf-8", newline="")
+                note_path = Path(path)
+                if not note_path.exists():
+                    continue
+                try:
+                    # Read it back first: a note that cannot be read is one
+                    # we cannot restore either, and the failure belongs to
+                    # this note instead of to the next one.
+                    note_path.read_text(encoding="utf-8")
+                    note_path.write_text(text, encoding="utf-8", newline="")
+                except OSError as restore_exc:
+                    unrestored.append(f"{path} ({restore_exc})")
+            if unrestored:
+                raise ValueError(
+                    f"delete failed: {exc}; could not restore "
+                    f"{len(unrestored)} note(s): {', '.join(unrestored)}"
+                ) from exc
             raise ValueError(f"delete failed: {exc}") from exc
 
         report["vault_entry_removed"] = True

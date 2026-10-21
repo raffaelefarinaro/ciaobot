@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from starlette.requests import Request
 
 from ciao.config import CiaoConfig
 from ciao.schedules import ScheduleStore
@@ -339,6 +340,171 @@ def test_delete_project_with_delete_vault_restores_links_when_rmtree_fails(
     assert "projects/active/Stuck/Stuck" in ref.read_text(encoding="utf-8")
     assert "related:" in ref.read_text(encoding="utf-8")
     assert "[Stuck](../projects/active/Stuck/Stuck.md)" in ref.read_text(encoding="utf-8")
+
+
+def _vault_delete_setup(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
+    """A project folder with two notes and two backlink notes outside it.
+
+    Returns ``(folder, ref, other, ref_text, other_text)``: the project
+    folder, the two notes that link into it, and their original texts.
+    """
+    vault = tmp_path / "memory-vault" / "personal"
+    folder = vault / "projects" / "active" / "Stuck"
+    folder.mkdir(parents=True)
+    (folder / "Stuck.md").write_text(
+        "---\nname: Stuck\nstatus: active\n---\n# Stuck\n",
+        encoding="utf-8",
+    )
+    (folder / "Detail.md").write_text(
+        "---\nname: Detail\ntype: note\n---\n# Detail\n",
+        encoding="utf-8",
+    )
+    notes = vault / "Notes"
+    notes.mkdir(parents=True)
+    ref = notes / "Ref.md"
+    ref_text = (
+        "---\n"
+        "name: Ref\n"
+        "type: note\n"
+        "related:\n"
+        "  - projects/active/Stuck/Detail\n"
+        "---\n"
+        "# Ref\n\n"
+        "See [Detail](../projects/active/Stuck/Detail.md).\n"
+    )
+    ref.write_text(ref_text, encoding="utf-8")
+    other = notes / "Other.md"
+    other_text = (
+        "---\n"
+        "name: Other\n"
+        "type: note\n"
+        "related:\n"
+        "  - projects/active/Stuck/Detail\n"
+        "---\n"
+        "# Other\n\n"
+        "See [Detail](../projects/active/Stuck/Detail.md).\n"
+    )
+    other.write_text(other_text, encoding="utf-8")
+    return folder, ref, other, ref_text, other_text
+
+
+def _delete_request(pcm: ProjectChatManager, project_id: str) -> Request:
+    """A DELETE for the project route, with the vault delete asked for."""
+    app = SimpleNamespace(state=SimpleNamespace(project_chat_manager=pcm))
+    return Request({
+        "type": "http",
+        "method": "DELETE",
+        "path": f"/api/projects/{project_id}",
+        "query_string": b"delete_vault=1",
+        "headers": [],
+        "path_params": {"project_id": project_id},
+        "app": app,
+    })
+
+
+async def test_partial_vault_delete_restores_only_notes_that_still_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial delete puts back the notes that are still on disk, and only those.
+
+    The link cleanup is staged and rolled back when the removal fails. A
+    note the removal already took is left alone: writing it back would put
+    a note the user deleted on disk again, with a link to a note that went
+    with it.
+    """
+    from ciao.web.routes_api import project_detail
+
+    folder, ref, other, _ref_text, other_text = _vault_delete_setup(tmp_path)
+
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()  # triggers auto-discovery
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "Stuck")
+
+    def _partial_rmtree(*_args: object, **_kwargs: object) -> None:
+        # A removal that took one of the notes with it and then failed.
+        if ref.exists():
+            ref.unlink()
+        raise OSError("permission denied")
+
+    monkeypatch.setattr("ciao.web.project_chats.shutil.rmtree", _partial_rmtree)
+
+    with pytest.raises(ValueError, match="delete failed"):
+        pcm.delete_project(proj.project_id, delete_vault=True)
+
+    # The note the removal had already taken is not put back.
+    assert not ref.exists()
+    # The note that is still on disk is back to its original text.
+    assert other.read_text(encoding="utf-8") == other_text
+    # And nothing points at the note that is gone.
+    for note in (folder / "Stuck.md", folder / "Detail.md", other):
+        assert "Ref.md" not in note.read_text(encoding="utf-8")
+    # The folder is still there, and so is the project row: the delete can
+    # be retried.
+    assert (folder / "Stuck.md").exists()
+    assert (folder / "Detail.md").exists()
+    assert proj.project_id in pcm._projects
+
+    # The route answers the failed delete with a 4xx, not a 500.
+    try:
+        response = await project_detail(_delete_request(pcm, proj.project_id))
+    except Exception as exc:  # a 500-class error must not escape the route
+        pytest.fail(f"the delete route let {type(exc).__name__} escape: {exc}")
+    assert 400 <= response.status_code < 500
+    assert "delete failed" in json.loads(response.body)["error"]
+
+
+async def test_vault_delete_rollback_write_failure_is_a_value_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rollback that cannot write one note still restores the others.
+
+    The write failure used to escape as an OSError, which the delete route
+    does not catch: the request answered 500 and the notes after the
+    failing one were never restored. Every restore is best-effort now, and
+    the error names the note that could not be put back.
+    """
+    from ciao.web.routes_api import project_detail
+
+    _folder, ref, other, _ref_text, other_text = _vault_delete_setup(tmp_path)
+
+    pcm = _make_manager(tmp_path)
+    pcm.list_projects()  # triggers auto-discovery
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "Stuck")
+
+    def _denied(*_args: object, **_kwargs: object) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr("ciao.web.project_chats.shutil.rmtree", _denied)
+
+    real_write_text = Path.write_text
+    unwritable = ref.resolve()
+
+    def _write_text(self: Path, data: str, *args: object, **kwargs: object) -> int:
+        if self.resolve() == unwritable:
+            raise OSError("permission denied")
+        return real_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _write_text)
+
+    with pytest.raises(ValueError) as excinfo:
+        pcm.delete_project(proj.project_id, delete_vault=True)
+
+    message = str(excinfo.value)
+    assert "delete failed" in message
+    assert "could not restore 1 note(s)" in message
+    assert str(unwritable) in message
+    # The other note was still restored.
+    assert other.read_text(encoding="utf-8") == other_text
+    # The one that could not be written back keeps its dissolved links.
+    assert "projects/active/Stuck/Detail" not in ref.read_text(encoding="utf-8")
+
+    # The route answers the failed delete with a 4xx, not a 500.
+    try:
+        response = await project_detail(_delete_request(pcm, proj.project_id))
+    except Exception as exc:  # a 500-class error must not escape the route
+        pytest.fail(f"the delete route let {type(exc).__name__} escape: {exc}")
+    assert 400 <= response.status_code < 500
+    assert "delete failed" in json.loads(response.body)["error"]
 
 
 def test_delete_project_with_delete_vault_refuses_symlink_escape(tmp_path: Path) -> None:
