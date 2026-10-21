@@ -100,6 +100,8 @@ function chat(workspace, n, projectId, title, extra = {}) {
  * can never reach the "Continue this chat" button — the browser suite could
  * not exercise it at all (#1710). The real chat ids start with `chat-`; the
  * fixture's are `<workspace>-chat-<n>`, so the folder carries that prefix.
+ * The folder is therefore not the row's `chat_id`: a spec must not read the
+ * button's target as the archived chat it listed.
  */
 function transcriptPath(chatId, stem = '2026-01-01T09-00-00') {
   return `memory-vault/Logs/Chats/chat-${chatId}/claude/${stem}-${chatId}.md`

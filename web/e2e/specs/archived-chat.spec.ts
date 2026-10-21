@@ -91,6 +91,13 @@ test.describe('archived chat', () => {
    * the transcript opens in the tile and the file viewer — with its
    * "Continue this chat" — never opens at all. jsdom has no split view and
    * no `.chat-split-side`, so the regression is only observable here.
+   *
+   * What this asserts is the list and the surface that opens it. The
+   * fixture's chat ids predate the engine's `chat-<8hex>` shape, and the
+   * transcript folder carries the `chat-` prefix so the viewer offers
+   * "Continue this chat" at all — which means the button names a chat the
+   * fixture has no row for. So the continue round-trip itself is out of
+   * reach here, and is not what this spec claims.
    */
   test('the project archive list opens its transcript in the viewer, not the side panel', async ({ page }) => {
     await isolate(page, `project-archive-${test.info().workerIndex}`)
