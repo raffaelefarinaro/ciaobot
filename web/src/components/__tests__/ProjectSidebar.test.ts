@@ -20,7 +20,8 @@ const chatId = 'chat-1234-abcd'
 function delegatedTask(overrides: Partial<Task> = {}): Task {
   return {
     id: 'task-1', title: 'Ship it', status: 'in_review', project_id: '', due: '',
-    assignee: 'agent', chat_id: '', attempt_id: 'attempt-1', created_at: '', updated_at: '',
+    assignee: 'agent', chat_id: '', attempt_id: 'attempt-1', linked_chats: [],
+    created_at: '', updated_at: '',
     revision: 'r1', relative_path: 'tasks/ship-it.md', attempt_state: 'ready_for_review',
     attempt_outcome: 'done', attempt_summary: '', attempt_detail: '', live_attempt_id: 'attempt-1',
     ...overrides,
@@ -167,7 +168,53 @@ describe('ProjectSidebar chat actions', () => {
     // The row's accessible name comes from its content, so it says "task" too.
     expect(delegated.text()).toContain('task')
     expect(plain.find('.chat-task-tag').exists()).toBe(false)
-    expect(delegated.attributes('title')).toBe('Copy me\nDrag to move to another project')
+    expect(delegated.attributes('title'))
+      .toBe('Copy me\nDrag to move to another project\nDelegated board task')
+    wrapper.unmount()
+  })
+
+  it('names the delegated relation in the task badge\'s tooltip', async () => {
+    const store = useProjectStore()
+    store.chats[0].helper = {
+      kind: 'task_delegation', task_id: 'task-1', task_revision: 'r1', attempt_id: 'attempt-1',
+    }
+    const wrapper = await mountSidebar()
+
+    const tag = wrapper.get('.chat-item .chat-task-tag')
+    expect(tag.text()).toBe('task')
+    expect(tag.attributes('title')).toBe('Delegated board task')
+    // The tag hides while the row is hovered or focused, so the qualifier is
+    // also text: in the row's title for a pointer, in a hidden line for AT.
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('Delegated board task')
+    expect(wrapper.get('.chat-item .sr-only').text()).toBe(', Delegated board task')
+    wrapper.unmount()
+  })
+
+  it('tags a chat linked to a board task and says it is only linked', async () => {
+    const signals = useTaskSignalsStore()
+    signals.tasks = [delegatedTask({ id: 'linked-task', chat_id: '', linked_chats: [chatId] })]
+    signals.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar()
+
+    const tag = wrapper.get('.chat-item .chat-task-tag')
+    // The same squared word as a delegated chat, so the row reads as one.
+    expect(tag.text()).toBe('task')
+    // The relation is what says delegation apart: a link is not an attempt.
+    expect(tag.attributes('title')).toBe('Linked to a board task')
+    expect(wrapper.get('.chat-item').attributes('title')).toContain('Linked to a board task')
+    expect(wrapper.get('.chat-item .sr-only').text()).toBe(', Linked to a board task')
+    wrapper.unmount()
+  })
+
+  it('leaves a chat with no task relation untagged', async () => {
+    const signals = useTaskSignalsStore()
+    signals.tasks = [delegatedTask({
+      id: 'other-task', chat_id: 'other-chat', linked_chats: ['other-chat'],
+    })]
+    signals.loadedWorkspace = 'personal'
+    const wrapper = await mountSidebar()
+
+    expect(wrapper.find('.chat-task-tag').exists()).toBe(false)
     wrapper.unmount()
   })
 

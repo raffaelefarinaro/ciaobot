@@ -300,6 +300,57 @@ describe('chat markdown file links', () => {
   })
 })
 
+// Issue #1768: a message that names another conversation links to it, under
+// its human title. The link is the app's own: it opens in this tab, and the
+// raw id stays in the tooltip and in `data-chat-id`.
+describe('chat markdown chat references', () => {
+  const KNOWN = new Map([['chat-0123abcd', 'Budget review']])
+
+  function render(input: string): HTMLElement {
+    const el = document.createElement('div')
+    el.innerHTML = renderMarkdown(input, [], KNOWN)
+    return el
+  }
+
+  it('links a known reference to its title and keeps the raw id', () => {
+    const link = render('see chat-0123abcd for the numbers').querySelector('a.chat-link')!
+    expect(link.getAttribute('href')).toBe('/chat/chat-0123abcd')
+    expect(link.getAttribute('title')).toBe('chat-0123abcd')
+    expect(link.getAttribute('data-chat-id')).toBe('chat-0123abcd')
+    expect(link.textContent).toBe('Budget review')
+  })
+
+  it('keeps the reference in the app instead of opening a new tab', () => {
+    const html = renderMarkdown('see chat-0123abcd', [], KNOWN)
+    expect(html).not.toContain('target="_blank"')
+  })
+
+  it('leaves an unknown id plain', () => {
+    const html = renderMarkdown('see chat-ffffffff', [], KNOWN)
+    expect(html).not.toContain('chat-link')
+    expect(html).toContain('chat-ffffffff')
+  })
+
+  it('links a reference in a user bubble too', () => {
+    const el = document.createElement('div')
+    el.innerHTML = renderUserMarkdown('see chat-0123abcd', [], KNOWN)
+    expect(el.querySelector('a.chat-link')?.textContent).toBe('Budget review')
+  })
+
+  it('leaves the file-link pipeline alone', () => {
+    const html = renderMarkdown('see [notes](notes.md) and chat-0123abcd', [], KNOWN)
+    expect(html).toContain('data-file-path="notes.md"')
+    expect(html).toContain('data-chat-id="chat-0123abcd"')
+  })
+
+  it('never rewrites an existing anchor', () => {
+    const id = '0123456789abcdef0123456789abcdef'
+    const html = renderMarkdown(`[chat-0123abcd](/tasks/${id})`, [], KNOWN)
+    expect(html).toContain(`href="/tasks/${id}"`)
+    expect(html).not.toContain('chat-link')
+  })
+})
+
 describe('chat code blocks and long links', () => {
   it('gives a fenced block a header with its language and the copy button', () => {
     const html = renderMarkdown('```json\n{"a": 1}\n```')
