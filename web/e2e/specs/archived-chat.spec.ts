@@ -77,4 +77,48 @@ test.describe('archived chat', () => {
       .poll(async () => (await dialled(page)).some(url => url.includes(`/ws/chat/${LIVE_CHAT}`)))
       .toBe(true)
   })
+
+  /**
+   * The project's own archive list, and the file viewer it opens (#1710).
+   *
+   * A browser test because the failure is a layout one: the fixture had no
+   * route for `GET /api/projects/<id>/chats?archived=1`, so the list came back
+   * as `{}`, ProjectView read `items` off a payload that had none, and the
+   * whole project pane went blank instead of listing the archived chats.
+   *
+   * It is also the only place #1700 shows up for real. That fix kept the
+   * pinned side tile beside a chat; a project route must not become one, or
+   * the transcript opens in the tile and the file viewer — with its
+   * "Continue this chat" — never opens at all. jsdom has no split view and
+   * no `.chat-split-side`, so the regression is only observable here.
+   *
+   * What this asserts is the list and the surface that opens it. The
+   * fixture's chat ids predate the engine's `chat-<8hex>` shape, and the
+   * transcript folder carries the `chat-` prefix so the viewer offers
+   * "Continue this chat" at all — which means the button names a chat the
+   * fixture has no row for. So the continue round-trip itself is out of
+   * reach here, and is not what this spec claims.
+   */
+  test('the project archive list opens its transcript in the viewer, not the side panel', async ({ page }) => {
+    await isolate(page, `project-archive-${test.info().workerIndex}`)
+    // Desktop width: the split view exists only there, so a transcript that
+    // docked instead of opening would be visible.
+    await page.setViewportSize({ width: 1280, height: 900 })
+
+    await boot(page, '/project/alpha-general', '.archive-toggle')
+    await page.locator('.archive-toggle').click()
+
+    const row = page.locator('.chat-row.archived', { hasText: 'alpha archived conversation' })
+    await expect(row).toBeVisible()
+    await row.click()
+
+    const viewer = page.locator('.fv-modal')
+    await expect(viewer).toBeVisible()
+    // The action that makes an archived transcript worth opening, and the
+    // reason the file viewer is the right surface for it.
+    await expect(viewer.locator('.fv-continue-btn')).toHaveText('Continue this chat')
+    // The side tile is the chat's own pinned pane (#1700). It has no business
+    // on a project route, where it would have taken the transcript.
+    await expect(page.locator('.chat-split-side')).toHaveCount(0)
+  })
 })
