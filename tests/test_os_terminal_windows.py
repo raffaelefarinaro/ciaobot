@@ -1997,8 +1997,13 @@ def _emit(code: str) -> bytes:
     ``-join`` over an array of characters works in Windows PowerShell 5.1 as
     well as in PowerShell 7, and it needs no pipeline and no script block:
     a ``-replace`` with ``$1`` is not a per-match capture in any of them.
+
+    The line ends with a bare carriage return, never ``\\r\\n``: PowerShell
+    reads CR as Enter, while LF is "insert a newline" in the line editor.
+    A stray LF therefore opens a ``>>`` continuation line, and every command
+    typed afterwards becomes part of that block instead of running.
     """
-    return (f"$m = 'CIAO' + (-join @({code})) + '-END'; Write-Output $m\r\n").encode(
+    return (f"$m = 'CIAO' + (-join @({code})) + '-END'; Write-Output $m\r").encode(
         "utf-8"
     )
 
@@ -2006,7 +2011,7 @@ def _emit(code: str) -> bytes:
 def _emit_unicode(codes: tuple[int, ...]) -> bytes:
     """The PowerShell that writes the given code points as one string."""
     listed = ",".join(f"[char]{code}" for code in codes)
-    return (f"$m = (-join @({listed})); Write-Output $m\r\n").encode("utf-8")
+    return (f"$m = (-join @({listed})); Write-Output $m\r").encode("utf-8")
 
 
 def _read_until(
@@ -2087,7 +2092,7 @@ def test_a_real_terminal_reports_the_window_size_after_a_resize(
             (
                 "$w = $Host.UI.RawUI.WindowSize; $m = 'CIAO' + "
                 f"(-join @({size_code})) + "
-                "'-END ' + $w.Width + 'x' + $w.Height; Write-Output $m\r\n"
+                "'-END ' + $w.Width + 'x' + $w.Height; Write-Output $m\r"
             ).encode("utf-8")
         )
         produced = _read_until(terminal, size.encode("utf-8"))
@@ -2115,7 +2120,7 @@ def test_a_real_ctrl_c_interrupts_the_foreground_command_and_not_the_shell(
     try:
         terminal.write(_emit(ready_code))
         _read_until(terminal, ready.encode("utf-8"))
-        terminal.write(b"Start-Sleep -Seconds 30\r\n")
+        terminal.write(b"Start-Sleep -Seconds 30\r")
         time.sleep(1.0)
         terminal.write(b"\x03")
         terminal.write(_emit(coded))
@@ -2173,7 +2178,7 @@ def test_a_real_close_kills_the_background_child(tmp_path: Path) -> None:
             (
                 "$p = Start-Process -PassThru powershell -ArgumentList "
                 "'-NoProfile','-Command','Start-Sleep 300'; "
-                f"Set-Content -Path '{marker}' -Value $p.Id\r\n"
+                f"Set-Content -Path '{marker}' -Value $p.Id\r"
             ).encode("utf-8")
         )
         deadline = time.monotonic() + 30
@@ -2198,6 +2203,13 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
     One warm-up cycle first: the first terminal opens handles that are
     cached for the rest of the process (the console host's, the module's
     thread handle), and counting them as a leak would be wrong.
+
+    The count is read once it has settled, not the instant the last close
+    returns: from Windows 11 24H2 on ``ClosePseudoConsole`` returns before
+    the console host has finished disconnecting, so a sample taken
+    immediately afterwards still counts handles that are about to go. The
+    bound itself is unchanged — a terminal that really leaks keeps the
+    count high and still fails.
     """
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.GetCurrentProcess.restype = ctypes.c_void_p
@@ -2215,6 +2227,18 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
             raise AssertionError("GetProcessHandleCount failed")
         return int(count.value)
 
+    def settled_handle_count(timeout: float = 10.0) -> int:
+        """The count once two consecutive samples agree, or the deadline."""
+        previous = handle_count()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            current = handle_count()
+            if current == previous:
+                return current
+            previous = current
+        return previous
+
     warm_coded, warm_expected = _marker("WARM")
     warm = tw.spawn_terminal(cwd=tmp_path)
     try:
@@ -2223,7 +2247,7 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
     finally:
         warm.close()
 
-    before = handle_count()
+    before = settled_handle_count()
     cycle_coded, cycle_expected = _marker("CYCLE")
     for _ in range(3):
         terminal = tw.spawn_terminal(cwd=tmp_path)
@@ -2232,7 +2256,7 @@ def test_real_spawn_cycles_do_not_leak_handles(tmp_path: Path) -> None:
             _read_until(terminal, cycle_expected.encode("utf-8"))
         finally:
             terminal.close()
-    after = handle_count()
+    after = settled_handle_count()
 
     # Three cycles leak six handles if every terminal keeps one; a bound of
     # two leaves room for the one-off handles the console host takes and

@@ -360,7 +360,11 @@ while the server is running, because the live schedule store may be writing it.
   whether a pseudoconsole really carries the shell's output, the interrupt
   and the resize: the real tests wait for text the shell has to compute from
   code points, so a terminal that only echoed the command back cannot pass
-  them.
+  them. Their input lines end with a bare `\r`: PowerShell reads CR as Enter
+  while LF means "insert a newline" in its line editor, so a `\r\n` leaves a
+  `>>` continuation line open and the next command joins that block instead
+  of running — which is exactly what made the Ctrl-C case look like a dead
+  terminal on the first native run.
   The `discover-agents` workflow (`.github/workflows/discover-agents.yml`, manual
   plus weekly, never on a PR) records where Claude Code and OpenCode keep their
   files (#696, D-04). On `macos-latest` and `windows-latest` it installs both
