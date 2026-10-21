@@ -313,6 +313,7 @@
       </template>
     </div>
     <FileViewerModal v-if="fileViewerMounted" :opener="fileViewerOpener" />
+    <ItemPeekHost v-if="itemPeekMounted" />
   </div>
 </template>
 
@@ -323,6 +324,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { homeNewChatProjectId, openNewChatPicker, pendingNewChat } from '../lib/newChat'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { useItemPeekStore } from '../stores/itemPeek'
 import { useTaskStore } from '../stores/tasks'
 import { useMemoryMapStore } from '../stores/memoryMap'
 import ProjectSidebar from './ProjectSidebar.vue'
@@ -360,6 +362,9 @@ const ChatPanel = defineAsyncComponent({
 })
 const PinnedFilePanel = defineAsyncComponent(loadPinnedFilePanel)
 const FileViewerModal = defineAsyncComponent(loadFileViewerModal)
+// Lazy like the file viewer, and not in lib/chatComponents: that module's loaders
+// are the chat chunk's named entry points.
+const ItemPeekHost = defineAsyncComponent(() => import('./ItemPeekHost.vue'))
 import PaneHeader from './PaneHeader.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import HomeIntake from './HomeIntake.vue'
@@ -385,6 +390,13 @@ watch(() => fileViewer.isOpen, (open, wasOpen) => {
     fileViewerOpener.value = document.activeElement
   }
 }, { flush: 'sync' })
+// The item peek (a task opened from a link) is mounted once first opened, like
+// the file viewer, and its open state gates the chat's own keys the same way.
+const itemPeek = useItemPeekStore()
+const itemPeekMounted = ref(itemPeek.isOpen)
+watch(() => itemPeek.isOpen, (open) => {
+  if (open) itemPeekMounted.value = true
+})
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
 // reach composer-owned actions (archive).
@@ -718,7 +730,8 @@ const viewShortcutsActive = computed(() =>
   viewMode.value !== 'settings'
   && !pendingConfirm.value
   && !pendingPrompt.value
-  && !fileViewer.isOpen,
+  && !fileViewer.isOpen
+  && !itemPeek.isOpen,
 )
 // The chat-only chords are inert on the full-screen views that own the keyboard
 // themselves. `1`–`9` keep switching workspaces from all of them: they are gated
@@ -1087,7 +1100,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   const alt = e.altKey
   const isSectionArrow = alt && !mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')
   if (isSectionArrow) {
-    if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    if (e.repeat || isTypingTarget(e.target) || pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen || itemPeek.isOpen) return
     // Order matches the sidebar's own destination order (Chats, Automations,
     // Tasks, Memory, Settings), so Option+Arrow walks the sections the way the
     // nav lists them. `/tasks` needs its own index: it has no `viewMode` fall
@@ -1178,7 +1191,7 @@ function onUnreservedKeydown(e: KeyboardEvent) {
   // bell), so this never steals the key from them.
   if (matchesShortcut(e, 'closeChat')) {
     // The confirm dialog and the file viewer own Esc while they are up.
-    if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen) return
+    if (pendingConfirm.value || pendingPrompt.value || fileViewer.isOpen || itemPeek.isOpen) return
     // Any open Reka layer (dialog, menu, popover) owns Esc: Reka marks each one
     // `data-dismissable-layer` and closes it from its own window listener,
     // which is registered after this one and so runs after it. Without this,

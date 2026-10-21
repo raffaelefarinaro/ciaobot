@@ -7,6 +7,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick, ref } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useFileViewerStore } from '../../stores/fileViewer'
+import { useItemPeekStore } from '../../stores/itemPeek'
 import { useTaskStore } from '../../stores/tasks'
 import { useHousekeepingStore } from '../../stores/housekeeping'
 import { useFontScale } from '../../composables/useFontScale'
@@ -2269,6 +2270,24 @@ describe('ChatLayout home arrow navigation', () => {
 
     expect(store.activeChatId).toBeNull()
     textarea.remove()
+    wrapper.unmount()
+  })
+
+  it('Esc with the task peek open leaves the chat open', async () => {
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    await nextTick()
+    const peek = useItemPeekStore()
+    peek.target = { kind: 'task', id: 'ship', workspace: 'personal' }
+    await flushPromises()
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+
+    expect(store.activeChatId).toBe('chat-1')
+    expect(peek.isOpen).toBe(true)
+    peek.close()
     wrapper.unmount()
   })
 
