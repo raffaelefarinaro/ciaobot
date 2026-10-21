@@ -74,9 +74,12 @@ if sys.platform == "win32":
     _CREATE_SUSPENDED = 0x00000004
     _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
     _CREATE_UNICODE_ENVIRONMENT = 0x00000400
-    # CREATE_NEW_PROCESS_GROUP (0x200) is deliberately not used: a terminal's
-    # Ctrl+C is an input byte, not a console control event, so the child needs
-    # no process group of its own.
+    # CREATE_NEW_PROCESS_GROUP (0x200) is deliberately not used. The console
+    # host turns the 0x03 byte into a Ctrl+C control event, and the operating
+    # system delivers that event to the processes of the console host's
+    # process group: a child that sits in a group of its own is guaranteed
+    # never to receive it. The shell therefore shares the group of the
+    # pseudoconsole, which is the group the event is delivered to.
 
     # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE (processthreadsapi.h).
     _PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
