@@ -59,7 +59,8 @@ web/
     components/           one Vue SFC per feature pane (including HomeIntake, HomeReviewSummary,
                            CommandPaletteModal, FileViewerModal, and WebhookTriggers)
     components/*.css      stylesheets two panes share, each pulled in with
-                           `<style scoped src>` (overviewSections.css, chatTrace.css)
+                           `<style scoped src>` (overviewSections.css, chatTrace.css,
+                           titleShimmer.css)
     components/settings/  panels split out of SettingsView.vue (the host's start-at-sign-in row is
                            SettingsEngineLogin.vue; SettingsMemoryHandover.vue is the Memory handover card:
                            agreement rate and the operator-only per-workspace handover choice), plus the

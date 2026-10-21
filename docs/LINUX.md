@@ -144,6 +144,12 @@ the service account cannot enter. Settings → Main workspace shows this command
 instead of a Move button, since the service account cannot stop its own unit.
 To undo, move it back.
 
+Bare-shell discovery (`ciao` run outside the service) and the Memory handover
+gate read the workspace from `/etc/systemd/system/ciaobot.service`. They trust
+that file only while it is owned by root and not group- or world-writable, and
+they never consult the caller's environment. A workspace the current user
+cannot read is skipped.
+
 ## HTTPS access
 
 Use Tailscale Serve for private HTTPS access, or point a domain at the VPS and

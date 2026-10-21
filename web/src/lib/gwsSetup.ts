@@ -10,6 +10,14 @@ export interface GwsSetupProgress {
   /** True when every profile is signed in, not expired, and linked. */
   complete: boolean
 }
+export interface GwsSetupGroups {
+  /** The steps already finished, in setup order. */
+  done: GwsSetupStep[]
+  /** The one step to do next; null when no step is current. */
+  current: GwsSetupStep | null
+  /** The steps that are neither finished nor the current one, in setup order. */
+  pending: GwsSetupStep[]
+}
 
 const STEP_ORDER: GwsSetupStepId[] = ['install', 'account', 'client', 'signin', 'link']
 
@@ -47,4 +55,25 @@ export function gwsSetupProgress(s: GwsIntegrationSettings): GwsSetupProgress {
   })
 
   return { focus, steps, complete }
+}
+
+/**
+ * Groups the derived steps into what is finished, the one step to do next and
+ * the steps that follow it. The setup order is preserved in every group; the
+ * derivation itself is untouched.
+ */
+export function gwsSetupGroups(progress: GwsSetupProgress): GwsSetupGroups {
+  const done: GwsSetupStep[] = []
+  const pending: GwsSetupStep[] = []
+  let current: GwsSetupStep | null = null
+  for (const step of progress.steps) {
+    if (step.state === 'done') {
+      done.push(step)
+    } else if (step.state === 'current' && !current) {
+      current = step
+    } else {
+      pending.push(step)
+    }
+  }
+  return { done, current, pending }
 }
