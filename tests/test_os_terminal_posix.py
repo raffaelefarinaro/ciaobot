@@ -2,9 +2,9 @@
 
 Everything here is a real pty with a real shell behind it: the tests spawn the
 adapter, drive a real ``$SHELL``, and read what the terminal actually says.
-Nothing is mocked except the one seam that must not signal a foreign process
-(the session-membership check), which is patched to answer with a fixed table
-and never reaches a real ``kill``.
+The only things patched are the seams that must not reach a real process (the
+session-membership check, the signal, the process listing) and the two seams
+the races need (a pause inside an I/O call, the tree constructor).
 
 The tests run on POSIX only. Windows has no equivalent adapter yet (#1692 says
 so); the module still imports there, which the Windows import gate checks.
@@ -13,10 +13,13 @@ so); the module still imports there, which the Windows import gate checks.
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -122,6 +125,16 @@ def _open_fd_count() -> int:
     return len(os.listdir("/dev/fd"))
 
 
+def _wait_for_file(path: Path, seconds: float) -> None:
+    """Wait until the file exists and is not empty."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if path.exists() and path.read_text().strip():
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{path} never appeared")
+
+
 def test_real_controlling_terminal_and_initial_size(tmp_path: Path) -> None:
     """The shell owns a real tty, and the size the adapter asked for is the
     size the tty reports."""
@@ -178,13 +191,10 @@ def test_ctrl_c_interrupts_foreground_job_not_shell(tmp_path: Path) -> None:
     """0x03 goes to the foreground job through the line discipline; the shell
     survives it and answers the next command."""
     term = _spawn(tmp_path)
-    foreground_pid = tmp_path / "foreground.pid"
+    foreground_pid = tmp_path / f"foreground-{secrets.token_hex(6)}.pid"
     try:
         term.write(f"sh -c 'echo $$ > {foreground_pid}; exec sleep 300'\n".encode())
-        deadline = time.monotonic() + 15
-        while not foreground_pid.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert foreground_pid.exists(), "the foreground job never started"
+        _wait_for_file(foreground_pid, 15)
         pid = int(foreground_pid.read_text().strip())
         assert _running(pid)
 
@@ -203,18 +213,15 @@ def test_close_kills_foreground_background_and_stopped_job_groups(tmp_path: Path
     """Every job group the terminal owns ends with it: the running background
     job, the stopped job, and the foreground one."""
     term = _spawn(tmp_path)
-    background_pid = tmp_path / "background.pid"
-    stopped_pid = tmp_path / "stopped.pid"
+    run = secrets.token_hex(6)
+    background_pid = tmp_path / f"background-{run}.pid"
+    stopped_pid = tmp_path / f"stopped-{run}.pid"
     background = stopped = 0
     try:
         term.write(f"sh -c 'echo $$ > {background_pid}; exec sleep 300' &\n".encode())
         term.write(f"sh -c 'echo $$ > {stopped_pid}; exec sleep 300'\n".encode())
-        deadline = time.monotonic() + 15
-        while (
-            not background_pid.exists() or not stopped_pid.exists()
-        ) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert background_pid.exists() and stopped_pid.exists(), "the jobs never started"
+        _wait_for_file(background_pid, 15)
+        _wait_for_file(stopped_pid, 15)
         background = int(background_pid.read_text().strip())
         stopped = int(stopped_pid.read_text().strip())
         term.write(b"\x1a")  # suspend the foreground job
@@ -259,6 +266,280 @@ def test_close_reaps_leader_closes_fds_and_is_idempotent(tmp_path: Path) -> None
     assert _open_fd_count() == before
 
 
+def test_the_master_stays_open_until_an_in_flight_read_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call that is using the descriptor keeps it alive: the close waits for
+    it, so the number cannot be closed under a running read and handed to
+    something else."""
+    term = _spawn(tmp_path)
+    master = term._master
+    assert master is not None
+    inside = threading.Event()
+    release = threading.Event()
+    real_read = os.read
+
+    def pausing_read(fd: int, size: int) -> bytes:
+        # The pause happens while the call holds the lock, before the real
+        # syscall, so the descriptor is in use the whole time.
+        if fd == master:
+            inside.set()
+            release.wait(20)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(terminal_posix.os, "read", pausing_read)
+
+    reader = threading.Thread(target=lambda: term.read(65536))
+    reader.start()
+    assert inside.wait(10), "the read never reached the descriptor"
+
+    closer = threading.Thread(target=term.close)
+    closer.start()
+    time.sleep(0.5)
+
+    # The read holds the descriptor: the close cannot have taken it away.
+    os.fstat(master)
+    assert closer.is_alive(), "the close did not wait for the read"
+
+    release.set()
+    reader.join(20)
+    closer.join(20)
+    assert not reader.is_alive()
+    assert not closer.is_alive()
+    # Now the descriptor is gone.
+    with pytest.raises(OSError):
+        os.fstat(master)
+
+
+def test_io_after_close_refuses(tmp_path: Path) -> None:
+    """Once the terminal is closed, no call may use the descriptor again."""
+    term = _spawn(tmp_path)
+    term.close()
+    assert term.read(65536) == b""
+    with pytest.raises(OSError):
+        term.write(b"x")
+    with pytest.raises(OSError):
+        term.resize(80, 24)
+
+
+def test_a_second_close_waits_for_the_first_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second close does not report completion while the first cleanup is
+    still running."""
+    term = _spawn(tmp_path)
+    listing = threading.Event()
+    release = threading.Event()
+
+    def slow_listing() -> list[int]:
+        listing.set()
+        release.wait(20)
+        return []
+
+    monkeypatch.setattr(terminal_posix, "_list_process_ids", slow_listing)
+
+    first: list[object] = []
+
+    def first_close() -> None:
+        try:
+            term.close()
+            first.append("ok")
+        except Exception as exc:  # noqa: BLE001 - the outcome is what matters
+            first.append(exc)
+
+    thread = threading.Thread(target=first_close)
+    thread.start()
+    assert listing.wait(10), "the first close never started its cleanup"
+
+    second_done = threading.Event()
+
+    def second_close() -> None:
+        try:
+            term.close()
+        except Exception:  # noqa: BLE001 - the outcome is what matters
+            pass
+        second_done.set()
+
+    other = threading.Thread(target=second_close)
+    other.start()
+    time.sleep(0.5)
+    assert not second_done.is_set(), "the second close reported while the first was running"
+
+    release.set()
+    thread.join(20)
+    other.join(20)
+    assert second_done.is_set()
+    assert first == ["ok"]
+
+
+def test_a_failed_close_is_reported_again_and_never_silently_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cleanup that could not finish is a failure every time, not a success
+    on the second call."""
+    term = _spawn(tmp_path)
+    job_pid = tmp_path / f"job-{secrets.token_hex(6)}.pid"
+    term.write(f"sh -c 'echo $$ > {job_pid}; exec sleep 300' &\n".encode())
+    _wait_for_file(job_pid, 15)
+
+    def refuse(pgid: int, sig: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(terminal_posix, "_signal_group", refuse)
+    monkeypatch.setattr(terminal_posix, "_group_is_only_zombies", lambda pgid: False)
+
+    with pytest.raises(OSError):
+        term.close()
+    with pytest.raises(OSError):
+        term.close()
+
+
+def test_a_live_group_that_cannot_be_killed_is_reported_as_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EPERM on a group that still holds live members is a failure, not
+    proof that the job ended. No group outside the session is signalled."""
+    term = _spawn(tmp_path)
+    job_pid = tmp_path / f"job-{secrets.token_hex(6)}.pid"
+    term.write(f"sh -c 'echo $$ > {job_pid}; exec sleep 300' &\n".encode())
+    _wait_for_file(job_pid, 15)
+    job = int(job_pid.read_text().strip())
+    session_groups = set(
+        terminal_posix._owned_job_groups(term.pid, terminal_posix._list_process_ids())
+    )
+    assert os.getpgid(job) in session_groups
+
+    signalled: list[int] = []
+
+    def refuse(pgid: int, sig: int) -> None:
+        signalled.append(pgid)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(terminal_posix, "_signal_group", refuse)
+    monkeypatch.setattr(terminal_posix, "_group_is_only_zombies", lambda pgid: False)
+
+    with pytest.raises(OSError):
+        term.close()
+
+    # Only the terminal's own groups were even attempted.
+    assert set(signalled) <= session_groups
+    assert signalled, "no group was signalled at all"
+
+
+def test_a_group_that_holds_only_zombies_is_not_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exceptional macOS case: a group that answers EPERM but holds only
+    zombies is over, and the close still succeeds."""
+    term = _spawn(tmp_path)
+    job_pid = tmp_path / f"job-{secrets.token_hex(6)}.pid"
+    term.write(f"sh -c 'echo $$ > {job_pid}; exec sleep 300' &\n".encode())
+    _wait_for_file(job_pid, 15)
+
+    def refuse(pgid: int, sig: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(terminal_posix, "_signal_group", refuse)
+    monkeypatch.setattr(terminal_posix, "_group_is_only_zombies", lambda pgid: True)
+
+    term.close()
+    assert term.poll() is not None
+
+
+def _fake_ps_listing(lines: list[str], returncode: int = 0) -> Any:
+    """A ``subprocess.run`` stand-in that answers with a process listing."""
+
+    def run(cmd: list[str], **kwargs: Any) -> Any:
+        return subprocess.CompletedProcess(cmd, returncode, stdout="\n".join(lines))
+
+    return run
+
+
+def test_the_zombie_proof_needs_the_members_of_the_group_it_is_asked_about(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listing that does not mention the group proves nothing about it.
+
+    Other groups in the listing are not evidence about this one, and a group
+    that is simply not there has not been observed to be a zombie either.
+    """
+    monkeypatch.setattr(
+        terminal_posix.subprocess,
+        "run",
+        _fake_ps_listing(["  100 S", "  200 S", "  300 Z"]),
+    )
+    # The group is not in the listing at all: its absence is not proof.
+    assert terminal_posix._group_is_only_zombies(400) is False
+    # It is in the listing and it is a zombie.
+    assert terminal_posix._group_is_only_zombies(300) is True
+    # It is in the listing and it is alive.
+    assert terminal_posix._group_is_only_zombies(100) is False
+
+
+def test_the_zombie_proof_refuses_a_mixed_or_empty_or_broken_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One live member among the zombies is enough to refuse, and a listing
+    that failed or said nothing proves nothing."""
+    monkeypatch.setattr(
+        terminal_posix.subprocess,
+        "run",
+        _fake_ps_listing(["  100 Z", "  100 S"]),
+    )
+    assert terminal_posix._group_is_only_zombies(100) is False
+
+    monkeypatch.setattr(terminal_posix.subprocess, "run", _fake_ps_listing([]))
+    assert terminal_posix._group_is_only_zombies(100) is False
+
+    monkeypatch.setattr(
+        terminal_posix.subprocess, "run", _fake_ps_listing(["  100 Z"], returncode=1)
+    )
+    assert terminal_posix._group_is_only_zombies(100) is False
+
+    monkeypatch.setattr(
+        terminal_posix.subprocess, "run", _fake_ps_listing(["not a listing at all"])
+    )
+    assert terminal_posix._group_is_only_zombies(100) is False
+
+
+def test_a_shell_that_cannot_be_reaped_is_reported_as_a_failure() -> None:
+    """A shell that stays unreaped is reported, not claimed to have ended."""
+
+    class Unreapable:
+        """A child that never ends, not even after the kill."""
+
+        def wait(self, timeout: float | None = None) -> int:
+            raise subprocess.TimeoutExpired("sh", timeout)
+
+        def kill(self) -> None:
+            return None
+
+    assert terminal_posix._reap(Unreapable()) == ["the shell could not be reaped"]  # type: ignore[arg-type]
+
+
+def test_a_close_reports_a_shell_that_could_not_be_reaped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The close says so when the shell could not be reaped, and says it
+    again the next time."""
+    term = _spawn(tmp_path)
+
+    def failing_reap(process: subprocess.Popen[bytes]) -> list[str]:
+        try:
+            process.kill()
+            process.wait(timeout=20)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return ["the shell could not be reaped"]
+
+    monkeypatch.setattr(terminal_posix, "_reap", failing_reap)
+
+    with pytest.raises(OSError):
+        term.close()
+    with pytest.raises(OSError):
+        term.close()
+
+
 def test_close_reports_a_failed_enumeration_but_still_ends_the_leader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -277,6 +558,161 @@ def test_close_reports_a_failed_enumeration_but_still_ends_the_leader(
     assert term.poll() is not None
     with pytest.raises(ChildProcessError):
         os.waitpid(pid, os.WNOHANG)
+
+
+def test_a_failed_spawn_ends_the_jobs_the_child_already_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child that already exec'd the shell and started a job of its own is
+    undone by the same verified-session cleanup a normal close uses.
+
+    The job ignores SIGHUP, so closing the pty does not end it: only the
+    cleanup that reaches the whole session can.
+    """
+    before = _open_fd_count()
+    # pytest reuses its temporary directories, so the files the child writes
+    # are named per run: a stale pid from an earlier run would be read here.
+    run = secrets.token_hex(6)
+    job_pid = tmp_path / f"job-{run}.pid"
+    runner = tmp_path / f"runner-{run}.sh"
+    runner.write_text(
+        "#!/bin/sh\n"
+        "trap '' HUP\n"
+        f"echo $$ > {job_pid}\n"
+        "exec sleep 300\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    seen: dict[str, int] = {}
+
+    def failing_step(fd: int) -> None:
+        # The shell is on the pty already; make it start a job of its own,
+        # then let the setup fail.
+        os.write(fd, f"{runner} &\n".encode())
+        _wait_for_file(job_pid, 20)
+        seen["job"] = int(job_pid.read_text().strip())
+        seen["job_session"] = os.getsid(seen["job"])
+        seen["job_group"] = os.getpgid(seen["job"])
+        raise OSError("the terminal could not be finished")
+
+    monkeypatch.setattr(terminal_posix, "_set_nonblocking", failing_step)
+    with pytest.raises(OSError):
+        terminal_posix.spawn_terminal(cwd=tmp_path)
+
+    job = seen["job"]
+    # The job lives in the terminal's session, but in a group of its own: the
+    # leader's group alone would not have reached it.
+    assert seen["job_session"] != os.getsid(os.getpid()), "the job must be in the terminal's session"
+    assert seen["job_group"] != seen["job_session"], "the job must be in a group of its own"
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and _running(job):
+        time.sleep(0.1)
+    assert not _running(job), "the job the shell started survived the failed spawn"
+    assert _open_fd_count() == before
+
+
+def test_a_failed_spawn_with_a_broken_tree_constructor_still_ends_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tree is built inside the spawn transaction: when that fails, the
+    child and its session still go, and every descriptor is released."""
+    before = _open_fd_count()
+    run = secrets.token_hex(6)
+    job_pid = tmp_path / f"job-{run}.pid"
+    runner = tmp_path / f"runner-{run}.sh"
+    runner.write_text(
+        "#!/bin/sh\n"
+        "trap '' HUP\n"
+        f"echo $$ > {job_pid}\n"
+        "exec sleep 300\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    seen: dict[str, int] = {}
+    master: list[int] = []
+
+    class FailingTree:
+        """A tree that cannot be built, so the spawn has to undo the child."""
+
+        def __init__(self, pid: int, **kwargs: object) -> None:
+            # The child is already on the pty: make it start a job of its
+            # own before the transaction gives up. The job ignores SIGHUP, so
+            # closing the pty cannot be what ends it.
+            os.write(master[0], f"{runner} &\n".encode())
+            _wait_for_file(job_pid, 20)
+            seen["job"] = int(job_pid.read_text().strip())
+            raise OSError("the process tree could not be created")
+
+    real_set_nonblocking = terminal_posix._set_nonblocking
+
+    def capture_master(fd: int) -> None:
+        master.append(fd)
+        real_set_nonblocking(fd)
+
+    monkeypatch.setattr(terminal_posix, "_set_nonblocking", capture_master)
+    monkeypatch.setattr(terminal_posix, "ProcessTree", FailingTree)
+    with pytest.raises(OSError):
+        terminal_posix.spawn_terminal(cwd=tmp_path)
+
+    job = seen["job"]
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and _running(job):
+        time.sleep(0.1)
+    assert not _running(job), "the job survived the failed spawn"
+    assert _open_fd_count() == before
+
+
+def test_a_failed_spawn_with_a_broken_terminal_constructor_still_ends_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The terminal object is built inside the spawn transaction too: when
+    that fails, the child and its session still go, and every descriptor is
+    released."""
+    before = _open_fd_count()
+    run = secrets.token_hex(6)
+    job_pid = tmp_path / f"job-{run}.pid"
+    runner = tmp_path / f"runner-{run}.sh"
+    runner.write_text(
+        "#!/bin/sh\n"
+        "trap '' HUP\n"
+        f"echo $$ > {job_pid}\n"
+        "exec sleep 300\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    seen: dict[str, int] = {}
+    master: list[int] = []
+
+    class FailingTerminal:
+        """A terminal that cannot be built, so the spawn has to undo the child."""
+
+        def __init__(self, **kwargs: object) -> None:
+            # The child is already on the pty: make it start a job of its
+            # own before the transaction gives up. The job ignores SIGHUP, so
+            # closing the pty cannot be what ends it.
+            os.write(master[0], f"{runner} &\n".encode())
+            _wait_for_file(job_pid, 20)
+            seen["job"] = int(job_pid.read_text().strip())
+            raise OSError("the terminal could not be built")
+
+    real_set_nonblocking = terminal_posix._set_nonblocking
+
+    def capture_master(fd: int) -> None:
+        master.append(fd)
+        real_set_nonblocking(fd)
+
+    monkeypatch.setattr(terminal_posix, "_set_nonblocking", capture_master)
+    monkeypatch.setattr(terminal_posix, "PosixTerminalProcess", FailingTerminal)
+    with pytest.raises(OSError):
+        terminal_posix.spawn_terminal(cwd=tmp_path)
+
+    job = seen["job"]
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and _running(job):
+        time.sleep(0.1)
+    assert not _running(job), "the job survived the failed spawn"
+    assert _open_fd_count() == before
 
 
 def test_spawn_failure_releases_all_allocated_fds_and_started_child(
@@ -460,3 +896,37 @@ def test_helper_is_inert_on_import_and_uses_no_fork_or_preexec() -> None:
     assert result.returncode == 0, result.stderr
     assert result.stdout == b""
     assert result.stderr == b""
+
+
+def test_helper_writes_no_traceback_when_the_terminal_cannot_be_claimed() -> None:
+    """The helper fails with a status, not with a traceback in the user's
+    terminal."""
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(CHILD_HELPER), "/bin/sh"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == terminal_posix.HELPER_CLAIM_FAILED
+    assert result.stderr == b""
+    assert b"Traceback" not in result.stderr
+
+
+def test_helper_writes_no_traceback_when_the_program_cannot_be_run() -> None:
+    """The same when the program itself cannot be started: the status says so
+    and nothing about the program is written."""
+    master, slave = os.openpty()
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", str(CHILD_HELPER), "/bin/does-not-exist"],
+            stdin=slave,
+            capture_output=True,
+            timeout=30,
+            start_new_session=True,
+        )
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert result.returncode == terminal_posix.HELPER_EXEC_FAILED
+    assert result.stderr == b""
+    assert b"Traceback" not in result.stderr

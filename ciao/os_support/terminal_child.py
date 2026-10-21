@@ -20,19 +20,27 @@ The rules it follows, and why:
   second one would detach the terminal from the group the cleanup signals.
 - It imports nothing from ``ciao`` and runs under ``-I -S``, so no user or
   site initialisation runs and no credential is read on the way in.
-- It writes nothing to stdout or stderr: the pty carries the shell's own
-  output, and a traceback here would land in the user's terminal.
+- It writes nothing to stdout or stderr, and it never prints a traceback: the
+  pty carries the shell's own output, and a traceback here would land in the
+  user's terminal and could carry the path of the program. A failure is a
+  status, and only a status.
 
-The POSIX-only imports are guarded, so the engine's import-all gate can load
-this module on Windows too; the guard is also what keeps the ``win32`` type
-check clean. Importing the module does nothing: the work happens in
-:func:`main`, under a ``__main__`` guard.
+The POSIX-only imports are inside the function, so the engine's import-all
+gate can load this module on Windows too; that is also what keeps the
+``win32`` type check clean. Importing the module does nothing: the work
+happens in :func:`main`, under a ``__main__`` guard.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+
+#: The terminal could not be claimed: the process is not the session leader
+#: it needed to be, or the descriptor is not a terminal.
+CLAIM_FAILED = 125
+#: The program could not be run at all.
+EXEC_FAILED = 126
 
 
 def _claim_controlling_terminal() -> None:
@@ -53,8 +61,14 @@ def main(argv: list[str]) -> int:
     """Claim the terminal and become ``argv[0]``; never returns on success."""
     if not argv:
         return 2
-    _claim_controlling_terminal()
-    os.execvpe(argv[0], argv, os.environ)
+    try:
+        _claim_controlling_terminal()
+    except OSError:
+        return CLAIM_FAILED
+    try:
+        os.execvpe(argv[0], argv, os.environ)
+    except OSError:
+        return EXEC_FAILED
     return 127  # only reached when exec itself failed
 
 
