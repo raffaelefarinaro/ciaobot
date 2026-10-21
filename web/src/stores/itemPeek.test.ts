@@ -127,6 +127,51 @@ describe('itemPeek store', () => {
     expect(peek.notFound).toBe(false)
   })
 
+  it('retry from an error shows loading until the answer lands', async () => {
+    get.mockRejectedValueOnce(httpError(500, { error: { message: 'The task is being edited' } }))
+    const peek = useItemPeekStore()
+    peek.openTask('ship')
+    await vi.waitFor(() => expect(peek.error).toBe('The task is being edited'))
+
+    const retry = deferred<unknown>()
+    get.mockReturnValueOnce(retry.promise as Promise<never>)
+    void peek.refresh()
+    expect(peek.loading).toBe(true)
+    expect(peek.error).toBe('')
+
+    retry.resolve(answer({ title: 'Back' }))
+    await vi.waitFor(() => expect(peek.task?.title).toBe('Back'))
+    expect(peek.loading).toBe(false)
+    expect(peek.error).toBe('')
+  })
+
+  it('a failed background refresh keeps the task on screen', async () => {
+    get.mockResolvedValueOnce(answer({ title: 'Kept' }))
+    const peek = useItemPeekStore()
+    peek.openTask('ship')
+    await vi.waitFor(() => expect(peek.task?.title).toBe('Kept'))
+
+    get.mockRejectedValueOnce(httpError(500, { error: { message: 'Connection dropped' } }))
+    await peek.refresh()
+    expect(peek.task?.title).toBe('Kept')
+    expect(peek.error).toBe('')
+    expect(peek.notFound).toBe(false)
+    expect(peek.loading).toBe(false)
+  })
+
+  it('a background refresh that finds the task gone shows not-found', async () => {
+    get.mockResolvedValueOnce(answer({ title: 'Soon gone' }))
+    const peek = useItemPeekStore()
+    peek.openTask('ship')
+    await vi.waitFor(() => expect(peek.task?.title).toBe('Soon gone'))
+
+    get.mockRejectedValueOnce(httpError(404))
+    await peek.refresh()
+    expect(peek.task).toBeNull()
+    expect(peek.notFound).toBe(true)
+    expect(peek.error).toBe('')
+  })
+
   it('a late answer for an earlier task is dropped', async () => {
     const first = deferred<unknown>()
     const second = deferred<unknown>()

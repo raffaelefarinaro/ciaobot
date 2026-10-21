@@ -41,7 +41,9 @@ export const useItemPeekStore = defineStore('itemPeek', () => {
     const current = target.value
     if (!current) return
     const mine = ++seq
-    if (!keepShown) loading.value = true
+    // A read with nothing on screen (an open, or a Retry from an error) shows
+    // the loading state; a background refresh keeps the task it is updating.
+    if (!keepShown || !task.value) loading.value = true
     notFound.value = false
     error.value = ''
     try {
@@ -55,6 +57,8 @@ export const useItemPeekStore = defineStore('itemPeek', () => {
       if ((e as { status?: number } | null)?.status === 404) {
         task.value = null
         notFound.value = true
+      } else if (keepShown && task.value) {
+        // A failed background refresh leaves the task on screen as it was.
       } else {
         error.value = taskApiErrorMessage(e, 'Could not read the task')
       }
