@@ -777,9 +777,9 @@ const openExternalState = ref<'' | 'loading' | 'ok'>('')
 // or another Mac it would open on a screen nobody is looking at.
 const canOpenExternally = isLoopbackPage()
 
-// The chat or project on screen whose split view can take the file; '' where
-// there is none (a phone, Home, Settings, the memory map). Pinning anywhere
-// else would put the file beside a chat that is not shown.
+// The chat on screen whose split view can take the file; '' where there is
+// none (a phone, a project page, Home, Settings, the memory map). Pinning
+// anywhere else would put the file beside a chat that is not shown.
 const activePinKey = computed(() => store.dockTarget)
 const canPin = computed(() => !!activePinKey.value)
 const isPinned = computed(() => {

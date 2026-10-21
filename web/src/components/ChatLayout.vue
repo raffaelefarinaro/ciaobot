@@ -32,14 +32,8 @@
             transition: isDraggingSplit ? 'none' : undefined
           }"
         >
-          <ProjectView
-            v-if="projectIdParam"
-            :project-id="projectIdParam"
-            @close="closeProject"
-            @open-sidebar="sidebarCollapsed = false"
-          />
           <SubagentChatView
-            v-else-if="subagentRoute"
+            v-if="subagentRoute"
             :key="subagentRoute.agentId"
             :chat-id="subagentRoute.chatId"
             :agent-id="subagentRoute.agentId"
@@ -848,20 +842,19 @@ const activePinKey = computed(() => {
   // still selected underneath it. Home (`/` or a bare `/chat`) has no key at
   // all, so a retained chat can never surface its pinned page for even one
   // frame while the route watcher clears the view; Settings, Automations,
-  // Tasks, Memory and the project routes read as before (they carry neither
-  // param). Coming back to the chat restores that chat's pin, because the pin
-  // is looked up under the chat the route names.
+  // Tasks, Memory and the project routes have no key either. Coming back to
+  // the chat restores that chat's pin, because the pin is looked up under the
+  // chat the route names.
   //
   // A chat route shows that chat only while it is the one selected: archiving
   // or deleting it, or a refresh that no longer lists it, clears the selection
   // without a navigation, and the screen falls back to Home. The pin follows
   // what is on screen, so Home never carries a chat's page beside it.
-  if (projectIdParam.value) return projectIdParam.value
   const chatId = (route.params.chatId as string) || ''
   return chatId && store.activeChat?.chat_id === chatId ? chatId : ''
 })
-// A file opened while the split view is available docks beside the chat or
-// project on screen instead of opening the viewer (stores/fileViewer.ts).
+// A file opened from a chat while the split view is available docks beside
+// that chat instead of opening the viewer (stores/fileViewer.ts).
 watch(
   [activePinKey, isMobile],
   ([key, mobile]) => fileViewer.setDockTarget(mobile ? '' : key),
@@ -896,12 +889,11 @@ watch(
   },
 )
 // On a narrow device there is no split pane: the chat's shared (server-owned)
-// pin is a compact opener within the chat. Only a chat route carries one — a
-// project route and Home have no narrow pin (their pins stay desktop-local).
+// pin is a compact opener within the chat. Only a chat route carries a pin key.
 const narrowSharedPin = computed(() => {
   if (!isMobile.value) return ''
   const key = activePinKey.value
-  if (!key || projectIdParam.value) return ''
+  if (!key) return ''
   return store.pinnedFileFor(key) || ''
 })
 const pinWritePending = computed(() => {

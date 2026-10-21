@@ -449,4 +449,18 @@ describe('FileViewerModal', () => {
     expect(popovers.length).toBeGreaterThan(0)
     for (const popover of popovers) expect(popover.props('inline')).toBe(true)
   })
+
+  it('offers Continue this chat for an archived transcript', async () => {
+    const projects = useProjectStore()
+    const continueArchived = vi.spyOn(projects, 'continueArchivedChat').mockResolvedValue(undefined as never)
+    const store = openViewer()
+    store.path = 'memory-vault/Logs/Chats/chat-old/claude/x.md'
+    await settle()
+    const button = wrapper!.find('.fv-continue-btn')
+    expect(button.exists()).toBe(true)
+    await button.trigger('click')
+    await settle()
+    expect(continueArchived).toHaveBeenCalledWith('chat-old')
+    expect(store.isOpen).toBe(false)
+  })
 })
