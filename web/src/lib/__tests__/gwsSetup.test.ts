@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gwsSetupProgress } from '../gwsSetup'
+import { gwsSetupGroups, gwsSetupProgress } from '../gwsSetup'
 import type { GwsIntegrationProfile, GwsIntegrationSettings } from '../types'
 
 function profile(overrides: Partial<GwsIntegrationProfile> = {}): GwsIntegrationProfile {
@@ -110,5 +110,27 @@ describe('gwsSetupProgress', () => {
       signin: 'done',
       link: 'done',
     })
+  })
+})
+
+describe('gwsSetupGroups', () => {
+  it('groups setup into done current and pending without changing order', () => {
+    const groups = gwsSetupGroups(gwsSetupProgress(integration([])))
+    expect(groups.done.map((step) => step.id)).toEqual(['install'])
+    expect(groups.current?.id).toBe('account')
+    expect(groups.pending.map((step) => step.id)).toEqual(['client', 'signin', 'link'])
+  })
+
+  it('has no current step and nothing pending once every account is ready', () => {
+    const groups = gwsSetupGroups(gwsSetupProgress(integration([profile()])))
+    expect(groups.current).toBeNull()
+    expect(groups.pending).toEqual([])
+    expect(groups.done.map((step) => step.id)).toEqual([
+      'install',
+      'account',
+      'client',
+      'signin',
+      'link',
+    ])
   })
 })

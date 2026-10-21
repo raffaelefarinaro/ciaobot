@@ -215,11 +215,74 @@ describe('the setup checklist', () => {
     wrapper.unmount()
   })
 
+  it('keeps pending instructions behind a closed disclosure', async () => {
+    gwsState.value = integration([profile({ client_secret_present: false, configured: false, workspaces: [] })])
+    const wrapper = await mountWorkspacesTab()
+
+    const more = wrapper.find('details.gws-setup-more')
+    expect(more.exists()).toBe(true)
+    expect(more.attributes('open')).toBeUndefined()
+    expect(more.find('summary').text()).toBe('What happens next?')
+
+    // The steps after the current one keep their order and their copy.
+    const pending = more.findAll('.gws-setup-step')
+    expect(pending).toHaveLength(2)
+    expect(pending[0].text()).toContain('Sign in with Google')
+    expect(pending[0].text()).toContain('approve access in the browser tab that opens')
+    expect(pending[1].text()).toContain('Link a workspace')
+    expect(pending[1].text()).toContain("Pick this account in a workspace's Google profile field above.")
+    wrapper.unmount()
+  })
+
+  it('shows the installed CLI as a quiet status line', async () => {
+    gwsState.value = integration([profile({ client_secret_present: false, configured: false, workspaces: [] })])
+    const wrapper = await mountWorkspacesTab()
+
+    const done = wrapper.findAll('.gws-setup-done-item')
+    expect(done.map((item) => item.text())).toEqual([
+      'Google Workspace CLI · Installed',
+      'Add a Google account · Done',
+    ])
+    // The install manual is not repeated once the CLI is there.
+    expect(wrapper.find('.gws-setup').text()).not.toContain('npm install -g @googleworkspace/cli')
+    wrapper.unmount()
+  })
+
   it('hides once every account is set up', async () => {
     gwsState.value = integration([profile()])
     const wrapper = await mountWorkspacesTab()
 
     expect(wrapper.find('.gws-setup').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+describe('the account create form', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    gwsState.value = integration([profile()])
+  })
+
+  it('labels the account name and display name fields', async () => {
+    const wrapper = await mountWorkspacesTab()
+
+    const fields = wrapper.findAll('.gws-account-add-field')
+    expect(fields).toHaveLength(2)
+
+    // The visible label is the field's name, and it is the input's name too.
+    expect(fields[0].text()).toContain('Account name')
+    expect(fields[1].text()).toContain('Display name (optional)')
+
+    const nameInput = fields[0].find('input').element as HTMLInputElement
+    expect(nameInput.labels?.[0]?.textContent).toContain('Account name')
+    expect(nameInput.getAttribute('placeholder')).toBe('short name (e.g. personal, acme)')
+
+    const labelInput = fields[1].find('input').element as HTMLInputElement
+    expect(labelInput.labels?.[0]?.textContent).toContain('Display name (optional)')
+    expect(labelInput.getAttribute('placeholder')).toBe('display name (optional)')
+
+    // The block is headed by a real heading, not a bare label.
+    expect(wrapper.find('.gws-account-add h3').text()).toBe('Add a Google account')
     wrapper.unmount()
   })
 })

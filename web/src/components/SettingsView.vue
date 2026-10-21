@@ -1286,24 +1286,30 @@
               </div>
               <GwsSetupChecklist :integration="gwsIntegration" />
               <div class="gws-account-add">
-                <span class="ws-label">Add a Google account</span>
+                <h3 class="gws-account-add-title">Add a Google account</h3>
                 <div class="gws-account-add-row">
-                  <input
-                    class="routine-input"
-                    v-model="newGwsProfileName"
-                    placeholder="short name (e.g. personal, acme)"
-                    :disabled="gwsProfileAdding"
-                    @keyup.enter="addGwsProfile"
-                  />
-                  <input
-                    class="routine-input"
-                    v-model="newGwsProfileLabel"
-                    placeholder="display name (optional)"
-                    :disabled="gwsProfileAdding"
-                    @keyup.enter="addGwsProfile"
-                  />
+                  <label class="settings-field gws-account-add-field">
+                    <span class="ws-label">Account name</span>
+                    <input
+                      class="routine-input"
+                      v-model="newGwsProfileName"
+                      placeholder="short name (e.g. personal, acme)"
+                      :disabled="gwsProfileAdding"
+                      @keyup.enter="addGwsProfile"
+                    />
+                  </label>
+                  <label class="settings-field gws-account-add-field">
+                    <span class="ws-label">Display name (optional)</span>
+                    <input
+                      class="routine-input"
+                      v-model="newGwsProfileLabel"
+                      placeholder="display name (optional)"
+                      :disabled="gwsProfileAdding"
+                      @keyup.enter="addGwsProfile"
+                    />
+                  </label>
                   <button
-                    class="btn-primary btn-small"
+                    class="btn-primary btn-small gws-account-add-submit"
                     :disabled="!newGwsProfileName.trim() || gwsProfileAdding"
                     @click="addGwsProfile"
                   >
@@ -5628,15 +5634,30 @@ a.btn-secondary {
   border-bottom: 1px dashed var(--border);
   margin-bottom: var(--space-3);
 }
+.gws-account-add-title {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
 .gws-account-add-row {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  align-items: center;
+  align-items: flex-end;
 }
-.gws-account-add-row .routine-input {
+/* Each field is a labelled column; the button sits on the inputs' baseline. */
+.gws-account-add-field {
   flex: 1 1 180px;
   min-width: 0;
+}
+.gws-account-add-field .routine-input {
+  flex: none;
+  width: 100%;
+  min-width: 0;
+}
+.gws-account-add-submit {
+  flex: 0 0 auto;
 }
 .gws-profile-title {
   margin: 0;
