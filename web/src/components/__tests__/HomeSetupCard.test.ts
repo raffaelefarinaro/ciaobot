@@ -156,6 +156,7 @@ describe('HomeSetupCard', () => {
     expect(hasButton(view, 'Install')).toBe(true)
     // Instructions are for the browsers without a prompt; this one has one.
     expect(view.text()).not.toContain('Install option in the address bar or menu')
+    expect(view.findAllComponents(RouterLinkStub).some(l => l.props('to') === '/settings#install-app')).toBe(false)
 
     await button(view, 'Install').trigger('click')
     await flushPromises()
