@@ -4,7 +4,7 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import DecisionReason from '../DecisionReason.vue'
 
-function mountReason(props: { modelValue?: string, disabled?: boolean } = {}) {
+function mountReason(props: { modelValue?: string, disabled?: boolean, chips?: readonly string[], label?: string } = {}) {
   return mount(DecisionReason, { props: { modelValue: '', idPrefix: 'why', ...props } })
 }
 
@@ -46,5 +46,14 @@ describe('DecisionReason', () => {
     const wrapper = mountReason({ disabled: true })
     expect(wrapper.get('textarea').attributes('disabled')).toBeDefined()
     for (const chip of wrapper.findAll('.task-chip')) expect(chip.attributes('disabled')).toBeDefined()
+  })
+
+  it('offers the chips it is given and a custom label, composing them the same way', async () => {
+    const wrapper = mountReason({ chips: ['one-off', 'not true'], label: 'Reason (optional)', modelValue: 'one-off' })
+    expect(wrapper.findAll('.task-chip').map((chip) => chip.text())).toEqual(['one-off', 'not true'])
+    expect(wrapper.get('label').text()).toBe('Reason (optional)')
+    expect(wrapper.findAll('.task-chip')[0]!.attributes('aria-pressed')).toBe('true')
+    await wrapper.findAll('.task-chip')[1]!.trigger('click')
+    expect(wrapper.emitted('update:modelValue')![0]).toEqual(['one-off, not true'])
   })
 })

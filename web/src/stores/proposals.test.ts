@@ -652,6 +652,38 @@ describe('sibling previews after an accept', () => {
   })
 })
 
+describe('decision reasons', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(api.get).mockReset()
+    vi.mocked(api.post).mockReset()
+    vi.mocked(api.get).mockResolvedValue({ rows: [] } as never)
+    vi.mocked(api.post).mockResolvedValue({} as never)
+  })
+
+  it('act sends reason only when one is given', async () => {
+    const store = useProposalsStore()
+    await store.act('p1', 'dismiss', '', { reason: 'one-off' })
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', { reason: 'one-off' })
+
+    await store.act('p1', 'dismiss')
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', {})
+
+    await store.act('p1', 'dismiss', '', { reason: '' })
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/dismiss', {})
+  })
+
+  it('act with text, expectedRevision and reason sends all three', async () => {
+    const store = useProposalsStore()
+    await store.act('p1', 'accept', '', { expectedRevision: 'rev-1', text: 'Edited.', reason: 'not true' })
+    expect(api.post).toHaveBeenLastCalledWith('/api/proposals/p1/accept', {
+      expected_revision: 'rev-1',
+      text: 'Edited.',
+      reason: 'not true',
+    })
+  })
+})
+
 describe('accepting a skill proposal into a chat', () => {
   beforeEach(() => {
     setActivePinia(createPinia())

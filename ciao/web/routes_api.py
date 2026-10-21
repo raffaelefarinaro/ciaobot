@@ -74,6 +74,7 @@ from ciao.workspaces import (
 )
 # Kept as an alias: several call sites predate the shared module.
 _WORKSPACE_NAME_RE = WORKSPACE_NAME_RE
+from ciao.task_decisions import clean_reason
 from ciao.tool_path import resolve_command
 from ciao.providers.opencode import OpencodeProvider
 from ciao.provider_service import capabilities_for, supported_providers
@@ -8989,7 +8990,7 @@ async def proposal_action(request: Request) -> JSONResponse:
 
     ``dismiss`` drops the bullet without writing anything. Unknown id is 404.
 
-    An optional JSON body carries the review card's two extras:
+    An optional JSON body carries the review card's extras:
 
     * ``expected_revision`` — the destination digest the operator's preview was
       computed against. A destination that changed since then is refused with
@@ -8999,6 +9000,9 @@ async def proposal_action(request: Request) -> JSONResponse:
     * ``text`` — an edited wording to promote instead of the bullet's own. The
       decision history still records the bullet's original text, because that
       is what the dedupe readers compare a re-extracted fact against.
+    * ``reason`` — an optional "why", a string trimmed and at most 1000
+      characters after the trim (400 if longer or not a string). Stored on the
+      decision row; ignored for skill-file rows.
     """
     config = request.app.state.config
     pid = request.path_params["id"]
@@ -9026,6 +9030,12 @@ async def proposal_action(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": "action must be accept|dismiss", "id": pid}, status_code=400
         )
+    # Raw value, no str() coercion: a list or number must be refused, and the
+    # refusal has to precede every write below.
+    try:
+        reason = clean_reason(body.get("reason"))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc), "id": pid}, status_code=400)
     row = ctx["row"]
 
     if action == "dismiss" and row.get("kind") == "category":
@@ -9390,6 +9400,7 @@ async def proposal_action(request: Request) -> JSONResponse:
                 # so the receipt reference is the only way back to what an
                 # edited accept actually wrote.
                 receipt_id=promoted.receipt_id or "",
+                reason=reason,
             )
         return JSONResponse({"ok": True, "result": result.as_dict()})
     if removed_ours:
@@ -9404,6 +9415,7 @@ async def proposal_action(request: Request) -> JSONResponse:
             via="pwa",
             source=str(row.get("source") or ""),
             proposal_id=pid,
+            reason=reason,
         )
     return JSONResponse(
         {

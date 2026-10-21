@@ -18,6 +18,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -4237,3 +4238,158 @@ def test_listing_exposes_decider_and_reason(tmp_path: Path) -> None:
     assert rows["tagged"]["decide_reason"] == "judgement"
     assert "decider" not in rows["plain"]
     assert "decide_reason" not in rows["plain"]
+
+
+# -- Decision reasons (#1734) -------------------------------------------------
+
+
+def _memory_row(client: TestClient) -> dict:
+    rows = client.get("/api/proposals").json()["rows"]
+    return next(r for r in rows if r["text"].startswith("Remember the lesson"))
+
+
+def _history_for(client: TestClient, text: str) -> list[dict]:
+    rows = client.get("/api/proposals/history").json()["rows"]
+    return [r for r in rows if r["text"] == text]
+
+
+def test_dismiss_with_a_reason_lands_in_history(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _memory_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/dismiss", json={"reason": "already known"})
+
+    assert resp.status_code == 200
+    (hist,) = _history_for(client, row["text"])
+    assert hist["reason"] == "already known"
+    assert hist["action"] == "dismissed"
+
+
+def test_accept_with_a_reason_and_edited_text_lands_in_history(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _memory_row(client)
+
+    resp = client.post(
+        f"/api/proposals/{row['id']}/accept",
+        json={"text": "Remember the edited lesson.", "reason": "yes, everywhere"},
+    )
+
+    assert resp.status_code == 200
+    (hist,) = _history_for(client, row["text"])
+    assert hist["reason"] == "yes, everywhere"
+    assert hist["action"] == "accepted"
+    # The history API folds the receipt id into ``change``; the recorded
+    # original text and the receipt reference both survive the edit.
+    assert hist["change"]["receipt_id"]
+
+
+@pytest.mark.parametrize("bad", ["x" * 1001, 123, ["a"]])
+def test_an_over_cap_or_non_string_reason_is_refused_before_any_write(
+    tmp_path: Path, bad: object
+) -> None:
+    from ciao.memory_proposals import dismissed_log_path
+
+    config = _default_vault(tmp_path)
+    queue = _queue_text(config, "personal")
+    client = _client(config)
+    row = _memory_row(client)
+
+    def snapshot() -> dict[str, bytes]:
+        # Every file under the test root: the queue, the accept destination (the
+        # workspace guide), the sidecar and any receipt journal.
+        return {
+            p.relative_to(tmp_path).as_posix(): p.read_bytes()
+            for p in sorted(tmp_path.rglob("*"))
+            if p.is_file()
+        }
+
+    before = snapshot()
+    bodies = [
+        {"reason": bad},
+        {"text": "edited", "reason": bad},
+    ]
+    for action in ("dismiss", "accept"):
+        for body in bodies:
+            resp = client.post(f"/api/proposals/{row['id']}/{action}", json=body)
+            assert resp.status_code == 400
+            assert "1000" in resp.json()["error"] or "string" in resp.json()["error"]
+
+    assert snapshot() == before, "a refused reason must write nothing at all"
+    assert not dismissed_log_path(queue).exists()
+    assert any(r["id"] == row["id"] for r in client.get("/api/proposals").json()["rows"])
+
+
+def test_a_reason_of_exactly_the_cap_after_trim_passes(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _memory_row(client)
+
+    resp = client.post(
+        f"/api/proposals/{row['id']}/dismiss", json={"reason": "  " + "x" * 1000 + "  "}
+    )
+
+    assert resp.status_code == 200
+    (hist,) = _history_for(client, row["text"])
+    assert hist["reason"] == "x" * 1000
+
+
+@pytest.mark.parametrize("blank", ["   ", None])
+def test_a_blank_reason_is_no_reason(tmp_path: Path, blank: object) -> None:
+    config = _default_vault(tmp_path)
+    client = _client(config)
+    row = _memory_row(client)
+
+    resp = client.post(f"/api/proposals/{row['id']}/dismiss", json={"reason": blank})
+
+    assert resp.status_code == 200
+    (hist,) = _history_for(client, row["text"])
+    assert hist["reason"] == ""
+
+
+def test_batch_and_sweep_never_store_a_reason(tmp_path: Path) -> None:
+    config = _default_vault(tmp_path)
+    _write_queue(config, "personal", (
+        "## 2026-07-01 curation pass\n\n"
+        "- [memory] An old fact about a forgotten chat.  _(from: Decisions)_\n\n"
+        "## 2026-08-19 curation pass (this pass)\n\n"
+        "- [memory] A recent fact worth keeping.  _(from: Decisions)_\n"
+    ))
+    client = _client(config)
+    rows = client.get("/api/proposals").json()["rows"]
+    recent = next(r for r in rows if r["text"].startswith("A recent"))
+
+    swept = client.post(
+        "/api/proposals/dismiss-older-than?date=2026-08-01", json={"reason": "nope"}
+    )
+    assert swept.status_code == 200
+    batch = client.post(
+        "/api/proposals/batch",
+        json={"action": "dismiss", "ids": [recent["id"]], "reason": "nope"},
+    )
+    assert batch.status_code == 200
+
+    history = client.get("/api/proposals/history").json()["rows"]
+    assert len(history) == 2
+    assert all(r["reason"] == "" for r in history)
+
+
+def test_history_rows_carry_a_seeded_reason(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _seed_history(
+        config,
+        "personal",
+        [
+            {
+                "dismissed_at": "2026-09-01T10:00:00+00:00",
+                "kind": "memory",
+                "text": "Seeded.",
+                "reason": "one-off",
+            }
+        ],
+    )
+
+    rows = _client(config).get("/api/proposals/history").json()["rows"]
+
+    assert rows[0]["reason"] == "one-off"

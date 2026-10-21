@@ -10,9 +10,9 @@ function items(text: string): string[] {
 }
 
 /** The quick reasons present in `text`, as the chip labels. */
-export function chipsIn(text: string): string[] {
+export function chipsIn(text: string, chips: readonly string[] = REASON_CHIPS): string[] {
   const present = new Set(items(text).map((item) => item.toLowerCase()))
-  return REASON_CHIPS.filter((chip) => present.has(chip))
+  return chips.filter((chip) => present.has(chip.toLowerCase()))
 }
 
 /** Add `chip` as a comma-joined item, or remove it when already there. */
