@@ -12,6 +12,9 @@ import { canReconcile, descriptorFor, kindLabel, rehomeMode } from '../lib/propo
 import { CHANGE_FILTERS, changeFor, isRegionPreview, type ProposalChange, type ProposalChangeType } from '../lib/proposalChange'
 import type { ProposalMergeFallback } from '../lib/proposalKinds'
 import ProposalHistoryList from './ProposalHistoryList.vue'
+import DecisionReason from './DecisionReason.vue'
+import { MEMORY_REASON_CHIPS } from '../lib/memoryDecisionReasons'
+import { cleanReason } from '../lib/decisionReasons'
 
 const store = useProposalsStore()
 const projectStore = useProjectStore()
@@ -63,7 +66,7 @@ const olderThanDays = ref(30)
  * would take the reason and the competing entries away the moment they became
  * relevant, and the retry that resolves it belongs next to them.
  */
-const deferredById = ref<Record<string, { reason: string; competing: string[]; text?: string; expectedRevision?: string }>>({})
+const deferredById = ref<Record<string, { reason: string; competing: string[]; text?: string; expectedRevision?: string; decisionReason?: string }>>({})
 
 function deferredFor(row: ProposalRow) {
   return deferredById.value[row.id]
@@ -93,6 +96,19 @@ function clearDeferred(id: string) {
 const previewId = ref('')
 const editingPreview = ref(false)
 const editBuffer = ref('')
+// The optional "why" typed on a decision card, per row, and whether its
+// disclosure is open. Both live only as long as the card: Cancel discards them.
+const reasonById = ref<Record<string, string>>({})
+const whyOpenById = ref<Record<string, boolean>>({})
+
+function reasonFor(id: string): string {
+  return cleanReason(reasonById.value[id] ?? '')
+}
+
+function clearReason(id: string) {
+  delete reasonById.value[id]
+  delete whyOpenById.value[id]
+}
 
 const openPreview = computed(() => (previewId.value ? store.previews[previewId.value] : undefined))
 
@@ -118,6 +134,7 @@ function closePreview() {
   editingPreview.value = false
   editBuffer.value = ''
   if (!id) return
+  clearReason(id)
   // The row shows its preview, so closing the card keeps it — unless the card
   // re-previewed an edited wording. That preview describes a write the
   // operator walked away from, so the row goes back to the original bullet's.
@@ -194,10 +211,15 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
   const preview = store.previews[row.id]
   if (!preview) return
   const edited = preview.text !== row.text ? preview.text : ''
+  // Read before the card can close: a refusal closes it, and the deferral
+  // below keeps the reason for the retry (as `decisionReason`: a deferral already
+  // has a `reason` of its own).
+  const reason = reasonFor(row.id)
   const result = await store.act(row.id, 'accept', workspace, {
     expectedRevision: preview.revision,
     text: edited,
     reconcile,
+    reason,
   })
   if (result.conflict) return
   if (result.ok) {
@@ -209,6 +231,7 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
     }
     store.dropPreview(row.id)
     clearDeferred(row.id)
+    clearReason(row.id)
     return
   }
   // A refusal that is not a conflict (an over-cap guard, a people note that
@@ -220,6 +243,7 @@ async function confirmPreview(row: ProposalRow, workspace = '', reconcile = fals
   await handleAcceptRefusal(row, result.error || '', result.payload, {
     text: edited || undefined,
     expectedRevision: preview.revision,
+    decisionReason: reason || undefined,
   })
 }
 
@@ -967,6 +991,7 @@ async function retryReconcile(row: ProposalRow) {
     reconcile: true,
     expectedRevision: pending?.expectedRevision,
     text: pending?.text,
+    reason: pending?.decisionReason,
   })
   if (result.ok) {
     clearDeferred(row.id)
@@ -1044,7 +1069,7 @@ async function handleAcceptRefusal(
   row: ProposalRow,
   msg: string,
   payload?: unknown,
-  pending?: { text?: string; expectedRevision?: string },
+  pending?: { text?: string; expectedRevision?: string; decisionReason?: string },
 ) {
   const deferral = deferralFrom(payload)
   if (deferral) {
@@ -1110,7 +1135,10 @@ function moveTargets(row: ProposalRow): string[] {
 }
 
 function doDismiss(row: ProposalRow) {
-  void store.act(row.id, 'dismiss')
+  // A row-level Dismiss with no card open has no reason; from the card it
+  // carries what was typed there.
+  void store.act(row.id, 'dismiss', '', { reason: reasonFor(row.id) })
+  clearReason(row.id)
 }
 
 async function openWorkspaceChatInBackground(workspace: string, title: string, helper: ProposalHelper) {
@@ -1752,6 +1780,26 @@ watch(
 
               <p v-if="store.previews[row.id].reason" class="pr-card-reason">{{ store.previews[row.id].reason }}</p>
 
+              <div class="pr-card-why">
+                <button
+                  type="button"
+                  class="btn-small btn-chip pr-card-why-toggle"
+                  :aria-expanded="Boolean(whyOpenById[row.id])"
+                  :aria-controls="`pr-why-${row.id}`"
+                  @click="whyOpenById[row.id] = !whyOpenById[row.id]"
+                >Why? (optional)</button>
+                <DecisionReason
+                  v-if="whyOpenById[row.id]"
+                  :id="`pr-why-${row.id}`"
+                  label="Reason (optional)"
+                  :chips="MEMORY_REASON_CHIPS"
+                  :id-prefix="`pr-why-${row.id}`"
+                  :model-value="reasonById[row.id] ?? ''"
+                  :disabled="store.isBusy(row.id)"
+                  @update:model-value="reasonById[row.id] = $event"
+                />
+              </div>
+
               <div class="pr-actions pr-actions--card">
                 <button
                   v-if="store.previews[row.id].can_accept"
@@ -2252,6 +2300,14 @@ watch(
   border-radius: var(--radius-sm);
   color: var(--fg);
   font-size: 0.82rem;
+}
+
+.pr-card-why {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
 }
 
 /* The card's actions run across, not down: the column layout above exists to

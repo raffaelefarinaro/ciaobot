@@ -1595,6 +1595,99 @@ describe('decision card', () => {
     wrapper.unmount()
   })
 
+  describe('the optional Why field', () => {
+    async function expandWhy(wrapper: ReturnType<typeof mount>) {
+      await wrapper.find('.pr-card-why-toggle').trigger('click')
+      await flushPromises()
+    }
+
+    it('is collapsed and Save posts the same body as before when untouched', async () => {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = await openCard()
+
+      const toggle = wrapper.find('.pr-card-why-toggle')
+      expect(toggle.text()).toBe('Why? (optional)')
+      expect(toggle.attributes('aria-expanded')).toBe('false')
+      expect(wrapper.find('.decision-reason').exists()).toBe(false)
+
+      await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+      await flushPromises()
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', { expected_revision: 'rev-1' })
+      wrapper.unmount()
+    })
+
+    it('sends a chip plus free text as reason on Save', async () => {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = await openCard()
+      await expandWhy(wrapper)
+      expect(wrapper.find('.pr-card-why-toggle').attributes('aria-expanded')).toBe('true')
+
+      const chip = wrapper.findAll('.decision-reason .btn-chip').find(b => b.text() === 'one-off')!
+      await chip.trigger('click')
+      await wrapper.find('.decision-reason textarea').setValue('one-off, only this chat')
+      await wrapper.find('.pr-actions--card .btn-primary').trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/accept', {
+        expected_revision: 'rev-1',
+        reason: 'one-off, only this chat',
+      })
+      wrapper.unmount()
+    })
+
+    it('sends the reason when Dismiss is clicked from the card', async () => {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = await openCard()
+      await expandWhy(wrapper)
+      await wrapper.find('.decision-reason textarea').setValue('already known')
+
+      const dismiss = wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Dismiss')!
+      await dismiss.trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', { reason: 'already known' })
+      wrapper.unmount()
+    })
+
+    it('sends no reason when Dismiss is clicked from the row without a card', async () => {
+      mockQueue()
+      apiPost.mockResolvedValue({} as never)
+      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+      await flushPromises()
+
+      const dismiss = wrapper.findAll('.pr-row button').find(b => b.text() === 'Dismiss')!
+      await dismiss.trigger('click')
+      await flushPromises()
+
+      expect(apiPost).toHaveBeenCalledWith('/api/proposals/row-1/dismiss', {})
+      wrapper.unmount()
+    })
+
+    it('discards the reason on Cancel', async () => {
+      mockQueue()
+      const wrapper = await openCard()
+      await expandWhy(wrapper)
+      await wrapper.find('.decision-reason textarea').setValue('typed then abandoned')
+
+      const cancel = wrapper.findAll('.pr-actions--card button').find(b => b.text() === 'Cancel')!
+      await cancel.trigger('click')
+      await flushPromises()
+      await wrapper.find('.pr-row .pr-edit-first').trigger('click')
+      await flushPromises()
+      const cancelEdit = wrapper.findAll('.pr-card button').find(b => b.text() === 'Cancel edit')
+      if (cancelEdit) await cancelEdit.trigger('click')
+      await flushPromises()
+
+      expect(wrapper.find('.pr-card-why-toggle').attributes('aria-expanded')).toBe('false')
+      await expandWhy(wrapper)
+      expect((wrapper.find('.decision-reason textarea').element as HTMLTextAreaElement).value).toBe('')
+      wrapper.unmount()
+    })
+  })
+
   it('re-renders the card from the conflict response instead of writing', async () => {
     // The destination moved while the card was on screen. The server refuses
     // and hands back a refreshed preview; showing THAT is the whole point, so

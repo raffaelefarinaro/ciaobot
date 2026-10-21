@@ -4654,6 +4654,17 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     if not needle:
         print("a proposal text or unique substring is required", file=sys.stderr)
         return 2
+    # Validated before the queue lock so a bad reason mutates nothing.
+    from ciao.task_decisions import clean_reason
+
+    reason = ""
+    reason_file = (args.reason_file or "").strip()
+    if reason_file:
+        try:
+            reason = clean_reason(Path(reason_file).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            print(f"could not use the reason in {reason_file}: {exc}", file=sys.stderr)
+            return 2
     # Two needle forms, because rows reach the queue two ways:
     # `memory-proposal-add` flattens what it writes, while the Workspace care schedule prompt
     # appends `[review]` questions directly and may keep repeated whitespace.
@@ -4775,6 +4786,7 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
         text=removed_text,
         kind=kind,
         via="agent",
+        reason=reason,
     )
     if args.json:
         # `text` is the resolved bullet, not the caller's needle: a row can be
@@ -7979,6 +7991,15 @@ def build_parser() -> argparse.ArgumentParser:
             "The fact was already filed into its destination (the "
             "promote-then-dismiss flow); record the outcome as promoted "
             "instead of dismissed."
+        ),
+    )
+    memory_proposal_dismiss_parser.add_argument(
+        "--reason-file",
+        default="",
+        help=(
+            "Read an optional one-line reason for this decision from this file "
+            "(at most 1000 characters). Recorded in History beside the "
+            "decision, for the accept (--promoted) and the dismissal alike."
         ),
     )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)

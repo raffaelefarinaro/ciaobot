@@ -913,3 +913,88 @@ def test_dismiss_still_works_on_a_bullet_with_a_decide_tail(tmp_path: Path) -> N
     decisions = read_decisions(queue)
     assert len(decisions) == 1
     assert decisions[0]["text"] == "Mo leads platform."
+
+
+# ── decision reasons (#1734) ──────────────────────────────────────────────
+
+
+def _reason_queue(tmp_path: Path) -> tuple[Path, Path]:
+    vault = tmp_path / "memory-vault"
+    queue = vault / "Workspace" / "Memory-Proposals.md"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        "# Memory Proposals\n\n- [memory] durable lesson  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    return vault, queue
+
+
+def _dismiss_args(tmp_path: Path, vault: Path, *extra: str) -> list[str]:
+    return [
+        "memory-proposal-dismiss",
+        "--workspace", str(tmp_path),
+        "--vault-root", str(vault),
+        *extra,
+        "durable lesson",
+    ]
+
+
+def test_cli_dismiss_records_a_reason_from_a_file(tmp_path: Path) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+    reason_file = tmp_path / "reason.txt"
+    reason_file.write_text("one-off\n", encoding="utf-8")
+
+    rc = cli.main(_dismiss_args(tmp_path, vault, "--reason-file", str(reason_file)))
+
+    assert rc == 0
+    decisions = read_decisions(queue)
+    assert decisions[0]["reason"] == "one-off"
+    assert decisions[0]["via"] == "agent"
+    assert decisions[0]["action"] == "dismissed"
+
+
+def test_cli_promoted_dismiss_records_the_reason_on_the_accepted_row(tmp_path: Path) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+    reason_file = tmp_path / "reason.txt"
+    reason_file.write_text("yes, everywhere", encoding="utf-8")
+
+    rc = cli.main(
+        _dismiss_args(tmp_path, vault, "--promoted", "--reason-file", str(reason_file))
+    )
+
+    assert rc == 0
+    decisions = read_decisions(queue)
+    assert decisions[0]["action"] == "accepted"
+    assert decisions[0]["reason"] == "yes, everywhere"
+
+
+def test_cli_over_cap_or_unreadable_reason_file_exits_2_and_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    from ciao import cli
+    from ciao.memory_receipts import journal_path
+
+    vault, queue = _reason_queue(tmp_path)
+    before = queue.read_bytes()
+    too_long = tmp_path / "long.txt"
+    too_long.write_text("x" * 1001, encoding="utf-8")
+
+    for reason_file in (too_long, tmp_path / "missing.txt"):
+        rc = cli.main(_dismiss_args(tmp_path, vault, "--reason-file", str(reason_file)))
+        assert rc == 2
+        assert queue.read_bytes() == before
+        assert read_decisions(queue) == []
+        assert not journal_path(vault, None).exists()
+
+
+def test_cli_without_reason_file_is_unchanged(tmp_path: Path) -> None:
+    from ciao import cli
+
+    vault, queue = _reason_queue(tmp_path)
+
+    assert cli.main(_dismiss_args(tmp_path, vault)) == 0
+    assert read_decisions(queue)[0]["reason"] == ""

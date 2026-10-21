@@ -1,9 +1,9 @@
 <template>
   <div class="form-group decision-reason">
-    <label :for="`${idPrefix}-reason`">Why? (optional)</label>
+    <label :for="`${idPrefix}-reason`">{{ label }}</label>
     <div class="decision-reason-chips" role="group" aria-label="Quick reasons">
       <button
-        v-for="chip in REASON_CHIPS"
+        v-for="chip in chips"
         :key="chip"
         type="button"
         class="btn-chip task-chip"
@@ -27,14 +27,17 @@
 import { computed } from 'vue'
 import { REASON_CHIPS, REASON_MAX, chipsIn, toggleChip } from '../lib/decisionReasons'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   modelValue: string
   disabled?: boolean
   idPrefix: string
-}>()
+  /** The quick reasons offered; the task board's by default. */
+  chips?: readonly string[]
+  label?: string
+}>(), { chips: () => REASON_CHIPS, label: 'Why? (optional)' })
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 
-const active = computed<string[]>(() => chipsIn(props.modelValue))
+const active = computed<string[]>(() => chipsIn(props.modelValue, props.chips))
 </script>
 
 <style scoped>

@@ -2052,6 +2052,8 @@ export interface ProposalHistoryRow {
   learning_id?: string
   /** Which finding within that learning, when the decision named one. */
   finding?: string
+  /** The operator's optional "why" (or the agent's, when `via` is `agent`). Absent or empty when none was given. Evidence text: render as text, never markup. */
+  reason?: string
   /** The archive transcript this fact came from, when one is still on disk. */
   source_path?: string
   /** The receipt that performed this decision. ABSENT — not falsy — for every

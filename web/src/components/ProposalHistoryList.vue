@@ -280,6 +280,7 @@ const filtersHideEverything = computed(
             </div>
             <p class="ph-text">{{ row.text }}</p>
             <p v-if="row.destination" class="ph-destination">{{ row.destination }}</p>
+            <p v-if="row.reason" class="ph-reason"><span class="ph-reason-label">Why</span> {{ row.reason }}</p>
             <!-- A retirement went to the review trash, not through a memory
                  receipt, so the Changes box below says there is no snapshot.
                  Saying so alone would read as "nothing happened" beside a note
@@ -593,6 +594,17 @@ const filtersHideEverything = computed(
   color: var(--fg2);
   font-size: 0.8rem;
   font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.ph-reason {
+  margin: 0;
+  color: var(--fg2);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.ph-reason-label {
+  font-weight: 600;
 }
 
 .ph-source-line {
