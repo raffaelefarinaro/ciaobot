@@ -1176,6 +1176,26 @@ def _store_prediction(queue: Path, verdict: str, text: str = "Prefers uv over pi
     record_prediction(queue, kind="memory", text=text, verdict=verdict, reason="because")
 
 
+def _store_fresh_prediction(queue: Path, verdict: str, text: str = "Prefers uv over pip for installs.") -> None:
+    """Append a prediction one second after the newest decision on *text*."""
+    import json
+    from datetime import datetime, timedelta
+
+    from ciao.proposal_predictions import predictions_path
+
+    decided = [row["ts"] for row in read_decisions(queue) if row.get("text") == text]
+    after = max(datetime.fromisoformat(ts) for ts in decided) + timedelta(seconds=1)
+    row = {
+        "predicted_at": after.isoformat(timespec="seconds"),
+        "kind": "memory",
+        "text": text,
+        "verdict": verdict,
+        "reason": "fresh after the decision",
+    }
+    with predictions_path(queue).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
 def test_predict_records_a_verdict_without_touching_the_queue(tmp_path: Path, capsys) -> None:
     import json
 
@@ -1493,10 +1513,13 @@ def test_accept_leaves_an_event_shaped_row_queued(tmp_path: Path, capsys) -> Non
 def test_accept_duplicate_removes_the_row_and_records_duplicate(tmp_path: Path) -> None:
     root, vault, queue = _accepted_install(tmp_path)
     assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
-    # The same fact queued again, with a fresh prediction.
+    # The same fact queued again, with a fresh prediction stamped after the first
+    # decision: the earlier one is stale once a later decision exists (#1759), and
+    # whether the accept lands in the same second as it must not matter.
     queue.write_text(
         queue.read_text(encoding="utf-8") + "\n" + _REGION_BULLET + "\n", encoding="utf-8"
     )
+    _store_fresh_prediction(queue, "accept")
 
     assert _run_handover("memory-proposal-accept", root, vault, _REGION_NEEDLE) == 0
 
