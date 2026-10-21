@@ -39,6 +39,7 @@ from ciao.port_in_use import (
     check_server_port,
     is_address_in_use,
     port_in_use_message,
+    port_is_available,
     read_port_in_use,
 )
 from ciao.web.routes_api import startup_status_endpoint
@@ -400,3 +401,43 @@ def test_the_engines_own_bind_claims_a_free_port() -> None:
         probe.bind(("127.0.0.1", 0))
     finally:
         probe.close()
+
+
+def _free_port() -> int:
+    """A port the kernel just handed out and that nothing holds any more."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+    finally:
+        probe.close()
+
+
+def test_a_free_port_is_available_on_the_wildcard_address() -> None:
+    """The default probe (host ``''``) must not report a free port as taken.
+
+    ``''`` binds ``::`` and ``0.0.0.0``. An AF_INET6 socket that is not
+    V6ONLY also claims the IPv4 wildcard on macOS and on Linux with
+    ``bindv6only=0``, so the second bind used to fail with EADDRINUSE on a
+    port nothing held. ``asyncio.create_server`` (and so uvicorn) sets
+    ``IPV6_V6ONLY`` on those sockets; the probe has to as well.
+    """
+    port = _free_port()
+
+    assert port_is_available(port) is True
+    check_server_port("", port)
+
+
+def test_a_listener_on_the_ipv4_wildcard_makes_the_port_taken() -> None:
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    holder.bind(("0.0.0.0", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        assert port_is_available(port) is False
+        with pytest.raises(OSError) as raised:
+            check_server_port("", port)
+        assert is_address_in_use(raised.value) is True
+    finally:
+        holder.close()
