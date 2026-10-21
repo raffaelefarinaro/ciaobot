@@ -2117,6 +2117,7 @@ import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsMemoryHandover from './settings/SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
 import type { ModelSection } from '../lib/modelSections'
+import { modelDisplayName, modelProviderPrefix } from '../lib/modelLabels'
 import { isLoopbackHostname } from '../lib/loopback'
 import { settingsTabLabel } from '../lib/settingsNav'
 import { parseWorkspaceFileAccessHref } from '../lib/appLinks'
@@ -2534,40 +2535,77 @@ function providerDefaultModelOverride(provider: AliasProviderKey): string {
   return routines.value?.provider_default_models?.[provider] || ''
 }
 
+// The readable name of every model in a section, keyed by its raw id, and the
+// provider namespace each id states. Both come from the shared helpers in
+// lib/modelLabels, so a model reads the same in Settings as it does in the
+// chat and schedule pickers.
+function modelLabelsFor(models: string[]): Record<string, string> {
+  const labels: Record<string, string> = {}
+  for (const model of models) labels[model] = modelDisplayName(model)
+  return labels
+}
+
+function modelBadgesFor(models: string[]): Record<string, string[]> {
+  const badges: Record<string, string[]> = {}
+  for (const model of models) {
+    // The namespace the id itself states, and nothing else: a tier alias
+    // names no provider.
+    const namespace = modelProviderPrefix(model)
+    if (namespace) badges[model] = [namespace]
+  }
+  return badges
+}
+
 // The alias-provider section entry (models + disabled state) is identical
 // wherever a picker offers one provider's catalog; only the surrounding
 // sections (e.g. the "Default"/Automatic entry above) differ per caller.
 function aliasSectionEntry(provider: string): ModelSection {
   const section = aliasProviderSections.value.find((s) => s.key === provider)
+  const models = section?.options || []
   return {
     key: provider,
     label: section?.label || provider,
-    models: section?.options || [],
+    models,
+    modelLabels: modelLabelsFor(models),
+    modelBadges: modelBadgesFor(models),
     disabled: !section?.available,
   }
 }
 
 // One provider's catalog behind a single "Default" entry, which the caller
-// names (the sentinel it stores as "unset" and the label it shows).
+// names (the sentinel it stores as "unset" and the label it shows). The entry
+// names the readable model Automatic resolves to, and its badge names that
+// model's provider namespace, nothing else. The raw id is not on this entry —
+// the option's own data is the sentinel — it stays on that model's entry in
+// the provider section below.
 function providerSectionsWithDefault(
   provider: AliasProviderKey,
   sentinel: string,
   label: (effective: string) => string,
+  namesResolvedModel = false,
 ): ModelSection[] {
+  const effective = providerDefaultModelEffective(provider)
+  const namespace = modelProviderPrefix(effective)
   return [
     {
       key: 'default',
       label: 'Default',
       models: [sentinel],
-      modelLabels: { [sentinel]: label(providerDefaultModelEffective(provider)) },
+      modelLabels: { [sentinel]: label(effective) },
+      ...(namesResolvedModel && namespace
+        ? { modelBadges: { [sentinel]: [namespace] } }
+        : {}),
     },
     aliasSectionEntry(provider),
   ]
 }
 
 function providerDefaultModelSectionsFor(provider: AliasProviderKey): ModelSection[] {
-  return providerSectionsWithDefault(provider, DEFAULT_MODEL_SELECTION, (effective) =>
-    effective ? `Automatic (${effective})` : 'Automatic',
+  return providerSectionsWithDefault(
+    provider,
+    DEFAULT_MODEL_SELECTION,
+    (effective) => (effective ? `Automatic (${modelDisplayName(effective)})` : 'Automatic'),
+    true, // the entry names the model Automatic resolves to
   )
 }
 
