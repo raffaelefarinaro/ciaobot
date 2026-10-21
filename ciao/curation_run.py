@@ -350,11 +350,12 @@ def _proposal_items(vault_root: Path) -> list[WorklistItem]:
     # cross-project fact look busy forever, and the nightly run would spend a
     # model turn re-reading a row it is forbidden to act on. They are skipped
     # after the walk, not before it, so leaving one out cannot renumber a later
-    # duplicate's ordinal.
+    # duplicate's ordinal. A row escalated with `decide: you` likewise waits for
+    # the operator and is not nightly work; the item key never hashes the decider.
     keys = tuple(
         item_key(PASS_PROPOSALS, _proposal_subject(entry.bullet, entry.dup))
         for entry in walk_proposal_queue("", PROPOSALS_RELATIVE, text)
-        if entry.bullet.kind not in {"memory", "profile"}
+        if entry.bullet.kind not in {"memory", "profile"} and entry.bullet.decider != "you"
     )
     if not keys:
         return []

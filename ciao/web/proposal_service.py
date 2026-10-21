@@ -995,6 +995,11 @@ def _scan_proposal_rows(config) -> tuple[list[dict[str, Any]], dict[str, dict[st
                     # a preview rendered without the request shows a line with no
                     # citation that the accept then writes with one.
                     row["request"] = bullet.request
+                if bullet.decider:
+                    # Absent for rows with no decider, like `target` and `request`.
+                    row["decider"] = bullet.decider
+                    if bullet.decide_reason:
+                        row["decide_reason"] = bullet.decide_reason
                 accept = proposal_kinds.accept_for(bullet.kind)
                 if accept.action == "edit_region":
                     row["region"] = resolve_region(bullet.kind)

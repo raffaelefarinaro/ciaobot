@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 import urllib.error
 import urllib.request
 
-from ciao import dev, gws_wrapper, package_smoke, public_release, release, service_backend
+from ciao import dev, gws_wrapper, package_smoke, proposal_kinds, public_release, release, service_backend
 from ciao.server_host import (
     BUNDLE_ID,
     EXIT_TIMEOUT_SECONDS,
@@ -4177,7 +4177,12 @@ def _memory_proposals_command(args: argparse.Namespace) -> int:
             print("No memory proposals are pending.")
         for row in window:
             tag = f" [{row['source']}]" if row["source"] else ""
-            print(f"- [{row['kind']}] {row['text']}{tag}")
+            decide = (
+                f" (decide: {row['decider']}; {row['decide_reason']})"
+                if row["decider"]
+                else ""
+            )
+            print(f"- [{row['kind']}] {row['text']}{tag}{decide}")
         if "next_offset" in page:
             print(
                 f"Showing {args.offset + 1}-{page['next_offset']} of {len(rows)}; "
@@ -4324,12 +4329,32 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    decide = (args.decide or "").strip()
+    reason_file = (args.decide_reason_file or "").strip()
+    decide_reason = ""
+    if decide and not reason_file:
+        print("--decide needs --decide-reason-file (one line saying why)", file=sys.stderr)
+        return 2
+    if reason_file and not decide:
+        print("--decide-reason-file needs --decide", file=sys.stderr)
+        return 2
+    if reason_file:
+        try:
+            decide_reason = " ".join(Path(reason_file).read_text(encoding="utf-8").split())
+        except (OSError, UnicodeError) as exc:
+            print(f"could not read {reason_file}: {exc}", file=sys.stderr)
+            return 2
+        if not decide_reason:
+            print("the decide reason is empty", file=sys.stderr)
+            return 2
     proposal = MemoryProposal(
         target=kind,
         text=text,
         source_section=args.source.strip() or "curation",
         payload=payload,
         request=request,
+        decider=decide,
+        decide_reason=decide_reason,
     )
     path = append_proposals(
         [proposal], vault, allow_dismissed=bool(getattr(args, "allow_dismissed", False))
@@ -4351,6 +4376,7 @@ def _memory_proposal_add_command(args: argparse.Namespace) -> int:
                 "path": str(path) if path else None,
                 "text": text,
                 "request": request,
+                "decide": decide,
                 # argparse supplies a Path when --workspace is explicit, and
                 # json.dump cannot serialize one; report the resolved root.
                 "workspace": str(workspace),
@@ -4763,6 +4789,65 @@ def _memory_proposal_dismiss_command(args: argparse.Namespace) -> int:
     else:
         verb = "Promoted" if args.promoted else "Dismissed"
         print(f"{verb} memory proposal matching {needle!r}.")
+    return 0
+
+
+def _memory_proposal_escalate_command(args: argparse.Namespace) -> int:
+    """Re-tag one queued proposal ``decide: you`` with the reason it could not be settled.
+
+    Not a decision: the bullet stays queued, nothing is recorded in History and
+    no receipt is written. Matched like ``memory-proposal-dismiss``; escalating
+    an item already marked ``you`` replaces its reason.
+    """
+    refused = _refuse_ambiguous_vault_write(args)
+    if refused is not None:
+        return refused
+    from ciao.memory_proposals import set_proposal_decider
+
+    workspace, vault = _resolve_workspace_and_vault(args)
+    path = vault / "Workspace" / "Memory-Proposals.md"
+    text_file = (args.text_file or "").strip()
+    needle = (args.text or "").strip()
+    if needle and text_file:
+        print(
+            "pass the substring either as text or via --text-file, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if text_file:
+        try:
+            needle = Path(text_file).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            print(f"could not read {text_file}: {exc}", file=sys.stderr)
+            return 2
+    if not needle:
+        print("a proposal text or unique substring is required", file=sys.stderr)
+        return 2
+    reason_file = (args.reason_file or "").strip()
+    if not reason_file:
+        print("--reason-file is required (one line saying why only you can decide)", file=sys.stderr)
+        return 2
+    reason = _read_argv_safe("", reason_file, "the reason")
+    if reason is None:
+        return 2
+    reason = " ".join(reason.split())
+    if not reason:
+        print("the escalation reason is empty", file=sys.stderr)
+        return 2
+    forms = (needle, " ".join(needle.split()))
+    result = set_proposal_decider(path, forms, "you", reason)
+    if result is None:
+        print(
+            f"No unique memory proposal matched {needle!r} "
+            "(the text may be ambiguous or absent).",
+            file=sys.stderr,
+        )
+        return 1
+    kind, text = result
+    if args.json:
+        _emit_json({"escalated": True, "text": text, "workspace": str(workspace)})
+    else:
+        print(f"Escalated [{kind}] proposal to decide: you.")
     return 0
 
 
@@ -7746,6 +7831,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-file a previously dismissed fact for review; promoted facts remain deduped.",
     )
+    memory_proposal_add_parser.add_argument(
+        "--decide",
+        choices=proposal_kinds.DECIDERS,
+        default="",
+        help=(
+            "Who should settle it: `nightly` when more context (other chats, "
+            "existing notes, a duplicate check) would settle it, `you` only for "
+            "a judgement about the operator's identity or preferences. "
+            "Requires --decide-reason-file."
+        ),
+    )
+    memory_proposal_add_parser.add_argument(
+        "--decide-reason-file",
+        default="",
+        help="Read the one-line reason for --decide from this file.",
+    )
     memory_proposal_add_parser.set_defaults(func=_memory_proposal_add_command)
 
     def _observation_options(parser: argparse.ArgumentParser) -> None:
@@ -7881,6 +7982,50 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     memory_proposal_dismiss_parser.set_defaults(func=_memory_proposal_dismiss_command)
+
+    memory_proposal_escalate_parser = subparsers.add_parser(
+        "memory-proposal-escalate",
+        help="Re-tag one queued memory proposal as needing the operator.",
+        description=(
+            "Marks one pending memory proposal `decide: you` with the reason "
+            "it could not be settled, matched by a unique text substring. The "
+            "bullet stays queued; this is not a decision and leaves no History row."
+        ),
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "text",
+        nargs="?",
+        default="",
+        help="Proposal text or unique substring. Omit when --text-file supplies it.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--text-file",
+        default="",
+        help="Read the substring from this file instead of the argument.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--reason-file",
+        default="",
+        help="Read the one-line reason from this file.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    memory_proposal_escalate_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured result as JSON instead of text.",
+    )
+    memory_proposal_escalate_parser.set_defaults(func=_memory_proposal_escalate_command)
 
     curation_plan_parser = subparsers.add_parser(
         "curation-plan",
