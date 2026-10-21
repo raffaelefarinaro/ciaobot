@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.6.1 - 2026-10-21
+
+### New features
+- **Sign in on this computer:** forgot the dashboard password? The login page on the computer running Ciaobot now signs you straight in, and Settings → PWA password there lets you set a new one without the current one.
+- **Provider updates on Home:** a housekeeping tile tells you when Claude or OpenCode is behind the version this release was tested with, with Copy and Update in Terminal buttons (also in Settings → Models).
+- **Welcome card:** a one-time "Your Ciaobot" card on Home shows your workspace folder, password and AI tool, plus a "Use on your phone" link to Other devices.
+- **Task peek:** task links in a chat open the task in a read-only peek over the current view instead of leaving the chat.
+- **Delete a vault-backed project with its notes:** deleting a project can now remove its vault folder too, cleaning up links to it from other notes.
+- **Workspaces in Desktop, Documents or Downloads (macOS):** these folders now work as workspaces when the engine runs under Ciaobot Server.app.
+
+### Improvements
+- The live "Working" activity in a chat is a single row you can expand, instead of a growing list.
+- Setup warns when your workspace sits inside iCloud Drive, Dropbox, Google Drive or OneDrive.
+- If macOS denies folder access or another program holds the port, Ciaobot says so on startup instead of restarting in a loop; the installer names the port that is taken.
+- Links the assistant writes to pages inside Ciaobot open in the app, and the File access settings have a direct link.
+- Completing a task is one action with an optional note, and the assistant can delete a task when you ask it to.
+- The assistant knows which workspace it is in and what it may change, and agent shells no longer stop to ask for git or GitHub credentials.
+- Recently used chats keep their Claude process warm, so replies start faster after a pause.
+- Opening a chat shows a placeholder while it loads, and only files opened from a chat are docked beside it.
+
+### Bug fixes
+- When several permission or question prompts were waiting, approving or answering them could deliver only one ([#1616](https://github.com/raffaelefarinaro/ciaobot/issues/1616), [#1619](https://github.com/raffaelefarinaro/ciaobot/issues/1619)).
+- Permission and question prompts from OpenCode sub-agents never appeared ([#1617](https://github.com/raffaelefarinaro/ciaobot/issues/1617)).
+- A reconnect could send the same message twice or repeat a finished answer ([#1645](https://github.com/raffaelefarinaro/ciaobot/issues/1645)).
+- An answered permission stayed in the live step label ([#1618](https://github.com/raffaelefarinaro/ciaobot/issues/1618)), and a second answer to an already-answered prompt reported success ([#1624](https://github.com/raffaelefarinaro/ciaobot/issues/1624), [#1635](https://github.com/raffaelefarinaro/ciaobot/issues/1635)).
+- A wrong current password in Settings → PWA password signed you out ([#1583](https://github.com/raffaelefarinaro/ciaobot/issues/1583)).
+- A fresh install showed "Workspace care did not run when expected" on Home and listed the General project note to revisit ([#1578](https://github.com/raffaelefarinaro/ciaobot/issues/1578), [#1579](https://github.com/raffaelefarinaro/ciaobot/issues/1579)).
+- A slow remote connection was shown as the engine being offline.
+- Chats with many sub-agents slowed down while they ran ([#1652](https://github.com/raffaelefarinaro/ciaobot/issues/1652)).
+- A failed engine update or workspace move did not say which step failed ([#1571](https://github.com/raffaelefarinaro/ciaobot/issues/1571), [#1596](https://github.com/raffaelefarinaro/ciaobot/issues/1596)).
+
+[Full list of changes](https://github.com/raffaelefarinaro/ciaobot/compare/v1.6.0...v1.6.1)
+
 ## v1.6.0 - 2026-10-20
 
 **Heads up:**

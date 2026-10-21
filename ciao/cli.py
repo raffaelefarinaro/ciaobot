@@ -4444,7 +4444,7 @@ def _read_persisted_text_file(path: str, flag: str) -> str | None:
     characters are read so a huge file is never loaded whole; the caller's own
     length check then refuses an over-long reason.
     """
-    from ciao.execution_modes import CREDENTIAL_DENY_PATTERNS
+    from ciao.execution_modes import is_credential_adjacent
     from ciao.task_decisions import MAX_REASON
 
     target = Path(path).expanduser()
@@ -4453,7 +4453,7 @@ def _read_persisted_text_file(path: str, flag: str) -> str | None:
     except OSError as exc:
         print(f"{flag} cannot be read: {exc}", file=sys.stderr)
         return None
-    if any(resolved.match(pattern) for pattern in CREDENTIAL_DENY_PATTERNS):
+    if is_credential_adjacent(resolved):
         print(
             f"{flag} refuses credential-adjacent paths ({path}): "
             "pass the content in a workspace file instead.",

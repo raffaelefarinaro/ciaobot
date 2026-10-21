@@ -1370,6 +1370,21 @@ def test_handover_messages_refuse_credential_paths(tmp_path: Path) -> None:
     assert agent_cli._handover_messages(f"@{plain}") == [{"role": "user"}]
 
 
+def test_task_body_refuses_nested_runtime_and_env_variant(tmp_path: Path) -> None:
+    """`Path.match` only caught a direct child of `.runtime/`, so a deeper file
+    or a `.env.*` variant could be read into a vault-persisted task body (#1746)."""
+    nested = tmp_path / ".runtime" / "a" / "b" / "file.txt"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("token", encoding="utf-8")
+    with pytest.raises(agent_cli.UsageError, match="credential"):
+        agent_cli._task_body(f"@{nested}")
+
+    env_local = tmp_path / ".env.local"
+    env_local.write_text("TOKEN=x", encoding="utf-8")
+    with pytest.raises(agent_cli.UsageError, match="credential"):
+        agent_cli._task_body(f"@{env_local}")
+
+
 # ── Decision reasons (#1726) ─────────────────────────────────────────
 
 
