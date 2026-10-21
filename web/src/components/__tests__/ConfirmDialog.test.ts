@@ -4,7 +4,7 @@ import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { afterEach, describe, expect, it } from 'vitest'
 import ConfirmDialog from '../ConfirmDialog.vue'
-import { askConfirm, pendingConfirm } from '../../lib/confirm'
+import { askConfirm, askConfirmReason, pendingConfirm } from '../../lib/confirm'
 
 type ConfirmOptions = Parameters<typeof askConfirm>[1]
 
@@ -158,5 +158,73 @@ describe('ConfirmDialog', () => {
     expect(pendingConfirm.value?.message).toBe('Second?')
     await find<HTMLButtonElement>('.confirm-action--cancel').click()
     await expect(second).resolves.toBe(false)
+  })
+
+  describe('with a reason field', () => {
+    function openReason() {
+      wrapper = mount(ConfirmDialog, { attachTo: document.body })
+      return askConfirmReason('Delete it?', { confirmLabel: 'Delete', destructive: true })
+    }
+
+    it('shows the reason field only for a withReason request', async () => {
+      const plain = openDialog('Plain?')
+      await settle()
+      expect(document.querySelector('.decision-reason')).toBeNull()
+      pendingConfirm.value?.resolve(false)
+      await plain
+      wrapper?.unmount()
+      wrapper = null
+
+      const answer = openReason()
+      await settle()
+      expect(document.querySelector('.decision-reason')).not.toBeNull()
+      expect(document.activeElement).toBe(find('.confirm-action--cancel'))
+      pendingConfirm.value?.resolve(false)
+      await answer
+    })
+
+    it('does not confirm on Enter inside the textarea', async () => {
+      const answer = openReason()
+      await settle()
+      const field = find<HTMLTextAreaElement>('.decision-reason textarea')
+      field.focus()
+      press(field, 'Enter')
+      await settle()
+      expect(pendingConfirm.value).not.toBeNull()
+      pendingConfirm.value?.resolve(false)
+      await answer
+    })
+
+    it('does not confirm on Enter on a chip', async () => {
+      const answer = openReason()
+      await settle()
+      const chip = find<HTMLButtonElement>('.decision-reason .task-chip')
+      chip.focus()
+      press(chip, 'Enter')
+      await settle()
+      expect(pendingConfirm.value).not.toBeNull()
+      pendingConfirm.value?.resolve(false)
+      await answer
+    })
+
+    it('still confirms on Enter elsewhere and copies the typed reason out', async () => {
+      const answer = openReason()
+      await settle()
+      const field = find<HTMLTextAreaElement>('.decision-reason textarea')
+      field.value = 'wrong person'
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      press(find('.confirm-action--cancel'), 'Enter')
+      await expect(answer).resolves.toEqual({ confirmed: true, reason: 'wrong person' })
+    })
+
+    it('Escape cancels with no reason', async () => {
+      const answer = openReason()
+      await settle()
+      const field = find<HTMLTextAreaElement>('.decision-reason textarea')
+      field.value = 'typed'
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      press(field, 'Escape')
+      await expect(answer).resolves.toEqual({ confirmed: false, reason: '' })
+    })
   })
 })
