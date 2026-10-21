@@ -439,6 +439,13 @@ describe('ProjectSidebar chat actions', () => {
     const here = join(__dirname, '..')
     const source = readFileSync(join(here, 'ProjectSidebar.vue'), 'utf8')
     expect(source).toContain('<style scoped src="./titleShimmer.css">')
+    const css = readFileSync(join(here, 'titleShimmer.css'), 'utf8')
+    expect(css).toMatch(/\.title-shimmer\s*\{[^}]*flex:\s*1/)
+    expect(css).toMatch(/animation:\s*title-shimmer-sweep/)
+    // The extracted stylesheet cannot declare keyframes for another block, so
+    // the mobile skeleton keeps its own sweep in the sidebar's block.
+    expect(source).toMatch(/animation:\s*mm-shimmer-sweep/)
+    expect(source).toMatch(/@keyframes\s+mm-shimmer-sweep/)
   })
 })
 

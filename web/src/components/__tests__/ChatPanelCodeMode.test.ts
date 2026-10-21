@@ -267,6 +267,8 @@ describe('ChatPanel naming placeholder', () => {
   it('shows the shared naming placeholder while the title is pending', async () => {
     const { wrapper } = await mountPanel()
     const store = useProjectStore()
+    store.projects[0].repo = REPO
+    store.chats[0].code_mode = true
     store.chats[0].title = 'New Chat'
     store.chats[0].title_status = 'pending'
     await flushPromises()
@@ -278,8 +280,10 @@ describe('ChatPanel naming placeholder', () => {
     // The placeholder stands in for the title, so the temporary one never shows.
     expect(wrapper.find('.chat-title-row .chat-title').exists()).toBe(false)
     expect(wrapper.get('.chat-title-row').text()).not.toContain('New Chat')
-    // The close control stays put while the conversation is being named.
+    // The close control and the code badge stay put while the conversation is
+    // being named.
     expect(wrapper.find('.chat-title-row .close-btn').exists()).toBe(true)
+    expect(wrapper.find('.chat-title-row .chat-code-badge').exists()).toBe(true)
   })
 
   it('replaces the placeholder when the title settles', async () => {
@@ -302,6 +306,7 @@ describe('ChatPanel naming placeholder', () => {
     const { wrapper } = await mountPanel()
     const store = useProjectStore()
     store.projects[0].repo = REPO
+    store.projects[0].name = 'Launch notes'
     store.chats[0].code_mode = true
     await flushPromises()
 
@@ -311,6 +316,9 @@ describe('ChatPanel naming placeholder', () => {
     expect(row.find('.chat-code-badge').exists()).toBe(true)
     // The project sits beside the row, never inside it, so a second line
     // under the title cannot drag the close control off the title's centre.
+    // A named project is required here: General renders no crumb at all, and
+    // the assertion would then pass wherever the crumb lived.
+    expect(wrapper.find('.header-breadcrumb > .breadcrumb-scope').exists()).toBe(true)
     expect(row.find('.breadcrumb-scope').exists()).toBe(false)
 
     store.chats[0].code_mode = false
