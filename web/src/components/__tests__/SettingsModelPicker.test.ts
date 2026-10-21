@@ -15,6 +15,9 @@ import type { ModelsResponse } from '../../lib/types'
 // A namespaced id, the shape opencode's catalog carries.
 const NAMESPACED = 'openai/gpt-5.6-luna'
 
+// The sentinel the picker stores while a provider's default is "unset".
+const DEFAULT_SELECTION = '__ciao_default_model__'
+
 const state = vi.hoisted(() => ({
   models: null as unknown,
   routines: null as unknown,
@@ -198,7 +201,7 @@ describe('Settings → Models model names', () => {
     }
   })
 
-  it('keeps the Default entry reading Automatic, with the id it resolves to', async () => {
+  it('keeps the Default entry reading Automatic, badged with the provider namespace', async () => {
     const wrapper = await mountModelsTab()
     try {
       const items = await openDefaultModelPicker(wrapper, 'opencode')
@@ -206,10 +209,13 @@ describe('Settings → Models model names', () => {
       expect(automatic, 'no Default entry').toBeTruthy()
 
       expect(automatic!.find('.model-selector__item-label').text()).toBe('Automatic (GPT-5.6 Luna)')
-      // The technical id Automatic resolves to is still there beside it.
+      // The badge is the namespace the resolved model's id states, never the
+      // raw id itself.
       expect(automatic!.findAll('.model-selector__item-badge').map((el) => el.text())).toEqual([
-        NAMESPACED,
+        'openai',
       ])
+      // The option's own data is the sentinel Automatic stores.
+      expect(automatic!.attributes('data-model')).toBe(DEFAULT_SELECTION)
       // And the closed picker says the same on its trigger.
       expect(defaultModelTrigger(wrapper, 'opencode').text()).toContain('Automatic (GPT-5.6 Luna)')
     } finally {

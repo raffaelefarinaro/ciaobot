@@ -2573,9 +2573,11 @@ function aliasSectionEntry(provider: string): ModelSection {
 }
 
 // One provider's catalog behind a single "Default" entry, which the caller
-// names (the sentinel it stores as "unset" and the label it shows). When the
-// label names the model Automatic resolves to, that model's technical id
-// rides beside it, so the id itself is never lost.
+// names (the sentinel it stores as "unset" and the label it shows). The entry
+// names the readable model Automatic resolves to, and its badge names that
+// model's provider namespace, nothing else. The raw id is not on this entry —
+// the option's own data is the sentinel — it stays on that model's entry in
+// the provider section below.
 function providerSectionsWithDefault(
   provider: AliasProviderKey,
   sentinel: string,
@@ -2583,14 +2585,15 @@ function providerSectionsWithDefault(
   namesResolvedModel = false,
 ): ModelSection[] {
   const effective = providerDefaultModelEffective(provider)
+  const namespace = modelProviderPrefix(effective)
   return [
     {
       key: 'default',
       label: 'Default',
       models: [sentinel],
       modelLabels: { [sentinel]: label(effective) },
-      ...(namesResolvedModel && effective
-        ? { modelBadges: { [sentinel]: [effective] } }
+      ...(namesResolvedModel && namespace
+        ? { modelBadges: { [sentinel]: [namespace] } }
         : {}),
     },
     aliasSectionEntry(provider),
