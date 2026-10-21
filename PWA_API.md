@@ -1238,8 +1238,11 @@ the same rules per row and reports `promoted` and `dismissed` for each, keeping
 the bullets it could not write.
 
 `GET /api/proposals/handover?workspace=<name>` returns `{workspace, handover,
-agreement}` and is read-only. `handover` is the workspace's Memory handover
-setting. `agreement` measures how often the verdicts the nightly run recorded
+acting_available, agreement}` and is read-only. `handover` is the workspace's
+Memory handover setting. `acting_available` is whether the unattended run can act
+on it on this install: the handover gate trusts only the installed service
+definition (LaunchAgent or Windows task), so it is false on a Linux/systemd
+install and whenever the workspace is not registered there. `agreement` measures how often the verdicts the nightly run recorded
 for `[memory]`/`[profile]` rows matched what the operator then decided, over the
 newest 50 operator (`via: "pwa"`) decisions that carry a prediction; agent,
 auto and swept decisions do not count. It holds `decided`, `matched`, `rate`

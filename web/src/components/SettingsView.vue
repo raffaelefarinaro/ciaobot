@@ -361,6 +361,9 @@
              actions; the only thing it cannot do alone is navigate to a chat,
              so it emits the setup chat's id for this view to open. -->
         <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
+        <!-- The operator's switch for the nightly run's own decisions. It owns
+             its data: nothing here is part of the workspace edit form. -->
+        <SettingsMemoryHandover />
 
         <SettingsInsights
           :routines="routines"
@@ -2091,6 +2094,7 @@ import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
+import SettingsMemoryHandover from './settings/SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
 import type { ModelSection } from '../lib/modelSections'
 import { isLoopbackHostname } from '../lib/loopback'
