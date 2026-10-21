@@ -153,6 +153,8 @@ The workspace editor keeps one consistent label/control row per field, with each
 
 The device-setup reminder uses quiet task labels at `--text-base`, weight 600, and one aligned action column. Installation help is a real navigation link styled as a neutral bordered action; notification Enable and a browser-provided Install action retain primary emphasis. On narrow panes, row actions become full-width touch targets. *Use on your phone* is a closed native disclosure containing the existing three instructions and the permanent Settings → Other devices link. Phone setup remains host-only and informational, never a completion requirement; closing the reminder still persists for this browser.
 
+Shared model-picker sections show readable names while retaining the exact technical identifier in each option's tooltip, data and search. Provider badges come only from the identifier's actual namespace, never an inferred upstream vendor, and remain beside any Default badge. Formatting changes presentation only: selected raw identifiers and provider routing stay unchanged.
+
 
 ## Colors
 
