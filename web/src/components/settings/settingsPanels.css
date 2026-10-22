@@ -865,3 +865,67 @@
   .settings-switch .switch-track,
   .settings-switch .switch-track::after { transition: none; }
 }
+.instance-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  margin-top: 0;
+  width: 100%;
+}
+/* A quiet segmented control: the current choice is a raised tile, not an
+   accent fill - the accent stays reserved for each section's one action. */
+.toggle-btn {
+  flex: 1;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background 0.15s, color 0.15s;
+}
+.toggle-btn:hover:not(:disabled) {
+  color: var(--fg);
+}
+.toggle-btn.active {
+  background: var(--bg3);
+  color: var(--fg);
+}
+@media (pointer: coarse) {
+  .toggle-btn { min-height: var(--touch); }
+}
+.toggle-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Row text and control column shared with Settings child panels (moved from SettingsView). */
+.routine-detail {
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  line-height: 1.35;
+}
+.routine-detail code {
+  font-size: var(--text-xs);
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.settings-control {
+  width: min(100%, 430px);
+  min-width: 320px;
+  flex: 0 0 auto;
+}
+@container (max-width: 720px) {
+  .settings-control {
+    min-width: 0;
+    width: 100%;
+  }
+}

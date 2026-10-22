@@ -299,7 +299,7 @@
         <div class="card">
           <div class="settings-card-header">
             <p class="section-title">Appearance</p>
-            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
+            <p class="hint">Control the visual theme, text and type used across Ciaobot.</p>
           </div>
           <div class="setting-row setting-row--inline setting-row--flush">
             <div class="routine-info">
@@ -346,6 +346,8 @@
               </div>
             </div>
           </div>
+          <SettingsAppearance />
+          <p v-if="appearanceError" class="action-result" role="alert">{{ appearanceError }}</p>
         </div>
       </template>
 
@@ -2046,6 +2048,8 @@ import {
   useFontScale,
 } from '../composables/useFontScale'
 import { useModalFocus } from '../composables/useModalFocus'
+import { useAppearanceSettings } from '../composables/useAppearanceSettings'
+import { applyTheme, readLocalTheme, type AppearancePayload, type Theme } from '../lib/appearance'
 import type {
   AgentAssetsResponse,
   ArchivedWorkspace,
@@ -2107,6 +2111,7 @@ import GwsSetupChecklist from './settings/GwsSetupChecklist.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
+import SettingsAppearance from './settings/SettingsAppearance.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsMemoryHandover from './settings/SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './settings/SettingsUpdateTasks.vue'
@@ -2277,40 +2282,38 @@ const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 
 // ── Appearance settings ────────────────────────────────────────────────────
-const activeTheme = ref('system')
+const activeTheme = ref<Theme>('system')
 // The scale itself, its bounds, its step and its persistence live in
 // useFontScale, shared with the global zoom shortcuts. Only the displayed
 // percentage is Settings' own: the scale is anchored to the pre-rescale UI, so
 // DEFAULT_FONT_SCALE (1.2) reads as "100%".
 const { fontScale, adjust: adjustFontScale, reset: resetFontScale } = useFontScale()
+const appearance = useAppearanceSettings()
 const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))
 
 function loadAppearanceSettings() {
-  try {
-    activeTheme.value = localStorage.getItem('ciao-theme') || 'system'
-  } catch {
-    // Ignore localStorage block
-  }
+  activeTheme.value = appearance.settings.value.theme ?? readLocalTheme()
 }
 
-function setTheme(theme: 'dark' | 'light' | 'system') {
-  activeTheme.value = theme
-  try {
-    localStorage.setItem('ciao-theme', theme)
-  } catch { /* localStorage blocked */ }
+// Theme and font size are engine-wide: apply here at once, then store on the
+// engine so every device follows. A failed save reloads the engine value.
+const appearanceError = ref('')
+// Another device (or the first load) can move the engine theme while Settings is open.
+watch(() => appearance.settings.value.theme, (theme) => {
+  if (theme) activeTheme.value = theme
+})
 
-  if (theme === 'light') {
-    document.documentElement.classList.add('theme-light')
-  } else if (theme === 'dark') {
-    document.documentElement.classList.remove('theme-light')
-  } else {
-    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    if (isDark) {
-      document.documentElement.classList.remove('theme-light')
-    } else {
-      document.documentElement.classList.add('theme-light')
-    }
-  }
+function saveAppearance(patch: Partial<AppearancePayload>) {
+  appearanceError.value = ''
+  void appearance.save(patch).catch((cause: unknown) => {
+    appearanceError.value = cause instanceof Error ? cause.message : 'Could not save appearance settings.'
+  })
+}
+
+function setTheme(theme: Theme) {
+  activeTheme.value = theme
+  applyTheme(theme)
+  saveAppearance({ theme })
 }
 
 function isSkillExpanded(name: string) {
@@ -5496,45 +5499,6 @@ a.btn-secondary {
   overflow-x: auto;
 }
 
-.instance-toggle {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  margin-top: 0;
-  width: 100%;
-}
-/* A quiet segmented control: the current choice is a raised tile, not an
-   accent fill - the accent stays reserved for each section's one action. */
-.toggle-btn {
-  flex: 1;
-  min-height: 36px;
-  padding: 0 14px;
-  border: 0;
-  border-radius: 6px;
-  cursor: pointer;
-  background: transparent;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  transition: background 0.15s, color 0.15s;
-}
-.toggle-btn:hover:not(:disabled) {
-  color: var(--fg);
-}
-.toggle-btn.active {
-  background: var(--bg3);
-  color: var(--fg);
-}
-@media (pointer: coarse) {
-  .toggle-btn { min-height: var(--touch); }
-}
-.toggle-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
 .status-dot {
   display: inline-block;
   width: 8px;
@@ -5550,18 +5514,6 @@ a.btn-secondary {
   background: var(--error);
 }
 
-.routine-detail {
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  line-height: 1.35;
-}
-.routine-detail code {
-  font-size: var(--text-xs);
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--bg);
-  color: var(--fg);
-}
 .workspace-move-row {
   margin-top: var(--space-3);
 }
@@ -5620,11 +5572,6 @@ a.btn-secondary {
   content: '·';
   margin-right: 10px;
   color: var(--fg3);
-}
-.settings-control {
-  width: min(100%, 430px);
-  min-width: 320px;
-  flex: 0 0 auto;
 }
 .tier-provider-section {
   padding-top: var(--space-3);
@@ -5929,10 +5876,6 @@ a.btn-secondary {
   }
   .action-row--compact > button {
     flex: 1 1 100%;
-    width: 100%;
-  }
-  .settings-control {
-    min-width: 0;
     width: 100%;
   }
   /* The heading takes the full row; status and account actions wrap below. */
