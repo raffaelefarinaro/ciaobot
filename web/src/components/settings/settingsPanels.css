@@ -1009,3 +1009,27 @@
 }
 /* Must stay below the base .workspace-select rule above. */
 @media (pointer: coarse) { .workspace-select { min-height: var(--touch); } }
+/* Row text and control column shared with Settings child panels (moved from SettingsView). */
+.routine-detail {
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  line-height: 1.35;
+}
+.routine-detail code {
+  font-size: var(--text-xs);
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.settings-control {
+  width: min(100%, 430px);
+  min-width: 320px;
+  flex: 0 0 auto;
+}
+@container (max-width: 720px) {
+  .settings-control {
+    min-width: 0;
+    width: 100%;
+  }
+}

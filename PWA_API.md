@@ -1075,6 +1075,23 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
   -d '{"revision":"<revision-from-GET>","keyboard_shortcuts":{"archiveChat":"Mod+KeyK","workspace2":"disabled"},"keyboard_send_mode":"enter","mid_turn_delivery":"steer"}'
 ```
 
+**Appearance settings (Settings → Appearance)**
+
+```bash
+# Read the engine-shared appearance: `text_contrast` ("normal" or "soft"),
+# `theme` ("dark", "light" or "system"; `null` until a browser first stores one,
+# and "system" still resolves per device from its OS), `font_scale` (0.8 to 1.5
+# in steps of 0.05; `null` until first stored) and `revision`.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/appearance"
+
+# Include the revision returned by GET; a stale revision gets 409. Engine-shared,
+# so every device agrees; also in the /ws/events snapshot as `appearance` and in
+# `appearance_settings_changed`.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/appearance" \
+  -H 'content-type: application/json' \
+  -d '{"revision":"<revision-from-GET>","text_contrast":"soft","theme":"dark","font_scale":1.25}'
+```
+
 **MCP inventory and status (Settings → MCP)**
 
 ```bash

@@ -288,7 +288,7 @@
         <div class="card">
           <div class="settings-card-header">
             <p class="section-title">Appearance</p>
-            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
+            <p class="hint">Control the visual theme, text and type used across Ciaobot.</p>
           </div>
           <div class="setting-row setting-row--inline setting-row--flush">
             <div class="routine-info">
@@ -296,29 +296,12 @@
               <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
             </div>
             <div class="settings-control">
-              <div class="instance-toggle">
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'dark' }"
-                  @click="setTheme('dark')"
-                >
-                  Dark
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'light' }"
-                  @click="setTheme('light')"
-                >
-                  Light
-                </button>
-                <button
-                  class="toggle-btn"
-                  :class="{ active: activeTheme === 'system' }"
-                  @click="setTheme('system')"
-                >
-                  System
-                </button>
-              </div>
+              <SettingsRadioGroup
+                label="Theme"
+                :options="THEME_OPTIONS"
+                :model-value="activeTheme"
+                @update:model-value="setTheme"
+              />
             </div>
           </div>
           <div class="setting-row setting-row--inline">
@@ -335,6 +318,8 @@
               </div>
             </div>
           </div>
+          <SettingsAppearance />
+          <p v-if="appearanceError" class="action-result" role="alert">{{ appearanceError }}</p>
         </div>
       </template>
 
@@ -1916,6 +1901,8 @@ import {
   useFontScale,
 } from '../composables/useFontScale'
 import { useModalFocus } from '../composables/useModalFocus'
+import { useAppearanceSettings } from '../composables/useAppearanceSettings'
+import { readLocalTheme, type Theme } from '../lib/appearance'
 import type {
   AgentAssetsResponse,
   CommandAsset,
@@ -1979,6 +1966,8 @@ import GwsSetupChecklist from './settings/GwsSetupChecklist.vue'
 import SettingsKeyboardShortcuts from './settings/SettingsKeyboardShortcuts.vue'
 import SettingsEngineLogin from './settings/SettingsEngineLogin.vue'
 import SettingsMcpServers from './settings/SettingsMcpServers.vue'
+import SettingsAppearance from './settings/SettingsAppearance.vue'
+import SettingsRadioGroup from './settings/SettingsRadioGroup.vue'
 import SettingsMemoryBackup from './settings/SettingsMemoryBackup.vue'
 import SettingsWorkspaceOverview from './settings/SettingsWorkspaceOverview.vue'
 import type { ModelSection } from '../lib/modelSections'
@@ -2152,40 +2141,40 @@ const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 
 // ── Appearance settings ────────────────────────────────────────────────────
-const activeTheme = ref('system')
+const activeTheme = ref<Theme>('system')
 // The scale itself, its bounds, its step and its persistence live in
 // useFontScale, shared with the global zoom shortcuts. Only the displayed
 // percentage is Settings' own: the scale is anchored to the pre-rescale UI, so
 // DEFAULT_FONT_SCALE (1.2) reads as "100%".
 const { fontScale, adjust: adjustFontScale, reset: resetFontScale } = useFontScale()
+const appearance = useAppearanceSettings()
 const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))
 
 function loadAppearanceSettings() {
-  try {
-    activeTheme.value = localStorage.getItem('ciao-theme') || 'system'
-  } catch {
-    // Ignore localStorage block
-  }
+  activeTheme.value = appearance.settings.value.theme ?? readLocalTheme()
 }
 
-function setTheme(theme: 'dark' | 'light' | 'system') {
-  activeTheme.value = theme
-  try {
-    localStorage.setItem('ciao-theme', theme)
-  } catch { /* localStorage blocked */ }
+// Theme and font size are engine-wide: apply here at once, then store on the
+// engine so every device follows. A failed save reloads the engine value.
+const THEME_OPTIONS: { value: Theme; label: string }[] = [
+  { value: 'dark', label: 'Dark' },
+  { value: 'light', label: 'Light' },
+  { value: 'system', label: 'System' },
+]
+const appearanceError = ref('')
+// Another device (or the first load) can move the engine theme while Settings is open.
+// While a choice is being saved the control shows that choice, not the engine's
+// answer to an earlier one.
+watch([() => appearance.settings.value.theme, appearance.themeSaves], ([theme, saves]) => {
+  if (theme && saves === 0) activeTheme.value = theme
+})
 
-  if (theme === 'light') {
-    document.documentElement.classList.add('theme-light')
-  } else if (theme === 'dark') {
-    document.documentElement.classList.remove('theme-light')
-  } else {
-    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    if (isDark) {
-      document.documentElement.classList.remove('theme-light')
-    } else {
-      document.documentElement.classList.add('theme-light')
-    }
-  }
+function setTheme(theme: Theme) {
+  activeTheme.value = theme
+  appearanceError.value = ''
+  void appearance.saveTheme(theme).catch((cause: unknown) => {
+    appearanceError.value = cause instanceof Error ? cause.message : 'Could not save appearance settings.'
+  })
 }
 
 function isSkillExpanded(name: string) {
@@ -5098,18 +5087,6 @@ a.btn-secondary {
   background: var(--error);
 }
 
-.routine-detail {
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  line-height: 1.35;
-}
-.routine-detail code {
-  font-size: var(--text-xs);
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--bg);
-  color: var(--fg);
-}
 .workspace-move-row {
   margin-top: var(--space-3);
 }
@@ -5168,11 +5145,6 @@ a.btn-secondary {
   content: '·';
   margin-right: 10px;
   color: var(--fg3);
-}
-.settings-control {
-  width: min(100%, 430px);
-  min-width: 320px;
-  flex: 0 0 auto;
 }
 .tier-provider-section {
   padding-top: var(--space-3);
@@ -5477,10 +5449,6 @@ a.btn-secondary {
   }
   .action-row--compact > button {
     flex: 1 1 100%;
-    width: 100%;
-  }
-  .settings-control {
-    min-width: 0;
     width: 100%;
   }
   /* The heading takes the full row; status and account actions wrap below. */

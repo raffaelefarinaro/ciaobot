@@ -168,10 +168,11 @@ async def test_payload_carries_shell_prefix_and_no_example_commands(
         workspace="personal", agent_root=root, explicitly_denied=set(), manager=None,
         claude_available=True, opencode_available=True,
     )
-    if nt:
-        # Patching os.name breaks pathlib, so only the prefix builder runs under it.
-        monkeypatch.setattr("ciao.web.mcp_inventory.os.name", "nt")
-        payload["shell"] = _shell_prefix(root)
+    # Patching os.name breaks pathlib, so only the prefix builder runs under it.
+    # Both cases patch it: the parametrization is about the target platform, not
+    # about the host running the suite, and a Windows runner is `nt` by default.
+    monkeypatch.setattr("ciao.web.mcp_inventory.os.name", "nt" if nt else "posix")
+    payload["shell"] = _shell_prefix(root)
 
     if nt:
         quoted = "".join(

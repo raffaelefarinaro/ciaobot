@@ -646,6 +646,10 @@ async def ws_events(websocket: WebSocket) -> None:
                 websocket.app.state.app_settings.settings.mid_turn_delivery or "queue"
                 if getattr(websocket.app.state, "app_settings", None) is not None else "queue"
             ),
+            "appearance": (
+                websocket.app.state.app_settings.appearance_payload()
+                if getattr(websocket.app.state, "app_settings", None) is not None else None
+            ),
             "keyboard_revision": (
                 hashlib.sha256(
                     json.dumps([
