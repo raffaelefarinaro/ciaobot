@@ -597,43 +597,6 @@ def test_schedule_run_mode_resolves_through_the_real_dispatch_function(tmp_path:
     )
 
 
-def _operator_schedule(plane, project, mode: str):
-    """A routine the operator made (store write), with a saved mode."""
-    return plane.schedules.create(
-        daily_time_utc="09:00",
-        prompt="Original text.",
-        model="",
-        mode=mode,
-        chat_id=0,
-        web_project_id=project.project_id,
-        web_project_name=project.name,
-        workspace="work",
-    )
-
-
-def _stored(plane, schedule_id: str):
-    return next(e for e in plane.schedules.list_entries() if e.schedule_id == schedule_id)
-
-
-def test_saved_schedule_mode_is_a_ceiling_at_dispatch() -> None:
-    """Lowering the workspace default later lowers an agent routine's saved mode."""
-    from ciao.execution_modes import MODE_RANK, cap_schedule_mode
-
-    assert cap_schedule_mode("", "auto") == "auto"
-    assert cap_schedule_mode("bypass", "normal") == "normal"
-    assert cap_schedule_mode("bypass", "auto") == "auto"
-    # A saved weaker mode stays weaker when the default rises.
-    assert cap_schedule_mode("normal", "bypass") == "normal"
-    assert cap_schedule_mode("auto", "auto") == "auto"
-    # A value that is not a mode cannot raise anything.
-    assert cap_schedule_mode("junk", "normal") == "normal"
-
-    # control_plane and main share one rank object, and main uses the cap.
-    from ciao import control_plane as cp_module
-
-    assert cp_module._MODE_RANK is MODE_RANK
-
-
 def test_agent_edit_of_a_routines_text_is_capped_at_the_callers_mode(tmp_path: Path) -> None:
     plane, _manager_, principal, project = _agent_world(tmp_path, "normal")
 
@@ -661,6 +624,18 @@ def test_agent_edit_of_a_routines_text_is_capped_at_the_callers_mode(tmp_path: P
 def _webhook(plane, tmp):
     created = plane.workspace_webhook_create("work", name="hook", instructions="Do the thing.")
     return created["trigger"] if "trigger" in created else created
+
+
+def test_agent_switching_a_routines_provider_cannot_raise_its_mode(tmp_path: Path) -> None:
+    """Another provider may be pinned higher in this workspace; the agent's edit must not inherit it."""
+    plane, _manager_, principal, project = _agent_world(tmp_path, "normal")
+    plane.config.workspaces["work"].provider_overrides = {"opencode": {"permission_mode": "bypass"}}
+    routine = _operator_schedule(plane, project, "")
+
+    plane.schedule_update(principal, routine.schedule_id, provider="opencode")
+
+    assert _stored(plane, routine.schedule_id).provider == "opencode"
+    assert _stored(plane, routine.schedule_id).mode == "normal"
 
 
 def test_agent_below_the_workspace_default_cannot_enable_edit_or_rotate_a_webhook(

@@ -6262,9 +6262,15 @@ class CiaoControlPlane:
             # (unlike `changes`, filtered above).
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
-        if "mode" in changes or normalized.get("prompt") or "command" in normalized:
+        if (
+            "mode" in changes
+            or normalized.get("prompt")
+            or "command" in normalized
+            or "provider" in normalized
+        ):
             # Same ceiling `schedule_create` applies. Rewriting a routine's text
-            # or command (or naming its mode) makes the routine the agent's own
+            # or command, naming its mode, or switching its provider (whose
+            # default may be pinned higher) makes the routine the agent's own
             # work, so it runs at most at the agent's mode: it can weaken the
             # saved mode, never keep or set a stronger one, and an empty mode
             # cannot clear a saved one. An update touching none of these
