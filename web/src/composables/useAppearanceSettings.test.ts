@@ -180,3 +180,34 @@ describe('font scale persistence', () => {
     expect(patch.mock.calls[0][1]).toMatchObject({ font_scale: 1.25 })
   })
 })
+
+describe('boot before the engine value loads', () => {
+  it('keeps the restored paint cache when the theme class flips', async () => {
+    vi.resetModules()
+    localStorage.setItem('ciao-appearance', JSON.stringify({
+      text_contrast: 'soft',
+      body_font: 'serif',
+      custom_colors: { light: { bg: '#fdf6e3', fg: '#2b2b2b' } },
+    }))
+    const root = document.documentElement
+    root.classList.remove('theme-light')
+    await import('./useAppearanceSettings')
+    const { restoreAppearanceFromCache } = await import('../lib/appearance')
+    try {
+      // main.ts: theme class, then the cache, both after the module graph loaded.
+      root.classList.add('theme-light')
+      restoreAppearanceFromCache(root)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(root.style.getPropertyValue('--bg')).toBe('#fdf6e3')
+      expect(root.dataset.textContrast).toBe('soft')
+      expect(root.dataset.bodyFont).toBe('serif')
+    } finally {
+      root.classList.remove('theme-light')
+      root.removeAttribute('style')
+      root.removeAttribute('data-text-contrast')
+      root.removeAttribute('data-body-font')
+      root.removeAttribute('data-custom-colors')
+    }
+  })
+})

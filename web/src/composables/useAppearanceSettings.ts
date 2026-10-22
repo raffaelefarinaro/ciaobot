@@ -10,6 +10,7 @@ import {
   isTextContrast,
   isTheme,
   readLocalTheme,
+  restoreAppearanceFromCache,
   writeAppearanceCache,
   type AppearancePayload,
   type Theme,
@@ -119,7 +120,13 @@ function save(patch: Partial<AppearancePayload>): Promise<void> {
 }
 
 // Flipping Theme (or the OS scheme) switches which mode's custom pair shows.
-watch(isLightTheme, () => applyAppearanceToRoot(settings.value, document.documentElement))
+watch(isLightTheme, () => {
+  const root = document.documentElement
+  // Before the first engine value, `settings` is still the defaults; applying
+  // them would wipe the paint cache main.ts just restored.
+  if (loaded.value) applyAppearanceToRoot(settings.value, root)
+  else restoreAppearanceFromCache(root)
+})
 
 // Every writer of the font scale (Settings buttons, the zoom shortcuts) goes
 // through useFontScale, so one debounced watcher persists them all to the engine.

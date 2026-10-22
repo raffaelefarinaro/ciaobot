@@ -159,4 +159,24 @@ describe('CustomColorsDialog', () => {
     expect(wrapper!.emitted('update:open')?.length).toBe(2)
     expect(patch).not.toHaveBeenCalled()
   })
+
+  it('stores a typed 3-digit hex as six digits', async () => {
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue({ ...engine, revision: 'r1' })
+    await open()
+    await type(hex('dark', 'fg'), '#fff')
+    button('Apply').click()
+    await settle()
+    expect(patch).toHaveBeenCalledWith('/api/settings/appearance', {
+      custom_colors: { dark: { bg: '#1a1a2e', fg: '#ffffff' } },
+      revision: 'r0',
+    })
+  })
+
+  it('seeds the text from the theme default, not the softened colour, under Soft contrast', async () => {
+    applyAppearanceSettings({ ...engine, text_contrast: 'soft', revision: 'r1' })
+    document.documentElement.style.setProperty('--fg', '#d2d2de')
+    await open()
+    expect(hex('dark', 'fg').value).toBe('#e8e8f0')
+    expect(button('Apply').disabled).toBe(true)
+  })
 })

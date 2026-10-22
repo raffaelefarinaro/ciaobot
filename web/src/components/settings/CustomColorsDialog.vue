@@ -129,7 +129,10 @@ function seedFor(mode: ThemeMode): ColorPair {
   if (mode !== active) return { ...DEFAULT_PAIRS[mode] }
   return {
     bg: themeColor('--bg', DEFAULT_PAIRS[mode].bg),
-    fg: themeColor('--fg', DEFAULT_PAIRS[mode].fg),
+    // Soft contrast dims the computed --fg; a custom pair starts from the theme's own text colour.
+    fg: settings.value.text_contrast === 'soft'
+      ? DEFAULT_PAIRS[mode].fg
+      : themeColor('--fg', DEFAULT_PAIRS[mode].fg),
   }
 }
 
@@ -200,7 +203,10 @@ function apply(): void {
   if (!canApply.value) return
   const next = { ...settings.value.custom_colors }
   for (const { mode } of MODES) {
-    if (edited(mode)) next[mode] = { ...draft[mode] }
+    if (!edited(mode)) continue
+    // The normalised pair: a typed #fff is stored as #ffffff, which the engine requires.
+    const result = checkCustomPair(draft[mode])
+    if (result.ok) next[mode] = { bg: result.tokens['--bg'], fg: result.tokens['--fg'] }
   }
   void persist(next)
 }

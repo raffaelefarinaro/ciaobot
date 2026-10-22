@@ -12,7 +12,6 @@ const TOUCH_MIN = 44
 const fg = (page: Page) =>
   page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue('--fg').trim())
 
-const SHOTS = '/private/tmp/claude-501/-Users-raffaelefarinaro-repos-ciaobot/99b57655-501d-4cf6-a65f-209885cd051b/scratchpad/shots'
 const token = (page: Page, name: string) =>
   page.evaluate((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim(), name)
 const dialog = (page: Page) => page.getByRole('dialog', { name: 'Custom colours' })
@@ -129,7 +128,6 @@ test.describe('Settings › Appearance', () => {
     await hexInput(page, 'Dark theme text hex').fill('#5a5a70')
     await expect(dialog(page).getByRole('status').first()).toHaveText(/4\.5:1/)
     await expect(dialog(page).getByRole('button', { name: 'Apply' })).toBeDisabled()
-    await page.screenshot({ path: `${SHOTS}/issue-1898-dialog-refused-1440.png` })
 
     await hexInput(page, 'Dark theme text hex').fill('#e8e8f0')
     await hexInput(page, 'Dark theme background hex').fill('#101018')
@@ -139,7 +137,6 @@ test.describe('Settings › Appearance', () => {
     await expect(dialog(page)).toBeHidden()
     await expect(page.locator('html')).toHaveAttribute('data-custom-colors', 'dark')
     expect(await token(page, '--bg')).toBe('#101018')
-    await page.screenshot({ path: `${SHOTS}/issue-1898-appearance-custom-dark-1440.png` })
 
     // Light has no pair, so flipping Theme drops the dark tokens live.
     await page.getByRole('radio', { name: 'Light', exact: true }).click()
@@ -157,7 +154,7 @@ test.describe('Settings › Appearance', () => {
     await page.addInitScript(() => localStorage.setItem('ciao-theme', 'light'))
     await boot(page, '/settings/appearance', SETTINGS)
     await openCustomise(page)
-    await page.screenshot({ path: `${SHOTS}/issue-1898-dialog-light-1440.png` })
+    await expect(hexInput(page, 'Light theme background hex')).toHaveValue('#f4f4fa')
     await dialog(page).getByRole('button', { name: 'Cancel' }).click()
     await expect(dialog(page)).toBeHidden()
   })
@@ -216,9 +213,7 @@ test('on a touch device every control is at least 44px and the page does not scr
     }, TOUCH_MIN)
     expect(dialogSmall).toEqual([])
     expect((await horizontalOverflow(page)).overflow).toBeLessThanOrEqual(0)
-    await page.screenshot({ path: `${SHOTS}/issue-1898-dialog-390.png` })
     await hexInput(page, 'Dark theme text hex').fill('#5a5a70')
-    await page.screenshot({ path: `${SHOTS}/issue-1898-dialog-refused-390.png` })
   } finally {
     await context.close()
   }

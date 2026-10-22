@@ -170,4 +170,15 @@ describe('SettingsAppearance custom colours', () => {
     await flushPromises()
     expect(wrapper.text()).not.toContain('has no effect')
   })
+
+  it('ignores a stored pair that fails the readability check', async () => {
+    const failing = { ...engine, text_contrast: 'soft' as const, custom_colors: { dark: { bg: '#1a1a2e', fg: '#5a5a70' } }, revision: 'r1' }
+    applyAppearanceSettings(failing)
+    vi.spyOn(api, 'get').mockResolvedValue(failing)
+    const wrapper = mount(SettingsAppearance)
+    await flushPromises()
+    expect(customRow(wrapper).text()).toContain('Choose your own background and text colours.')
+    expect(wrapper.text()).not.toContain('has no effect')
+    applyAppearanceSettings({ ...failing, text_contrast: 'normal', custom_colors: {}, revision: 'r2' })
+  })
 })

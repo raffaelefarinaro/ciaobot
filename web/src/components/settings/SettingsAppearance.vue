@@ -58,6 +58,7 @@ import { useAppearanceSettings } from '../../composables/useAppearanceSettings'
 import CustomColorsDialog from './CustomColorsDialog.vue'
 import SettingsRadioGroup from './SettingsRadioGroup.vue'
 import { isLightTheme } from '../../lib/theme'
+import { checkCustomPair } from '../../lib/contrast'
 import type { AppearancePayload, BodyFont, TextContrast } from '../../lib/appearance'
 
 const TEXT_CONTRAST_OPTIONS: { value: TextContrast; label: string }[] = [
@@ -76,7 +77,12 @@ const error = ref('')
 
 const customOpen = ref(false)
 const resetting = ref(false)
-const customModes = computed(() => (['dark', 'light'] as const).filter((mode) => settings.value.custom_colors?.[mode]))
+// Only a pair that passes the readability check is painted, so only that counts.
+function paintedPair(mode: 'dark' | 'light'): boolean {
+  const pair = settings.value.custom_colors?.[mode]
+  return !!pair && checkCustomPair(pair).ok
+}
+const customModes = computed(() => (['dark', 'light'] as const).filter(paintedPair))
 const hasCustomColors = computed(() => customModes.value.length > 0)
 const customColorsDetail = computed(() => {
   if (customModes.value.length === 2) return 'Using your own colours for both themes.'
@@ -84,7 +90,7 @@ const customColorsDetail = computed(() => {
   return 'Choose your own background and text colours.'
 })
 const softIgnored = computed(() => settings.value.text_contrast === 'soft'
-  && !!settings.value.custom_colors?.[isLightTheme.value ? 'light' : 'dark'])
+  && paintedPair(isLightTheme.value ? 'light' : 'dark'))
 
 async function resetCustomColors() {
   resetting.value = true
