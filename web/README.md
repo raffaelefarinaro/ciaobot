@@ -67,7 +67,10 @@ web/
                            agreement rate and the operator-only per-workspace handover choice;
                            SettingsWorkspaceOverview.vue is the Workspace > Overview page;
                            SettingsManageWorkspaces.vue is the Manage workspaces page: boxed
-                           rows, the short New workspace form and Archived), plus the
+                           rows, the short New workspace form and Archived; rows reorder by
+                           drag, Alt/Option+Up/Down on the handle, or Move up / Move down in
+                           the row menu, through `store.reorderWorkspaces`, with the polite
+                           announcement text from `lib/workspaceOrder.ts`), plus the
                            scoped CSS they share with it
     components/WorkspaceTile.vue  the tinted 1-9 / initial tile for a workspace on the settings pages
     components/MemoryHowItWorks.vue  the static "How memory works" disclosure, mounted once in
@@ -457,7 +460,11 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   active workspace, headed by its name and tinted initial tile. Workspaces has
   no rail item: Manage workspaces (`/settings/workspaces`, named by
   `SETTINGS_HIDDEN_PAGES`) is reached from the workspace switcher, whose menu
-  ends with Workspace settings, Manage workspaces and New workspace. Providers is one card, so its page rail
+  ends with Workspace settings, Manage workspaces and New workspace. The workspace
+  order is the server registry's list order: Manage workspaces reorders it with
+  `store.reorderWorkspaces` (optimistic, rolled back on failure, `moveName` and
+  `moveAnnouncement` in `lib/workspaceOrder.ts`; with no workspace named `personal` the main workspace is pinned first), and every list, the switcher and the
+  1-9 shortcuts read `store.workspaceOptions` in that order. Providers is one card, so its page rail
   shows Status only, with no "On this page" list.
   The "On this page" navigation is built from the rendered sections in DOM order,
   so it follows that order. The MCP tab shows the provider inventory plus an
