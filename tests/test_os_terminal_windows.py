@@ -484,8 +484,23 @@ def test_spawn_assigns_the_job_before_resuming_and_never_uses_a_process_group(
         # executable the adapter resolved is what travels to the helper,
         # and it travels whole.
         assert argv[0] in command, "the resolved shell path must travel to the helper"
-        assert command.count(Path(argv[0]).name) == 1, (
+        # The shell is never created with a path guessed from a PATH: the
+        # executable the adapter resolved is what travels to the helper,
+        # and it travels whole. It travels twice — once as the executable
+        # the helper is told to run, once as the program token the command
+        # line itself carries — and both are the full path, so a bare name
+        # that a PATH could resolve to something else appears nowhere.
+        shell_name = Path(argv[0]).name
+        stray = re.findall(
+            rf"(?<![\\/A-Za-z0-9_.-]){re.escape(shell_name)}(?![\\A-Za-z0-9_.-])",
+            command,
+        )
+        assert not stray, (
             "the shell must be named by its path, and by nothing else"
+        )
+        assert command.count(argv[0]) == 2, (
+            "the shell's path travels twice: as the executable the helper "
+            "runs and as the command line's own program token"
         )
     finally:
         terminal.close()
@@ -2818,6 +2833,26 @@ def test_the_helper_imports_nothing_from_the_engine() -> None:
     source = CHILD_HELPER.read_text(encoding="utf-8")
     assert "import ciao" not in source
     assert "from ciao" not in source
+
+
+def test_the_helper_does_not_ask_for_null_standard_handles() -> None:
+    """The shell inherits the console's handles; it does not ask for none.
+
+    ``STARTF_USESTDHANDLES`` says "use these three handles", and a null
+    slot means *no* handle. A child that merely inherits a console and
+    asks for null standard handles gets invalid ones, and a shell with
+    invalid standard handles prints nothing at all — which is exactly what
+    the first native run of this design did. Without the flag the shell
+    inherits the helper's standard handles, and the helper's are the
+    console's own.
+    """
+    source = CHILD_HELPER.read_text(encoding="utf-8")
+    assert "dwFlags = _STARTF_USESTDHANDLES" not in source, (
+        "the helper must not ask the shell for null standard handles"
+    )
+    assert "startup.dwFlags" not in source, (
+        "the shell's standard handles come from the console, not from a flag"
+    )
 
 
 def test_the_helper_is_inert_on_import_and_prints_nothing() -> None:

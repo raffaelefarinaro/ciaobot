@@ -183,13 +183,19 @@ if sys.platform == "win32":
         The pseudoconsole's handle is therefore not needed here, and no
         handle is inherited by anybody.
 
-        The three standard-handle slots stay null, exactly as the adapter
-        leaves them for the helper: the shell's input and output are the
-        console's own, and not the engine's.
+        ``STARTF_USESTDHANDLES`` is deliberately **not** set, and that is the
+        point of this call. The flag says "use these three handles", and a
+        null slot means *no* handle: a child that merely inherits a console
+        and asks for null standard handles gets invalid ones, and a shell
+        with invalid standard handles prints nothing at all. Without the
+        flag the shell inherits the helper's standard handles, and the
+        helper's are the console's own — the adapter attached the helper to
+        the pseudoconsole with the three slots null precisely so that they
+        would be the console's. This is how Windows Terminal's own console
+        host starts its shell.
         """
         startup = _StartupInfo()
         startup.cb = ctypes.sizeof(_StartupInfo)
-        startup.dwFlags = _STARTF_USESTDHANDLES
         process_info = _ProcessInformation()
         command = ctypes.create_unicode_buffer(command_line)
         if not _CreateProcessW(
