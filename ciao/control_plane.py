@@ -5820,6 +5820,19 @@ class CiaoControlPlane:
             )
         )
 
+    def _require_webhook_mode(self, principal: AgentPrincipal) -> None:
+        """Refuse when the caller's mode ranks below the workspace's webhook chat mode."""
+        scope = self._workspace(principal)
+        provider = self.config.default_provider_for_workspace(scope)
+        default = self.config.default_mode_for_provider(provider, scope)
+        if MODE_RANK[self._child_mode(principal, None)] < MODE_RANK[default]:
+            raise ControlPlaneError(
+                "webhook_requires_operator",
+                "A webhook runs its chats in this workspace's default permission "
+                f"mode ({default}), which is stronger than this chat's. Ask the "
+                "user to make this change to the trigger in Settings.",
+            )
+
     def webhook_update(
         self,
         principal: AgentPrincipal,
@@ -5833,21 +5846,13 @@ class CiaoControlPlane:
         """Edit one trigger at the revision it was read at.
 
         A webhook chat starts at the workspace's default permission mode, which
-        a sender cannot choose. Switching a trigger on is therefore the
-        operator's call when the calling agent runs below that default: it
-        could otherwise hand an outside sender a stronger chat than its own.
+        a sender cannot choose. Switching a trigger on, or changing what it
+        runs, is therefore the operator's call when the calling agent runs
+        below that default: it could otherwise hand an outside sender a
+        stronger chat than its own. Renaming and disabling stay open.
         """
-        if enabled:
-            scope = self._workspace(principal)
-            provider = self.config.default_provider_for_workspace(scope)
-            default = self.config.default_mode_for_provider(provider, scope)
-            if MODE_RANK[self._child_mode(principal, None)] < MODE_RANK[default]:
-                raise ControlPlaneError(
-                    "webhook_enable_requires_operator",
-                    "A webhook runs its chats in this workspace's default permission "
-                    f"mode ({default}), which is stronger than this chat's. Ask the "
-                    "user to enable the trigger in Settings.",
-                )
+        if enabled or instructions is not None:
+            self._require_webhook_mode(principal)
         return _ok(
             self.workspace_webhook_update(
                 self._workspace(principal),
@@ -5862,7 +5867,12 @@ class CiaoControlPlane:
     def webhook_rotate(
         self, principal: AgentPrincipal, trigger_id: str, *, expected_revision: str
     ) -> dict[str, Any]:
-        """Replace one trigger's secret; the old one stops working at once."""
+        """Replace one trigger's secret; the old one stops working at once.
+
+        Rotating a live trigger is held to the same mode check as editing it.
+        """
+        if self._webhook_of(self._workspace(principal), trigger_id).enabled:
+            self._require_webhook_mode(principal)
         return _ok(
             self.workspace_webhook_rotate(
                 self._workspace(principal),

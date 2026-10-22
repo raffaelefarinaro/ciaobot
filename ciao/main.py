@@ -123,6 +123,18 @@ class StartupTracker:
         }
 
 
+def schedule_run_mode(
+    config: CiaoConfig, saved: str, provider: str, workspace: str | None
+) -> str:
+    """The permission mode one schedule run uses.
+
+    The default is the operator's pin for the provider the run resolves to, with
+    the workspace's override of that pin winning. A saved mode (an agent-made
+    routine) is an upper limit, not a pin: see ``cap_schedule_mode``.
+    """
+    return cap_schedule_mode(saved, config.default_mode_for_provider(provider, workspace))
+
+
 def _refresh_vault_index(
     workspace: Path,
     vault_root: Path | None = None,
@@ -881,10 +893,7 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # fall back to the Telegram context's mode, which is a different
         # surface's state and belongs to no workspace.
         provider, model, workspace = pcm.schedule_effective_routing(entry)
-        # A saved mode (an agent-made routine) is an upper limit, not a pin.
-        mode = cap_schedule_mode(
-            entry.mode, config.default_mode_for_provider(provider, workspace)
-        )
+        mode = schedule_run_mode(config, entry.mode, provider, workspace)
         return ("claude", model, mode, provider)
 
     # Classified before anything else touches the runtime root, because the

@@ -570,13 +570,68 @@ def test_saved_schedule_mode_is_a_ceiling_at_dispatch() -> None:
     # A value that is not a mode cannot raise anything.
     assert cap_schedule_mode("junk", "normal") == "normal"
 
+    # control_plane and main share one rank object.
+    from ciao import control_plane as cp_module
+
+    assert cp_module._MODE_RANK is MODE_RANK
+
+
+def test_schedule_run_mode_resolves_through_the_real_dispatch_function(tmp_path: Path) -> None:
+    """main._resolve_schedule_target calls schedule_run_mode; exercise it with a real config."""
+    config = _config(
+        tmp_path,
+        {"claude": {"permission_mode": "bypass"}},
+        provider_default_modes={"claude": "auto"},
+    )
+    assert ciao_main.schedule_run_mode(config, "", "claude", "work") == "bypass"
+    assert ciao_main.schedule_run_mode(config, "normal", "claude", "work") == "normal"
+    # Another workspace has the engine default (auto): a saved bypass drops to it.
+    assert ciao_main.schedule_run_mode(config, "bypass", "claude", "personal") == "auto"
+    # Lowering the workspace override lowers a saved higher mode with it.
+    config.workspaces["work"].provider_overrides = {"claude": {"permission_mode": "manual"}}
+    assert ciao_main.schedule_run_mode(config, "bypass", "claude", "work") == "normal"
+    assert ciao_main.schedule_run_mode(config, "", "claude", "work") == "normal"
+    # The closure in create_app goes through this function, not its own copy.
+    assert "schedule_run_mode(config, entry.mode, provider, workspace)" in " ".join(
+        inspect.getsource(ciao_main).split()
+    )
+
+
+def _operator_schedule(plane, project, mode: str):
+    """A routine the operator made (store write), with a saved mode."""
+    return plane.schedules.create(
+        daily_time_utc="09:00",
+        prompt="Original text.",
+        model="",
+        mode=mode,
+        chat_id=0,
+        web_project_id=project.project_id,
+        web_project_name=project.name,
+        workspace="work",
+    )
+
+
+def _stored(plane, schedule_id: str):
+    return next(e for e in plane.schedules.list_entries() if e.schedule_id == schedule_id)
+
+
+def test_saved_schedule_mode_is_a_ceiling_at_dispatch() -> None:
+    """Lowering the workspace default later lowers an agent routine's saved mode."""
+    from ciao.execution_modes import MODE_RANK, cap_schedule_mode
+
+    assert cap_schedule_mode("", "auto") == "auto"
+    assert cap_schedule_mode("bypass", "normal") == "normal"
+    assert cap_schedule_mode("bypass", "auto") == "auto"
+    # A saved weaker mode stays weaker when the default rises.
+    assert cap_schedule_mode("normal", "bypass") == "normal"
+    assert cap_schedule_mode("auto", "auto") == "auto"
+    # A value that is not a mode cannot raise anything.
+    assert cap_schedule_mode("junk", "normal") == "normal"
+
     # control_plane and main share one rank object, and main uses the cap.
     from ciao import control_plane as cp_module
 
     assert cp_module._MODE_RANK is MODE_RANK
-    source = inspect.getsource(ciao_main)
-    assert "cap_schedule_mode(" in source
-    assert "entry.mode, config.default_mode_for_provider(provider, workspace)" in " ".join(source.split())
 
 
 def test_agent_edit_of_a_routines_text_is_capped_at_the_callers_mode(tmp_path: Path) -> None:
@@ -603,37 +658,61 @@ def test_agent_edit_of_a_routines_text_is_capped_at_the_callers_mode(tmp_path: P
     assert _stored(plane, untouched.schedule_id).mode == "bypass"
 
 
-def test_agent_enabling_a_webhook_needs_a_mode_at_the_workspace_default(tmp_path: Path) -> None:
-    """A webhook chat starts at the workspace default, so an agent below it cannot switch one on."""
-    plane, _manager_, principal, _project = _agent_world(tmp_path, "normal")
+def _webhook(plane, tmp):
     created = plane.workspace_webhook_create("work", name="hook", instructions="Do the thing.")
-    trigger = created["trigger"] if "trigger" in created else created
-    revision = trigger["revision"]
+    return created["trigger"] if "trigger" in created else created
 
-    with pytest.raises(ControlPlaneError) as excinfo:
-        plane.webhook_update(
-            principal, trigger["trigger_id"], expected_revision=revision, enabled=True
-        )
-    assert excinfo.value.code == "webhook_enable_requires_operator"
 
-    # Edits that do not enable, and disabling, stay open to the agent.
-    renamed = plane.webhook_update(
-        principal, trigger["trigger_id"], expected_revision=revision, name="renamed"
+def test_agent_below_the_workspace_default_cannot_enable_edit_or_rotate_a_webhook(
+    tmp_path: Path,
+) -> None:
+    """A webhook chat starts at the workspace default, so an agent below it may not
+    switch a trigger on, change what an enabled one runs, or rotate its secret."""
+    plane, _manager_, principal, _project = _agent_world(tmp_path, "normal")
+    trigger = _webhook(plane, tmp_path)
+    tid = trigger["trigger_id"]
+
+    def refused(**kwargs):
+        with pytest.raises(ControlPlaneError) as excinfo:
+            plane.webhook_update(principal, tid, expected_revision=current["revision"], **kwargs)
+        assert excinfo.value.code == "webhook_requires_operator"
+
+    current = trigger
+    # Disabled trigger: enabling is refused, and so is rewriting its instructions
+    # (it would run them the moment the operator switches it on).
+    refused(enabled=True)
+    refused(instructions="Run something else.")
+    # A name change and disabling stay open.
+    current = plane.webhook_update(
+        principal, tid, expected_revision=current["revision"], name="renamed"
     )["data"]
-    plane.webhook_update(
-        principal, trigger["trigger_id"], expected_revision=renamed["revision"], enabled=False
+    current = plane.webhook_update(
+        principal, tid, expected_revision=current["revision"], enabled=False
+    )["data"]
+
+    # The operator enables it; now rewriting and rotating are refused too.
+    current = plane.workspace_webhook_update(
+        "work", tid, expected_revision=current["revision"], enabled=True
     )
+    assert current["enabled"] is True
+    refused(instructions="Run something else.")
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.webhook_rotate(principal, tid, expected_revision=current["revision"])
+    assert excinfo.value.code == "webhook_requires_operator"
+    # Disabling an enabled one is still allowed.
+    plane.webhook_update(principal, tid, expected_revision=current["revision"], enabled=False)
 
-    # A caller at or above the default may enable it.
-    _plane2, _m2, bypass_principal, _p2 = _agent_world(tmp_path / "b", "bypass")
-    plane2 = _plane2
-    created2 = plane2.workspace_webhook_create("work", name="hook", instructions="Do the thing.")
-    trigger2 = created2["trigger"] if "trigger" in created2 else created2
-    ok = plane2.webhook_update(
-        bypass_principal, trigger2["trigger_id"],
-        expected_revision=trigger2["revision"], enabled=True,
+
+def test_agent_at_the_workspace_default_may_manage_a_webhook(tmp_path: Path) -> None:
+    plane, _m, principal, _p = _agent_world(tmp_path, "bypass")
+    trigger = _webhook(plane, tmp_path)
+    tid = trigger["trigger_id"]
+    edited = plane.webhook_update(
+        principal, tid, expected_revision=trigger["revision"],
+        instructions="Run something else.", enabled=True,
     )["data"]
-    assert ok["enabled"] is True
+    assert edited["enabled"] is True
+    plane.webhook_rotate(principal, tid, expected_revision=edited["revision"])
 
 
 def test_override_warning_clips_a_long_key(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
