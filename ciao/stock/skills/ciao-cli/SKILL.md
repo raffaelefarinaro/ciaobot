@@ -12,6 +12,7 @@ One `ciao <noun> <verb>` command per Ciaobot operation, callable from the shell.
 Use it for:
 - Reading or changing Ciaobot's own state: chats, projects, the task board, schedules, webhook triggers, background runs, and the memory, vault and review-queue commands (syntax only; their write policy is `ciao-memory`).
 - Surfacing a file you produced in the user's pinned preview panel.
+- Suggesting a terminal command the user can review and run themselves.
 
 Not for:
 - Editing ordinary workspace files — use the provider's native Read/Write/Edit/Glob, same as today.
@@ -24,12 +25,12 @@ Not for:
 - Every command prints exactly one JSON object on stdout: `{"ok": true, "data": ...}` on success, `{"ok": false, "error": {"code": "...", "message": "...", "retryable": bool}}` on failure. Nothing else goes to stdout. `--json` is accepted for compatibility but output is always JSON — there is no human-readable mode.
 - Exit code `0` when `ok` is true, `1` when `ok` is false, `2` for a usage error (bad flags, missing required argument) caught before any operation runs.
 - Identity is never a flag. `CIAO_AGENT_TOKEN` and `CIAO_AGENT_URL` in the calling chat's environment say who is calling and against which server; there is no `--workspace` flag and no `--token` flag.
-- `--chat ID` is optional on every chat-scoped command and defaults to the calling chat. Pointing it at another chat in the same workspace is allowed; pointing it at a chat in a different workspace returns `workspace_forbidden`.
+- `--chat ID` is optional on every chat-scoped command and defaults to the calling chat. Pointing it at another chat in the same workspace is allowed; pointing it at a chat in a different workspace returns `workspace_forbidden`. The one exception is `chat terminal-offer`, which has no `--chat` at all: the suggestion belongs to the chat that asked for it.
 - Ids are not the only accepted form. `--project` (and a positional project argument) takes a project **name**, and `--chat` takes a chat **title**, matched case-insensitively and exactly, inside the calling chat's workspace only. A title has to name exactly one non-archived chat: two matches, none, or a match in another workspace all return `chat_not_found`, an unknown project returns `project_not_found`, and a name two projects in the workspace share returns `project_ambiguous` (pass the id). Resolution never widens scope, so a name can only ever reach something the id would have reached.
 - A plan-mode chat gets `plan_mode_read_only` back from any mutating command — plan mode is read-only by design, not a permission you can flag past.
 - Destructive commands (`chat delete`, `chat stop`, `project complete`, `project delete`, `schedule pause|resume|run|delete`, `webhook delete`, `run start`, `run cancel`, and every `vault review` mutation) can return `approval_required` outside auto/bypass mode. That is not a failure to retry — it means a human has to approve the action first.
 - `schedule create|update --command` sets a shell command that later runs with no permission prompt. Outside bypass mode it returns `command_requires_operator`: create the schedule without it and ask the user to add the command in the schedule's Prompt card. Do not retry.
-- Structured input is the exception, not the rule: only `chat handover --messages @file.json` and `run start -- <cmd> [args...]` take it. Everywhere else, arguments are scalar flags or a constrained enum value. For `run start`, everything after `--` is the literal argv passed to the subprocess — no shell, so `run start -- bash -lc "a && b"` is how you get shell features, and you own that choice.
+- Structured input is the exception, not the rule: only `chat handover --messages @file.json`, `chat terminal-offer --command-file FILE` and `run start -- <cmd> [args...]` take it. Everywhere else, arguments are scalar flags or a constrained enum value. For `run start`, everything after `--` is the literal argv passed to the subprocess — no shell, so `run start -- bash -lc "a && b"` is how you get shell features, and you own that choice.
 
 ### Reloading tools
 
@@ -112,6 +113,7 @@ Top-level commands, outside the `<noun> <verb>` table: plain text output (a `--j
 | `chat archive [--chat ID]` | Archive a chat to the vault and trigger normal post-archive memory extraction. | — |
 | `chat delete [--chat ID]` | Delete a chat. | Destructive; deleting the calling chat itself is deferred until the turn finishes. |
 | `chat stop --chat ID` | Stop another chat's active provider turn. | Destructive; a chat cannot stop its own turn. |
+| `chat terminal-offer --command-file FILE` | Suggest a terminal command for this chat: the user reads it, copies it and runs it themselves. | `FILE` holds the command text (`@file.txt` or a plain path). There is no `--chat` and no inline command: the suggestion belongs to the calling chat. The text is untrusted, model-authored guidance — Ciaobot does not verify it and does not claim it is safe, so put a placeholder in it, never a real token or password. Nothing is executed, no terminal is unlocked and no output is collected. For a provider Ciaobot already supports, prefer the Settings flow for its own login or install step. |
 
 ### Projects
 
