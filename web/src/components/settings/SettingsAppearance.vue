@@ -27,13 +27,38 @@
       />
     </div>
   </div>
+  <div class="setting-row setting-row--inline">
+    <div class="routine-info">
+      <span class="routine-name">Custom colours</span>
+      <span class="routine-detail">{{ customColorsDetail }}</span>
+    </div>
+    <div class="settings-control custom-colors-actions">
+      <button class="btn-small" type="button" @click="customOpen = true">Customise…</button>
+      <button
+        v-if="hasCustomColors"
+        class="btn-small"
+        type="button"
+        :disabled="resetting"
+        @click="resetCustomColors"
+      >
+        Reset
+      </button>
+    </div>
+  </div>
+  <p v-if="softIgnored" class="hint">
+    Soft text contrast has no effect while custom colours are on for this theme.
+  </p>
+  <CustomColorsDialog v-model:open="customOpen" />
   <p v-if="error" class="action-result" role="alert">{{ error }}</p>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useAppearanceSettings } from '../../composables/useAppearanceSettings'
+import CustomColorsDialog from './CustomColorsDialog.vue'
 import SettingsRadioGroup from './SettingsRadioGroup.vue'
+import { isLightTheme } from '../../lib/theme'
+import { checkCustomPair } from '../../lib/contrast'
 import type { AppearancePayload, BodyFont, TextContrast } from '../../lib/appearance'
 
 const TEXT_CONTRAST_OPTIONS: { value: TextContrast; label: string }[] = [
@@ -49,6 +74,35 @@ const BODY_FONT_OPTIONS: { value: BodyFont; label: string; fontFamily: string }[
 
 const { settings, load, save } = useAppearanceSettings()
 const error = ref('')
+
+const customOpen = ref(false)
+const resetting = ref(false)
+// Only a pair that passes the readability check is painted, so only that counts.
+function paintedPair(mode: 'dark' | 'light'): boolean {
+  const pair = settings.value.custom_colors?.[mode]
+  return !!pair && checkCustomPair(pair).ok
+}
+const customModes = computed(() => (['dark', 'light'] as const).filter(paintedPair))
+const hasCustomColors = computed(() => customModes.value.length > 0)
+const customColorsDetail = computed(() => {
+  if (customModes.value.length === 2) return 'Using your own colours for both themes.'
+  if (customModes.value.length === 1) return `Using your own colours for the ${customModes.value[0]} theme.`
+  return 'Choose your own background and text colours.'
+})
+const softIgnored = computed(() => settings.value.text_contrast === 'soft'
+  && paintedPair(isLightTheme.value ? 'light' : 'dark'))
+
+async function resetCustomColors() {
+  resetting.value = true
+  error.value = ''
+  try {
+    await save({ custom_colors: {} })
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : 'Could not save appearance settings.'
+  } finally {
+    resetting.value = false
+  }
+}
 
 onMounted(() => {
   void load().catch(() => { error.value = 'Could not load appearance settings.' })

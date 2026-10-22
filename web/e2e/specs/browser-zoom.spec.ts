@@ -84,4 +84,33 @@ test.describe('zoom and text scaling', () => {
       `scaled layout scrolls ${overflow}px sideways; widest unclipped: ${JSON.stringify(culprits)}`,
     ).toBeLessThanOrEqual(0)
   })
+
+  test('Appearance page and the custom colours dialog reflow at 200% zoom and the largest font scale', async ({ page }) => {
+    await page.addInitScript(() => {
+      try { localStorage.setItem('ciao-font-scale', '1.5') } catch { /* blocked */ }
+    })
+    await page.setViewportSize({ width: 640, height: 450 })
+    await boot(page, '/settings/appearance', '.settings-main')
+    await page.getByRole('button', { name: 'Customise…' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Custom colours' })
+    await expect(dialog).toBeVisible()
+    const { overflow, culprits } = await horizontalOverflow(page)
+    expect(
+      overflow,
+      `scaled layout scrolls ${overflow}px sideways; widest unclipped: ${JSON.stringify(culprits)}`,
+    ).toBeLessThanOrEqual(0)
+    // The dialog body scrolls, so its footer stays reachable inside the viewport.
+    const viewport = page.viewportSize()!
+    const box = await dialog.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height + 1)
+    for (const name of ['Reset', 'Cancel', 'Apply']) {
+      const button = dialog.getByRole('button', { name, exact: true })
+      await button.scrollIntoViewIfNeeded()
+      const b = await button.boundingBox()
+      expect(b).not.toBeNull()
+      expect(b!.x + b!.width).toBeLessThanOrEqual(viewport.width + 1)
+      expect(b!.y + b!.height).toBeLessThanOrEqual(viewport.height + 1)
+    }
+  })
 })

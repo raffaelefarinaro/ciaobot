@@ -155,8 +155,11 @@ def test_every_settings_path_names_a_real_tab() -> None:
     and the ASCII arrow has crept in before.
     """
     first_words = {label.split()[0] for label in _settings_tab_labels()}
-    guidance = _reference("install-and-settings.md")
-    heads = re.findall(r"Settings (?:→|->) ([A-Za-z][A-Za-z]*)", guidance)
+    guidance = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((CAPABILITIES / "references").glob("*.md"))
+    )
+    heads = re.findall(r"(?<!System )Settings (?:→|->) ([A-Za-z][A-Za-z]*)", guidance)
     assert heads, "no settings path to check"
     unknown = sorted({head for head in heads if head not in first_words})
     assert not unknown, f"these settings paths name no real tab: {unknown}"
@@ -177,6 +180,13 @@ def test_guidance_cites_the_official_provider_mcp_sources() -> None:
     assert "https://code.claude.com/docs/en/mcp" in guidance
     assert "https://opencode.ai/v2/docs/mcp-servers" in guidance
     assert "https://github.com/googleworkspace/cli" in guidance
+
+
+def test_google_workspace_oauth_docs_match_supported_client_type() -> None:
+    integrations = (REPO / "INTEGRATIONS.md").read_text(encoding="utf-8")
+    oauth_setup = integrations.split("**Getting `client_secret.json`.**", 1)[1].split("\n\n", 1)[0]
+    assert "Desktop app" in oauth_setup
+    assert "Web application clients are not supported" in oauth_setup
 
 
 def test_terminal_guidance_avoids_misleading_claims() -> None:

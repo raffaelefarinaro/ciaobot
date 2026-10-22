@@ -23,6 +23,7 @@ const state = vi.hoisted(() => ({
 vi.mock('../../lib/api', () => {
   const get = vi.fn((path: string) => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
+    if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
     if (path === '/api/integrations/gws') return Promise.resolve(state.gws)
     if (path.startsWith('/api/proposals/handover')) {

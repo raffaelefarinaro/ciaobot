@@ -42,6 +42,8 @@ vi.mock('../../lib/api', () => {
         profiles: [],
       })
     }
+    // The Overview's Chats and models card reads the engine defaults.
+    if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})
   })
   return {

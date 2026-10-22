@@ -1457,6 +1457,7 @@ import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { canOfferMoveToBackground, shouldRestoreFocus } from '../lib/moveToBackground'
 import { renderMarkdown as renderSafeMarkdown, renderUserMarkdown as renderSafeUserMarkdown } from '../lib/safeMarkdown'
 import { handleCodeCopyClick, writeClipboard } from '../lib/codeCopy'
+import { handleOpenLocalFileClick } from '../lib/openWorkspaceFile'
 import { classifyError, errorQuickAction, isProviderAuthError } from '../lib/errorAttribution'
 import { formatTime, formatDuration } from '../lib/time'
 import { isChatCodeModeOn, isCodeModeLocked } from '../lib/codeMode'
@@ -3921,15 +3922,12 @@ watch(() => chat.value?.chat_id, (id) => notifyChatFocused(id))
 
 const knownFilePaths = computed(() => touchedFiles.value.map(f => f.file_path))
 
-// The conversations this reader can open, by id and human title. A message
-// that names one of them links to it (see lib/chatLinks.ts). A remote chat's
-// session lives on another device and an archived one is a transcript, so
-// neither is a destination a reference should offer: a link to a
-// conversation that cannot be opened is worse than plain text.
+// The conversations the @-mention picker offers are the conversations this
+// reader can open. Use that same set for message references so a reference
+// can never link a chat the picker omits (see lib/chatLinks.ts).
 function reachableChatLinks(): [string, string][] {
   const pairs: [string, string][] = []
-  for (const chat of store.chats) {
-    if (chat.archived || chat.local === false) continue
+  for (const chat of mentionChats.value) {
     if (!isChatId(chat.chat_id)) continue
     pairs.push([chat.chat_id, chat.title || ''])
   }
@@ -3975,7 +3973,7 @@ function renderMarkdown(text: string): string {
   const cached = mdCache.get(text)
   if (cached !== undefined) return cached
 
-  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value)
+  const rendered = renderSafeMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true })
   if (mdCache.size >= MAX_MD_CACHE_SIZE) {
     // Plain FIFO eviction — fine for chat scroll-back.
     const firstKey = mdCache.keys().next().value
@@ -3990,7 +3988,7 @@ function renderUserMessage(text: string): string {
   const cached = userMdCache.get(text)
   if (cached !== undefined) return cached
 
-  const rendered = renderSafeUserMarkdown(text, knownFilePaths.value, knownChatLinks.value)
+  const rendered = renderSafeUserMarkdown(text, knownFilePaths.value, knownChatLinks.value, { openLocal: true })
   if (userMdCache.size >= MAX_MD_CACHE_SIZE) {
     const firstKey = userMdCache.keys().next().value
     if (firstKey !== undefined) userMdCache.delete(firstKey)
@@ -4069,6 +4067,7 @@ function handleFileLinkClick(e: MouseEvent): void {
 function handlePanelClick(e: MouseEvent): void {
   if (handleCodeCopyClick(e)) return
   if (handleAppLinkClick(e)) return
+  if (handleOpenLocalFileClick(e, (m) => store.pushErrorToast('Could not open file', m))) return
   handleFileLinkClick(e)
 }
 
@@ -8172,6 +8171,10 @@ details[open] > .activity-summary::before {
 </style>
 
 <style scoped src="./chatTrace.css"></style>
+
+<!-- The openable dead link: a `file:` path rendered as a button the engine
+     can act on. Shared with the file viewer and the pinned-file panel. -->
+<style scoped src="./markdownDeadLink.css"></style>
 
 <!-- The shared naming placeholder: the same bar the sidebar shows while the
      engine names a chat. -->

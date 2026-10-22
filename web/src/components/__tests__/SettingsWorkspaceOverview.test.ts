@@ -36,6 +36,8 @@ vi.mock('../../lib/api', () => {
       })
     }
     if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
+    // The Overview's Chats and models card reads the engine defaults.
+    if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})
   })
   return {
@@ -113,6 +115,7 @@ describe('Settings > Workspace Overview', () => {
       const titles = wrapper.findAll('.section-title').map(el => el.text())
       expect(titles).toEqual([
         'Workspace',
+        'Chats and models',
         'Google account',
         'Memory handover',
         'Update task history',
@@ -227,7 +230,7 @@ describe('Settings > Workspace Overview', () => {
     }
   })
 
-  it('the Google account card is one row, and Save sits in the Workspace card', async () => {
+  it('the Google account card is one row, and Save sits in the Chats and models card', async () => {
     const { wrapper } = await mountOverview('work')
     try {
       const cards = wrapper.findAll('.card')
@@ -236,12 +239,14 @@ describe('Settings > Workspace Overview', () => {
       expect(google.find('.gws-account').exists()).toBe(true)
       expect(google.find('select').exists()).toBe(false)
       expect(card('Workspace').text()).not.toContain('both cards')
+      expect(card('Workspace').find('.workspace-save').exists()).toBe(false)
 
       const other = wrapper.findAll('.workspace-color-swatch').find(b => b.attributes('aria-checked') === 'false')
       await other!.trigger('click')
       await nextTick()
       expect(wrapper.findAll('.workspace-save')).toHaveLength(1)
-      expect(card('Workspace').find('.workspace-save').exists()).toBe(true)
+      expect(card('Workspace').find('.workspace-save').exists()).toBe(false)
+      expect(card('Chats and models').find('.workspace-save').exists()).toBe(true)
       expect(google.find('.workspace-save').exists()).toBe(false)
     } finally {
       wrapper.unmount()
