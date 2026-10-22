@@ -85,7 +85,7 @@ def test_system_prompt_states_workspace_scope_limits() -> None:
     append = payload["append"]
     assert "file_access=workspace only" in append
     assert "Do not probe them" in append
-    assert "Settings → Workspaces → Edit → File access" in append
+    assert "Settings → Overview → File access" in append
     assert "`gh` is not signed in" in append
 
 

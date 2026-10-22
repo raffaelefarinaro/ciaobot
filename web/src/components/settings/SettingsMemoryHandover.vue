@@ -60,27 +60,22 @@
         </button>
       </div>
 
-      <div :key="groupKey" class="handover-options" role="radiogroup" aria-label="Memory handover">
-        <label
+      <div class="instance-toggle" role="radiogroup" aria-label="Memory handover" @keydown="onOptionKeydown">
+        <button
           v-for="option in OPTIONS"
           :key="option.value"
-          class="handover-option"
-          :class="{ 'handover-option--on': selected === option.value }"
-        >
-          <input
-            type="radio"
-            name="memory-handover"
-            :value="option.value"
-            :checked="selected === option.value"
-            :disabled="saving || (option.value !== 'off' && !data.acting_available)"
-            @change="choose(option.value)"
-          />
-          <span class="handover-option-text">
-            <span class="handover-option-label">{{ option.label }}</span>
-            <span class="hint hint--compact">{{ option.hint }}</span>
-          </span>
-        </label>
+          ref="optionEls"
+          type="button"
+          role="radio"
+          class="toggle-btn"
+          :class="{ active: selected === option.value }"
+          :aria-checked="selected === option.value"
+          :tabindex="selected === option.value ? 0 : -1"
+          :disabled="optionDisabled(option.value)"
+          @click="choose(option.value)"
+        >{{ option.label }}</button>
       </div>
+      <p class="hint hint--compact handover-hint" role="status">{{ selectedHint }}</p>
       <p v-if="saveError" class="action-result action-result--error" role="alert">{{ saveError }}</p>
     </template>
   </div>
@@ -118,10 +113,8 @@ const loadError = ref('')
 const saving = ref(false)
 const saveError = ref('')
 const selected = ref<MemoryHandover>('off')
-// A declined choice leaves the browser's radio on the option it clicked while
-// `selected` never moved, so Vue sees nothing to patch. A new key rebuilds the
-// group from `selected`.
-const groupKey = ref(0)
+const optionEls = ref<HTMLButtonElement[]>([])
+const selectedHint = computed(() => OPTIONS.find((o) => o.value === selected.value)?.hint ?? '')
 let ticket = 0
 
 const percent = computed(() => {
@@ -147,6 +140,41 @@ async function load(): Promise<void> {
   }
 }
 
+function optionDisabled(value: MemoryHandover): boolean {
+  return saving.value || (value !== 'off' && !data.value?.acting_available)
+}
+
+// Radio-group keys: arrows select (and so save) the neighbour, wrapping past
+// the ends and skipping disabled options; Home/End jump to the first/last.
+function onOptionKeydown(e: KeyboardEvent): void {
+  const enabled = OPTIONS.map((o, i) => ({ o, i })).filter(({ o }) => !optionDisabled(o.value))
+  if (!enabled.length) return
+  const at = enabled.findIndex(({ o }) => o.value === selected.value)
+  let target: number
+  switch (e.key) {
+    case 'ArrowRight':
+    case 'ArrowDown':
+      target = (at + 1) % enabled.length
+      break
+    case 'ArrowLeft':
+    case 'ArrowUp':
+      target = (at <= 0 ? enabled.length : at) - 1
+      break
+    case 'Home':
+      target = 0
+      break
+    case 'End':
+      target = enabled.length - 1
+      break
+    default:
+      return
+  }
+  e.preventDefault()
+  const next = enabled[target]
+  optionEls.value[next.i]?.focus()
+  void choose(next.o.value)
+}
+
 async function choose(value: MemoryHandover): Promise<void> {
   if (saving.value || !data.value || value === data.value.handover) {
     selected.value = data.value?.handover ?? 'off'
@@ -161,7 +189,6 @@ async function choose(value: MemoryHandover): Promise<void> {
     )
     if (!ok) {
       selected.value = data.value.handover
-      groupKey.value++
       return
     }
   }
@@ -174,7 +201,6 @@ async function choose(value: MemoryHandover): Promise<void> {
   } catch (e) {
     saveError.value = apiErrorMessage(e, 'The setting could not be saved.')
     selected.value = data.value?.handover ?? 'off'
-    groupKey.value++
   } finally {
     saving.value = false
   }
@@ -191,6 +217,27 @@ watch(workspace, () => {
 </script>
 
 <style scoped src="./settingsPanels.css"></style>
+
+<style scoped>
+.action-result--error { color: var(--error); }
+.handover-note {
+  margin: 0 0 var(--space-3);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.handover-evidence {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+.handover-evidence p { margin: 0; }
+.handover-line { color: var(--fg); font-size: var(--text-sm); line-height: 1.5; }
+.handover-hint { margin-top: var(--space-2); }
+</style>
 
 <style scoped>
 .action-result--error { color: var(--error); }

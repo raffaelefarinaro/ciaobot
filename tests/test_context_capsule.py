@@ -230,7 +230,7 @@ def test_the_file_access_line_names_the_roots_only_for_a_confined_chat() -> None
     )
     assert "/work/agent, /work/agent/memory-vault/work" in line
     assert '"Operation not permitted"' in line
-    assert "Settings → Workspaces → Edit → File access" in line
+    assert "Settings → Overview → File access" in line
     assert "file_access=" not in build_context_capsule(workspace="work")
 
 

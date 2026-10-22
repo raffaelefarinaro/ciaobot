@@ -6419,6 +6419,26 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).not.toHaveBeenCalled()
   })
 
+  test('switchWorkspace asks the settings guard first and stays when it declines', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const guard = vi.fn().mockResolvedValue(false)
+    store.setWorkspaceSwitchGuard(guard)
+
+    await store.switchWorkspace('personal', { transition: false })
+    expect(guard).toHaveBeenCalledWith('work')
+    expect(store.activeWorkspace).toBe('work')
+
+    guard.mockResolvedValue(true)
+    await store.switchWorkspace('personal', { transition: false })
+    expect(store.activeWorkspace).toBe('personal')
+
+    store.setWorkspaceSwitchGuard(null)
+    await store.switchWorkspace('work', { transition: false })
+    expect(guard).toHaveBeenCalledTimes(2)
+    expect(store.activeWorkspace).toBe('work')
+  })
+
   test('deleteChat on active chat transitions to first chat of current workspace', async () => {
     const store = useProjectStore()
     store.projects = [

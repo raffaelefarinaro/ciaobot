@@ -4019,8 +4019,17 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs(chatId)
   }
 
+  // Set by the open Settings workspace editor so a switch away from unsaved
+  // edits asks first. Returns false to keep the current workspace.
+  let workspaceSwitchGuard: ((from: WorkspaceName) => Promise<boolean>) | null = null
+  function setWorkspaceSwitchGuard(guard: ((from: WorkspaceName) => Promise<boolean>) | null): void {
+    workspaceSwitchGuard = guard
+  }
+
   async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }) {
     const transition = options?.transition !== false
+    if (activeWorkspace.value === ws) return
+    if (workspaceSwitchGuard && !(await workspaceSwitchGuard(activeWorkspace.value))) return
     if (activeWorkspace.value === ws) return
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
@@ -6835,7 +6844,7 @@ export const useProjectStore = defineStore('projects', () => {
     generalProject,
     createChat, newChatInGeneral, newChatInProject, renameChat, updateChat, setChatCodeMode, handoverChat, forkChat, moveChat, deleteChat, closeChat, clearActiveChatView, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
-    switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
+    switchChat, switchWorkspace, setWorkspaceSwitchGuard, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest, reconcileChatList,
     sendMessage, stopChat, moveChatToBackground, compactChat, compactRequests, respondPermission, respondQuestion, respondCapability, markResolvedQuestion, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,

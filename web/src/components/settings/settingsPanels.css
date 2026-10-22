@@ -865,3 +865,143 @@
   .settings-switch .switch-track,
   .settings-switch .switch-track::after { transition: none; }
 }
+
+.instance-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  margin-top: 0;
+  width: 100%;
+}
+/* A quiet segmented control: the current choice is a raised tile, not an
+   accent fill - the accent stays reserved for each section's one action. */
+.toggle-btn {
+  flex: 1;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background 0.15s, color 0.15s;
+}
+.toggle-btn:hover:not(:disabled) {
+  color: var(--fg);
+}
+.toggle-btn.active {
+  background: var(--bg3);
+  color: var(--fg);
+}
+@media (pointer: coarse) {
+  .toggle-btn { min-height: var(--touch); }
+}
+.toggle-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* A File access link briefly tints the row it found. The animation carries no
+   meaning: the focus ring on the select is the durable cue, and reduced motion
+   keeps that while dropping the tint. */
+.workspace-card--target {
+  animation: workspace-link-target 1.6s var(--ease);
+}
+@keyframes workspace-link-target {
+  0% { background-color: color-mix(in srgb, var(--accent) 14%, transparent); }
+  100% { background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-card--target { animation: none; }
+}
+.workspace-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.workspace-edit-actions .btn-small {
+  flex: 0 0 auto;
+}
+.workspace-color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+/* 26px swatch; the selected one carries a ring in the text colour so the
+   choice reads without relying on the swatch hue. */
+.workspace-color-swatch {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--swatch);
+  cursor: pointer;
+  transition: box-shadow 120ms var(--ease), transform 120ms var(--ease);
+}
+.workspace-color-swatch:hover:not(:disabled) {
+  transform: scale(1.08);
+}
+.workspace-color-swatch.active {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg);
+}
+@media (pointer: coarse) {
+  .workspace-color-swatch {
+    width: var(--touch);
+    height: var(--touch);
+    background: radial-gradient(circle at center, var(--swatch) 0 13px, transparent 14px);
+  }
+  .workspace-color-swatch.active {
+    box-shadow: none;
+    background: radial-gradient(circle at center, var(--swatch) 0 13px, var(--bg) 14px 15px, var(--fg) 16px 17px, transparent 18px);
+  }
+}
+.workspace-color-swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.workspace-color-swatch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.workspace-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  min-height: 36px;
+  padding: 7px 36px 7px 12px;
+  border-radius: var(--radius);
+  background-color: var(--bg-elev);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%237a7a90' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px 12px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease);
+}
+.workspace-select:hover:not(:disabled) {
+  background-color: var(--bg3);
+}
+.workspace-select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+.workspace-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+/* Must stay below the base .workspace-select rule above. */
+@media (pointer: coarse) { .workspace-select { min-height: var(--touch); } }

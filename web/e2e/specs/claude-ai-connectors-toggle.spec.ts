@@ -12,8 +12,7 @@ async function openEditor(page: Page, patches: Array<Record<string, unknown>>) {
     }
     await route.fallback()
   })
-  await boot(page, '/settings/workspaces', '[aria-label="Edit workspace alpha"]')
-  await page.locator('[aria-label="Edit workspace alpha"]').click()
+  await boot(page, '/settings/workspace', '.settings-switch-row')
   const toggle = page.getByRole('switch', { name: 'claude.ai connectors' })
   await toggle.scrollIntoViewIfNeeded()
   await expect(toggle).toBeVisible()
