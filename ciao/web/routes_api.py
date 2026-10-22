@@ -6443,7 +6443,7 @@ async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
 
 # ── Moving the install workspace ─────────────────────────────────────────
 #
-# Settings → Main workspace. Every route but the status read is for the
+# Settings → Advanced → Ciaobot folder. Every route but the status read is for the
 # computer running Ciaobot only: browsing folders and moving the install are
 # filesystem operations a phone or a remote browser has no business making.
 # "Local" is the setup routes' rule (`_localhost_request`: a loopback TCP peer

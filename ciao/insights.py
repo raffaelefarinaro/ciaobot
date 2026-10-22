@@ -16,7 +16,7 @@ def resolve_insights_model(
     """Pick the model for the memory pass and the one-shots that share it.
 
     ``provider`` is the chat's actual provider. Its Session insights model
-    (Settings → Models → that provider's card, ``provider_insights_models``)
+    (Settings → Providers → that provider's card, ``provider_insights_models``)
     wins; Automatic uses the source chat's model. Calls without a recorded
     source model (for example history imports) use the workspace/provider default.
     """
@@ -84,7 +84,7 @@ def is_model_refused(exc: Exception) -> bool:
     Distinct from :func:`is_context_overflow` in what the operator has to do
     about it: an overflow is a payload that must be trimmed, while this is a
     model that refused a one-shot call and is worked around by picking another
-    in Settings → Models. A refusal recurs on the same configuration, so it is
+    in Settings → Providers. A refusal recurs on the same configuration, so it is
     not worth a traceback per dispatch — but the classification is a text
     match, not a claim that the model can never serve any call.
 
