@@ -3075,3 +3075,41 @@ async def test_task_rules_are_quoted_when_present_and_skipped_when_absent(tmp_pa
     prompt = _starts(pcm)[-1][1]
     assert "<task-rules>" in prompt and "- **Drop** chores" in prompt
     assert prompt.index("</task-board-task>") < prompt.index("<task-rules>")
+
+
+async def test_agent_delegation_is_capped_at_the_callers_mode_not_the_workspace_override(
+    tmp_path: Path,
+) -> None:
+    """A workspace permission-mode override never reaches a chat an agent creates.
+
+    The agent's delegated chat (and a retry of it) take the caller's mode; the
+    user/PWA path passes no mode and keeps the workspace default.
+    """
+    plane, pcm = _world(tmp_path)
+    plane.config.workspaces["personal"].provider_overrides = {
+        "claude": {"permission_mode": "bypass"}
+    }
+    pcm.chats["chat-agent"] = SimpleNamespace(chat_id="chat-agent", mode="normal")
+    principal = _principal()
+    created = plane.task_create(
+        principal, title="Review the diff", body="Read the diff and report any defects."
+    )["data"]
+
+    outcome = plane.task_delegate(
+        principal, created["id"], expected_revision=created["revision"]
+    )
+    assert outcome["data"]["created"] is True
+    creates = [c for c in pcm.calls if c[0] == "create_chat"]
+    assert creates[-1][2]["mode"] == "normal"
+
+    await _end_turns(pcm)
+    attempt_id = outcome["data"]["attempt"]["attempt_id"]
+    await plane.task_attempt_action(principal, attempt_id, "stop")
+    await plane.task_attempt_action(principal, attempt_id, "retry")
+    creates = [c for c in pcm.calls if c[0] == "create_chat"]
+    assert len(creates) == 2
+    assert creates[-1][2]["mode"] == "normal"
+
+    other = _create(plane, title="Second job")
+    _delegate(plane, other)
+    assert [c for c in pcm.calls if c[0] == "create_chat"][-1][2]["mode"] is None

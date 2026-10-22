@@ -190,7 +190,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), appearance: { text_contrast: 'normal', theme: null, font_scale: null, revision: 'a0' }, handover: {} }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', theme: null, font_scale: null, revision: 'a0' }, handover: {} }
     sessions.set(id, state)
   }
   return state
@@ -351,17 +351,30 @@ function terminalEmit(session, ws, text) {
 async function terminalApi(req, res, pathname, url, state) {
   const terminals = terminalSessions(state)
   if (pathname === '/api/terminal/status' && req.method === 'GET') {
+    // No grant until the browser has asked for one: the pane obtains it
+    // by itself, so a spec that opens the terminal exercises that path
+    // rather than finding a live grant waiting for it.
     return sendJson(res, {
       available: true,
       reason: '',
       platform: TERMINAL_PLATFORM,
       host: TERMINAL_HOST,
-      unlock_expires_in: 900,
+      unlock_expires_in: state.terminalUnlocked ? 900 : 0,
       detached_ttl_seconds: 600,
     })
   }
   if (pathname === '/api/terminal/unlock' && req.method === 'POST') {
-    await readBody(req)
+    // The engine's route takes no body: the signed-in session is the
+    // terminal's trust boundary, so a request that carries one is refused.
+    const raw = await readRawBody(req)
+    if (raw.length > 0) {
+      return sendJson(
+        res,
+        { ok: false, reason: 'bad_request', error: 'this route takes no body.' },
+        400,
+      )
+    }
+    state.terminalUnlocked = true
     return sendJson(res, { ok: true, expires_in: 900 })
   }
   if (pathname === '/api/terminal/sessions' && req.method === 'GET') {
@@ -623,6 +636,13 @@ async function readBody(req) {
   for await (const chunk of req) chunks.push(chunk)
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { return {} }
+}
+
+/** The raw request body, as bytes: what the engine's unlock route looks at. */
+async function readRawBody(req) {
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  return Buffer.concat(chunks)
 }
 
 // ── Static files ────────────────────────────────────────────────────────

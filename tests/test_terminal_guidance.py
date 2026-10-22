@@ -44,14 +44,17 @@ WRONG_TERMINAL_CLAIMS = (
 )
 
 #: The boundaries the offer keeps, in the words the guidance uses for them:
-#: it never types, runs or unlocks anything, it never brings the shell's
+#: it never types, runs or starts anything, it never brings the shell's
 #: output back, the engine has not checked the text, and the provider's own
 #: transcript may still hold the tool arguments — so the guidance never
-#: promises that a suggested command leaves no trace.
+#: promises that a suggested command leaves no trace. ("Never unlocks" used
+#: to be one of them: the terminal used to ask for the password again, and
+#: the card had no business doing that. There is no unlock secret any more,
+#: so the boundary that still matters is the one above.)
 OFFER_BOUNDARIES = (
     "never types",
     "never runs",
-    "never unlocks",
+    "never starts a shell",
     "never brings",
     "output",
     "has not checked",

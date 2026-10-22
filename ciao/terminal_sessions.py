@@ -35,8 +35,8 @@ detaching, but nothing about it may grow. So:
   cannot stop its output, and a write that is cancelled can neither
   duplicate nor lose the bytes.
 
-Two identities are kept apart on purpose. A **grant** (a password
-unlock) says *this browser may use the terminal at all*, and it lives
+Two identities are kept apart on purpose. A **grant** (a per-browser
+terminal permission) says *this browser may use the terminal at all*, and it lives
 in :mod:`ciao.terminal_auth`. A **controller** says *this particular
 attachment owns the session right now*, and it lives here: one random
 ``connection_id`` per attachment, minted by the route, never the grant

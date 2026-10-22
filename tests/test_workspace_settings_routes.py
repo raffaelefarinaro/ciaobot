@@ -1650,12 +1650,52 @@ def test_patch_rename_returns_renamed_and_publishes_from_to(tmp_path):
     assert stored_run.workspace == "beta"
 
 
+def test_patch_rename_without_the_key_keeps_provider_overrides(tmp_path):
+    """A rename PATCH that omits provider_overrides carries the stored map to the new name."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    overrides = {"claude": {"model": "opus", "permission_mode": "manual"}}
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        workspaces={
+            "alpha": WorkspaceConfig(
+                name="alpha", vault_root="memory-vault/alpha", provider_overrides=overrides
+            ),
+            "work": WorkspaceConfig(name="work", vault_root="memory-vault/work"),
+        },
+    )
+    config.persist_workspace_registry()
+    app = Starlette(
+        routes=[Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"])]
+    )
+    app.state.config = config
+    app.state.project_chat_manager = _RenamePCM()
+    client = TestClient(app, client=("127.0.0.1", 50000))
+
+    resp = client.patch("/api/workspaces/alpha", json={"name": "beta"})
+
+    assert resp.status_code == 200, resp.json()
+    beta = next(w for w in resp.json()["workspaces"] if w["name"] == "beta")
+    assert beta["provider_overrides"] == overrides
+    assert config.workspace("beta").provider_overrides == overrides
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert next(r for r in stored if r["name"] == "beta")["provider_overrides"] == overrides
+
+
 @pytest.mark.parametrize(
     "extra",
     [
         {"default_provider": "invalid"},
         {"color": "chartreuse"},
         {"disallowed_tools": 123},
+        {"provider_overrides": {"claude": {"model": "gpt-9"}}},
     ],
 )
 def test_patch_rename_with_invalid_setting_writes_nothing(tmp_path, extra):
@@ -1861,6 +1901,76 @@ def test_workspace_memory_handover_defaults_off_persists_and_validates(tmp_path)
     bad = client.patch("/api/workspaces/personal", json={"memory_handover": "everything"})
     assert bad.status_code == 400
     assert config.workspace("personal").memory_handover == "off"
+
+
+def test_workspace_provider_overrides_persist_validate_and_clear(tmp_path):
+    """Overrides are operator-set per workspace and provider, sparse on disk, replaced whole."""
+    client, config, _pcm = _client(tmp_path)
+    registry = tmp_path / ".runtime" / "workspaces.json"
+
+    def stored_row() -> dict:
+        return next(w for w in json.loads(registry.read_text()) if w["name"] == "personal")
+
+    def listed_overrides() -> dict:
+        listed = client.get("/api/workspaces").json()
+        return next(w for w in listed["workspaces"] if w["name"] == "personal")["provider_overrides"]
+
+    assert listed_overrides() == {}
+
+    body = {"claude": {"model": "sonnet", "permission_mode": "manual"}}
+    patched = client.patch("/api/workspaces/personal", json={"provider_overrides": body})
+    assert patched.status_code == 200, patched.json()
+    updated = next(w for w in patched.json()["workspaces"] if w["name"] == "personal")
+    assert updated["provider_overrides"] == body
+    assert stored_row()["provider_overrides"] == body
+    assert config.workspace("personal").provider_overrides == body
+    assert listed_overrides() == body
+
+    # A save that omits the key keeps it.
+    kept = client.patch("/api/workspaces/personal", json={"color": "cyan"})
+    assert kept.status_code == 200
+    assert config.workspace("personal").provider_overrides == body
+
+    # A save that carries the key replaces the whole map; opencode takes any model id.
+    replaced = client.patch(
+        "/api/workspaces/personal",
+        json={"provider_overrides": {"opencode": {"model": "vendor/x", "thinking": "high"}}},
+    )
+    assert replaced.status_code == 200
+    assert stored_row()["provider_overrides"] == {
+        "opencode": {"model": "vendor/x", "thinking": "high"}
+    }
+
+    for bad in (
+        {"nope": {"model": "sonnet"}},
+        {"claude": {"default_model": "sonnet"}},
+        {"claude": {"permission_mode": "plan"}},
+        {"claude": {"thinking": "extreme"}},
+        {"claude": {"model": "gpt-9"}},
+        {"claude": {"insights_model": "gpt-9"}},
+        [],
+    ):
+        refused = client.patch("/api/workspaces/personal", json={"provider_overrides": bad})
+        assert refused.status_code == 400, bad
+        assert stored_row()["provider_overrides"] == {
+            "opencode": {"model": "vendor/x", "thinking": "high"}
+        }
+        assert config.workspace("personal").provider_overrides == {
+            "opencode": {"model": "vendor/x", "thinking": "high"}
+        }
+
+    # {} clears it and the key leaves the file.
+    cleared = client.patch("/api/workspaces/personal", json={"provider_overrides": {}})
+    assert cleared.status_code == 200
+    assert "provider_overrides" not in stored_row()
+    assert listed_overrides() == {}
+
+    created = client.post(
+        "/api/workspaces",
+        json={"name": "fresh", "provider_overrides": {"claude": {"thinking": "low"}}},
+    )
+    assert created.status_code in (200, 201), created.json()
+    assert config.workspace("fresh").provider_overrides == {"claude": {"thinking": "low"}}
 
 
 def test_missing_agent_fs_scope_loads_as_workspace(tmp_path, monkeypatch):

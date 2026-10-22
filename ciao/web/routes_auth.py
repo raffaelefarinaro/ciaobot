@@ -223,10 +223,9 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     or wrong ``current_password`` is 400/403, never 401: 401 means the session
     is gone, and the PWA sends the browser to /login on it.
 
-    A successful change ends every terminal grant, on every browser: the
-    password is the terminal's own credential, so a change ends the
-    unlocks it made and every browser has to unlock again. A refused change
-    ends nothing.
+    A successful change ends every terminal grant, on every browser: it
+    re-keys the sessions behind them, so every browser has to sign in and
+    ask for a new grant. A refused change ends nothing.
     """
     from ciao.web.auth import MIN_PWA_PASSWORD_LENGTH, make_serializer
     from ciao.web.routes_api import _env_path, _write_env_values
@@ -289,10 +288,10 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     config.pwa_auth_token = token_to_store
     request.app.state.serializer = make_serializer(token_to_store)
     _password_change_failures.pop(client_ip, None)
-    # The password is the terminal's own credential, so a change ends every
-    # unlock it made — on every browser, including this one. A rewrite of
-    # the same secret is still a change and still ends them. Nothing is
-    # revoked on the failure paths above: a refused change changes nothing.
+    # A change re-keys the sessions behind the terminal grants, so it ends
+    # every grant — on every browser, including this one. A rewrite of the
+    # same secret is still a change and still ends them. Nothing is revoked
+    # on the failure paths above: a refused change changes nothing.
     _terminal_grants(request).revoke_all()
     logger.info("PWA password changed (on_host=%s)", on_host)
 
@@ -306,7 +305,7 @@ async def auth_settings_update(request: Request) -> JSONResponse:
     signed = request.app.state.serializer.dumps({"user": "owner"})
     response.set_cookie(SESSION_COOKIE, signed, **session_cookie_kwargs(request))
     # The terminal cookie goes with the grants it named: this browser has
-    # to unlock the terminal again, with the new password.
+    # to acquire a new terminal grant after signing in again.
     _clear_terminal_cookie(response, request)
     return response
 

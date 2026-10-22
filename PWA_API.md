@@ -6,12 +6,12 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 ## Auth And Browser Security
 
-- Browser-terminal access (`GET /api/terminal/status`, `POST /api/terminal/unlock`) always requires a signed session, including on loopback. Terminal policy additionally requires the request's exact scheme, hostname and effective port: POST needs a bare `Origin` (no path, query or fragment); GET may use a same-origin page `Referer`, whose path and query are the page's own and are permitted, while a fragment is refused (browsers strip it before sending). Userinfo — including empty userinfo such as `http://@host` — missing/null origins and mismatches are refused. Remote access requires effective HTTPS; plain HTTP is allowed only for a direct loopback peer without proxy headers and a loopback Host. Unlock accepts exactly `{password}` in at most 4096 body bytes (password at most 1024 UTF-8 bytes), checks the password with bounded per-address failures, and returns a 15-minute grant only in a host-only HttpOnly SameSite=Strict cookie (`Secure` over HTTPS). No bearer appears in JSON. Responses are `no-store`. These routes launch no shell; session and stream integration are separate.
+- Browser-terminal access (`GET /api/terminal/status`, `POST /api/terminal/unlock`) always requires a signed session, including on loopback. Terminal policy additionally requires the request's exact scheme, hostname and effective port: POST needs a bare `Origin` (no path, query or fragment); GET may use a same-origin page `Referer`, whose path and query are the page's own and are permitted, while a fragment is refused (browsers strip it before sending). Userinfo — including empty userinfo such as `http://@host` — missing/null origins and mismatches are refused. Remote access requires effective HTTPS; plain HTTP is allowed only for a direct loopback peer without proxy headers and a loopback Host. **The signed-in session is the terminal's trust boundary:** unlock asks for no secret. It takes no body at all — a request that carries one is 400 `bad_request`, and a body over 4096 bytes is 413 — and returns a 15-minute grant only in a host-only HttpOnly SameSite=Strict cookie (`Secure` over HTTPS). The grant answers which browser may hold the socket and for how long: it is bound to the session cookie, has a fixed 15-minute lifetime that does not slide, and is revoked when the session behind it is re-keyed. No bearer appears in JSON. Responses are `no-store`. These routes launch no shell; session and stream integration are separate. The consequence is plain: a workspace that denies the agent `Bash` no longer has a host-shell boundary, because a signed-in browser is enough to reach a shell on the engine.
 - The terminal routes answer with two different envelopes, and a client must not assume one of them. A refusal from the terminal's own policy is `{"ok": false, "reason": ..., "error": ...}`; a refusal from the ordinary `AuthMiddleware` origin check — which runs first on a state-changing request and can answer before the terminal handler is reached at all — is `{"error": "forbidden origin"}`, with no `reason` key. The terminal's policy is intentionally stricter than the app's general rule (it also refuses userinfo and a non-bare `Origin`), so the two are not expected to accept the same set of requests.
 - The browser terminal's session routes (`GET`/`POST /api/terminal/sessions`, `DELETE /api/terminal/sessions/{session_id}`) carry the same door, in the same order: the terminal policy, then the signed session, then a fresh grant. A request that is not this engine's own page never has its body read, and a browser that has not unlocked the terminal never reaches a session — no grant is `403 locked` on all three routes. They name a *target*, never a folder and never a command: exactly one of `chat_id` or `project_id`, and the folder comes from the engine's own resolution. Every response is `no-store`, and a session record carries no output bytes and no connection id.
 - The browser terminal's socket (`WS /ws/terminal/{session_id}`) carries the same door, in the same order, and every refusal is a close code rather than a body: `4403` for the terminal policy (a foreign origin, or plain HTTP from a remote browser), `4001` for a missing signed session, `4401` for a missing or revoked terminal grant, `4404` for a session that is gone. A handshake carries no credential in its query string — the signed session and the `ciao_terminal` grant travel in cookies only. The grant is re-checked while the socket is open (at most once a second, and again for every client message), so a revoked or expired grant closes the socket with `4401` rather than leaving a shell open behind it.
 
-- Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is required, except from a browser on the host: loopback TCP peer with no reverse-proxy headers, loopback `Host`, exact same-origin `Origin`/`Referer` - the session is still required; `tailscale serve` callers are not the host). A change re-keys the session signer: every other device is signed out, and only the browser that made the change gets a new cookie. A successful change also ends **every** terminal grant, on every browser, and clears the `ciao_terminal` cookie: the password is the terminal's own credential, so every browser has to unlock the terminal again with the new password — including the browser that made the change. A refused change (a missing or wrong current password, a too-short new password) ends no grant and clears no terminal cookie. A missing current password is 400 `current_password_required`, a wrong one 403 `wrong_current_password`; neither is 401, which is reserved for a missing session. After 5 wrong current passwords from one client IP within 15 minutes, further changes from that IP are 429 `rate_limited` (even with the right password) until the window passes; a successful change clears the count, a missing current password does not count, and host browsers, which send no current password, are never limited. A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login or the login page's *Sign in on this computer*.
+- Password protection is always on; nothing turns it off. `PWA_AUTH_TOKEN` in the workspace `.env` is the dashboard password: the first-run wizard asks for it and `POST /api/auth/settings` changes it (the current password is required, except from a browser on the host: loopback TCP peer with no reverse-proxy headers, loopback `Host`, exact same-origin `Origin`/`Referer` - the session is still required; `tailscale serve` callers are not the host). A change re-keys the session signer: every other device is signed out, and only the browser that made the change gets a new cookie. A successful change also ends **every** terminal grant, on every browser, and clears the `ciao_terminal` cookie: the grant is bound to the signed session, and the change re-keys the session behind it, so every browser has to sign in again and ask for a new grant — including the browser that made the change. A refused change (a missing or wrong current password, a too-short new password) ends no grant and clears no terminal cookie. A missing current password is 400 `current_password_required`, a wrong one 403 `wrong_current_password`; neither is 401, which is reserved for a missing session. After 5 wrong current passwords from one client IP within 15 minutes, further changes from that IP are 429 `rate_limited` (even with the right password) until the window passes; a successful change clears the count, a missing current password does not count, and host browsers, which send no current password, are never limited. A forgotten password is read back from `.env`, or bypassed once with a `ciao setup-url` localhost login or the login page's *Sign in on this computer*.
 - `POST /api/auth` accepts `{"token": "<PWA_AUTH_TOKEN>"}` and returns an HttpOnly `ciao_session` cookie.
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - `POST /api/auth/host-sign-in` is loopback-only and needs no session (it is in `_LOOPBACK_ONLY_API`): a browser on the host's login page calls it to mint a fresh setup token, which the engine writes into an owner-only `.runtime/sign-in-*.html` and opens in the host's default browser; that page redirects to `/?setup=<token>`. The response is `{"ok": true}` and never carries the token. The redirect port is the socket's own listening port, never the Host header's, and the token file is recreated owner-only on every mint. A request relayed by `tailscale serve` or any local proxy, a signed-in remote browser, a cross-origin page or a rebound host is refused. Errors: 403 `not_on_host`, 409 `setup_required`/`no_desktop`/`no_workspace`/`open_failed`, 429 `cooldown`.
@@ -85,7 +85,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao; loopback clients only (403 otherwise) |
 | GET | `/api/host/terminal` | Can this browser open a terminal on the engine's machine: {available, platform, reason, terminal, actions}; a non-host browser (wrong peer, wrong `Host`, or a browser origin that is not this engine's exact origin) gets available:false, reason:"not_on_host" |
 | GET | `/api/terminal/status` | Signed session + terminal origin/transport policy; returns {available, reason, platform, host, unlock_expires_in, detached_ttl_seconds}. Status grants nothing and includes no credential. |
-| POST | `/api/terminal/unlock` | Browser password re-entry: exactly {password}; 200 {ok:true, expires_in:900} plus HttpOnly grant cookie; 400 malformed body, 401 unsigned session, 403 policy/wrong password, 413 body over cap, 429 rate limit or grant capacity. Never launches a shell. |
+| POST | `/api/terminal/unlock` | Issues the terminal grant to a signed-in, same-origin browser; no body (a body is 400 bad_request, one over 4096 bytes is 413). 200 {ok:true, expires_in:900} plus HttpOnly grant cookie; 401 unsigned session, 403 policy, 429 grant capacity. Never launches a shell. |
 | GET | `/api/terminal/sessions?chat_id=` \| `?project_id=` | The terminal sessions opened for exactly one target: {sessions:[info]}. `info` is {session_id, folder, cols, rows, seq, attached, exited, exit_code} — no output bytes and no connection id. Exactly one of `chat_id`/`project_id` must be named (400 otherwise), and an unknown target is a 404. |
 | POST | `/api/terminal/sessions` | Open a shell for one target: exactly {"chat_id"} or exactly {"project_id"}; 200 {session:info}. The body never names a folder or a command — the folder comes from the engine's own resolution, and the window from the manager. 400 bad_request (a body that is not exactly one target, or a target that names nothing), 403 locked (the browser has not unlocked the terminal), 404 not_found, 409 capacity (the manager is full) or folder_missing, 500 spawn_failed. |
 | DELETE | `/api/terminal/sessions/{session_id}` | End a session: the shell is closed and the record removed; 200 {ok:true}. 400 bad_request (not a session id), 404 not_found, 409 closed. |
@@ -322,20 +322,17 @@ Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer sa
 
 **Browser terminal sessions**
 
-`/api/terminal/sessions` opens, lists and ends the shells the browser terminal runs. The three routes carry the terminal's own door: the request must declare this engine's exact `Origin` (a `curl` sends it explicitly — the terminal's policy, unlike the app's, refuses a request that declares no source at all), it must carry the signed session cookie, and it must carry a live terminal grant. The grant comes from `POST /api/terminal/unlock`, which asks for the terminal's own password and leaves its cookie in the same jar; without it every one of the three routes answers `403 locked`.
+`/api/terminal/sessions` opens, lists and ends the shells the browser terminal runs. The three routes carry the terminal's own door: the request must declare this engine's exact `Origin` (a `curl` sends it explicitly — the terminal's policy, unlike the app's, refuses a request that declares no source at all), it must carry the signed session cookie, and it must carry a live terminal grant. The grant comes from `POST /api/terminal/unlock`, which asks for no secret — the signed-in session is the terminal's trust boundary — and leaves its cookie in the same jar; without it every one of the three routes answers `403 locked`.
 
 The body and the query name a *target*, never a folder and never a command: exactly one of `chat_id` or `project_id`, and the engine resolves the folder itself. A record answers `{session_id, folder, cols, rows, seq, attached, exited, exit_code}` — no output bytes and no connection id.
 
 ```bash
-# Unlock the terminal. It asks for the Ciaobot password again — the same
-# PWA_AUTH_TOKEN the dashboard login uses, re-entered so a signed-in tab
-# cannot open a shell by itself. The grant
+# Get the terminal grant. It takes no body: the signed-in session is the
+# terminal's trust boundary, so there is no password to send. The grant
 # cookie lands in the jar next to the session cookie.
 curl -sS -c /tmp/ciao.jar -b /tmp/ciao.jar -X POST \
   "http://localhost:${PWA_PORT:-8443}/api/terminal/unlock" \
-  -H "origin: http://localhost:${PWA_PORT:-8443}" \
-  -H 'content-type: application/json' \
-  -d "{\"password\":\"$TERMINAL_PASSWORD\"}"
+  -H "origin: http://localhost:${PWA_PORT:-8443}"
 
 # The sessions opened for one chat, and the ones opened for one project.
 curl -sS -b /tmp/ciao.jar \
@@ -778,8 +775,8 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats
 # `terminal_offer.id`, 32 lowercase hex characters) and nothing else: it
 # cannot be combined with the fields above. A stale id is 409 with the
 # current offer; a chat that has no offer is still 200. This is the
-# browser's own dismissal and it needs no terminal grant: nothing is run,
-# opened or unlocked by it.
+# browser's own dismissal and it needs no terminal grant: nothing is run
+# or opened by it.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
   -H 'content-type: application/json' \
   -d '{"terminal_offer":{"expected_id":"<the chat terminal_offer.id>"}}'
@@ -919,9 +916,14 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 # untrusted [memory]/[profile] text into the always-loaded AGENTS.md regions,
 # within the event-shape and duplicate guards and a cap of five accepts per
 # curation run, and each accept can be undone from History.
+# Each workspace also reports provider_overrides
+# ({provider: {model, thinking, permission_mode, insights_model}}, sparse,
+# {} when none): this workspace's overrides of the Settings -> Providers
+# defaults for new chats and schedule runs on that provider. Empty or missing
+# means the engine default.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
-# Upsert — body keys: name, default_provider,
+# Upsert — body keys: name, default_provider, provider_overrides,
 # gws_profile, color (pink|cyan|amber|emerald|violet; default
 # pink — PWA accent only), disallowed_tools (extra tools, CSV or list,
 # null = defaults), claude_ai_connectors (boolean, default true). When false,
@@ -940,6 +942,29 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/worksp
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \
   -H 'content-type: application/json' \
   -d '{"disallowed_tools":"mcp__n8n_mcp"}'
+
+# Override provider defaults for one workspace. provider_overrides maps a
+# provider id to {model, thinking, permission_mode (manual|auto|bypass),
+# insights_model}. An unknown provider, key or value is a 400 and nothing is
+# saved; model and insights_model must be a tier alias or Claude model id
+# (opencode takes any id), and thinking one of the provider's levels. The map
+# replaces the stored one, a save that omits the key keeps it, and {} clears it;
+# an empty value means "engine default". The override applies to new chats,
+# schedule runs, webhook and task chats and memory passes in that workspace on
+# that provider; an explicit model or mode still wins. A chat, a delegated
+# task (or its retry), a schedule and a webhook that an agent creates, edits or
+# enables over MCP never exceed that agent's own permission mode, whatever the
+# override says: a rewritten schedule is pinned to the agent's mode, an agent
+# below the workspace default gets webhook_requires_operator when it
+# enables a trigger, rewrites a trigger's instructions or rotates a live
+# trigger's secret (renaming and disabling stay open), and a schedule's saved mode is an upper limit (a run uses
+# the lower of it and the current default). Editing a schedule's prompt or
+# command in the PWA clears the saved mode. Operator-only:
+# no agent verb, CLI, MCP tool or env var writes it, and an archive restore
+# does not bring it back.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \
+  -H 'content-type: application/json' \
+  -d '{"provider_overrides":{"claude":{"model":"sonnet","permission_mode":"manual"}}}'
 
 # Archive. Nothing is deleted or merged into another workspace: the folder
 # moves intact to <install>/.archived-workspaces/<name>-<YYYYMMDD-HHMMSS>/
@@ -1713,11 +1738,11 @@ escaped text: no Markdown, no HTML, no link parsing, no action registry.
   success. "Open terminal" opens the existing browser terminal for the
   owning chat (the terminal pane's own `open({chat_id})` flow, which carries
   the terminal's own door — its policy, the signed session and a live
-  terminal grant); the card does not create a terminal session, unlock the
-  terminal, send input or reach the host terminal itself, and it never
-  autofocuses a shell or auto-submits anything. Nothing on the card executes
-  the command, pastes it into a shell, grants a terminal or collects the
-  command's output — running it is the user's own act, in their own terminal.
+  terminal grant); the card does not create a terminal session, send input or
+  reach the host terminal itself, and it never autofocuses a shell or
+  auto-submits anything. Nothing on the card executes the command, pastes it
+  into a shell or collects the command's output — running it is the user's
+  own act, in their own terminal.
   Viewing, opening or copying the card never reports a login, an install or
   an MCP connection as done.
 - **Dismiss**: `PATCH /api/chats/{chat_id}` with body
@@ -1745,7 +1770,7 @@ escaped text: no Markdown, no HTML, no link parsing, no action registry.
   a static message, refused before the chat is read. A refusal is a static
   string: nothing the caller wrote is echoed back.
 - **Auth**: the ordinary signed-session, same-origin browser gate, unchanged.
-  A dismissal needs no terminal grant and no unlock — dropping a suggestion is
+  A dismissal needs no terminal grant — dropping a suggestion is
   not a privileged act, so it opens no host terminal, creates no provider
   session, executes nothing and mints no grant.
 - **Retention**: the offer is transient state in memory only. It is never

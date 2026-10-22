@@ -113,7 +113,7 @@ Top-level commands, outside the `<noun> <verb>` table: plain text output (a `--j
 | `chat archive [--chat ID]` | Archive a chat to the vault and trigger normal post-archive memory extraction. | — |
 | `chat delete [--chat ID]` | Delete a chat. | Destructive; deleting the calling chat itself is deferred until the turn finishes. |
 | `chat stop --chat ID` | Stop another chat's active provider turn. | Destructive; a chat cannot stop its own turn. |
-| `chat terminal-offer --command-file FILE` | Suggest a terminal command for this chat: the user reads it, copies it and runs it themselves. | `FILE` holds the command text (`@file.txt` or a plain path). There is no `--chat` and no inline command: the suggestion belongs to the calling chat. The text is untrusted, model-authored guidance — Ciaobot does not verify it and does not claim it is safe, so put a placeholder in it, never a real token or password. Nothing is executed, no terminal is unlocked and no output is collected. For a provider Ciaobot already supports, prefer the Settings flow for its own login or install step. |
+| `chat terminal-offer --command-file FILE` | Suggest a terminal command for this chat: the user reads it, copies it and runs it themselves. | `FILE` holds the command text (`@file.txt` or a plain path). There is no `--chat` and no inline command: the suggestion belongs to the calling chat. The text is untrusted, model-authored guidance — Ciaobot does not verify it and does not claim it is safe, so put a placeholder in it, never a real token or password. Nothing is executed, no terminal grant is obtained and no output is collected. For a provider Ciaobot already supports, prefer the Settings flow for its own login or install step. |
 
 ### Projects
 
