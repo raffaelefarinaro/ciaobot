@@ -18,6 +18,36 @@ vi.mock('../../lib/api', () => ({
   api: { get: apiGet, post: apiPost, patch: vi.fn(), del: vi.fn() },
 }))
 
+/**
+ * The engine's awareness socket, as the store opens it. The store's global
+ * event handler is a real path in the app, so a test that needs an engine
+ * frame delivers it through this rather than around the store.
+ */
+class FakeWebSocket {
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
+
+  readyState = FakeWebSocket.OPEN
+  onmessage: ((event: { data: string }) => void) | null = null
+  onclose: ((event: CloseEvent) => void) | null = null
+  onerror: (() => void) | null = null
+  onopen: (() => void) | null = null
+
+  constructor(public url: string) {
+    fakeSockets.push(this)
+  }
+
+  send = vi.fn()
+
+  close() {
+    this.readyState = FakeWebSocket.CLOSED
+  }
+}
+
+let fakeSockets: FakeWebSocket[] = []
+
 function row(overrides: Partial<ProposalRow> = {}): ProposalRow {
   return {
     id: 'row-1',
@@ -647,6 +677,77 @@ describe('ProposalReviewPanel', () => {
     expect(projects.chats.some(c => c.chat_id === 'chat-x')).toBe(true)
     expect(wrapper.findAll('.pr-row-action').map(b => b.text())).toContain('Open chat')
     wrapper.unmount()
+  })
+
+  it('a stale chat list cannot erase a terminal offer the engine announced while it was in flight', async () => {
+    // The panel pulls the chat list itself after an accept, and that request
+    // hydrates the transient terminal offers. It captures the offer watermark
+    // BEFORE the await, so a command the engine offered while the request was
+    // in flight survives the older reply: the reply answers a question asked
+    // before the offer existed.
+    const path = 'work/Workspace/Skill-Proposals/proposal-2026-08-20.md'
+    let accepted = false
+    let releaseChats!: (rows: unknown[]) => void
+    const chatsPending = new Promise<unknown[]>((resolve) => { releaseChats = resolve })
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/proposals') {
+        return Promise.resolve({
+          rows: [row({
+            id: 'skill', kind: 'skill', text: 'proposal-2026-08-20',
+            workspace: 'work', path, line: -1,
+            ...(accepted ? { lifecycle: 'implementing', chat_id: 'chat-x' } : {}),
+          })],
+        })
+      }
+      if (url === '/api/chats') return chatsPending
+      return Promise.resolve({})
+    })
+    apiPost.mockImplementation(() => {
+      accepted = true
+      return Promise.resolve({ ok: true, chat_id: 'chat-x', project_id: 'p-work', created: true } as never)
+    })
+    fakeSockets = []
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    try {
+      const projects = useProjectStore()
+      projects.activeWorkspace = 'work'
+      projects.chats = []
+      projects.connectEventsWs()
+      const eventsSocket = fakeSockets[fakeSockets.length - 1]
+
+      const wrapper = mount(ProposalReviewPanel, { global: { plugins: [pinia] } })
+      await flushPromises()
+
+      await wrapper.findAll('.pr-row-action').find(b => b.text() === 'Improve skill')!.trigger('click')
+      await flushPromises()
+
+      // The panel's own list request is in flight.
+      expect(apiGet).toHaveBeenCalledWith('/api/chats')
+
+      // The engine offers a command while that request is pending.
+      eventsSocket.onmessage?.({
+        data: JSON.stringify({
+          type: 'chat_terminal_offer_changed',
+          chat_id: 'chat-x',
+          terminal_offer: { id: 'offer-1', command: 'claude login' },
+        }),
+      })
+      expect(projects.terminalOffers['chat-x']?.id).toBe('offer-1')
+
+      // The reply is the list that request asked for, and it names no offer.
+      releaseChats([
+        { chat_id: 'chat-x', project_id: 'p-work', title: 'Improve proposal-2026-08-20', workspace: 'work', archived: false, terminal_offer: null },
+      ])
+      await flushPromises()
+
+      // The list was applied…
+      expect(projects.chats.some(c => c.chat_id === 'chat-x')).toBe(true)
+      // …and the newer offer survived the older reply.
+      expect(projects.terminalOffers['chat-x']?.id).toBe('offer-1')
+      wrapper.unmount()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('does not announce a start it did not make', async () => {

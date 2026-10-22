@@ -1395,8 +1395,12 @@ async function refreshChatListFor(chatId: string) {
   if (projectStore.chats.some((c) => c.chat_id === chatId)) return
   try {
     const { api } = await import('../lib/api')
+    // Captured before the request, not when it lands: the list hydrates the
+    // transient terminal offers, and a payload that raced a newer offer
+    // change must not roll it back.
+    const readStartedAt = projectStore.terminalOfferReadStart()
     const next = await api.get<any[]>('/api/chats')
-    if (Array.isArray(next)) projectStore.reconcileChatList(next)
+    if (Array.isArray(next)) projectStore.reconcileChatList(next, readStartedAt)
   } catch {
     /* the next chat sync will carry it */
   }
