@@ -12,7 +12,10 @@ export type SettingsNavGroup = {
 export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
   { id: 'engine', label: 'Ciaobot', items: [
     { to: '/settings', label: 'General' },
+    { to: '/settings/appearance', label: 'Appearance' },
+    { to: '/settings/access', label: 'Access & devices' },
     { to: '/settings/providers', label: 'Providers' },
+    { to: '/settings/advanced', label: 'Advanced' },
     { to: '/settings/workspaces', label: 'Workspaces' },
   ] },
   { id: 'workspace', label: null, items: [

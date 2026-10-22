@@ -252,6 +252,49 @@
              never have been opened in this session. -->
         <SettingsUpdateTasks />
 
+        <!-- Start at sign-in. It changes whether the engine service starts at
+             the *next* sign-in, never the engine running now, and never the
+             optional app window SettingsAppInstall owns. -->
+        <SettingsEngineLogin />
+
+        <!-- The operator's switch for the nightly run's own decisions. It owns
+             its data: nothing here is part of the workspace edit form. -->
+        <SettingsMemoryHandover />
+
+        <!-- Open source. The face image on the right appears only while the
+             GitHub-star ask is still live (housekeeping detects it via the
+             `starred` / snoozed receipt): once the user has starred or
+             dismissed, the card quiets back to prose. -->
+        <div class="card open-source-card" :class="{ 'open-source-card--with-face': showStarNudge }">
+          <div class="settings-card-header">
+            <p class="section-title">Open source</p>
+            <p class="hint">
+              Ciaobot is an open-source project. Support and contributions are welcome:
+              report issues, suggest features, or open a pull request on
+              <a href="https://github.com/raffaelefarinaro/ciaobot" target="_blank" rel="noopener">GitHub</a>.
+              You can browse without an account; submitting an issue or pull request requires a free GitHub account, and GitHub will prompt you to sign in or create one.
+            </p>
+            <div v-if="showStarNudge" class="open-source-actions">
+              <button
+                class="btn-primary btn-small"
+                :disabled="starPending"
+                @click="starOnGitHub"
+              >{{ starPending ? 'Starring…' : '★ Star on GitHub' }}</button>
+              <button class="btn-small" @click="dismissStarNudge">Later</button>
+            </div>
+          </div>
+          <img
+            v-if="showStarNudge"
+            class="open-source-face"
+            src="/face.png"
+            alt=""
+            draggable="false"
+          />
+        </div>
+      </template>
+
+      <!-- APPEARANCE TAB -->
+      <template v-if="currentTab === 'appearance'">
         <!-- Appearance -->
         <div class="card">
           <div class="settings-card-header">
@@ -304,7 +347,87 @@
             </div>
           </div>
         </div>
+      </template>
 
+      <!-- ACCESS & DEVICES TAB -->
+      <template v-if="currentTab === 'access'">
+        <!-- PWA password -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">PWA password</p>
+              <p class="hint">
+                Ciaobot is always password-protected — this is the password you type to open it,
+                and the one another device needs to sign in.
+                <a
+                  class="settings-help-link"
+                  href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Keeping it private</a>
+              </p>
+            </div>
+          </div>
+          <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
+          <template v-else>
+            <div class="settings-form-panel">
+              <label v-if="!authSettings.on_host" class="settings-field">
+                <span class="ws-label">Current password</span>
+                <input
+                  id="auth-current-password"
+                  v-model="authCurrentPassword"
+                  type="password"
+                  class="routine-input"
+                  autocomplete="current-password"
+                  :aria-invalid="authCurrentPasswordError ? 'true' : undefined"
+                  :aria-describedby="authCurrentPasswordError ? 'auth-current-password-error' : undefined"
+                  :disabled="authSettingsSaving"
+                />
+                <span v-if="authCurrentPasswordError" id="auth-current-password-error" class="hint hint--warn" role="alert">{{ authCurrentPasswordError }}</span>
+              </label>
+              <p v-if="authSettings.on_host" class="hint">You're on the computer running Ciaobot, so you don't need the current password here.</p>
+              <label class="settings-field">
+                <span class="ws-label">New password</span>
+                <input
+                  v-model="authNewPassword"
+                  type="password"
+                  class="routine-input"
+                  placeholder="at least 4 characters"
+                  autocomplete="new-password"
+                  :disabled="authSettingsSaving"
+                />
+              </label>
+              <div class="action-row settings-actions">
+                <button
+                  class="btn-primary btn-small"
+                  @click="saveAuthSettings"
+                  :disabled="authSettingsSaving || !canSaveAuthSettings"
+                >
+                  {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
+                </button>
+              </div>
+            </div>
+            <div v-if="authSettingsResult" class="action-result" :class="{ 'action-result--error': authSettingsError }">
+              {{ authSettingsResult }}
+            </div>
+          </template>
+        </div>
+
+        <!-- Other devices — where to open Ciaobot from a phone or another
+             computer. The one place to set the trusted HTTPS address. -->
+        <SettingsDevices />
+
+        <!-- Network access: server settings that used to live in the workspace .env. -->
+        <SettingsServer
+          section="network"
+          :routines="routines"
+          :routines-saving="routinesSaving"
+          :save-routines="saveRoutines"
+        />
+      </template>
+
+      <!-- ADVANCED TAB -->
+      <template v-if="currentTab === 'advanced'">
         <!-- Actions. This card is about the Ciaobot *program*: the checkout it
              runs from, and whether it is up to date. It shares a repository and
              a serialization with the memory backup below, but never the
@@ -353,29 +476,20 @@
           </div>
         </div>
 
-        <!-- Start at sign-in. The last host fact beside the program's own, and
-             a different thing from both: it changes whether the engine service
-             starts at the *next* sign-in, never the engine running now, and
-             never the optional app window SettingsAppInstall owns. -->
-        <SettingsEngineLogin />
-
         <!-- Memory backup. The unattended, one-way copy of the user's memory,
              right below the program's own repository controls so the two are
              read together and never confused. The panel owns its data and its
              actions; the only thing it cannot do alone is navigate to a chat,
              so it emits the setup chat's id for this view to open. -->
         <SettingsMemoryBackup @open-chat="openBackupSetupChat" />
-        <!-- The operator's switch for the nightly run's own decisions. It owns
-             its data: nothing here is part of the workspace edit form. -->
-        <SettingsMemoryHandover />
 
-        <!-- Main workspace -->
+        <!-- Ciaobot folder -->
         <div v-if="routines && routines.workspace_context" class="card">
           <div class="settings-card-header">
-            <p class="section-title">Main workspace</p>
+            <p class="section-title">Ciaobot folder</p>
             <p class="hint">
-              The server filesystem root for routines, skills, scripts, runtime state, and the <code>.env</code> file.
-              Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
+              The folder Ciaobot runs from: routines, skills, scripts, runtime state and the <code>.env</code> file.
+              Chat workspaces (the sidebar switcher) are managed separately under Settings &rarr; Workspaces.
             </p>
           </div>
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
@@ -448,75 +562,9 @@
           </div>
         </div>
 
-        <!-- PWA password -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">PWA password</p>
-              <p class="hint">
-                Ciaobot is always password-protected — this is the password you type to open it,
-                and the one another device needs to sign in.
-                <a
-                  class="settings-help-link"
-                  href="https://www.raffaelefarinaro.com/ciaobot/remote.html#browser"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >Keeping it private</a>
-              </p>
-            </div>
-          </div>
-          <SkeletonLoader v-if="!authSettings" label="Loading access settings" :count="2" />
-          <template v-else>
-            <div class="settings-form-panel">
-              <label v-if="!authSettings.on_host" class="settings-field">
-                <span class="ws-label">Current password</span>
-                <input
-                  id="auth-current-password"
-                  v-model="authCurrentPassword"
-                  type="password"
-                  class="routine-input"
-                  autocomplete="current-password"
-                  :aria-invalid="authCurrentPasswordError ? 'true' : undefined"
-                  :aria-describedby="authCurrentPasswordError ? 'auth-current-password-error' : undefined"
-                  :disabled="authSettingsSaving"
-                />
-                <span v-if="authCurrentPasswordError" id="auth-current-password-error" class="hint hint--warn" role="alert">{{ authCurrentPasswordError }}</span>
-              </label>
-              <p v-if="authSettings.on_host" class="hint">You're on the computer running Ciaobot, so you don't need the current password here.</p>
-              <label class="settings-field">
-                <span class="ws-label">New password</span>
-                <input
-                  v-model="authNewPassword"
-                  type="password"
-                  class="routine-input"
-                  placeholder="at least 4 characters"
-                  autocomplete="new-password"
-                  :disabled="authSettingsSaving"
-                />
-              </label>
-              <div class="action-row settings-actions">
-                <button
-                  class="btn-primary btn-small"
-                  @click="saveAuthSettings"
-                  :disabled="authSettingsSaving || !canSaveAuthSettings"
-                >
-                  {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
-                </button>
-              </div>
-            </div>
-            <div v-if="authSettingsResult" class="action-result" :class="{ 'action-result--error': authSettingsError }">
-              {{ authSettingsResult }}
-            </div>
-          </template>
-        </div>
-
-        <!-- Other devices — where to open Ciaobot from a phone or another
-             computer. The one place to set the trusted HTTPS address. -->
-        <SettingsDevices />
-
-        <!-- Network access and the developer switches: server settings that
-             used to live in the workspace .env. -->
+        <!-- Developer switches: server settings that used to live in the workspace .env. -->
         <SettingsServer
+          section="developer"
           :routines="routines"
           :routines-saving="routinesSaving"
           :save-routines="saveRoutines"
@@ -538,38 +586,6 @@
           </div>
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
-
-        <!-- Open source. The face image on the right appears only while the
-             GitHub-star ask is still live (housekeeping detects it via the
-             `starred` / snoozed receipt): once the user has starred or
-             dismissed, the card quiets back to prose. -->
-        <div class="card open-source-card" :class="{ 'open-source-card--with-face': showStarNudge }">
-          <div class="settings-card-header">
-            <p class="section-title">Open source</p>
-            <p class="hint">
-              Ciaobot is an open-source project. Support and contributions are welcome:
-              report issues, suggest features, or open a pull request on
-              <a href="https://github.com/raffaelefarinaro/ciaobot" target="_blank" rel="noopener">GitHub</a>.
-              You can browse without an account; submitting an issue or pull request requires a free GitHub account, and GitHub will prompt you to sign in or create one.
-            </p>
-            <div v-if="showStarNudge" class="open-source-actions">
-              <button
-                class="btn-primary btn-small"
-                :disabled="starPending"
-                @click="starOnGitHub"
-              >{{ starPending ? 'Starring…' : '★ Star on GitHub' }}</button>
-              <button class="btn-small" @click="dismissStarNudge">Later</button>
-            </div>
-          </div>
-          <img
-            v-if="showStarNudge"
-            class="open-source-face"
-            src="/face.png"
-            alt=""
-            draggable="false"
-          />
-        </div>
-
       </template>
 
       <!-- PROVIDERS TAB: chat providers. The old models tab was renamed;
@@ -3097,14 +3113,18 @@ function scrollToChatProvidersIfLinked(): void {
 }
 watch(() => route.fullPath, scrollToChatProvidersIfLinked)
 
-// Home links land on these home-tab cards (#install-app from the setup
-// card's "How to install", #other-devices from "Phone setup"); the cards
-// are mounted with the home tab, so only the scroll needs waiting for.
-const HOME_TAB_ANCHORS = new Set(['#install-app', '#other-devices'])
+// Home links land on these cards (#install-app on General from the setup
+// card's "How to install", #other-devices on Access & devices from "Phone
+// setup"). A link mounts the tab and sets the hash in one navigation and the
+// cards mount after the tab flips, so the scroll re-runs on either change.
+const TAB_ANCHORS: Record<string, string[]> = {
+  home: ['#install-app'],
+  access: ['#other-devices'],
+}
 watch(
-  () => route.hash,
-  hash => {
-    if (!HOME_TAB_ANCHORS.has(hash)) return
+  [() => route.hash, currentTab],
+  ([hash, tab]) => {
+    if (!TAB_ANCHORS[tab]?.includes(hash)) return
     void nextTick(() => {
       document.getElementById(hash.slice(1))?.scrollIntoView?.({ block: 'start' })
     })
@@ -4189,12 +4209,26 @@ function loadSettingsTab(tab: string): Promise<void> {
   let reads: Promise<unknown>[]
   switch (tab) {
     case 'home':
-      // The health card waits on the agent assets, so the home tab has to
-      // read them: without this it stays on its loader until another tab
-      // happens to fetch the same data.
+      // The Updates card reads the package and update status; Session
+      // insights reads the routines.
+      reads = [fetchPackageStatus(), fetchUpdateStatus(), fetchRoutines()]
+      break
+    case 'appearance':
+      // The card is local: loadAppearanceSettings() runs on mount.
+      reads = []
+      break
+    case 'access':
+      // PWA password; Network access reads the routines. SettingsDevices
+      // owns its own loads.
+      reads = [fetchAuthSettings(), fetchRoutines()]
+      break
+    case 'advanced':
+      // The health card waits on the agent assets, so this tab has to read
+      // them: without this it stays on its loader until another tab happens
+      // to fetch the same data.
       reads = [fetchLocalStatus().then(() => {
         if (localStatus.value?.dev_mode) return refreshDebugIssues()
-      }), fetchAuthSettings(), fetchRoutines(), fetchWorkspaceMove(), fetchPackageStatus(), fetchUpdateStatus(), fetchAgentAssets()]
+      }), fetchRoutines(), fetchWorkspaceMove(), fetchAgentAssets()]
       break
     case 'providers':
       reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), mcp.fetchStatus(), fetchWorkspaceModels()]
@@ -4252,9 +4286,9 @@ watch(() => projectStore.activeWorkspace, () => {
   }
   if (['providers', 'skills', 'subagents', 'commands', 'mcp'].includes(currentTab.value)) {
     void loadSettingsTab(currentTab.value)
-  } else if (currentTab.value === 'home') {
-    // The home tab's health card reads the same workspace-scoped agent
-    // assets, so a switch has to refresh them too. The home tab itself stays
+  } else if (currentTab.value === 'advanced') {
+    // The advanced tab's health card reads the same workspace-scoped agent
+    // assets, so a switch has to refresh them too. The advanced tab itself stays
     // unscoped: its other reads do not belong to a workspace.
     void fetchAgentAssets()
   }

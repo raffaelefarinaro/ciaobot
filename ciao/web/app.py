@@ -852,7 +852,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     # here, published here, started by the lifespan and closed by it; the
     # routes read this one and there is no second registry.
     app.state.terminal_sessions = TerminalSessionManager()
-    # Runtime-mutable settings store (Settings → Models tab). None in
+    # Runtime-mutable settings store (Settings → Providers tab). None in
     # tests that build the app without one; the route 503s in that case.
     app.state.app_settings = app_settings
     app.state.mcp_service = mcp_service

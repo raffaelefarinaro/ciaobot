@@ -40,7 +40,7 @@ and transfer `ciao/web/static/` with the source. The server does not need Vite.
 Setup generates the dashboard password in `/srv/ciaobot/.env`, mode `0600`, and
 prints a one-time login URL. Existing passwords and config are preserved on rerun.
 
-For HTTPS reverse proxy hosting, set Settings → General → Network access to
+For HTTPS reverse proxy hosting, set Settings → Access & devices → Network access to
 **This computer only** (the bind address, `127.0.0.1`) and restart the service,
 and keep the port in the workspace `.env`:
 
@@ -140,7 +140,7 @@ service account), copies the account's Claude Code sessions to the new folder's
 name, repoints `WorkingDirectory=` and `CIAO_WORKSPACE` in
 `/etc/systemd/system/ciaobot.service`, runs `daemon-reload` and starts the unit.
 If the engine does not come back, everything is put back. It refuses a folder
-the service account cannot enter. Settings → Main workspace shows this command
+the service account cannot enter. Settings → Advanced → Ciaobot folder shows this command
 instead of a Move button, since the service account cannot stop its own unit.
 To undo, move it back.
 

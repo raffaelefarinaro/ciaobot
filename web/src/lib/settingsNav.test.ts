@@ -20,11 +20,23 @@ describe('SETTINGS_NAV_GROUPS', () => {
     expect(SETTINGS_NAV_GROUPS.map(g => g.id)).toEqual(['engine', 'workspace'])
     const [engine, workspace] = SETTINGS_NAV_GROUPS
     expect(engine.label).toBe('Ciaobot')
-    expect(engine.items.map(i => i.label)).toEqual(['General', 'Providers', 'Workspaces'])
+    expect(engine.items.map(i => i.label)).toEqual(['General', 'Appearance', 'Access & devices', 'Providers', 'Advanced', 'Workspaces'])
     expect(workspace.label).toBeNull()
     expect(workspace.items.map(i => i.label)).toEqual(['Skills', 'Subagents', 'Commands', 'MCP servers'])
     expect(SETTINGS_NAV).toEqual([...engine.items, ...workspace.items])
     const targets = SETTINGS_NAV.map(i => i.to)
     expect(new Set(targets).size).toBe(targets.length)
+  })
+  it('lists the final engine order', () => {
+    const engine = SETTINGS_NAV_GROUPS[0]
+    expect(engine.items.map(i => [i.label, i.to])).toEqual([
+      ['General', '/settings'],
+      ['Appearance', '/settings/appearance'],
+      ['Access & devices', '/settings/access'],
+      ['Providers', '/settings/providers'],
+      ['Advanced', '/settings/advanced'],
+      ['Workspaces', '/settings/workspaces'],
+    ])
+    expect(settingsTabLabel('/settings/access')).toBe('Access & devices')
   })
 })

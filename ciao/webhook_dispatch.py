@@ -14,7 +14,7 @@ Six rules; every one but the first is a refusal somebody could otherwise have ta
   non-plan chat when ``unattended=True``, so this module calls
   ``start_stream(chat_id, prompt)`` and never names that argument at all. The
   chat is created like any new chat, in the operator's new-chat default
-  permission mode (Settings → Models & providers), and an approval card is an
+  permission mode (Settings → Providers), and an approval card is an
   ordinary approval card that surfaces in Needs-you, exactly as it does for a
   wake turn (``_deliver_wake``) or the ``chat_prompt`` route. The sender never
   reaches model, provider or permission selection: the *trigger* pins the

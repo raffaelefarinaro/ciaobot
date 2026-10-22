@@ -461,9 +461,9 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
-  it('SettingsView shows the memory backup section on /settings', async () => {
+  it('SettingsView shows the memory backup section on /settings/advanced', async () => {
     const router = makeRouter()
-    await router.push('/settings')
+    await router.push('/settings/advanced')
     await router.isReady()
     const mod = await import('../SettingsView.vue')
     const wrapper = mount(mod.default as never, {

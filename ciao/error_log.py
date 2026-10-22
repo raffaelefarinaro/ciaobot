@@ -6,7 +6,7 @@ Two RotatingFileHandlers are wired into the root logger:
   tail the file, feed it to an error-triage automation, and clear it after a
   successful run.
 - ``server_debug.log`` receives everything DEBUG+ when the log level setting
-  (Settings → General → Developer) is ``debug``, giving verbose runtime detail (provider stderr noise, lifecycle
+  (Settings → Advanced → Developer) is ``debug``, giving verbose runtime detail (provider stderr noise, lifecycle
   events) that survives console rotation and is surfaced through the debug
   issue report so the agent can inspect its own behavior.
 """

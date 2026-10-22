@@ -78,7 +78,7 @@ def _omits(text: str, pattern: str) -> bool:
 
 
 def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
-    """Settings is seven routes; the four asset lists are compared through the scoped API.
+    """Settings is ten routes; the four asset lists are compared through the scoped API.
 
     The old task called Settings one scrolling page with an "On this page" rail
     and treated a bare `curl` 401 as proof the endpoint worked. Both are wrong:
@@ -92,6 +92,9 @@ def test_settings_walk_names_current_routes_and_scoped_checks() -> None:
     # All seven supported routes, including the default.
     for route in (
         "`/settings`",
+        "`/settings/appearance`",
+        "`/settings/access`",
+        "`/settings/advanced`",
         "`/settings/workspaces`",
         "`/settings/providers`",
         "`/settings/skills`",

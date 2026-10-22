@@ -3421,7 +3421,7 @@ class ProjectChatManager:
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
-        # The provider's operator default (Settings → Models tab); the
+        # The provider's operator default (Settings → Providers tab); the
         # workspace no longer pins a model. An explicit ``model`` arg wins.
         # Passing chat_provider resolves against that provider's own operator
         # default when it differs from the workspace's default provider.

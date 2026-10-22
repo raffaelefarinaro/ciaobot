@@ -14,7 +14,7 @@ Screenshots go to `$TMPDIR/ciao-release-walk/<version>/`, named
 Open the app at **the origin this install actually serves** — the URL the
 `/ciao-dev-install` skill printed, or the address the installed service is bound to —
 not a hard-coded `127.0.0.1:8443`. The bind address defaults to `0.0.0.0`
-(Settings → General → Network access) and `PWA_PORT` to `8443`
+(Settings → Access & devices → Network access) and `PWA_PORT` to `8443`
 (`INTEGRATIONS.md`), but the operator may have changed either, so read the
 running config rather than assume. Wait for the document to
 load, then note the final URL and the page title.
