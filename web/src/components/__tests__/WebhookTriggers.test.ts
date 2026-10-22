@@ -959,8 +959,8 @@ describe('the receiver recipe', () => {
     await button(wrapper, 'Recipe').trigger('click')
     await flushPromises()
 
-    // `.chat-main` declares `container-type: inline-size`, which makes it the
-    // containing block for `position: fixed` descendants: an overlay drawn in
+    // `.chat-main` keeps layout containment, which makes it the containing
+    // block for `position: fixed` descendants: an overlay drawn in
     // place would dim and clip to the Automations pane and leave the sidebar
     // live and undimmed behind a "modal".
     const backdrop = document.querySelector('.wh-backdrop')

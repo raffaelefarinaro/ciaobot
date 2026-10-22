@@ -159,9 +159,10 @@ iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `
 ### The browser terminal
 
 The chat's and the project's *Open in Terminal* opens a terminal **inside the
-app**: a strip under the chat on a wide pane, a full-height drawer on a phone.
-It is a shell on the engine's own machine, and the pane says so before
-anything is typed. The native host terminal keeps its own button
+app**, in the same right-hand tile a pinned file uses: the same inset
+rounded window, the same draggable divider, the same remembered ratio. It
+is a shell on the engine's own machine, and the pane says so before anything
+is typed. The native host terminal keeps its own button
 (`HostTerminalButton.vue`) for the actions that need a real window on the
 engine's computer: provider sign-in, skill updates, the engine's own update.
 
@@ -174,6 +175,25 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   a project without a repository — an auto-managed project included — has one
   too. The button is `components/BrowserTerminalButton.vue` and it is the only
   way in; opening the panel starts no shell.
+- **One slot, two occupants.** The right-hand slot is the file panel's tile
+  (`.chat-split-side`): the same inset, radius, border and shadow, behind the
+  same `chat-split-resizer` divider, and the same remembered ratio
+  (`ciao:chat-split-ratio`). A pinned file owns the slot. A terminal takes it
+  when no file has and the pane is wide enough for both columns, and falls
+  back to the full-screen drawer over the pane when it cannot — a phone, a
+  pane too narrow, or a file that has the slot. The tile keeps the terminal
+  mounted behind it, so the shell survives a hide; the drawer is the same
+  overlay the phone has always had.
+- **The shape comes from the room, not from the window.** The terminal's
+  slot needs 360px for the chat column, 360px for the tile and its 24px of
+  inset and grip, so a pane narrower than 744px cannot hold both and gets
+  the drawer instead.
+  `ChatLayout` measures the pane with a `ResizeObserver` and tells the pane
+  which shape it is in; the pane draws the shape it is told. The phone rule
+  still wins over both, so a phone-sized pane is always a drawer. The
+  divider's drag clamps belong to the occupant: a file keeps the widths it
+  has always had, and the terminal holds the chat column at 360px and the
+  tile at 360px.
 - `stores/terminal.ts` owns the wire — the HTTP actions, the socket, the
   bounded renderer backpressure and the replay offsets. The pane
   (`components/TerminalPane.vue`) owns the screen and the controls around it;
