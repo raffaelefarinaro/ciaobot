@@ -219,10 +219,13 @@ def _chat(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def _pcm(transcript_rows: list[dict]) -> SimpleNamespace:
+def _pcm(
+    transcript_rows: list[dict], get_active_stream: object = None
+) -> SimpleNamespace:
     return SimpleNamespace(
         _transcripts=SimpleNamespace(current_messages=lambda _ctx, _p: transcript_rows),
         _agent_root_for_chat=lambda _cid: "/tmp",
+        get_active_stream=get_active_stream or (lambda _cid: None),
     )
 
 
@@ -451,6 +454,351 @@ async def test_a_non_error_turn_missing_from_the_session_adds_no_row(
     assert users[0]["content"] == "newer turn"
     assert users[0]["turn_index"] == 1
     assert all(row.get("content") != "older turn" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_handover_turn_is_numbered_from_the_current_lineage(
+    monkeypatch,
+) -> None:
+    """A provider handover leaves the previous provider's durable file on disk.
+
+    ``turn_index_base`` counts every send so far, while the durable file's own
+    indices restart at the provider stint, so numbering from ``base + file
+    index`` overshoots. The rows are numbered from the end of the file and only
+    the current lineage (``abs >= base``) participates.
+    """
+    durable = [
+        {
+            "role": "user",
+            "content": "first",
+            "turn_index": 0,
+            "sent_at": "2026-10-22T09:00:00Z",
+        },
+        {"role": "assistant", "content": "a1", "sent_at": "2026-10-22T09:00:00Z"},
+        {
+            "role": "user",
+            "content": "second",
+            "turn_index": 1,
+            "sent_at": "2026-10-22T10:00:00Z",
+        },
+        {"role": "assistant", "content": "a2", "sent_at": "2026-10-22T10:00:00Z"},
+        {
+            "role": "user",
+            "content": "third",
+            "turn_index": 2,
+            "sent_at": "2026-10-22T12:00:00Z",
+        },
+        {"role": "assistant", "content": "a3", "sent_at": "2026-10-22T12:00:00Z"},
+    ]
+    session = [SimpleNamespace(type="user", message={"content": "third"})]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        turn_index_base=4,
+        user_turn_count=5,
+        user_turn_timings={"4": {"sent_at": "2026-10-22T12:00:00Z"}},
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm(durable), _config(), chat
+    )
+
+    assert rows == [
+        {
+            "role": "user",
+            "content": "third",
+            "turn_index": 4,
+            "sent_at": "2026-10-22T12:00:00Z",
+        }
+    ]
+    assert all(row.get("content") not in {"first", "second"} for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_retry_of_the_same_text_keeps_the_failed_turn(monkeypatch) -> None:
+    """``retryFromError`` re-sends the same text after the failure.
+
+    Durable turns are ``[failed "why?", retry "why?", answer]`` while the
+    session holds only the retry. Matching the failed turn to the session row
+    by text stamped the retry's row with the failure's index and hid the
+    failure; a run of identical texts has to align from the right.
+    """
+    durable = [
+        {
+            "role": "user",
+            "content": "why?",
+            "turn_index": 0,
+            "sent_at": "2026-10-22T11:26:33Z",
+        },
+        {
+            "role": "assistant",
+            "content": "TimeoutError",
+            "sent_at": "2026-10-22T11:26:33Z",
+            "is_error": True,
+        },
+        {
+            "role": "user",
+            "content": "why?",
+            "turn_index": 1,
+            "sent_at": "2026-10-22T11:32:00Z",
+        },
+        {
+            "role": "assistant",
+            "content": "Nothing is stuck.",
+            "sent_at": "2026-10-22T11:32:00Z",
+        },
+    ]
+    session = [
+        SimpleNamespace(type="user", message={"content": "why?"}),
+        SimpleNamespace(
+            type="assistant",
+            message={"content": [{"type": "text", "text": "Nothing is stuck."}]},
+        ),
+    ]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_timings={
+            "0": {"sent_at": "2026-10-22T11:26:33Z"},
+            "1": {"sent_at": "2026-10-22T11:32:00Z"},
+        },
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm(durable), _config(), chat
+    )
+
+    assert rows == [
+        {
+            "role": "user",
+            "content": "why?",
+            "turn_index": 0,
+            "sent_at": "2026-10-22T11:26:33Z",
+        },
+        {
+            "role": "assistant",
+            "content": "TimeoutError",
+            "sent_at": "2026-10-22T11:26:33Z",
+            "is_error": True,
+        },
+        {
+            "role": "user",
+            "content": "why?",
+            "turn_index": 1,
+            "sent_at": "2026-10-22T11:32:00Z",
+        },
+        {"role": "assistant", "content": "Nothing is stuck."},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_restamped_row_does_not_keep_the_failed_sends_images(
+    monkeypatch,
+) -> None:
+    """A wrong turn index also handed the row the failed send's image refs.
+
+    The re-stamped row must re-derive its images from its own turn (or the
+    session's inline blocks), and the failed row must own the attachments.
+    """
+    durable = [
+        {
+            "role": "user",
+            "content": "look at this",
+            "turn_index": 0,
+            "sent_at": "2026-10-22T11:26:33Z",
+        },
+        {
+            "role": "assistant",
+            "content": "TimeoutError",
+            "sent_at": "2026-10-22T11:26:33Z",
+            "is_error": True,
+        },
+        {
+            "role": "user",
+            "content": "why?",
+            "turn_index": 1,
+            "sent_at": "2026-10-22T11:32:00Z",
+        },
+        {
+            "role": "assistant",
+            "content": "Nothing is stuck.",
+            "sent_at": "2026-10-22T11:32:00Z",
+        },
+    ]
+    session = [SimpleNamespace(type="user", message={"content": "why?"})]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_images={"0": ["/tmp/a.png"]},
+        user_turn_timings={"1": {"sent_at": "2026-10-22T11:32:00Z"}},
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm(durable), _config(), chat
+    )
+
+    assert rows[0]["content"] == "look at this"
+    assert rows[0]["images"] == ["/tmp/a.png"]
+    restamped = next(row for row in rows if row.get("content") == "why?")
+    assert "images" not in restamped
+
+
+def _sdk_user(text: str) -> SimpleNamespace:
+    return SimpleNamespace(type="user", message={"content": text})
+
+
+def _sdk_assistant(text: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        type="assistant", message={"content": [{"type": "text", "text": text}]}
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_in_flight_does_not_shift_the_settled_rows(
+    monkeypatch,
+) -> None:
+    """`user_turn_count` is bumped at send time, `record_turn` writes later.
+
+    While a turn runs, the durable file holds one turn fewer than the counter,
+    so numbering from the counter shifted every settled row by one and made it
+    collide with the in-flight row's own index.
+    """
+    durable = [
+        {"role": "user", "content": "u0", "turn_index": 0, "sent_at": "t0"},
+        {"role": "assistant", "content": "a0", "sent_at": "t0"},
+        {"role": "user", "content": "u1", "turn_index": 1, "sent_at": "t1"},
+        {"role": "assistant", "content": "a1", "sent_at": "t1"},
+    ]
+    session = [
+        _sdk_user("u0"),
+        _sdk_assistant("a0"),
+        _sdk_user("u1"),
+        _sdk_assistant("a1"),
+        _sdk_user("u2"),
+    ]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(user_turn_count=3, user_turn_unattended={})
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm(durable, get_active_stream=lambda _cid: object()), _config(), chat
+    )
+
+    assert [row["turn_index"] for row in rows if row["role"] == "user"] == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_a_steered_turn_does_not_shift_the_settled_rows(
+    monkeypatch,
+) -> None:
+    """A steer bumps `user_turn_count` but leaves no durable turn behind.
+
+    The steer's own row is in the session, so the positional numbering already
+    accounts for it; the settled rows must not be pulled forward by the extra
+    counter value.
+    """
+    durable = [
+        {"role": "user", "content": "t0", "turn_index": 0, "sent_at": "t0"},
+        {"role": "assistant", "content": "a0", "sent_at": "t0"},
+        {"role": "user", "content": "t1", "turn_index": 1, "sent_at": "t1"},
+        {"role": "assistant", "content": "a1", "sent_at": "t1"},
+    ]
+    session = [
+        _sdk_user("t0"),
+        _sdk_assistant("a0"),
+        _sdk_user("steer this"),
+        _sdk_user("t1"),
+        _sdk_assistant("a1"),
+    ]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_count=3, user_turn_steered={"1": True}, user_turn_unattended={}
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm(durable), _config(), chat
+    )
+
+    assert [row["turn_index"] for row in rows if row["role"] == "user"] == [0, 1, 2]
+    assert len(rows) == 5
+    assert not any(row.get("is_error") for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_first_send_still_renders(monkeypatch) -> None:
+    """The very first send can fail before the provider records anything."""
+    durable = [
+        {
+            "role": "user",
+            "content": "look at this",
+            "turn_index": 0,
+            "sent_at": "2026-10-22T11:26:33Z",
+        },
+        {
+            "role": "assistant",
+            "content": "TimeoutError",
+            "sent_at": "2026-10-22T11:26:33Z",
+            "is_error": True,
+        },
+        {
+            "role": "user",
+            "content": "why?",
+            "turn_index": 1,
+            "sent_at": "2026-10-22T11:32:00Z",
+        },
+        {
+            "role": "assistant",
+            "content": "Nothing is stuck.",
+            "sent_at": "2026-10-22T11:32:00Z",
+        },
+    ]
+    session = [_sdk_user("why?"), _sdk_assistant("Nothing is stuck.")]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_count=2,
+        user_turn_timings={
+            "0": {"sent_at": "2026-10-22T11:26:33Z"},
+            "1": {"sent_at": "2026-10-22T11:32:00Z"},
+        },
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm(durable), _config(), chat
+    )
+
+    assert rows == [
+        {
+            "role": "user",
+            "content": "look at this",
+            "turn_index": 0,
+            "sent_at": "2026-10-22T11:26:33Z",
+        },
+        {
+            "role": "assistant",
+            "content": "TimeoutError",
+            "sent_at": "2026-10-22T11:26:33Z",
+            "is_error": True,
+        },
+        {
+            "role": "user",
+            "content": "why?",
+            "turn_index": 1,
+            "sent_at": "2026-10-22T11:32:00Z",
+        },
+        {"role": "assistant", "content": "Nothing is stuck."},
+    ]
 
 
 def test_subagent_rows_match_the_wire_contract() -> None:

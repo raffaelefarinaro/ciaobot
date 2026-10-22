@@ -3893,13 +3893,13 @@ describe('optimistic user bubble reconciliation', () => {
   })
 
   test('server history and the live bubble agree after a failed turn', async () => {
-    // Regression pin for #1861's symptom, not for a client rule: a send that
-    // died before the provider recorded it used to make the server number the
-    // NEXT turn one early, so that turn's live bubble and the server's row
-    // carried different turn indices and both rendered. With the server
-    // numbering from the durable turns, the live bubble pairs with its own row
-    // and only ONE bubble per send survives the merge. The merge code itself
-    // needs no change, and this test fails if it stops pairing them.
+    // Pins the merge rule this test relies on: two user rows that both carry a
+    // turn index pair only when the indices are equal. The fixture is the
+    // POST-fix payload (#1861). The pre-fix payload repeated the failed send's
+    // indexing, so the server row for "again?" arrived at turn_index 1 while
+    // the live bubble carried 2 — a different index each, so they could not
+    // pair and BOTH rendered, the duplicate the issue reports. No client
+    // behaviour change is expected; this test fails if the rule is weakened.
     const store = useProjectStore()
     const chatId = 'chat-failed-turn'
     store.messages[chatId] = [

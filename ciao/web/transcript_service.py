@@ -928,10 +928,10 @@ def _stamp_user_turn(
 
     The fields this helper owns are cleared before stamping, so re-stamping a
     row with the turn index it really belongs to cannot leave the previous
-    turn's flags on it. ``images`` survive when the new turn has no record,
-    because they came from the session's own inline blocks.
+    turn's flags on it. Images are always re-derived from this turn's refs (or
+    the session message's inline blocks), never kept from the row's old index.
     """
-    for key in ("sent_at", "steered", "unattended", "origin"):
+    for key in ("images", "sent_at", "steered", "unattended", "origin"):
         entry.pop(key, None)
     # Image refs are recorded per user-turn index at send time. JSON keys are
     # strings, but tolerate int lookups too in case the map has been mutated
@@ -974,9 +974,10 @@ def _stamp_user_turn(
 
 def _align_user_turns(
     result: list[dict],
-    session_user_rows: list[tuple[int, str]],
+    session_user_rows: list[tuple[int, str, Any]],
     current_rows: list[dict],
     chat: Any,
+    in_flight: bool = False,
 ) -> list[dict]:
     """Align rendered session user rows with the durable transcript's turns.
 
@@ -985,22 +986,53 @@ def _align_user_turns(
     provider recorded anything is absent from the session, so every later
     session row inherited its ``turn_index``, its ``sent_at`` and its per-turn
     flags. The durable transcript does hold that turn (``is_error`` on its
-    assistant row), so walk both lists in order and re-stamp each session row
-    from the durable turn it pairs with.
+    assistant row), so walk both lists in order, count the durable turns the
+    session cannot show, and number the rows positionally from ``base``.
+
+    Numbering positionally is what keeps the common shapes untouched: with no
+    lost turn the session's own ``base + position`` is already the engine's
+    numbering for steered, in-flight and post-handover rows alike. A durable
+    turn the session cannot show still consumes a chat turn, so it shifts the
+    rows after it even when it renders nothing.
 
     Only an *error* durable turn with no session counterpart is rendered as a
     lost turn. Any other mismatch — a compaction summary, a session reset —
-    keeps the session's own numbering and adds no row, so no transcript can be
-    duplicated.
+    adds no row.
     """
     durable = [
         (index, row)
         for index, row in enumerate(current_rows)
         if row.get("role") == "user"
     ]
-    if not durable:
+    if not durable or not session_user_rows:
         return result
     base = chat.turn_index_base
+    # The durable file belongs to a provider stint: a handover leaves the
+    # previous provider's file on disk, so it can hold turns this chat no
+    # longer renders. A steer bumps `user_turn_count` without writing a durable
+    # turn, and a turn in flight is counted at send time while `record_turn`
+    # writes at completion, so both are subtracted from how many durable turns
+    # the current stint can have. `count == 0` is the older-state/test-double
+    # case: nothing is sliced.
+    count = int(getattr(chat, "user_turn_count", 0) or 0)
+    if count:
+        steered = sum(
+            1
+            for key in getattr(chat, "user_turn_steered", {})
+            if int(key) >= base and int(key) < count
+        )
+        capacity = (count - base) - steered - (1 if in_flight else 0)
+        if capacity <= 0:
+            # Nothing this stint can be aligned against.
+            return result
+        if capacity < len(durable):
+            durable = durable[-capacity:]
+    durable_texts = [
+        " ".join(str(row.get("content") or "").split()) for _index, row in durable
+    ]
+    session_texts = [
+        " ".join(text.split()) for _pos, text, _message in session_user_rows
+    ]
 
     def failed_turn(index: int) -> bool:
         """Whether the durable reply to the turn at ``index`` is an error row."""
@@ -1009,14 +1041,19 @@ def _align_user_turns(
         reply = current_rows[index + 1]
         return reply.get("role") == "assistant" and bool(reply.get("is_error"))
 
-    def lost_turn_rows(index: int, row: dict) -> list[dict]:
+    def lost_turn_rows(abs_turn: int, index: int, row: dict) -> list[dict]:
         """The two durable rows for a send the provider never recorded."""
         user_row: dict = {
             "role": "user",
             "content": row.get("content") or "",
-            "turn_index": base + int(row.get("turn_index") or 0),
+            "turn_index": abs_turn,
             "sent_at": str(row.get("sent_at") or ""),
         }
+        refs = chat.user_turn_images.get(str(abs_turn))
+        if refs is None:
+            refs = chat.user_turn_images.get(abs_turn)
+        if refs:
+            user_row["images"] = list(refs)
         return [user_row, {**current_rows[index + 1], "is_error": True}]
 
     def has_session_counterpart(text: str, start: int) -> bool:
@@ -1025,60 +1062,97 @@ def _align_user_turns(
         A durable transcript can hold fewer turns than the session — a chat
         whose recording starts partway through, or a store that was reset. Its
         turn indices are then relative to that shorter list, so re-stamping a
-        session row from them would misnumber it. Only a failed turn with no
-        counterpart at all may be rendered, which keeps this path from ever
-        duplicating a row the session already holds.
+        session row from them would misnumber it. Only a turn with no
+        counterpart at all may be counted, which keeps this path from ever
+        duplicating the session rows it holds.
         """
-        wanted = " ".join(text.split())
-        return any(
-            " ".join(session_text.split()) == wanted
-            for _pos, session_text in session_user_rows[start:]
-        )
+        return text in session_texts[start:]
 
-    # Durable turns in order: the position their row already holds in
-    # ``result`` (or -1 when the session has no row for them), their index in
-    # ``current_rows``, and the durable row itself.
-    walk: list[tuple[int, int, dict]] = []
+    def run_length(texts: list[str], start: int) -> int:
+        """How many consecutive rows from ``start`` carry the same text."""
+        length = 0
+        while start + length < len(texts) and texts[start + length] == texts[start]:
+            length += 1
+        return length
+
+    pairs: list[tuple[int, int, dict]] = []
+    # Durable turns the session cannot render, in durable order: the session
+    # position they sit before, "lost" (a failed send to render) or "skipped"
+    # (a turn that only consumes an index), their index in ``current_rows`` and
+    # the durable row itself.
+    shifts: list[tuple[int, str, int, dict]] = []
     session_pos = 0
-    for index, row in durable:
+    for position, (index, row) in enumerate(durable):
+        text = durable_texts[position]
         if session_pos >= len(session_user_rows):
             # The session ended first: only a failed turn still earns a row.
             if failed_turn(index):
-                walk.append((-1, index, row))
+                shifts.append((len(session_user_rows), "lost", index, row))
             continue
-        rendered_at, text = session_user_rows[session_pos]
-        if " ".join(str(row.get("content") or "").split()) == " ".join(text.split()):
-            walk.append((rendered_at, index, row))
+        if text == session_texts[session_pos]:
+            # `retryFromError` re-sends the same text after a failure, so a run
+            # of identical texts has to align from the RIGHT: the failed send
+            # keeps its row, and the retry keeps the index the engine counted
+            # for it. Equal-length runs (a genuine repeat, or several sends
+            # that all reached the provider) pair one-to-one as before.
+            if failed_turn(index) and run_length(durable_texts, position) > run_length(
+                session_texts, session_pos
+            ):
+                shifts.append((session_pos, "lost", index, row))
+                continue
+            pairs.append((session_pos, index, row))
             session_pos += 1
-        elif failed_turn(index) and not has_session_counterpart(
-            str(row.get("content") or ""), session_pos
-        ):
-            walk.append((-1, index, row))
-    for rendered_at, _index, row in walk:
-        if rendered_at < 0:
-            continue
+        elif not has_session_counterpart(text, session_pos):
+            # The session cannot show this durable turn. A failed send is the
+            # case the whole path exists for; any other is a compaction or a
+            # reset, which keeps its engine turn number but renders no row.
+            # A turn whose text is still ahead in the session is only a stalled
+            # match (a steer row sits in the way), so it shifts nothing.
+            shifts.append((
+                session_pos,
+                "lost" if failed_turn(index) else "skipped",
+                index,
+                row,
+            ))
+    # A stale prefix row from the provider stint this chat left must never
+    # shift the current stint's numbering.
+    first_pair = pairs[0][0] if pairs else len(session_user_rows)
+    if base > 0:
+        shifts = [entry for entry in shifts if entry[0] >= first_pair]
+    shift_anchors = [anchor for anchor, _kind, _index, _row in shifts]
+
+    def shifts_up_to(position: int) -> int:
+        return sum(1 for anchor in shift_anchors if anchor <= position)
+
+    paired_by_position = {position: row for position, _index, row in pairs}
+    for position, (rendered_at, _text, message) in enumerate(session_user_rows):
+        paired = paired_by_position.get(position)
         _stamp_user_turn(
             result[rendered_at],
             chat,
-            base + int(row.get("turn_index") or 0),
-            raw_message=None,
-            fallback_sent_at=str(row.get("sent_at") or ""),
+            base + position + shifts_up_to(position),
+            raw_message=message,
+            fallback_sent_at=str((paired or {}).get("sent_at") or ""),
         )
     insertions: list[tuple[int, list[dict]]] = []
-    for position, (rendered_at, index, row) in enumerate(walk):
-        if rendered_at >= 0:
+    for ordinal, (anchor, kind, index, row) in enumerate(shifts):
+        if kind != "lost":
             continue
-        anchor = len(result)
-        for later_at, _later_index, _later_row in walk[position + 1:]:
-            if later_at >= 0:
-                anchor = later_at
-                break
-        insertions.append((anchor, lost_turn_rows(index, row)))
+        target = (
+            session_user_rows[anchor][0]
+            if anchor < len(session_user_rows)
+            else len(result)
+        )
+        # The shift entries ahead of this one (all at the same or an earlier
+        # anchor) already own the turn numbers before it.
+        insertions.append(
+            (target, lost_turn_rows(base + anchor + ordinal, index, row))
+        )
     # Anchors are non-decreasing along the walk, so inserting from the highest
-    # one down keeps the earlier positions valid; equal anchors go in last to
-    # keep the durable order.
-    for anchor, rows in reversed(insertions):
-        result[anchor:anchor] = rows
+    # one down keeps the earlier positions valid; within one anchor the last
+    # lost entry goes in first to keep the durable order.
+    for target, rows in reversed(insertions):
+        result[target:target] = rows
     return result
 
 
@@ -1392,9 +1466,10 @@ async def _assemble_chat_messages(
 
     user_idx = chat.turn_index_base
     # Every user row this session rendered, with the text the durable
-    # transcript is compared against: a send that died before the provider
-    # wrote it shifts this numbering off the durable one.
-    session_user_rows: list[tuple[int, str]] = []
+    # transcript is compared against and the SDK message its images can be
+    # re-derived from: a send that died before the provider wrote it shifts
+    # this numbering off the durable one.
+    session_user_rows: list[tuple[int, str, Any]] = []
     failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         if m.type == "assistant":
@@ -1564,7 +1639,7 @@ async def _assemble_chat_messages(
         }
         if m.type == "user":
             _stamp_user_turn(entry, chat, user_idx, m.message)
-            session_user_rows.append((len(result), content))
+            session_user_rows.append((len(result), content, m.message))
             user_idx += 1
         result.append(entry)
     # Stitch the durable transcript's per-turn metadata (token usage with the
@@ -1577,8 +1652,14 @@ async def _assemble_chat_messages(
     )
     # Number the session rows from the durable turns they pair with, and
     # render the failed turns the session cannot contain, before the metadata
-    # overlay walks the rows by turn index.
-    result = _align_user_turns(result, session_user_rows, current, chat)
+    # overlay — which pairs the transcript's assistant rows to the entry rows
+    # positionally — runs. A chat whose turn is still running has one durable
+    # turn fewer than its counter, so the alignment has to know about it.
+    resolver = getattr(pcm, "get_active_stream", None)
+    in_flight = bool(resolver(chat_id)) if callable(resolver) else False
+    result = _align_user_turns(
+        result, session_user_rows, current, chat, in_flight=in_flight
+    )
     if current and result:
         _overlay_transcript_metadata(result, current)
     _overlay_assistant_timings(result, chat.user_turn_timings)
