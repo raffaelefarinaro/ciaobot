@@ -128,7 +128,7 @@ describe('ArchiveTaskDialog', () => {
     button('Complete task…').click()
     await settle()
     expect(document.activeElement).toBe(find('#archive-task-resolution'))
-    expect(button('Mark done').disabled).toBe(true)
+    expect(button('Mark done').disabled).toBe(false)
     await typeNote('  Merged  ')
     button('Mark done').click()
     await expect(answer).resolves.toBe('marked-done')
@@ -157,11 +157,11 @@ describe('ArchiveTaskDialog', () => {
     })
   })
 
-  it('Complete without note sends an empty resolution', async () => {
+  it('a blank note completes with an empty resolution', async () => {
     const { answer } = await open(task({ attempt_id: '', live_attempt_id: '' }))
     button('Complete task…').click()
     await settle()
-    button('Complete without note').click()
+    button('Mark done').click()
     await expect(answer).resolves.toBe('marked-done')
     expect(apiPost).toHaveBeenCalledTimes(1)
     expect(apiPost).toHaveBeenCalledWith('/api/tasks/ship/complete', {
@@ -169,6 +169,15 @@ describe('ArchiveTaskDialog', () => {
       expected_revision: REVISION,
       resolution: '',
     })
+  })
+
+  it('the note step offers Back and one completion action, and no no-note button', async () => {
+    await open()
+    button('Complete task…').click()
+    await settle()
+    const dialog = find<HTMLElement>('[role="dialog"]')
+    expect([...dialog.querySelectorAll('button')].map(b => b.textContent?.trim())).toEqual(['Back', 'Mark done'])
+    expect(dialog.textContent).not.toContain('Complete without note')
   })
 
   it('a 409 shows the refusal and keeps the dialog open', async () => {

@@ -10,6 +10,10 @@
  * approve from where they read the result. A task waiting on the user gets no
  * button: the composer is the answer.
  *
+ * The completion asks for a note in the field, and the note is optional: one
+ * action completes the task, and a blank note completes it without a
+ * resolution — the same contract as the board's completion sheet.
+ *
  * A task the chat is only *linked* to (`task link-chat`) is named in its own
  * read-only sentence, with no state and no completion: the chat did not run
  * that task, so it has nothing to report and nothing to close.
@@ -158,9 +162,8 @@ async function approve(resolution: string): Promise<void> {
   await taskSignals.reload(workspace)
 }
 
-function submitNote(withoutNote: boolean): void {
-  const resolution = withoutNote ? '' : noteDraft.value.trim()
-  if (!withoutNote && !resolution) return
+function submitNote(): void {
+  const resolution = noteDraft.value.trim()
   if (canApprove.value) void approve(resolution)
   else void markDone(resolution)
 }
@@ -177,7 +180,7 @@ function submitNote(withoutNote: boolean): void {
         </p>
         <p v-if="statusWords" class="task-origin-status">{{ statusWords }}</p>
         <template v-if="noteOpen">
-          <label class="task-origin-note-label" for="task-origin-resolution">How was this completed?</label>
+          <label class="task-origin-note-label" for="task-origin-resolution">How was this completed? (optional)</label>
           <textarea
             id="task-origin-resolution"
             v-model="noteDraft"
@@ -189,15 +192,9 @@ function submitNote(withoutNote: boolean): void {
             <button
               type="button"
               class="btn-small task-origin-approve"
-              :disabled="approving || !noteDraft.trim()"
-              @click="submitNote(false)"
-            >{{ approving ? 'Saving…' : (canApprove ? 'Approve Done' : 'Mark done') }}</button>
-            <button
-              type="button"
-              class="btn-small"
               :disabled="approving"
-              @click="submitNote(true)"
-            >Complete without note</button>
+              @click="submitNote()"
+            >{{ approving ? 'Saving…' : (canApprove ? 'Approve Done' : 'Mark done') }}</button>
             <button type="button" class="btn-small" :disabled="approving" @click="noteOpen = false">Cancel</button>
           </div>
         </template>
