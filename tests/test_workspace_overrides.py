@@ -19,7 +19,7 @@ from ciao.config import (
     WorkspaceConfig,
     coerce_provider_overrides,
 )
-from ciao.control_plane import CiaoControlPlane, McpPrincipal
+from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 from ciao.insights import HELPER_MODEL_CLAUDE, resolve_helper_model, resolve_insights_model
 from ciao.schedules import ScheduleEntry
 from ciao.sessions import StateStore
@@ -537,3 +537,110 @@ def test_invalid_stored_override_warning_does_not_log_the_value(
     assert config.workspace("work").provider_overrides == {}
     assert any("provider_overrides" in r.getMessage() for r in caplog.records)
     assert "SECRET" not in caplog.text
+
+
+def _operator_schedule(plane, project, mode: str):
+    """A routine the operator made (store write), with a saved mode."""
+    return plane.schedules.create(
+        daily_time_utc="09:00",
+        prompt="Original text.",
+        model="",
+        mode=mode,
+        chat_id=0,
+        web_project_id=project.project_id,
+        web_project_name=project.name,
+        workspace="work",
+    )
+
+
+def _stored(plane, schedule_id: str):
+    return next(e for e in plane.schedules.list_entries() if e.schedule_id == schedule_id)
+
+
+def test_saved_schedule_mode_is_a_ceiling_at_dispatch() -> None:
+    """Lowering the workspace default later lowers an agent routine's saved mode."""
+    from ciao.execution_modes import MODE_RANK, cap_schedule_mode
+
+    assert cap_schedule_mode("", "auto") == "auto"
+    assert cap_schedule_mode("bypass", "normal") == "normal"
+    assert cap_schedule_mode("bypass", "auto") == "auto"
+    # A saved weaker mode stays weaker when the default rises.
+    assert cap_schedule_mode("normal", "bypass") == "normal"
+    assert cap_schedule_mode("auto", "auto") == "auto"
+    # A value that is not a mode cannot raise anything.
+    assert cap_schedule_mode("junk", "normal") == "normal"
+
+    # control_plane and main share one rank object, and main uses the cap.
+    from ciao import control_plane as cp_module
+
+    assert cp_module._MODE_RANK is MODE_RANK
+    source = inspect.getsource(ciao_main)
+    assert "cap_schedule_mode(" in source
+    assert "entry.mode, config.default_mode_for_provider(provider, workspace)" in " ".join(source.split())
+
+
+def test_agent_edit_of_a_routines_text_is_capped_at_the_callers_mode(tmp_path: Path) -> None:
+    plane, _manager_, principal, project = _agent_world(tmp_path, "normal")
+
+    # Operator routine with no saved mode: an agent rewrite pins it to the caller's ceiling.
+    inherits = _operator_schedule(plane, project, "")
+    plane.schedule_update(principal, inherits.schedule_id, prompt="New text.")
+    assert _stored(plane, inherits.schedule_id).mode == "normal"
+
+    # Operator routine saved at bypass: a rewrite cannot keep it there.
+    high = _operator_schedule(plane, project, "bypass")
+    plane.schedule_update(principal, high.schedule_id, prompt="New text.")
+    assert _stored(plane, high.schedule_id).mode == "normal"
+
+    # Naming the mode key: stronger is clamped, "" cannot clear a saved mode.
+    auto = _operator_schedule(plane, project, "bypass")
+    plane.schedule_update(principal, auto.schedule_id, mode="")
+    assert _stored(plane, auto.schedule_id).mode == "normal"
+
+    # An update that touches neither text nor mode leaves the saved mode alone.
+    untouched = _operator_schedule(plane, project, "bypass")
+    plane.schedule_update(principal, untouched.schedule_id, enabled=False)
+    assert _stored(plane, untouched.schedule_id).mode == "bypass"
+
+
+def test_agent_enabling_a_webhook_needs_a_mode_at_the_workspace_default(tmp_path: Path) -> None:
+    """A webhook chat starts at the workspace default, so an agent below it cannot switch one on."""
+    plane, _manager_, principal, _project = _agent_world(tmp_path, "normal")
+    created = plane.workspace_webhook_create("work", name="hook", instructions="Do the thing.")
+    trigger = created["trigger"] if "trigger" in created else created
+    revision = trigger["revision"]
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.webhook_update(
+            principal, trigger["trigger_id"], expected_revision=revision, enabled=True
+        )
+    assert excinfo.value.code == "webhook_enable_requires_operator"
+
+    # Edits that do not enable, and disabling, stay open to the agent.
+    renamed = plane.webhook_update(
+        principal, trigger["trigger_id"], expected_revision=revision, name="renamed"
+    )["data"]
+    plane.webhook_update(
+        principal, trigger["trigger_id"], expected_revision=renamed["revision"], enabled=False
+    )
+
+    # A caller at or above the default may enable it.
+    _plane2, _m2, bypass_principal, _p2 = _agent_world(tmp_path / "b", "bypass")
+    plane2 = _plane2
+    created2 = plane2.workspace_webhook_create("work", name="hook", instructions="Do the thing.")
+    trigger2 = created2["trigger"] if "trigger" in created2 else created2
+    ok = plane2.webhook_update(
+        bypass_principal, trigger2["trigger_id"],
+        expected_revision=trigger2["revision"], enabled=True,
+    )["data"]
+    assert ok["enabled"] is True
+
+
+def test_override_warning_clips_a_long_key(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    huge = "k" * 5000
+    with pytest.raises(ValueError) as excinfo:
+        coerce_provider_overrides({"claude": {huge: "x"}})
+    assert len(str(excinfo.value)) < 200
+    with pytest.raises(ValueError) as excinfo:
+        coerce_provider_overrides({huge: {}})
+    assert len(str(excinfo.value)) < 200

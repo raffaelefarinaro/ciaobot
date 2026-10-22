@@ -392,6 +392,12 @@ _OVERRIDE_ID_MAX_CHARS = 200
 _OVERRIDE_ID_RE = re.compile(r"[A-Za-z0-9._:/@\[\]-]+")
 
 
+def _clip(value: object) -> str:
+    """A repr of an untrusted key, cut short so it cannot flood an error or a log line."""
+    text = repr(value)
+    return text if len(text) <= 64 else text[:61] + "..."
+
+
 def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
     """Normalize a workspace's provider overrides. None -> {}; unknown provider/key/value raises ValueError."""
     from ciao import provider_registry
@@ -403,7 +409,7 @@ def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
     known = provider_registry.provider_ids()
     for provider in raw:
         if provider not in known:
-            raise ValueError(f"provider_overrides: unknown provider '{provider}'")
+            raise ValueError(f"provider_overrides: unknown provider {_clip(provider)}")
     cleaned: dict[str, dict[str, str]] = {}
     for provider in known:
         if provider not in raw:
@@ -413,7 +419,7 @@ def coerce_provider_overrides(raw: object) -> dict[str, dict[str, str]]:
             raise ValueError(f"provider_overrides.{provider} must be an object")
         for key in entry:
             if key not in PROVIDER_OVERRIDE_FIELDS:
-                raise ValueError(f"provider_overrides.{provider}: unknown key '{key}'")
+                raise ValueError(f"provider_overrides.{provider}: unknown key {_clip(key)}")
         fields: dict[str, str] = {}
         for key in PROVIDER_OVERRIDE_FIELDS:
             if key not in entry:

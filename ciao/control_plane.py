@@ -27,6 +27,7 @@ from typing import Any, Literal, cast
 from ciao import decision_rules, vault_index
 from ciao.async_reads import keyed_lock, run_read
 from ciao.background import BackgroundRun, BackgroundRunError, TAIL_LINES
+from ciao.execution_modes import MODE_RANK
 from ciao.fts_search import (
     get_db_path,
     index_vault,
@@ -194,7 +195,7 @@ McpPrincipal = AgentPrincipal
 # ``plan`` is read-only, ``normal`` asks before acting, ``auto`` acts with safer
 # defaults, ``bypass`` skips approvals. Mirrors ``BridgeMode`` in ciao.models
 # and the SDK mapping in ciao.providers.claude.
-_MODE_RANK: dict[str, int] = {"plan": 0, "normal": 1, "auto": 2, "bypass": 3}
+_MODE_RANK = MODE_RANK
 
 RELOAD_OWN_NOTE = (
     "The provider restarts when this turn ends and the conversation continues "
@@ -5829,7 +5830,24 @@ class CiaoControlPlane:
         instructions: str | None = None,
         enabled: bool | None = None,
     ) -> dict[str, Any]:
-        """Edit one trigger at the revision it was read at."""
+        """Edit one trigger at the revision it was read at.
+
+        A webhook chat starts at the workspace's default permission mode, which
+        a sender cannot choose. Switching a trigger on is therefore the
+        operator's call when the calling agent runs below that default: it
+        could otherwise hand an outside sender a stronger chat than its own.
+        """
+        if enabled:
+            scope = self._workspace(principal)
+            provider = self.config.default_provider_for_workspace(scope)
+            default = self.config.default_mode_for_provider(provider, scope)
+            if MODE_RANK[self._child_mode(principal, None)] < MODE_RANK[default]:
+                raise ControlPlaneError(
+                    "webhook_enable_requires_operator",
+                    "A webhook runs its chats in this workspace's default permission "
+                    f"mode ({default}), which is stronger than this chat's. Ask the "
+                    "user to enable the trigger in Settings.",
+                )
         return _ok(
             self.workspace_webhook_update(
                 self._workspace(principal),
@@ -6234,10 +6252,16 @@ class CiaoControlPlane:
             # (unlike `changes`, filtered above).
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
-        if normalized.get("mode"):
-            # Same ceiling `schedule_create` applies: an agent can weaken a
-            # routine's mode but never set a stronger one than its own.
-            normalized["mode"] = self._child_mode(principal, str(normalized["mode"]))
+        if "mode" in changes or normalized.get("prompt") or "command" in normalized:
+            # Same ceiling `schedule_create` applies. Rewriting a routine's text
+            # or command (or naming its mode) makes the routine the agent's own
+            # work, so it runs at most at the agent's mode: it can weaken the
+            # saved mode, never keep or set a stronger one, and an empty mode
+            # cannot clear a saved one. An update touching none of these
+            # (enable/disable, workspace) leaves the saved mode alone.
+            normalized["mode"] = self._child_mode(
+                principal, str(normalized.get("mode") or entry.mode or "") or None
+            )
         if project is not None:
             # The recorded name is what survives per-instance project-id
             # regeneration (dispatch re-homes by it), so leaving the previous

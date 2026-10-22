@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from ciao.config import RESTART_EXIT_CODE, CiaoConfig
+from ciao.execution_modes import cap_schedule_mode
 from ciao.legacy_node_state import (
     LegacyNodeState,
     STATE_FILENAME as LEGACY_STATE_FILENAME,
@@ -880,7 +881,10 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
         # fall back to the Telegram context's mode, which is a different
         # surface's state and belongs to no workspace.
         provider, model, workspace = pcm.schedule_effective_routing(entry)
-        mode = entry.mode or config.default_mode_for_provider(provider, workspace)
+        # A saved mode (an agent-made routine) is an upper limit, not a pin.
+        mode = cap_schedule_mode(
+            entry.mode, config.default_mode_for_provider(provider, workspace)
+        )
         return ("claude", model, mode, provider)
 
     # Classified before anything else touches the runtime root, because the

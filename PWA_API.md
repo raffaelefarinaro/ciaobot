@@ -955,8 +955,13 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/works
 # an empty value means "engine default". The override applies to new chats,
 # schedule runs, webhook and task chats and memory passes in that workspace on
 # that provider; an explicit model or mode still wins. A chat, a delegated
-# task (or its retry) and a schedule that an agent creates over MCP never
-# exceed that agent's own permission mode, whatever the override says. Operator-only:
+# task (or its retry), a schedule and a webhook that an agent creates, edits or
+# enables over MCP never exceed that agent's own permission mode, whatever the
+# override says: a rewritten schedule is pinned to the agent's mode, an agent
+# below the workspace default gets webhook_enable_requires_operator when it
+# enables a trigger, and a schedule's saved mode is an upper limit (a run uses
+# the lower of it and the current default). Editing a schedule's prompt or
+# command in the PWA clears the saved mode. Operator-only:
 # no agent verb, CLI, MCP tool or env var writes it, and an archive restore
 # does not bring it back.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \

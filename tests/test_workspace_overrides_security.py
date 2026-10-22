@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import inspect
 
+import pytest
+
 from ciao import agent_cli, cli
-from ciao.control_plane import CiaoControlPlane
+from ciao.control_plane import CiaoControlPlane, ControlPlaneError
 
 from tests.test_workspace_overrides import _agent_world
 
@@ -29,26 +31,35 @@ def test_agent_and_operator_surfaces_cannot_write_provider_overrides() -> None:
     assert not [name for name in _choices(cli.build_parser()) if "override" in name]
 
 
-def test_every_mutating_workspace_method_leaves_overrides_alone(tmp_path) -> None:
-    """No agent-reachable ControlPlane method can change stored overrides."""
-    plane, manager, principal, project = _agent_world(tmp_path, "normal")
-    before = {"claude": {"permission_mode": "bypass"}}
-    work = plane.config.workspace("work")
+def test_no_control_plane_method_can_write_provider_overrides(tmp_path) -> None:
+    """Structural: no public method declares the field. Behavioural: the three
+    open-ended schedule methods accept it as a stray kwarg and still leave the
+    workspace registry untouched, byte for byte."""
+    plane, _manager, principal, project = _agent_world(tmp_path, "normal")
+
+    for name, method in inspect.getmembers(CiaoControlPlane, inspect.isfunction):
+        if name.startswith("_"):
+            continue
+        assert "provider_overrides" not in inspect.signature(method).parameters, name
+
+    registry = tmp_path / ".runtime" / "workspaces.json"
+    plane.config.persist_workspace_registry()
+    registry_before = registry.read_bytes()
+    overrides_before = plane.config.workspace("work").provider_overrides
     payload = {"provider_overrides": {"claude": {"permission_mode": "bypass", "model": "opus"}}}
-    mutators = [
-        n for n in dir(CiaoControlPlane)
-        if n.startswith(("workspace_", "task_", "schedule_", "project_", "chat_"))
-        and not n.startswith("_")
-    ]
-    assert mutators
-    for name in mutators:
-        method = getattr(plane, name)
-        for args in ((principal,), ("work",), (principal, "x"), ("work", "x")):
-            try:
-                result = method(*args, **payload)
-                if inspect.isawaitable(result):
-                    result.close()
-            except Exception:  # noqa: BLE001 - only the stored overrides matter
-                pass
-    assert work.provider_overrides == before
+
+    created = plane.schedule_preview(
+        principal, prompt="p", daily_time="09:00", frequency="weekly", **payload
+    )
+    assert created["ok"] is True
+    made = plane.schedule_create(
+        principal, prompt="p", daily_time="09:00", timezone="UTC", frequency="weekly", **payload
+    )["data"]
+    # Update names its fields and refuses the stray one outright.
+    with pytest.raises(ControlPlaneError) as excinfo:
+        plane.schedule_update(principal, made["schedule_id"], enabled=False, **payload)
+    assert excinfo.value.code == "invalid_fields"
+
+    assert plane.config.workspace("work").provider_overrides == overrides_before
     assert plane.config.workspace("personal").provider_overrides == {}
+    assert registry.read_bytes() == registry_before
