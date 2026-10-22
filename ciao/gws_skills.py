@@ -204,7 +204,7 @@ Run every Google API call through the `ciao` CLI — never bare `gws`. Bare `gws
 ciao gws "$GWS_PROFILE" <service> <subcommand> [flags]
 ```
 
-`GWS_PROFILE` names the Google account linked to this chat's workspace. It is the only account available in a chat; accounts are linked in Settings → Manage workspaces. `ciao gws` routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
+`GWS_PROFILE` names the Google account linked to this chat's workspace. It is the only account available in a chat; accounts are added in Settings → Manage workspaces (Google Workspace card) and linked to a workspace in Settings → Overview → Google account. `ciao gws` routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
 
 OAuth setup: Settings → Manage workspaces (Google Workspace card). Credentials live in `secrets/gws-<account>/` (the pre-existing `personal` and `work` accounts use `secrets/gws-personal/` and `secrets/gws/`).
 

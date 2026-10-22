@@ -258,7 +258,7 @@ calls). Usually pre-installed.
 
 ## MCP Connectors (via claude.ai)
 
-These MCP servers reach the session through the claude.ai connector bridge. They are enabled per-workspace on claude.ai; no local install required. Availability is session-scoped: new connectors only surface after a fresh Claude Code session. A workspace's **claude.ai connectors** switch (Settings → Manage workspaces, `claude_ai_connectors` in the registry) turns them off for that workspace's Claude chats by setting `ENABLE_CLAUDEAI_MCP_SERVERS=false` on the spawned Claude Code process. Memory passes always run with them off.
+These MCP servers reach the session through the claude.ai connector bridge. They are enabled per-workspace on claude.ai; no local install required. Availability is session-scoped: new connectors only surface after a fresh Claude Code session. A workspace's **claude.ai connectors** switch (Settings → Overview, `claude_ai_connectors` in the registry) turns them off for that workspace's Claude chats by setting `ENABLE_CLAUDEAI_MCP_SERVERS=false` on the spawned Claude Code process. Memory passes always run with them off.
 
 | Connector | Scope | Used by |
 |---|---|---|

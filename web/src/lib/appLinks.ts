@@ -36,8 +36,9 @@ const PAGE_HREFS = [
 ]
 
 // Settings tabs come from the sidebar's own rail (plus the pages with no rail
-// item), so a renamed tab cannot leave this list behind. `/settings/home` is the General tab by name; the
-// shipped app links to `/settings#install-app` and both spellings land there.
+// item), so a renamed tab cannot leave this list behind. `/settings/home` is
+// the General tab by name; the shipped app links to `/settings#install-app`
+// and both spellings land there.
 const SETTINGS_HREFS = [
   ...SETTINGS_NAV.map(item => item.to),
   ...SETTINGS_HIDDEN_PAGES.map(item => item.to),

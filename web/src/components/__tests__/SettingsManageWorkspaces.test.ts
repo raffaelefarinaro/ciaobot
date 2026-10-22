@@ -247,6 +247,31 @@ describe('Settings > Manage workspaces', () => {
     }
   })
 
+  it('a declined switch after a create says the workspace was created and the draft kept', async () => {
+    const { api } = await import('../../lib/api')
+    const { wrapper, router, store } = await mountManage()
+    try {
+      vi.mocked(api.post).mockImplementation((path: string) => {
+        if (path === '/api/workspaces') state.workspaces = registry(['personal', 'work', 'side'])
+        return Promise.resolve({})
+      })
+      vi.spyOn(store, 'switchWorkspace').mockResolvedValue(false)
+      await wrapper.findAll('button').find(b => b.text() === 'New workspace')!.trigger('click')
+      await flushPromises()
+      const panel = wrapper.get('#new-workspace')
+      await panel.get('input').setValue('side')
+      await panel.findAll('button').find(b => b.text() === 'Create and open')!.trigger('click')
+      await flushPromises()
+
+      expect(router.currentRoute.value.path).toBe('/settings/workspaces')
+      expect(wrapper.get('.workspace-link-status').text())
+        .toBe('Created "side"; your unsaved changes to "personal" were kept.')
+      expect(wrapper.find('.action-result--error').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('a failed create stays on the page and shows the error', async () => {
     const { api } = await import('../../lib/api')
     const { wrapper, router, store } = await mountManage()

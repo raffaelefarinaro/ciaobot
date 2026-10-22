@@ -306,16 +306,20 @@ export function useWorkspaceAdmin(deps: {
       workspacesSaving.value = null
     }
     // Outside the try: a failed switch is not a failed create.
-    if (created) await openWorkspaceSettings(created)
+    if (created && !await openWorkspaceSettings(created)) {
+      workspaceLinkStatus.value =
+        `Created "${created}"; your unsaved changes to "${projectStore.activeWorkspace}" were kept.`
+    }
   }
 
   // Makes `name` the active workspace and opens its Overview. transition:false
   // keeps the user in Settings. A declined discard of an unsaved draft leaves
   // the active workspace unchanged, and then nothing navigates.
-  async function openWorkspaceSettings(name: string, hash = ''): Promise<void> {
+  async function openWorkspaceSettings(name: string, hash = ''): Promise<boolean> {
     await projectStore.switchWorkspace(name, { transition: false })
-    if (projectStore.activeWorkspace !== name) return
+    if (projectStore.activeWorkspace !== name) return false
     await router.push({ path: '/settings/workspace', hash })
+    return true
   }
 
   // The primary workspace and the last one cannot be archived; the server

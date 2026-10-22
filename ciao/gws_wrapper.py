@@ -119,7 +119,8 @@ def main(argv: list[str] | None = None) -> int:
     if not profile:
         print(
             "No Google account is linked to this workspace. "
-            "Link one in Settings → Manage workspaces.",
+            "Link one in Settings → Overview → Google account "
+            "(add accounts under Manage workspaces).",
             file=sys.stderr,
         )
         return 2

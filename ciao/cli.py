@@ -1242,7 +1242,7 @@ def setup_workspace(
                     "vault_root": f"{name}/{vault_path.name}",
                     "default_provider": default_provider,
                     # No Google account is linked at scaffold time; the user
-                    # chooses in Settings → Manage workspaces after setup.
+                    # chooses in Settings → Overview after setup.
                     "gws_profile": "",
                 }],
                 indent=2,

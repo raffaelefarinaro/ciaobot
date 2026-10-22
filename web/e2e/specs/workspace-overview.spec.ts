@@ -51,6 +51,15 @@ test.describe('workspace overview', () => {
     await expect(page.locator('.page-tag')).toContainText('Overview')
   })
 
+  test('Rename on Manage workspaces opens Overview with the name field focused', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await boot(page, '/settings/workspaces', READY)
+    await page.getByRole('button', { name: /^Actions for workspace /i }).first().click()
+    await page.getByRole('menuitem', { name: /^Rename workspace /i }).click()
+    await expect(page).toHaveURL(/\/settings\/workspace#workspace-name$/)
+    await expect(page.locator('#workspace-name-input')).toBeFocused()
+  })
+
   test('the memory handover radiogroup takes arrow keys', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     await boot(page, OVERVIEW, READY)
