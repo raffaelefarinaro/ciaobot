@@ -281,27 +281,17 @@ def _provider_inventory(
         "available": available,
         "inventory_state": inventory_state,
         "servers": sorted(rows.values(), key=lambda row: row["name"].casefold()),
-        "setup": _setup_instructions(provider, agent_root),
     }
 
 
-def _setup_instructions(provider: str, agent_root: Path) -> dict[str, str]:
+def _shell_prefix(agent_root: Path) -> dict[str, str]:
     root = str(agent_root)
     if os.name == "nt":
-        cd = f"Set-Location -LiteralPath '{root.replace(chr(39), chr(39) * 2)}'; "
-    else:
-        cd = f"cd -- {shlex.quote(root)} && "
-    if provider == "claude":
         return {
-            "add": (
-                cd + "claude mcp add --scope local --transport http example https://example.com/mcp"
-            ),
-            "authenticate": cd + "claude mcp login example",
+            "kind": "powershell",
+            "cd_prefix": f"Set-Location -LiteralPath '{root.replace(chr(39), chr(39) * 2)}'; ",
         }
-    return {
-        "add": cd + "opencode mcp add example --url https://example.com/mcp",
-        "authenticate": cd + "opencode mcp auth example",
-    }
+    return {"kind": "posix", "cd_prefix": f"cd -- {shlex.quote(root)} && "}
 
 
 async def provider_inventory(
@@ -345,6 +335,7 @@ async def provider_inventory(
         "workspace": workspace,
         "agent_root": str(agent_root),
         "providers": [claude, opencode],
+        "shell": _shell_prefix(agent_root),
     }
 
 
