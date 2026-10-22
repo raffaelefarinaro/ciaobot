@@ -149,10 +149,24 @@ export function resolveVaultImageSrc(filePath: string, href: string): string {
   return `/api/workspace-image?path=${encodeURIComponent(resolved)}`
 }
 
-export function renderVaultMarkdown(body: string, filePath: string, markdownPaths: string[]): string {
+/**
+ * Render a note for the file viewer and the pinned-file panel.
+ *
+ * `openLocal` opts the surface into the openable dead link: a refused
+ * `file:` link becomes a button the engine opens with the OS default app.
+ * Only a surface whose click chain handles that button (the delegated
+ * `handleOpenLocalFileClick`) may pass it.
+ */
+export function renderVaultMarkdown(
+  body: string,
+  filePath: string,
+  markdownPaths: string[],
+  openLocal = false,
+): string {
   return renderFileMarkdown(body, {
     filePath,
     markdownPaths,
     resolveImageSrc: href => resolveVaultImageSrc(filePath, href),
+    openLocal,
   })
 }

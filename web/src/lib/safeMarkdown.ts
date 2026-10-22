@@ -6,18 +6,40 @@ import { CODE_BLOCK_CLASS, codeCopyButtonHtml } from './codeCopy'
 import { linkifyChatIds } from './chatLinks'
 import { COMMENT_TAGS } from './commentContext'
 import { hasKnownFileExtension, isPlausibleFilePath, linkifyHtml } from './filePaths'
+import { isLoopbackPage } from './loopback'
+import { DEAD_LINK_OPENABLE_CLASS, DEAD_LINK_PATH_ATTR } from './openWorkspaceFile'
 import { buildMarkdownIndex, resolveVaultLinkTarget, vaultNoteRefFromHref } from './vaultLinks'
 
 type FileMarkdownOptions = {
   resolveImageSrc: (href: string) => string
   filePath?: string
   markdownPaths?: string[]
+  openLocal?: boolean
+}
+
+/** Per-render opt-in: may a refused `file:` link become an openable button? */
+type RenderOptions = {
+  openLocal?: boolean
 }
 
 const MARKDOWN_OPTIONS = { breaks: true }
 
 // The class a refused link is rendered as: inert text, not an anchor.
 const DEAD_LINK_CLASS = 'markdown-dead-link'
+
+/**
+ * Whether the render in progress may turn a refused `file:` link into a
+ * button the engine can open. Set for the duration of one render, from the
+ * opt-in its caller passes.
+ *
+ * A module-level flag is safe here because the markdown parsers are
+ * synchronous: every renderer callback that reads it fires inside the
+ * caller's `parse()` call, and no render awaits anything, so the single
+ * thread of the page cannot run another render in between. Each render sets
+ * the flag on entry and clears it in a `finally`, so no render can see
+ * another one's opt-in.
+ */
+let openLocalFiles = false
 
 /**
  * Whether a link target can be followed. The sanitizer's own URI policy
@@ -62,10 +84,28 @@ function localPathOf(target: string): string {
  * A link the sanitizer will drop: the label stays readable, and a file path
  * stays visible as text the reader can copy. The path goes inside the
  * anchor, whose content `linkifyHtml` skips.
+ *
+ * A dead link whose target is a local path is not dead after all — but only
+ * where the surface opted in (`openLocal`) *and* the app runs on the engine's
+ * own machine. There it becomes a clickable button: a readable label and a
+ * visible, copyable path, and a click that asks the engine to open the path
+ * with the OS default application. The affordance exists only there, because
+ * that is the only machine the app can open anything on: elsewhere (a phone,
+ * another computer on the LAN) the link stays inert text, because
+ * `POST /api/workspace-open` is refused to a remote caller.
  */
 function deadLinkHtml(renderer: Renderer, token: Tokens.Link): string {
   const label = renderer.parser.parseInline(token.tokens)
   const path = localPathOf(token.href)
+  // A path the engine can open. `file://myhost` is a machine name, not a
+  // file: it keeps the plain inert anchor.
+  if (path && openLocalFiles && isLoopbackPage() && !/^\/\/[^/]+$/.test(path)) {
+    return (
+      `<button type="button" class="${DEAD_LINK_CLASS} ${DEAD_LINK_OPENABLE_CLASS}"`
+      + ` ${DEAD_LINK_PATH_ATTR}="${escapeAttr(path)}" title="Open on this computer">`
+      + `${label} (${escapeAttr(path)})</button>`
+    )
+  }
   const shown = path ? ` (${escapeAttr(path)})` : ''
   return `<a href="${escapeAttr(token.href)}">${label}${shown}</a>`
 }
@@ -186,7 +226,18 @@ function sanitizeHtml(html: string): string {
     // `data-chat-id` is the raw id of a conversation a message references
     // (see lib/chatLinks.ts). It is named explicitly: the allowlist is not
     // widened to every data attribute.
-    ADD_ATTR: ['target', 'rel', 'loading', 'data-file-path', 'data-line', 'data-chat-id'],
+    // `data-local-path` is the local path of an openable dead link (see
+    // lib/openWorkspaceFile.ts): the engine opens it, the browser never
+    // navigates to it.
+    ADD_ATTR: [
+      'target',
+      'rel',
+      'loading',
+      'data-file-path',
+      'data-local-path',
+      'data-line',
+      'data-chat-id',
+    ],
     FORBID_ATTR: ['style'],
   })
 }
@@ -219,6 +270,9 @@ function escapeAttr(value: string): string {
  * href is not a link but still looks like one — the panes paint `a` with the
  * accent colour and an underline — so it becomes plain text, with the inline
  * formatting it was written with.
+ *
+ * Only anchors are walked: a dead link that the engine can open is already a
+ * button (see `deadLinkHtml`), and this pass must leave it alone.
  *
  * This runs last, after `linkifyHtml`: that pass skips the content of an
  * anchor, so a dead link's label is never turned into a workspace file link.
@@ -254,12 +308,20 @@ const NO_KNOWN_CHATS: ReadonlyMap<string, string> = new Map()
  * titles. A reference to one of them becomes a link to the conversation,
  * under its title, before the external attributes are added — so it keeps
  * the app's own link shape: this tab, no `target="_blank"`.
+ *
+ * `openLocal` opts this surface into the openable dead link: a refused
+ * `file:` link becomes a button that asks the engine to open the path. Only
+ * a surface whose click chain handles that button (the delegated
+ * `handleOpenLocalFileClick`) may opt in — a control that looks clickable and
+ * does nothing is the very defect the inert text replaced.
  */
 export function renderMarkdown(
   text: string,
   knownPaths: string[] = [],
   knownChats: ReadonlyMap<string, string> = NO_KNOWN_CHATS,
+  opts: RenderOptions = {},
 ): string {
+  openLocalFiles = !!opts.openLocal
   try {
     const html = chatMarkdownParser.parse(text) as string
     const linked = linkifyChatIds(html, knownChats)
@@ -268,6 +330,8 @@ export function renderMarkdown(
     )
   } catch {
     return neutralizeDeadAnchors(sanitizeHtml(text))
+  } finally {
+    openLocalFiles = false
   }
 }
 
@@ -297,11 +361,17 @@ const userMarkdownParser = new Marked({
   renderer: userMarkdownRenderer,
 })
 
+/**
+ * Render a typed message. `openLocal` opts this surface into the openable
+ * dead link; see `renderMarkdown` for who may opt in.
+ */
 export function renderUserMarkdown(
   text: string,
   knownPaths: string[] = [],
   knownChats: ReadonlyMap<string, string> = NO_KNOWN_CHATS,
+  opts: RenderOptions = {},
 ): string {
+  openLocalFiles = !!opts.openLocal
   try {
     const html = userMarkdownParser.parse(text) as string
     const linked = linkifyChatIds(html, knownChats)
@@ -310,9 +380,15 @@ export function renderUserMarkdown(
     )
   } catch {
     return escapeAttr(text)
+  } finally {
+    openLocalFiles = false
   }
 }
 
+/**
+ * Render a note for the file viewer. `options.openLocal` opts this surface
+ * into the openable dead link; see `renderMarkdown` for who may opt in.
+ */
 export function renderFileMarkdown(text: string, options: FileMarkdownOptions): string {
   // Cross-note links are relative markdown links (`[Mo](./People/Mo.md)`).
   // Left to the default renderer they would emit `<a href="./People/Mo.md">`,
@@ -323,6 +399,7 @@ export function renderFileMarkdown(text: string, options: FileMarkdownOptions): 
   const vaultPaths = filePath && options.markdownPaths?.length ? options.markdownPaths : null
   const linkIndex = vaultPaths ? buildMarkdownIndex(vaultPaths) : null
   const linkPathSet = vaultPaths ? new Set(vaultPaths) : null
+  openLocalFiles = !!options.openLocal
 
   const renderer = {
     image({ href, title, text: alt }: { href: string; title: string | null; text: string }): string {
@@ -353,5 +430,7 @@ export function renderFileMarkdown(text: string, options: FileMarkdownOptions): 
     return neutralizeDeadAnchors(sanitizeHtml(parser.parse(text) as string))
   } catch {
     return neutralizeDeadAnchors(sanitizeHtml(text))
+  } finally {
+    openLocalFiles = false
   }
 }
