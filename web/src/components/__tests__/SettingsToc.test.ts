@@ -53,7 +53,8 @@ it('lists the rendered sections of the tab in the On this page rail', async () =
       'Keyboard shortcuts',
       'Update task history',
     ])
-    expect(labels.slice(6)).toEqual(['Start at sign-in', 'Memory handover', 'Session insights', 'Open source'])
+    expect(labels.slice(6)).toEqual(['Start at sign-in', 'Memory handover', 'Open source'])
+    expect(labels).not.toContain('Session insights')
     expect(labels).not.toContain('Appearance')
     expect(labels).not.toContain('This host')
     expect(labels.indexOf('Open source')).toBeGreaterThan(labels.indexOf('Keyboard shortcuts'))
@@ -78,6 +79,7 @@ it('lists Ciaobot folder on the rail, in page order, once its routines load', as
     const labels = wrapper.findAll('.settings-toc-item').map(item => item.text())
     const at = labels.indexOf('Ciaobot folder')
     expect(at).toBeGreaterThan(-1)
+    expect(labels).not.toContain('Session insights')
     expect(labels[at - 1]).toBe('Memory backup')
     expect(labels[at + 1]).toBe('Workspace health')
     expect(wrapper.find('#settings-ciaobot-folder').exists()).toBe(true)

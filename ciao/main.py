@@ -536,9 +536,6 @@ async def _run_server_locked(config: CiaoConfig, *, supervised: bool = False) ->
     from ciao.app_settings import AppSettingsStore
 
     app_settings = AppSettingsStore(config.state_path.parent / "app_settings.json")
-    app_settings.migrate_legacy_insights_enabled(
-        getattr(config, "legacy_insights_disabled", None)
-    )
     app_settings.import_legacy_env(getattr(config, "legacy_env_settings", {}))
     app_settings.apply_to_config(config)
 

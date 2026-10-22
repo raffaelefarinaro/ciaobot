@@ -14,6 +14,7 @@ from typing import cast
 
 import pytest
 
+from ciao.app_settings import AppSettingsStore
 from ciao.config import CiaoConfig
 from ciao.context.capsule import build_context_capsule
 from ciao.models import AgentRequest, ChatContext
@@ -26,7 +27,7 @@ from ciao.web.project_chats import ArchiveOutcome, ChatInfo, ProjectInfo
 class _Host:
     """The manager surface ``ArchivePipeline`` needs for these contracts."""
 
-    def __init__(self, tmp_path: Path, *, insights_enabled: bool = True) -> None:
+    def __init__(self, tmp_path: Path) -> None:
         runtime = tmp_path / ".runtime"
         runtime.mkdir(parents=True, exist_ok=True)
         self._config = CiaoConfig(
@@ -34,7 +35,6 @@ class _Host:
             workspace_root=tmp_path,
             state_path=runtime / "state.json",
             media_root=runtime / "media",
-            insights_enabled=insights_enabled,
         )
         self._detached_tasks: set[asyncio.Task[object]] = set()
         self._chats: dict[str, ChatInfo] = {}
@@ -95,9 +95,9 @@ class _Host:
 
 
 def _setup(
-    tmp_path: Path, **host_kwargs: bool
+    tmp_path: Path,
 ) -> tuple[_Host, ArchivePipeline, ChatInfo, ProjectInfo, ArchiveOutcome]:
-    host = _Host(tmp_path, **host_kwargs)
+    host = _Host(tmp_path)
     chat = ChatInfo(chat_id="chat-1", project_id="project-1", title="Archived", archived=True)
     project = ProjectInfo(
         project_id="project-1",
@@ -127,14 +127,18 @@ async def test_archive_queues_the_memory_pass_and_indexes(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_insights_off_skips_the_pass_but_still_indexes(tmp_path: Path) -> None:
-    host, pipeline, chat, project, outcome = _setup(tmp_path, insights_enabled=False)
+async def test_archive_enqueues_the_pass_even_with_a_persisted_opt_out(
+    tmp_path: Path,
+) -> None:
+    host, pipeline, chat, project, outcome = _setup(tmp_path)
+    path = tmp_path / ".runtime" / "app_settings.json"
+    path.write_text('{"insights_enabled": false}', encoding="utf-8")
+    AppSettingsStore(path).apply_to_config(host._config)
 
     pipeline.run_archive_postprocess(chat.chat_id, outcome, chat, project)
     await asyncio.sleep(0)
 
-    assert host.enqueued == []
-    assert host.index_calls == ["index"]
+    assert host.enqueued == [(chat.chat_id, outcome.path, project.vault_doc_path)]
 
 
 def _real_archive(tmp_path: Path, prompts: list[str]) -> Path:

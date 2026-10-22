@@ -261,12 +261,6 @@
              its data: nothing here is part of the workspace edit form. -->
         <SettingsMemoryHandover />
 
-        <SettingsInsights
-          :routines="routines"
-          :routines-saving="routinesSaving"
-          :save-routines="saveRoutines"
-        />
-
         <!-- Open source. The face image on the right appears only while the
              GitHub-star ask is still live (housekeeping detects it via the
              `starred` / snoozed receipt): once the user has starred or
@@ -1979,7 +1973,7 @@
 
       <!-- Native provider MCP inventory, scoped to the selected workspace. -->
       <template v-if="currentTab === 'mcp'">
-        <SettingsMcpServers :mcp="mcp" />
+        <SettingsMcpServers :mcp="mcp" :default-provider="mcpDefaultProvider" @ask-ciao="createAssetViaChat('mcp')" />
       </template>
       </div>
 
@@ -2106,7 +2100,6 @@ import { useCommandCopy } from '../composables/useCommandCopy'
 import UpdateProgressView from './UpdateProgressView.vue'
 import WorkspaceMoveDialog from './WorkspaceMoveDialog.vue'
 import ModelSelector from './ModelSelector.vue'
-import SettingsInsights from './settings/SettingsInsights.vue'
 import SettingsDevices from './settings/SettingsDevices.vue'
 import SettingsServer from './settings/SettingsServer.vue'
 import SettingsAppInstall from './settings/SettingsAppInstall.vue'
@@ -2143,6 +2136,7 @@ const housekeeping = useHousekeepingStore()
 
 // Native MCP inventory follows the sidebar's selected workspace.
 const mcp = useMcpServers({ api, workspace: () => projectStore.activeWorkspace })
+const mcpDefaultProvider = computed(() => projectStore.workspaceOptions.find(w => w.name === projectStore.activeWorkspace)?.default_provider)
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   return tab
@@ -3659,6 +3653,10 @@ const ASSET_CHAT_PROMPTS = {
   command: {
     title: 'New Slash Command',
     prompt: 'I want to create a new shared slash command. Please guide me through writing it under the commands/ directory.',
+  },
+  mcp: {
+    title: 'Add an MCP server',
+    prompt: 'Add an MCP server to this workspace. Ask me which server and its URL, run the CLI command for the provider I use, help me sign in, then reload this chat.',
   },
 } as const
 

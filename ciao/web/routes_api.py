@@ -5759,8 +5759,6 @@ def _routines_payload(config, app_settings) -> dict:
     s = app_settings.settings
 
     return {
-        # Overrides as stored ("" = automatic default).
-        "insights_enabled": config.insights_enabled,
         # Per-provider default model for new chats, as stored (missing =
         # provider's own catalog default).
         "provider_default_models": s.provider_default_models or {},

@@ -121,13 +121,13 @@ export interface McpProviderInventory {
   available: boolean
   inventory_state: 'loaded' | 'unknown'
   servers: McpNativeServer[]
-  setup: { add: string; authenticate: string }
 }
 
 export interface McpStatus {
   workspace: string
   agent_root: string
   providers: McpProviderInventory[]
+  shell: { kind: 'posix' | 'powershell'; cd_prefix: string }
 }
 
 /** Status of the agent CLI surface (Settings → Agent CLI), from /api/agent/status. */
@@ -924,8 +924,6 @@ export interface MoveToBackgroundResponse { moved: boolean }
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
 // model overrides (Settings → Providers tab).
 export interface RoutineSettings {
-  insights_enabled?: boolean
-
   // Per-provider default model for new chats; a missing entry = the provider's
   // own catalog default.
   provider_default_models?: Record<string, string>

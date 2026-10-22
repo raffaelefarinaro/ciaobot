@@ -192,10 +192,22 @@ function serve(sessions: Record<string, unknown>[] = [], status: Record<string, 
   })
 }
 
-async function mountPane() {
-  const wrapper = mount(TerminalPane, { attachTo: document.body })
+async function mountPane(props: { inTile?: boolean } = {}) {
+  const wrapper = mount(TerminalPane, { props, attachTo: document.body })
   await flushPromises()
   return wrapper
+}
+
+/** The width jsdom starts with, so a test that changes it can put it back. */
+const DEFAULT_VIEWPORT_WIDTH = window.innerWidth
+
+/**
+ * The pane's shape follows the viewport, exactly as the layout's does: a
+ * column beside the chat on a wide pane, a full-screen drawer on a phone.
+ */
+function setViewportWidth(width: number): void {
+  Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: width })
+  window.dispatchEvent(new Event('resize'))
 }
 
 describe('TerminalPane', () => {
@@ -214,6 +226,7 @@ describe('TerminalPane', () => {
   afterEach(() => {
     useTerminalStore().dispose()
     document.body.innerHTML = ''
+    setViewportWidth(DEFAULT_VIEWPORT_WIDTH)
     vi.unstubAllGlobals()
   })
 
@@ -229,6 +242,65 @@ describe('TerminalPane', () => {
     expect(wrapper.get('.tp-unlock-input').attributes('type')).toBe('password')
     // The password is handed over once and not kept.
     expect(wrapper.text()).toContain('not kept')
+    wrapper.unmount()
+  })
+
+  it('fills the tile when the layout puts it in the slot', async () => {
+    serve([sessionInfo('s1')])
+    setViewportWidth(1280)
+    const store = useTerminalStore()
+    const wrapper = await mountPane({ inTile: true })
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const pane = wrapper.get('.terminal-pane')
+    expect(pane.classes()).toContain('terminal-pane--tile')
+    expect(pane.classes()).not.toContain('terminal-pane--drawer')
+    wrapper.unmount()
+  })
+
+  it('is a drawer when the layout did not give it the slot', async () => {
+    // A tile in a pane that cannot hold it would squeeze the chat to a
+    // sliver, so a pane that has no room gets the drawer instead.
+    serve([sessionInfo('s1')])
+    setViewportWidth(900)
+    const store = useTerminalStore()
+    const wrapper = await mountPane({ inTile: false })
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const pane = wrapper.get('.terminal-pane')
+    expect(pane.classes()).toContain('terminal-pane--drawer')
+    expect(pane.classes()).not.toContain('terminal-pane--tile')
+    wrapper.unmount()
+  })
+
+  it('is a drawer on a phone-sized pane, however much room it is told it has', async () => {
+    // A shell on a phone wants the whole screen, whatever the layout says.
+    serve([sessionInfo('s1')])
+    setViewportWidth(375)
+    const store = useTerminalStore()
+    const wrapper = await mountPane({ inTile: true })
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const pane = wrapper.get('.terminal-pane')
+    expect(pane.classes()).toContain('terminal-pane--drawer')
+    expect(pane.classes()).not.toContain('terminal-pane--tile')
+    wrapper.unmount()
+  })
+
+  it('is a drawer until the layout says it can have the slot', async () => {
+    serve([sessionInfo('s1')])
+    setViewportWidth(1280)
+    const store = useTerminalStore()
+    const wrapper = await mountPane()
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    const pane = wrapper.get('.terminal-pane')
+    expect(pane.classes()).toContain('terminal-pane--drawer')
+    expect(pane.classes()).not.toContain('terminal-pane--tile')
     wrapper.unmount()
   })
 
@@ -480,5 +552,66 @@ describe('TerminalPane', () => {
     expect(source).toMatch(/@media \(pointer: coarse\)/)
     expect(source).toMatch(/min-height:\s*var\(--touch\)/)
     expect(source).toMatch(/\.tp-session \{[^}]*min-height:\s*var\(--touch\)/)
+  })
+
+  it('draws no frame of its own in the tile: the tile is the window', () => {
+    // The slot is the same window the pinned file uses — inset, rounded,
+    // shadowed — so the terminal inside it must not draw a second frame.
+    // jsdom has no layout engine, so the rule is asserted from the sheet the
+    // pane ships.
+    const source = readFileSync(join(__dirname, '..', 'TerminalPane.vue'), 'utf8')
+    const tile = source.match(/\.terminal-pane--tile\.terminal-pane--open \{([^}]*)\}/)
+    expect(tile).not.toBeNull()
+    const rules = tile![1]
+    expect(rules).toMatch(/height:\s*100%/)
+    expect(rules).toMatch(/background:\s*transparent/)
+    expect(rules).not.toMatch(/border/)
+    expect(rules).not.toMatch(/border-radius/)
+    expect(rules).not.toMatch(/margin:/)
+    // No shadow of its own either: the window it sits in already has one.
+    expect(rules).not.toMatch(/box-shadow/)
+    // The flush dock is gone: the tile is the only column shape.
+    expect(source).not.toMatch(/terminal-pane--dock/)
+  })
+
+  it('binds a screen to the session that is already open when it mounts again', async () => {
+    // The pane moves between the slot and the drawer, so it unmounts and
+    // mounts again while the shell is still running. The session is still
+    // the one the screen belongs to, and the new pane must draw it — a
+    // second screen for the same session would be two histories at once.
+    serve([sessionInfo('s1')])
+    const store = useTerminalStore()
+    const first = await mountPane({ inTile: true })
+    await store.open({ chatId: 'c1' })
+    await flushPromises()
+
+    expect(screen.FakeScreen.instances).toHaveLength(1)
+    expect(screen.FakeScreen.instances[0].sessionId).toBe('s1')
+    expect(screen.FakeScreen.instances[0].disposed).toBe(false)
+    const firstElement = screen.FakeScreen.instances[0].element
+
+    first.unmount()
+    await flushPromises()
+    // The old screen goes with the old pane.
+    expect(screen.FakeScreen.instances[0].disposed).toBe(true)
+    expect(firstElement.isConnected).toBe(false)
+
+    const second = await mountPane({ inTile: false })
+    await flushPromises()
+
+    // The new pane made its own screen, and it is bound to the same
+    // session the old one drew.
+    expect(screen.FakeScreen.instances).toHaveLength(2)
+    expect(screen.FakeScreen.instances[1].sessionId).toBe('s1')
+    expect(screen.FakeScreen.instances[1].disposed).toBe(false)
+    // It is a live screen in the live DOM, not a dead pane.
+    expect(screen.FakeScreen.instances[1].element.isConnected).toBe(true)
+    expect(screen.FakeScreen.instances[1].element).not.toBe(firstElement)
+    // And the store is drawing on it again: the session is attached, so the
+    // pane reconnects to it.
+    expect(store.activeSession?.session_id).toBe('s1')
+    expect(sockets).toHaveLength(2)
+    expect(sockets[1].closed).toBe(false)
+    second.unmount()
   })
 })

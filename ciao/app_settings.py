@@ -91,7 +91,6 @@ _NESTED_CLEANERS: dict[str, Callable[[object], dict[str, str]]] = {
     "provider_default_modes": _clean_default_modes,
 }
 _BOOLEAN_FIELDS = {
-    "insights_enabled",
     "backup_enabled",
     "backup_paused",
     "dev_mode",
@@ -184,8 +183,6 @@ class AppSettings:
     dynamic, so each nests a per-provider value rather than a scalar per
     provider.
     """
-
-    insights_enabled: bool = True
 
     # The unattended backup service (ciao/backup_service.py). `backup_enabled`
     # is the owner's standing decision and defaults on, so an existing install
@@ -464,22 +461,6 @@ class AppSettingsStore:
         self._save()
         return self.settings
 
-    def migrate_legacy_insights_enabled(
-        self, legacy_disabled: bool | None
-    ) -> bool | None:
-        if legacy_disabled is None:
-            return None
-        if "insights_enabled" in self._explicit_fields:
-            return None
-        self.settings.insights_enabled = not legacy_disabled
-        self._explicit_fields.add("insights_enabled")
-        self._save()
-        logger.warning(
-            "CIAO_INSIGHTS_DISABLED is no longer read; migrated it to Settings → "
-            "General once. Remove it from .env."
-        )
-        return self.settings.insights_enabled
-
     def import_legacy_env(self, legacy: Mapping[str, str]) -> list[str]:
         """Copy the retired `.env` server variables into Settings, once.
 
@@ -551,7 +532,6 @@ class AppSettingsStore:
                 )
         d = self._defaults
         s = self.settings
-        config.insights_enabled = s.insights_enabled
         config.dev_mode = s.dev_mode
         config.app_repo = Path(s.app_repo).expanduser().resolve() if s.app_repo else None
         # Per-provider default models / thinking / routine models have no
