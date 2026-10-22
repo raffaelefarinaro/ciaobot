@@ -216,13 +216,17 @@ def test_a_stale_id_is_a_conflict_and_the_offer_survives(tmp_path: Path) -> None
 
     The other device dismissed the old offer and the assistant offered a
     new command. This tab still holds the old id; quoting it must not
-    remove the command the user is looking at now.
+    remove the command the user is looking at now — and it must not
+    *tell* the other devices to remove it either. A null clear published
+    on a refusal would drop the offer on every other device while this
+    chat still holds it, which is not the state the engine is in.
     """
     manager = _make_manager(tmp_path)
     chat, first = _offered(manager)
     client = _make_client(manager)
 
-    stale = _dismiss(client, chat.chat_id, "0" * 32)
+    with _record_events(manager) as published:
+        stale = _dismiss(client, chat.chat_id, "0" * 32)
 
     assert stale.status_code == 409
     body = stale.json()
@@ -233,6 +237,8 @@ def test_a_stale_id_is_a_conflict_and_the_offer_survives(tmp_path: Path) -> None
     # And the offer is untouched.
     assert manager.get_chat(chat.chat_id).terminal_offer is not None
     assert manager.get_chat(chat.chat_id).to_dict()["terminal_offer"] == first
+    # A refusal changes nothing, so it says nothing to the other devices.
+    assert _offer_events(published) == []
 
 
 def test_a_dismissal_cannot_remove_a_command_offered_after_it(tmp_path: Path) -> None:
@@ -260,10 +266,13 @@ def test_an_unknown_chat_is_a_404(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     client = _make_client(manager)
 
-    response = _dismiss(client, "chat-nope", "0" * 32)
+    with _record_events(manager) as published:
+        response = _dismiss(client, "chat-nope", "0" * 32)
 
     assert response.status_code == 404
     assert response.json() == {"error": "not found"}
+    # A refusal changes nothing, so it publishes nothing.
+    assert _offer_events(published) == []
 
 
 def test_a_malformed_body_is_refused_before_the_chat_is_looked_up(
@@ -334,6 +343,10 @@ def test_a_dismissal_cannot_be_combined_with_another_update(
     [
         pytest.param("", id="empty"),
         pytest.param(123, id="number"),
+        # Thirty-two digits: a number the length of an id, so a refusal
+        # that only counted characters would let it through. The id is
+        # hex, and a number is not a string that could be one.
+        pytest.param(12345678901234567890123456789012, id="32-digit-number"),
         pytest.param(True, id="bool"),
         pytest.param(None, id="null"),
         pytest.param([], id="list"),
@@ -557,6 +570,13 @@ def test_a_dismissal_from_a_foreign_origin_is_refused(tmp_path: Path) -> None:
         pytest.param(b"{", id="truncated"),
         pytest.param(b'{"command": "hunter2-credential"', id="truncated-with-text"),
         pytest.param(b"", id="empty"),
+        # A byte that is not text: the decoder fails on the *encoding*,
+        # not on the syntax, and that failure is a `UnicodeDecodeError` —
+        # a `ValueError`, but not a `JSONDecodeError`. A body like
+        # `b"\xff\xfe"` would not test that at all: it is a UTF-16LE BOM,
+        # so the decoder reads it as an empty document and fails on the
+        # syntax instead.
+        pytest.param(b"\xff", id="not-utf8"),
     ],
 )
 def test_a_body_that_is_not_json_is_refused(tmp_path: Path, raw: bytes) -> None:
