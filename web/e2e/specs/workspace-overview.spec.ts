@@ -37,9 +37,18 @@ test.describe('workspace overview', () => {
 
   test('the memory handover radiogroup takes arrow keys', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 })
-    // The fixture has no write route.
+    // The fixture persists neither the workspace PATCH nor the handover, so
+    // the save would silently revert and the second arrow would have nothing
+    // to move from. Keep the chosen value here and answer both routes from it.
+    let handover = 'off'
+    await page.route('**/api/proposals/handover*', async (route) => {
+      const real = await (await page.request.get(route.request().url())).json()
+      await route.fulfill({ json: { ...real, handover } })
+    })
     await page.route('**/api/workspaces/*', async (route) => {
       if (route.request().method() === 'PATCH') {
+        const body = route.request().postDataJSON() as { memory_handover?: string } | null
+        if (body?.memory_handover) handover = body.memory_handover
         // Answer with the registry itself: the store replaces its list from the reply.
         await route.fulfill({ json: await (await page.request.get('/api/workspaces')).json() })
         return
@@ -56,7 +65,10 @@ test.describe('workspace overview', () => {
     await page.keyboard.press('ArrowRight')
     const dismiss = group.getByRole('radio', { name: 'Dismiss', exact: true })
     await expect(dismiss).toBeFocused()
-    // Focus survives the save, so a second arrow still moves on.
+    // Focus moves at once; the save is still in flight, and the group ignores
+    // arrows until it settles (no second write mid-save). Wait for the save,
+    // then the next arrow moves on with focus intact.
+    await expect(dismiss).not.toHaveAttribute('aria-disabled', 'true')
     await page.keyboard.press('ArrowLeft')
     await expect(off).toBeFocused()
   })
