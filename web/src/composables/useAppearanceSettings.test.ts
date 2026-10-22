@@ -89,6 +89,34 @@ describe('save', () => {
   })
 })
 
+describe('custom colours', () => {
+  const colors = { dark: { bg: '#101018', fg: '#e8e8f0' }, light: { bg: '#fdf6e3', fg: '#2b2b2b' } }
+
+  it('applies the active mode pair and the cache keeps it', () => {
+    applyAppearanceSettings({ ...base, custom_colors: colors, revision: 'r1' })
+    expect(document.documentElement.style.getPropertyValue('--bg')).toBe('#101018')
+    expect(JSON.parse(localStorage.getItem('ciao-appearance') || '{}').custom_colors.dark.bg).toBe('#101018')
+    applyAppearanceSettings({ custom_colors: 'red' as never })
+    expect(useAppearanceSettings().settings.value.custom_colors).toEqual(colors)
+    applyAppearanceSettings({ custom_colors: {}, revision: 'r2' })
+    expect(document.documentElement.style.getPropertyValue('--bg')).toBe('')
+  })
+
+  it('re-applies the other mode pair when the theme class flips', async () => {
+    applyAppearanceSettings({ ...base, custom_colors: colors, revision: 'r1' })
+    document.documentElement.classList.add('theme-light')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+    expect(document.documentElement.style.getPropertyValue('--bg')).toBe('#fdf6e3')
+    expect(document.documentElement.dataset.customColors).toBe('light')
+    document.documentElement.classList.remove('theme-light')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+    expect(document.documentElement.style.getPropertyValue('--bg')).toBe('#101018')
+    applyAppearanceSettings({ custom_colors: {}, revision: 'r2' })
+  })
+})
+
 describe('font scale persistence', () => {
   it('saves a locally changed font scale to the engine, debounced', async () => {
     vi.useFakeTimers()

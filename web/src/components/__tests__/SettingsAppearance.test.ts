@@ -5,7 +5,7 @@ import SettingsAppearance from '../settings/SettingsAppearance.vue'
 import { api } from '../../lib/api'
 import { applyAppearanceSettings } from '../../composables/useAppearanceSettings'
 
-const engine = { text_contrast: 'normal' as const, body_font: 'system' as const, theme: 'dark' as const, font_scale: 1.2, revision: 'r0' }
+const engine = { text_contrast: 'normal' as const, body_font: 'system' as const, theme: 'dark' as const, font_scale: 1.2, custom_colors: {}, revision: 'r0' }
 
 beforeEach(() => {
   applyAppearanceSettings(engine)
@@ -123,5 +123,51 @@ describe('SettingsAppearance body font', () => {
     await fontRadios(wrapper)[2].trigger('click')
     await flushPromises()
     expect(wrapper.find('[role="alert"]').text()).toContain('another device')
+  })
+})
+
+describe('SettingsAppearance custom colours', () => {
+  const customRow = (wrapper: ReturnType<typeof mount>) =>
+    wrapper.findAll('.setting-row').find((row) => row.text().includes('Custom colours'))!
+
+  it('opens the dialog from Customise… and hides Reset without custom colours', async () => {
+    const wrapper = mount(SettingsAppearance, { attachTo: document.body })
+    await flushPromises()
+    const row = customRow(wrapper)
+    expect(row.text()).toContain('Choose your own background and text colours.')
+    expect(row.findAll('button').map((b) => b.text())).toEqual(['Customise…'])
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    await row.find('button').trigger('click')
+    await flushPromises()
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull()
+    wrapper.unmount()
+    document.body.innerHTML = ''
+  })
+
+  it('shows Reset only with custom colours and patches an empty map', async () => {
+    const withColors = { ...engine, custom_colors: { dark: { bg: '#101018', fg: '#e8e8f0' } }, revision: 'r1' }
+    applyAppearanceSettings(withColors)
+    vi.spyOn(api, 'get').mockResolvedValue(withColors)
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue({ ...engine, revision: 'r2' })
+    const wrapper = mount(SettingsAppearance)
+    await flushPromises()
+    const row = customRow(wrapper)
+    expect(row.text()).toContain('Using your own colours for the dark theme.')
+    await row.findAll('button')[1].trigger('click')
+    await flushPromises()
+    expect(patch).toHaveBeenCalledWith('/api/settings/appearance', { custom_colors: {}, revision: 'r1' })
+    expect(customRow(wrapper).findAll('button').map((b) => b.text())).toEqual(['Customise…'])
+  })
+
+  it('explains that Soft has no effect while custom colours are on for this theme', async () => {
+    const withColors = { ...engine, text_contrast: 'soft' as const, custom_colors: { dark: { bg: '#101018', fg: '#e8e8f0' } }, revision: 'r1' }
+    applyAppearanceSettings(withColors)
+    vi.spyOn(api, 'get').mockResolvedValue(withColors)
+    const wrapper = mount(SettingsAppearance)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Soft text contrast has no effect while custom colours are on for this theme.')
+    applyAppearanceSettings({ ...withColors, custom_colors: {}, revision: 'r2' })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('has no effect')
   })
 })
