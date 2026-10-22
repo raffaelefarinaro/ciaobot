@@ -1131,8 +1131,8 @@ describe('terminal store status and grant', () => {
 
   it('asks for the grant again when the first open could not get one', async () => {
     // The first status read answers: the terminal is available, and this
-    // browser holds no grant. The unlock is refused, and so is the status
-    // that follows it.
+    // browser holds no grant. The unlock is refused, and the open path
+    // does not need the status again to ask.
     apiGet.mockResolvedValueOnce(statusPayload({ unlock_expires_in: 0 }))
     apiGet.mockRejectedValue(new Error('network down'))
     apiPost.mockRejectedValue(new Error('refused'))
@@ -1158,6 +1158,89 @@ describe('terminal store status and grant', () => {
     expect(unlocks()).toBe(1 + MAX_AUTO_RECONNECT_ATTEMPTS)
     expect(store.phase).toBe('error')
     expect(store.error).toContain('could not be re-established')
+  })
+
+  it('resumes the open path when the grant arrives on a later attempt', async () => {
+    // The status says the terminal is available and this browser holds no
+    // grant; the first ask is refused and the second one succeeds.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') {
+        return Promise.resolve(statusPayload({ unlock_expires_in: 0 }))
+      }
+      return Promise.resolve({ sessions: [sessionPayload('s1')] })
+    })
+    apiPost
+      .mockRejectedValueOnce(new Error('refused'))
+      .mockResolvedValue({ ok: true, expires_in: 900 })
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.phase).toBe('locked')
+
+    // The second ask succeeds, and the pane resumes where it stopped.
+    await vi.advanceTimersByTimeAsync(250)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(store.phase).toBe('ready')
+    expect(store.unlocked).toBe(true)
+    expect(store.error).toBe('')
+    // The sessions are listed: an existing session is adopted, never
+    // created.
+    expect(store.sessions.map((session) => session.session_id)).toEqual(['s1'])
+    expect(store.activeSession?.session_id).toBe('s1')
+    // And no socket is opened until a surface attaches.
+    expect(fakeSockets).toHaveLength(0)
+    store.attachRenderer(makeRenderer('s1').renderer)
+    expect(fakeSockets).toHaveLength(1)
+  })
+
+  it('stops asking for a grant when the pane is hidden', async () => {
+    apiGet.mockResolvedValue(statusPayload({ unlock_expires_in: 0 }))
+    apiPost.mockRejectedValue(new Error('refused'))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+    const statuses = () =>
+      apiGet.mock.calls.filter((call) => call[0] === '/api/terminal/status').length
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+    await vi.advanceTimersByTimeAsync(0)
+    const asked = unlocks()
+    const read = statuses()
+
+    // The pane is hidden: the chain stops with it. Nothing is asked behind
+    // the user's back, and the pane's own state is left alone.
+    store.hide()
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(unlocks()).toBe(asked)
+    expect(statuses()).toBe(read)
+    expect(store.phase).not.toBe('reconnecting')
+    expect(store.phase).not.toBe('error')
+  })
+
+  it('stops asking for a grant when the pane is hidden mid-chain', async () => {
+    apiGet.mockResolvedValue(statusPayload({ unlock_expires_in: 0 }))
+    apiPost.mockRejectedValue(new Error('refused'))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+    await vi.advanceTimersByTimeAsync(0)
+    // The chain is running: one retry has asked again.
+    await vi.advanceTimersByTimeAsync(250)
+    const asked = unlocks()
+    expect(asked).toBe(2)
+
+    // The pane is hidden while the chain is in flight: the rest of it
+    // stops with it.
+    store.hide()
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(unlocks()).toBe(asked)
+    expect(store.phase).not.toBe('reconnecting')
+    expect(store.phase).not.toBe('error')
   })
 
   it('gives a newly opened pane its own attempt budget', async () => {

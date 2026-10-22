@@ -967,9 +967,12 @@ export const useTerminalStore = defineStore('terminal', () => {
           // The engine would not give us a grant. There is no form for the
           // user to fill in any more, so the next attempt asks again, on
           // the same backoff and the same budget a lost connection uses.
+          // The counter was reset above, so this first wait is the delay
+          // of attempt 1 — the attempt the timer is about to make.
           scheduleTimer(() => {
             if (myScope !== scopeEpoch || myOpen !== openEpoch) return
-            void scheduleRetry()
+            if (!visible.value) return
+            void scheduleOpenRetry()
           }, terminalReconnectDelayMs(reconnectAttempts + 1))
           return
         }
@@ -986,18 +989,70 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   /**
+   * The open path's own continuation.
+   *
+   * `open` asked for a grant and the engine would not give one. This asks
+   * again — on the same backoff and the same attempt budget a lost
+   * connection uses — and resumes where `open` stopped when the grant
+   * arrives: the pane becomes ready, the sessions are listed, and the
+   * socket opens once a surface attaches.
+   *
+   * It is deliberately not `scheduleRetry`: that one resumes a
+   * *connection*, and it needs a session and a screen to attach to, which a
+   * pane that has just opened does not have — `open` stopped before the
+   * session list.
+   */
+  async function scheduleOpenRetry(): Promise<void> {
+    reconnectAttempts += 1
+    if (reconnectAttempts > MAX_AUTO_RECONNECT_ATTEMPTS) {
+      phase.value = 'error'
+      error.value = 'The terminal connection could not be re-established.'
+      return
+    }
+    const myScope = scopeEpoch
+    const myOpen = openEpoch
+    const granted = await acquireGrant()
+    if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+    // A hidden pane asks for nothing and says nothing: the chain stops
+    // here rather than running behind the user's back.
+    if (!visible.value) return
+    if (!granted) {
+      // The engine would not give us a grant this time. The next attempt
+      // asks again, until the attempt budget runs out.
+      scheduleTimer(() => {
+        if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+        if (!visible.value) return
+        void scheduleOpenRetry()
+      }, terminalReconnectDelayMs(reconnectAttempts))
+      return
+    }
+    // The grant is here: the pane resumes where `open` stopped.
+    phase.value = 'ready'
+    error.value = ''
+    await refreshSessions()
+    if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+    if (!visible.value) return
+    maybeConnect()
+  }
+
+  /**
    * Ask the engine for this browser's terminal grant.
    *
    * There is no password and nothing to re-enter: the signed-in session is
    * the terminal's trust boundary, so the engine decides whether this
    * browser may hold the socket. The body is empty — the route takes none —
    * and the grant itself never reaches this code: it arrives as a cookie.
+   *
+   * The answer only counts for the open that asked: an older open of the
+   * same scope must not write over the state of the newer one, so the
+   * open epoch is checked before anything is written.
    */
   async function acquireGrant(): Promise<boolean> {
     const myScope = scopeEpoch
+    const myOpen = openEpoch
     try {
       const raw = await api.post<unknown>(`${TERMINAL_API}/unlock`)
-      if (myScope !== scopeEpoch) return false
+      if (myScope !== scopeEpoch || myOpen !== openEpoch) return false
       const expires = parseUnlock(raw)
       if (expires === null) {
         unlocked.value = false
@@ -1008,7 +1063,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       unlocked.value = true
       return true
     } catch {
-      if (myScope !== scopeEpoch) return false
+      if (myScope !== scopeEpoch || myOpen !== openEpoch) return false
       unlocked.value = false
       phase.value = 'locked'
       error.value = 'The terminal grant could not be obtained.'
