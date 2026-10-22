@@ -39,6 +39,7 @@ def test_get_defaults(tmp_path):
     assert body["body_font"] == "system"
     assert body["theme"] is None
     assert body["font_scale"] is None
+    assert body["custom_colors"] == {}
     assert re.fullmatch(r"[0-9a-f]{64}", body["revision"])
 
 
@@ -111,3 +112,22 @@ def test_unrelated_settings_keys_are_refused(tmp_path):
     assert "dev_mode" in response.json()["error"] and "pwa_host" in response.json()["error"]
     assert store.settings.dev_mode is False
     assert store.settings.text_contrast == ""
+
+
+def test_custom_colors_in_revision(tmp_path):
+    client, manager = _client(tmp_path)
+    first = client.get("/api/settings/appearance").json()["revision"]
+    response = client.patch(
+        "/api/settings/appearance",
+        json={"custom_colors": {"dark": {"bg": "#101018", "fg": "#e8e8f0"}}, "revision": first},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["custom_colors"] == {"dark": {"bg": "#101018", "fg": "#e8e8f0"}}
+    assert body["revision"] != first
+    assert manager.events.published[-1]["custom_colors"] == body["custom_colors"]
+    bad = client.patch(
+        "/api/settings/appearance",
+        json={"custom_colors": {"dark": {"bg": "red", "fg": "#fff"}}, "revision": body["revision"]},
+    )
+    assert bad.status_code == 400

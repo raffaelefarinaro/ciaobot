@@ -1107,7 +1107,9 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
 # `body_font` ("system", "serif" or "mono"),
 # `theme` ("dark", "light" or "system"; `null` until a browser first stores one,
 # and "system" still resolves per device from its OS), `font_scale` (0.8 to 1.5
-# in steps of 0.05; `null` until first stored) and `revision`.
+# in steps of 0.05; `null` until first stored), `custom_colors` (`{}` or
+# `{"dark": {"bg": "#rrggbb", "fg": "#rrggbb"}, "light": {...}}`, either mode
+# optional) and `revision`.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/appearance"
 
 # Include the revision returned by GET; a stale revision gets 409. Engine-shared,
@@ -1116,6 +1118,15 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/appea
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/appearance" \
   -H 'content-type: application/json' \
   -d '{"revision":"<revision-from-GET>","text_contrast":"soft","theme":"dark","font_scale":1.25}'
+
+# Custom colours: the engine validates hex shape only (`#rrggbb`, stored
+# lowercase; a malformed entry or unknown mode is 400; `{}` or `null` resets).
+# The readability rule (WCAG AA 4.5:1 for body text) is enforced by the PWA, not
+# the server: a hand-sent unreadable pair is stored but the PWA never paints it,
+# and Settings › Appearance › Reset recovers.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/appearance" \
+  -H 'content-type: application/json' \
+  -d '{"revision":"<revision-from-GET>","custom_colors":{"dark":{"bg":"#101018","fg":"#e8e8f0"}}}'
 ```
 
 **MCP inventory and status (Settings → MCP)**
