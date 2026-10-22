@@ -92,7 +92,6 @@
         <p class="section-title">Google account</p>
         <p :id="`workspace-gws-hint-${form.name}`" class="hint">
           Which Google account this workspace uses. Accounts are added on Manage workspaces under Google Workspace.
-          Save changes applies to every card above it.
         </p>
       </div>
       <div class="overview-body">
@@ -113,6 +112,7 @@
             </option>
           </select>
         </label>
+        <p v-if="workspaceDirty(form)" class="hint hint--compact">Save changes applies to every card above it.</p>
         <div v-if="workspaceDirty(form)" class="workspace-edit-actions">
           <button
             type="button"

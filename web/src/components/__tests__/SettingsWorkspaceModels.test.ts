@@ -204,4 +204,20 @@ describe('SettingsWorkspaceModels', () => {
     expect(view.findAll('select').every((s) => s.attributes('disabled') !== undefined)).toBe(true)
     expect(view.findAll('button[role="radio"]').every((b) => b.attributes('disabled') !== undefined)).toBe(true)
   })
+
+  it('with no overrides the permission mode select sits on Engine default', async () => {
+    const view = await mountCard()
+    const el = select(view, 'permission_mode').element as HTMLSelectElement
+    expect(el.value).toBe('')
+    expect(el.selectedOptions[0].textContent!.trim()).toMatch(/^Engine default \(/)
+  })
+
+  it('names what failed when a fetch errors', async () => {
+    const { api } = await import('../../lib/api')
+    vi.mocked(api.get).mockImplementation((path: string) => Promise.reject(new Error(`boom ${path}`)))
+    const view = await mountCard()
+    const alerts = view.findAll('[role="alert"]').map((a) => a.text())
+    expect(alerts.some((t) => t.startsWith('Could not load the provider defaults:'))).toBe(true)
+    expect(alerts.some((t) => t.startsWith('Could not load the model list:'))).toBe(true)
+  })
 })

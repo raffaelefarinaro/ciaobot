@@ -55,7 +55,7 @@
           @change="setField('thinking', ($event.target as HTMLSelectElement).value)"
         >
           <option value="">Engine default ({{ engineThinkingLabel }})</option>
-          <option v-for="level in thinkingLevels" :key="level" :value="level">{{ capitalise(level) }}</option>
+          <option v-for="level in thinkingLevels" :key="level.value" :value="level.value">{{ capitalise(level.label) }}</option>
         </select>
       </label>
       <p v-if="!models" class="hint hint--compact set-subrow-hint">
@@ -171,7 +171,8 @@ const insightsSections = computed(() =>
   ),
 )
 
-const thinkingLevels = computed(() => models.value?.thinking_levels?.[provider.value] ?? [])
+// The first entry is the composable's own "Automatic"; this card names the engine default instead.
+const thinkingLevels = computed(() => choices.providerThinkingOptions(provider.value).slice(1))
 const engineThinkingLabel = computed(() => {
   const level = routines.value?.provider_default_thinking?.[provider.value]
   return level ? capitalise(level) : 'Auto'
@@ -224,9 +225,9 @@ onMounted(async () => {
   ])
   if (unmounted) return
   if (r.status === 'fulfilled') routines.value = r.value
-  else routinesError.value = `Could not load the engine defaults: ${apiErrorMessage(r.reason, 'The request failed.')}`
+  else routinesError.value = `Could not load the provider defaults: ${apiErrorMessage(r.reason, 'The request failed.')}`
   if (m.status === 'fulfilled') models.value = m.value
-  else modelsError.value = `Could not load the engine defaults: ${apiErrorMessage(m.reason, 'The request failed.')}`
+  else modelsError.value = `Could not load the model list: ${apiErrorMessage(m.reason, 'The request failed.')}`
 })
 onBeforeUnmount(() => { unmounted = true })
 </script>
