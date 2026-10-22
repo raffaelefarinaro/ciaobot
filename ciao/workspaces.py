@@ -248,6 +248,17 @@ def workspace_from_request(
         provider_overrides = existing.provider_overrides
     else:
         provider_overrides = {}
+    if "gws_profile" in data:
+        # Imported here: gws_auth pulls in the HTTP and subprocess stack.
+        from ciao.gws_auth import slugify_profile
+
+        gws_profile = str(data["gws_profile"]).strip()
+        if gws_profile and slugify_profile(gws_profile) != gws_profile:
+            raise ValueError(
+                "gws_profile must be a profile id (lowercase letters, digits, - and _)"
+            )
+    else:
+        gws_profile = existing.gws_profile if existing else ""
     return WorkspaceConfig(
         name=name,
         # Vault locations are not an editable Settings field. Updating a
@@ -264,7 +275,7 @@ def workspace_from_request(
         default_provider=provider,
         disallowed_tools=disallowed_tools,
         claude_ai_connectors=claude_ai_connectors,
-        gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
+        gws_profile=gws_profile,
         color=color,
         agent_fs_scope=agent_fs_scope,
         memory_handover=memory_handover,

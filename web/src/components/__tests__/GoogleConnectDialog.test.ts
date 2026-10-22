@@ -85,13 +85,13 @@ function integration(profiles: GwsIntegrationProfile[]): GwsIntegrationSettings 
   return { installed: true, binary_path: '/usr/local/bin/gws', cli_available: true, profiles }
 }
 
-function registry(): WorkspacesResponse {
+function registry(acmeLink = ''): WorkspacesResponse {
   return {
     workspaces: ['acme', 'other'].map((name) => ({
       name,
       vault_root: `${name}/memory-vault`,
       default_provider: 'claude',
-      gws_profile: '',
+      gws_profile: name === 'acme' ? acmeLink : '',
       color: 'pink',
     })),
     active: 'acme',
@@ -437,6 +437,86 @@ describe('Connect Google account dialog', () => {
         }
       }
       expect(inertSiblings).toBeGreaterThan(0)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('never shows or copies a stored link that is not a plain profile id', async () => {
+    state.workspaces = registry('a;b\nc')
+    const wrapper = await mountOverview()
+    try {
+      const dialog = await openDialog(wrapper)
+      await dialog.findAll('input[type="radio"]')[0].setValue()
+      const shown = dialog.get('code.gws-command').text()
+      expect(shown).toBe('ciao gws acme auth setup')
+      expect(shown).not.toMatch(/[\n;]/)
+      expect(dialog.get('#gws-connect-storage').text()).toContain('secrets/gws-acme/')
+      await button(dialog, 'Check again').trigger('click')
+      await flushPromises()
+      expect(posts(api, '/api/integrations/gws/profiles/add')[0][1]).toMatchObject({ name: 'acme' })
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('reauth on a connected account offers sign in', async () => {
+    state.workspaces = registry('acme')
+    state.gws = integration([profile({ configured: true, client_secret_present: true, email: 'me@acme.co', workspaces: ['acme'] })])
+    vi.stubGlobal('open', vi.fn(() => ({ location: { href: '' }, close: vi.fn() })))
+    const wrapper = await mountOverview()
+    try {
+      await wrapper.get('[aria-label="Actions for Google account"]').trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      await nextTick()
+      const item = wrapper.findAll('.settings-menu-item').find((i) => i.text() === 'Re-authenticate')!
+      await item.trigger('click')
+      await flushPromises()
+      const dialog = wrapper.get('[role="dialog"]')
+      const signIn = button(dialog, 'Sign in with Google')
+      expect(signIn.attributes('disabled')).toBeUndefined()
+      await signIn.trigger('click')
+      await flushPromises()
+      expect(posts(api, '/api/integrations/gws/relogin/start')).toEqual([
+        ['/api/integrations/gws/relogin/start', { profile: 'acme' }],
+      ])
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('links the workspace the dialog was opened for, not the one active later', async () => {
+    state.gws = integration([profile({ client_secret_present: true })])
+    state.exchange = integration([profile({ client_secret_present: true, configured: true })])
+    vi.stubGlobal('open', vi.fn(() => ({ location: { href: '' }, close: vi.fn() })))
+    const wrapper = await mountOverview()
+    try {
+      const dialog = await openDialog(wrapper)
+      await button(dialog, 'Paste a code instead').trigger('click')
+      await flushPromises()
+      await dialog.get('input.gws-auth-input').setValue('4/abc')
+      useProjectStore().activeWorkspace = 'other'
+      await flushPromises()
+      await button(wrapper.get('[role="dialog"]'), 'Complete Sign-In').trigger('click')
+      await flushPromises()
+      expect(vi.mocked(api.patch).mock.calls).toEqual([['/api/workspaces/acme', { gws_profile: 'acme' }]])
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('a failed copy keeps the command visible and says so', async () => {
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText: vi.fn(() => Promise.reject(new Error('denied'))) } })
+    const wrapper = await mountOverview()
+    try {
+      const store = useProjectStore()
+      const toast = vi.spyOn(store, 'pushErrorToast')
+      const dialog = await openDialog(wrapper)
+      await dialog.findAll('input[type="radio"]')[0].setValue()
+      await button(dialog, 'Copy').trigger('click')
+      await flushPromises()
+      expect(toast).toHaveBeenCalledWith('Google account', 'Could not copy. Select the command and copy it by hand.')
+      expect(dialog.get('code.gws-command').text()).toBe('ciao gws acme auth setup')
     } finally {
       wrapper.unmount()
     }

@@ -442,7 +442,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   buttons. Both `inject` `useGwsAccounts` (`GWS_ACCOUNTS_KEY`), which holds every
   Google account call and sign-in flow; `SettingsView.vue` calls it once. The
   account id is derived from the workspace name (`lib/gwsProfileId.ts`, a mirror
-  of `gws_auth.slugify_profile`, pinned by `tests/test_gws_auth.py`) and never
+  of `gws_auth.slugify_profile`; `tests/test_gws_auth.py` pins only its reserved-name list) and never
   typed. The workspace is linked when the account connects, through
   `useWorkspaceAdmin.setWorkspaceGwsLink`; saving the Workspace card never sends
   `gws_profile`.

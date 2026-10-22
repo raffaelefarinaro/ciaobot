@@ -63,7 +63,7 @@
           </div>
           <div v-if="clientMode === 'gcloud'" class="gws-step-panel">
             <div class="gws-command-row">
-              <code ref="gcloudCommand" class="gws-command">ciao gws {{ profileId }} auth setup</code>
+              <code class="gws-command">{{ setupCommand }}</code>
               <button type="button" class="btn-small" @click="copyCommand">Copy</button>
             </div>
             <p class="hint hint--compact">
@@ -105,9 +105,9 @@
               Sign back in to restore Gmail, Calendar, Drive, and scheduled Google tasks.
             </p>
             <p v-if="connected" class="gws-action-hint gws-connected-line">
-              Connected as {{ profile.email || profile.label }}<template v-if="linked">. Linked to {{ workspace }}</template>
+              Connected as {{ profile.email || profile.label }}<template v-if="linked">. Linked to {{ openedWorkspace }}</template>
             </p>
-            <template v-else>
+            <template v-if="!connected || mode === 'reauth'">
               <div v-if="!gwsAuthUrls[profileId] && !gwsReloginPending[profileId]" class="gws-btn-group">
                 <button
                   v-if="profile.loopback_eligible"
@@ -192,10 +192,11 @@ import { GWS_ACCOUNTS_KEY, type GwsAccounts } from '../../composables/useGwsAcco
 import { WORKSPACE_ADMIN_KEY, type WorkspaceAdminContext } from '../../composables/useWorkspaceAdmin'
 import { useProjectStore } from '../../stores/projects'
 import { errorMessage } from '../../lib/errorMessage'
-import { deriveGwsProfileId, gwsStorageHint } from '../../lib/gwsProfileId'
+import { deriveGwsProfileId, gwsStorageHint, slugifyGwsProfile } from '../../lib/gwsProfileId'
 import { gwsAccountState, gwsDialogSteps, type GwsDialogStepId } from '../../lib/gwsSetup'
 import { workspaceLabel } from '../../lib/workspaceLabel'
 import { writeClipboard } from '../../lib/codeCopy'
+import { quoteArg } from '../../lib/shellQuote'
 
 // The Connect Google account dialog: install gws, get an OAuth client, sign
 // in. One modal sheet for the active workspace's account. The account id is
@@ -238,9 +239,11 @@ const projectStore = useProjectStore()
 const sheetEl = ref<HTMLElement | null>(null)
 const nameInput = ref<HTMLInputElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
-const gcloudCommand = ref<HTMLElement | null>(null)
 
 const profileId = ref('')
+// The workspace the dialog was opened for. A later change of the active
+// workspace must not redirect an auto-link that finishes afterwards.
+const openedWorkspace = ref('')
 const displayName = ref('')
 const clientMode = ref<'gcloud' | 'upload'>('upload')
 const linking = ref(false)
@@ -255,7 +258,7 @@ function stepState(id: GwsDialogStepId): string {
 const accountState = computed(() => gwsAccountState(profile.value))
 const connected = computed(() => accountState.value === 'connected')
 const linked = computed(() => {
-  const form = admin.workspaceForms.value.find((f) => f.name === props.workspace)
+  const form = admin.workspaceForms.value.find((f) => f.name === openedWorkspace.value)
   return !!form && form.gws_profile === profileId.value
 })
 
@@ -266,13 +269,18 @@ watch(
   () => props.open,
   (open) => {
     if (!open) return
-    const existing = admin.workspaceForms.value.find((f) => f.name === props.workspace)?.gws_profile
+    openedWorkspace.value = props.workspace
+    // A stored link is adopted only when it is a plain profile id: it ends up in
+    // a command the user pastes into a terminal.
+    const raw = admin.workspaceForms.value.find((f) => f.name === props.workspace)?.gws_profile ?? ''
+    const existing = raw !== '' && slugifyGwsProfile(raw) === raw ? raw : ''
     const taken = new Set(
       (gwsIntegration.value?.profiles ?? [])
         .filter((p) => p.workspaces.some((w) => w !== props.workspace))
         .map((p) => p.name),
     )
     profileId.value = existing || deriveGwsProfileId(props.workspace, taken)
+    delete gwsReloginError.value[profileId.value]
     displayName.value = profile.value?.label || `${workspaceLabel(props.workspace)} Google account`
     clientMode.value = 'upload'
   },
@@ -323,20 +331,22 @@ async function onInstallInChat(): Promise<void> {
   close()
 }
 
+// The id is a plain slug by construction; quoting is defence in depth.
+const setupCommand = computed(() => `ciao gws ${quoteArg(profileId.value, 'posix')} auth setup`)
+
 async function copyCommand(): Promise<void> {
-  const text = gcloudCommand.value?.textContent ?? ''
-  if (await writeClipboard(text)) return
-  const el = gcloudCommand.value
-  if (el) window.getSelection()?.selectAllChildren(el)
+  if (await writeClipboard(setupCommand.value)) return
+  // The command stays on screen as selectable text.
+  projectStore.pushErrorToast('Google account', 'Could not copy. Select the command and copy it by hand.')
 }
 
 watch([connected, () => props.open], async ([isConnected, isOpen]) => {
   if (!isConnected || !isOpen || linked.value || linking.value) return
   linking.value = true
   try {
-    await admin.setWorkspaceGwsLink(props.workspace, profileId.value)
+    await admin.setWorkspaceGwsLink(openedWorkspace.value, profileId.value)
   } catch (e) {
-    projectStore.pushErrorToast('Could not link the Google account', `${props.workspace}: ${errorMessage(e)}`)
+    projectStore.pushErrorToast('Could not link the Google account', `${openedWorkspace.value}: ${errorMessage(e)}`)
   } finally {
     linking.value = false
   }
