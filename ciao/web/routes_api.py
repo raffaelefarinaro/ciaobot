@@ -5084,13 +5084,16 @@ def _open_path_with_default_app(path: Path) -> None:
 
 
 async def workspace_open(request: Request) -> Response:
-    """Open a file with the OS default application on the machine running Ciao.
+    """Open a path with the OS default application on the machine running Ciao.
 
     Body: ``{"path": str}``. Uses the same path resolver as the workspace
     viewers (relative paths anchor to workspace_root; fuzzy basename lookup
-    is allowed). The open happens on the engine's machine, so a remote caller
-    (a phone, another Mac over Tailscale) would pop the file up on a screen
-    nobody is looking at: refused, and the PWA hides the action there.
+    is allowed for files). Directories are opened too — that is the file
+    manager — because an agent that points at a folder is pointing at a
+    thing the user wants to see. The open happens on the engine's machine,
+    so a remote caller (a phone, another Mac over Tailscale) would pop the
+    file up on a screen nobody is looking at: refused, and the PWA hides
+    the action there.
     """
     if not is_loopback_client(request):
         return JSONResponse(
@@ -5107,7 +5110,7 @@ async def workspace_open(request: Request) -> Response:
 
     config = request.app.state.config
     roots = _allowed_roots(config)
-    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True, allow_dir=True)
     if isinstance(result, Response):
         return result
     resolved = result

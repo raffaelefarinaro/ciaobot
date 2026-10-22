@@ -300,6 +300,21 @@ export function linkifyHtml(html: string, knownPaths: string[] = []): string {
       i = close + 4
       continue
     }
+    // Skip <button ...>...</button> blocks as well. The openable dead-link
+    // button (lib/safeMarkdown.ts) carries a path as visible text, and
+    // wrapping that text in an inner `<a class="file-link">` would intercept
+    // the click. Text inside a button is otherwise plain button markup, not
+    // prose.
+    if (lower.startsWith('<button', i)) {
+      const close = lower.indexOf('</button>', i)
+      if (close === -1) {
+        out += html.slice(i)
+        break
+      }
+      out += html.slice(i, close + 8)
+      i = close + 8
+      continue
+    }
     // Advance to the next tag boundary; linkify the text span we skip over.
     const nextTag = html.indexOf('<', i)
     if (nextTag === -1) {
