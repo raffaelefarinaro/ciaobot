@@ -240,9 +240,9 @@ describe('TaskOriginNote', () => {
     await wrapper.findAll('button').find((b) => b.text() === 'Approve Done')!.trigger('click')
     await flushPromises()
 
-    // The write disables the field, and a browser moves focus off an element
-    // it disables; jsdom keeps the focus on the disabled field, so take it
-    // away by hand — the task link is the next focusable stop.
+    // jsdom keeps the focus on a disabled field, as Chromium does, so the
+    // refusal would find the field still focused and the assertion would
+    // pass by accident; take it away by hand — the link is the next stop.
     wrapper.get('a').element.focus()
     expect(document.activeElement).not.toBe(wrapper.get('#task-origin-resolution').element)
 
