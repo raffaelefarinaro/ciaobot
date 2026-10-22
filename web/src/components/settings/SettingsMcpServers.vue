@@ -185,7 +185,7 @@ function flashNote(text: string): void {
 async function runCommand(cmd: string | null, opts?: { enter?: boolean }): Promise<void> {
   if (!cmd || terminal.busy.value) return
   const result = await terminal.run(cmd, opts)
-  if (result === 'typed') flashNote('Typed in the terminal below')
+  if (result === 'typed') flashNote('Typed in a separate Ciao terminal session below')
   else if (result === 'copied') flashNote('Copied. Paste it into the terminal.')
   else flashNote(`Could not reach the terminal or the clipboard. Run this yourself: ${cmd}`)
 }

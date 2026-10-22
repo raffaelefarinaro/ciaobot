@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive } from 'vue'
 import { resetRunInTerminalSession, useRunInTerminal } from '../useRunInTerminal'
 
@@ -46,14 +46,13 @@ describe('useRunInTerminal', () => {
       const created = { session_id: `s${terminal.sessions.length + 1}`, exited: false }
       terminal.sessions = [...terminal.sessions, created]
       terminal.activeSession = created
+      terminal.phase = 'ready'
       setTimeout(() => { terminal.phase = 'live' }, 0)
       return true
     })
     terminal.sendInput.mockReset().mockReturnValue(true)
     writeClipboard.mockReset().mockResolvedValue(true)
   })
-
-  afterEach(async () => { await new Promise(resolve => setTimeout(resolve, 5)) })
 
   it('types the command with Enter once the shell is live', async () => {
     const { run, busy } = useRunInTerminal(500)
@@ -102,6 +101,34 @@ describe('useRunInTerminal', () => {
     expect(await run('two')).toBe('typed')
     expect(terminal.createSession).toHaveBeenCalledTimes(2)
     expect(terminal.activeSession?.session_id).toBe('s2')
+  })
+
+  it('copies when the user switches to another session before the shell is live', async () => {
+    terminal.createSession.mockImplementation(async () => {
+      const created = { session_id: 's1', exited: false }
+      terminal.sessions = [created, { session_id: 'users', exited: false }]
+      terminal.activeSession = created
+      terminal.phase = 'connecting'
+      setTimeout(() => { terminal.activeSession = { session_id: 'users' }; terminal.phase = 'live' }, 0)
+      return true
+    })
+    const { run } = useRunInTerminal(500)
+    expect(await run('cmd')).toBe('copied')
+    expect(terminal.sendInput).not.toHaveBeenCalled()
+    expect(writeClipboard).toHaveBeenCalledWith('cmd')
+  })
+
+  it('keeps a remembered session per project', async () => {
+    const { run } = useRunInTerminal(500)
+    await run('one')
+    projects.workspaceProjects = [{ project_id: 'p2' }]
+    await run('two')
+    expect(terminal.createSession).toHaveBeenCalledTimes(2)
+    projects.workspaceProjects = [{ project_id: 'p1' }]
+    terminal.sessions = terminal.sessions.filter(e => e.session_id === 's1')
+    await run('three')
+    expect(terminal.createSession).toHaveBeenCalledTimes(2)
+    expect(terminal.selectSession).toHaveBeenCalledWith('s1')
   })
 
   it('copies when a new session cannot be created', async () => {

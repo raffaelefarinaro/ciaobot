@@ -50,6 +50,14 @@ describe('mcpCommand', () => {
   })
 })
 
+describe('powershell commas', () => {
+  it('quotes a url containing a comma so it is not split into an array', () => {
+    expect(quoteArg('https://a.com/a,b', 'powershell')).toBe("'https://a.com/a,b'")
+    expect(quoteArg('https://a.com/a,b', 'posix')).toBe('https://a.com/a,b')
+    expect(mcpCommand({ shell: 'powershell', cdPrefix: 'P; ', provider: 'claude', action: 'add', name: 'notion', url: 'https://a.com/a,b' })).toBe("P; claude mcp add --scope local --transport http notion 'https://a.com/a,b'")
+  })
+})
+
 describe('url hardening', () => {
   const add = (url: string, shell: 'posix' | 'powershell' = 'posix', cdPrefix = PREFIX) =>
     mcpCommand({ shell, cdPrefix, provider: 'claude', action: 'add', name: 'notion', url })

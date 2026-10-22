@@ -3,9 +3,11 @@ export type McpProvider = 'claude' | 'opencode'
 export type McpAction = 'add' | 'list' | 'login' | 'remove' | 'logout'
 
 const SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/
+// PowerShell turns an unquoted comma into an array, so it is not safe there.
+const SAFE_ARG_POWERSHELL = /^[A-Za-z0-9_@%+=:./-]+$/
 
 export function quoteArg(arg: string, shell: ShellKind): string {
-  if (SAFE_ARG.test(arg)) return arg
+  if ((shell === 'powershell' ? SAFE_ARG_POWERSHELL : SAFE_ARG).test(arg)) return arg
   const escaped = shell === 'powershell' ? arg.replace(/['\u2018-\u201B]/g, ch => ch + ch) : arg.replace(/'/g, "'\\''")
   return `'${escaped}'`
 }
@@ -33,7 +35,7 @@ export function serverUrlError(raw: string, shell: ShellKind): string | null {
   if (!validServerUrl(raw)) return 'Enter an http:// or https:// URL without spaces.'
   const href = new URL(raw).href
   if (shell === 'powershell' && (CMD_EXE_META.test(raw) || CMD_EXE_META.test(href))) {
-    return "This URL has characters the Windows terminal can't pass safely. Use Copy and adjust the command by hand."
+    return "This URL has characters the Windows terminal can't pass safely. Type the add command yourself in a terminal."
   }
   if (!HREF_ALLOWLIST.test(href)) return 'Enter an http:// or https:// URL using plain ASCII characters.'
   return null
