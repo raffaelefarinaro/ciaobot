@@ -323,6 +323,136 @@ async def test_a_sessionless_chat_serves_the_durable_transcript(monkeypatch) -> 
     assert rows == TRANSCRIPT_ROWS
 
 
+@pytest.mark.asyncio
+async def test_a_failed_turn_keeps_its_row_and_does_not_shift_the_next_turn(
+    monkeypatch,
+) -> None:
+    """#1861: a send that died before the provider recorded it still renders.
+
+    The provider session holds only the turn that reached the model, so
+    numbering its user rows by session position stamped the surviving question
+    with the failed send's index and ``sent_at``. The failed turn is in the
+    durable transcript with ``is_error`` on its assistant row; it must own its
+    user row, its error row, and the numbering.
+    """
+    durable = [
+        {
+            "role": "user",
+            "content": "and you also didn't find one?",
+            "turn_index": 0,
+            "sent_at": "2026-10-22T11:26:33Z",
+        },
+        {
+            "role": "assistant",
+            "content": "TimeoutError",
+            "sent_at": "2026-10-22T11:26:33Z",
+            "is_error": True,
+        },
+        {
+            "role": "user",
+            "content": "Why is stopped?",
+            "turn_index": 1,
+            "sent_at": "2026-10-22T11:52:58Z",
+        },
+        {
+            "role": "assistant",
+            "content": "Nothing is stuck.",
+            "sent_at": "2026-10-22T11:52:58Z",
+        },
+    ]
+    session = [
+        SimpleNamespace(type="user", message={"content": "Why is stopped?"}),
+        SimpleNamespace(
+            type="assistant",
+            message={"content": [{"type": "text", "text": "Nothing is stuck."}]},
+        ),
+    ]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_timings={
+            "0": {"sent_at": "2026-10-22T11:26:33Z"},
+            "1": {"sent_at": "2026-10-22T11:52:58Z"},
+        },
+        user_turn_origin={"1": "retry"},
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm(durable), _config(), chat
+    )
+
+    assert rows == [
+        {
+            "role": "user",
+            "content": "and you also didn't find one?",
+            "turn_index": 0,
+            "sent_at": "2026-10-22T11:26:33Z",
+        },
+        {
+            "role": "assistant",
+            "content": "TimeoutError",
+            "sent_at": "2026-10-22T11:26:33Z",
+            "is_error": True,
+        },
+        {
+            "role": "user",
+            "content": "Why is stopped?",
+            "turn_index": 1,
+            "sent_at": "2026-10-22T11:52:58Z",
+            "origin": "retry",
+        },
+        {"role": "assistant", "content": "Nothing is stuck."},
+    ]
+    assert [
+        row
+        for row in rows
+        if row.get("turn_index") == 0 and row.get("content") == "Why is stopped?"
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_a_non_error_turn_missing_from_the_session_adds_no_row(
+    monkeypatch,
+) -> None:
+    """Compaction / session reset: only an *error* durable turn may be rendered.
+
+    A durable turn the session legitimately does not contain (a compaction
+    summary, a rotation) must keep today's numbering and add no row, so no
+    transcript is ever duplicated.
+    """
+    durable = [
+        {
+            "role": "user",
+            "content": "older turn",
+            "turn_index": 0,
+            "sent_at": "2026-10-22T10:00:00Z",
+        },
+        {
+            "role": "user",
+            "content": "newer turn",
+            "turn_index": 1,
+            "sent_at": "2026-10-22T10:05:00Z",
+        },
+    ]
+    session = [SimpleNamespace(type="user", message={"content": "newer turn"})]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(user_turn_timings={}, user_turn_unattended={})
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm(durable), _config(), chat
+    )
+
+    users = [row for row in rows if row.get("role") == "user"]
+    assert len(users) == 1
+    assert users[0]["content"] == "newer turn"
+    assert users[0]["turn_index"] == 1
+    assert all(row.get("content") != "older turn" for row in rows)
+
+
 def test_subagent_rows_match_the_wire_contract() -> None:
     rendered = transcript_service._render_subagent_messages(
         [SDK_USER, SDK_ASSISTANT, SDK_RESULT]

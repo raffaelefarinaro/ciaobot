@@ -3892,6 +3892,46 @@ describe('optimistic user bubble reconciliation', () => {
     expect(userMsgs).toHaveLength(1)
   })
 
+  test('server history and the live bubble agree after a failed turn', async () => {
+    // Regression pin for #1861's symptom, not for a client rule: a send that
+    // died before the provider recorded it used to make the server number the
+    // NEXT turn one early, so that turn's live bubble and the server's row
+    // carried different turn indices and both rendered. With the server
+    // numbering from the durable turns, the live bubble pairs with its own row
+    // and only ONE bubble per send survives the merge. The merge code itself
+    // needs no change, and this test fails if it stops pairing them.
+    const store = useProjectStore()
+    const chatId = 'chat-failed-turn'
+    store.messages[chatId] = [
+      { role: 'user', content: 'why?', timestamp: '2026-10-22T11:52:58Z', turn_index: 1, i: 0 },
+      { role: 'assistant', content: 'Nothing is stuck.', timestamp: '2026-10-22T11:54:18Z', i: 1 },
+      // The live bubble for the send still in flight: no server index yet.
+      { role: 'user', content: 'again?', timestamp: '2026-10-22T12:00:00Z', turn_index: 2 },
+    ]
+    apiGet.mockResolvedValue({
+      items: [
+        { i: 0, role: 'user', content: 'why?', sent_at: '2026-10-22T11:52:58Z', turn_index: 1 },
+        { i: 1, role: 'assistant', content: 'Nothing is stuck.', sent_at: '2026-10-22T11:54:18Z' },
+        { i: 2, role: 'user', content: 'again?', sent_at: '2026-10-22T12:00:00Z', turn_index: 2 },
+      ],
+      total: 3, offset: 0, limit: 50, hasMore: false, nextOffset: null,
+    })
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.map(m => `${m.role}:${m.content}`)).toEqual([
+      'user:why?',
+      'assistant:Nothing is stuck.',
+      'user:again?',
+    ])
+    // The live bubble adopted the server row for its own turn (index 2) instead
+    // of being left below the answer as a second copy.
+    const bubbles = msgs.filter(m => m.role === 'user')
+    expect(bubbles.map(m => m.turn_index)).toEqual([1, 2])
+    expect(msgs.at(-1)?.i).toBe(2)
+  })
+
   test('a flat reload keeps both bubbles when the server holds the text twice', async () => {
     // The mirror of the case above: a deliberate repeat. The server holds the
     // message twice, so both bubbles are real and must survive the reload.

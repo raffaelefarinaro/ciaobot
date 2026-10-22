@@ -913,6 +913,175 @@ def _opencode_child_turn_index(info: dict, chat) -> int:
     return best
 
 
+def _stamp_user_turn(
+    entry: dict,
+    chat: Any,
+    turn_index: int,
+    raw_message: Any,
+    fallback_sent_at: str = "",
+) -> None:
+    """Stamp the index-derived fields for one user row.
+
+    ``raw_message`` is the SDK message object, needed only for the inline-image
+    fallback on a session row; ``fallback_sent_at`` is the durable turn's own
+    timestamp, used only when ``user_turn_timings`` has no send time.
+
+    The fields this helper owns are cleared before stamping, so re-stamping a
+    row with the turn index it really belongs to cannot leave the previous
+    turn's flags on it. ``images`` survive when the new turn has no record,
+    because they came from the session's own inline blocks.
+    """
+    for key in ("sent_at", "steered", "unattended", "origin"):
+        entry.pop(key, None)
+    # Image refs are recorded per user-turn index at send time. JSON keys are
+    # strings, but tolerate int lookups too in case the map has been mutated
+    # in-memory since the last save.
+    refs = chat.user_turn_images.get(str(turn_index))
+    if refs is None:
+        refs = chat.user_turn_images.get(turn_index)
+    if refs:
+        entry["images"] = list(refs)
+    elif raw_message is not None:
+        # Fall back to inline base64 images from the SDK session. This handles
+        # sessions that were context-compacted: the user_turn_images index map
+        # becomes stale after compaction shifts the turn numbering, but inline
+        # images survive.
+        inline = _extract_inline_images(raw_message)
+        if inline:
+            entry["images"] = inline
+    # Surface the user-turn index so the client can dedup replayed user_echo
+    # events against history it already loaded.
+    entry["turn_index"] = turn_index
+    # Attach the persisted send time so the UI footer can show it on reload.
+    # Missing for pre-feature chats: the frontend treats an empty string as
+    # "no timestamp".
+    timing = chat.user_turn_timings.get(str(turn_index)) or chat.user_turn_timings.get(turn_index)
+    sent_at = timing.get("sent_at") if isinstance(timing, dict) else ""
+    if not sent_at:
+        sent_at = fallback_sent_at
+    if sent_at:
+        entry["sent_at"] = sent_at
+    # Loop/schedule ticks are user turns in the session file too, so the flag
+    # has to come from our own per-turn record.
+    if chat.user_turn_steered.get(str(turn_index)) or chat.user_turn_steered.get(turn_index):
+        entry["steered"] = True
+    elif chat.user_turn_unattended.get(str(turn_index)) or chat.user_turn_unattended.get(turn_index):
+        entry["unattended"] = True
+    origin = chat.user_turn_origin.get(str(turn_index)) or chat.user_turn_origin.get(turn_index)
+    if origin:
+        entry["origin"] = origin
+
+
+def _align_user_turns(
+    result: list[dict],
+    session_user_rows: list[tuple[int, str]],
+    current_rows: list[dict],
+    chat: Any,
+) -> list[dict]:
+    """Align rendered session user rows with the durable transcript's turns.
+
+    This module numbers user rows by their position in the provider session,
+    while the engine numbers turns per send. A send that died before the
+    provider recorded anything is absent from the session, so every later
+    session row inherited its ``turn_index``, its ``sent_at`` and its per-turn
+    flags. The durable transcript does hold that turn (``is_error`` on its
+    assistant row), so walk both lists in order and re-stamp each session row
+    from the durable turn it pairs with.
+
+    Only an *error* durable turn with no session counterpart is rendered as a
+    lost turn. Any other mismatch — a compaction summary, a session reset —
+    keeps the session's own numbering and adds no row, so no transcript can be
+    duplicated.
+    """
+    durable = [
+        (index, row)
+        for index, row in enumerate(current_rows)
+        if row.get("role") == "user"
+    ]
+    if not durable:
+        return result
+    base = chat.turn_index_base
+
+    def failed_turn(index: int) -> bool:
+        """Whether the durable reply to the turn at ``index`` is an error row."""
+        if index + 1 >= len(current_rows):
+            return False
+        reply = current_rows[index + 1]
+        return reply.get("role") == "assistant" and bool(reply.get("is_error"))
+
+    def lost_turn_rows(index: int, row: dict) -> list[dict]:
+        """The two durable rows for a send the provider never recorded."""
+        user_row: dict = {
+            "role": "user",
+            "content": row.get("content") or "",
+            "turn_index": base + int(row.get("turn_index") or 0),
+            "sent_at": str(row.get("sent_at") or ""),
+        }
+        return [user_row, {**current_rows[index + 1], "is_error": True}]
+
+    def has_session_counterpart(text: str, start: int) -> bool:
+        """Whether any session user row from ``start`` on carries this text.
+
+        A durable transcript can hold fewer turns than the session — a chat
+        whose recording starts partway through, or a store that was reset. Its
+        turn indices are then relative to that shorter list, so re-stamping a
+        session row from them would misnumber it. Only a failed turn with no
+        counterpart at all may be rendered, which keeps this path from ever
+        duplicating a row the session already holds.
+        """
+        wanted = " ".join(text.split())
+        return any(
+            " ".join(session_text.split()) == wanted
+            for _pos, session_text in session_user_rows[start:]
+        )
+
+    # Durable turns in order: the position their row already holds in
+    # ``result`` (or -1 when the session has no row for them), their index in
+    # ``current_rows``, and the durable row itself.
+    walk: list[tuple[int, int, dict]] = []
+    session_pos = 0
+    for index, row in durable:
+        if session_pos >= len(session_user_rows):
+            # The session ended first: only a failed turn still earns a row.
+            if failed_turn(index):
+                walk.append((-1, index, row))
+            continue
+        rendered_at, text = session_user_rows[session_pos]
+        if " ".join(str(row.get("content") or "").split()) == " ".join(text.split()):
+            walk.append((rendered_at, index, row))
+            session_pos += 1
+        elif failed_turn(index) and not has_session_counterpart(
+            str(row.get("content") or ""), session_pos
+        ):
+            walk.append((-1, index, row))
+    for rendered_at, _index, row in walk:
+        if rendered_at < 0:
+            continue
+        _stamp_user_turn(
+            result[rendered_at],
+            chat,
+            base + int(row.get("turn_index") or 0),
+            raw_message=None,
+            fallback_sent_at=str(row.get("sent_at") or ""),
+        )
+    insertions: list[tuple[int, list[dict]]] = []
+    for position, (rendered_at, index, row) in enumerate(walk):
+        if rendered_at >= 0:
+            continue
+        anchor = len(result)
+        for later_at, _later_index, _later_row in walk[position + 1:]:
+            if later_at >= 0:
+                anchor = later_at
+                break
+        insertions.append((anchor, lost_turn_rows(index, row)))
+    # Anchors are non-decreasing along the walk, so inserting from the highest
+    # one down keeps the earlier positions valid; equal anchors go in last to
+    # keep the durable order.
+    for anchor, rows in reversed(insertions):
+        result[anchor:anchor] = rows
+    return result
+
+
 def _overlay_transcript_metadata(
     entries: list[dict], transcript_rows: list[dict]
 ) -> None:
@@ -1222,6 +1391,10 @@ async def _assemble_chat_messages(
         return list(handover_messages)
 
     user_idx = chat.turn_index_base
+    # Every user row this session rendered, with the text the durable
+    # transcript is compared against: a send that died before the provider
+    # wrote it shifts this numbering off the durable one.
+    session_user_rows: list[tuple[int, str]] = []
     failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         if m.type == "assistant":
@@ -1390,40 +1563,8 @@ async def _assemble_chat_messages(
             "content": content,
         }
         if m.type == "user":
-            # Image refs are recorded per user-turn index at send time. JSON
-            # keys are strings, but tolerate int lookups too in case the map
-            # has been mutated in-memory since the last save.
-            refs = chat.user_turn_images.get(str(user_idx))
-            if refs is None:
-                refs = chat.user_turn_images.get(user_idx)
-            if refs:
-                entry["images"] = list(refs)
-            else:
-                # Fall back to inline base64 images from the SDK session.
-                # This handles sessions that were context-compacted: the
-                # user_turn_images index map becomes stale after compaction
-                # shifts the turn numbering, but inline images survive.
-                inline = _extract_inline_images(m.message)
-                if inline:
-                    entry["images"] = inline
-            # Surface the user-turn index so the client can dedup replayed
-            # user_echo events against history it already loaded.
-            entry["turn_index"] = user_idx
-            # Attach the persisted send time so the UI footer can show it on
-            # reload. Missing for pre-feature chats: the frontend treats an
-            # empty string as "no timestamp".
-            timing = chat.user_turn_timings.get(str(user_idx)) or chat.user_turn_timings.get(user_idx)
-            if timing and timing.get("sent_at"):
-                entry["sent_at"] = timing["sent_at"]
-            # Loop/schedule ticks are user turns in the session file too, so the
-            # flag has to come from our own per-turn record.
-            if chat.user_turn_steered.get(str(user_idx)) or chat.user_turn_steered.get(user_idx):
-                entry["steered"] = True
-            elif chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
-                entry["unattended"] = True
-            origin = chat.user_turn_origin.get(str(user_idx)) or chat.user_turn_origin.get(user_idx)
-            if origin:
-                entry["origin"] = origin
+            _stamp_user_turn(entry, chat, user_idx, m.message)
+            session_user_rows.append((len(result), content))
             user_idx += 1
         result.append(entry)
     # Stitch the durable transcript's per-turn metadata (token usage with the
@@ -1434,6 +1575,10 @@ async def _assemble_chat_messages(
     current = pcm._transcripts.current_messages(
         ChatContext.for_web(chat_id), provider
     )
+    # Number the session rows from the durable turns they pair with, and
+    # render the failed turns the session cannot contain, before the metadata
+    # overlay walks the rows by turn index.
+    result = _align_user_turns(result, session_user_rows, current, chat)
     if current and result:
         _overlay_transcript_metadata(result, current)
     _overlay_assistant_timings(result, chat.user_turn_timings)
