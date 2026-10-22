@@ -992,17 +992,30 @@ def _align_user_turns(
     Numbering positionally is what keeps the common shapes untouched: with no
     lost turn the session's own ``base + position`` is already the engine's
     numbering for steered, in-flight and post-handover rows alike. A durable
-    turn the session cannot show still consumes a chat turn, so it shifts the
-    rows after it even when it renders nothing.
+    turn the session cannot show consumes a chat turn only when the stint is
+    provably short of counted sends, so an engine-rewritten prompt (an
+    attachment's ``ciao-drop:`` refs expanded into absolute paths) never shifts
+    the rows after it.
+
+    A durable file also holds turns that are not counted sends at all: our own
+    hidden continuation prompts are written by ``record_turn`` without bumping
+    ``user_turn_count`` and are hidden by the renderer, so they are dropped
+    before the walk.
 
     Only an *error* durable turn with no session counterpart is rendered as a
-    lost turn. Any other mismatch — a compaction summary, a session reset —
-    adds no row.
+    lost turn.
     """
     durable = [
         (index, row)
         for index, row in enumerate(current_rows)
         if row.get("role") == "user"
+    ]
+    # Continuation prompts are recorded as turns but never counted as sends and
+    # never rendered, so they own no turn index.
+    durable = [
+        (index, row)
+        for index, row in durable
+        if not cli_envelopes.is_hidden_continuation(str(row.get("content") or ""))
     ]
     if not durable or not session_user_rows:
         return result
@@ -1010,18 +1023,22 @@ def _align_user_turns(
     # The durable file belongs to a provider stint: a handover leaves the
     # previous provider's file on disk, so it can hold turns this chat no
     # longer renders. A steer bumps `user_turn_count` without writing a durable
-    # turn, and a turn in flight is counted at send time while `record_turn`
-    # writes at completion, so both are subtracted from how many durable turns
-    # the current stint can have. `count == 0` is the older-state/test-double
-    # case: nothing is sliced.
+    # turn, so it is subtracted from how many durable turns the current stint
+    # can have. `count == 0` is the older-state/test-double case: nothing is
+    # sliced.
     count = int(getattr(chat, "user_turn_count", 0) or 0)
+    expected = 0
     if count:
         steered = sum(
             1
             for key in getattr(chat, "user_turn_steered", {})
             if int(key) >= base and int(key) < count
         )
-        capacity = (count - base) - steered - (1 if in_flight else 0)
+        expected = (count - base) - steered
+        # `record_turn` runs before the stream closes, so the finished turn can
+        # already be in the durable file while the stream is still active:
+        # subtract the in-flight turn only when the file does not hold it.
+        capacity = expected - (1 if in_flight and len(durable) < expected else 0)
         if capacity <= 0:
             # Nothing this stint can be aligned against.
             return result
@@ -1103,22 +1120,19 @@ def _align_user_turns(
             pairs.append((session_pos, index, row))
             session_pos += 1
         elif not has_session_counterpart(text, session_pos):
-            # The session cannot show this durable turn. A failed send is the
-            # case the whole path exists for; any other is a compaction or a
-            # reset, which keeps its engine turn number but renders no row.
-            # A turn whose text is still ahead in the session is only a stalled
-            # match (a steer row sits in the way), so it shifts nothing.
-            shifts.append((
-                session_pos,
-                "lost" if failed_turn(index) else "skipped",
-                index,
-                row,
-            ))
-    # A stale prefix row from the provider stint this chat left must never
-    # shift the current stint's numbering.
-    first_pair = pairs[0][0] if pairs else len(session_user_rows)
-    if base > 0:
-        shifts = [entry for entry in shifts if entry[0] >= first_pair]
+            # A failed send is the case the whole path exists for: the session
+            # cannot hold it, so it owns its row and its index.
+            if failed_turn(index):
+                shifts.append((session_pos, "lost", index, row))
+                continue
+            # For any other turn, a text mismatch is only a *missing* turn when
+            # the stint is provably short of counted sends. Otherwise the prompt
+            # was engine-rewritten (an attachment's refs expanded), or the match
+            # stalled behind a steer row: advance the durable cursor only, so
+            # nothing is renumbered.
+            deficit = expected - len(session_user_rows) - len(shifts)
+            if count == 0 or deficit > 0:
+                shifts.append((session_pos, "skipped", index, row))
     shift_anchors = [anchor for anchor, _kind, _index, _row in shifts]
 
     def shifts_up_to(position: int) -> int:
@@ -1653,8 +1667,9 @@ async def _assemble_chat_messages(
     # Number the session rows from the durable turns they pair with, and
     # render the failed turns the session cannot contain, before the metadata
     # overlay — which pairs the transcript's assistant rows to the entry rows
-    # positionally — runs. A chat whose turn is still running has one durable
-    # turn fewer than its counter, so the alignment has to know about it.
+    # positionally — runs. `in_flight` is only subtracted when the durable file
+    # does not already hold the running turn, since `record_turn` runs before
+    # the stream closes.
     resolver = getattr(pcm, "get_active_stream", None)
     in_flight = bool(resolver(chat_id)) if callable(resolver) else False
     result = _align_user_turns(

@@ -20,6 +20,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from ciao import cli_envelopes
+from ciao.models import AgentRequest, ChatContext
+from ciao.transcripts import TranscriptStore
 from ciao.web import app as web_app
 from ciao.web import transcript_service
 
@@ -649,6 +652,41 @@ async def test_a_restamped_row_does_not_keep_the_failed_sends_images(
     assert "images" not in restamped
 
 
+def _pcm_store(store: TranscriptStore, get_active_stream: object = None) -> SimpleNamespace:
+    """A manager double whose durable transcript is a real store."""
+    return SimpleNamespace(
+        _transcripts=store,
+        _agent_root_for_chat=lambda _cid: "/tmp",
+        get_active_stream=get_active_stream or (lambda _cid: None),
+    )
+
+
+def _record_turn(
+    store: TranscriptStore,
+    prompt: str,
+    response: str,
+    *,
+    is_error: bool = False,
+) -> None:
+    store.record_turn(
+        AgentRequest(
+            prompt=prompt,
+            model="sonnet",
+            mode="bypass",
+            resume_session=None,
+            images=[],
+        ),
+        ctx=ChatContext.for_web("chat-1"),
+        response_text=response,
+        effective_model="sonnet",
+        session_id="s",
+        usage={},
+        quota={},
+        input_kind="text",
+        is_error=is_error,
+    )
+
+
 def _sdk_user(text: str) -> SimpleNamespace:
     return SimpleNamespace(type="user", message={"content": text})
 
@@ -799,6 +837,161 @@ async def test_a_failed_first_send_still_renders(monkeypatch) -> None:
         },
         {"role": "assistant", "content": "Nothing is stuck."},
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_hidden_continuation_does_not_shift_the_numbering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The durable file records our continuation prompts, the engine does not.
+
+    `record_turn` writes the continuation prompt as a turn, but it never bumps
+    `user_turn_count` and the renderer hides it, so it is not a chat turn: it
+    must not consume an index for the rows after it.
+    """
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "transcripts")
+    for prompt in ("initial", cli_envelopes.CODE_MODE_CONTINUE_PROMPT, "second"):
+        _record_turn(store, prompt, "answer")
+    session = [
+        _sdk_user("initial"),
+        _sdk_assistant("a1"),
+        _sdk_user(cli_envelopes.CODE_MODE_CONTINUE_PROMPT),
+        _sdk_assistant("a2"),
+        _sdk_user("second"),
+        _sdk_assistant("a3"),
+    ]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_count=2,
+        user_turn_timings={
+            "0": {"sent_at": "2026-10-22T10:00:00Z"},
+            "1": {"sent_at": "2026-10-22T10:01:00Z"},
+        },
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm_store(store), _config(), chat
+    )
+
+    users = [
+        (row["content"], row["turn_index"], row.get("sent_at"))
+        for row in rows
+        if row["role"] == "user"
+    ]
+    assert users == [
+        ("initial", 0, "2026-10-22T10:00:00Z"),
+        ("second", 1, "2026-10-22T10:01:00Z"),
+    ]
+    assert all(
+        cli_envelopes.CODE_MODE_CONTINUE_PROMPT not in str(row.get("content") or "")
+        for row in rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_attachment_prompt_does_not_shift_the_numbering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The durable prompt keeps ``ciao-drop:`` tokens; the session expands them.
+
+    The same send renders different text on the two sides, so a text mismatch
+    there is not a turn the session is missing.
+    """
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "transcripts")
+    _record_turn(store, "Summarise these `ciao-drop:drop_abc`", "First answer")
+    _record_turn(store, "next question", "Second answer")
+    session = [
+        _sdk_user("Summarise these /tmp/a.pdf"),
+        _sdk_assistant("First answer"),
+        _sdk_user("next question"),
+        _sdk_assistant("Second answer"),
+    ]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_count=2,
+        user_turn_timings={
+            "0": {"sent_at": "2026-10-22T10:00:00Z"},
+            "1": {"sent_at": "2026-10-22T10:01:00Z"},
+        },
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm_store(store), _config(), chat
+    )
+
+    users = [
+        (row["content"], row["turn_index"], row.get("sent_at"))
+        for row in rows
+        if row["role"] == "user"
+    ]
+    assert users == [
+        ("Summarise these /tmp/a.pdf", 0, "2026-10-22T10:00:00Z"),
+        ("next question", 1, "2026-10-22T10:01:00Z"),
+    ]
+    assert len(rows) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_turn_that_is_still_streaming_is_not_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`record_turn` runs before the stream closes.
+
+    With the third send already recorded, the counter and the durable file both
+    hold three turns while the stream is still open, so subtracting the
+    "in-flight" turn again slices the stint down to its last two rows — here it
+    drops the failed send the whole path exists to render.
+    """
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "transcripts")
+    _record_turn(store, "comment", "TimeoutError", is_error=True)
+    _record_turn(store, "why?", "Nothing is stuck.")
+    _record_turn(store, "third", "third answer")
+    session = [
+        _sdk_user("why?"),
+        _sdk_assistant("Nothing is stuck."),
+        _sdk_user("third"),
+        _sdk_assistant("third answer"),
+    ]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_count=3,
+        user_turn_timings={
+            "0": {"sent_at": "2026-10-22T11:26:33Z"},
+            "1": {"sent_at": "2026-10-22T11:52:58Z"},
+            "2": {"sent_at": "2026-10-22T12:10:00Z"},
+        },
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm_store(store, get_active_stream=lambda _cid: object()), _config(), chat
+    )
+
+    assert [
+        (row["role"], row["content"], row.get("turn_index"), row.get("is_error"))
+        for row in rows
+    ] == [
+        ("user", "comment", 0, None),
+        ("assistant", "TimeoutError", None, True),
+        ("user", "why?", 1, None),
+        ("assistant", "Nothing is stuck.", None, None),
+        ("user", "third", 2, None),
+        ("assistant", "third answer", None, None),
+    ]
+    # The failed turn carries its own record time, not the next turn's send.
+    assert rows[0]["sent_at"] == (
+        store.current_messages(ChatContext.for_web("chat-1"))[0]["sent_at"]
+    )
+    assert rows[2]["sent_at"] == "2026-10-22T11:52:58Z"
+    assert rows[4]["sent_at"] == "2026-10-22T12:10:00Z"
 
 
 def test_subagent_rows_match_the_wire_contract() -> None:
