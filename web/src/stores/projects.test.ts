@@ -6419,6 +6419,42 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).not.toHaveBeenCalled()
   })
 
+  test('switchWorkspace asks the settings guard first and stays when it declines', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const guard = vi.fn().mockResolvedValue(false)
+    store.setWorkspaceSwitchGuard(guard)
+
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(guard).toHaveBeenCalledWith('work')
+    expect(store.activeWorkspace).toBe('work')
+
+    guard.mockResolvedValue(true)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+    expect(store.activeWorkspace).toBe('personal')
+    // Already there counts as switched.
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+
+    store.setWorkspaceSwitchGuard(null)
+    await store.switchWorkspace('work', { transition: false })
+    expect(guard).toHaveBeenCalledTimes(2)
+    expect(store.activeWorkspace).toBe('work')
+  })
+
+  test('clearWorkspaceSwitchGuard only clears the guard that is still installed', async () => {
+    const store = useProjectStore()
+    store.activeWorkspace = 'work'
+    const older = vi.fn().mockResolvedValue(false)
+    const newer = vi.fn().mockResolvedValue(false)
+    store.setWorkspaceSwitchGuard(older)
+    store.setWorkspaceSwitchGuard(newer)
+    store.clearWorkspaceSwitchGuard(older)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(false)
+    expect(newer).toHaveBeenCalled()
+    store.clearWorkspaceSwitchGuard(newer)
+    expect(await store.switchWorkspace('personal', { transition: false })).toBe(true)
+  })
+
   test('deleteChat on active chat transitions to first chat of current workspace', async () => {
     const store = useProjectStore()
     store.projects = [
@@ -8674,6 +8710,32 @@ describe('queue delivery: queue or steer', () => {
     expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('steer')
     sock.onmessage?.({ data: JSON.stringify({ type: 'keyboard_settings_changed', keyboard_shortcuts: {}, keyboard_send_mode: 'modifier', mid_turn_delivery: 'queue', revision: 'r2' }) })
     expect(useKeyboardSettings().settings.value.mid_turn_delivery).toBe('queue')
+  })
+
+  it('appearance_settings_changed applies the value', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValue([])
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    document.documentElement.removeAttribute('data-text-contrast')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'appearance_settings_changed', text_contrast: 'soft', theme: 'dark', font_scale: 1.2, revision: 'r' }) })
+    expect(document.documentElement.dataset.textContrast).toBe('soft')
+    sock.onmessage?.({ data: JSON.stringify({ type: 'appearance_settings_changed', text_contrast: 'normal', theme: 'dark', font_scale: 1.2, revision: 'r2' }) })
+    expect(document.documentElement.dataset.textContrast).toBeUndefined()
+  })
+
+  it('a snapshot carrying appearance applies the value', async () => {
+    const store = useProjectStore()
+    apiGet.mockResolvedValue([])
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    document.documentElement.removeAttribute('data-text-contrast')
+    sock.onmessage?.({ data: JSON.stringify({
+      type: 'snapshot', active_streams: [], chat_pins: {}, chat_terminal_offers: {},
+      appearance: { text_contrast: 'soft', theme: 'dark', font_scale: 1.2, revision: 'r' },
+    }) })
+    expect(document.documentElement.dataset.textContrast).toBe('soft')
+    document.documentElement.removeAttribute('data-text-contrast')
   })
 })
 

@@ -79,7 +79,7 @@
               </tbody>
             </table>
           </div>
-          <p class="mhw-note">Settings → General → Memory handover can let Workspace care act on its guess for memory and profile: off, dismiss, or dismiss and accept. Accept is capped at 5 per run, and each one has Undo in History. Not available on every install.</p>
+          <p class="mhw-note">Settings → Overview → Memory handover can let Workspace care act on its guess for memory and profile: off, dismiss, or dismiss and accept. Accept is capped at 5 per run, and each one has Undo in History. Not available on every install.</p>
 
           <h3 class="mhw-sub">Why you decided</h3>
           <ul class="mhw-list">

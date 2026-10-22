@@ -1359,7 +1359,7 @@ defineExpose({ onArrow })
 
 async function selectAutomationWorkspace(workspace: string) {
   if (store.activeWorkspace !== workspace) {
-    await store.switchWorkspace(workspace, { transition: false })
+    if ((await store.switchWorkspace(workspace, { transition: false })) === false) return
   }
   if (props.mode === 'schedules') await router.push('/schedules')
 }

@@ -1259,7 +1259,7 @@ async function onSystemWorkspaceChange(event: Event) {
   const scheduleId = schedule.value.schedule_id
   await store.updateSchedule(scheduleId, { workspace })
   if (projectStore.activeWorkspace !== workspace) {
-    await projectStore.switchWorkspace(workspace, { transition: false })
+    if ((await projectStore.switchWorkspace(workspace, { transition: false })) === false) return
   }
   await router.push(`/schedules/${scheduleId}`)
 }

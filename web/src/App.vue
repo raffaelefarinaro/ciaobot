@@ -291,6 +291,11 @@ watch(shouldPollStartup, (shouldPoll) => {
   --error: #c62828;
 }
 
+/* Text contrast: Soft. Only --fg moves; --fg2/--fg3 keep their values, so the
+   hierarchy stays. Dark #d2d2de is 11.4:1 on --bg; light #2e2f46 is ~11.9:1. */
+:root[data-text-contrast="soft"] { --fg: #d2d2de; }
+:root.theme-light[data-text-contrast="soft"] { --fg: #2e2f46; }
+
 /* Per-workspace accent overrides (Option A: accents only).
    Applied on #ciao-app for the active workspace, and on individual
    controls (home new-chat buttons, workspace pills, chat badges) that

@@ -9,8 +9,9 @@ from pathlib import Path
 # contributors can decide whether their new route really belongs here.
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/terminal/unlock": (
-        "browser-only password re-entry; signed session and exact origin/transport "
-        "policy, grant travels only in an HttpOnly cookie, never a command or path"
+        "browser-only grant issue; signed session and exact origin/transport "
+        "policy, no body and no secret, grant travels only in an HttpOnly cookie, "
+        "never a command or path"
     ),
     "/api/welcome/open-folder": (
         "Home welcome card's Show in Finder; host-only (session + host_browser_request), "
@@ -49,6 +50,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/schedules/{schedule_id}": "agents edit schedules via the schedule_* MCP tools, not curl",
     "/api/status": "internal status PATCH",
     "/api/settings/keyboard": "user-owned keyboard preferences are managed through Settings",
+    "/api/settings/appearance": "user-owned appearance preferences are managed through Settings",
     "/api/push/subscribe": "browser push registration",
     "/api/push/unsubscribe": "browser push registration",
     "/api/admin/snapshot": "admin internal; deploy is the agent-callable wrapper",

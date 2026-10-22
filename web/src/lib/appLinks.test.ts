@@ -34,6 +34,7 @@ const PAGES = [
   '/memory/history',
   '/settings',
   '/settings/home',
+  '/settings/workspace',
   '/settings/workspaces',
   '/settings/providers',
   '/settings/skills',
