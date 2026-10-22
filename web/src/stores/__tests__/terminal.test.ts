@@ -18,7 +18,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { useTerminalStore, type TerminalRenderer } from '../terminal'
+import { useTerminalStore, MAX_AUTO_RECONNECT_ATTEMPTS, type TerminalRenderer } from '../terminal'
 import { encodeTerminalBytes } from '../../lib/terminalProtocol'
 
 const apiGet = vi.hoisted(() => vi.fn())
@@ -1127,6 +1127,69 @@ describe('terminal store status and grant', () => {
     expect(apiPost).toHaveBeenCalledTimes(1)
     // No shell was started: only the grant was refused.
     expect(apiPost).not.toHaveBeenCalledWith('/api/terminal/sessions', expect.anything())
+  })
+
+  it('asks for the grant again when the first open could not get one', async () => {
+    // The first status read answers: the terminal is available, and this
+    // browser holds no grant. The unlock is refused, and so is the status
+    // that follows it.
+    apiGet.mockResolvedValueOnce(statusPayload({ unlock_expires_in: 0 }))
+    apiGet.mockRejectedValue(new Error('network down'))
+    apiPost.mockRejectedValue(new Error('refused'))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+    const store = useTerminalStore()
+
+    await store.open({ chatId: 'chat-1' })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The open asked once, and the engine would not give a grant.
+    expect(store.phase).toBe('locked')
+    expect(unlocks()).toBe(1)
+
+    // The pane does not stop there: the next attempt asks again, on the
+    // same backoff a lost connection uses.
+    await vi.advanceTimersByTimeAsync(250)
+    expect(unlocks()).toBe(2)
+
+    // And the budget still stops it: the open's own ask, plus one attempt
+    // per retry the budget allows, and no more.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(unlocks()).toBe(1 + MAX_AUTO_RECONNECT_ATTEMPTS)
+    expect(store.phase).toBe('error')
+    expect(store.error).toContain('could not be re-established')
+  })
+
+  it('gives a newly opened pane its own attempt budget', async () => {
+    const store = useTerminalStore()
+    await store.open({ chatId: 'chat-1' })
+    apiPost.mockResolvedValue({ session: sessionPayload('s1') })
+    await store.createSession()
+    store.attachRenderer(makeRenderer('s1').renderer)
+
+    // The engine is unreachable: this pane burns its whole budget and says
+    // so.
+    apiGet.mockRejectedValue(new Error('network down'))
+    apiPost.mockRejectedValue(new Error('network down'))
+    fakeSockets[0].close(4401)
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(store.phase).toBe('error')
+
+    // A new pane gets a new budget: its first retry is not blocked by the
+    // previous pane's exhausted one.
+    apiGet.mockResolvedValue(statusPayload({ unlock_expires_in: 0 }))
+    const unlocks = () =>
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/unlock').length
+    const before = unlocks()
+
+    await store.open({ chatId: 'chat-2' })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(unlocks()).toBe(before + 1)
+
+    // And the retry happens: the new pane's budget is its own.
+    await vi.advanceTimersByTimeAsync(250)
+    expect(unlocks()).toBe(before + 2)
   })
 
   it('exposes no unlock action and no password state', async () => {
@@ -2464,6 +2527,9 @@ describe('terminal store close codes', () => {
     })
     apiPost.mockResolvedValue({ ok: true, expires_in: 900 })
     const before = fakeSockets.length
+    const createsBefore = apiPost.mock.calls.filter(
+      (call) => call[0] === '/api/terminal/sessions',
+    ).length
 
     socket.close(4401)
 
@@ -2484,6 +2550,11 @@ describe('terminal store close codes', () => {
     const resumed = fakeSockets[fakeSockets.length - 1]
     expect(resumed.ofType('attach')).toHaveLength(1)
     expect(resumed.ofType('attach')[0].takeover).toBe(false)
+    // A reconnect resumes the session; it never starts one.
+    const createsAfter = apiPost.mock.calls.filter(
+      (call) => call[0] === '/api/terminal/sessions',
+    ).length
+    expect(createsAfter).toBe(createsBefore)
   })
 
   it('keeps asking for a grant the engine will not give', async () => {
@@ -2531,7 +2602,10 @@ describe('terminal store close codes', () => {
     await vi.advanceTimersByTimeAsync(60_000)
 
     // The budget is finite: the pane stops asking and says so, rather
-    // than asking forever.
+    // than asking forever. The count is exact — the close's own ask is
+    // the budget's first attempt, and the pane holds no grant of its own
+    // to spend before it.
+    expect(unlocks()).toBe(MAX_AUTO_RECONNECT_ATTEMPTS)
     expect(store.phase).toBe('error')
     expect(store.error).toContain('could not be re-established')
     const asked = unlocks()

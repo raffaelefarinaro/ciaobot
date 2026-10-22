@@ -242,6 +242,9 @@ describe('TerminalPane', () => {
     await flushPromises()
 
     expect(store.phase).toBe('locked')
+    // The locked body says what happened, so an empty pane cannot pass
+    // for a locked one.
+    expect(wrapper.text()).toContain('The terminal grant could not be obtained.')
     // There is no unlock form any more: the signed-in session is the
     // terminal's trust boundary, so the pane has nothing to ask for.
     expect(wrapper.find('.tp-unlock').exists()).toBe(false)

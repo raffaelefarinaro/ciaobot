@@ -100,8 +100,13 @@ const PING_INTERVAL_MS = 15_000
 const WATCHDOG_MS = 30_000
 /** How long the engine may take to answer the attach with a ready frame. */
 const READY_TIMEOUT_MS = 5000
-/** Automatic reconnect attempts before the client gives up and asks the user. */
-const MAX_AUTO_RECONNECT_ATTEMPTS = 8
+/**
+ * Automatic reconnect attempts before the client gives up and asks the user.
+ *
+ * Exported so a test can assert the exact number of attempts a bounded
+ * retry chain makes, rather than only that it stopped.
+ */
+export const MAX_AUTO_RECONNECT_ATTEMPTS = 8
 /** Sessions the engine keeps for one scope. */
 const MAX_SESSIONS = 4
 
@@ -560,23 +565,6 @@ export const useTerminalStore = defineStore('terminal', () => {
       && phase.value !== 'error'
   }
 
-  /**
-   * Whether the pane may make another attempt at all.
-   *
-   * `canRecover` is about opening a *socket*, so it needs a grant and a
-   * matching surface. This is the weaker question — may the pane try
-   * again, such as asking for the grant it is missing — and it needs only
-   * a pane that is on screen and a session that is not in a state the user
-   * has to decide.
-   */
-  function mayRetry(): boolean {
-    if (disposed) return false
-    if (!visible.value) return false
-    return phase.value !== 'takeover'
-      && phase.value !== 'ended'
-      && phase.value !== 'error'
-  }
-
   function maybeConnect(): void {
     if (!canConnect()) return
     if (socket && socket.readyState <= WebSocket.OPEN) return
@@ -835,7 +823,6 @@ export const useTerminalStore = defineStore('terminal', () => {
         // the attempt budget runs out.
         scheduleTimer(() => {
           if (myScope !== scopeEpoch || myConnection !== connectionEpoch) return
-          if (!mayRetry()) return
           void scheduleRetry()
         }, terminalReconnectDelayMs(reconnectAttempts))
         return
@@ -913,7 +900,9 @@ export const useTerminalStore = defineStore('terminal', () => {
    * The status is read first: it is the only answer that says whether this
    * browser may use the terminal at all. The grant comes next, and the pane
    * asks for it itself — there is no password to re-enter, because the
-   * signed-in session is the terminal's trust boundary. Sessions are listed
+   * signed-in session is the terminal's trust boundary. A grant the engine
+   * will not give is not the end of the road either: the pane asks again,
+   * on the same bounded backoff a lost connection uses. Sessions are listed
    * when the grant is live, and an existing session is adopted — never
    * created. Creating a shell is an explicit action.
    */
@@ -940,6 +929,10 @@ export const useTerminalStore = defineStore('terminal', () => {
       activeSession.value = null
       truncated.value = false
     }
+    // The retry budget belongs to the pane, not to the session: a pane
+    // that opens gets a whole budget of its own, and the chain the
+    // previous one left behind is stale (its connection epoch is gone).
+    reconnectAttempts = 0
     error.value = ''
     warning.value = ''
     phase.value = 'loading'
@@ -968,8 +961,18 @@ export const useTerminalStore = defineStore('terminal', () => {
       } else {
         // No grant yet. A signed-in, same-origin browser gets one on its
         // own, so the pane opens without asking for anything.
-        if (!await acquireGrant()) return
+        const granted = await acquireGrant()
         if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+        if (!granted) {
+          // The engine would not give us a grant. There is no form for the
+          // user to fill in any more, so the next attempt asks again, on
+          // the same backoff and the same budget a lost connection uses.
+          scheduleTimer(() => {
+            if (myScope !== scopeEpoch || myOpen !== openEpoch) return
+            void scheduleRetry()
+          }, terminalReconnectDelayMs(reconnectAttempts + 1))
+          return
+        }
       }
       phase.value = 'ready'
       await refreshSessions()
