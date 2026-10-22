@@ -99,9 +99,9 @@ test('the terminal opens from a chat, takes a command, and keeps its session whe
   await expect.poll(async () => (await readSession()).cols).not.toBe(before.cols)
 })
 
-test('the terminal docks on the right of the chat when the pane holds both columns', async ({ page }) => {
+test('the terminal is the pinned file tile, with the same divider', async ({ page }) => {
   // 1280×900 with the sidebar open leaves the pane 940px: room for a chat
-  // column and the dock's floor, so the dock is the shape it takes.
+  // column and the tile, so the tile is the shape the terminal takes.
   await page.setViewportSize({ width: 1280, height: 900 })
   await boot(page, CHAT_PATH, COMPOSER)
 
@@ -114,33 +114,59 @@ test('the terminal docks on the right of the chat when the pane holds both colum
 
   const pane = page.locator('.terminal-pane')
   await expect(pane).toBeVisible()
-  // The wide shape is a column beside the chat, the way the pinned file
-  // panel is one — not a strip under the conversation.
-  await expect(pane).toHaveClass(/terminal-pane--dock/)
+  // The terminal is in the slot: the same window the pinned file uses.
+  await expect(pane).toHaveClass(/terminal-pane--tile/)
 
-  // The chat column is the box the dock stands beside. ChatPanel has a
-  // .chat-body of its own, so the column is named by where it sits.
+  // And the tile is that window: the same inset, radius and border the
+  // file panel's tile has.
+  const tile = page.locator('.chat-split-side')
+  const chrome = await tile.evaluate(el => {
+    const style = getComputedStyle(el)
+    return {
+      margin: style.margin,
+      radius: style.borderRadius,
+      border: style.borderTopWidth,
+      background: style.backgroundColor,
+    }
+  })
+  expect(chrome.margin).toBe('16px 16px 16px 0px')
+  expect(chrome.radius).not.toBe('0px')
+  expect(chrome.border).toBe('1px')
+
+  // The divider between the chat and the tile, and it is a separator.
+  const divider = page.locator('.chat-split-resizer')
+  await expect(divider).toBeVisible()
+  expect(await divider.getAttribute('role')).toBe('separator')
+  expect(await divider.getAttribute('aria-orientation')).toBe('vertical')
+
+  // The tile stands to the right of the chat, and it is a window of its own.
   const column = page.locator('.chat-main > .chat-body')
-  const main = page.locator('.chat-main')
   const columnBox = (await column.boundingBox())!
   const paneBox = (await pane.boundingBox())!
-  const mainBox = (await main.boundingBox())!
-
-  // To the right of the chat, not under it.
+  const mainBox = (await page.locator('.chat-main').boundingBox())!
   expect(paneBox.x).toBeGreaterThanOrEqual(columnBox.x + columnBox.width - 1)
-  // The full height of the pane: a shell wants the vertical room.
-  expect(paneBox.height).toBeGreaterThanOrEqual(mainBox.height - 1)
-  // The width it asks for: the clamp, between its floor and its ceiling.
-  expect(paneBox.width).toBeGreaterThanOrEqual(360)
-  expect(paneBox.width).toBeLessThanOrEqual(620)
-  // And the chat keeps a column worth reading: the dock never squeezes the
-  // conversation to a sliver.
+  expect(paneBox.height).toBeLessThan(mainBox.height)
+  // The chat keeps a column worth reading.
   expect(columnBox.width).toBeGreaterThanOrEqual(360)
+
+  // The divider drags: the chat gives up the room and the tile takes it.
+  const dividerBox = (await divider.boundingBox())!
+  await page.mouse.move(dividerBox.x + dividerBox.width / 2, dividerBox.y + dividerBox.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(dividerBox.x - 100, dividerBox.y + dividerBox.height / 2, { steps: 8 })
+  await page.mouse.up()
+
+  const columnAfter = (await column.boundingBox())!
+  const paneAfter = (await pane.boundingBox())!
+  expect(columnAfter.width).toBeLessThan(columnBox.width - 50)
+  expect(paneAfter.width).toBeGreaterThan(paneBox.width + 50)
+  // And the chat never goes below the floor the drag holds it to.
+  expect(columnAfter.width).toBeGreaterThanOrEqual(360)
 })
 
 test('a pane too narrow for both columns gets the drawer, not a squeezed chat', async ({ page }) => {
   // 900×800 with the sidebar open leaves the pane 560px: too narrow for a
-  // chat column and the dock's 360px floor side by side.
+  // chat column and the tile's 360px floor side by side.
   await page.setViewportSize({ width: 900, height: 800 })
   await boot(page, CHAT_PATH, COMPOSER)
   await page.locator('.work-inspector-trigger').click()
@@ -150,7 +176,7 @@ test('a pane too narrow for both columns gets the drawer, not a squeezed chat', 
 
   const pane = page.locator('.terminal-pane')
   await expect(pane).toBeVisible()
-  // The drawer, not a dock in a pane that cannot hold it.
+  // The drawer, not a tile in a pane that cannot hold it.
   await expect(pane).toHaveClass(/terminal-pane--drawer/)
 
   const main = page.locator('.chat-main')
@@ -171,6 +197,30 @@ test('a pane too narrow for both columns gets the drawer, not a squeezed chat', 
   await expect(pane).toBeHidden()
   const after = (await column.boundingBox())!
   expect(after.width).toBeGreaterThanOrEqual(columnBox.width - 1)
+})
+
+test('a pinned file keeps the slot and the terminal falls back to the drawer', async ({ page }) => {
+  // This chat's own file is pinned by the server, so the slot is taken
+  // before the terminal is ever asked for.
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await boot(page, '/chat/beta-chat-1', COMPOSER)
+
+  const tile = page.locator('.chat-split-side')
+  await expect(tile).toBeVisible()
+  await expect(tile.locator('.pinned-file-panel')).toBeVisible()
+
+  await page.locator('.work-inspector-trigger').click()
+  const details = page.locator('#chat-work-rail')
+  await expect(details).toBeVisible()
+  await details.locator('.chat-rail-terminal').getByRole('button', { name: 'Open in Terminal' }).click()
+
+  // The terminal cannot have the slot — the file has it — so it is the
+  // drawer over the pane, and the file keeps the tile.
+  const pane = page.locator('.terminal-pane')
+  await expect(pane).toBeVisible()
+  await expect(pane).toHaveClass(/terminal-pane--drawer/)
+  await expect(tile.locator('.terminal-pane')).toHaveCount(0)
+  await expect(tile.locator('.pinned-file-panel')).toBeVisible()
 })
 
 test('a chat with no repository opens the terminal too', async ({ page }) => {

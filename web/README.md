@@ -159,13 +159,12 @@ iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `
 ### The browser terminal
 
 The chat's and the project's *Open in Terminal* opens a terminal **inside the
-app**: a column beside the chat on a wide pane — a right dock, the full
-height of the pane and `clamp(360px, 38%, 620px)` wide — and a full-height
-drawer on a phone. It is a shell on the engine's own machine, and the pane
-says so before anything is typed. The native host terminal keeps its own
-button (`HostTerminalButton.vue`) for the actions that need a real window on
-the engine's computer: provider sign-in, skill updates, the engine's own
-update.
+app**, in the same right-hand tile a pinned file uses: the same inset
+rounded window, the same draggable divider, the same remembered ratio. It
+is a shell on the engine's own machine, and the pane says so before anything
+is typed. The native host terminal keeps its own button
+(`HostTerminalButton.vue`) for the actions that need a real window on the
+engine's computer: provider sign-in, skill updates, the engine's own update.
 
 - **One entry per surface, outside the repository.** A chat's Chat details
   carries a *Terminal* section of its own — under *Repository*, above *Always
@@ -176,22 +175,25 @@ update.
   a project without a repository — an auto-managed project included — has one
   too. The button is `components/BrowserTerminalButton.vue` and it is the only
   way in; opening the panel starts no shell.
-- **Two shapes, one threshold.** A viewport of 768px or wider docks the pane
-  beside the chat (`terminal-pane--dock`): `.chat-main` is a row, the chat
-  column (`.chat-body`) and the terminal are its two children, and the dock
-  takes `clamp(360px, 38%, 620px)` and the pane's full height. Its body
-  stacks, screen above sessions, because a dock is narrow. Below 768px the
-  pane is a full-screen drawer (`terminal-pane--drawer`) positioned inside
-  `.chat-main`. There is no strip under the chat any more: a shell is kept
-  open while the chat is read, so it takes the vertical room.
-- **The shape comes from the room, not from the window.** A dock needs the
-  chat column's floor (360px — the width the app's own narrow chat uses) and
-  the dock's own floor (360px, the clamp's), so a pane narrower than 720px
-  cannot hold both and gets the drawer instead. `ChatLayout` measures the
-  pane with a `ResizeObserver` and passes `dock-fits` to the pane, which
-  defaults to the drawer; the phone rule still wins over both, so a
-  phone-sized pane is always a drawer. The dock's width is never negotiated:
-  it is the clamp, or the drawer.
+- **One slot, two occupants.** The right-hand slot is the file panel's tile
+  (`.chat-split-side`): the same inset, radius, border and shadow, behind the
+  same `chat-split-resizer` divider, and the same remembered ratio
+  (`ciao:chat-split-ratio`). A pinned file owns the slot. A terminal takes it
+  when no file has and the pane is wide enough for both columns, and falls
+  back to the full-screen drawer over the pane when it cannot — a phone, a
+  pane too narrow, or a file that has the slot. The tile keeps the terminal
+  mounted behind it, so the shell survives a hide; the drawer is the same
+  overlay the phone has always had.
+- **The shape comes from the room, not from the window.** The terminal's
+  slot needs 360px for the chat column, 360px for the tile and its 24px of
+  inset and grip, so a pane narrower than 744px cannot hold both and gets
+  the drawer instead.
+  `ChatLayout` measures the pane with a `ResizeObserver` and tells the pane
+  which shape it is in; the pane draws the shape it is told. The phone rule
+  still wins over both, so a phone-sized pane is always a drawer. The
+  divider's drag clamps belong to the occupant: a file keeps the widths it
+  has always had, and the terminal holds the chat column at 360px and the
+  tile at 360px.
 - `stores/terminal.ts` owns the wire — the HTTP actions, the socket, the
   bounded renderer backpressure and the replay offsets. The pane
   (`components/TerminalPane.vue`) owns the screen and the controls around it;

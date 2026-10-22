@@ -42,14 +42,15 @@ import type { TerminalRenderer } from '../lib/terminalRenderer'
 const store = useTerminalStore()
 
 /**
- * Whether the pane has room for the dock beside the chat.
+ * Whether the pane is in the slot beside the chat.
  *
- * The layout measures its own space and says so; the pane only draws the
- * shape it is told. It defaults to false — the drawer — because the drawer
- * is always usable, while a dock in a pane too narrow for it would squeeze
- * the conversation to a sliver.
+ * The layout owns the slot: a pinned file takes it, and the terminal takes
+ * it when no file has and the pane has room for both columns. The pane only
+ * draws the shape it is told — the tile when it is in the slot, the drawer
+ * over the pane when it is not.
  */
-const props = withDefaults(defineProps<{ dockFits?: boolean }>(), { dockFits: false })
+const props = withDefaults(defineProps<{ inTile?: boolean }>(), { inTile: false })
+const emit = defineEmits<{ open: [boolean] }>()
 
 /** The element the screen is mounted into. It exists for the pane's whole life. */
 const surfaceEl = ref<HTMLElement | null>(null)
@@ -78,11 +79,12 @@ const isMobile = ref(false)
 /**
  * The shape this pane is in.
  *
- * A phone-sized pane is always a drawer, whatever the room: a shell on a
- * narrow screen wants the whole screen. A wide one docks beside the chat
- * only when the layout says the pane holds both columns.
+ * The tile is the slot the pinned file uses too: the same window, the same
+ * divider, the same remembered ratio. Everything else — a phone, a pane too
+ * narrow for both columns, a pinned file that owns the slot — is the drawer
+ * over the pane, which is always usable.
  */
-const isDock = computed(() => !isMobile.value && props.dockFits)
+const isTile = computed(() => props.inTile && !isMobile.value)
 
 const hasScreen = computed(() => renderer.value !== null)
 const canEnd = computed(() => store.activeSession !== null && !store.ending)
@@ -276,6 +278,9 @@ watch(() => store.phase, () => {
 })
 
 watch(() => store.visible, (open) => {
+  // The layout owns the slot and needs to know whether the terminal is on
+  // screen: a hidden terminal gives the slot back.
+  emit('open', open)
   if (open) {
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     void nextTick(() => { if (store.visible) focusScreen() })
@@ -294,6 +299,12 @@ function onViewport(): void {
 onMounted(() => {
   onViewport()
   window.addEventListener('resize', onViewport)
+  // The screen draws into an element that does not exist yet when the setup
+  // runs, so the watcher above did nothing for a session that was already
+  // open. A pane that mounts again — it moves between the slot and the
+  // drawer — finds its session here.
+  const session = store.activeSession
+  if (session) void openScreen(session.session_id)
 })
 
 onBeforeUnmount(() => {
@@ -307,8 +318,8 @@ onBeforeUnmount(() => {
     class="terminal-pane"
     :class="{
       'terminal-pane--open': store.visible,
-      'terminal-pane--drawer': !isDock,
-      'terminal-pane--dock': isDock,
+      'terminal-pane--drawer': !isTile,
+      'terminal-pane--tile': isTile,
     }"
     aria-label="Terminal"
     @keydown.capture="onPaneKeydownCapture"
@@ -437,22 +448,21 @@ onBeforeUnmount(() => {
   color: var(--fg);
 }
 
-/* The dock: a column beside the chat, the way the pinned file panel is one.
-   A shell is something people keep open while they read, so it takes the
-   pane's height and its own width, and the conversation keeps its measure
-   instead of being squeezed by a strip underneath it. */
-.terminal-pane--dock.terminal-pane--open {
-  flex: 0 0 auto;
-  width: clamp(360px, 38%, 620px);
+/* The tile: the slot the pinned file uses too. The tile draws the window —
+   the inset, the radius, the shadow — and the terminal is its content, so
+   the pane draws no frame of its own and fills the tile. */
+.terminal-pane--tile.terminal-pane--open {
+  flex: 1 1 auto;
+  height: 100%;
   min-height: 0;
-  border-left: 1px solid var(--border);
+  background: transparent;
 }
-/* A dock is narrow, so the body stacks: the screen takes the room and the
+/* A tile is narrow, so the body stacks: the screen takes the room and the
    session list keeps a slice of the height under it. */
-.terminal-pane--dock .tp-body {
+.terminal-pane--tile .tp-body {
   flex-direction: column;
 }
-.terminal-pane--dock .tp-sessions {
+.terminal-pane--tile .tp-sessions {
   flex: 0 0 auto;
   max-height: 30%;
 }
@@ -673,15 +683,15 @@ onBeforeUnmount(() => {
 }
 /* On a phone the header stacks: the buttons take their own row, so the
    status line gets the full width and the path is a line of it rather
-   than a column. A dock stacks it for the same reason: it is a narrow
-   column, and a row of three buttons leaves the title no room. */
+   than a column. A tile stacks it for the same reason: it is a narrow
+   window, and a row of three buttons leaves the title no room. */
 .terminal-pane--drawer .tp-head,
-.terminal-pane--dock .tp-head {
+.terminal-pane--tile .tp-head {
   flex-direction: column;
   align-items: stretch;
 }
 .terminal-pane--drawer .tp-actions,
-.terminal-pane--dock .tp-actions {
+.terminal-pane--tile .tp-actions {
   justify-content: flex-start;
 }
 @media (pointer: coarse) {

@@ -192,7 +192,7 @@ function serve(sessions: Record<string, unknown>[] = [], status: Record<string, 
   })
 }
 
-async function mountPane(props: { dockFits?: boolean } = {}) {
+async function mountPane(props: { inTile?: boolean } = {}) {
   const wrapper = mount(TerminalPane, { props, attachTo: document.body })
   await flushPromises()
   return wrapper
@@ -245,33 +245,33 @@ describe('TerminalPane', () => {
     wrapper.unmount()
   })
 
-  it('docks beside the chat when the pane has room for both columns', async () => {
+  it('fills the tile when the layout puts it in the slot', async () => {
     serve([sessionInfo('s1')])
     setViewportWidth(1280)
     const store = useTerminalStore()
-    const wrapper = await mountPane({ dockFits: true })
+    const wrapper = await mountPane({ inTile: true })
     await store.open({ chatId: 'c1' })
     await flushPromises()
 
     const pane = wrapper.get('.terminal-pane')
-    expect(pane.classes()).toContain('terminal-pane--dock')
+    expect(pane.classes()).toContain('terminal-pane--tile')
     expect(pane.classes()).not.toContain('terminal-pane--drawer')
     wrapper.unmount()
   })
 
   it('is a drawer when the pane is too narrow to hold both columns', async () => {
-    // A dock in a pane that cannot hold it would squeeze the chat to a
-    // sliver, so the pane that has no room gets the drawer instead.
+    // A tile in a pane that cannot hold it would squeeze the chat to a
+    // sliver, so a pane that has no room gets the drawer instead.
     serve([sessionInfo('s1')])
     setViewportWidth(900)
     const store = useTerminalStore()
-    const wrapper = await mountPane({ dockFits: false })
+    const wrapper = await mountPane({ inTile: false })
     await store.open({ chatId: 'c1' })
     await flushPromises()
 
     const pane = wrapper.get('.terminal-pane')
     expect(pane.classes()).toContain('terminal-pane--drawer')
-    expect(pane.classes()).not.toContain('terminal-pane--dock')
+    expect(pane.classes()).not.toContain('terminal-pane--tile')
     wrapper.unmount()
   })
 
@@ -280,17 +280,17 @@ describe('TerminalPane', () => {
     serve([sessionInfo('s1')])
     setViewportWidth(375)
     const store = useTerminalStore()
-    const wrapper = await mountPane({ dockFits: true })
+    const wrapper = await mountPane({ inTile: true })
     await store.open({ chatId: 'c1' })
     await flushPromises()
 
     const pane = wrapper.get('.terminal-pane')
     expect(pane.classes()).toContain('terminal-pane--drawer')
-    expect(pane.classes()).not.toContain('terminal-pane--dock')
+    expect(pane.classes()).not.toContain('terminal-pane--tile')
     wrapper.unmount()
   })
 
-  it('is a drawer until the layout says the pane has room', async () => {
+  it('is a drawer until the layout says it can have the slot', async () => {
     serve([sessionInfo('s1')])
     setViewportWidth(1280)
     const store = useTerminalStore()
@@ -300,7 +300,7 @@ describe('TerminalPane', () => {
 
     const pane = wrapper.get('.terminal-pane')
     expect(pane.classes()).toContain('terminal-pane--drawer')
-    expect(pane.classes()).not.toContain('terminal-pane--dock')
+    expect(pane.classes()).not.toContain('terminal-pane--tile')
     wrapper.unmount()
   })
 
@@ -552,5 +552,23 @@ describe('TerminalPane', () => {
     expect(source).toMatch(/@media \(pointer: coarse\)/)
     expect(source).toMatch(/min-height:\s*var\(--touch\)/)
     expect(source).toMatch(/\.tp-session \{[^}]*min-height:\s*var\(--touch\)/)
+  })
+
+  it('draws no frame of its own in the tile: the tile is the window', () => {
+    // The slot is the same window the pinned file uses — inset, rounded,
+    // shadowed — so the terminal inside it must not draw a second frame.
+    // jsdom has no layout engine, so the rule is asserted from the sheet the
+    // pane ships.
+    const source = readFileSync(join(__dirname, '..', 'TerminalPane.vue'), 'utf8')
+    const tile = source.match(/\.terminal-pane--tile\.terminal-pane--open \{([^}]*)\}/)
+    expect(tile).not.toBeNull()
+    const rules = tile![1]
+    expect(rules).toMatch(/height:\s*100%/)
+    expect(rules).toMatch(/background:\s*transparent/)
+    expect(rules).not.toMatch(/border/)
+    expect(rules).not.toMatch(/border-radius/)
+    expect(rules).not.toMatch(/margin:/)
+    // The flush dock is gone: the tile is the only column shape.
+    expect(source).not.toMatch(/terminal-pane--dock/)
   })
 })
