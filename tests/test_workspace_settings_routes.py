@@ -225,6 +225,27 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
     assert pcm.refresh_count == 3
 
 
+def test_workspace_gws_profile_must_be_a_profile_id(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    client.post("/api/workspaces", json={"name": "client-a"})
+
+    bad = client.patch("/api/workspaces/client-a", json={"gws_profile": "x\ncurl"})
+    assert bad.status_code == 400
+    assert "gws_profile must be a profile id" in bad.json()["error"]
+    assert config.workspace("client-a").gws_profile != "x\ncurl"
+
+    ok = client.patch("/api/workspaces/client-a", json={"gws_profile": "acme"})
+    assert ok.status_code == 200
+    assert config.workspace("client-a").gws_profile == "acme"
+
+    # A save that leaves the key out keeps the stored link; an empty one unlinks.
+    client.patch("/api/workspaces/client-a", json={"color": "cyan"})
+    assert config.workspace("client-a").gws_profile == "acme"
+    cleared = client.patch("/api/workspaces/client-a", json={"gws_profile": ""})
+    assert cleared.status_code == 200
+    assert config.workspace("client-a").gws_profile == ""
+
+
 def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
     client, config, _pcm = _client(tmp_path)
 

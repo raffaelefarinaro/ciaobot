@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gwsSetupGroups, gwsSetupProgress } from '../gwsSetup'
+import { gwsAccountState, gwsDialogSteps, gwsSetupGroups, gwsSetupProgress } from '../gwsSetup'
 import type { GwsIntegrationProfile, GwsIntegrationSettings } from '../types'
 
 function profile(overrides: Partial<GwsIntegrationProfile> = {}): GwsIntegrationProfile {
@@ -132,5 +132,27 @@ describe('gwsSetupGroups', () => {
       'signin',
       'link',
     ])
+  })
+})
+
+describe('gwsDialogSteps', () => {
+  const states = (installed: boolean, p: GwsIntegrationProfile | null) =>
+    gwsDialogSteps({ installed }, p).map((step) => step.state)
+
+  it('marks the first undone step current', () => {
+    expect(states(true, null)).toEqual(['done', 'current', 'pending'])
+    expect(states(true, profile({ configured: false, client_secret_present: true }))).toEqual(['done', 'done', 'current'])
+    expect(states(true, profile())).toEqual(['done', 'done', 'done'])
+    expect(states(false, profile())).toEqual(['current', 'done', 'done'])
+  })
+})
+
+describe('gwsAccountState', () => {
+  it('maps a profile to the row state', () => {
+    expect(gwsAccountState(null)).toBe('none')
+    expect(gwsAccountState(undefined)).toBe('none')
+    expect(gwsAccountState(profile({ configured: false, client_secret_present: true }))).toBe('none')
+    expect(gwsAccountState(profile())).toBe('connected')
+    expect(gwsAccountState(profile({ needs_relogin: true }))).toBe('expired')
   })
 })

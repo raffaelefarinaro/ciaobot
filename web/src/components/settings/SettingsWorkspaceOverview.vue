@@ -76,43 +76,12 @@
     <div class="card">
       <div class="settings-card-header">
         <p class="section-title">Google account</p>
-        <p :id="`workspace-gws-hint-${form.name}`" class="hint">
-          Which Google account this workspace uses. Accounts are added on Manage workspaces under Google Workspace.
+        <p class="hint">
+          Used by this workspace's chats and schedules for Gmail, Calendar, Drive, Docs, Sheets, Slides and Tasks. One account per workspace.
         </p>
       </div>
       <div class="overview-body">
-        <label class="settings-field set-subrow">
-          <span class="ws-label set-subrow-label">Google profile</span>
-          <select
-            class="routine-input routine-select workspace-select set-subrow-control"
-            v-model="form.gws_profile"
-            :disabled="workspacesSaving === form.name"
-            :aria-describedby="`workspace-gws-hint-${form.name}`"
-          >
-            <option value="">No Google account</option>
-            <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
-              {{ profile.label }} ({{ profile.email || profile.name }})
-            </option>
-            <option v-if="workspaceCustomGwsProfile(form.gws_profile)" :value="form.gws_profile">
-              Custom: {{ form.gws_profile }}
-            </option>
-          </select>
-        </label>
-        <p v-if="workspaceDirty(form)" class="hint hint--compact">Save changes applies to every card above it.</p>
-        <div v-if="workspaceDirty(form)" class="workspace-edit-actions">
-          <button
-            type="button"
-            class="btn-primary btn-small workspace-save"
-            :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
-            @click="saveWorkspace(form.name)"
-          >{{ workspacesSaving === form.name ? 'Saving...' : 'Save changes' }}</button>
-          <button
-            type="button"
-            class="btn-small workspace-discard"
-            :disabled="workspacesSaving === form.name"
-            @click="discardWorkspace(form.name)"
-          >Discard</button>
-        </div>
+        <WorkspaceGoogleAccount />
       </div>
     </div>
 
@@ -149,6 +118,7 @@ import WorkspaceTile from '../WorkspaceTile.vue'
 import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
 import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
+import WorkspaceGoogleAccount from './WorkspaceGoogleAccount.vue'
 import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
 import {
   WORKSPACE_ADMIN_KEY,
@@ -171,13 +141,8 @@ const {
   workspaceNameDraft,
   workspaceLinkTarget,
   fsScopeDefaultOptionLabel,
-  gwsProfileOptions,
-  workspaceCustomGwsProfile,
   activeWorkspaceForm: form,
   clearWorkspaceLinkHighlight,
-  workspaceDirty,
-  discardWorkspace,
-  saveWorkspace,
   workspaceArchivable,
   archiveWorkspace,
 } = admin

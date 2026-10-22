@@ -32,7 +32,6 @@ function setup(initial: WorkspaceInfo) {
     notifySaved: vi.fn(),
     notifyFailed: vi.fn(),
     gwsProfileOptions: computed(() => []),
-    workspaceCustomGwsProfile: () => false,
     fetchGwsIntegration: vi.fn().mockResolvedValue(undefined),
   }))!
   return { admin, update }

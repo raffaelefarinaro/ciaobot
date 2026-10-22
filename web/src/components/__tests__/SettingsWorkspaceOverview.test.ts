@@ -229,4 +229,27 @@ describe('Settings > Workspace Overview', () => {
       wrapper.unmount()
     }
   })
+
+  it('the Google account card is one row, and Save sits in the Chats and models card', async () => {
+    const { wrapper } = await mountOverview('work')
+    try {
+      const cards = wrapper.findAll('.card')
+      const card = (title: string) => cards.find(c => c.find('.section-title').text() === title)!
+      const google = card('Google account')
+      expect(google.find('.gws-account').exists()).toBe(true)
+      expect(google.find('select').exists()).toBe(false)
+      expect(card('Workspace').text()).not.toContain('both cards')
+      expect(card('Workspace').find('.workspace-save').exists()).toBe(false)
+
+      const other = wrapper.findAll('.workspace-color-swatch').find(b => b.attributes('aria-checked') === 'false')
+      await other!.trigger('click')
+      await nextTick()
+      expect(wrapper.findAll('.workspace-save')).toHaveLength(1)
+      expect(card('Workspace').find('.workspace-save').exists()).toBe(false)
+      expect(card('Chats and models').find('.workspace-save').exists()).toBe(true)
+      expect(google.find('.workspace-save').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
 })

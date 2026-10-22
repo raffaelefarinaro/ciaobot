@@ -96,6 +96,21 @@
       <p class="hint hint--compact models-hint">
         Switching the provider shows that provider's overrides; each provider keeps its own.
       </p>
+      <p v-if="workspaceDirty(form)" class="hint hint--compact">Save changes applies to every card above it.</p>
+      <div v-if="workspaceDirty(form)" class="workspace-edit-actions">
+        <button
+          type="button"
+          class="btn-primary btn-small workspace-save"
+          :disabled="workspacesSaving === form.name || archivingWorkspace === form.name"
+          @click="saveWorkspace(form.name)"
+        >{{ workspacesSaving === form.name ? 'Saving...' : 'Save changes' }}</button>
+        <button
+          type="button"
+          class="btn-small workspace-discard"
+          :disabled="workspacesSaving === form.name"
+          @click="discardWorkspace(form.name)"
+        >Discard</button>
+      </div>
     </div>
   </div>
 </template>
@@ -113,13 +128,21 @@ import type { ModelsResponse, ProviderOverrideField, RoutineSettings, WorkspaceP
 
 // Workspace > Overview > "Chats and models": this workspace's overrides of the
 // Settings > Providers defaults. It edits the same form object as the rest of
-// the page, so Save changes / Discard and the unsaved-draft confirm need no
-// code here. Empty always means "engine default"; the first option of every
+// the page. This is the last form card, so it carries the page's one Save
+// changes / Discard row; the unsaved-draft confirm needs no code here. Empty always means "engine default"; the first option of every
 // field names that engine value.
 const admin = inject(WORKSPACE_ADMIN_KEY)
 if (!admin) throw new Error('SettingsWorkspaceModels needs the workspace admin SettingsView provides')
 
-const { activeWorkspaceForm: form, workspaceProviderOptions, workspacesSaving } = admin
+const {
+  activeWorkspaceForm: form,
+  workspaceProviderOptions,
+  workspacesSaving,
+  archivingWorkspace,
+  workspaceDirty,
+  saveWorkspace,
+  discardWorkspace,
+} = admin
 
 const WS_DEFAULT = '__ciao_ws_default__'
 

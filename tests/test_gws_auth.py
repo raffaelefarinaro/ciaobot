@@ -56,6 +56,18 @@ def test_profile_config_dir_mapping(tmp_path: Path) -> None:
     assert gws_auth.profile_config_dir(cfg, "!!!") is None
 
 
+def test_frontend_reserved_profile_names_mirror_backend() -> None:
+    import re
+
+    source = (
+        Path(__file__).resolve().parent.parent / "web" / "src" / "lib" / "gwsProfileId.ts"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"GWS_RESERVED_PROFILE_NAMES[^=]*=\s*\[([^\]]*)\]", source)
+    assert match, "GWS_RESERVED_PROFILE_NAMES array literal not found"
+    names = set(re.findall(r"'([^']+)'", match.group(1)))
+    assert names == set(gws_auth.GWS_SERVICE_NAMES)
+
+
 def test_scopes_cover_all_supported_services() -> None:
     # Both profiles request the full Workspace scope set so the in-process
     # re-login can mint a token that covers any gws subcommand (including
