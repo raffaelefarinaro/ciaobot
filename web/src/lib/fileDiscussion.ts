@@ -54,7 +54,8 @@ export async function startFileDiscussion(
   }
   if (target !== previous) {
     try {
-      await store.switchWorkspace(target)
+      // A declined settings guard is the user's own Cancel: no chat, no toast.
+      if ((await store.switchWorkspace(target)) === false) return null
     } catch (e) {
       // Inside the guard, not above it: the contract is "the chat, or null and
       // a toast", and `switchWorkspace` can reject on its own (it awaits a

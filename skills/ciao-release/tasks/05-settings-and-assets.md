@@ -14,18 +14,20 @@ listed in the sidebar, and each renders only its own cards:
 
 `/settings` (General, the default), `/settings/appearance`,
 `/settings/access`, `/settings/providers`, `/settings/advanced`,
-`/settings/workspaces`, `/settings/skills`, `/settings/subagents`,
+`/settings/workspaces`, `/settings/workspace`, `/settings/skills`, `/settings/subagents`,
 `/settings/commands`, `/settings/mcp`.
 
 Visit each route in turn. On each one, **wait for that route's own heading or
 load state to resolve** — do not sleep a fixed interval and call it loaded.
 `/settings/models` redirects to `/settings/providers`; it is not a section of
 its own. The sidebar rail has two groups: Ciaobot (General, Appearance,
-Access & devices, Providers, Advanced, Workspaces) and the active workspace (Skills, Subagents, Commands, MCP servers).
+Access & devices, Providers, Advanced, Workspaces) and the active workspace (Overview, Skills, Subagents, Commands, MCP servers).
 
 `/settings` (General) carries What can Ciaobot do?, Updates, app install,
-notifications, keyboard shortcuts, update task history, start at sign-in,
-memory handover, insights and open source. `/settings/advanced` carries This
+notifications, keyboard shortcuts, start at sign-in, insights and open
+source. `/settings/workspace` (Overview) is the active workspace's page: the
+Workspace and Google account cards, memory handover, update task history and,
+for an archivable workspace, Archive this workspace. `/settings/advanced` carries This
 host, memory backup, the Ciaobot folder, workspace health and Developer (and
 Debug only in dev mode). `/settings/access` carries the PWA password card,
 Other devices and Network access. `/settings/appearance` is the Appearance card
@@ -51,9 +53,10 @@ finding; do not wait on it more than once.
 ## Step 1b — File access per workspace
 
 Open `/settings/workspaces`. Each workspace row must show a **File access** tag
-with the effective value (*Workspace only* or *Whole machine*). Open **Edit** on
-one workspace and confirm the **File access** select offers *Default*, *Workspace
-only* and *Whole machine*. Close it without saving. Do not change the value.
+with the effective value (*Workspace only* or *Whole machine*). Follow
+**Settings →** on one workspace: it makes that workspace active and opens
+`/settings/workspace`, where the **File access** select must offer *Default*,
+*Workspace only* and *Whole machine*. Do not change the value.
 
 ## Step 2 — the four asset lists are scoped to one workspace
 

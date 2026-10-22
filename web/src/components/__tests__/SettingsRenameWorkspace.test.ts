@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-// Settings > Workspaces: Edit can rename a workspace. An unchanged name is the
+// Settings > Workspace > Overview: the Name field renames the active workspace. An unchanged name is the
 // plain save and never confirms. A changed name asks first, then PATCHes the
 // old path with `name` set to the new one. Cancelling sends nothing.
 
@@ -10,6 +10,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import type { WorkspacesResponse } from '../../lib/types'
+import { useProjectStore } from '../../stores/projects'
 
 const state = vi.hoisted(() => ({
   workspaces: null as unknown,
@@ -19,6 +20,19 @@ vi.mock('../../lib/api', () => {
   const get = vi.fn((path: string) => {
     if (path === '/api/workspaces') return Promise.resolve(state.workspaces)
     if (path === '/api/workspaces/archived') return Promise.resolve({ archived: [] })
+    if (path.startsWith('/api/proposals/handover')) {
+      return Promise.resolve({
+        workspace: 'work',
+        handover: 'off',
+        acting_available: true,
+        agreement: {
+          decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9,
+          predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0,
+          suggest_handover: false,
+        },
+      })
+    }
+    if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
     if (path === '/api/integrations/gws') {
       return Promise.resolve({
         installed: false,
@@ -64,13 +78,14 @@ function workspaces(names: string[], primary = 'personal'): WorkspacesResponse {
   }
 }
 
-async function mountWorkspacesTab() {
+async function mountOverview(active = 'work') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/settings', component: Stub }, { path: '/settings/:tab', component: Stub }],
   })
-  await router.push('/settings/workspaces')
+  await router.push('/settings/workspace')
   await router.isReady()
+  useProjectStore().activeWorkspace = active
   const { default: SettingsView } = await import('../SettingsView.vue')
   const wrapper = mount(SettingsView, {
     global: { plugins: [router], stubs: { Teleport: true, UpdateProgressView: Stub } },
@@ -80,21 +95,20 @@ async function mountWorkspacesTab() {
   return wrapper
 }
 
-function cardFor(wrapper: Awaited<ReturnType<typeof mountWorkspacesTab>>, name: string) {
-  const card = wrapper.findAll('.workspace-list .workspace-card')
-    .find(c => c.find('.workspace-title').text() === name)
-  expect(card, `no card for ${name}`).toBeTruthy()
+type Wrapper = Awaited<ReturnType<typeof mountOverview>>
+
+// The Workspace card is the first card on the page.
+function workspaceCard(wrapper: Wrapper) {
+  const card = wrapper.findAll('.card').find(c => c.find('.section-title').text() === 'Workspace')
+  expect(card, 'no Workspace card').toBeTruthy()
   return card!
 }
 
-async function openEditor(wrapper: Awaited<ReturnType<typeof mountWorkspacesTab>>, name: string) {
-  await cardFor(wrapper, name).find(`[aria-label="Edit workspace ${name}"]`).trigger('click')
-  await nextTick()
-  const card = cardFor(wrapper, name)
-  return card.find('.set-row-body input.routine-input')
+function nameInput(wrapper: Wrapper) {
+  return wrapper.find('#workspace-name-input')
 }
 
-describe('Settings > Workspaces rename from Edit', () => {
+describe('Settings > Workspace Overview rename', () => {
   beforeEach(async () => {
     setActivePinia(createPinia())
     state.workspaces = workspaces(['personal', 'work'])
@@ -103,12 +117,11 @@ describe('Settings > Workspaces rename from Edit', () => {
     vi.mocked(api.patch).mockImplementation(() => Promise.resolve({}))
   })
 
-  it('shows the name as the first row of the Edit body', async () => {
-    const wrapper = await mountWorkspacesTab()
+  it('shows the name as the first row of the Workspace card', async () => {
+    const wrapper = await mountOverview()
     try {
-      const nameInput = await openEditor(wrapper, 'work')
-      expect((nameInput.element as HTMLInputElement).value).toBe('work')
-      const firstRow = cardFor(wrapper, 'work').find('.set-row-body .set-subrow')
+      expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('work')
+      const firstRow = workspaceCard(wrapper).find('.set-subrow')
       expect(firstRow.find('.set-subrow-label').text()).toBe('Name')
       expect(firstRow.find('input').exists()).toBe(true)
     } finally {
@@ -119,17 +132,16 @@ describe('Settings > Workspaces rename from Edit', () => {
   it('an unchanged name saves without confirming and without sending a name', async () => {
     const { api } = await import('../../lib/api')
     const { pendingConfirm } = await import('../../lib/confirm')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountOverview()
     try {
-      await openEditor(wrapper, 'work')
-      // Change a different field so Save is offered, leaving the name alone.
-      const other = cardFor(wrapper, 'work').findAll('.workspace-color-swatch')
+            // Change a different field so Save is offered, leaving the name alone.
+      const other = workspaceCard(wrapper).findAll('.workspace-color-swatch')
         .find(b => b.attributes('aria-checked') === 'false')
       await other!.trigger('click')
       await nextTick()
-      expect(cardFor(wrapper, 'work').find('.workspace-save').exists()).toBe(true)
+      expect(wrapper.find('.workspace-save').exists()).toBe(true)
 
-      await cardFor(wrapper, 'work').find('.workspace-save').trigger('click')
+      await wrapper.find('.workspace-save').trigger('click')
       await flushPromises()
 
       expect(pendingConfirm.value).toBeNull()
@@ -149,12 +161,12 @@ describe('Settings > Workspaces rename from Edit', () => {
       state.workspaces = workspaces(['personal', 'santo'])
       return Promise.resolve({ ...workspaces(['personal', 'santo']), renamed: { from: 'work', to: 'santo' } })
     })
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountOverview()
     try {
-      const nameInput = await openEditor(wrapper, 'work')
-      await nameInput.setValue('santo')
+      const input = nameInput(wrapper)
+      await input.setValue('santo')
       await nextTick()
-      await cardFor(wrapper, 'work').find('.workspace-save').trigger('click')
+      await wrapper.find('.workspace-save').trigger('click')
       await nextTick()
 
       const request = pendingConfirm.value
@@ -174,8 +186,9 @@ describe('Settings > Workspaces rename from Edit', () => {
       const [path, body] = vi.mocked(api.patch).mock.calls[0] as unknown as [string, Record<string, unknown>]
       expect(path).toBe('/api/workspaces/work')
       expect(body.name).toBe('santo')
-      expect(wrapper.findAll('.workspace-list .workspace-card').map(c => c.find('.workspace-title').text()))
-        .toEqual(['personal', 'santo'])
+      // The rename follows through the store and the Name field shows the new name.
+      expect(useProjectStore().activeWorkspace).toBe('santo')
+      expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('santo')
     } finally {
       wrapper.unmount()
     }
@@ -184,17 +197,17 @@ describe('Settings > Workspaces rename from Edit', () => {
   it('cancelling the rename confirmation sends nothing', async () => {
     const { api } = await import('../../lib/api')
     const { pendingConfirm } = await import('../../lib/confirm')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountOverview()
     try {
-      const nameInput = await openEditor(wrapper, 'work')
-      await nameInput.setValue('santo')
-      await cardFor(wrapper, 'work').find('.workspace-save').trigger('click')
+      const input = nameInput(wrapper)
+      await input.setValue('santo')
+      await wrapper.find('.workspace-save').trigger('click')
       await nextTick()
       pendingConfirm.value!.resolve(false)
       await flushPromises()
 
       expect(api.patch).not.toHaveBeenCalled()
-      expect((cardFor(wrapper, 'work').find('.set-row-body input.routine-input').element as HTMLInputElement).value).toBe('santo')
+      expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('santo')
     } finally {
       wrapper.unmount()
     }
@@ -202,11 +215,11 @@ describe('Settings > Workspaces rename from Edit', () => {
 
   it('renaming a first-listed personal keeps it the main workspace, so says nothing about it', async () => {
     const { pendingConfirm } = await import('../../lib/confirm')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountOverview('personal')
     try {
-      const nameInput = await openEditor(wrapper, 'personal')
-      await nameInput.setValue('home')
-      await cardFor(wrapper, 'personal').find('.workspace-save').trigger('click')
+      const input = nameInput(wrapper)
+      await input.setValue('home')
+      await wrapper.find('.workspace-save').trigger('click')
       await nextTick()
 
       expect(pendingConfirm.value!.message).toContain('Rename "personal" to "home".')
@@ -221,11 +234,11 @@ describe('Settings > Workspaces rename from Edit', () => {
   it('renaming a personal that is not first names the workspace that becomes main', async () => {
     const { pendingConfirm } = await import('../../lib/confirm')
     state.workspaces = workspaces(['work', 'personal'])
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountOverview('personal')
     try {
-      const nameInput = await openEditor(wrapper, 'personal')
-      await nameInput.setValue('home')
-      await cardFor(wrapper, 'personal').find('.workspace-save').trigger('click')
+      const input = nameInput(wrapper)
+      await input.setValue('home')
+      await wrapper.find('.workspace-save').trigger('click')
       await nextTick()
 
       expect(pendingConfirm.value!.message).toContain('"work" becomes the main workspace.')
@@ -239,11 +252,11 @@ describe('Settings > Workspaces rename from Edit', () => {
   it('renaming a workspace to personal says it becomes the main workspace', async () => {
     const { pendingConfirm } = await import('../../lib/confirm')
     state.workspaces = workspaces(['work', 'home'], 'work')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountOverview('home')
     try {
-      const nameInput = await openEditor(wrapper, 'home')
-      await nameInput.setValue('personal')
-      await cardFor(wrapper, 'home').find('.workspace-save').trigger('click')
+      const input = nameInput(wrapper)
+      await input.setValue('personal')
+      await wrapper.find('.workspace-save').trigger('click')
       await nextTick()
 
       expect(pendingConfirm.value!.message).toBe(
@@ -259,11 +272,11 @@ describe('Settings > Workspaces rename from Edit', () => {
   it('renaming the current main workspace to personal says nothing about the main workspace', async () => {
     const { pendingConfirm } = await import('../../lib/confirm')
     state.workspaces = workspaces(['work', 'home'], 'work')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountOverview()
     try {
-      const nameInput = await openEditor(wrapper, 'work')
-      await nameInput.setValue('personal')
-      await cardFor(wrapper, 'work').find('.workspace-save').trigger('click')
+      const input = nameInput(wrapper)
+      await input.setValue('personal')
+      await wrapper.find('.workspace-save').trigger('click')
       await nextTick()
 
       expect(pendingConfirm.value!.message).not.toContain('main workspace')
@@ -277,11 +290,11 @@ describe('Settings > Workspaces rename from Edit', () => {
   it('an empty name is refused before any confirmation or request', async () => {
     const { api } = await import('../../lib/api')
     const { pendingConfirm } = await import('../../lib/confirm')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountOverview()
     try {
-      const nameInput = await openEditor(wrapper, 'work')
-      await nameInput.setValue('   ')
-      await cardFor(wrapper, 'work').find('.workspace-save').trigger('click')
+      const input = nameInput(wrapper)
+      await input.setValue('   ')
+      await wrapper.find('.workspace-save').trigger('click')
       await flushPromises()
 
       expect(pendingConfirm.value).toBeNull()
@@ -293,11 +306,9 @@ describe('Settings > Workspaces rename from Edit', () => {
   })
 })
 
-// The editor used to close on a bare "Done" word that turned into "Discard"
-// when the form was dirty. One control now says what it does: a clean editor
-// is closed, a dirty one is discarded, and both are bordered buttons next to
-// the primary Save.
-describe('Settings > Workspaces editor completion controls', () => {
+// The editor is the page itself, so it has no Close. Changing a field offers
+// the primary Save next to a bordered Discard; a clean form offers neither.
+describe('Settings > Workspace Overview editor controls', () => {
   beforeEach(async () => {
     setActivePinia(createPinia())
     state.workspaces = workspaces(['personal', 'work'])
@@ -306,59 +317,39 @@ describe('Settings > Workspaces editor completion controls', () => {
     vi.mocked(api.patch).mockImplementation(() => Promise.resolve({}))
   })
 
-  it('offers a bordered Close instead of Done on a clean editor', async () => {
-    const wrapper = await mountWorkspacesTab()
+  async function changeAccent(wrapper: Wrapper) {
+    const other = workspaceCard(wrapper).findAll('.workspace-color-swatch')
+      .find(b => b.attributes('aria-checked') === 'false')
+    await other!.trigger('click')
+    await nextTick()
+  }
+
+  it('offers no Close and no Save when clean', async () => {
+    const wrapper = await mountOverview()
     try {
-      await openEditor(wrapper, 'work')
-      const actions = cardFor(wrapper, 'work').find('.workspace-edit-actions')
-      const close = actions.find('.workspace-close')
-      expect(close.exists()).toBe(true)
-      expect(close.text()).toBe('Close')
-      expect(close.classes()).toContain('btn-small')
-      // Nothing to save and nothing to throw away on a clean editor.
-      expect(actions.find('.workspace-save').exists()).toBe(false)
-      expect(actions.find('.workspace-discard').exists()).toBe(false)
-      expect(actions.text()).not.toContain('Done')
-      expect(actions.text()).not.toContain('Discard')
+      expect(wrapper.find('.workspace-save').exists()).toBe(false)
+      expect(wrapper.find('.workspace-discard').exists()).toBe(false)
+      expect(wrapper.find('.workspace-close').exists()).toBe(false)
+      expect(wrapper.find('.workspace-edit-actions').exists()).toBe(false)
     } finally {
       wrapper.unmount()
     }
   })
 
-  it('offers Discard instead of Close when the editor is dirty', async () => {
-    const wrapper = await mountWorkspacesTab()
+  it('offers Save changes and Discard when dirty', async () => {
+    const wrapper = await mountOverview()
     try {
-      await openEditor(wrapper, 'work')
-      const other = cardFor(wrapper, 'work').findAll('.workspace-color-swatch')
-        .find(b => b.attributes('aria-checked') === 'false')
-      await other!.trigger('click')
-      await nextTick()
+      await changeAccent(wrapper)
 
-      const actions = cardFor(wrapper, 'work').find('.workspace-edit-actions')
+      const actions = wrapper.find('.workspace-edit-actions')
+      expect(wrapper.findAll('.workspace-save')).toHaveLength(1)
+      expect(wrapper.findAll('.workspace-discard')).toHaveLength(1)
       expect(actions.find('.workspace-save').text()).toBe('Save changes')
       const discard = actions.find('.workspace-discard')
-      expect(discard.exists()).toBe(true)
       expect(discard.text()).toBe('Discard')
       expect(discard.classes()).toContain('btn-small')
-      expect(actions.find('.workspace-close').exists()).toBe(false)
+      expect(wrapper.find('.workspace-close').exists()).toBe(false)
       expect(actions.text()).not.toContain('Done')
-    } finally {
-      wrapper.unmount()
-    }
-  })
-
-  it('closes a clean editor without saving', async () => {
-    const { api } = await import('../../lib/api')
-    const wrapper = await mountWorkspacesTab()
-    try {
-      await openEditor(wrapper, 'work')
-      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(true)
-
-      await cardFor(wrapper, 'work').find('.workspace-close').trigger('click')
-      await flushPromises()
-
-      expect(api.patch).not.toHaveBeenCalled()
-      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(false)
     } finally {
       wrapper.unmount()
     }
@@ -366,29 +357,24 @@ describe('Settings > Workspaces editor completion controls', () => {
 
   it('discards unsaved workspace edits without changing permissions', async () => {
     const { api } = await import('../../lib/api')
-    const wrapper = await mountWorkspacesTab()
+    const wrapper = await mountOverview()
     try {
-      await openEditor(wrapper, 'work')
-      const other = cardFor(wrapper, 'work').findAll('.workspace-color-swatch')
-        .find(b => b.attributes('aria-checked') === 'false')
-      await other!.trigger('click')
-      await cardFor(wrapper, 'work').find('#workspace-file-access-work').setValue('machine')
+      await changeAccent(wrapper)
+      await wrapper.find('#workspace-file-access-work').setValue('machine')
       await nextTick()
 
-      await cardFor(wrapper, 'work').find('.workspace-discard').trigger('click')
+      await wrapper.find('.workspace-discard').trigger('click')
       await flushPromises()
 
       expect(api.patch).not.toHaveBeenCalled()
-      expect(cardFor(wrapper, 'work').find('.set-row-body').exists()).toBe(false)
+      expect(wrapper.find('.workspace-save').exists()).toBe(false)
 
-      // Reopening shows the saved accent and the saved File access.
-      await openEditor(wrapper, 'work')
-      const card = cardFor(wrapper, 'work')
-      const active = card.findAll('.workspace-color-swatch')
+      // The form shows the saved accent and the saved File access again.
+      const active = workspaceCard(wrapper).findAll('.workspace-color-swatch')
         .filter(b => b.attributes('aria-checked') === 'true')
       expect(active).toHaveLength(1)
       expect(active[0]!.attributes('aria-label')).toBe('Rose Pink')
-      expect((card.find('#workspace-file-access-work').element as HTMLSelectElement).value).toBe('')
+      expect((wrapper.find('#workspace-file-access-work').element as HTMLSelectElement).value).toBe('')
     } finally {
       wrapper.unmount()
     }

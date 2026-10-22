@@ -449,6 +449,13 @@ const GET_ROUTES = {
   // rather than replacing these defaults for everybody: the other review specs
   // assert the empty and the plain states, which must stay the default.
   '/api/proposals': (req) => (sessionOf(req).verification ? { rows: [...PROPOSALS, ...VERIFICATION_PROPOSALS] } : { rows: PROPOSALS }),
+  // Settings > Workspace > Overview's Memory handover card.
+  '/api/proposals/handover': () => ({
+    workspace: WORKSPACES[0].name,
+    handover: 'off',
+    acting_available: true,
+    agreement: { decided: 0, matched: 0, rate: null, window: 50, min_decisions: 20, threshold: 0.9, predicted_accept: 0, accept_matched: 0, predicted_dismiss: 0, dismiss_matched: 0, suggest_handover: false },
+  }),
   '/api/proposals/history': (req) => (sessionOf(req).verification ? VERIFICATION_HISTORY : { rows: [], total: 0, truncated: false, limit: 200, at_max: true }),
   '/api/vault/graph': (req) => (sessionOf(req).verification
     ? { workspace: WORKSPACES[0].name, workspaces: WORKSPACES.map(w => w.name), nodes: VERIFICATION_NODES, edges: MEMORY_EDGES }

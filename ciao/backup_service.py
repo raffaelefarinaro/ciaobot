@@ -1231,7 +1231,7 @@ What that means for how you work:
 - The work happens in the data folder above. If a command there is refused
   (for example with "Operation not permitted"), stop and tell the owner that
   this chat has no write access to the data folder. They can grant it in
-  Settings → Workspaces → Edit → File access → Whole machine, and then you
+  Settings → Overview → File access → Whole machine, and then you
   retry.
 - Nothing in this prompt is a credential, and no credential belongs in the
   remote URL, in the repository, or in this chat. Use the authentication this

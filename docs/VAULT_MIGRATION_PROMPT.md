@@ -61,7 +61,7 @@ Two consequences worth stating outright. The one **mandatory** notice
 whether the install still needs separating — check Home. And the two optional
 notices that are on both are **not** the same thing twice over.
 `unrehomed_people` does not even ask the same question: Home offers a task you
-may dismiss, reopen from Settings → Update task history, and finish — and it
+may dismiss, reopen from Settings → Overview → Update task history, and finish — and it
 appears only when `ciao vault-rehome`'s own plan finds a tag-obvious note to
 move, while the audit keeps reporting the broader condition whatever that card
 says, because a dismissed card is a decision about a card. The misplaced-vault
@@ -670,7 +670,7 @@ Home has a second, separate group: the **After this update** tasks, driven by
 `ciao/update_task_catalog.py` and packaged in `ciao/stock/update-tasks/`. A
 task there is a *decision that persists* until somebody reverses it, with a
 server-owned prompt, a per-`(id, revision)` record, dismissal, and a reopen in
-Settings → Update task history.
+Settings → Overview → Update task history.
 
 **Only one migration notice in this document is a catalog task, and it is the
 one whose remedy writes a receipt.** `unrehomed_people` ships as

@@ -1423,7 +1423,7 @@ def test_the_setup_prompt_says_what_to_do_when_the_data_folder_is_refused(
     assert '(for example with "Operation not permitted")' in rejoined
     assert "stop and tell the owner" in rejoined
     assert (
-        "Settings → Workspaces → Edit → File access → Whole machine" in rejoined
+        "Settings → Overview → File access → Whole machine" in rejoined
     )
 
 
