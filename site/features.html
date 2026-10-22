@@ -151,10 +151,10 @@
         <h2>Google Workspace, built in</h2>
         <p>An assistant needs your calendar and inbox. Ciaobot works with Google's own command-line tool, <a href="https://github.com/googleworkspace/cli"><code>gws</code></a>, and ships ready-made skills for <strong>Gmail</strong> (read, triage, reply, send), <strong>Calendar</strong>, <strong>Drive</strong>, <strong>Docs</strong>, <strong>Sheets</strong>, <strong>Slides</strong>, <strong>Tasks</strong> and <strong>Forms</strong>.</p>
         <p>Add as many Google accounts as you need and link <strong>one per workspace</strong>: your personal Gmail in Personal, your company account in Work.</p>
-        <p class="how"><strong>How:</strong> Settings → Workspaces → Google Workspace. Then just ask: "What's on my calendar tomorrow?"</p>
+        <p class="how"><strong>How:</strong> Open the workspace's settings and connect Google Workspace. Then just ask: "What's on my calendar tomorrow?"</p>
       </div>
       <figure>
-        <a href="assets/img/google.webp"><img src="assets/img/google.webp" alt="Settings, Workspaces tab: each workspace with its colour, AI tool and Google profile, and the Google Workspace card for adding accounts" loading="lazy" width="1600" height="1000"></a>
+        <a href="assets/img/google.webp"><img src="assets/img/google.webp" alt="Settings, Personal workspace Overview, with workspace file access, chat defaults and the Google account section" loading="lazy" width="1600" height="1000"></a>
       </figure>
     </div>
 
@@ -164,7 +164,7 @@
       <p>Each workspace decides how much of your computer its agent can read. <strong>Workspace only</strong> keeps the agent's shell and file tools inside that workspace's folder. <strong>Whole machine</strong> lets it read any file you can read. A workspace with no File access choice uses Workspace only on macOS and Linux, and Whole machine on Windows, which has no sandbox.</p>
       <p>Workspace only does not limit the network: the agent can still reach the internet and Ciaobot's own command-line tool. On Linux, the sandbox needs a one-time AppArmor setup on Ubuntu 23.10 and later (see the Linux guide in the GitHub repository).</p>
       <p>File access covers the agent, not the <a href="terminal.html">terminal panel</a>: that one is your own shell, and it is not confined to the workspace folder.</p>
-      <p class="how"><strong>How:</strong> Settings → Workspaces → Edit, then <em>File access</em>. Each workspace row shows the value in effect.</p>
+      <p class="how"><strong>How:</strong> Open the workspace's settings, then choose <em>File access</em>. Each workspace row shows the value in effect.</p>
     </section>
 
     <div class="feature phone" id="devices">
