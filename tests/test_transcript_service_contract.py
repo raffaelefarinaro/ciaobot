@@ -222,13 +222,10 @@ def _chat(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def _pcm(
-    transcript_rows: list[dict], get_active_stream: object = None
-) -> SimpleNamespace:
+def _pcm(transcript_rows: list[dict]) -> SimpleNamespace:
     return SimpleNamespace(
         _transcripts=SimpleNamespace(current_messages=lambda _ctx, _p: transcript_rows),
         _agent_root_for_chat=lambda _cid: "/tmp",
-        get_active_stream=get_active_stream or (lambda _cid: None),
     )
 
 
@@ -652,12 +649,11 @@ async def test_a_restamped_row_does_not_keep_the_failed_sends_images(
     assert "images" not in restamped
 
 
-def _pcm_store(store: TranscriptStore, get_active_stream: object = None) -> SimpleNamespace:
+def _pcm_store(store: TranscriptStore) -> SimpleNamespace:
     """A manager double whose durable transcript is a real store."""
     return SimpleNamespace(
         _transcripts=store,
         _agent_root_for_chat=lambda _cid: "/tmp",
-        get_active_stream=get_active_stream or (lambda _cid: None),
     )
 
 
@@ -726,7 +722,7 @@ async def test_a_turn_in_flight_does_not_shift_the_settled_rows(
     chat = _chat(user_turn_count=3, user_turn_unattended={})
 
     rows = await transcript_service._assemble_chat_messages(
-        _pcm(durable, get_active_stream=lambda _cid: object()), _config(), chat
+        _pcm(durable), _config(), chat
     )
 
     assert [row["turn_index"] for row in rows if row["role"] == "user"] == [0, 1, 2]
@@ -938,15 +934,106 @@ async def test_an_attachment_prompt_does_not_shift_the_numbering(
 
 
 @pytest.mark.asyncio
+async def test_a_rewritten_prompt_before_a_failed_send_stays_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An engine-rewritten prompt is still the send its session row holds.
+
+    The durable prompt keeps its ``ciao-drop:`` refs while the session expands
+    them, so the texts differ. With one send missing from the session (the
+    failed one), that rewrite must consume the session row instead of being
+    skipped: otherwise the failed turn anchors above it and both rows get the
+    wrong index, time and attachments.
+    """
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "transcripts")
+    _record_turn(store, "Summarise these `ciao-drop:drop_abc`", "first answer")
+    _record_turn(store, "lost question", "TimeoutError", is_error=True)
+    session = [
+        _sdk_user("Summarise these /tmp/a.pdf"),
+        _sdk_assistant("first answer"),
+    ]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_count=2,
+        user_turn_images={"0": ["/tmp/a.pdf"]},
+        user_turn_timings={
+            "0": {"sent_at": "2026-10-22T10:00:00Z"},
+            "1": {"sent_at": "2026-10-22T10:05:00Z"},
+        },
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm_store(store), _config(), chat
+    )
+
+    assert [
+        (row["role"], row["content"], row.get("turn_index"), row.get("is_error"))
+        for row in rows
+    ] == [
+        ("user", "Summarise these /tmp/a.pdf", 0, None),
+        ("assistant", "first answer", None, None),
+        ("user", "lost question", 1, None),
+        ("assistant", "TimeoutError", None, True),
+    ]
+    assert rows[0]["sent_at"] == "2026-10-22T10:00:00Z"
+    assert rows[0]["images"] == ["/tmp/a.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_a_rewritten_prompt_then_failure_then_next_send_numbers_0_1_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rewritten prompt, the failed turn and the next send number 0, 1, 2."""
+    store = TranscriptStore(tmp_path / ".runtime", tmp_path / "transcripts")
+    _record_turn(store, "Summarise these `ciao-drop:drop_abc`", "first answer")
+    _record_turn(store, "lost question", "TimeoutError", is_error=True)
+    _record_turn(store, "next question", "next answer")
+    session = [
+        _sdk_user("Summarise these /tmp/a.pdf"),
+        _sdk_assistant("first answer"),
+        _sdk_user("next question"),
+        _sdk_assistant("next answer"),
+    ]
+    monkeypatch.setattr(
+        transcript_service, "_read_session_segment", lambda _sid, _dirs: session
+    )
+    chat = _chat(
+        user_turn_count=3,
+        user_turn_timings={
+            "0": {"sent_at": "2026-10-22T10:00:00Z"},
+            "1": {"sent_at": "2026-10-22T10:05:00Z"},
+            "2": {"sent_at": "2026-10-22T10:10:00Z"},
+        },
+        user_turn_unattended={},
+    )
+
+    rows = await transcript_service._assemble_chat_messages(
+        _pcm_store(store), _config(), chat
+    )
+
+    assert [
+        (row["content"], row["turn_index"])
+        for row in rows
+        if row["role"] == "user"
+    ] == [
+        ("Summarise these /tmp/a.pdf", 0),
+        ("lost question", 1),
+        ("next question", 2),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_recorded_turn_that_is_still_streaming_is_not_dropped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`record_turn` runs before the stream closes.
+    """Three durable turns where the session never held the first one.
 
-    With the third send already recorded, the counter and the durable file both
-    hold three turns while the stream is still open, so subtracting the
-    "in-flight" turn again slices the stint down to its last two rows — here it
-    drops the failed send the whole path exists to render.
+    The counter and the durable file both hold three turns, so the stint is
+    complete: the walk must keep the failed ``comment`` row and its error row,
+    and leave ``why?`` and ``third`` on their own indices.
     """
     store = TranscriptStore(tmp_path / ".runtime", tmp_path / "transcripts")
     _record_turn(store, "comment", "TimeoutError", is_error=True)
@@ -972,7 +1059,7 @@ async def test_a_recorded_turn_that_is_still_streaming_is_not_dropped(
     )
 
     rows = await transcript_service._assemble_chat_messages(
-        _pcm_store(store, get_active_stream=lambda _cid: object()), _config(), chat
+        _pcm_store(store), _config(), chat
     )
 
     assert [

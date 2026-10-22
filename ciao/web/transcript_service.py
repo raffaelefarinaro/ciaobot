@@ -35,6 +35,7 @@ import asyncio
 import json
 import logging
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -977,7 +978,6 @@ def _align_user_turns(
     session_user_rows: list[tuple[int, str, Any]],
     current_rows: list[dict],
     chat: Any,
-    in_flight: bool = False,
 ) -> list[dict]:
     """Align rendered session user rows with the durable transcript's turns.
 
@@ -991,11 +991,12 @@ def _align_user_turns(
 
     Numbering positionally is what keeps the common shapes untouched: with no
     lost turn the session's own ``base + position`` is already the engine's
-    numbering for steered, in-flight and post-handover rows alike. A durable
-    turn the session cannot show consumes a chat turn only when the stint is
-    provably short of counted sends, so an engine-rewritten prompt (an
-    attachment's ``ciao-drop:`` refs expanded into absolute paths) never shifts
-    the rows after it.
+    numbering for steered and post-handover rows alike. The counts decide what
+    a mismatch means: of the sends the session is short of, ``lost`` turns
+    explain some, and whatever is left can only be a *different* text for a
+    send the session does hold — an engine-rewritten prompt (an attachment's
+    ``ciao-drop:`` refs expanded into absolute paths), which consumes its
+    session row instead of taking a turn number of its own.
 
     A durable file also holds turns that are not counted sends at all: our own
     hidden continuation prompts are written by ``record_turn`` without bumping
@@ -1035,15 +1036,11 @@ def _align_user_turns(
             if int(key) >= base and int(key) < count
         )
         expected = (count - base) - steered
-        # `record_turn` runs before the stream closes, so the finished turn can
-        # already be in the durable file while the stream is still active:
-        # subtract the in-flight turn only when the file does not hold it.
-        capacity = expected - (1 if in_flight and len(durable) < expected else 0)
-        if capacity <= 0:
+        if expected <= 0:
             # Nothing this stint can be aligned against.
             return result
-        if capacity < len(durable):
-            durable = durable[-capacity:]
+        if expected < len(durable):
+            durable = durable[-expected:]
     durable_texts = [
         " ".join(str(row.get("content") or "").split()) for _index, row in durable
     ]
@@ -1092,6 +1089,21 @@ def _align_user_turns(
             length += 1
         return length
 
+    durable_counts = Counter(durable_texts)
+    session_counts = Counter(session_texts)
+
+    def is_lost_like(position: int) -> bool:
+        """An error turn whose identical-text run outnumbers the session's."""
+        index, _row = durable[position]
+        text = durable_texts[position]
+        return failed_turn(index) and durable_counts[text] > session_counts[text]
+
+    # How many sends the session is short of, and how many of those the error
+    # turns explain. What is left can only be a non-error turn the session
+    # cannot show.
+    surplus = max(0, expected - len(session_user_rows)) if count else 0
+    missing = max(0, surplus - sum(1 for p in range(len(durable)) if is_lost_like(p)))
+
     pairs: list[tuple[int, int, dict]] = []
     # Durable turns the session cannot render, in durable order: the session
     # position they sit before, "lost" (a failed send to render) or "skipped"
@@ -1102,9 +1114,13 @@ def _align_user_turns(
     for position, (index, row) in enumerate(durable):
         text = durable_texts[position]
         if session_pos >= len(session_user_rows):
-            # The session ended first: only a failed turn still earns a row.
+            # The session ended first: a failed turn still earns a row, and a
+            # non-error turn takes an index only when one is genuinely missing.
             if failed_turn(index):
                 shifts.append((len(session_user_rows), "lost", index, row))
+            elif missing > 0:
+                missing -= 1
+                shifts.append((len(session_user_rows), "skipped", index, row))
             continue
         if text == session_texts[session_pos]:
             # `retryFromError` re-sends the same text after a failure, so a run
@@ -1125,14 +1141,22 @@ def _align_user_turns(
             if failed_turn(index):
                 shifts.append((session_pos, "lost", index, row))
                 continue
-            # For any other turn, a text mismatch is only a *missing* turn when
-            # the stint is provably short of counted sends. Otherwise the prompt
-            # was engine-rewritten (an attachment's refs expanded), or the match
-            # stalled behind a steer row: advance the durable cursor only, so
-            # nothing is renumbered.
-            deficit = expected - len(session_user_rows) - len(shifts)
-            if count == 0 or deficit > 0:
+            if count == 0:
+                # Older state with no counter: the file's own length is the
+                # only evidence, so a missing turn takes an index.
                 shifts.append((session_pos, "skipped", index, row))
+                continue
+            if missing > 0:
+                missing -= 1
+                shifts.append((session_pos, "skipped", index, row))
+                continue
+            # No send is missing here: this durable turn is an engine-rewritten
+            # prompt (attachment refs expanded into paths), so it is the SAME
+            # send as the session row at the cursor. Consume that row so a
+            # later lost turn anchors after it.
+            if session_pos < len(session_user_rows):
+                pairs.append((session_pos, index, row))
+                session_pos += 1
     shift_anchors = [anchor for anchor, _kind, _index, _row in shifts]
 
     def shifts_up_to(position: int) -> int:
@@ -1667,14 +1691,8 @@ async def _assemble_chat_messages(
     # Number the session rows from the durable turns they pair with, and
     # render the failed turns the session cannot contain, before the metadata
     # overlay — which pairs the transcript's assistant rows to the entry rows
-    # positionally — runs. `in_flight` is only subtracted when the durable file
-    # does not already hold the running turn, since `record_turn` runs before
-    # the stream closes.
-    resolver = getattr(pcm, "get_active_stream", None)
-    in_flight = bool(resolver(chat_id)) if callable(resolver) else False
-    result = _align_user_turns(
-        result, session_user_rows, current, chat, in_flight=in_flight
-    )
+    # positionally — runs.
+    result = _align_user_turns(result, session_user_rows, current, chat)
     if current and result:
         _overlay_transcript_metadata(result, current)
     _overlay_assistant_timings(result, chat.user_turn_timings)
