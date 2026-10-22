@@ -27,13 +27,15 @@ effect on the next tick.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
+import math
 import logging
 import re
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, TypeGuard
 
 from ciao import provider_registry
 
@@ -229,6 +231,15 @@ class AppSettings:
     # follow-up turn), "steer" = injected into the running turn.
     mid_turn_delivery: str = ""
 
+    # Appearance preferences are engine-wide so every device agrees. "" and
+    # 0.0 mean "never stored": the first browser to load seeds theme and
+    # font_scale from its own local values, after which the engine wins.
+    # text_contrast: "" = normal, "soft" = dimmer body text.
+    text_contrast: str = ""
+    # "dark", "light" or "system" (resolved per device from its OS).
+    theme: str = ""
+    font_scale: float = 0.0
+
     # The server's bind address; "" = DEFAULT_PWA_HOST. Read at startup only,
     # so a change takes effect after a restart. Was PWA_HOST.
     pwa_host: str = ""
@@ -249,6 +260,26 @@ class AppSettings:
     legacy_env_imported: bool = False
 
 
+THEMES = ("dark", "light", "system")
+MIN_FONT_SCALE = 0.8
+MAX_FONT_SCALE = 1.5
+FONT_SCALE_STEP = 0.05
+
+
+def _valid_font_scale(value: object) -> TypeGuard[int | float]:
+    """A number inside the Settings range that sits on a 0.05 step."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        number = float(value)  # an int beyond float range raises OverflowError
+    except OverflowError:
+        return False
+    if not math.isfinite(number) or not MIN_FONT_SCALE - 1e-9 <= number <= MAX_FONT_SCALE + 1e-9:
+        return False
+    steps = (number - MIN_FONT_SCALE) / FONT_SCALE_STEP
+    return abs(steps - round(steps)) < 1e-6
+
+
 def _parse_settings(raw: object) -> AppSettings:
     """``raw`` (the decoded JSON file) as validated settings. No side effects."""
     settings = AppSettings()
@@ -259,6 +290,7 @@ def _parse_settings(raw: object) -> AppSettings:
         for field in fields(AppSettings)
         if field.name not in _NESTED_CLEANERS
         and field.name not in _BOOLEAN_FIELDS
+        and field.name != "font_scale"
     }
     for key, value in raw.items():
         if key in string_fields and isinstance(value, str):
@@ -284,6 +316,13 @@ def _parse_settings(raw: object) -> AppSettings:
         settings.keyboard_send_mode = ""
     if settings.mid_turn_delivery != "steer":
         settings.mid_turn_delivery = ""
+    if settings.text_contrast != "soft":
+        settings.text_contrast = ""
+    if settings.theme not in THEMES:
+        settings.theme = ""
+    raw_scale = raw.get("font_scale")
+    if _valid_font_scale(raw_scale):
+        settings.font_scale = round(float(raw_scale), 2)
     # A hand-edited file must not hand uvicorn or the root logger garbage.
     if settings.pwa_host and not _valid_host(settings.pwa_host):
         logger.warning("Ignoring invalid pwa_host %r in app settings", settings.pwa_host)
@@ -443,6 +482,24 @@ class AppSettingsStore:
                     raise ValueError("mid_turn_delivery must be queue or steer")
                 updated.mid_turn_delivery = "steer" if value == "steer" else ""
                 continue
+            if key == "text_contrast":
+                if not isinstance(value, str) or value not in {"normal", "soft"}:
+                    raise ValueError("text_contrast must be normal or soft")
+                updated.text_contrast = "soft" if value == "soft" else ""
+                continue
+            if key == "theme":
+                if not isinstance(value, str) or value not in THEMES:
+                    raise ValueError("theme must be dark, light or system")
+                updated.theme = value
+                continue
+            if key == "font_scale":
+                if not _valid_font_scale(value):
+                    raise ValueError(
+                        f"font_scale must be a multiple of {FONT_SCALE_STEP} "
+                        f"between {MIN_FONT_SCALE} and {MAX_FONT_SCALE}"
+                    )
+                updated.font_scale = round(float(value), 2)
+                continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             value = value.strip()
@@ -460,6 +517,22 @@ class AppSettingsStore:
         self._explicit_fields.update(explicit)
         self._save()
         return self.settings
+
+    def appearance_payload(self) -> dict[str, object]:
+        """The engine-wide appearance preferences plus a content revision.
+
+        ``theme`` and ``font_scale`` are ``None`` until a browser first stores
+        one, which is the signal for that browser to seed them.
+        """
+        body: dict[str, object] = {
+            "text_contrast": self.settings.text_contrast or "normal",
+            "theme": self.settings.theme or None,
+            "font_scale": self.settings.font_scale or None,
+        }
+        digest = hashlib.sha256(
+            json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return {**body, "revision": digest}
 
     def import_legacy_env(self, legacy: Mapping[str, str]) -> list[str]:
         """Copy the retired `.env` server variables into Settings, once.

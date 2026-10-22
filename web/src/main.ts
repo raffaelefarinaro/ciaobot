@@ -4,9 +4,10 @@ import { router } from './router'
 import App from './App.vue'
 import { installViewportPlumbing } from './lib/viewport'
 import { listenForInstallPrompt, probeInstalledApp } from './lib/installPrompt'
+import { restoreAppearanceFromCache } from './lib/appearance'
 import { DEFAULT_FONT_SCALE, FONT_SCALE_STORAGE_KEY } from './composables/useFontScale'
 
-// Restore theme & font scale from localStorage as early as possible
+// Restore theme, font scale and appearance paint caches from localStorage as early as possible
 try {
   const savedTheme = localStorage.getItem('ciao-theme') || 'system'
   if (savedTheme === 'light') {
@@ -47,6 +48,11 @@ try {
   const savedFontScale = localStorage.getItem(FONT_SCALE_STORAGE_KEY)
     || String(DEFAULT_FONT_SCALE)
   document.documentElement.style.setProperty('--font-scale', savedFontScale)
+
+  // Last engine appearance, as a paint cache: the engine value overwrites it
+  // as soon as it loads. Runs after the theme class so any mode-dependent
+  // value picks the right side.
+  restoreAppearanceFromCache(document.documentElement)
 } catch {
   // Ignore localStorage restrictions
 }

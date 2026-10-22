@@ -181,7 +181,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false, appearance: { text_contrast: 'normal', theme: null, font_scale: null, revision: 'a0' } }
     sessions.set(id, state)
   }
   return state
@@ -465,6 +465,10 @@ const GET_ROUTES = {
   }),
   // Settings → Providers reads these. The real endpoints always send every
   // field; an empty object crashed the tab, so the stub mirrors the shape.
+  // Engine-wide appearance, kept per browser session like the real engine keeps
+  // one document: GET reads it, the PATCH branch below merges known keys and
+  // bumps `revision`. theme and font_scale start null (never stored).
+  '/api/settings/appearance': (req) => sessionOf(req).appearance,
   '/api/settings/routines': () => ({
     provider_default_models: {},
     provider_default_modes: {},
@@ -814,6 +818,14 @@ const server = http.createServer(async (req, res) => {
     // The dismissal of a suggested command: exactly `{terminal_offer:{expected_id}}`,
     // and only a PATCH carries one. Every other write keeps the behaviour it
     // had.
+    if (req.method === 'PATCH' && pathname === '/api/settings/appearance') {
+      const state = sessionOf(req)
+      for (const key of ['text_contrast', 'theme', 'font_scale']) {
+        if (body && body[key] !== undefined) state.appearance[key] = body[key]
+      }
+      state.appearance.revision = `a${Number(state.appearance.revision.slice(1)) + 1}`
+      return sendJson(res, state.appearance)
+    }
     if (req.method === 'PATCH') {
       const chatId = chatIdFromPath(pathname)
       if (chatId && body && typeof body === 'object' && body.terminal_offer !== undefined) {
