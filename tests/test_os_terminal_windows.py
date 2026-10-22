@@ -24,6 +24,7 @@ from __future__ import annotations
 import ctypes
 import queue
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -40,7 +41,18 @@ _windows_only = pytest.mark.skipif(
     sys.platform != "win32", reason="the native ConPTY adapter is the Windows branch"
 )
 
+from ciao.os_support import terminal_child_windows as tcw  # noqa: E402
 from ciao.os_support import terminal_windows as tw  # noqa: E402
+
+#: The helper that clears the terminal's interrupt attribute and starts the
+#: shell. The path is spelled out rather than read from the adapter, so the
+#: file is found on a machine that is not Windows too.
+CHILD_HELPER = (
+    Path(__file__).resolve().parents[1]
+    / "ciao"
+    / "os_support"
+    / "terminal_child_windows.py"
+)
 
 
 # ── a fake Kernel32 ─────────────────────────────────────────────────────────
@@ -301,6 +313,10 @@ class _FakeWin32:
             return 0xFFFFFFFF
         return 1
 
+    def SetHandleInformation(self, handle: Any, mask: int, flags: int) -> int:
+        self._record("SetHandleInformation", handle, mask, flags)
+        return 1
+
     def TerminateProcess(self, handle: Any, code: int) -> int:
         self._record("TerminateProcess", handle, code)
         self.wait_release.set()
@@ -381,6 +397,7 @@ def _install_fake(monkeypatch: pytest.MonkeyPatch, fake: _FakeWin32) -> None:
         "DeleteProcThreadAttributeList",
         "CreateProcessW",
         "ResumeThread",
+        "SetHandleInformation",
         "TerminateProcess",
         "GetExitCodeProcess",
         "WaitForSingleObject",
@@ -511,10 +528,17 @@ def test_the_job_is_created_between_the_child_and_its_resume(
 
 
 @_windows_only
-def test_spawn_uses_an_explicit_executable_and_the_full_quoted_argv(
+def test_spawn_names_the_shell_explicitly_and_quotes_the_whole_argv(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """CreateProcessW gets the executable and the whole command line."""
+    """The shell's executable and its whole argv travel to the helper.
+
+    The adapter no longer creates the shell itself: a fresh process has to
+    clear the ignore-Ctrl+C attribute before the shell is created, or the
+    shell inherits the engine's. The shell's name therefore goes to the
+    helper, which creates the shell with it — still explicit, still fully
+    quoted, and never guessed from a PATH.
+    """
     fake = _FakeWin32()
     _install_fake(monkeypatch, fake)
     argv = _shell(monkeypatch)
@@ -522,11 +546,15 @@ def test_spawn_uses_an_explicit_executable_and_the_full_quoted_argv(
     terminal = tw.spawn_terminal(cwd=tmp_path)
     try:
         spawned = fake.spawned[0]
-        assert spawned["application"] == argv[0]
-        assert "-NoLogo" in spawned["command"]
-        assert "-NoProfile" in spawned["command"]
+        command = spawned["command"]
+        assert argv[0] in command, "the shell's executable must be named"
+        assert "-NoLogo" in command
+        assert "-NoProfile" in command
+        assert str(tw.CHILD_HELPER) in command, "the helper must be named"
         assert spawned["cwd"] == str(tmp_path)
-        assert spawned["inherit"] == 0
+        assert (
+            spawned["inherit"] == 1
+        ), "the helper must inherit the pseudoconsole's handle"
     finally:
         terminal.close()
 
@@ -2555,6 +2583,242 @@ def test_the_interrupt_is_measured_against_the_console_host(
     warnings.warn(report, stacklevel=1)
 
 
+# ── the attribute that decides the delivery (#1721) ──────────────────────────
+#
+# The chain that carries an interrupt into a pseudoconsole has four links,
+# and the measurements above pinned three of them: the console host turns
+# the 0x03 byte into a Ctrl+C key event, the host raises a CTRL_C_EVENT
+# because the console's input mode has ENABLE_PROCESSED_INPUT set, and the
+# operating system then decides whether that event reaches the process.
+#
+# That last decision is made from a per-process attribute: the "ignore
+# Ctrl+C" flag. SetConsoleCtrlHandler(NULL, TRUE) sets it,
+# SetConsoleCtrlHandler(NULL, FALSE) clears it, and **every child inherits
+# it from its parent**. A process that has it set is skipped when the
+# event is delivered: no handler runs, no read is aborted, and the process
+# is not even terminated by the default handler — it simply never hears
+# about the event.
+#
+# The engine inherits the attribute from whatever started it (a
+# POSIX-flavoured shell sets it, so that its own Ctrl+C arrives as a
+# signal), and a shell the engine created would inherit it from the engine.
+# The probe below puts the attribute in a known state and measures what the
+# operating system then does with the event, so the attribute is either the
+# blocker or it is not.
+
+# The probe that measures the attribute. It is a Python program rather than
+# a PowerShell script: it needs a control handler of its own, and ctypes
+# gives it one without a compiler in the way.
+#
+# Two states, and only the attribute differs between them:
+#
+# * "ignored": the handler is registered first and the attribute is set
+#   afterwards, so the attribute is the last word and the event must not
+#   reach the handler;
+# * "cleared": the attribute is set and then cleared, and the handler is
+#   registered afterwards, so the attribute is clear and the event must
+#   reach it.
+#
+# The order is deliberate. A probe that only ever cleared the attribute
+# would say nothing about what the attribute does, and a probe that
+# registered its handler after setting the attribute would have the
+# attribute set twice over in the "ignored" case.
+_IGNORE_ATTRIBUTE_PROBE = '''"""The probe that measures the ignore-Ctrl+C attribute."""
+
+import ctypes
+import sys
+import time
+
+KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+KERNEL32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, ctypes.c_int]
+KERNEL32.SetConsoleCtrlHandler.restype = ctypes.c_int
+
+HANDLER = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulong)
+
+#: How long the probe waits for the interrupt. The test waits for the
+#: marker that ends the wait, so the answer is never a timeout.
+WAIT_SECONDS = 6
+
+
+def _on_control(control_type):
+    """The control handler: the event reached this process."""
+    sys.stdout.write("CIAO-HANDLER\\n")
+    sys.stdout.flush()
+    return 1
+
+
+def main():
+    mode = sys.argv[1]
+    callback = HANDLER(_on_control)
+    if mode == "cleared":
+        KERNEL32.SetConsoleCtrlHandler(None, True)
+        KERNEL32.SetConsoleCtrlHandler(None, False)
+    KERNEL32.SetConsoleCtrlHandler(callback, True)
+    if mode == "ignored":
+        KERNEL32.SetConsoleCtrlHandler(None, True)
+    sys.stdout.write("CIAO-READY\\n")
+    sys.stdout.flush()
+    time.sleep(WAIT_SECONDS)
+    sys.stdout.write("CIAO-DONE\\n")
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _interrupt_with_the_ignore_attribute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> tuple[int, bool]:
+    """Whether the probe's handler ran, with the attribute in that state.
+
+    Returns ``(ran, measured)``: whether the control handler ran, and
+    whether the probe answered at all — either the handler ran, or the
+    probe reached the end of its wait without it. A run that never got the
+    interrupt is still an answer; a run that never answered is not.
+    """
+    probe = tmp_path / f"ignore-attribute-{mode}.py"
+    probe.write_text(_IGNORE_ATTRIBUTE_PROBE, encoding="utf-8")
+    argv = [sys.executable, "-I", "-S", str(probe), mode]
+    with monkeypatch.context() as patch:
+        patch.setattr(tw, "default_shell", lambda: list(argv))
+        terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        _read_until(terminal, b"CIAO-READY", timeout=60)
+        terminal.write(b"\x03")
+        produced = _collect_until(
+            terminal, (b"CIAO-HANDLER", b"CIAO-DONE"), timeout=30
+        )
+        ran = b"CIAO-HANDLER" in produced
+        return int(ran), ran or b"CIAO-DONE" in produced
+    finally:
+        terminal.close()
+
+
+@_windows_only
+def test_the_ignore_ctrl_c_attribute_decides_whether_the_event_is_delivered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measure the attribute that decides whether the interrupt arrives.
+
+    The console host raises the control event, and the operating system
+    then decides whether it reaches the process: a process that has the
+    "ignore Ctrl+C" attribute is skipped, and one that does not is not.
+    The attribute is inherited by every child, so the engine's own decides
+    what a shell it starts inherits.
+
+    The probe measures the attribute directly: it puts it in a known
+    state, writes the 0x03 byte, and reports whether its control handler
+    ran. The two states differ in the attribute and in nothing else, so the
+    difference between the two numbers is the attribute's doing.
+
+    The numbers are reported as a warning so they land in the CI log; the
+    test asserts that the measurement was possible, not what the numbers
+    say.
+    """
+    ignored, ignored_measured = _interrupt_with_the_ignore_attribute(
+        tmp_path, monkeypatch, "ignored"
+    )
+    cleared, cleared_measured = _interrupt_with_the_ignore_attribute(
+        tmp_path, monkeypatch, "cleared"
+    )
+    assert ignored_measured and cleared_measured, (
+        "the probe never answered: the attribute cannot be measured"
+    )
+    report = (
+        f"#1721 ignore-attribute experiment: with the ignore-Ctrl+C attribute "
+        f"set, the 0x03 ran the reader's CancelKeyPress handler: {ignored}; "
+        f"with the attribute cleared, it ran: {cleared}"
+    )
+    print(report)
+    warnings.warn(report, stacklevel=1)
+
+
+@_windows_only
+def test_ctrl_c_ends_a_running_program_and_the_shell_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The interrupt reaches the shell and ends the program the shell runs.
+
+    Three things hold at once, and each of them is a different link of the
+    chain:
+
+    * the shell's own control handler runs, so the operating system
+      delivered the event to the shell — the helper clears the
+      ignore-Ctrl+C attribute the shell would otherwise have inherited
+      from the engine;
+    * the program the shell runs ends, so the event reached the program as
+      well: ``ping`` neither reads the console nor installs a handler, so
+      nothing but the event itself can end it;
+    * the shell survives, so the event did not take the shell down with it.
+
+    The byte is still the byte the user typed: ``0x03``, written to the
+    terminal's input, unchanged.
+    """
+    char, aborted, handler = _interrupt_seen_by_a_reader(
+        tmp_path, monkeypatch, b"\x03"
+    )
+    assert handler == 1, (
+        "the shell must receive the console control event: the helper "
+        f"clears the ignore-Ctrl+C attribute for it (read: {char}, "
+        f"aborted: {aborted})"
+    )
+    ended = _interrupt_ends_a_running_program(tmp_path, b"\x03")
+    assert ended == 1, "the interrupt must end the running program"
+
+
+# ── the helper that starts the shell (#1721) ─────────────────────────────────
+
+
+def test_the_helper_imports_nothing_from_the_engine() -> None:
+    """The helper is a plain module: it imports nothing from ciao.
+
+    It runs under ``-I -S`` as a process of its own, and the engine's
+    packages are not on its way in: a helper that imported the engine
+    would read the engine's configuration on the way to a terminal.
+    """
+    source = CHILD_HELPER.read_text(encoding="utf-8")
+    assert "import ciao" not in source
+    assert "from ciao" not in source
+
+
+@_windows_only
+def test_the_helper_reports_a_status_and_never_a_traceback(tmp_path: Path) -> None:
+    """A helper that cannot start the shell says so with a status.
+
+    The helper's standard handles are the user's terminal, so a traceback
+    would land in it. A failure is a status, and only a status — and the
+    status says which step failed.
+    """
+    missing = str(tmp_path / "no-such-shell.exe")
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(CHILD_HELPER), "0", missing, missing],
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode in (tcw.CONTROL_FAILED, tcw.CREATE_FAILED), (
+        f"the helper must fail with a status, not a crash: {result.returncode}"
+    )
+    assert result.stdout == b""
+    assert result.stderr == b""
+    assert b"Traceback" not in result.stderr
+
+
+@_windows_only
+def test_the_helper_refuses_an_argument_it_cannot_use() -> None:
+    """A helper that cannot read its arguments says so with a status."""
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", str(CHILD_HELPER), "not-a-handle"],
+        capture_output=True,
+        timeout=30,
+    )
+    assert result.returncode == 2, "the helper must refuse a bad argument"
+    assert result.stdout == b""
+    assert result.stderr == b""
+
+
 def _process_alive(pid: int) -> bool:
     """True when a process with that id is still running."""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -2582,6 +2846,45 @@ def _process_alive(pid: int) -> bool:
         return code.value == 259  # STILL_ACTIVE
     finally:
         kernel32.CloseHandle(handle)
+
+
+@_windows_only
+def test_the_pseudoconsole_handle_is_inheritable_for_the_helper_and_not_after(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The pseudoconsole's handle reaches the helper, and nobody else.
+
+    The helper attaches the shell to the pseudoconsole, so it needs the
+    pseudoconsole's handle — and a handle reaches a child only when it is
+    inheritable. The flag is set before the child is created and taken back
+    right after it, so the engine's other children never inherit the
+    pseudoconsole and the handle is not left inheritable for the rest of
+    the engine's life.
+    """
+    fake = _FakeWin32()
+    _install_fake(monkeypatch, fake)
+    _shell(monkeypatch)
+
+    terminal = tw.spawn_terminal(cwd=tmp_path)
+    try:
+        names = _names(fake)
+        flags = [
+            (index, args)
+            for index, (name, args) in enumerate(fake.calls)
+            if name == "SetHandleInformation"
+        ]
+        assert len(flags) == 2, "the flag is set for the spawn and taken back"
+        (set_at, set_args), (cleared_at, cleared_args) = flags
+        assert set_args[1] == tw._HANDLE_FLAG_INHERIT, "the handle must be inheritable"
+        assert set_args[2] == tw._HANDLE_FLAG_INHERIT
+        assert cleared_args[1] == tw._HANDLE_FLAG_INHERIT
+        assert cleared_args[2] == 0, "the flag must be taken back"
+        created = names.index("CreateProcessW")
+        assert set_at < created < cleared_at, (
+            "the handle must be inheritable for the one spawn and not after it"
+        )
+    finally:
+        terminal.close()
 
 
 @_windows_only

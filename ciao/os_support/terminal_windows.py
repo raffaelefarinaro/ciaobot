@@ -8,6 +8,12 @@ reads keystrokes from the other. This module drives it directly through
 * the child is created **suspended**, assigned to the
   :class:`~ciao.os_support.processes.ProcessTree` job object and only then
   resumed, so no shell instruction can ever run outside the job that owns it;
+* the child is the **helper**
+  (:mod:`ciao.os_support.terminal_child_windows`), not the shell: the
+  helper clears the "ignore Ctrl+C" attribute — the one the operating system
+  reads to decide whether a console control event reaches a process at all,
+  and the one every child inherits — and then creates the shell, so the
+  shell inherits the cleared attribute and the engine's own is untouched;
 * the child's ``STARTUPINFO`` carries ``STARTF_USESTDHANDLES`` with the
   three standard-handle slots null, so the pseudoconsole replaces the
   child's console instead of the child inheriting the parent's handles;
@@ -74,12 +80,28 @@ if sys.platform == "win32":
     _CREATE_SUSPENDED = 0x00000004
     _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
     _CREATE_UNICODE_ENVIRONMENT = 0x00000400
-    # CREATE_NEW_PROCESS_GROUP (0x200) is deliberately not used. The console
-    # host turns the 0x03 byte into a Ctrl+C control event, and the operating
-    # system delivers that event to the processes of the console host's
-    # process group: a child that sits in a group of its own is guaranteed
-    # never to receive it. The shell therefore shares the group of the
-    # pseudoconsole, which is the group the event is delivered to.
+    # CREATE_NEW_PROCESS_GROUP (0x200) is deliberately not used, and the
+    # reason is the delivery half of the interrupt. The console host turns
+    # the 0x03 byte into a Ctrl+C control event, and the operating system
+    # delivers that event to the processes of the console host's *process
+    # group*: a child that sits in a group of its own is guaranteed never
+    # to receive it. The console host is created by CreatePseudoConsole as
+    # a child of the engine, without that flag, so it shares the engine's
+    # group; the helper and the shell are created the same way and share it
+    # too. That is one half of the delivery.
+    #
+    # The other half is the "ignore Ctrl+C" attribute, which decides
+    # whether the operating system delivers the event to a process at all
+    # and which every child inherits from its parent. The engine inherits
+    # it from whatever started it, and the shell would inherit it from the
+    # engine, so the event would never reach the shell. The helper clears
+    # it in itself before it creates the shell, and the shell inherits the
+    # cleared state: that is what ciao/os_support/terminal_child_windows.py
+    # is for.
+
+    # Handle flags (winnt.h). A handle reaches a child only when it is
+    # inheritable, and only for that one spawn.
+    _HANDLE_FLAG_INHERIT = 0x00000001
 
     # PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE (processthreadsapi.h).
     _PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
@@ -117,6 +139,12 @@ if sys.platform == "win32":
     _CLOSE_TIMEOUT = 10.0
     # How long the reader gets to report that it started.
     _READER_START_TIMEOUT = 10.0
+
+    #: The helper that clears the terminal's interrupt attribute and starts
+    #: the shell. It is a fresh process of its own because the attribute is
+    #: inherited: only a process that is not the engine can clear it for the
+    #: shell without changing the engine's own.
+    CHILD_HELPER = Path(__file__).resolve().with_name("terminal_child_windows.py")
 
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -250,6 +278,9 @@ if sys.platform == "win32":
         ctypes.POINTER(_ProcessInformation),
     )
     _ResumeThread = _declare("ResumeThread", wintypes.DWORD, wintypes.HANDLE)
+    _SetHandleInformation = _declare(
+        "SetHandleInformation", wintypes.BOOL, wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD
+    )
     _TerminateProcess = _declare(
         "TerminateProcess", wintypes.BOOL, wintypes.HANDLE, wintypes.UINT
     )
@@ -388,6 +419,12 @@ if sys.platform == "win32":
         The reader thread owns the output pipe, the closer thread owns the
         pseudoconsole handle, and this object owns the job, the process
         handle and the two parent-side pipe ends.
+
+        ``pid`` is the process that owns the terminal: on Windows that is the
+        helper, and the shell is its child. The helper is a process of its
+        own because the "ignore Ctrl+C" attribute is inherited, and only a
+        process that is not the engine can clear it for the shell without
+        changing the engine's own.
 
         One caller at a time may :meth:`read`; :meth:`write` may be called
         from any thread and is serialised.
@@ -936,6 +973,16 @@ if sys.platform == "win32":
         resumed, so the shell is never outside the job that owns it. Any
         failure along the way kills what was created and closes every handle
         the transaction opened.
+
+        The child is not the shell but the **helper**
+        (:mod:`ciao.os_support.terminal_child_windows`): a fresh process
+        that clears the "ignore Ctrl+C" attribute and then creates the
+        shell, so the shell inherits the cleared attribute. The attribute is
+        what decides whether the operating system delivers a console control
+        event to a process at all, it is inherited by every child, and the
+        engine inherits it from whatever started it — so a shell the engine
+        created itself would never receive the interrupt, and the terminal's
+        Ctrl+C would do nothing.
         """
         folder = _validated_folder(cwd)
         _validated_dimension(cols, "cols", 20, 500)
@@ -1012,16 +1059,41 @@ if sys.platform == "win32":
             # to use them rather than the parent's handles.
             startup.StartupInfo.dwFlags = _STARTF_USESTDHANDLES
 
+            # The helper attaches the shell to this pseudoconsole, so it
+            # needs the pseudoconsole's handle — and a handle reaches a
+            # child only when it is inheritable. The flag is set for that
+            # one spawn and taken back right after it, so the engine's
+            # other children never inherit the pseudoconsole.
+            if not _SetHandleInformation(
+                int(hpcon.value or 0), _HANDLE_FLAG_INHERIT, _HANDLE_FLAG_INHERIT
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+
             block = _environment_block(env)
             environment = ctypes.create_string_buffer(block, len(block))
-            command = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
+            # The helper is given the pseudoconsole's handle, the shell's
+            # executable and the shell's whole command line, and it creates
+            # the shell with them: the shell's name stays explicit and its
+            # argv stays fully quoted, and the helper needs no more.
+            helper_argv = [
+                sys.executable,
+                "-I",
+                "-S",
+                str(CHILD_HELPER),
+                str(int(hpcon.value or 0)),
+                argv[0],
+                subprocess.list2cmdline(argv),
+            ]
+            command = ctypes.create_unicode_buffer(
+                subprocess.list2cmdline(helper_argv)
+            )
 
             if not _CreateProcessW(
-                argv[0],
+                sys.executable,
                 command,
                 None,
                 None,
-                False,
+                True,
                 _CREATE_SUSPENDED
                 | _EXTENDED_STARTUPINFO_PRESENT
                 | _CREATE_UNICODE_ENVIRONMENT,
@@ -1034,6 +1106,12 @@ if sys.platform == "win32":
             process_handle = int(process_info.hProcess or 0)
             thread_handle = int(process_info.hThread or 0)
             opened.extend([process_handle, thread_handle])
+
+            # The helper has the handle now; the engine's other children
+            # must not.
+            _SetHandleInformation(
+                int(hpcon.value or 0), _HANDLE_FLAG_INHERIT, 0
+            )
 
             # The pseudoconsole keeps its own copies of these; ours would
             # keep the pipes alive and hide a broken channel.
