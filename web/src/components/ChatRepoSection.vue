@@ -6,7 +6,6 @@ import { branchLabel } from '../lib/repo'
 import { chatLocationDiffers, repoChip } from '../lib/repoLocation'
 import type { ProjectRepo, RepoLocation } from '../lib/types'
 import { useProjectStore } from '../stores/projects'
-import BrowserTerminalButton from './BrowserTerminalButton.vue'
 
 const props = defineProps<{
   repo: ProjectRepo
@@ -106,7 +105,6 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
         </span>
       </div>
     </div>
-    <BrowserTerminalButton v-if="!chip.missing" :chat-id="chatId" class="chat-repo-terminal" />
     <template v-if="!archived">
       <div class="repo-code-row">
         <span :id="switchId" class="repo-code-label">Code mode</span>
@@ -263,7 +261,6 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
 .chat-repo-dirty { display: inline-flex; align-items: center; gap: 6px; }
 .chat-repo-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warning); flex: none; }
 .chat-repo-missing { margin: var(--space-1) 0 0; color: var(--warning); font-size: var(--text-sm); }
-.chat-repo-terminal { display: block; margin-top: var(--space-2); }
 @media (pointer: coarse) {
   .repo-code-switch { min-width: var(--touch); }
   .chat-repo-copy, .repo-code-info { width: var(--touch); height: var(--touch); }

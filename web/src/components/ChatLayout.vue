@@ -367,7 +367,10 @@ const PinnedFilePanel = defineAsyncComponent(loadPinnedFilePanel)
 // and a hide must not throw it away. The signal that asks for it is its own
 // tiny module, so the app shell does not carry the terminal store.
 const TerminalPane = defineAsyncComponent(() => import('./TerminalPane.vue'))
-const terminalMounted = ref(false)
+// The signal is asked for once and stays true for the session, so a shell
+// mounted after that has to read it: a watcher alone only sees the change, and
+// a terminal opened on another page would leave this one without its pane.
+const terminalMounted = ref(terminalPanelWanted.value)
 watch(terminalPanelWanted, (wanted) => {
   if (wanted) terminalMounted.value = true
 })
