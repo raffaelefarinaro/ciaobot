@@ -891,8 +891,7 @@ async function doComplete() {
 async function submitClosure() {
   if (!project.value || closureBusy.value) return
   // The note is optional in the field itself: a blank (or whitespace-only)
-  // note closes the project without a resolution, like the task board's
-  // completion sheet.
+  // note closes the project without a note, like the task board's completion sheet.
   const note = closureNote.value.trim()
   closureBusy.value = true
   closureError.value = ''
