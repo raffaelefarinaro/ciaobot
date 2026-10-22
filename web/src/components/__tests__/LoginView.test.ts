@@ -698,7 +698,7 @@ describe('LoginView setup wizard tests', () => {
         await button.trigger('click')
         await flushPromises()
         expect(mockApiPost).toHaveBeenCalledWith('/api/auth/host-sign-in', undefined)
-        expect(wrapper.get('.login-host-status').text()).toContain('Settings → PWA password')
+        expect(wrapper.get('.login-host-status').text()).toContain('Settings → Access & devices → PWA password')
         await vi.advanceTimersByTimeAsync(2000)
         expect(fetchMock).toHaveBeenCalled()
         expect(replace).toHaveBeenCalledWith('/')

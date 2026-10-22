@@ -588,7 +588,6 @@
         </div>
       </template>
 
-
       <!-- PROVIDERS TAB: chat providers. The old models tab was renamed;
            /settings/models redirects here (router.ts). -->
       <template v-if="currentTab === 'providers'">
@@ -3123,7 +3122,7 @@ const TAB_ANCHORS: Record<string, string[]> = {
   access: ['#other-devices'],
 }
 watch(
-  () => [route.hash, currentTab.value] as const,
+  [() => route.hash, currentTab],
   ([hash, tab]) => {
     if (!TAB_ANCHORS[tab]?.includes(hash)) return
     void nextTick(() => {

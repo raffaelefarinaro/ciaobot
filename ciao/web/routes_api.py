@@ -5752,7 +5752,7 @@ async def list_models(request: Request) -> JSONResponse:
     })
 
 
-# ── Routine settings (Settings → Models tab) ────────────────────────────
+# ── Routine settings (Settings → Providers tab) ────────────────────────────
 
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
