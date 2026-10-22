@@ -435,6 +435,42 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         return JSONResponse(payload, status_code=201 if created else 200)
 
 
+async def reorder_workspaces(request: Request) -> JSONResponse:
+    """Persist a reordered workspace registry. Body: {"order": [name, ...]}."""
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    order = body.get("order") if isinstance(body, dict) else None
+    if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
+        return JSONResponse({"error": "order[] is required"}, status_code=400)
+    # No await from here to the mutation below: the registry has no lock, and
+    # that keeps the check and the rebuild atomic on the event loop.
+    current = list(config.workspaces)
+    if len(order) != len(set(order)) or set(order) != set(current):
+        return JSONResponse(
+            {"error": "order must list every registered workspace exactly once"},
+            status_code=400,
+        )
+    if order != current:
+        previous = dict(config.workspaces)
+        config.workspaces.clear()
+        config.workspaces.update({name: previous[name] for name in order})
+        try:
+            _persist_workspaces(config)
+        except OSError as exc:
+            config.workspaces.clear()
+            config.workspaces.update(previous)
+            return JSONResponse(
+                {"error": f"Failed to save the workspace order: {exc}"},
+                status_code=500,
+            )
+        _refresh_project_manager_workspaces(request)
+        _publish_workspaces_changed(request)
+    return JSONResponse(_workspaces_payload(config))
+
+
 async def _bootstrap_new_agent_root(config, name: str) -> bool:
     """Seed a freshly created workspace's own agent root.
 

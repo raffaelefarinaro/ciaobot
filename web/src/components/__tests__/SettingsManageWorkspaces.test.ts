@@ -172,10 +172,10 @@ describe('Settings > Manage workspaces', () => {
     }
   })
 
-  it('the menu offers only Rename on the main workspace', async () => {
+  it('the menu offers no Archive on the main workspace', async () => {
     const { wrapper } = await mountManage()
     try {
-      expect((await openMenu(rowFor(wrapper, 'personal'))).map(b => b.text())).toEqual(['Rename'])
+      expect((await openMenu(rowFor(wrapper, 'personal'))).map(b => b.text())).toEqual(['Rename', 'Move up', 'Move down'])
     } finally {
       wrapper.unmount()
     }
@@ -184,7 +184,7 @@ describe('Settings > Manage workspaces', () => {
   it('the menu offers Rename and Archive on an archivable workspace', async () => {
     const { wrapper } = await mountManage()
     try {
-      expect((await openMenu(rowFor(wrapper, 'work'))).map(b => b.text())).toEqual(['Rename', 'Archive'])
+      expect((await openMenu(rowFor(wrapper, 'work'))).map(b => b.text())).toEqual(['Rename', 'Move up', 'Move down', 'Archive'])
     } finally {
       wrapper.unmount()
     }
@@ -310,6 +310,201 @@ describe('Settings > Manage workspaces', () => {
       await nextTick()
       const form = wrapper.get('.workspace-card--new')
       expect(document.activeElement).toBe(form.get('input').element)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+})
+
+describe('Settings > Manage workspaces > reorder', () => {
+  beforeEach(async () => {
+    localStorage.clear()
+    document.body.innerHTML = ''
+    setActivePinia(createPinia())
+    state.workspaces = registry(['personal', 'work', 'side'])
+    const { api } = await import('../../lib/api')
+    vi.mocked(api.post).mockReset()
+    vi.mocked(api.post).mockImplementation((path: string, body?: unknown) => {
+      if (path === '/api/workspaces/reorder') {
+        const order = (body as { order: string[] }).order
+        state.workspaces = registry(order)
+        return Promise.resolve(state.workspaces)
+      }
+      return Promise.resolve({})
+    })
+  })
+
+  const order = (wrapper: Mounted['wrapper']) =>
+    rows(wrapper).map(r => r.get('.workspace-title').text())
+  const handle = (wrapper: Mounted['wrapper'], name: string) =>
+    wrapper.get(`[data-workspace-handle="${name}"]`)
+  const live = (wrapper: Mounted['wrapper']) => wrapper.get('[role="status"][aria-live="polite"]')
+
+  it('Alt+ArrowDown on a handle moves the row down, announces it and keeps focus', async () => {
+    const { wrapper, store } = await mountManage()
+    try {
+      const spy = vi.spyOn(store, 'reorderWorkspaces')
+      const first = handle(wrapper, 'personal')
+      ;(first.element as HTMLElement).focus()
+      await first.trigger('keydown', { key: 'ArrowDown', altKey: true })
+      await flushPromises()
+      await nextTick()
+
+      expect(spy).toHaveBeenCalledWith(['work', 'personal', 'side'])
+      expect(order(wrapper)).toEqual(['work', 'personal', 'side'])
+      expect(live(wrapper).text()).toBe('Moved Personal to position 2 of 3')
+      expect(document.activeElement).toBe(handle(wrapper, 'personal').element)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('Alt+ArrowUp on the first row and plain arrows do nothing', async () => {
+    const { wrapper, store } = await mountManage()
+    try {
+      const spy = vi.spyOn(store, 'reorderWorkspaces')
+      const first = handle(wrapper, 'personal')
+      await first.trigger('keydown', { key: 'ArrowUp', altKey: true })
+      await first.trigger('keydown', { key: 'ArrowDown' })
+      await first.trigger('keydown', { key: 'ArrowUp' })
+      await flushPromises()
+      expect(spy).not.toHaveBeenCalled()
+      expect(live(wrapper).text()).toBe('')
+      const last = handle(wrapper, 'side')
+      await last.trigger('keydown', { key: 'ArrowDown', altKey: true })
+      expect(spy).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('the menu disables Move up on the first row and Move down on the last', async () => {
+    const { wrapper } = await mountManage()
+    try {
+      const firstItems = await openMenu(rowFor(wrapper, 'personal'))
+      const up = firstItems.find(b => b.text() === 'Move up')!
+      const down = firstItems.find(b => b.text() === 'Move down')!
+      expect(up.attributes('data-disabled')).toBeDefined()
+      expect(down.attributes('data-disabled')).toBeUndefined()
+      expect(up.element.closest('[role="menuitem"]')).toBeTruthy()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('the menu disables Move down on the last row', async () => {
+    const { wrapper } = await mountManage()
+    try {
+      const items = await openMenu(rowFor(wrapper, 'side'))
+      expect(items.find(b => b.text() === 'Move down')!.attributes('data-disabled')).toBeDefined()
+      expect(items.find(b => b.text() === 'Move up')!.attributes('data-disabled')).toBeUndefined()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('menu Move down reorders, announces and returns focus to the handle', async () => {
+    const { wrapper, store } = await mountManage()
+    try {
+      const spy = vi.spyOn(store, 'reorderWorkspaces')
+      const items = await openMenu(rowFor(wrapper, 'work'))
+      await items.find(b => b.text() === 'Move down')!.trigger('click')
+      await flushPromises()
+      await nextTick()
+
+      expect(spy).toHaveBeenCalledWith(['personal', 'side', 'work'])
+      expect(order(wrapper)).toEqual(['personal', 'side', 'work'])
+      expect(live(wrapper).text()).toBe('Moved Work to position 3 of 3')
+      expect(document.activeElement).toBe(handle(wrapper, 'work').element)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('dropping the first row on the last posts the moved order', async () => {
+    const { wrapper, store } = await mountManage()
+    try {
+      const spy = vi.spyOn(store, 'reorderWorkspaces')
+      const dataTransfer = { setData: vi.fn(), setDragImage: vi.fn(), effectAllowed: '' }
+      await handle(wrapper, 'personal').trigger('dragstart', { dataTransfer })
+      await rowFor(wrapper, 'side').trigger('dragover', { dataTransfer })
+      expect(rowFor(wrapper, 'side').classes()).toContain('workspace-row--drag-over')
+      await rowFor(wrapper, 'side').trigger('drop', { dataTransfer })
+      await flushPromises()
+
+      expect(spy).toHaveBeenCalledWith(['work', 'side', 'personal'])
+      expect(order(wrapper)).toEqual(['work', 'side', 'personal'])
+      expect(live(wrapper).text()).toBe('Moved Personal to position 3 of 3')
+      expect(wrapper.find('.workspace-row--drag-over').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('a rejected save shows the alert, restores the order and does not announce', async () => {
+    const { api } = await import('../../lib/api')
+    const { wrapper } = await mountManage()
+    try {
+      vi.mocked(api.post).mockRejectedValue(new Error('disk full'))
+      await handle(wrapper, 'personal').trigger('keydown', { key: 'ArrowDown', altKey: true })
+      await flushPromises()
+
+      expect(wrapper.get('.action-result--error[role="alert"]').text())
+        .toBe('Could not save the workspace order: disk full')
+      expect(order(wrapper)).toEqual(['personal', 'work', 'side'])
+      expect(live(wrapper).text()).toBe('')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('each row shows the key its position maps to, and the shortcut follows a move', async () => {
+    const { wrapper } = await mountManage()
+    try {
+      const keys = () => rows(wrapper).map(r => r.get('.workspace-row-key').text())
+      expect(keys()).toEqual(['Key 1', 'Key 2', 'Key 3'])
+      await handle(wrapper, 'personal').trigger('keydown', { key: 'ArrowDown', altKey: true })
+      await flushPromises()
+      expect(order(wrapper)).toEqual(['work', 'personal', 'side'])
+      expect(keys()).toEqual(['Key 1', 'Key 2', 'Key 3'])
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('the main workspace tag follows the server after a move', async () => {
+    const { api } = await import('../../lib/api')
+    const { wrapper } = await mountManage()
+    try {
+      vi.mocked(api.post).mockImplementation((_path: string, body?: unknown) => {
+        const names = (body as { order: string[] }).order
+        return Promise.resolve({ ...registry(names), primary: names[0] })
+      })
+      await handle(wrapper, 'personal').trigger('keydown', { key: 'ArrowDown', altKey: true })
+      await flushPromises()
+      expect(rowFor(wrapper, 'work').find('.set-tag').exists()).toBe(true)
+      expect(rowFor(wrapper, 'personal').find('.set-tag').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('archived rows have no handle', async () => {
+    const { api } = await import('../../lib/api')
+    const base = vi.mocked(api.get).getMockImplementation()!
+    vi.mocked(api.get).mockImplementation((path: string) => {
+      if (path === '/api/workspaces/archived') {
+        return Promise.resolve({
+          archived: [{ id: 'old-1', name: 'old', archived_at: '2026-01-01T00:00:00Z', path: '/x', restorable: true }],
+        })
+      }
+      return base(path)
+    })
+    const { wrapper } = await mountManage()
+    try {
+      expect(wrapper.findAll('.archived-item')).toHaveLength(1)
+      expect(wrapper.findAll('[data-workspace-handle]')).toHaveLength(3)
+      expect(wrapper.find('.archived-item [data-workspace-handle]').exists()).toBe(false)
     } finally {
       wrapper.unmount()
     }
