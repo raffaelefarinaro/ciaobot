@@ -578,10 +578,9 @@
 
       </template>
 
-      <!-- MODELS TAB: chat providers, then background models.
-           The old providers tab folded in here; /settings/providers
-           redirects to /settings/models#chat-providers (router.ts). -->
-      <template v-if="currentTab === 'models'">
+      <!-- PROVIDERS TAB: chat providers. The old models tab was renamed;
+           /settings/models redirects here (router.ts). -->
+      <template v-if="currentTab === 'providers'">
         <!-- Chat providers -->
         <div v-if="!providerKeysLoaded" class="card" role="status" aria-live="polite" aria-label="Loading providers">
           <div class="mm-loading-heading"><span class="history-loading-spinner" aria-hidden="true"></span><span>Loading providers…</span></div>
@@ -875,25 +874,7 @@
           </div>
         </template>
 
-        <!-- Background models -->
-        <div v-if="!routinesLoaded" class="card"><SkeletonLoader label="Loading routines" :count="3" /></div>
-        <template v-else-if="routinesError">
-          <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
-        </template>
-        <template v-else-if="routines">
-          <!-- Background models (internal routines) -->
-          <div class="card">
-            <div class="settings-card-header">
-              <p class="section-title">Background models</p>
-              <p class="hint">
-                Session insights, the model that reads archived chats into memory, names new chats
-                and checks schedule results, is set on each provider above. Automatic uses the chat's
-                own model; choose a model to override it.
-              </p>
-            </div>
-          </div>
-          <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
-        </template>
+        <div v-if="routinesError" class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
       </template>
 
       <!-- WORKSPACES TAB -->
@@ -1988,7 +1969,7 @@
       <!-- On this page: built from the rendered sections of the current tab,
            so it follows whatever the tab actually shows (conditional sections
            included) instead of a second hand-kept list. -->
-      <aside v-if="tocItems.length > 1 || assetRail" class="page-rail settings-rail" aria-label="About this page">
+      <aside v-if="tocItems.length > 1 || assetRail || providersStatusRail" class="page-rail settings-rail" aria-label="About this page">
         <section v-if="tocItems.length > 1" class="rail-section">
           <h2 id="settings-toc-title" class="rail-title">On this page</h2>
           <nav class="settings-toc" aria-label="Sections on this page">
@@ -2003,15 +1984,15 @@
             >{{ item.label }}</button>
           </nav>
         </section>
-        <!-- Models: a glance at whether each CLI is working. -->
+        <!-- Providers: a glance at whether each CLI is working. -->
         <section
-          v-if="currentTab === 'models' && providerKeys?.connections"
+          v-if="providersStatusRail"
           class="rail-section settings-rail-status"
           aria-labelledby="settings-rail-status-title"
         >
           <h2 id="settings-rail-status-title" class="rail-title">Status</h2>
           <div class="rail-kvs">
-            <div v-for="(conn, connKey) in providerKeys.connections" :key="`rail-${connKey}`" class="rail-kv">
+            <div v-for="(conn, connKey) in providerKeys?.connections" :key="`rail-${connKey}`" class="rail-kv">
               <span>{{ conn.label || connKey }}</span>
               <strong :class="{ 'rail-attention': !conn.ok }">{{ conn.ok ? 'Connected' : 'Not connected' }}</strong>
             </div>
@@ -2029,7 +2010,7 @@
             Saved in <code>{{ assetRail.folder }}</code>.
             <template v-if="currentTab === 'skills'">
               Skills you install directly in a CLI stay available too; see
-              <RouterLink to="/settings/models#chat-providers">Models &amp; providers</RouterLink>.
+              <RouterLink to="/settings/providers#chat-providers">Providers</RouterLink>.
             </template>
           </p>
         </section>
@@ -2381,12 +2362,10 @@ const agentAssets = ref<AgentAssetsResponse | null>(null)
 const agentAssetsLoaded = ref(false)
 const agentAssetsError = ref('')
 
-// ── Routine settings (Models tab) ─────────────────────────────────────────
+// ── Routine settings (Providers tab) ─────────────────────────────────────────
 const routines = ref<RoutineSettings | null>(null)
-const routinesLoaded = ref(false)
 const routinesError = ref('')
 const routinesSaving = ref(false)
-const routinesResult = ref('')
 
 // Every provider with models is a runtime provider now.
 type AliasProviderKey = RuntimeProvider
@@ -2461,20 +2440,16 @@ async function fetchRoutines() {
     routines.value = await api.get<RoutineSettings>('/api/settings/routines')
   } catch (e) {
     routinesError.value = `Failed to load model settings: ${errorMessage(e)}`
-  } finally {
-    routinesLoaded.value = true
   }
 }
 
 async function saveRoutines(patch: Record<string, unknown>) {
   routinesSaving.value = true
-  routinesResult.value = ''
   try {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
     notifySaved('Model settings saved.')
   } catch (e) {
     const detail = errorMessage(e)
-    routinesResult.value = `Error: ${detail}`
     notifyFailed('Could not save model settings', detail)
   } finally {
     routinesSaving.value = false
@@ -2532,7 +2507,7 @@ function getProviderSection(provider: string): AliasProviderSection | undefined 
   return aliasProviderSections.value.find((s) => s.key === provider)
 }
 
-// ── Per-provider default model / thinking (Models tab) ─────────────────
+// ── Per-provider default model / thinking (Providers tab) ─────────────────
 const DEFAULT_MODEL_SELECTION = '__ciao_default_model__'
 
 function providerDefaultModelOverride(provider: AliasProviderKey): string {
@@ -2677,7 +2652,7 @@ async function saveProviderDefaultThinking(provider: AliasProviderKey, value: st
   await saveRoutines({ provider_default_thinking: defaults })
 }
 
-// ── Per-provider default permission mode (Models tab) ────────────────
+// ── Per-provider default permission mode (Providers tab) ────────────────
 const DEFAULT_MODE_SELECTION = '__ciao_mode_default__'
 
 // PWA-facing names; "manual" maps to the BridgeMode "normal" on the backend.
@@ -2701,7 +2676,7 @@ async function saveProviderDefaultMode(provider: AliasProviderKey, value: string
   await saveRoutines({ provider_default_modes: modes })
 }
 
-// ── Per-provider Session insights model (Models tab) ────────────────
+// ── Per-provider Session insights model (Providers tab) ────────────────
 // Automatic reads the session with that chat's own model; a closed project
 // uses its last-active chat (ciao/insights.py::resolve_insights_model).
 const DEFAULT_INSIGHTS_SELECTION = '__ciao_insights_default__'
@@ -2725,10 +2700,11 @@ async function saveProviderInsightsModel(provider: AliasProviderKey, value: stri
   await saveRoutines({ provider_insights_models: models })
 }
 
-// ── Provider connections (Models tab, chat providers card) ───────────────────
+// ── Provider connections (Providers tab, chat providers card) ───────────────────
 const providerKeys = ref<ProviderConfigSettings | null>(null)
 const providerKeysLoaded = ref(false)
 const providerKeysError = ref('')
+const providersStatusRail = computed(() => currentTab.value === 'providers' && !!providerKeys.value?.connections)
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
 const gwsIntegration = ref<GwsIntegrationSettings | null>(null)
@@ -3113,7 +3089,7 @@ async function fetchProviderKeys() {
   }
 }
 
-// /settings/providers lands on /settings/models#chat-providers. The anchor
+// /settings/providers#chat-providers lands on the Chat providers card. The anchor
 // only exists once the connections have loaded, so the browser's own hash
 // jump misses it, and the router has no scrollBehavior for in-app links (this
 // view stays mounted across tabs). Scroll on the first load and on each
@@ -4208,7 +4184,7 @@ async function restoreWorkspace(item: ArchivedWorkspace) {
 // tabs get a separate load after switching roots.
 const tabLoads = new Map<string, Promise<void>>()
 function loadSettingsTab(tab: string): Promise<void> {
-  const scoped = ['models', 'skills', 'subagents', 'commands', 'mcp'].includes(tab)
+  const scoped = ['providers', 'skills', 'subagents', 'commands', 'mcp'].includes(tab)
   const key = scoped ? `${tab}:${projectStore.activeWorkspace}` : tab
   const prior = tabLoads.get(key)
   if (prior) return prior
@@ -4222,7 +4198,7 @@ function loadSettingsTab(tab: string): Promise<void> {
         if (localStatus.value?.dev_mode) return refreshDebugIssues()
       }), fetchAuthSettings(), fetchRoutines(), fetchWorkspaceMove(), fetchPackageStatus(), fetchUpdateStatus(), fetchAgentAssets()]
       break
-    case 'models':
+    case 'providers':
       reads = [fetchRoutines(), fetchProviderKeys().then(scrollToChatProvidersIfLinked), mcp.fetchStatus(), fetchWorkspaceModels()]
       break
     case 'workspaces':
@@ -4276,7 +4252,7 @@ watch(() => projectStore.activeWorkspace, () => {
   for (const key of tabLoads.keys()) {
     if (key.includes(':')) tabLoads.delete(key)
   }
-  if (['models', 'skills', 'subagents', 'commands', 'mcp'].includes(currentTab.value)) {
+  if (['providers', 'skills', 'subagents', 'commands', 'mcp'].includes(currentTab.value)) {
     void loadSettingsTab(currentTab.value)
   } else if (currentTab.value === 'home') {
     // The home tab's health card reads the same workspace-scoped agent
@@ -6487,7 +6463,7 @@ a.btn-secondary {
 }
 
 /* "What this CLI brings": the per-provider MCP and skill chip lists, folded
-   away by default so the models tab stays scannable. The summary is the whole
+   away by default so the providers tab stays scannable. The summary is the whole
    touch target, so it keeps the 44px minimum. */
 .provider-brings > summary {
   display: inline-flex;

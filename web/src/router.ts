@@ -88,10 +88,9 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
-    // The providers tab folded into models (chat providers are its first
-    // card). Keep old links and bookmarks working.
-    path: '/settings/providers',
-    redirect: { path: '/settings/models', hash: '#chat-providers' },
+    // The Models & providers tab was renamed Providers. Old links and bookmarks keep working.
+    path: '/settings/models',
+    redirect: to => ({ path: '/settings/providers', query: to.query, hash: to.hash }),
   },
   {
     path: '/settings/:tab',

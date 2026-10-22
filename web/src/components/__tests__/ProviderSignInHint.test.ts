@@ -56,7 +56,7 @@ describe('ProviderSignInHint', () => {
     const wrapper = mount(ProviderSignInHint, { props: { provider: 'claude', actionLabel: 'Retry' } })
     await open(wrapper)
     expect(wrapper.find('[role="alert"]').text()).toContain('offline')
-    expect(wrapper.find('[role="alert"]').text()).toContain('Settings → Models')
+    expect(wrapper.find('[role="alert"]').text()).toContain('Settings → Providers')
     expect(wrapper.find('code').exists()).toBe(false)
   })
 })

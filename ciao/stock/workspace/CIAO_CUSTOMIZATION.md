@@ -60,8 +60,7 @@ Ciaobot supports two chat providers, each authenticating through its own CLI:
 - `opencode`: the open-source agent CLI, bring-your-own model provider. This is how you reach anything else — Ollama, OpenRouter, or any OpenAI-compatible endpoint. Configure it in opencode and its models appear in Ciaobot's pickers automatically; Ciaobot lists whatever opencode reports as connected.
 
 Each provider has its own default model, thinking level, and permission mode
-for new chats, all set on the chat providers card in Settings → Models &
-providers. A Claude model alias
+for new chats, all set on the chat providers card in Settings → Providers. A Claude model alias
 (`haiku`, `sonnet`, `opus`, `fable`) is a real Claude model id; opencode resolves its
 own defaults from the signed-in account's catalog. The permission mode chooses
 how much a chat may do without asking: manual (ask for every action), auto
@@ -73,8 +72,8 @@ Integration keys (MCP servers, third-party APIs) live in `.env`; provider sign-i
 
 Common keys:
 
-- Claude Code authentication is owned by the Claude CLI; use Settings → Models & providers to connect or verify it.
-- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Models & providers. Ciaobot has no API-key fields.
+- Claude Code authentication is owned by the Claude CLI; use Settings → Providers to connect or verify it.
+- Provider authentication is owned by the provider CLIs; use `ciao auth <provider>` or Settings → Providers. Ciaobot has no API-key fields.
 
 Agents may check whether a key is set, but must not print the value.
 
