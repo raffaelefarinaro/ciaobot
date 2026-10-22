@@ -1028,7 +1028,7 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
   -H 'content-type: application/json' -d '{"profile":"personal"}'
 ```
 
-**Routine settings (Settings → General / Models)**
+**Routine settings (Settings → General / Providers)**
 
 ```bash
 # Read internal-routine settings: the automatic-session-insights switch and the
@@ -1876,7 +1876,7 @@ use those rather than curl when you are in one.
 
 ```bash
 # Configure a trigger. The launched turn runs in the new-chat default permission
-# mode (Settings → Models & providers); a sender can never change it.
+# mode (Settings → Providers); a sender can never change it.
 # The reply carries the secret, ONCE — only its SHA-256 is stored, so copy it
 # into the sender's configuration now. There is no way to read it back.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/webhooks" \

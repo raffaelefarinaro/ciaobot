@@ -34,7 +34,7 @@ the sender's own call is a short `curl` recipe in `PWA_API.md`.
   project, chat, model or permission mode.
 - **A webhook event is an ordinary new chat.** The turn it launches runs in the
   trigger's own project with the same permission mode and model a new chat gets
-  (Settings → Models & providers); there is no separate per-trigger mode. If it
+  (Settings → Providers); there is no separate per-trigger mode. If it
   needs an approval, that is an ordinary approval card waiting for you in
   **Needs-you**. If your new-chat default is bypass, webhook turns run in bypass
   too.

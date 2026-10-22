@@ -237,7 +237,7 @@
             <span class="nav-item-label" aria-hidden="true">Tasks</span>
           </router-link>
           <!-- mode, not active-class: every settings tab is its own route
-               (/settings/models, /settings/workspaces, ...) and none of them match
+               (/settings/providers, /settings/workspaces, ...) and none of them match
                the /settings record, so active-class left this item inactive on
                nearly every settings page - and with it the label collapsed. The
                sibling links already key off mode for the same reason. -->
@@ -397,15 +397,33 @@
 
     <template v-if="!collapsed && mode === 'settings'">
       <nav class="settings-nav-list" aria-label="Settings sections">
-        <h2 class="sidebar-list-label">Settings</h2>
-        <router-link
-          v-for="item in SETTINGS_NAV"
-          :key="item.to"
-          :to="item.to"
-          class="settings-nav-item"
-          :class="{ active: route.path === item.to }"
-          :aria-current="route.path === item.to ? 'page' : undefined"
-        >{{ item.label }}</router-link>
+        <div
+          v-for="group in SETTINGS_NAV_GROUPS"
+          :key="group.id"
+          class="settings-nav-group"
+          role="group"
+          :aria-labelledby="`settings-nav-heading-${group.id}`"
+        >
+          <h2
+            :id="`settings-nav-heading-${group.id}`"
+            class="sidebar-list-label settings-nav-heading"
+            :data-workspace-color="group.label === null ? activeWorkspaceAccent(store.workspaces, store.activeWorkspace) : undefined"
+          >
+            <template v-if="group.label !== null">{{ group.label }}</template>
+            <template v-else>
+              <span class="workspace-scope-mark" aria-hidden="true">{{ workspaceShortcut(store.activeWorkspace) || workspaceInitial(store.activeWorkspace) }}</span>
+              <span class="settings-nav-heading-name">{{ workspaceLabel(store.activeWorkspace) || 'Workspace' }}</span>
+            </template>
+          </h2>
+          <router-link
+            v-for="item in group.items"
+            :key="item.to"
+            :to="item.to"
+            class="settings-nav-item"
+            :class="{ active: route.path === item.to }"
+            :aria-current="route.path === item.to ? 'page' : undefined"
+          >{{ item.label }}</router-link>
+        </div>
       </nav>
     </template>
 
@@ -946,7 +964,7 @@ import { isApplePlatform } from '../lib/platform'
 import { scheduleInWorkspace, scheduleNeedsAttention } from '../lib/automationWorkspace'
 import { oneOffSortKey, oneOffWhen, scheduleClock } from '../lib/scheduleClock'
 import { activeWorkspaceAccent, workspaceAccent } from '../lib/workspaceColors'
-import { SETTINGS_NAV } from '../lib/settingsNav'
+import { SETTINGS_NAV_GROUPS } from '../lib/settingsNav'
 import { ARCHIVE_MENU_LABEL } from '../lib/archiveCopy'
 import { askConfirm } from '../lib/confirm'
 import { projectDeleteMessage, projectDeleteToastBody } from '../lib/projectDelete'
@@ -3279,6 +3297,25 @@ async function confirmDeleteChat(chatId: string) {
 }
 .settings-nav-list .sidebar-list-label {
   margin: 0;
+}
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-nav-group + .settings-nav-group {
+  margin-top: 12px;
+}
+.settings-nav-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-nav-heading-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .settings-nav-item {
   display: flex;

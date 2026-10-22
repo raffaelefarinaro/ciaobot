@@ -922,7 +922,7 @@ export interface ModelsResponse {
 export interface MoveToBackgroundResponse { moved: boolean }
 
 // GET/PATCH /api/settings/routines — internal-routine model overrides and
-// model overrides (Settings → Models tab).
+// model overrides (Settings → Providers tab).
 export interface RoutineSettings {
   insights_enabled?: boolean
 

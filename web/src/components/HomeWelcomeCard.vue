@@ -146,7 +146,7 @@ async function close() {
         </div>
         <div class="home-welcome-row">
           <dt>AI tool</dt>
-          <dd>{{ status.provider_label }} <RouterLink class="home-welcome-link" to="/settings/models#chat-providers">Providers</RouterLink></dd>
+          <dd>{{ status.provider_label }} <RouterLink class="home-welcome-link" to="/settings/providers#chat-providers">Providers</RouterLink></dd>
         </div>
       </dl>
       <p class="sr-only" aria-live="polite">{{ copied ? 'Password copied' : '' }}</p>
