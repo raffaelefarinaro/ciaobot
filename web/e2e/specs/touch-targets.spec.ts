@@ -232,7 +232,6 @@ test.describe('touch targets', () => {
   test('controls inside menus and dialogs are at least 44×44 on touch', async ({ page }) => {
     const small: string[] = []
     const panels: string[] = []
-    const measuredPanels = new Set<string>()
     const opened: string[] = []
     const skipped: string[] = []
     for (const [route, ready] of POPUP_SURFACES) {
@@ -265,7 +264,6 @@ test.describe('touch targets', () => {
         const found = await measure(page)
         for (const f of found.bad) if (!baseline.has(f)) small.push(`${name}: ${f}`)
         const p = await panelProblems(page)
-        p.measured.forEach((m) => measuredPanels.add(m))
         for (const m of p.out) panels.push(`${name}: ${m}`)
         await page.keyboard.press('Escape')
         // Escape leaves forms open on Settings, and a trigger may navigate: start those clean.
@@ -279,9 +277,6 @@ test.describe('touch targets', () => {
       expect(opened.some((o) => o.includes(known)), `trigger "${known}" never opened; opened:\n${opened.join('\n')}\nskipped:\n${skipped.join('\n')}`).toBe(true)
     }
     expect(skipped.length, `triggers that could not be clicked:\n${skipped.join('\n')}`).toBeLessThanOrEqual(MAX_SKIPPED)
-    for (const label of ['About Google Workspace integration']) {
-      expect(measuredPanels.has(label), `panel "${label}" was never measured`).toBe(true)
-    }
     expect.soft(panels, `popup panels out of place:\n${panels.join('\n')}`).toEqual([])
     expect(small, `controls under ${TOUCH_MIN}px:\n${small.join('\n')}`).toEqual([])
   })

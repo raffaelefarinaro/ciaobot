@@ -6910,7 +6910,7 @@ describe('update-available notification', () => {
 })
 
 describe('gws health toast', () => {
-  test('surfaces an error toast whose Fix action routes to Settings → Manage workspaces', () => {
+  test('surfaces an error toast whose Fix action routes to Settings → Overview', () => {
     const store = useProjectStore()
     store.connectEventsWs()
     const sock = fakeSockets[fakeSockets.length - 1]
@@ -6921,13 +6921,13 @@ describe('gws health toast', () => {
         token_valid: false,
         token_error: 'expired',
         title: 'Google Workspace login needs attention',
-        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Manage workspaces.',
+        body: 'The personal Google login may have expired or been revoked. Re-authenticate in Settings → Overview → Google account (open the workspace that uses it).',
       }),
     })
 
     const toast = store.toasts.find(t => t.variant === 'error' && t.title.includes('Google Workspace'))
     expect(toast).toBeTruthy()
-    expect(toast?.fixRoute).toBe('/settings/workspaces')
+    expect(toast?.fixRoute).toBe('/settings/workspace')
     expect(toast?.fixLabel).toBe('Fix in Settings')
     expect(toast?.chat_id).toBe('')
   })

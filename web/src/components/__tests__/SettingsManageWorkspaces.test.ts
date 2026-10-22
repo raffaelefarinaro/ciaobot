@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 
 // Settings > Manage workspaces (/settings/workspaces): every workspace as a
-// boxed row, the short New workspace form, the Google Workspace card and the
-// Archived list. Editing lives on a workspace's Overview.
+// boxed row, the short New workspace form and the Archived list. Editing lives on a workspace's Overview.
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -293,11 +292,24 @@ describe('Settings > Manage workspaces', () => {
     }
   })
 
-  it('Archived workspaces and the Google Workspace card remain', async () => {
+  it('Archived workspaces remain', async () => {
     const { wrapper } = await mountManage()
     try {
       expect(wrapper.text()).toContain('Archived workspaces')
-      expect(wrapper.findAll('.section-title').map(t => t.text())).toContain('Google Workspace')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('has no Google Workspace card but keeps the Google email in each row summary', async () => {
+    const { wrapper } = await mountManage()
+    try {
+      expect(wrapper.findAll('.section-title').map(t => t.text())).not.toContain('Google Workspace')
+      expect(wrapper.text()).not.toContain('Upload client_secret.json')
+      expect(wrapper.text()).not.toContain('Add a Google account')
+      const [first, second] = rows(wrapper)
+      expect(first.get('.set-row-sub').text()).toContain('p@example.com')
+      expect(second.get('.set-row-sub').text()).toContain('no Google')
     } finally {
       wrapper.unmount()
     }

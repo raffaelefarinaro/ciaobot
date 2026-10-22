@@ -26,6 +26,7 @@ def _config(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         workspace_root=tmp_path,
         state_path=tmp_path / ".runtime" / "state.json",
+        workspaces={"personal": SimpleNamespace(gws_profile="personal")},
     )
 
 
@@ -546,6 +547,51 @@ def test_health_monitor_debounces_and_rearms(tmp_path: Path) -> None:
     s5 = monitor.check_once()
     assert s5["notified"] == ["personal"]
     assert len(push.sent) == 2
+
+
+def test_health_monitor_skips_profiles_no_workspace_links(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    # "orphan" has credentials but no workspace links it; "archived-only" is
+    # linked only by a workspace that left config.workspaces (archived).
+    cfg.workspaces = {
+        "personal": SimpleNamespace(gws_profile="personal"),
+        "blank": SimpleNamespace(gws_profile=""),
+    }
+    for profile in ("personal", "orphan", "archived-only"):
+        config_dir = gws_auth.profile_config_dir(cfg, profile)
+        config_dir.mkdir(parents=True)
+        (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+
+    invalid = {
+        "available": True,
+        "token_valid": False,
+        "token_error": "Token has been expired or revoked.",
+        "has_refresh_token": True,
+    }
+    probed: list[str] = []
+
+    def status_fn(config, profile):
+        probed.append(profile)
+        return invalid
+
+    push, events = _FakePush(), _FakeEvents()
+    monitor = gws_auth.GwsHealthMonitor(
+        cfg,
+        push_manager=push,
+        events_hub=events,
+        runtime_root=tmp_path / ".runtime",
+        status_fn=status_fn,
+        retry_delay=0,
+        notify_threshold=1,
+    )
+
+    summary = monitor.check_once()
+
+    assert summary["checked"] == ["personal"]
+    assert summary["notified"] == ["personal"]
+    assert set(probed) == {"personal"}
+    assert [p["profile"] for p in push.sent] == ["personal"]
+    assert [e["profile"] for e in events.published] == ["personal"]
 
 
 def test_health_monitor_in_process_retry_suppresses_transient_invalid(tmp_path: Path) -> None:

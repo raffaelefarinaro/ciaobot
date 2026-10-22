@@ -960,8 +960,20 @@ class GwsHealthMonitor:
         )
 
     def _configured_profiles(self) -> list[str]:
+        """Accounts with credentials that at least one active workspace links.
+
+        An account no workspace links has no Settings screen to fix it, so its
+        expiry must not raise a toast or push. Archived workspaces are outside
+        ``config.workspaces`` and so do not count as links.
+        """
+        linked = {
+            str(workspace.gws_profile or "").strip()
+            for workspace in self._config.workspaces.values()
+        }
         out: list[str] = []
         for profile in known_profiles(self._config):
+            if profile not in linked:
+                continue
             config_dir = profile_config_dir(self._config, profile)
             if config_dir is None:
                 continue
@@ -1053,8 +1065,9 @@ class GwsHealthMonitor:
         title = "Google Workspace login needs attention"
         body = (
             f"The '{profile}' Google login may have expired or been revoked. "
-            "Re-authenticate in Settings → Manage workspaces to restore Gmail, "
-            "Calendar, Drive, and scheduled Google tasks."
+            "Re-authenticate in Settings → Overview → Google account (open the "
+            "workspace that uses it) to restore Gmail, Calendar, Drive, and "
+            "scheduled Google tasks."
         )
         if self._push is not None:
             try:

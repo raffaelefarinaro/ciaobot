@@ -5014,11 +5014,11 @@ export const useProjectStore = defineStore('projects', () => {
         // A Google Workspace login went dead (revoked/expired token). The
         // server debounces to one event per breakage; surface it as a
         // persistent error toast. The fix is re-authentication in
-        // Settings → Manage workspaces, so the Fix action navigates there rather
-        // than seeding a chat. The PWA push banner is the other
+        // Settings → Overview → Google account, so the Fix action navigates
+        // there rather than seeding a chat. The PWA push banner is the other
         // channel (see push.py); this is the live in-app signal.
         pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '', {
-          fixRoute: '/settings/workspaces',
+          fixRoute: '/settings/workspace',
           fixLabel: 'Fix in Settings',
         })
         break
