@@ -181,7 +181,7 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map() }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map(), terminalUnlocked: false }
     sessions.set(id, state)
   }
   return state
@@ -342,12 +342,15 @@ function terminalEmit(session, ws, text) {
 async function terminalApi(req, res, pathname, url, state) {
   const terminals = terminalSessions(state)
   if (pathname === '/api/terminal/status' && req.method === 'GET') {
+    // No grant until the browser has asked for one: the pane obtains it
+    // by itself, so a spec that opens the terminal exercises that path
+    // rather than finding a live grant waiting for it.
     return sendJson(res, {
       available: true,
       reason: '',
       platform: TERMINAL_PLATFORM,
       host: TERMINAL_HOST,
-      unlock_expires_in: 900,
+      unlock_expires_in: state.terminalUnlocked ? 900 : 0,
       detached_ttl_seconds: 600,
     })
   }
@@ -362,6 +365,7 @@ async function terminalApi(req, res, pathname, url, state) {
         400,
       )
     }
+    state.terminalUnlocked = true
     return sendJson(res, { ok: true, expires_in: 900 })
   }
   if (pathname === '/api/terminal/sessions' && req.method === 'GET') {

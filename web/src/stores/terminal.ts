@@ -560,6 +560,23 @@ export const useTerminalStore = defineStore('terminal', () => {
       && phase.value !== 'error'
   }
 
+  /**
+   * Whether the pane may make another attempt at all.
+   *
+   * `canRecover` is about opening a *socket*, so it needs a grant and a
+   * matching surface. This is the weaker question — may the pane try
+   * again, such as asking for the grant it is missing — and it needs only
+   * a pane that is on screen and a session that is not in a state the user
+   * has to decide.
+   */
+  function mayRetry(): boolean {
+    if (disposed) return false
+    if (!visible.value) return false
+    return phase.value !== 'takeover'
+      && phase.value !== 'ended'
+      && phase.value !== 'error'
+  }
+
   function maybeConnect(): void {
     if (!canConnect()) return
     if (socket && socket.readyState <= WebSocket.OPEN) return
@@ -772,8 +789,10 @@ export const useTerminalStore = defineStore('terminal', () => {
    * way to learn that the grant is gone. A missing grant is not a dead
    * end: the pane asks the engine for a new one, because the signed-in
    * session is the trust boundary and there is no password to re-enter.
-   * The retry never creates a session: a reconnect resumes, it does not
-   * launch.
+   * A grant the engine will not give is not a dead end either: the next
+   * attempt asks again, on the same backoff, until the attempt budget
+   * runs out. The retry never creates a session: a reconnect resumes, it
+   * does not launch.
    */
   async function scheduleRetry(): Promise<void> {
     reconnectAttempts += 1
@@ -807,7 +826,20 @@ export const useTerminalStore = defineStore('terminal', () => {
       // The grant is gone, or the status could not be read and the pane
       // knows it has none: a signed-in, same-origin browser gets a new
       // one on its own.
-      if (!await acquireGrant()) return
+      const granted = await acquireGrant()
+      if (myScope !== scopeEpoch || myConnection !== connectionEpoch) return
+      if (!granted) {
+        // The engine would not give us a grant this time. That is not the
+        // end of the road: there is no form for the user to fill in any
+        // more, so the next attempt asks again, on the same backoff, until
+        // the attempt budget runs out.
+        scheduleTimer(() => {
+          if (myScope !== scopeEpoch || myConnection !== connectionEpoch) return
+          if (!mayRetry()) return
+          void scheduleRetry()
+        }, terminalReconnectDelayMs(reconnectAttempts))
+        return
+      }
     }
     error.value = ''
     const delay = terminalReconnectDelayMs(reconnectAttempts)

@@ -475,8 +475,8 @@ class _FrozenDatetime:
 def test_password_change_revokes_every_terminal_grant(tmp_path: Path) -> None:
     """A password change ends every terminal grant, on every browser.
 
-    The password is the terminal's own credential too, so a change has to
-    end the unlocks it made — including the ones this browser holds.
+    A change re-keys the sessions behind the grants too, so it has to end
+    every grant — including the ones this browser holds.
     """
     app = _app(tmp_path, token="old-secret")
     store: TerminalGrantStore = app.state.terminal_grants

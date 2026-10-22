@@ -231,14 +231,17 @@ describe('TerminalPane', () => {
     vi.unstubAllGlobals()
   })
 
-  it('never renders a password field', async () => {
+  it('never renders a password field, not even when the terminal is locked', async () => {
+    // The engine refuses the grant, so the pane really is locked — the
+    // state the old unlock form used to live in.
     serve([], { unlock_expires_in: 0 })
-    apiPost.mockResolvedValue({ ok: true, expires_in: 900 })
+    apiPost.mockRejectedValue(new Error('refused'))
     const store = useTerminalStore()
     const wrapper = await mountPane()
     await store.open({ chatId: 'c1' })
     await flushPromises()
 
+    expect(store.phase).toBe('locked')
     // There is no unlock form any more: the signed-in session is the
     // terminal's trust boundary, so the pane has nothing to ask for.
     expect(wrapper.find('.tp-unlock').exists()).toBe(false)

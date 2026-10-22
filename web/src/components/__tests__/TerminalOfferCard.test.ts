@@ -298,13 +298,35 @@ describe('TerminalOfferCard', () => {
     const terminal = useTerminalStore()
     const sendInput = vi.spyOn(terminal, 'sendInput')
     const createSession = vi.spyOn(terminal, 'createSession')
+    // The browser holds no grant yet, so opening the pane asks the engine
+    // for one — the grant is a browser credential, and the card gets the
+    // pane, not a shell.
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/terminal/status') {
+        return Promise.resolve({
+          available: true,
+          reason: '',
+          platform: 'macos',
+          host: 'engine.local',
+          unlock_expires_in: 0,
+          detached_ttl_seconds: 600,
+        })
+      }
+      if (path.startsWith('/api/terminal/sessions')) return Promise.resolve({ sessions: [] })
+      return Promise.resolve({})
+    })
+    apiPost.mockResolvedValue({ ok: true, expires_in: 900 })
 
     await card.get('button.terminal-button').trigger('click')
     await flushPromises()
 
     expect(terminal.target).toEqual({ chatId: CHAT_ID })
-    // No shell, no grant, no keystroke: opening the panel starts nothing.
-    expect(apiPost).not.toHaveBeenCalled()
+    // The grant was fetched, and it is all that was: no shell, no
+    // keystroke, nothing run.
+    expect(apiPost).toHaveBeenCalledWith('/api/terminal/unlock')
+    expect(
+      apiPost.mock.calls.filter((call) => call[0] === '/api/terminal/sessions'),
+    ).toHaveLength(0)
     expect(terminal.sessions).toHaveLength(0)
     expect(createSession).not.toHaveBeenCalled()
     expect(sendInput).not.toHaveBeenCalled()

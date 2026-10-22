@@ -122,14 +122,17 @@ carried by the session.
   grant's own rules are unchanged: a host-only, HttpOnly, SameSite=Strict
   cookie, bound to the session cookie that minted it, a fixed 15-minute
   lifetime that does not slide, at most 32 live grants, one controller per
-  session, and revocation on logout and on a password change. The
-  consequence is written down rather than left implicit: a workspace that
-  denies the agent `Bash` (or confines it to the workspace) no longer has
-  a host-shell boundary. The terminal used to ask for the password a
-  second time, and that second prompt was the last thing between a
-  signed-in tab and a shell on the engine; it is gone, so a signed-in
-  browser is now enough. Anything that relied on that prompt as a second
-  barrier has to rely on the session instead.
+  session, and revocation on logout and on a password change. The lifetime
+  bounds a *grant*, not an open pane: when the engine closes the socket
+  because the grant expired or was revoked, an open pane asks for a new
+  grant and resumes, so what the 15 minutes ends is the grant, not the
+  pane. The consequence is written down rather than left implicit: a
+  workspace that denies the agent `Bash` (or confines it to the workspace)
+  no longer has a host-shell boundary. The terminal used to ask for the
+  password a second time, and that second prompt was the last thing
+  between a signed-in tab and a shell on the engine; it is gone, so a
+  signed-in browser is now enough. Anything that relied on that prompt as
+  a second barrier has to rely on the session instead.
 - The welcome card's `GET /api/welcome/password` and `POST /api/welcome/open-folder`
   need the session *and* `host_browser_request`, and are not in
   `_LOOPBACK_ONLY_API`. A tailnet visitor through `tailscale serve` fails

@@ -242,12 +242,12 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   that chat) and **Dismiss** (which names the suggestion it dismisses, so a
   newer one is never dismissed by mistake, and says so when the suggestion
   changed). The card never runs the command and never pastes it into the
-  shell: *Open in Terminal* starts no shell, mints no grant of its own and
-  asks the engine to run nothing — an already-live session attaches and
-  shows the screen it already holds, exactly like the *Terminal* section's
-  button. The *Terminal* section stays the persistent, manual way into the
-  terminal; the card is the contextual one, and it is shown only for the
-  chat on screen.
+  shell: *Open in Terminal* starts no shell and asks the engine to run
+  nothing — an already-live session attaches and shows the screen it
+  already holds, exactly like the *Terminal* section's button. The
+  *Terminal* section stays the persistent, manual way into the terminal;
+  the card is the contextual one, and it is shown only for the chat on
+  screen.
 
 ### Layout traps
 

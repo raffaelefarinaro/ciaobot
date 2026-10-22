@@ -183,8 +183,13 @@ test.describe('the suggested command', () => {
 
     // The terminal is scoped to the chat that made the suggestion.
     await expect.poll(() => terminalCalls.join(' ')).toContain(`chat_id=${CHAT_ID}`)
-    // Opening the panel starts no shell and asks for no grant.
-    expect(terminalCalls.filter(call => call.startsWith('POST'))).toEqual([])
+    // Opening the panel starts no shell. It does fetch the browser's own
+    // terminal grant — the pane asks the engine for it, because the
+    // signed-in session is the terminal's trust boundary — and that is the
+    // only POST it makes.
+    expect(terminalCalls.filter(call => call.startsWith('POST'))).toEqual([
+      'POST /api/terminal/unlock',
+    ])
     expect(await terminalSessions(page)).toBe(0)
     await expect(pane.locator('.tp-session')).toHaveCount(0)
   })

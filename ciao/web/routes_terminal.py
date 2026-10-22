@@ -112,15 +112,12 @@ def _no_store(response: JSONResponse) -> JSONResponse:
     return response
 
 
-def _fail(
-    reason: str, error: str, status: int, *, retry_after: int | None = None
-) -> JSONResponse:
-    response = JSONResponse(
-        {"ok": False, "reason": reason, "error": error}, status_code=status
+def _fail(reason: str, error: str, status: int) -> JSONResponse:
+    return _no_store(
+        JSONResponse(
+            {"ok": False, "reason": reason, "error": error}, status_code=status
+        )
     )
-    if retry_after is not None:
-        response.headers["Retry-After"] = str(retry_after)
-    return _no_store(response)
 
 
 # ── The policy ─────────────────────────────────────────────────────────────
@@ -263,8 +260,7 @@ def _origin_refusal(request: Request | WebSocket) -> str | None:
 def terminal_policy(request: Request | WebSocket) -> str | None:
     """The reason this request may not use the terminal, or ``None``.
 
-    ``None`` means the request may proceed to the session and password
-    checks. The reasons are a closed vocabulary — ``https_required``,
+    ``None`` means the request may proceed to the session check. The reasons are a closed vocabulary — ``https_required``,
     ``origin_required``, ``forbidden_origin`` — because a caller is told
     *which* rule it broke, never what it sent.
 

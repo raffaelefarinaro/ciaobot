@@ -50,7 +50,7 @@ Each area has a reference file next to this one. Open only the file the question
 | Files | viewer and pinned panel, annotations, drafts, previews, document conversion, HTML artifacts, CSV tables, backlinks, keyboard shortcuts | `references/files.md` |
 | Skills, models, Google Workspace | skills, subagents, slash commands, skill proposals, providers, permission modes, queue and steer, `gws` | `references/models-and-extensions.md` |
 | Task board | the Tasks page, Delegate to agent, Approve Done, "After this update" tasks | `references/tasks.md` |
-| Terminal | the browser terminal panel: where it runs, the unlock, sessions, the socket protocol, how to offer a suggested command, and what an agent can and cannot do | `references/terminal.md` |
+| Terminal | the browser terminal panel: where it runs, the grant and the session it rides on, sessions, the socket protocol, how to offer a suggested command, and what an agent can and cannot do | `references/terminal.md` |
 | App and system | Settings page, MCP, installing and updating, other devices, forgotten password, Linux, Windows, local API | `references/install-and-settings.md` |
 
 ## Left to companion tools

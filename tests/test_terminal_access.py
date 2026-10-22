@@ -39,7 +39,6 @@ from starlette.testclient import TestClient
 
 from ciao.terminal_auth import (
     TERMINAL_COOKIE,
-    TERMINAL_MAX_GRANTS,
     TERMINAL_UNLOCK_TTL_S,
     TerminalGrantStore,
 )
@@ -446,11 +445,18 @@ def test_remote_https_unlock_and_status_work(tmp_path: Path) -> None:
 
 
 def test_remote_plain_http_is_refused_before_the_body_is_read(tmp_path: Path) -> None:
-    """A plain-HTTP remote browser sees "https required", never a grant."""
+    """A plain-HTTP remote browser sees "https required", never a grant.
+
+    The body is a real one, so the order is observable: a route that read
+    the body before the policy would answer 400 (a body is refused) and
+    never reach the transport rule.
+    """
     app = _app(tmp_path)
     client = _client(app, peer="100.64.0.7", base_url="http://app.example")
     response = client.post(
-        UNLOCK, headers=_origin("http://app.example")
+        UNLOCK,
+        content=b'{"x": "y"}',
+        headers={**_origin("http://app.example"), "Content-Type": "application/json"},
     )
 
     assert response.status_code == 403
@@ -872,6 +878,79 @@ def test_the_status_route_answers_the_policy_refusals_with_its_own_reason(
     assert body["reason"] == "forbidden_origin"
 
 
+def test_a_same_site_sibling_origin_cannot_mint_a_grant(tmp_path: Path) -> None:
+    """A sibling origin — the same host, another port — is not this engine.
+
+    `localhost:5173` is the same *site* as `localhost:8443` and a different
+    *origin*: a dev server, a proxy, or another app on the machine, all of
+    which a browser sends as a plain `Origin`. The exact-origin rule is the
+    only thing in front of the grant now, so it is pinned on both sides:
+    the terminal's own rule refuses it with a static reason — never an echo
+    of what the caller sent — and the same request through the real app is
+    refused too. Neither sets a cookie, and neither mints a grant.
+    """
+    sibling = "http://localhost:5173"
+
+    # The terminal's own rule, with nothing in front of it.
+    bare = _bare_app(tmp_path)
+    bare_client = TestClient(bare, base_url=BASE, client=("127.0.0.1", 50000))
+    bare_client.cookies.set(
+        SESSION_COOKIE, bare.state.serializer.dumps({"user": "owner"})
+    )
+    response = bare_client.post(UNLOCK, headers=_origin(sibling))
+
+    assert response.status_code == 403
+    assert response.json()["reason"] == "forbidden_origin"
+    # A static refusal: the answer never repeats what the caller sent.
+    assert "5173" not in response.text
+    assert "set-cookie" not in response.headers
+    assert not _terminal_cookie(bare_client)
+    assert bare.state.terminal_grants.retained_grant_count() == 0
+
+    # And the same request through the real app, middleware and all.
+    app = _app(tmp_path)
+    client = _client(app)
+    response = client.post(UNLOCK, headers=_origin(sibling))
+
+    assert response.status_code == 403
+    assert "5173" not in response.text
+    assert "set-cookie" not in response.headers
+    assert not _terminal_cookie(client)
+    assert app.state.terminal_grants.retained_grant_count() == 0
+
+
+def test_only_post_can_mint_a_terminal_grant(tmp_path: Path) -> None:
+    """No other verb may reach the grant.
+
+    The unlock is a POST and nothing else. The shipped app registers it
+    that way, and the router refuses every other verb before the handler
+    can run: a GET is a 405, with no cookie to set and no grant to keep.
+    The method is a gate, not a hint.
+    """
+    # The shipped registration: POST alone.
+    shipped = create_app(_config(tmp_path))
+    methods = {
+        tuple(sorted(route.methods or ()))
+        for route in shipped.routes
+        if getattr(route, "path", "") == UNLOCK
+    }
+    assert methods == {("POST",)}
+
+    # And the router's own answer for a verb that is not there.
+    app = _app(tmp_path)
+    client = _client(app)
+    response = client.get(UNLOCK, headers=_origin())
+
+    assert response.status_code == 405
+    allowed = response.headers.get("allow", "")
+    assert "POST" in allowed
+    assert "GET" not in allowed
+    # And nothing was minted: no cookie, and no grant behind it.
+    assert "set-cookie" not in response.headers
+    assert not _terminal_cookie(client)
+    assert app.state.terminal_grants.retained_grant_count() == 0
+
+
 # ── The body: the route takes none ─────────────────────────────────────────
 
 
@@ -1015,7 +1094,10 @@ def test_grant_capacity_is_a_refusal_and_not_a_crash(tmp_path: Path) -> None:
     client = _client(app)
     store: TerminalGrantStore = app.state.terminal_grants
 
-    for index in range(TERMINAL_MAX_GRANTS):
+    # A literal 32, not the constant: the contract is 32 live grants, and a
+    # constant that grew would let a 33rd one through this test. (The
+    # constant's own value is pinned in `tests/test_terminal_auth.py`.)
+    for index in range(32):
         store.issue(f"other-session-{index}")
 
     response = client.post(UNLOCK, headers=_origin())
@@ -1148,7 +1230,13 @@ def test_the_route_refuses_an_unsigned_request_without_the_middleware(
     assert response.status_code == 401
     assert response.json()["reason"] == "unauthorized"
 
-    response = client.post(UNLOCK, headers=_origin())
+    # A real body, so the order is observable: a route that read it before
+    # the session check would answer 400 and never reach the session.
+    response = client.post(
+        UNLOCK,
+        content=b'{"x": "y"}',
+        headers={**_origin(), "Content-Type": "application/json"},
+    )
     assert response.status_code == 401
     assert response.json()["reason"] == "unauthorized"
     assert "set-cookie" not in response.headers
@@ -1158,12 +1246,22 @@ def test_the_route_refuses_an_unsigned_request_without_the_middleware(
 def test_an_unsigned_unlock_reads_no_body_and_issues_no_grant(
     tmp_path: Path,
 ) -> None:
-    """The refusal comes before the body is read, so no grant is minted."""
+    """The refusal comes before the body is read, so no grant is minted.
+
+    The body is a real one, so the order is observable: a route that read
+    it before the session check would answer 400 and never reach the
+    session.
+    """
     app = _bare_app(tmp_path)
     client = TestClient(app, base_url=BASE, client=("127.0.0.1", 50000))
 
-    response = client.post(UNLOCK, headers=_origin())
+    response = client.post(
+        UNLOCK,
+        content=b'{"x": "y"}',
+        headers={**_origin(), "Content-Type": "application/json"},
+    )
     assert response.status_code == 401
+    assert response.json()["reason"] == "unauthorized"
     # Nothing was minted and nothing was kept.
     assert app.state.terminal_grants.retained_grant_count() == 0
     assert not _terminal_cookie(client)
