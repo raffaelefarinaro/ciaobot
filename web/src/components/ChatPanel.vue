@@ -854,6 +854,16 @@
       </div>
     </div>
 
+    <!-- The command the assistant suggested for this chat. A transient card
+         above the queue and the composer, so a suggestion waiting to be
+         reviewed is never buried under the transcript. It is shown, copied,
+         opened or dismissed — never run. -->
+    <TerminalOfferCard
+      v-if="terminalOffer"
+      :chat-id="chat.chat_id"
+      :offer="terminalOffer"
+    />
+
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="store.currentQueued.length && (!dockPrimary || dockExpanded)" class="queued-messages">
       <button
@@ -1285,12 +1295,11 @@
       </div>
       <!-- The terminal is not a repository feature. A chat with no linked
            folder still needs a shell — a provider sign-in, an install, an MCP
-           server that stopped answering — so the terminal has a section of
-           its own, outside the repository's, and every chat has one. -->
-      <section class="rail-section chat-rail-terminal" aria-labelledby="chat-rail-terminal-label">
-        <p id="chat-rail-terminal-label" class="rail-label">Terminal</p>
-        <BrowserTerminalButton :chat-id="chat.chat_id" />
-      </section>
+           server that stopped answering — so every chat has a terminal row,
+           outside the repository's block; the row is its own label. -->
+      <div class="chat-rail-terminal">
+        <BrowserTerminalButton :chat-id="chat.chat_id" variant="row" />
+      </div>
       <!-- What the agent is given. The project also lives here on wide panes;
            the header only names it when this rail is hidden. -->
       <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
@@ -1300,6 +1309,7 @@
           :context-pct="contextPct"
           :compacting="compacting"
           :compact-disabled="compactDisabled"
+          :reveal-key="contextRevealKey"
           @open-file="openInspectorFile"
           @compact="compactContext"
         />
@@ -1337,21 +1347,24 @@
       <section v-if="toolUsage.skills.length || toolUsage.mcp.length" class="rail-section" aria-labelledby="chat-rail-tools">
         <p id="chat-rail-tools" class="rail-label">Skills and MCP used</p>
         <div class="rail-kvs">
-          <div v-for="skill in toolUsage.skills" :key="`skill-${skill.name}`" class="rail-kv">
-            <span class="chat-rail-tool"><small>Skill</small> {{ skill.name }}</span>
-            <strong v-if="skill.count > 1">×{{ skill.count }}</strong>
-          </div>
-          <div v-for="server in toolUsage.mcp" :key="`mcp-${server.name}`" class="rail-kv">
-            <span class="chat-rail-tool" :title="server.tools?.join(', ')"><small>MCP</small> {{ server.name }}</span>
-            <strong v-if="server.count > 1" :title="`${server.count} calls`">×{{ server.count }}</strong>
+          <div v-for="tool in shownTools" :key="`${tool.kind}-${tool.name}`" class="rail-kv">
+            <span class="chat-rail-tool" :title="tool.tools?.join(', ')"><small>{{ tool.kind === 'skill' ? 'Skill' : 'MCP' }}</small> {{ tool.name }}</span>
+            <strong v-if="tool.count > 1" :title="`${tool.count} calls`">×{{ tool.count }}</strong>
           </div>
         </div>
+        <button
+          v-if="railTools.length > RAIL_LIST_MAX"
+          type="button"
+          class="chat-rail-more"
+          :aria-expanded="railShowAll.tools"
+          @click="railShowAll.tools = !railShowAll.tools"
+        >{{ railShowAll.tools ? 'Show fewer' : `Show all ${railTools.length}` }}</button>
       </section>
       <section class="rail-section" aria-labelledby="chat-rail-files">
         <p id="chat-rail-files" class="rail-label">Files</p>
         <div v-if="inspectorOutputs.length" class="rail-list">
           <button
-            v-for="output in inspectorOutputs"
+            v-for="output in shownOutputs"
             :key="`${output.action}:${output.file_path}`"
             type="button"
             class="rail-item chat-rail-file"
@@ -1362,12 +1375,19 @@
             <small>{{ outputActionTag(output.action) }}<template v-if="shortDirname(output.file_path)"> · {{ shortDirname(output.file_path) }}</template></small>
           </button>
         </div>
-        <p v-else-if="!mentionedFiles.length" class="rail-note">None yet.</p>
+        <button
+          v-if="inspectorOutputs.length > RAIL_LIST_MAX"
+          type="button"
+          class="chat-rail-more"
+          :aria-expanded="railShowAll.files"
+          @click="railShowAll.files = !railShowAll.files"
+        >{{ railShowAll.files ? 'Show fewer' : `Show all ${inspectorOutputs.length}` }}</button>
+        <p v-if="!inspectorOutputs.length && !mentionedFiles.length" class="rail-note">None yet.</p>
         <template v-if="mentionedFiles.length">
           <p class="rail-label chat-rail-sublabel">Mentioned in replies</p>
           <div class="rail-list">
             <button
-              v-for="path in mentionedFiles"
+              v-for="path in shownMentioned"
               :key="`mentioned-${path}`"
               type="button"
               class="rail-item chat-rail-file"
@@ -1378,6 +1398,13 @@
               <small>{{ shortDirname(path) || 'workspace' }}</small>
             </button>
           </div>
+          <button
+            v-if="railMentioned.length > RAIL_LIST_MAX"
+            type="button"
+            class="chat-rail-more"
+            :aria-expanded="railShowAll.mentioned"
+            @click="railShowAll.mentioned = !railShowAll.mentioned"
+          >{{ railShowAll.mentioned ? 'Show fewer' : `Show all ${railMentioned.length}` }}</button>
         </template>
       </section>
     </aside>
@@ -1411,6 +1438,7 @@ import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
 import BrowserTerminalButton from './BrowserTerminalButton.vue'
+import TerminalOfferCard from './TerminalOfferCard.vue'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
@@ -1781,6 +1809,47 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const chat = computed(() => store.activeChat!)
 
+/**
+ * The command the assistant suggested for this chat, if it holds one.
+ *
+ * The offer is transient and engine-owned: the browser keeps it in memory and
+ * reads it from the store's map, never from the chat row, because a row's
+ * copy is the payload the list was read at and the map is the live one. An
+ * archived chat holds no offer — the command died with the chat — so the
+ * card is not shown for one.
+ */
+const terminalOffer = computed(() => {
+  const current = chat.value
+  if (!current || current.archived) return null
+  const offer = store.terminalOffers[current.chat_id]
+  return offer ? offer : null
+})
+
+// When the card that holds the focus goes away — dismissed by the user, or
+// dropped by the engine over the socket — it unmounts and the focus would
+// fall to <body>. Hand it to the composer instead, the way the queue hands
+// it over when a chip disappears. The watch is on the card's own render
+// condition, so the handoff also happens when the chat is archived or gone.
+// A replacement patches the card in place, so the focus belongs to the card
+// that is still there.
+watch(
+  () => terminalOffer.value,
+  (offer, previous) => {
+    // Only a removal unmounts the card.
+    if (offer !== null || previous === null) return
+    const held = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.terminal-offer')
+    if (!held) return
+    void nextTick(() => {
+      // The textarea would raise the soft keyboard on a phone and scroll the
+      // transcript out from under the reader, so the bar takes the focus
+      // there — the same rule the move-to-background chip follows.
+      if (window.innerWidth >= COMPOSER_FOCUS_MIN_WIDTH) inputEl.value?.focus({ preventScroll: true })
+      else composerBarEl.value?.focus()
+    })
+  },
+  { flush: 'pre' },
+)
+
 const archivePostprocess = computed(() => store.chatPostprocess(chat.value.chat_id))
 // The memory pass this chat spawned, recorded on its own postprocess record.
 // Present from the
@@ -2036,8 +2105,12 @@ const inspectorTrigger = ref<HTMLButtonElement | null>(null)
 // thinks of it as one file.
 // Temp-dir files are the agent's scratch work; the inline cards still show
 // them, but the chat's file list is what it made for the user.
+// Newest first: the merge keeps each file where it is first met, so walking
+// the turns backwards puts a file at its latest touch.
 const inspectorOutputs = computed<TraceOutput[]>(() => collapseOutputsByName(mergeTraceOutputs(
-  renderItems.value.map(item => (item.kind === 'trace' || item.kind === 'assistant' ? item.outputs : undefined)),
+  renderItems.value.map(item => (item.kind === 'trace' || item.kind === 'assistant' ? item.outputs : undefined))
+    .reverse()
+    .map(outputs => outputs && [...outputs].reverse()),
 ).filter(output => !isScratchPath(output.file_path))))
 // Every activity line this chat has produced: its turns, the subagents they
 // ran, and the turn in flight. The rail reads skills and MCP tools from it.
@@ -2077,6 +2150,20 @@ const mentionedFiles = computed<string[]>(() => {
   }
   return found
 })
+
+// The rail's lists show the five most recent entries; the rest are one click
+// away. Turns are kept in order, so newest-first is the order reversed.
+const RAIL_LIST_MAX = 5
+const railShowAll = ref({ files: false, mentioned: false, tools: false })
+watch(() => chat.value?.chat_id, () => { railShowAll.value = { files: false, mentioned: false, tools: false } })
+const railMentioned = computed(() => [...mentionedFiles.value].reverse())
+const railTools = computed(() => [
+  ...toolUsage.value.skills.map(skill => ({ ...skill, kind: 'skill' as const, tools: undefined as string[] | undefined })),
+  ...toolUsage.value.mcp.map(server => ({ ...server, kind: 'mcp' as const })),
+])
+const shownOutputs = computed(() => railShowAll.value.files ? inspectorOutputs.value : inspectorOutputs.value.slice(0, RAIL_LIST_MAX))
+const shownMentioned = computed(() => railShowAll.value.mentioned ? railMentioned.value : railMentioned.value.slice(0, RAIL_LIST_MAX))
+const shownTools = computed(() => railShowAll.value.tools ? railTools.value : railTools.value.slice(0, RAIL_LIST_MAX))
 
 // How full the model's context window was at the end of the latest turn, from
 // the usage the provider reported (the last model call of that turn). This is
@@ -2155,17 +2242,25 @@ const detailsFocusEl = computed<HTMLElement | null>(() => {
   if (detailsTarget.value === 'repo') return railRepoEl.value ?? railHideButton.value
   return railHideButton.value
 })
+// Bumped when a caller points at the agent context, so its Always loaded
+// disclosure opens instead of focusing a closed summary.
+const contextRevealKey = ref(0)
 function showDetails(target: DetailsTarget = 'close') {
   detailsTarget.value = target
+  // The rail may not be mounted yet (narrow drawer, or a wide rail that
+  // starts closed), and its watch is lazy: bump the key once it exists.
+  const reveal = () => { if (target === 'context') contextRevealKey.value += 1 }
   if (!isWidePane.value) {
     // The trap hands focus back to whatever held it on open: make that the
     // trigger, so Escape returns there and not to wherever the click came from.
     inspectorTrigger.value?.focus()
     inspectorOpen.value = true
+    void nextTick(reveal)
     return
   }
   railOpen.value = true
   void nextTick(() => {
+    reveal()
     const el = detailsFocusEl.value
     el?.focus()
     if (el && target !== 'close') el.scrollIntoView({ block: 'nearest' })
@@ -5284,15 +5379,28 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* The shared rail rhythm is `.rail-section + .rail-section`; this wrapper
    (the focus target for "See what Ciao knows") sits between two of them. */
 .chat-rail-agent-context + .rail-section { margin-top: var(--space-5); }
-/* The terminal's section sits between the repository block and the agent
-   context, so it carries the rhythm the repository block used to. A chat
-   without a repository has no block above it, and the section then starts
-   the rail like the context does. */
-.chat-rail-repo + .chat-rail-terminal { margin-top: var(--space-5); }
+/* The terminal row closes the repository block, a little tighter than the
+   gap between sections; with no repository it starts the rail. */
+.chat-rail-repo + .chat-rail-terminal { margin-top: var(--space-3); }
 .chat-rail-terminal + .chat-rail-agent-context { margin-top: var(--space-5); }
-/* The button is a block of its own under the section's label, so it is a
-   44px target on touch — the same box the project page gives it. */
-.chat-rail-terminal :deep(.terminal-button) { display: block; }
+.chat-rail-more {
+  margin-top: var(--space-1);
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.chat-rail-more:hover { color: var(--fg); text-decoration-color: currentColor; }
+.chat-rail-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-xs); }
+@media (pointer: coarse) {
+  .chat-rail-more { min-height: var(--touch); }
+}
 .chat-rail-repo:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;

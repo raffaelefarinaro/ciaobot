@@ -218,6 +218,22 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
 - **Hide is not End.** Hide detaches: the socket closes and the shell keeps
   running on the engine. End asks the engine to stop it. They are two
   buttons, and only one of them stops the process.
+- **A suggested command is a card above the composer, not a second *Terminal*
+  section.** When the assistant suggests a command in a chat, a transient card
+  appears above the composer (`components/TerminalOfferCard.vue`): the fixed
+  title *Suggested command — review before running*, the command as literal
+  text (never markup, never markdown, never a link), and three actions —
+  **Copy** (the exact text on screen, claiming *Copied* only when the
+  clipboard took it, and a retryable error when it did not), **Open in
+  Terminal** (the same `BrowserTerminalButton` the *Terminal* section uses, for
+  that chat) and **Dismiss** (which names the suggestion it dismisses, so a
+  newer one is never dismissed by mistake, and says so when the suggestion
+  changed). The card never runs the command and never pastes it into the
+  shell: *Open in Terminal* starts no shell, asks for no grant and asks the
+  engine to run nothing — an already-live session attaches and shows the
+  screen it already holds, exactly like the *Terminal* section's button. The
+  *Terminal* section stays the persistent, manual way into the terminal; the
+  card is the contextual one, and it is shown only for the chat on screen.
 
 ### Layout traps
 
@@ -327,6 +343,27 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   second `defineStore` would have put a proxy and a second `$state` in between.
   `stores/chatAnnotations.test.ts` drives it with a bare `ref` for the active
   chat — no Pinia, no mount.
+  **A suggested command is engine-owned and transient** (#1843): a chat's
+  offer is `{id, command}` in `ChatInfo.terminal_offer`, in the
+  `chat_terminal_offer_changed` event and in the `/ws/events` snapshot's
+  `chat_terminal_offers` map, and the browser keeps it in
+  `stores/projects.ts`'s `terminalOffers` — in memory only, never written to
+  `localStorage` or `sessionStorage`. The next chat read refills it under the
+  read-start watermark, and the `/ws/events` snapshot replaces the map
+  wholesale and itself becomes a watermark later reads must beat. A reload
+  therefore refills from `GET /api/chats` even with the socket blocked. The
+  card reads the map rather than a chat row, because a row's copy is only the
+  payload the list was read at, while the map is the live one. Every read
+  takes its watermark *before* the request (`terminalOfferReadStart()`) and
+  may only write when no newer change or snapshot exists, so a payload that
+  raced an offer change cannot roll it back. `dismissTerminalOffer(chatId,
+  expectedId)` sends exactly `{terminal_offer:{expected_id}}` — never a pin,
+  a title or any other update — and answers `dismissed` or `conflict`; a
+  conflict adopts the engine's newer offer and the card says the suggestion
+  changed. The card never executes the command, and *Open in Terminal* starts
+  no shell, asks for no grant and asks the engine to run nothing. It must
+  never be keyed by the offer id: a replacement patches it in place, so the
+  notice that explains the swap survives.
   Pure logic the store hands over whole lives in `lib/`, Vue-free and directly
   testable: `lib/chatHistory.ts` (history normalising, server-row mapping, turn
   grouping, metadata merge, superseded live-tail pruning, tool icons),

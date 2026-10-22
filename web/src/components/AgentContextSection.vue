@@ -26,8 +26,14 @@
     </div>
     <p class="agent-context-usage-note">{{ contextPctLabel }} of context window used</p>
   </section>
-  <section class="rail-section agent-context" aria-labelledby="agent-context-label">
-    <p id="agent-context-label" class="rail-label">Always loaded</p>
+  <!-- Closed by default: these rows are the same every turn, so they are
+       reference, not news. The summary still says how much they cost. -->
+  <details class="rail-section agent-context agent-context-loaded" :open="loadedOpen" @toggle="onLoadedToggle">
+    <summary class="agent-context-summary">
+      <svg class="agent-context-chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
+      <span class="agent-context-summary-label">Always loaded</span>
+      <span v-if="loadedTokens" class="agent-context-meta">{{ formatTokens(loadedTokens) }} tokens</span>
+    </summary>
     <div class="rail-list">
       <button
         v-if="guide.path"
@@ -77,7 +83,7 @@
         </span>
       </div>
     </div>
-  </section>
+  </details>
 </template>
 
 <script setup lang="ts">
@@ -97,6 +103,8 @@ const props = defineProps<{
   compactDisabled: boolean
   /** Code mode is effectively on (chat.code_mode and a linked repo). */
   codeMode?: boolean
+  /** Bumped by a caller that points at this section ("See what Ciao knows"): opens Always loaded. */
+  revealKey?: number
 }>()
 const emit = defineEmits<{ 'open-file': [path: string]; compact: [] }>()
 
@@ -156,6 +164,25 @@ function openContextFile(event: MouseEvent) {
   emit('open-file', path)
 }
 
+// Open or closed is remembered per browser, like Memory's "How memory works".
+const LOADED_OPEN_KEY = 'ciao.chatDetails.alwaysLoadedOpen'
+function readLoadedOpen(): boolean {
+  try { return localStorage.getItem(LOADED_OPEN_KEY) === '1' } catch { return false }
+}
+const loadedOpen = ref(readLoadedOpen())
+function onLoadedToggle(event: Event) {
+  loadedOpen.value = (event.target as HTMLDetailsElement).open
+  try { localStorage.setItem(LOADED_OPEN_KEY, loadedOpen.value ? '1' : '0') } catch { /* private mode */ }
+}
+watch(() => props.revealKey, (key) => { if (key) loadedOpen.value = true })
+
+const loadedTokens = computed(() => {
+  let total = guide.value.path ? guideTokens.value : 0
+  if (props.project && briefText.value) total += briefTokens.value
+  if (repoInstr.value) total += tokensFor(repoInstr.value.chars)
+  return total
+})
+
 const contextPctLabel = computed(() => {
   const pct = props.contextPct
   if (pct == null) return ''
@@ -201,6 +228,32 @@ const contextPctLabel = computed(() => {
   background: var(--fg2);
 }
 .agent-context-meter strong { font-variant-numeric: tabular-nums; }
+.agent-context-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  margin: 0 -4px;
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+  color: var(--fg3);
+  font-size: var(--text-sm);
+  list-style: none;
+  cursor: pointer;
+}
+.agent-context-summary::-webkit-details-marker { display: none; }
+.agent-context-summary:hover { color: var(--fg); }
+.agent-context-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.agent-context-summary-label { flex: 1; min-width: 0; }
+.agent-context-chevron { flex: none; transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1); }
+.agent-context-loaded[open] .agent-context-chevron { transform: rotate(90deg); }
+.agent-context-loaded[open] .agent-context-summary { margin-bottom: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .agent-context-chevron { transition: none; }
+}
+@media (pointer: coarse) {
+  .agent-context-summary { min-height: var(--touch); }
+}
 .agent-context-row { gap: 1px; }
 .agent-context-row-top {
   display: flex;
