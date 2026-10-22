@@ -165,6 +165,15 @@ anything is typed. The native host terminal keeps its own button
 (`HostTerminalButton.vue`) for the actions that need a real window on the
 engine's computer: provider sign-in, skill updates, the engine's own update.
 
+- **One entry per surface, outside the repository.** A chat's Chat details
+  carries a *Terminal* section of its own — under *Repository*, above *Always
+  loaded* — and a project page carries one under its *Repository* section. The
+  terminal is not a repository feature: a chat with no linked folder still
+  needs a shell (a provider sign-in, an install, an MCP server that stopped
+  answering), so neither section lives inside the repository's, and a chat or
+  a project without a repository — an auto-managed project included — has one
+  too. The button is `components/BrowserTerminalButton.vue` and it is the only
+  way in; opening the panel starts no shell.
 - `stores/terminal.ts` owns the wire — the HTTP actions, the socket, the
   bounded renderer backpressure and the replay offsets. The pane
   (`components/TerminalPane.vue`) owns the screen and the controls around it;
@@ -174,7 +183,9 @@ engine's computer: provider sign-in, skill updates, the engine's own update.
   for and kept after that, so the screen survives a hide and a chat page that
   never opens a terminal does not download it. `lib/terminalPanel.ts` carries
   the one-bit signal; Home's payload is guarded by
-  `e2e/specs/chat-file-open.spec.ts`.
+  `e2e/specs/chat-file-open.spec.ts`. The signal is a state, not an event:
+  `ChatLayout` reads it when it mounts, so a page opened after a terminal was
+  asked for still shows the pane.
 - **The keyboard belongs to the shell while the terminal has focus.** Escape,
   Tab, the arrows, Ctrl+C and Ctrl+D reach the terminal, so the pane does not
   use `useModalFocus` — its capture-phase Escape would swallow the shell's
