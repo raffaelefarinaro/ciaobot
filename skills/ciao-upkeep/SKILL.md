@@ -58,7 +58,7 @@ The full inventory — what is pinned where, and what the checker misses:
 | Frontend deps | `web/package.json` | yes — reported only |
 | **`gws` CLI** | generated, not pinned by hand — see below | **drift reported, updates manual** |
 | AnyDoc | rides the `pyproject.toml` pin | yes |
-| GitHub Actions | `actions/*@v4`/`@v5`, `astral-sh/setup-uv@v6` | **no** |
+| GitHub Actions | `.github/workflows/*.yml` | **no** |
 | Node floor | `.nvmrc` **and** `web/scripts/check-node.mjs` | **no** |
 | Playwright | `web/` | **no** |
 
@@ -87,7 +87,7 @@ build`), and let the release carry it later. Never blanket-upgrade majors.
 
 ### `gws`: never hand-edit the version
 
-The 22 `gws-*` skills are **generated**, and so is the version. `gws
+The `gws-*` skills are **generated**, and so is the version. `gws
 generate-skills` writes `metadata: version:` into `gws-shared/SKILL.md` itself,
 and `gws-shared` is one of the shipped skills, so regenerating advances the pin
 automatically. Upgrading the local `gws` CLI is the only input; there is
@@ -181,9 +181,12 @@ For each one, check it appears in:
       done
   ```
   And the reverse: a stock skill nobody links from the site.
-- `ciao/stock/skills/ciao-cli/commands.json` and the `OPERATIONS` table in
-  `ciao/mcp_server.py` must agree, and with `docs/AGENT_CLI.md`. Three copies
-  of one catalog, no test.
+- `ciao/stock/skills/ciao-cli/commands.json` must map to the `OPERATIONS` table
+  in `ciao/mcp_server.py` and agree with `docs/AGENT_CLI.md`. Run both
+  `test_every_documented_command_parses` and
+  `test_every_agent_command_is_in_the_telemetry_table` in
+  `tests/test_agent_surface.py`; together they check command/parser and
+  parser/catalog consistency.
 
 **Capabilities** — for a user-facing feature, `ciao-capabilities` is the answer
 to "can you…?". After any feature that adds one: add the entry to the right
@@ -192,7 +195,7 @@ shipped without one.
 
 ## 3. The marketing site
 
-`site/` is seven hand-written HTML files, 1201 lines, published by
+`site/` contains hand-written HTML pages, published by
 `.github/workflows/pages.yml` on any push to `main` that touches `site/**`. So a
 wrong claim goes live the moment it merges, and `workflow_dispatch` means a fix
 does not need a release.
@@ -217,9 +220,9 @@ subagents and three stock skills. `site/features.html` still has a full
 but nothing but a human checking knew that, and the same section is one rename
 away from being wrong. Sweep, then confirm rather than assume.
 
-Also worth a look each pass: `site/builtin.html`'s subagent copy against what
-`ciao/stock/agents/` actually ships, and the feature descriptions against the
-current Settings tabs. Screenshots in `site/assets/img/` are the slow rot —
+Also worth a look each pass: `site/builtin.html`'s skill and subagent copy
+against what `ciao/stock/skills/` actually ships, and the feature descriptions
+against the current Settings tabs. Screenshots in `site/assets/img/` are the slow rot —
 an image of a UI that no longer exists, with the alt text still describing it.
 
 ## 4. Doc rot
