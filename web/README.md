@@ -66,6 +66,7 @@ web/
                            SettingsEngineLogin.vue; SettingsMemoryHandover.vue is the Memory handover card:
                            agreement rate and the operator-only per-workspace handover choice;
                            SettingsWorkspaceOverview.vue is the Workspace > Overview page;
+                           SettingsWorkspaceModels.vue is its Chats and models card;
                            SettingsManageWorkspaces.vue is the Manage workspaces page: boxed
                            rows, the short New workspace form and Archived; rows reorder by
                            drag, Alt/Option+Up/Down on the handle, or Move up / Move down in
@@ -85,7 +86,7 @@ web/
                           modules (chatAnnotations) — see the ownership boundary below
     composables/          reactive logic shared between components, and behaviour lifted
                           out of oversized panes (useHoverPinPopover, useChatComposer,
-                          useMcpServers, useModalFocus, useWorkspaceAdmin)
+                          useMcpServers, useModalFocus, useWorkspaceAdmin, useProviderChoices)
     lib/                  pure helpers (api, time, safeMarkdown, contrast, etc.) — no Vue imports
 ```
 
@@ -428,8 +429,9 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   that preview — a separately opened viewer or a dirty edit is left untouched.
 - **Workspace > Overview (`/settings/workspace`).** The first item of the
   workspace rail group is the page for `projectStore.activeWorkspace`:
-  `SettingsWorkspaceOverview.vue` draws the Workspace and Google account cards
-  (one editor, one Save changes / Discard row), then Memory handover, Update
+  `SettingsWorkspaceOverview.vue` draws the Workspace, Chats and models and
+  Google account cards (one editor, one Save changes / Discard row, in the last
+  form card), then Memory handover, Update
   task history and, for an archivable workspace, Archive this workspace. The
   editor state is not in the component: `composables/useWorkspaceAdmin.ts` owns
   the registry forms, drafts, save, archive and restore, `SettingsView.vue` calls
@@ -440,6 +442,17 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
   asks first through `projectStore.setWorkspaceSwitchGuard`. A File access link
   (`/settings/workspaces?workspace=NAME#file-access`) switches to NAME and lands
   on Overview with the selector focused; it never saves.
+  `SettingsWorkspaceModels.vue` (Chats and models) edits the same form: the
+  default provider switch and, for the selected provider, the workspace's
+  `provider_overrides` (model, thinking, permission mode, session insights
+  model). It loads the engine defaults itself (`/api/settings/routines`,
+  `/api/models`) and builds its option lists with
+  `composables/useProviderChoices.ts` (shared with the Providers page). The
+  first option of every field is `Engine default (<value>)`, and an empty
+  choice deletes the override. All edits go through
+  `lib/workspaceOverrides.ts` (`normalizeOverrides`, `setOverride`) so
+  `JSON.stringify(form)` stays a stable dirty check;
+  `effectiveWorkspaceDefaultModel` feeds the schedule forms' "Inherit" label.
 - **`SettingsView.vue` ownership boundary.** Settings is being split the same
   way, one tab at a time, into `components/settings/`. General is split
   into four pages. General begins with the Updates section (compact to a title

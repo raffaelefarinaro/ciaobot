@@ -36,6 +36,8 @@ vi.mock('../../lib/api', () => {
       })
     }
     if (path.startsWith('/api/update-tasks')) return Promise.resolve({ tasks: [] })
+    // The Overview's Chats and models card reads the engine defaults.
+    if (path === '/api/settings/routines') return Promise.resolve({ model_options: { anthropic: [] } })
     return Promise.resolve({})
   })
   return {
@@ -113,6 +115,7 @@ describe('Settings > Workspace Overview', () => {
       const titles = wrapper.findAll('.section-title').map(el => el.text())
       expect(titles).toEqual([
         'Workspace',
+        'Chats and models',
         'Google account',
         'Memory handover',
         'Update task history',

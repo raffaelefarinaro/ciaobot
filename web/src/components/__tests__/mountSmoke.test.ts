@@ -647,14 +647,12 @@ describe('component mount smoke', () => {
     await nextTick()
 
     try {
-      const providerField = wrapper.findAll('label.settings-field')
-        .find((field) => field.find('.ws-label').text() === 'Agent CLI/Runtime')
-      expect(providerField).toBeTruthy()
-      const providerSelect = providerField!.find('select')
-      expect((providerSelect.element as HTMLSelectElement).value).toBe('claude')
-      expect(providerSelect.findAll('option').map((option) => option.attributes('value')))
-        .toContain('claude')
-      expect(providerSelect.text()).toContain('Anthropic (via Claude Code)')
+      // The provider control lives in the Overview's Chats and models card.
+      const card = wrapper.findAll('.card').find((c) => c.find('.section-title').text() === 'Chats and models')
+      expect(card).toBeTruthy()
+      const radios = card!.findAll('[role="radiogroup"] button[role="radio"]')
+      expect(radios.map((r) => r.text())).toEqual(['Anthropic (via Claude Code)', 'opencode'])
+      expect(radios.map((r) => r.attributes('aria-checked'))).toEqual(['true', 'false'])
     } finally {
       wrapper.unmount()
       testApi.setResponse('/api/workspaces', originalWorkspaces)

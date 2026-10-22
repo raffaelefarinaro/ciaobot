@@ -52,6 +52,9 @@ export interface WorkspaceProviderOption {
   default_model?: string
 }
 
+export type ProviderOverrideField = 'model' | 'thinking' | 'permission_mode' | 'insights_model'
+export type ProviderOverrides = Record<string, Partial<Record<ProviderOverrideField, string>>>
+
 export interface WorkspaceInfo {
   name: WorkspaceName
   vault_root: string
@@ -67,6 +70,8 @@ export interface WorkspaceInfo {
   // Filesystem scope for the agent and its shell. Absent or null: the workspace
   // never chose one and runs under the engine's default_agent_fs_scope.
   agent_fs_scope?: 'workspace' | 'machine' | null
+  // Operator-only; sparse: {provider: {field: value}}. Missing = engine default.
+  provider_overrides?: ProviderOverrides
 }
 
 export interface WorkspacesResponse {

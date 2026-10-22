@@ -9,7 +9,7 @@
           <p class="section-title">Workspace</p>
         </div>
         <p class="hint">
-          Name, colour, default provider and file access for this workspace. Save changes applies to both cards.
+          Name, colour and file access for this workspace.
         </p>
       </div>
       <div class="overview-body">
@@ -33,14 +33,6 @@
             :disabled="workspacesSaving === form.name"
           />
         </div>
-        <label class="settings-field set-subrow">
-          <span class="ws-label set-subrow-label">{{ workspaceProviderFieldLabel }}</span>
-          <select class="routine-input routine-select workspace-select set-subrow-control" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
-            <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
-              {{ provider.label }}
-            </option>
-          </select>
-        </label>
         <label
           class="settings-field set-subrow"
           :class="{ 'workspace-card--target': workspaceLinkTarget === form.name }"
@@ -79,6 +71,8 @@
       </div>
     </div>
 
+    <SettingsWorkspaceModels />
+
     <div class="card">
       <div class="settings-card-header">
         <p class="section-title">Google account</p>
@@ -104,6 +98,7 @@
             </option>
           </select>
         </label>
+        <p v-if="workspaceDirty(form)" class="hint hint--compact">Save changes applies to every card above it.</p>
         <div v-if="workspaceDirty(form)" class="workspace-edit-actions">
           <button
             type="button"
@@ -151,6 +146,7 @@
 import { inject } from 'vue'
 import SkeletonLoader from '../SkeletonLoader.vue'
 import WorkspaceTile from '../WorkspaceTile.vue'
+import SettingsWorkspaceModels from './SettingsWorkspaceModels.vue'
 import SettingsMemoryHandover from './SettingsMemoryHandover.vue'
 import SettingsUpdateTasks from './SettingsUpdateTasks.vue'
 import WorkspaceColorPicker from './WorkspaceColorPicker.vue'
@@ -175,8 +171,6 @@ const {
   workspaceNameDraft,
   workspaceLinkTarget,
   fsScopeDefaultOptionLabel,
-  workspaceProviderFieldLabel,
-  workspaceProviderOptions,
   gwsProfileOptions,
   workspaceCustomGwsProfile,
   activeWorkspaceForm: form,
