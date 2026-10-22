@@ -1283,6 +1283,14 @@
           :archived="!!chat.archived"
         />
       </div>
+      <!-- The terminal is not a repository feature. A chat with no linked
+           folder still needs a shell — a provider sign-in, an install, an MCP
+           server that stopped answering — so the terminal has a section of
+           its own, outside the repository's, and every chat has one. -->
+      <section class="rail-section chat-rail-terminal" aria-labelledby="chat-rail-terminal-label">
+        <p id="chat-rail-terminal-label" class="rail-label">Terminal</p>
+        <BrowserTerminalButton :chat-id="chat.chat_id" />
+      </section>
       <!-- What the agent is given. The project also lives here on wide panes;
            the header only names it when this rail is hidden. -->
       <div ref="railContextEl" class="chat-rail-agent-context" tabindex="-1">
@@ -1402,6 +1410,7 @@ import type { AgentAssetsResponse, CommandsResponse, RuntimeProvider, ModelsResp
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ChatRepoSection from './ChatRepoSection.vue'
+import BrowserTerminalButton from './BrowserTerminalButton.vue'
 import ModelSelector from './ModelSelector.vue'
 import { ARCHIVE_ACTION_LABEL } from '../lib/archiveCopy'
 import AppIcon from './AppIcon.vue'
@@ -2186,7 +2195,7 @@ useModalFocus(railEl, drawerShown, {
 // The browser terminal takes the screen on a narrow pane, and the chat
 // details drawer is a modal surface there: while it is up, everything outside
 // it is inert, and it claims Escape in the capture phase. The terminal is
-// opened from this drawer — its Repository section carries the button — so
+// opened from this drawer — its Terminal section carries the button — so
 // the drawer steps aside when the terminal opens, rather than leaving a
 // dead, inert pane on top of the screen.
 const terminal = useTerminalStore()
@@ -5275,7 +5284,15 @@ defineExpose({ toggleModelPicker, archiveActiveChat, handleQuestionShortcut, han
 /* The shared rail rhythm is `.rail-section + .rail-section`; this wrapper
    (the focus target for "See what Ciao knows") sits between two of them. */
 .chat-rail-agent-context + .rail-section { margin-top: var(--space-5); }
-.chat-rail-repo + .chat-rail-agent-context { margin-top: var(--space-5); }
+/* The terminal's section sits between the repository block and the agent
+   context, so it carries the rhythm the repository block used to. A chat
+   without a repository has no block above it, and the section then starts
+   the rail like the context does. */
+.chat-rail-repo + .chat-rail-terminal { margin-top: var(--space-5); }
+.chat-rail-terminal + .chat-rail-agent-context { margin-top: var(--space-5); }
+/* The button is a block of its own under the section's label, so it is a
+   44px target on touch — the same box the project page gives it. */
+.chat-rail-terminal :deep(.terminal-button) { display: block; }
 .chat-rail-repo:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 4px;
