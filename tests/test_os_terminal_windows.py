@@ -2789,33 +2789,30 @@ def test_the_ignore_ctrl_c_attribute_decides_whether_the_event_is_delivered(
 
 @_windows_only
 def test_ctrl_c_ends_a_running_program_and_the_shell_survives(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """The interrupt reaches the shell and ends the program the shell runs.
 
-    Three things hold at once, and each of them is a different link of the
-    chain:
+    Two things hold at once:
 
-    * the shell's own control handler runs, so the operating system
-      delivered the event to the shell — the helper clears the
-      ignore-Ctrl+C attribute the shell would otherwise have inherited
-      from the engine;
-    * the program the shell runs ends, so the event reached the program as
-      well: ``ping`` neither reads the console nor installs a handler, so
-      nothing but the event itself can end it;
+    * the program the shell runs ends, so the event reached the program:
+      ``ping`` neither reads the console nor installs a handler, so nothing
+      but the event itself can end it, and the shell's prompt coming back
+      is the sign that it ended;
     * the shell survives, so the event did not take the shell down with it.
 
     The byte is still the byte the user typed: ``0x03``, written to the
     terminal's input, unchanged.
+
+    What is deliberately **not** asserted here is the reader's own
+    ``CancelKeyPress`` handler. PowerShell installs its own console control
+    handler, and it is registered after the runtime's, so the shell answers
+    the event first and the runtime's handler never sees it — a shell that
+    handles Ctrl+C is not evidence of anything either way. The delivery is
+    measured where it can be measured: the experiment's own Python probe
+    registers a handler in a process that has no handler of its own, and it
+    reports whether the event was raised and delivered.
     """
-    char, aborted, handler = _interrupt_seen_by_a_reader(
-        tmp_path, monkeypatch, b"\x03"
-    )
-    assert handler == 1, (
-        "the shell must receive the console control event: the helper "
-        f"clears the ignore-Ctrl+C attribute for it (read: {char}, "
-        f"aborted: {aborted})"
-    )
     ended = _interrupt_ends_a_running_program(tmp_path, b"\x03")
     assert ended == 1, "the interrupt must end the running program"
 
