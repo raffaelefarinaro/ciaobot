@@ -79,7 +79,7 @@ onBeforeUnmount(() => clearTimeout(copyTimer))
     </div>
     <p v-if="chip.missing" class="chat-repo-missing" role="status">The linked folder is missing. Change or unlink it on the project page.</p>
     <div v-else class="chat-repo-meta">
-      <!-- The branch stays one line, with the facts about the checkout beside
+      <!-- The branch stays one line, with the facts about the checkout beside (or under, when the name is long)
            it. Its details open underneath at the section's full width, so the
            long path wraps across the rail instead of down a sliver beside the
            facts. -->
