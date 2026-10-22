@@ -2045,24 +2045,22 @@ def test_a_credential_adjacent_command_file_is_refused(tmp_path: Path) -> None:
 def test_a_credential_adjacent_command_file_is_refused_before_it_is_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The credential check comes before the file is even looked at.
+    """The credential check comes before the file is read.
 
     A `.env` is refused as a credential store, not as a file that happens to
     be unreadable, and the refusal must not depend on the file's contents.
     The file must not be *read* at all: a check that came after the read
-    would already have pulled the secret into the process, and one that came
-    after the stat would have asked the OS about a path it should not have
-    needed to name.
+    would already have pulled the secret into the process. That the check
+    also comes before the stat is pinned portably by the missing-`.env`
+    case below — a stat-first ordering answers "cannot be read" there.
     """
     secret = tmp_path / ".env"
     secret.write_text("TOKEN=x", encoding="utf-8")
     resolved = secret.resolve()
     opened = _record_path_calls(monkeypatch, "open", resolved)
-    inspected = _record_path_calls(monkeypatch, "stat", resolved)
     with pytest.raises(agent_cli.UsageError) as excinfo:
         agent_cli._terminal_offer_command(str(secret))
     assert not opened, "the credential file was opened"
-    assert not inspected, "the credential file was inspected"
     _assert_static_refusal(
         excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(secret), "TOKEN")
     )
@@ -2137,8 +2135,9 @@ def test_an_aliased_credential_path_is_refused_before_it_is_read(
     """The alias resolves to the credential, and nothing is read.
 
     The check follows the resolution *and* comes first: the file the alias
-    names is never opened and never even inspected, so a secret behind a
-    harmless-looking name is never pulled into the process.
+    names is never opened, so a secret behind a harmless-looking name is
+    never pulled into the process. The missing-`.env` case above is what
+    pins the check ahead of the stat, which resolution itself may touch.
     """
     protected = tmp_path / ".env"
     protected.write_text("TOKEN=1", encoding="utf-8")
@@ -2152,11 +2151,9 @@ def test_an_aliased_credential_path_is_refused_before_it_is_read(
         pass
     else:
         opened = _record_path_calls(monkeypatch, "open", target)
-        inspected = _record_path_calls(monkeypatch, "stat", target)
         with pytest.raises(agent_cli.UsageError) as excinfo:
             agent_cli._terminal_offer_command(str(safe))
         assert not opened, "the aliased credential was opened"
-        assert not inspected, "the aliased credential was inspected"
         _assert_static_refusal(
             excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
         )
@@ -2171,11 +2168,9 @@ def test_an_aliased_credential_path_is_refused_before_it_is_read(
 
     monkeypatch.setattr(Path, "resolve", _resolve)
     opened = _record_path_calls(monkeypatch, "open", target)
-    inspected = _record_path_calls(monkeypatch, "stat", target)
     with pytest.raises(agent_cli.UsageError) as excinfo:
         agent_cli._terminal_offer_command(str(safe))
     assert not opened, "the aliased credential was opened"
-    assert not inspected, "the aliased credential was inspected"
     _assert_static_refusal(
         excinfo, _TERMINAL_OFFER_REFUSALS["credential"], secrets=(str(safe),)
     )
