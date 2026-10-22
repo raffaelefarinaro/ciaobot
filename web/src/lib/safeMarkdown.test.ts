@@ -481,3 +481,106 @@ describe('renderUserMarkdown', () => {
     expect(el.querySelector('#out')).not.toBeNull()
   })
 })
+
+// A link whose target the sanitizer refuses must not survive as a link.
+// DOMPurify drops a `file:`, `javascript:` or `data:` href, but the anchor
+// used to stay behind: still painted with the accent colour and an
+// underline, still swallowing the click, and pointing nowhere.
+describe('links the sanitizer refuses', () => {
+  // The folder link from the report that started this.
+  const FILE_LINK =
+    '[zendesk-code39-93-itf-images](file:///Users/raffaelefarinaro/Documents/zendesk-code39-93-itf-images)'
+  const FILE_PATH = '/Users/raffaelefarinaro/Documents/zendesk-code39-93-itf-images'
+
+  function host(html: string): HTMLElement {
+    const el = document.createElement('div')
+    el.innerHTML = html
+    return el
+  }
+
+  it('shows a local file link as inert text, with the path still readable', () => {
+    const html = renderMarkdown(FILE_LINK)
+    const el = host(html)
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('.markdown-dead-link')).not.toBeNull()
+    // The label stays readable, and the path the reader cannot click stays
+    // visible and copyable.
+    expect(el.textContent).toContain('zendesk-code39-93-itf-images')
+    expect(el.textContent).toContain(FILE_PATH)
+    // Nothing in the markup can navigate to the folder.
+    expect(html).not.toContain('href=')
+    expect(html).not.toContain('file://')
+  })
+
+  it('shows the same in a user bubble', () => {
+    const el = host(renderUserMarkdown(FILE_LINK))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.textContent).toContain(FILE_PATH)
+  })
+
+  it('shows the same in a note', () => {
+    const el = host(renderFileMarkdown(FILE_LINK, { resolveImageSrc: (href) => href }))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.textContent).toContain(FILE_PATH)
+  })
+
+  it('keeps the authority of a network path', () => {
+    const el = host(renderMarkdown('[share](file://server/share/notes.md)'))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.textContent).toContain('//server/share/notes.md')
+    // The host is part of the path: `/share/notes.md` is a different place.
+    expect(el.textContent).not.toContain('(/share/notes.md)')
+  })
+
+  it('keeps the inline formatting of the label', () => {
+    const el = host(renderMarkdown('[**bold** label](file:///tmp/notes.md)'))
+
+    expect(el.querySelector('.markdown-dead-link strong')?.textContent).toBe('bold')
+  })
+
+  it('turns a raw anchor without a target into inert text', () => {
+    const el = host(renderMarkdown('<a>plain</a>'))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('.markdown-dead-link')?.textContent).toBe('plain')
+  })
+
+  it('turns a raw anchor with a refused target into inert text', () => {
+    const el = host(renderMarkdown('<a href="file:///tmp/x">raw</a>'))
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.querySelector('.markdown-dead-link')?.textContent).toBe('raw')
+  })
+
+  it('refuses javascript and data links, and keeps no trace of the target', () => {
+    const html = renderMarkdown(
+      '[bad](javascript:alert(1)) [also](data:text/html;base64,PHNjcmlwdD4=)',
+    )
+    const el = host(html)
+
+    expect(el.querySelector('a')).toBeNull()
+    expect(el.textContent).toContain('bad')
+    expect(el.textContent).toContain('also')
+    expect(html).not.toContain('javascript:')
+    expect(html).not.toContain('data:')
+  })
+
+  it('leaves the links a reader can follow alone', () => {
+    const html = renderMarkdown([
+      '[web](https://example.com/guide)',
+      '[mail](mailto:me@example.com)',
+      '[app](/tasks)',
+      '[note](notes.md)',
+    ].join('\n'))
+
+    expect(html).toContain('href="https://example.com/guide"')
+    expect(html).toContain('href="mailto:me@example.com"')
+    expect(html).toContain('href="/tasks"')
+    expect(html).toContain('data-file-path="notes.md"')
+    expect(html).not.toContain('markdown-dead-link')
+  })
+})
