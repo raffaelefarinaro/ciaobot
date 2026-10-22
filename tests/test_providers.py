@@ -3014,6 +3014,21 @@ def test_claude_connect_deadline_outlives_the_sdk_initialize_deadline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_claude_connect_uses_the_connect_budget(monkeypatch) -> None:
+    # Pins that the helper really waits on _CONNECT_TIMEOUT_S: the other
+    # connect tests pass whichever deadline the helper uses, because a raising
+    # connect() never reaches asyncio.wait_for's timer.
+    monkeypatch.setattr(claude, "_CONNECT_TIMEOUT_S", 0.01)
+
+    class HangingClient:
+        async def connect(self) -> None:
+            await asyncio.sleep(3600)
+
+    with pytest.raises(ClaudeInitializeTimeout):
+        await claude._connect_with_deadline(HangingClient())
+
+
+@pytest.mark.asyncio
 async def test_claude_connect_timeout_is_an_initialize_miss() -> None:
     class FakeClient:
         async def connect(self) -> None:

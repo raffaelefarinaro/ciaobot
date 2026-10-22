@@ -141,6 +141,10 @@ _INITIALIZE_TIMEOUT_MS = 180_000
 # with "Control request timeout: initialize". Our outer connect deadline must
 # outlive it, or it fires first with a bare TimeoutError, the SDK never names
 # the cause, and the one retry in run_streaming can never classify the miss.
+# The 30 s margin is smaller than a loaded machine's cold spawn (see above) and
+# the SDK's 180 s clock starts after it, so the outer deadline can still fire
+# first; that is harmless because _connect_with_deadline classifies its own
+# timeout as an initialize miss, preserving the retry.
 _CONNECT_TIMEOUT_S = _INITIALIZE_TIMEOUT_MS / 1000 + 30
 # Ask the CLI to name a refused startup in the message stream. Without it a
 # startup failure ends with stderr alone, which the SDK turns into a bare
@@ -1593,7 +1597,10 @@ class ClaudeProvider(BaseSDKProvider):
                 pass
             raise
         except asyncio.TimeoutError:
-            logger.error("Claude connect/query timed out after 120s")
+            logger.error(
+                "Claude query timed out after 120s; the connect step is "
+                "bounded separately by ClaudeInitializeTimeout"
+            )
             try:
                 await self.disconnect()
             except Exception:
