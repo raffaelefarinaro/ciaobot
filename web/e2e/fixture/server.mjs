@@ -14,10 +14,12 @@
  *   POST /__fixture__/transcript                     give this session a chat history
  *   POST /__fixture__/update-tasks                   give this session update tasks
  *   POST /__fixture__/chat-frame                     speak on a chat's own socket
+ *   POST /__fixture__/terminal-offer { chat_id, command }  offer a suggested command
  */
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { acceptUpgrade } from './ws.mjs'
 import { WORKSPACES, PROJECTS, CHATS, SCHEDULES, PROPOSALS, MEMORY_NODES, MEMORY_EDGES, MEMORY_CATEGORIES, UPDATE_TASKS, VERIFICATION_REVIEW, VERIFICATION_PROPOSALS, VERIFICATION_HISTORY, VERIFICATION_RECEIPT, VERIFICATION_ENTRY_RECEIPT, VERIFICATION_NODES, snapshotFrame } from './data.mjs'
@@ -179,10 +181,100 @@ function sessionOf(req) {
   const id = /(?:^|;\s*)e2e_session=([^;]+)/.exec(cookie)?.[1] || 'default'
   let state = sessions.get(id)
   if (!state) {
-    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map() }
+    state = { activeStreams: [], sockets: new Set(), chatSockets: new Map(), pendingChatFrames: new Map(), connections: 0, transcript: null, terminals: new Map(), terminalOffers: new Map() }
     sessions.set(id, state)
   }
   return state
+}
+
+// ── The suggested command ───────────────────────────────────────────────
+//
+// The engine holds one optional offer per chat: a command the assistant
+// suggested, which the user reviews before running. The fixture keeps it per
+// browser session, for the same reason the transcript is per session — one
+// server serves every worker, and a spec that offers a command in one chat
+// must not be visible to a spec running beside it.
+//
+// The offer is never executed here. It is a string the browser shows, copies
+// and dismisses; nothing in this file runs it.
+
+// A fresh 32-hex offer id, the way the engine mints one.
+function mintOfferId() {
+  return randomBytes(16).toString('hex')
+}
+
+/** The offer id shape the engine mints: 32 lowercase hex characters. */
+const OFFER_ID_PATTERN = /^[0-9a-f]{32}$/
+
+/** The longest command the engine accepts, in bytes. */
+const OFFER_COMMAND_MAX_BYTES = 4096
+
+/** The offer this session holds for a chat, or null. */
+function offerFor(state, chatId) {
+  return state.terminalOffers.get(chatId) || null
+}
+
+/** A chat row carrying this session's offer. */
+function chatWithOffer(state, chat) {
+  return { ...chat, terminal_offer: offerFor(state, chat.chat_id) }
+}
+
+/** The chat list, with this session's offers on the rows. */
+function chatsWithOffers(state) {
+  return CHATS.map(chat => chatWithOffer(state, chat))
+}
+
+/** One chat's row, with this session's offer on it. */
+function chatDetail(state, chatId) {
+  const chat = CHATS.find(c => c.chat_id === chatId)
+  if (!chat) return {}
+  return chatWithOffer(state, chat)
+}
+
+/** The chat id in an `/api/chats/<id>` path, or ''. */
+function chatIdFromPath(pathname) {
+  const match = /^\/api\/chats\/([^/]+)$/.exec(pathname)
+  return match ? decodeURIComponent(match[1]) : ''
+}
+
+/**
+ * Dismiss the command a chat offered.
+ *
+ * The body is exactly `{terminal_offer:{expected_id}}` and nothing else: a
+ * dismissal never carries a pin, a title or any other update, so it can
+ * never race another write on the same chat — and a body that does carry one
+ * is refused rather than half-applied. The shape is parsed before the chat
+ * is looked up, so a malformed request is a static 400 and never a 404.
+ *
+ * An offer with a different id is a conflict — the client asked to dismiss a
+ * command that is no longer the one on offer — and the engine's current
+ * offer comes back with it. No offer at all is an idempotent success.
+ */
+function dismissOffer(state, chatId, body) {
+  const keys = Object.keys(body)
+  if (keys.length !== 1 || keys[0] !== 'terminal_offer') {
+    return { status: 400, body: { error: 'bad_request' } }
+  }
+  const request = body.terminal_offer
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    return { status: 400, body: { error: 'bad_request' } }
+  }
+  const requestKeys = Object.keys(request)
+  if (requestKeys.length !== 1 || requestKeys[0] !== 'expected_id') {
+    return { status: 400, body: { error: 'bad_request' } }
+  }
+  const expectedId = request.expected_id
+  if (typeof expectedId !== 'string' || !OFFER_ID_PATTERN.test(expectedId)) {
+    return { status: 400, body: { error: 'bad_request' } }
+  }
+  const chat = CHATS.find(c => c.chat_id === chatId)
+  if (!chat) return { status: 404, body: { error: 'not found' } }
+  const current = offerFor(state, chatId)
+  if (current && current.id !== expectedId) {
+    return { status: 409, body: { error: 'terminal_offer_conflict', terminal_offer: current } }
+  }
+  state.terminalOffers.delete(chatId)
+  return { status: 200, body: { ...chat, terminal_offer: null } }
 }
 
 // ── The browser terminal ────────────────────────────────────────────────
@@ -323,7 +415,9 @@ const GET_ROUTES = {
   }),
   // /api/projects, /api/chats and /api/schedules are bare arrays, not envelopes.
   '/api/projects': () => PROJECTS,
-  '/api/chats': () => CHATS,
+  // The chat list carries this session's suggested commands: a chat holds the
+  // command the assistant suggested for it, or none.
+  '/api/chats': (req) => chatsWithOffers(sessionOf(req)),
   '/api/schedules': () => SCHEDULES,
   '/api/subagents/running': () => ({ chats: {} }),
   '/api/housekeeping': () => ({ actions: [] }),
@@ -464,6 +558,8 @@ const GET_PATTERNS = [
   // POST /__fixture__/transcript rather than giving every spec one.
   [/^\/api\/chats\/[^/]+\/messages$/, (req) => sessionOf(req).transcript || []],
   [/^\/api\/chats\/[^/]+\/subagents$/, () => ({ subagents: [] })],
+  // One chat's row, with this session's suggested command on it.
+  [/^\/api\/chats\/[^/]+$/, (req, url) => chatDetail(sessionOf(req), decodeURIComponent(url.pathname.split('/')[3] || ''))],
   [/^\/api\/tasks\/[0-9a-f]{32}$/, () => ({ workspace: WORKSPACES[0].name, task: { ...TASK, body: 'Find his comment and draft a reply.' } })],
   // The receipt behind a settled verification's accept, so the History card's
   // Undo is the real affordance a `note_apply` carries rather than an
@@ -658,6 +754,30 @@ const server = http.createServer(async (req, res) => {
         sessions: [...terminals.values()].map(terminalInfo),
       })
     }
+    if (pathname === '/__fixture__/terminal-offer') {
+      // Offer a suggested command to one chat. The replacement is silent: the
+      // engine announces an accepted change over the events socket, and this
+      // one is not announced, so the browser only learns about it from a read
+      // — or from the conflict a stale dismissal gets back. The id is fresh
+      // every time, so a dismissal that names the previous one is stale.
+      const body = await readBody(req)
+      const chatId = String(body?.chat_id || '')
+      const command = String(body?.command || '')
+      if (!chatId || !command) {
+        return sendJson(res, { error: 'chat_id and command are required' }, 400)
+      }
+      // The chat has to exist: the engine holds one offer per real chat.
+      if (!CHATS.some(c => c.chat_id === chatId)) {
+        return sendJson(res, { error: 'unknown chat' }, 404)
+      }
+      // The command is bounded, like the engine's.
+      if (Buffer.byteLength(command, 'utf8') > OFFER_COMMAND_MAX_BYTES) {
+        return sendJson(res, { error: 'the command is too long' }, 400)
+      }
+      const offer = { id: mintOfferId(), command }
+      state.terminalOffers.set(chatId, offer)
+      return sendJson(res, { ok: true, offer })
+    }
     return sendJson(res, { error: 'unknown fixture route' }, 404)
   }
 
@@ -672,6 +792,16 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, handler ? handler(req, url) : {})
     }
     const body = await readBody(req)
+    // The dismissal of a suggested command: exactly `{terminal_offer:{expected_id}}`,
+    // and only a PATCH carries one. Every other write keeps the behaviour it
+    // had.
+    if (req.method === 'PATCH') {
+      const chatId = chatIdFromPath(pathname)
+      if (chatId && body && typeof body === 'object' && body.terminal_offer !== undefined) {
+        const answer = dismissOffer(sessionOf(req), chatId, body)
+        return sendJson(res, answer.body, answer.status)
+      }
+    }
     const write = WRITE_ROUTES[pathname]
     return sendJson(res, write ? write(body) : { ok: true })
   }
@@ -774,7 +904,12 @@ server.on('upgrade', (req, socket) => {
   state.connections += 1
   state.sockets.add(ws)
   socket.on('close', () => state.sockets.delete(ws))
-  ws.send(snapshotFrame(state.activeStreams))
+  const frame = snapshotFrame(state.activeStreams)
+  // The suggested-command map is complete, like the pin map: the snapshot
+  // replaces the browser's copy, so it must carry every offer this session
+  // holds — a chat it does not name holds none.
+  frame.chat_terminal_offers = Object.fromEntries(state.terminalOffers)
+  ws.send(frame)
 })
 
 server.listen(PORT, '127.0.0.1', () => {

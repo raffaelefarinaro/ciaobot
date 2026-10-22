@@ -429,8 +429,8 @@ export function snapshotFrame(activeStreams) {
       'beta-chat-1': { path: '/synthetic/beta/pinned-report.md', dismissed_paths: [], revision: 1 },
     },
     // The transient suggested-command map. Complete, like the pin map: a
-    // chat it does not name holds no offer. Empty here — the offer card
-    // slice owns the fixture that produces one.
+    // chat it does not name holds no offer. Empty in the base frame; the
+    // fixture server fills it from the session's offers before sending.
     chat_terminal_offers: {},
   }
 }
