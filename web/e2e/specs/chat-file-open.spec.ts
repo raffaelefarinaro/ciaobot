@@ -76,7 +76,7 @@ test('Home loads chat and file code only when the user needs it', async ({ page 
     const asset = new URL(`../../../ciao/web/static${path}`, import.meta.url)
     return total + gzipSync(readFileSync(asset)).byteLength
   }, 0)
-  // 260,000 bytes (250 KiB) since 2026-10-22. The guard was 250,000, set when
+  // 260,000 bytes (~254 KiB) since 2026-10-22. The guard was 250,000, set when
   // the page-load work landed; readable model labels (#1782) and the header
   // naming work took Home from 249,9xx to 250,411, and a budget with no
   // headroom fails on every feature that adds a byte. This keeps the same
